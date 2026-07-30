@@ -185,44 +185,58 @@ def _current_user() -> str:
         return "system"
 
 
-# Unicode categories that carry no visible content: Cf (format — the zero-width
-# family, BOM, soft hyphen, bidi marks), Cc (control), Zs/Zl/Zp (separators).
+# Unicode categories whose members carry no visible content:
+#   Cf format (zero-width family, BOM, soft hyphen, bidi marks, U+180E)
+#   Cc control, Cs surrogate, Co private-use, Cn unassigned
+#   Zs/Zl/Zp separators (space, U+3000, NBSP, U+2028/U+2029, …)
+#   Mn/Me non-spacing and enclosing marks — no standalone glyph
 # A string made only of these is semantically EMPTY however long it is.
-_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Zs", "Zl", "Zp"})
+_INVISIBLE_CATEGORIES = frozenset(
+    {"Cf", "Cc", "Cs", "Co", "Cn", "Zs", "Zl", "Zp", "Mn", "Me"}
+)
 
-# Characters that render as NOTHING but whose Unicode category is a LETTER, so
-# the category test above cannot catch them. The Hangul fillers are the practical
-# set: U+3164 HANGUL FILLER and U+115F/U+1160 CHOSEONG/JUNGSEONG FILLER are
-# category Lo, and NFKC maps U+3164 to U+1160 rather than removing it — so a
-# ``created_by`` made only of fillers presented as a real principal on BOTH sides
-# of the authorship check and handed "anyone may manage this" to an author-less
-# row, exactly as the zero-width (Cf) family did before it.
-_INVISIBLE_LETTERS = frozenset({"ㅤ", "ᅟ", "ᅠ"})
+# Characters that DO render nothing but whose category says otherwise, so no
+# category rule can catch them. This is an explicit escape hatch, not the primary
+# mechanism — the categories above carry the general case.
+#
+# Each entry is here because it was demonstrated, and each cost a review round:
+#   U+3164 / U+115F / U+1160  Hangul fillers   — category Lo (a LETTER)
+#   U+2800                    BRAILLE BLANK    — category So (a SYMBOL); this is
+#                             the all-dots-lowered braille cell, which by
+#                             definition paints nothing, unlike every other
+#                             braille code point.
+# The TEST for this predicate is table-driven over the PROPERTY ("renders no
+# glyph") rather than over this list, so a new member is caught by a failing test
+# rather than by another review round.
+_INVISIBLE_CHARS = frozenset({"ㅤ", "ᅟ", "ᅠ", "⠀"})
 
 
 def _is_blank_identity(value: Optional[str]) -> bool:
-    """True when *value* carries no visible characters, so it names nobody.
+    """True when *value* renders no visible glyph, so it names nobody.
 
-    ``str.strip()`` is not sufficient: it removes whitespace (Zs/Zl/Zp) but a
-    zero-width character is category Cf — ``isspace()`` is False and ``strip()``
-    leaves it in place, so ``"\\u200b"`` read as a real principal on both sides of
-    an authorship check and satisfied the creator branch on an author-less row.
+    The QUESTION is deliberately "does anything render", not "is anything
+    unusual". ``str.strip()`` was not sufficient (it leaves zero-width Cf
+    characters), then Cf/Cc/Zs/Zl/Zp was not sufficient (the Hangul fillers are
+    Lo), then that was not sufficient either (U+2800 BRAILLE BLANK is So). Each
+    round added the code point just demonstrated; the fix is to ask the property
+    of every character and keep the explicit set as a small escape hatch for
+    characters whose category lies.
 
-    Normalizes NFKC first (so compatibility forms cannot smuggle a visible-looking
-    but empty character past the category test), then asks whether ANY character
-    survives as visible content — where "visible" excludes both the invisible
-    CATEGORIES and the invisible LETTERS (:data:`_INVISIBLE_LETTERS`), because
-    Unicode category alone does not separate rendering from letterhood.
+    Normalizes NFKC first, so a compatibility form cannot smuggle a
+    visible-looking but empty character past the test, then requires at least one
+    character that is neither in an invisible CATEGORY nor in
+    :data:`_INVISIBLE_CHARS`.
 
     Used ONLY to decide blankness — never to compare two identities, which stays
-    an EXACT match on the raw values.
+    an EXACT match on the raw values, so trailing whitespace and case differences
+    still denote DIFFERENT principals and still fail closed.
     """
     if not value:
         return True
     normalized = unicodedata.normalize("NFKC", value)
     return all(
         unicodedata.category(ch) in _INVISIBLE_CATEGORIES
-        or ch in _INVISIBLE_LETTERS
+        or ch in _INVISIBLE_CHARS
         for ch in normalized
     )
 
