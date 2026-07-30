@@ -161,6 +161,37 @@ _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 # that ended with the marker.
 _HEADER_VERSION_PREFIX = f"{_STYLE_HEADER}: {_COMPILER_VERSION_MARKER}"
 
+# THE PROOF OF CURRENCY. A version-stamped sentinel the compiler emits at a FIXED
+# position — the very first characters of every artifact — built from the same
+# UNIT SEPARATOR (U+001F) control character as the type-scale region delimiters.
+#
+# This is what makes currency unforgeable, and it replaces reading the header line.
+# FIVE successive rules all inspected that line, and every one of them fell,
+# because the line contains user-influenced text BY CONSTRUCTION (the design-system
+# name is interpolated into it). The last of them — prefix + non-empty name segment
+# + exactly one marker — was defeated by a PRE-VERSION artifact (no marker at all,
+# which the lazy backfill explicitly supports) whose NAME simply STARTED with
+# ``[ds-compiler v13]``: that reproduces the current prefix byte-for-byte, leaves a
+# name segment, and contains exactly one marker, so a stale body read as current and
+# NEVER recompiled.
+#
+# No amount of further tightening fixes that, because the header is a place where
+# compiler text and user text are adjacent. The fix is to stop asking the question
+# there. ``_safe`` / ``_safe_multiline`` strip category-``Cc`` characters from EVERY
+# interpolated user string, so no uploaded name, description, token, template or
+# README can contain U+001F. A sentinel built from it therefore cannot be forged by
+# any user input — the same argument that already makes the region delimiters sound,
+# reused for the version claim.
+#
+# It is VERSION-STAMPED so a v13 sentinel does not vouch for a v14 artifact, and it
+# is stripped from the model-facing text alongside the region delimiters
+# (:func:`strip_type_scale_region_markers`), so the model never sees it.
+_CURRENCY_SENTINEL = f"\x1f<ds-compiler v{COMPILER_VERSION}>\x1f"
+
+# Matches a currency sentinel of ANY version, so a stale-but-stamped artifact can be
+# recognized as *a compiled artifact* while still failing the exact-version check.
+_CURRENCY_SENTINEL_RE = re.compile(r"\x1f<ds-compiler v[0-9]+>\x1f")
+
 # Marker-SHAPED text, at ANY version number. Removed from the design-system NAME
 # where it is interpolated into the header (:func:`_header_safe_name`), which is
 # what makes the fixed marker slot the compiler's alone.
@@ -1295,6 +1326,11 @@ def compile_design_system(
     # The name still follows in full (nothing is hidden from the model); it simply
     # cannot reach the region the version check reads. The name is sanitized as
     # well, so it cannot inject additional header lines.
+    #
+    # The human-readable marker STAYS on the header line — it is greppable in logs
+    # and in a persisted row, and it tells a reader which compiler produced the
+    # artifact. It is no longer what the currency CHECK reads: that is
+    # ``_CURRENCY_SENTINEL``, prepended below in a position no user text can occupy.
     parts.append(f"{_HEADER_VERSION_PREFIX} {name}")
 
     # A short frontmatter-style description/identity caption comes FIRST (huashu /
@@ -1405,7 +1441,14 @@ def compile_design_system(
     # enumerated. The contract is always present when a design system compiles.
     parts.append(_ASSET_CONTRACT)
 
-    return "\n\n".join(parts)
+    # The currency sentinel leads the artifact. Prepended here — outside the
+    # ``\n\n``-joined body — so it occupies the first bytes of the string, a
+    # position no user text can reach: every interpolated user value goes through
+    # ``_safe``/``_safe_multiline``, which strip the control character it is built
+    # from. This, and not the header line, is what
+    # ``compiled_style_content_is_current`` reads. Stripped before the text is
+    # injected (``strip_type_scale_region_markers``), so the model never sees it.
+    return _CURRENCY_SENTINEL + "\n\n".join(parts)
 
 
 def extract_type_scale_block(compiled: Optional[str]) -> Optional[str]:
@@ -1453,17 +1496,30 @@ def extract_type_scale_block(compiled: Optional[str]) -> Optional[str]:
 
 
 def strip_type_scale_region_markers(compiled: Optional[str]) -> str:
-    """Remove the region sentinels, yielding the MODEL-FACING artifact text.
+    """Remove the compiler's control sentinels, yielding MODEL-FACING text.
 
-    The sentinels are structural bookkeeping for
-    :func:`extract_type_scale_block`; they must never reach the model. The
-    prompt-assembly seam (``agent_factory._get_prompt_content``) extracts the
-    block and then strips them, so the persisted artifact keeps its delimiters
-    while the injected prompt does not.
+    Two kinds, both structural bookkeeping that must never reach the model:
+
+    * the type-scale region delimiters, read by :func:`extract_type_scale_block`;
+    * the leading :data:`_CURRENCY_SENTINEL`, read by
+      :func:`compiled_style_content_is_current`. Stripped at ANY version
+      (:data:`_CURRENCY_SENTINEL_RE`) so an artifact persisted by an older compiler
+      is cleaned too, rather than leaking a stray control sequence into a prompt if
+      it reaches this seam before being recompiled.
+
+    The prompt-assembly seam (``agent_factory._get_prompt_content``) extracts the
+    type-scale block and then calls this, so the persisted artifact keeps its
+    sentinels — that is what makes the currency check work on a stored row — while
+    the injected prompt does not.
+
+    Leading blank space left where the currency sentinel was removed is trimmed, so
+    the model-facing text still OPENS with the ``SLIDE VISUAL STYLE:`` header
+    exactly as before this sentinel existed.
     """
     if not compiled:
         return ""
-    return compiled.replace(_REGION_BEGIN, "").replace(_REGION_END, "")
+    text = _CURRENCY_SENTINEL_RE.sub("", compiled)
+    return text.replace(_REGION_BEGIN, "").replace(_REGION_END, "").lstrip("\n")
 
 
 def _brand_manual_text_from_files(
@@ -1535,67 +1591,53 @@ def compiled_style_content_is_current(compiled: Optional[str]) -> bool:
     markers existed — and must be recomputed from the row's persisted data via
     ``recompute_compiled_style_content`` before being injected into a prompt.
 
-    Detection is an EXACT POSITIONAL MATCH against
-    :data:`_HEADER_VERSION_PREFIX` — the constant
-    ``"SLIDE VISUAL STYLE: [ds-compiler vN]"`` that every compiled artifact opens
-    with. The design-system name follows that prefix, so no user-controlled text
-    can precede, interrupt or extend the compared region.
+    Currency is proven by :data:`_CURRENCY_SENTINEL` — a version-stamped
+    UNIT-SEPARATOR sentinel the compiler emits at the FRONT of every artifact — and
+    NOT by inspecting the header line.
 
-    FOUR weaker rules were each defeated by the design system's NAME, because
-    every one of them read a position the name is interpolated into:
-      1. ``marker in artifact``     — any README mentioning the string passed.
-      2. ``marker in header line``  — a system NAMED like the marker passed.
+    FIVE successive rules read that header line, and every one was defeated,
+    because the line puts compiler text and user text side by side: the
+    design-system NAME is interpolated into it by construction.
+
+      1. ``marker in artifact``      — any README mentioning the string passed.
+      2. ``marker in header line``   — a system NAMED like the marker passed.
       3. ``header.endswith(marker)`` — a system named EXACTLY the marker passed.
-      4. ``prefix + non-empty name segment + endswith(marker)`` — a system named
-         ``Evil Brand [ds-compiler vN]`` satisfied all three clauses at once, so a
-         STALE pre-version body under that name read as current and NEVER
-         recompiled (the round-5 repro, incl. trailing-space/newline variants).
+      4. ``prefix + non-empty name + endswith(marker)`` — a system named
+         ``Evil Brand [ds-compiler vN]`` satisfied every clause at once.
+      5. ``prefix + non-empty name + exactly one marker`` — defeated by a
+         PRE-VERSION artifact (no marker at all, which the lazy backfill explicitly
+         supports) whose NAME merely STARTS with ``[ds-compiler vN]``: that
+         reproduces the current prefix byte-for-byte, leaves a name segment, and
+         contains exactly one marker. A stale body read as current and NEVER
+         recompiled.
 
-    Each fix tightened WHAT was compared while leaving WHERE it was compared
-    user-influenced. Position is the fix: currency is no longer a function of what
-    the header ends with, because a compiler-owned constant now occupies the front
-    of the line and the name can only ever appear after it.
+    Rules 1-5 each tightened WHAT was compared while leaving WHERE it was compared
+    user-influenced; rule 5 shows there is no end to that sequence. The fix is to
+    ask the question somewhere a user string cannot reach.
 
-    Trailing whitespace is tolerated (storage round-trips can add it); that is not
-    a version difference. A row whose name legitimately contains the marker text
-    still reads current from its OWN compile — the name buys nothing either way,
-    which is the point.
+    The sentinel is built from U+001F, category ``Cc``, which ``_safe`` and
+    ``_safe_multiline`` strip from EVERY interpolated user value — name,
+    description, token names/values, template names, filenames, README/SKILL prose.
+    So no uploaded text can contain one, let alone place one at offset zero. This is
+    the same construction argument that already makes the type-scale region
+    delimiters sound, reused for the version claim; it is a property of the
+    character class, not of the string being unlikely.
 
-    Three conditions, because position alone left one spoof reachable through
-    LEGACY rows. A v12 header must:
+    A PRE-VERSION artifact carries no sentinel and therefore always reads STALE,
+    which is the correct answer — it must be recompiled to regain the current
+    compiler's blocks. A README legitimately discussing ``[ds-compiler vN]`` keeps
+    its prose and confers nothing.
 
-    1. START with the exact current prefix followed by its separating space
-       (position), and
-    2. carry a NON-EMPTY name segment after it — the compiler always emits one
-       (an empty name falls back to the default label), so a bare-prefix header is
-       not something this compiler can produce, and
-    3. contain EXACTLY ONE marker-shaped substring (:data:`_MARKER_LIKE_RE`) —
-       i.e. the compiler's own.
-
-    Condition 2 closes the last case, which only a PERSISTED pre-v12 artifact can
-    exhibit: a system named ``"[ds-compiler v12] Evil"`` compiled by the v11
-    compiler (name-then-marker layout) produced
-    ``SLIDE VISUAL STYLE: [ds-compiler v12] Evil [ds-compiler v11]``, whose leading
-    characters ARE the current prefix while its body is v11. Counting markers makes
-    that header answer False on the SECOND marker, so the row recompiles. Such a
-    header is unreachable from v12 emission — ``_header_safe_name`` strips
-    marker-shaped text from the name — so this condition guards history, not the
-    current writer.
+    Trailing whitespace is tolerated implicitly (the sentinel leads, so anything
+    appended by a storage round-trip is irrelevant). The design-system name buys
+    nothing in EITHER direction: a system named exactly like the marker still reads
+    current from its own compile, and reads stale when its body is stale.
     """
     if not compiled:
         return False
-    header = compiled.split("\n", 1)[0].rstrip()
-    separator = f"{_HEADER_VERSION_PREFIX} "
-    if not header.startswith(separator):
-        return False
-    # A name segment is always emitted (empty names fall back to the default
-    # label), so a header that stops at the prefix was not written by this
-    # compiler.
-    if not header[len(separator):].strip():
-        return False
-    # Exactly one marker: the compiler's own, in its slot. A second one means the
-    # name smuggled marker text (only possible in a pre-v12 persisted artifact).
-    return len(_MARKER_LIKE_RE.findall(header)) == 1
+    # Exact version, at the FRONT. Not ``in``: a sentinel's position is part of what
+    # makes it unforgeable, and ``in`` would also accept one embedded in a body.
+    return compiled.startswith(_CURRENCY_SENTINEL)
 
 
 def ensure_compiled_style_content_current(design_system: Any) -> str:
