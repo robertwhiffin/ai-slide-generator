@@ -190,7 +190,32 @@ async def get_agent_config(session_id: str):
     # slide_style_id must not make a session UNLOADABLE (it is already
     # unsaveable), and a read is not the place to reject stored state.
     had_design_system = config.design_system_id is not None
-    await asyncio.to_thread(_sanitize_stale_pins, config, session_id=session_id)
+    cleared = await asyncio.to_thread(
+        _sanitize_stale_pins, config, session_id=session_id
+    )
+    # PERSIST the repair. Sanitizing a detached object and returning it MASKED the
+    # problem: the response looked healed while the stored row kept the dangling
+    # ids forever, and every later read re-ran the same clear and re-logged the
+    # same warnings.
+    #
+    # A side-effecting read is an established pattern in this codebase — the
+    # compiler lazily recomputes a stale ``compiled_style_content`` on read the
+    # same way — under three constraints:
+    #   * write ONLY when something was actually cleared (a clean read stays a
+    #     pure read; ``cleared`` is False and nothing is written),
+    #   * idempotent (the next read finds nothing to clear, so it writes nothing),
+    #   * and NEVER fail the read: a GET that cannot persist its repair degrades
+    #     to the previous masking behaviour instead of 500ing a session open.
+    if cleared and raw is not None:
+        try:
+            await asyncio.to_thread(_save_agent_config, session_id, config)
+        except Exception:
+            logger.warning(
+                "Could not persist the sanitised agent config for session %s; "
+                "returning the healed view without saving it",
+                session_id,
+                exc_info=True,
+            )
     result = config.model_dump()
     result["is_configured"] = raw is not None
     # Out-of-band flag (like ``is_configured``, not part of AgentConfig): tells the
