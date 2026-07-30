@@ -1,3 +1,135 @@
+# Round 8 findings
+
+Branch `ty/authz-optionc-e2e`, fresh worktree off tip `ad00745`. One commit per item.
+Round 7's findings are preserved below, unedited.
+
+Baselines captured BEFORE any edit, in this worktree:
+
+| Gate | Baseline @ `ad00745` |
+|---|---|
+| `pytest tests/unit -q` | **2495 passed, 11 skipped** |
+| `ruff check src tests` | **2176 errors** |
+| `mypy src` | **551 errors in 84 files** |
+| `COMPILER_VERSION` | **13** |
+
+Frozen-invariant hashes at baseline (re-verified after every item):
+`src/api/routes/_authz.py` = `afa344e8…e034647`,
+`services/pptx-emit-huashu/preprocess.mjs` = `eec02c0c…8906a1`.
+
+Environment: **PostgreSQL 14.22 (Homebrew)** live on `127.0.0.1:5432`, block_size
+8192 — the same version codex used, so Item 3's live matrix was really run.
+
+---
+
+## R8 Item 1 — B1: the NAME HEURISTIC was the defect, not its pattern list
+
+**Status: FIXED.** Commit `005abbc`.
+
+### RED first — all ten of codex's rows, reproduced verbatim
+
+Against `ad00745`, before any edit:
+
+```
+=== UNDER-inclusive (real font sizes, printed as SPACING) ===
+  'fs–body'   / 16px   owns=False   norm='fs–body'      <- en dash survived normalization
+  'fs．body'   / 16px   owns=False   norm='fs．body'      <- fullwidth period survived
+  'fs‐body'   / 16px   owns=False   norm='fs‐body'      <- unicode hyphen survived
+  'fs-body'   / 2cap   owns=False
+  'fs-body'   / 0      owns=False
+  'fs-body'   / small  owns=False
+  'fs-body'   / large  owns=False
+=== OVER-inclusive (NOT font sizes, but owned) ===
+  'text-indent'                / 2em   owns=True
+  'text-decoration-thickness'  / 2px   owns=True
+  'text-gap'                   / 8px   owns=True
+```
+
+New spec `tests/unit/test_design_system_compiler.py`, class
+`TestFontSizeOwnershipStemIsAWholeSegment`: **11 failed, 3 passed** before the fix.
+The eviction codex measured is pinned as its own case and failed with
+`'text-indent' is not a font size but holds the font-size heading`.
+
+After the fix, all ten invert:
+
+```
+UNDER-inclusive: all 7 owns=True      OVER-inclusive: all 3 owns=False
+```
+
+### Which structural option, and why
+
+**Option (a) — prefer the manifest's declared `kind` — was evaluated and REJECTED
+on evidence.** It is the most appealing option on its face, and it does not work
+here:
+
+1. **There is no declared kind left to read.** `design_system_token` carries exactly
+   `(group, name, value)` (`src/database/models/design_system.py:281-283`) and the
+   importer writes `DesignSystemToken(group=, name=, value=)`
+   (`src/services/design_system_service.py:712`). The manifest `kind` is mapped
+   through `_KIND_TO_GROUP` and collapsed into `group` at import time, before the
+   compiler ever runs.
+2. **Where kind IS visible, it is WRONG for exactly these tokens.** A real Claude
+   Design manifest declares
+   `{"name": "--fs-12", "value": "12px", "kind": "spacing"}`
+   (`tests/unit/conftest_design_system.py:112-115`). Preferring the declared kind
+   would file the type ramp as spacing **by contract** — re-creating the v7
+   small-titles defect as designed behaviour rather than closing it. The compiler
+   has documented this manifest bug since v4.
+
+So **(b) + (c)**: keep the name fallback, make both axes structural.
+
+**(b) Name.** Separators are decided by **Unicode category** (`Pd`/`Pc`/`Po` plus
+whitespace) via `_is_name_separator`, not a hand-listed ASCII class — hand-listing
+code points is the same losing move one level down, and would leave the next
+separator (em dash, ideographic full stop, non-breaking hyphen) broken. `Lo`/`So`/`Sm`
+are not punctuation, so CJK, Cyrillic and emoji are preserved and `fs-サイズ-24` still
+cannot collapse onto `fs-24` (pinned). The stem is a **whole segment**, never a
+prefix: `_TYPE_SIZE_STEMS = ("fs", "font-size", "text-size", "type-scale")`.
+
+**(c) Value.** Added `cap`/`rcap`, a bare `0`, and `small`/`large`. Still rejects
+negative lengths, colours and malformed `calc()`.
+
+### Two deliberate omissions from the suggested stem list
+
+Both because the stem would be **ambiguous**, not merely awkward:
+
+* **`size`** is in the suggested list but cannot be a stem: `size-gap: 8px` is an
+  explicitly named frozen control, and a bare `size` segment does not say *what* is
+  being sized. Verified: with `size` as a stem, `size-gap` becomes owned.
+* **bare `text`** had to go. `text-gap` (codex: must not be owned) and
+  `text-🎨-body` (round 7: was owned) are the **same shape** — `text` plus one
+  word — so no whole-segment rule can own one and reject the other. The suggested
+  list itself says `text-size`, not `text`.
+
+**Consequence, stated plainly:** two existing fixtures were restated onto the
+`text-size-*` spelling (`text-🎨-body` → `text-size-🎨-body` in
+`_HOSTILE_NAMED_RAMP`; `text-percent` → `text-size-percent`). Those two tokens are
+no longer *owned* under the bare-`text` spelling. Neither is dropped — both remain
+in the artifact under their declared group — so the cost is a label, whereas the
+prefix match's cost was evicting genuine spacing tokens *and* handing a non-size the
+font-size heading. The collision is pinned by
+`test_bare_text_is_not_a_stem_but_text_size_is` so it cannot be silently undone.
+
+### COMPILER_VERSION
+
+**13 → 14.** Compiled output changes in both directions, so persisted v13 rows hold
+both mislabelings and must recompile.
+
+### Gates
+
+| Gate | Before | After | Net-new |
+|---|---|---|---|
+| `pytest tests/unit` | 2495 passed, 11 skipped | **2510 passed, 11 skipped** | +15, 0 failures |
+| `ruff check src tests` | 2176 | 2176 | **0** |
+| `mypy src` | 551 in 84 files | 551 in 84 files | **0** |
+
+Zero tests disappeared. Frozen hashes for `_authz.py` and `preprocess.mjs` unchanged.
+All 14 `test_authz_*.py` spec files pass (246 passed, 5 skipped under `-k authz`).
+Goldens unregenerated; `git status` showed only the two intended files.
+
+Frontend: **no frontend file was touched, so tsc/eslint were not run.**
+
+---
+
 # Round 7 findings
 
 Branch `ty/authz-optionc-e2e`, worktree off tip `aaca44c`. One commit per item.
