@@ -544,6 +544,25 @@ def _safe_multiline(value: Any) -> str:
 _TYPE_SIZE_NAME_RE = re.compile(r"^(?:fs|font-?size|text)[-_]?\d*($|[-_])", re.IGNORECASE)
 _PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
 
+# Separator conventions a brand may use between the parts of a token name. A design
+# system is free to write its scale as ``fs-body``, ``fs.body``, ``fs_body``,
+# ``font.size.body`` or ``fontSizeBody``, and the choice is a house style — it says
+# nothing about whether the token is a font size. Ownership therefore compares a
+# NORMALIZED name: every separator run becomes a single ``-``, and a camelCase hump
+# becomes a separator too, so all of those spellings collapse onto ``fs-body`` /
+# ``font-size-body`` before :data:`_TYPE_SIZE_NAME_RE` is applied.
+#
+# Round 6 matched the raw name against a pattern that only accepted ``-``/``_``
+# after the stem, so ``fs.body``, ``font_size_body``, ``fontSizeBody`` and
+# ``font.size.body`` were all read as NOT font sizes and printed under
+# ``SPACING TOKENS:`` — the v7 small-titles mislabel on its fifth surface.
+# Only PUNCTUATION/whitespace is a separator. Deliberately NOT ``[^0-9A-Za-z]``:
+# that also consumed CJK, Cyrillic and emoji, so a legitimate brand token
+# ``fs-サイズ-24`` normalized to ``fs-24`` and collided with a different rung of the
+# same ramp. Normalization must unify SEPARATOR CONVENTIONS, never erase script.
+_NAME_SEPARATOR_RE = re.compile(r"[-_./\\:|\s]+")
+_CAMEL_HUMP_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
 # A font size may legitimately be declared in any CSS length/relative unit, or by
 # a function that computes one. OWNERSHIP (see ``_font_size_token_pairs``) accepts
 # every form; only :data:`_PX_VALUE_RE` values can contribute to the numeric bands,
@@ -555,17 +574,41 @@ _PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
 # answerable ONLY for a px value that was also the first token at its size — so
 # ``fs-body: 1rem`` and the second token at ``16px`` were both filed under
 # ``SPACING TOKENS:``, the v7 mislabel again.
-_FONT_SIZE_VALUE_RE = re.compile(
-    r"""^\s*(?:
-        [+-]?(?:\d+(?:\.\d+)?|\.\d+)      # a number, with or without a fraction
-        \s*(?:px|pt|pc|in|cm|mm|q         # absolute lengths
+# Two further corrections to the grammar, both round-7 B1:
+#
+# * NO LEADING SIGN. ``[+-]?`` accepted ``-8px``, but there is no such thing as a
+#   negative font size. The cost was not cosmetic: ownership SUPPRESSES a token from
+#   ``SPACING TOKENS:``, so a genuine spacing token of ``-8px`` was removed from the
+#   spacing list and re-homed under a font-size heading. A leading ``+`` is dropped
+#   with it — ``+16px`` is not a form any brand writes for a size.
+# * A COMPUTED SIZE MUST CONTAIN A SIZE. The arm was ``(?:clamp|calc|min|max)\s*\(.*\)``,
+#   where ``.*`` matched literally anything, so ``calc(not css at all)`` was claimed
+#   as a font size. The contents must now hold at least one length/percentage or
+#   custom-property reference, which is what distinguishes a real computed size from
+#   a string that merely opens with ``calc(``.
+#
+# ``var()`` is accepted as a size in its own right: indirecting the scale through a
+# custom property (``fs-body: var(--brand-body)``) is the most common way a design
+# system references its own tokens, and rejecting it printed those sizes as spacing.
+_LENGTH_UNITS = r"""(?:px|pt|pc|in|cm|mm|q         # absolute lengths
              |r?em|ex|ch|r?lh|ic          # font-relative lengths
              |v(?:w|h|i|b|min|max)        # viewport-relative lengths
              |[cdsl]v(?:w|h|i|b|min|max)  # small/large/dynamic/container viewport
              |cq(?:w|h|i|b|min|max)       # container-query lengths
-             |%)                          # percentage of the inherited size
-        |(?:clamp|calc|min|max)\s*\(.*\)  # a computed size
-        |x{1,3}-large|x{1,3}-small|larger|smaller|medium  # CSS absolute keywords
+             |%)                          # percentage of the inherited size"""
+
+_FONT_SIZE_VALUE_RE = re.compile(
+    rf"""^\s*(?:
+        (?:\d+(?:\.\d+)?|\.\d+)           # a non-negative number (no sign)
+        \s*{_LENGTH_UNITS}
+        |var\s*\(\s*--[^)]*\)             # a custom-property reference
+        |(?:clamp|calc|min|max)\s*\(      # a computed size, which must CONTAIN a size
+            (?=[^)]*(?:
+                (?:\d+(?:\.\d+)?|\.\d+)\s*{_LENGTH_UNITS}
+                |var\s*\(\s*--
+            ))
+            .*\)
+        |x{{1,3}}-large|x{{1,3}}-small|larger|smaller|medium  # CSS absolute keywords
     )\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -634,6 +677,22 @@ def _fmt_px(px: float) -> str:
     return f"{int(px)}px" if px == int(px) else f"{px:g}px"
 
 
+def _normalized_token_name(name: Any) -> str:
+    """A token name reduced to one separator convention, for COMPARISON only.
+
+    Sanitized first (so the string compared is the string EMITTED — see
+    :func:`_is_font_size_token`), then camelCase humps are split and every run of
+    non-alphanumerics collapses to a single ``-``. ``fs.body``, ``fs_body``,
+    ``fontSizeBody`` and ``font.size.body`` all normalize onto a form
+    :data:`_TYPE_SIZE_NAME_RE` recognizes.
+
+    Never used for OUTPUT: every emitted name is the author's own, verbatim through
+    :func:`_safe`. This exists so a house style cannot decide a token's role.
+    """
+    sanitized = _safe(name).strip()
+    return _NAME_SEPARATOR_RE.sub("-", _CAMEL_HUMP_RE.sub("-", sanitized)).strip("-")
+
+
 def _is_font_size_token(name: Any, value: Any) -> bool:
     """True when this token IS a font size, for LABELING purposes.
 
@@ -656,10 +715,21 @@ def _is_font_size_token(name: Any, value: Any) -> bool:
     A map keyed by the thing you can compute bands from can never be the register
     of what exists — the two answer different questions, so they are now two
     functions.
+
+    Round 7 (B1) corrected both halves of the test itself:
+
+    * The NAME is normalized (:func:`_normalized_token_name`) before matching, so a
+      brand's separator convention — ``fs.body``, ``font_size_body``,
+      ``fontSizeBody``, ``font.size.body`` — cannot change the answer.
+    * The name is normalized from the SANITIZED string, so the token that decides
+      ownership is the token the artifact actually EMITS. Classifying the raw name
+      let ``fs\\x1f-body`` be filed under spacing while it printed as ``fs-body``.
+    * The VALUE grammar accepts ``var()`` and rejects values that are not valid CSS
+      lengths (a negative length, a ``calc()`` containing no size).
     """
-    if not _TYPE_SIZE_NAME_RE.match(str(name or "").strip()):
+    if not _TYPE_SIZE_NAME_RE.match(_normalized_token_name(name)):
         return False
-    return bool(_FONT_SIZE_VALUE_RE.match(str(value or "")))
+    return bool(_FONT_SIZE_VALUE_RE.match(_safe(value).strip()))
 
 
 def _font_size_px_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, str]:
