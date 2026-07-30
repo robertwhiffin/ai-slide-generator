@@ -756,8 +756,14 @@ export const AgentConfigBar: React.FC = () => {
                     .join(' · ')}
                 </p>
               )}
+              {/* A design system and a slide style are mutually exclusive: picking
+                  either clears the other (AgentConfigContext.setStyle /
+                  setDesignSystem), so the old "design system takes precedence"
+                  hint is unreachable by selection. It is kept ONLY for a legacy
+                  stored config that still holds both, where it explains which
+                  one is actually in effect. */}
               {agentConfig.design_system_id != null && agentConfig.slide_style_id != null && (
-                <p className="mt-1 text-[11px] text-gray-400">
+                <p className="mt-1 text-[11px] text-gray-400" data-testid="style-precedence-note">
                   Design system takes precedence over slide style.
                 </p>
               )}

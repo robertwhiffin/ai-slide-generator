@@ -79,26 +79,34 @@ function withoutSessionScopedState(config: AgentConfig): AgentConfig {
 }
 
 /**
- * Has this config been through default resolution — i.e. is it real state rather
- * than the untouched first-paint placeholder?
+ * Does this config carry anything a person or a resolve could have put there?
  *
- * The localStorage mirror writes on EVERY config change, including the initial
- * `DEFAULT_AGENT_CONFIG` rendered before the default profile has loaded. Such a
- * mirror must not suppress the profile load, which is what the old
- * `tools.length > 0` test was really (and too bluntly) guarding: it also
- * discarded genuine zero-tool configurations.
+ * Used ONLY to decide whether the pre-session localStorage mirror may be WRITTEN
+ * yet. It is deliberately NOT used to decide whether a stored config is
+ * authoritative: an existing mirror always is (see `readStoredConfig`'s callers).
  *
- * Resolution always stamps `style_source`, so its presence is the honest marker.
- * A config with tools, a design system, or a deck prompt is unambiguously
- * user-modified and counts too — which keeps LEGACY stored configs (written
- * before provenance existed) working exactly as they did.
+ * That split is the fix for the legacy-config bug. There used to be one
+ * `isConfigResolved(config)` predicate answering both questions from CONTENT, and
+ * content cannot separate the two cases that matter: a config whose only edit was
+ * choosing "Design System: None" and the untouched first-paint placeholder are
+ * BYTE IDENTICAL when the user has no personal style/prompt preferences (no
+ * style_source, no ids, no tools). Treating that as "never resolved" discarded a
+ * deliberate None and seeded the org default over it — the very bug provenance
+ * was introduced to fix, arriving through another door.
+ *
+ * So EXISTENCE is now the marker for "authoritative", and this predicate only
+ * gates the write that creates it — a role where a false negative is harmless
+ * (the mirror is simply written a moment later, once anything is set).
  */
-function isConfigResolved(config: AgentConfig): boolean {
+function isConfigMeaningful(config: AgentConfig): boolean {
   return (
     config.style_source != null ||
     config.tools.length > 0 ||
     config.design_system_id != null ||
-    config.deck_prompt_id != null
+    config.slide_style_id != null ||
+    config.deck_prompt_id != null ||
+    config.system_prompt != null ||
+    config.slide_editing_instructions != null
   );
 }
 
@@ -226,13 +234,25 @@ async function resolveDefaultDesignSystemId(): Promise<number | null> {
  * a brand layered over it. Mirrors the backend's
  * `_apply_org_default_style_source`, which covers MCP and the chat routes.
  */
-async function withResolvedStyleSource(config: AgentConfig): Promise<AgentConfig> {
+async function withResolvedStyleSource(
+  config: AgentConfig,
+  { isNewSurface = false }: { isNewSurface?: boolean } = {},
+): Promise<AgentConfig> {
   // A style source the USER decided is COMPLETE — including the decision to have
   // NEITHER a style nor a design system. That is why provenance covers the slot
   // rather than one field: "both ids null" is indistinguishable by value from
   // "never resolved", so an explicit "Design System = None" was re-seeded from
   // the org default on the next load.
   if (config.style_source === 'user') return config;
+
+  // ABSENCE of provenance on an EXISTING stored config is USER-CHOSEN, never
+  // seedable. Such a config predates the marker, and the shape that matters most
+  // — an explicit "Design System: None" — carries no style_source, no ids and no
+  // tools, so nothing in its content distinguishes it from a fresh surface. Only
+  // a genuinely NEW surface (no stored config, no persisted session config) may
+  // be seeded, and its caller says so explicitly rather than it being inferred
+  // from values that cannot carry the distinction.
+  if (!isNewSurface && config.style_source == null) return config;
 
   if (config.design_system_id != null) return config;
 
@@ -401,6 +421,11 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // so we only do it once (on first mount with no stored config).
   const defaultProfileLoaded = useRef(false);
 
+  // Latches once this surface's config is real state rather than the untouched
+  // first-paint placeholder, so the localStorage mirror is written from then on
+  // (including for a config the user has since emptied back out).
+  const configEverResolvedRef = useRef(false);
+
   // ------------------------------------------------------------------
   // Pre-session: load default profile's config on first mount if no
   // stored config exists.
@@ -413,19 +438,20 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const storedConfig = readStoredConfig();
 
     // ANY stored configuration is authoritative — it is this user's own state,
-    // mirrored here by the effect below. It is kept as-is and only GAPS are
-    // filled; `withResolvedStyleSource` decides whether the stored style slot is
-    // a real choice, from its persisted provenance.
+    // mirrored here by the effect below. Its EXISTENCE is the marker: the
+    // untouched first-paint placeholder is never written (see the persistence
+    // effect's `configEverResolvedRef` gate), so a mirror being present means
+    // real state and `readStoredConfig` returning null is what still falls
+    // through to the profile load.
     //
-    // This used to require `tools.length > 0`. Tool count is not a proxy for
-    // "the user configured something": a config whose only edit was choosing
-    // Design System = None has zero tools, and discarding it threw that
-    // deliberate null away and re-seeded the org default on the next load. The
-    // real question — has this config been through resolution at all — is what
-    // `isConfigResolved` asks, so an unresolved first-paint mirror still falls
-    // through to the profile load below.
-    if (storedConfig && isConfigResolved(storedConfig)) {
+    // Deciding this from CONTENT is what caused the legacy-config bug twice
+    // over — first `tools.length > 0`, then a value test on provenance/ids —
+    // because a config whose only edit was choosing "Design System: None" is
+    // byte-identical to the placeholder. See `isConfigMeaningful`.
+    if (storedConfig) {
       if (storedConfig.design_system_id == null || storedConfig.deck_prompt_id == null) {
+        // NOT a new surface: this is the user's own stored state, so a missing
+        // provenance marker is read as their choice and never seeded over.
         void withResolvedStyleSource(storedConfig).then(resolved => {
           const updated = { ...resolved };
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();
@@ -455,7 +481,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
             }
           : { ...DEFAULT_AGENT_CONFIG };
 
-        config = await withResolvedStyleSource(config);
+        // A genuinely NEW surface: there was no stored config at all, so this is
+        // the one place org-default seeding belongs.
+        config = await withResolvedStyleSource(config, { isNewSurface: true });
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
@@ -501,6 +529,13 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       .then(async (config) => {
         // If the session has no explicitly-saved config, load the default profile
         const isConfigured = (config as AgentConfig & { is_configured?: boolean }).is_configured ?? true;
+        // The server clears a design_system_id whose row no longer exists and
+        // says so out-of-band. Surface it ONCE, non-blocking: a dropdown that
+        // silently reads "None" looks like the user's own selection was lost for
+        // no reason. Generic copy — never the design system's name.
+        const designSystemUnavailable =
+          (config as AgentConfig & { design_system_unavailable?: boolean })
+            .design_system_unavailable === true;
 
         if (!isConfigured) {
           try {
@@ -520,7 +555,10 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           // meant a user who chose Design System = None, saved, and reloaded
           // got the org default silently restored — and made an org-default
           // change retroactive to old sessions instead of session-isolated.
-          config = await withResolvedStyleSource(config);
+          //
+          // This branch is gated on `!isConfigured`, i.e. the server holds NO
+          // stored config for the session — genuine creation, so seeding applies.
+          config = await withResolvedStyleSource(config, { isNewSurface: true });
         }
 
         if (config.deck_prompt_id == null) {
@@ -545,6 +583,12 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
           setAgentConfig(config);
           claimOwnership(issuedFor);
+          if (designSystemUnavailable) {
+            showToast(
+              'The design system this deck used is no longer available; selection cleared.',
+              'info',
+            );
+          }
         });
       })
       .catch(err => {
@@ -560,6 +604,20 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // ------------------------------------------------------------------
   useEffect(() => {
     if (isPreSession) {
+      // Do NOT mirror the untouched first-paint placeholder. The mirror's mere
+      // EXISTENCE is what marks a config as real state (see the stored-config
+      // branch in the pre-session effect above),
+      // because content cannot tell a legacy explicit-"None" config apart from
+      // the placeholder — with no personal preferences set they are byte
+      // identical. Writing the placeholder would therefore let it masquerade as
+      // saved state on the next visit and suppress the default-profile load.
+      //
+      // The gate opens as soon as anything has resolved or the user has edited:
+      // provenance stamped, or any non-default selection present.
+      if (!configEverResolvedRef.current && !isConfigMeaningful(agentConfig)) {
+        return;
+      }
+      configEverResolvedRef.current = true;
       localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify(withoutSessionScopedState(agentConfig)),
@@ -721,9 +779,17 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     // Picking a style in the UI is the moment provenance is KNOWN, so it is
     // recorded here rather than reconstructed later by comparing ids — which
     // cannot distinguish this from the server seeding the same value.
+    //
+    // The two style sources are MUTUALLY EXCLUSIVE: a design system takes
+    // precedence in the prompt, so leaving `design_system_id` set here meant the
+    // style the user just picked had NO effect — silently. Choosing a style is
+    // therefore also a decision to stop using a design system, which clears its
+    // dependent template pin too.
+    const clearsDesignSystem = styleId != null && agentConfig.design_system_id != null;
     await updateConfig({
       ...agentConfig,
       slide_style_id: styleId,
+      ...(clearsDesignSystem ? { design_system_id: null, template_id: null } : {}),
       style_source: 'user',
     });
   }, [agentConfig, updateConfig]);
@@ -739,10 +805,15 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     // about the style slot, so it stamps user provenance. Without this, "None"
     // was indistinguishable from "never resolved" and the org default was
     // re-seeded on the next load.
+    //
+    // The mirrored half of exclusivity: selecting a design system clears the
+    // slide style, so the two never compete in one prompt. Clearing the design
+    // system to None does NOT resurrect a style — "neither" is a valid choice.
     await updateConfig({
       ...agentConfig,
       design_system_id: designSystemId,
       template_id: templateId,
+      ...(designSystemId != null ? { slide_style_id: null } : {}),
       style_source: 'user',
     });
   }, [agentConfig, updateConfig]);

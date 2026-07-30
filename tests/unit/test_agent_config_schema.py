@@ -275,3 +275,100 @@ def test_resolve_agent_config_with_new_types():
     }
     config = resolve_agent_config(raw)
     assert len(config.tools) == 3
+
+
+# ---------------------------------------------------------------------------
+# style_source must FAIL SOFT (a stored config can never brick GET)
+# ---------------------------------------------------------------------------
+#
+# ``style_source`` is a Literal["seeded", "user"], so an unexpected stored value
+# raised ValidationError out of ``resolve_agent_config`` — which every config
+# LOAD goes through. A single bad row (a hand-edited config, an older/newer
+# writer, a partial migration) therefore made the session unloadable rather than
+# merely mis-provenanced.
+#
+# Provenance is metadata ABOUT a choice, not the choice itself: when it cannot be
+# read, the safe reading is "a user chose this", because that is the
+# NON-OVERRIDING branch — it never silently substitutes the org default for
+# something a person may have deliberately selected.
+
+
+class TestMalformedStyleSourceFailsSoft:
+    def test_bogus_string_is_treated_as_user_chosen(self):
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        config = resolve_agent_config({"tools": [], "style_source": "bogus"})
+        assert config.style_source == "user"
+
+    def test_number_is_treated_as_user_chosen(self):
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        assert resolve_agent_config({"tools": [], "style_source": 7}).style_source == "user"
+
+    def test_explicit_null_is_preserved_as_absent_provenance(self):
+        """``null`` is not malformed — it is the LEGACY shape (a config written
+        before provenance existed) and must stay distinguishable, because Item 4
+        gives an EXISTING stored config with no marker the user-chosen reading."""
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        assert resolve_agent_config({"tools": [], "style_source": None}).style_source is None
+
+    def test_missing_key_is_preserved_as_absent_provenance(self):
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        assert resolve_agent_config({"tools": []}).style_source is None
+
+    def test_malformed_value_never_raises_and_keeps_the_rest_of_the_config(self):
+        """The whole point: loading must not fail, and no other field is lost."""
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        config = resolve_agent_config(
+            {
+                "tools": [],
+                "style_source": ["unexpected", "list"],
+                "design_system_id": 7,
+                "slide_style_id": 3,
+                "deck_prompt_id": 9,
+                "system_prompt": "synthetic",
+            }
+        )
+        assert config.style_source == "user"
+        assert config.design_system_id == 7
+        assert config.slide_style_id == 3
+        assert config.deck_prompt_id == 9
+        assert config.system_prompt == "synthetic"
+
+    def test_malformed_value_logs_a_warning(self, caplog):
+        """Silently rewriting provenance would hide a data problem, so the
+        coercion is observable."""
+        import logging
+
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        with caplog.at_level(logging.WARNING, logger="src.api.schemas.agent_config"):
+            resolve_agent_config({"tools": [], "style_source": "bogus"})
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("style_source" in message for message in messages), (
+            f"no warning mentioned style_source: {messages}"
+        )
+
+    def test_a_valid_provenance_value_is_untouched(self):
+        from src.api.schemas.agent_config import resolve_agent_config
+
+        for valid in ("seeded", "user"):
+            assert resolve_agent_config(
+                {"tools": [], "style_source": valid}
+            ).style_source == valid
+
+    def test_strict_validation_still_applies_to_direct_construction(self):
+        """The leniency belongs to READING STORED data. Constructing an
+        AgentConfig with a bogus provenance is a programming error and still
+        raises, so the type stays meaningful in code."""
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        from src.api.schemas.agent_config import AgentConfig
+
+        with _pytest.raises(ValidationError):
+            AgentConfig(style_source="bogus")
