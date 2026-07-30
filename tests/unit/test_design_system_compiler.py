@@ -2251,11 +2251,20 @@ class TestEveryTokenNameIsKept:
     # A RECOGNIZABLE ramp (>=3 distinct px sizes) whose names are all
     # allowlist-REJECTED and which are therefore suppressed from the spacing list
     # too — the combination that produced total loss.
+    #
+    # The 18px rung was ``text-🎨-body`` until round 8, when the font-size stem became
+    # a WHOLE SEGMENT rather than a prefix. Under a prefix rule, bare ``text`` owned
+    # every name starting with those four letters, which claimed ``text-indent: 2em``
+    # and ``text-gap: 8px`` as font sizes and EVICTED real spacing tokens from
+    # ``SPACING TOKENS:``. ``text-🎨-body`` is structurally identical to ``text-gap``
+    # — ``text`` plus one word — so no rule can own one and reject the other; the
+    # emoji is incidental. The rung keeps its emoji (that is what this class tests)
+    # on the ``text-size`` spelling, which is what actually denotes a size.
     _HOSTILE_NAMED_RAMP = [
         {"group": "spacing", "name": "fs-" + _LONG_NAME, "value": "64px"},
         {"group": "spacing", "name": "font-size/heading-xl", "value": "40px"},
         {"group": "spacing", "name": "fs-サイズ-24", "value": "24px"},
-        {"group": "spacing", "name": "text-🎨-body", "value": "18px"},
+        {"group": "spacing", "name": "text-size-🎨-body", "value": "18px"},
         {"group": "spacing", "name": "fs-12", "value": "12px"},
     ]
 
@@ -3652,10 +3661,14 @@ class TestFontTokenOwnershipIsIndependentOfRampConstruction:
         ``spacing`` group, none of which the px map could see."""
         from src.services.design_system_compiler import compile_design_system
 
+        # ``text-percent`` was ``text`` + one word until round 8 made the stem a whole
+        # segment; that spelling is indistinguishable from ``text-indent``, so it is
+        # stated here as ``text-size-percent``. The VALUE (``125%``) is what this case
+        # exercises, and it is unchanged.
         font_tokens = [
             ("fs-rem", "1rem"),
             ("font-size-em", "2em"),
-            ("text-percent", "125%"),
+            ("text-size-percent", "125%"),
             ("fs-clamp", "clamp(1rem, 2vw, 3rem)"),
         ]
         tokens = [
@@ -4058,8 +4071,14 @@ class TestCurrencyRestsOnAStructuralSentinel:
         )
         assert "SLIDE VISUAL STYLE:" in system_prompt
         # The human-readable marker is still visible (greppable), and the type-scale
-        # re-assertion still recovers its region.
-        assert "[ds-compiler v13]" in system_prompt
+        # re-assertion still recovers its region. Derived from COMPILER_VERSION rather
+        # than hardcoded: this asserts "the CURRENT marker is present", so pinning a
+        # literal made it fail on every legitimate version bump. The spoof-name
+        # literals elsewhere in this class stay hardcoded on purpose — they are
+        # historical strings that must keep reading STALE.
+        from src.services.design_system_compiler import COMPILER_VERSION
+
+        assert f"[ds-compiler v{COMPILER_VERSION}]" in system_prompt
         assert TYPE_SCALE_REASSERTION_HEADING in system_prompt
 
 
@@ -4291,3 +4310,261 @@ class TestFontSizeOwnershipIsDecidedOnTheVisibleToken:
         assert _font_size_px_ramp(grouped) == {}, (
             "a non-px font size must not fabricate a numeric band"
         )
+
+
+class TestFontSizeOwnershipStemIsAWholeSegment:
+    """B1, round 8: the NAME HEURISTIC itself was the defect, not its pattern list.
+
+    Five rounds tried to fix this class by extending a regex. Round 8 attacks the
+    two structural properties the regex never had.
+
+    UNDER-INCLUSIVE — separator NORMALIZATION was a hand-listed set of ASCII
+    punctuation (``[-_./\\\\:|\\s]+``). A brand writing its scale with a typographic
+    separator — an en dash ``fs–body``, a fullwidth period ``fs．body``, a Unicode
+    hyphen ``fs‐body`` — normalized to a name the stem pattern could not match, so
+    the token printed under ``SPACING TOKENS:``: the v7 small-titles mislabel on its
+    SIXTH surface. Enumerating code points is the same losing move as enumerating
+    separators, so the fix asks Unicode instead: a character is a separator when its
+    general category is a punctuation-dash/connector/other (``Pd``/``Pc``/``Po``).
+    Script-bearing characters (``Lo`` — CJK, ``So`` — emoji) are deliberately NOT
+    separators, which is what keeps ``fs-サイズ-24`` and ``text-🎨-body`` intact.
+
+    The VALUE grammar was also under-inclusive: a container-query/cap unit (``2cap``),
+    a bare ``0`` (valid CSS, and the one length that needs no unit) and the relative
+    keywords ``small``/``large`` are all real font sizes that printed as spacing.
+
+    OVER-INCLUSIVE — and this is the half no previous round touched. The stem
+    alternative ``text`` matched as a PREFIX, so any CSS property beginning with
+    those four letters was claimed as a font size:
+
+        ``text-indent: 2em``  ``text-decoration-thickness: 2px``  ``text-gap: 8px``
+
+    None is a font size. The cost is concrete and measured in the artifact: because
+    ownership SUPPRESSES a pair from the spacing list, a bundle carrying
+    ``text-indent`` alongside one real spacing token compiled to
+    ``SPACING TOKENS: only '- gap-8: 8px'`` while ``BRAND FONT-SIZE TOKENS`` claimed
+    ``'- text-indent: 2em'`` — a genuine spacing token EVICTED from its own section
+    and a non-size given a size's authority. The stem must therefore be a WHOLE
+    SEGMENT of the normalized name, never a prefix of one.
+
+    Every case asserts the artifact TEXT, not just the predicate, and every case
+    asserts keep-everything. All fixtures SYNTHETIC.
+    """
+
+    #: codex's SEVEN under-inclusive rows, verbatim: a real font size, owns=False.
+    UNDER_INCLUSIVE = [
+        ("fs–body", "16px"),  # en dash U+2013
+        ("fs．body", "16px"),  # fullwidth period U+FF0E
+        ("fs‐body", "16px"),  # unicode hyphen U+2010
+        ("fs-body", "2cap"),
+        ("fs-body", "0"),
+        ("fs-body", "small"),
+        ("fs-body", "large"),
+    ]
+
+    #: codex's THREE over-inclusive rows, verbatim: NOT a font size, owns=True.
+    OVER_INCLUSIVE = [
+        ("text-indent", "2em"),
+        ("text-decoration-thickness", "2px"),
+        ("text-gap", "8px"),
+    ]
+
+    @staticmethod
+    def _section(out, heading):
+        if heading not in out:
+            return ""
+        tail = out[out.index(heading):]
+        return tail[: tail.index("\n\n")] if "\n\n" in tail else tail
+
+    @pytest.mark.parametrize(("name", "value"), UNDER_INCLUSIVE)
+    def test_a_real_font_size_is_owned_whatever_separator_or_unit(
+        self, session, name, value
+    ):
+        """The seven under-inclusive rows: each IS a font size, so each must be owned."""
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        assert _is_font_size_token(name, value), (
+            f"{name!r}: {value!r} IS a font size but ownership says it is not — it "
+            "prints under SPACING TOKENS:, the small-titles mislabel"
+        )
+
+        tokens = [
+            {"group": "spacing", "name": name, "value": value},
+            {"group": "spacing", "name": "gap-8", "value": "8px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        spacing = self._section(out, "SPACING TOKENS:")
+
+        # DUMP THE ARTIFACT: assert on the compiled text, never on the helper alone.
+        sanitized = name.replace("–", "-").replace("．", ".")
+        assert sanitized not in spacing and name not in spacing, (
+            f"font size {name!r} ({value}) mislabeled as SPACING:\n{spacing}"
+        )
+        assert f"- {name}: {value}" in out, f"token {name!r} was DROPPED entirely"
+        assert "gap-8: 8px" in spacing, (
+            f"the genuine spacing token was evicted from its own section:\n{spacing}"
+        )
+
+    @pytest.mark.parametrize(("name", "value"), OVER_INCLUSIVE)
+    def test_a_css_property_merely_starting_with_text_is_not_a_font_size(
+        self, session, name, value
+    ):
+        """The three over-inclusive rows: a 'text' PREFIX is not a font-size stem."""
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        assert not _is_font_size_token(name, value), (
+            f"{name!r}: {value!r} is NOT a font size but ownership claims it, which "
+            "evicts it from SPACING TOKENS: and gives it a size's authority"
+        )
+
+        tokens = [{"group": "spacing", "name": name, "value": value}]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        spacing = self._section(out, "SPACING TOKENS:")
+
+        assert f"- {name}: {value}" in out, f"token {name!r} was DROPPED entirely"
+        assert name in spacing, (
+            f"{name!r} ({value}) is not a font size, so it must stay in its declared "
+            f"spacing group:\n{spacing}"
+        )
+
+    def test_the_concrete_eviction_codex_measured(self, session):
+        """codex's eviction, asserted as the two artifact lines it actually printed.
+
+        Before: ``SPACING TOKENS: only '- gap-8: 8px'`` while ``BRAND FONT-SIZE
+        TOKENS`` held ``'- text-indent: 2em'``. Both halves are wrong at once, so
+        both are pinned here.
+        """
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "spacing", "name": "text-indent", "value": "2em"},
+            {"group": "spacing", "name": "gap-8", "value": "8px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        spacing = self._section(out, "SPACING TOKENS:")
+        font_sizes = self._section(out, "BRAND FONT-SIZE TOKENS")
+
+        assert "- text-indent: 2em" not in font_sizes, (
+            f"'text-indent' is not a font size but holds the font-size heading:\n"
+            f"{font_sizes}"
+        )
+        assert "text-indent: 2em" in spacing, (
+            f"'text-indent' was evicted from SPACING TOKENS::\n{spacing}"
+        )
+        assert "gap-8: 8px" in spacing, f"the real spacing token vanished:\n{spacing}"
+
+    def test_every_previously_passing_control_still_passes(self, session):
+        """The controls the owner named. A breadth fix must not narrow these.
+
+        Three tokens at 16px, ``size-gap`` staying spacing, ``fs-brand: #fff``
+        staying spacing, an unknown-group font size still owned, CJK and emoji names
+        intact, and every separator convention from round 7.
+        """
+        from src.services.design_system_compiler import _is_font_size_token
+
+        # Round-7 separator conventions: still owned.
+        for name in ("fs.body", "font_size_body", "fontSizeBody", "font.size.body"):
+            assert _is_font_size_token(name, "16px"), f"{name!r} regressed"
+        assert _is_font_size_token("fs-var", "var(--x)")
+        # Script-bearing names must survive normalization as font sizes.
+        assert _is_font_size_token("fs-サイズ-24", "24px")
+        assert _is_font_size_token("text-size-\U0001f3a8-body", "18px")
+        assert _is_font_size_token("text-size-percent", "125%")
+        assert _is_font_size_token("font-size/heading-xl", "40px")
+        # Non-sizes must stay non-sizes.
+        assert not _is_font_size_token("size-gap", "8px")
+        assert not _is_font_size_token("fs-brand", "#fff")
+        assert not _is_font_size_token("fs-neg", "-8px")
+        assert not _is_font_size_token("fs-calc", "calc(not css at all)")
+        assert _is_font_size_token("fs-body", "18px")
+
+    def test_bare_text_is_not_a_stem_but_text_size_is(self, session):
+        """The deliberate NARROWING, pinned so it cannot be undone by accident.
+
+        ``text-gap`` (codex: must NOT be owned) and ``text-🎨-body`` (round 7: was
+        owned) are the SAME SHAPE — ``text`` plus one word. No whole-segment rule can
+        own one and reject the other, so bare ``text`` cannot be a font-size stem;
+        only the explicit ``text-size`` spelling can. Two earlier fixtures were
+        restated onto ``text-size-*`` for exactly this reason.
+
+        A brand that really does declare sizes as ``text-<rung>`` keeps every token in
+        the artifact — it is listed under its declared group, never dropped — so the
+        cost of the narrowing is a label, while the cost of the prefix match was
+        evicting real spacing tokens AND handing a non-size the font-size heading.
+        """
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        assert not _is_font_size_token("text-gap", "8px")
+        assert not _is_font_size_token("text-\U0001f3a8-body", "18px")
+        assert _is_font_size_token("text-size-\U0001f3a8-body", "18px")
+        assert _is_font_size_token("text-size", "18px")
+
+        # Keep-everything for the un-owned spelling: still in the artifact, and in
+        # its declared group.
+        tokens = [
+            {"group": "spacing", "name": "text-\U0001f3a8-body", "value": "18px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        assert "- text-\U0001f3a8-body: 18px" in out, "the token was DROPPED"
+        assert "text-\U0001f3a8-body" in self._section(out, "SPACING TOKENS:")
+
+    def test_a_script_bearing_name_is_not_split_into_a_bare_stem(self, session):
+        """``fs-サイズ-24`` must not normalize onto ``fs-24``.
+
+        Unicode categories make it tempting to treat everything non-alphanumeric as
+        a separator; that erases script and collides two rungs of one ramp. CJK
+        (``Lo``) and emoji (``So``) are NOT punctuation, so they are preserved.
+        """
+        from src.services.design_system_compiler import (
+            _normalized_token_name,
+            compile_design_system,
+        )
+
+        assert _normalized_token_name("fs-サイズ-24") != "fs-24", (
+            "script was erased by separator normalization, collapsing two distinct "
+            "ramp rungs onto one name"
+        )
+
+        tokens = [
+            {"group": "spacing", "name": "fs-サイズ-24", "value": "24px"},
+            {"group": "spacing", "name": "fs-24", "value": "24px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+        for name in ("fs-サイズ-24", "fs-24"):
+            assert f"- {name}: 24px" in out, f"token {name!r} was DROPPED"
+
+    def test_short_and_absent_ramps_still_fall_back_to_neutral_bands(self, session):
+        """The NEUTRAL-band control: a breadth change must not move the fallback."""
+        from src.services.design_system_compiler import compile_design_system
+
+        # No font sizes at all -> neutral bands.
+        out = compile_design_system(
+            _make_ds(
+                session,
+                name="Acme No Ramp",
+                tokens=[{"group": "spacing", "name": "gap-8", "value": "8px"}],
+            )
+        )
+        assert "40-52px" in out and "16-18px" in out, (
+            "a bundle with no ramp must fall back to the app's neutral bands"
+        )
+
+        # One font size -> still owned, still neutral bands (below _MIN_RAMP_SIZES).
+        out = compile_design_system(
+            _make_ds(
+                session,
+                name="Acme One Rung",
+                tokens=[{"group": "spacing", "name": "fs-body", "value": "16px"}],
+            )
+        )
+        assert "40-52px" in out, "a one-rung ramp must not derive numeric bands"
+        assert "- fs-body: 16px" in out, "the single font size was dropped"
