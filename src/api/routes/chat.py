@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session as DBSession
 
+from src.api.schemas.agent_config import normalize_style_source_exclusivity
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -186,6 +187,27 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     client_set_fields: frozenset[str] = frozenset()
     if config_sent:
         config = AgentConfig.model_validate(request.agent_config)
+        # ONE style authority, enforced by the SHARED chokepoint rather than a
+        # second copy of the rule here. Exclusivity used to be applied only on the
+        # agent-config PUT, so this path — which validates the client's config and
+        # then persists the DUMPED DICT directly, on both the create and the
+        # existing-session sync branch — happily stored BOTH slide_style_id and
+        # design_system_id while generation silently applied design-system
+        # precedence: a stored row that disagreed with the deck it produced. Now
+        # that MCP sets design_system_id, that is a real caller shape.
+        #
+        # Restating the rule locally is what keeps reopening this class, so this
+        # calls the same helper the PUT does and inherits its semantics:
+        # NORMALISE to design-system-wins, never 422 (a 422 would wedge legacy
+        # both-set rows on every save — the regression that already happened once).
+        #
+        # Applied to the parsed model BEFORE the dump, so every downstream branch
+        # (create, client-generated-id create, existing-session sync) writes an
+        # already-exclusive config; no branch can be added later that skips it.
+        # There is no reference validation on this path to order against — chat
+        # never clears a dangling pin — so the PUT's "validate first" ordering
+        # constraint does not apply here.
+        normalize_style_source_exclusivity(config, session_id=request.session_id)
         explicit_config = config.model_dump()
         client_set_fields = frozenset(config.model_fields_set)
 
