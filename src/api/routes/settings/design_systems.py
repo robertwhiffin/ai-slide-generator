@@ -18,7 +18,7 @@ import os
 import re
 import unicodedata
 from collections import OrderedDict
-from typing import Any, List, Optional
+from typing import Any, List, Optional, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
@@ -184,6 +184,15 @@ def _current_user() -> str:
 # A string made only of these is semantically EMPTY however long it is.
 _INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Zs", "Zl", "Zp"})
 
+# Characters that render as NOTHING but whose Unicode category is a LETTER, so
+# the category test above cannot catch them. The Hangul fillers are the practical
+# set: U+3164 HANGUL FILLER and U+115F/U+1160 CHOSEONG/JUNGSEONG FILLER are
+# category Lo, and NFKC maps U+3164 to U+1160 rather than removing it — so a
+# ``created_by`` made only of fillers presented as a real principal on BOTH sides
+# of the authorship check and handed "anyone may manage this" to an author-less
+# row, exactly as the zero-width (Cf) family did before it.
+_INVISIBLE_LETTERS = frozenset({"ㅤ", "ᅟ", "ᅠ"})
+
 
 def _is_blank_identity(value: Optional[str]) -> bool:
     """True when *value* carries no visible characters, so it names nobody.
@@ -195,14 +204,20 @@ def _is_blank_identity(value: Optional[str]) -> bool:
 
     Normalizes NFKC first (so compatibility forms cannot smuggle a visible-looking
     but empty character past the category test), then asks whether ANY character
-    survives as visible content. Used ONLY to decide blankness — never to compare
-    two identities, which stays an exact match.
+    survives as visible content — where "visible" excludes both the invisible
+    CATEGORIES and the invisible LETTERS (:data:`_INVISIBLE_LETTERS`), because
+    Unicode category alone does not separate rendering from letterhood.
+
+    Used ONLY to decide blankness — never to compare two identities, which stays
+    an EXACT match on the raw values.
     """
     if not value:
         return True
     normalized = unicodedata.normalize("NFKC", value)
     return all(
-        unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in normalized
+        unicodedata.category(ch) in _INVISIBLE_CATEGORIES
+        or ch in _INVISIBLE_LETTERS
+        for ch in normalized
     )
 
 
@@ -250,10 +265,12 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
     "Non-blank" is decided by :func:`_is_blank_identity`, which treats anything
     VISUALLY empty as blank — ``str.strip()`` alone let a zero-width character
     (category Cf: not ``isspace()``, untouched by ``strip()``) present as a real
-    name on both sides and satisfy the creator branch. The blankness TEST is the
-    only thing that normalizes; the identity COMPARISON below stays exact, so
-    two principals whose names differ only by invisible characters remain
-    different principals and still fail closed.
+    name on both sides and satisfy the creator branch, and a Hangul FILLER did
+    the same past the category test by normalizing to a letter. The blankness
+    TEST is the only thing that normalizes; the identity COMPARISON below is
+    EXACT on the raw values, so two principals whose names differ only by
+    invisible characters, by surrounding whitespace, or by case remain different
+    principals and still fail closed.
 
     Raises:
         HTTPException 403: caller is neither the author nor an admin, or the row
@@ -288,8 +305,16 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
         return
 
     perm_ctx = get_permission_context()
-    caller = (perm_ctx.user_name or "").strip() if perm_ctx else ""
-    created_by = (ds.created_by or "").strip() if ds.created_by else ""
+    # RAW values: blankness is decided by ``_is_blank_identity`` (which may
+    # normalize), and the identity COMPARISON is then exact on what was actually
+    # stored and resolved. Stripping both sides first — as this did — quietly made
+    # ``"creator@test.com "`` and ``"creator@test.com"`` the same principal, which
+    # contradicts the exact-match contract documented above.
+    caller = perm_ctx.user_name if perm_ctx else None
+    # ``cast`` only tells mypy what the ORM already returns at runtime (a str or
+    # None, not a Column); it performs NO conversion, so the comparison below
+    # stays exact on the stored value.
+    created_by = cast(Optional[str], ds.created_by)
     is_creator = (
         not _is_blank_identity(caller)
         and not _is_blank_identity(created_by)
