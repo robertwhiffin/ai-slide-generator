@@ -598,5 +598,9 @@ class TestSchemaQualifiedMigration:
         assert "bytes BYTEA" in file_ddl
         assert "id SERIAL" in ds_ddl
 
-        # `group` is a reserved word and must be double-quoted.
-        assert '"group" VARCHAR' in token_ddl
+        # `group` is a reserved word and must be double-quoted. The assertion names
+        # the QUOTING, which is the property under test; it used to spell the column
+        # TYPE alongside it ('"group" VARCHAR'), which coupled it to a cap that has
+        # since been removed — free-form brand text is now unbounded TEXT.
+        assert '"group" TEXT' in token_ddl
+        assert '"group" VARCHAR' not in token_ddl

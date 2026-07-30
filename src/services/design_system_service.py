@@ -233,18 +233,31 @@ def _canonicalize_token(
     kind: Optional[str] = None,
     group: Optional[str] = None,
 ) -> Optional[tuple[str, str]]:
-    """Resolve a token to a canonical ``(group, name)`` key, or ``None`` if unusable.
+    """Resolve a token to a ``(group, name)`` key, or ``None`` if unusable.
 
     The ONE canonical parser shared by the manifest-token and CSS ``:root`` paths,
     so the same underlying token dedups regardless of source. Group precedence:
 
-    1. An explicit, recognized legacy ``group`` key (kept for backward-compatible
-       bundles that carry one; the real Claude-Design manifest does not).
+    1. An explicit ``group`` the author supplied. A RECOGNIZED one is normalized to
+       its canonical spelling; ANY OTHER is preserved VERBATIM (see below).
     2. A color sub-group encoded in the name (core/accents/ink/tints).
     3. The manifest ``kind`` (color -> core, font -> type, spacing -> spacing,
        shadow -> shadow).
     4. Inference from the value (CSS-only vars with no ``kind``): color-like ->
        core, otherwise type.
+
+    An UNRECOGNIZED explicit group used to fall through to rules 2-4, which
+    REPLACED the author's group with an inferred one — so a token could not be
+    persisted with its group intact, and a design system that files its tokens under
+    its own vocabulary had that vocabulary silently rewritten at import. Rules 2-4
+    exist to INFER a group when none was given; running them over a group that WAS
+    given is not inference, it is overwriting brand data.
+
+    So an explicit group is now always honored. The compiler already handles any
+    group name — it aliases known synonyms onto canonical groups and emits the rest
+    under a role-less generic heading, dropping nothing — so preserving the author's
+    string costs nothing downstream and is what makes "every token persists with its
+    group" true.
 
     The name is the stripped identifier, minus a leading color sub-group segment
     when that segment determined the group.
@@ -255,8 +268,8 @@ def _canonicalize_token(
 
     head, _, rest = ident.partition("-")
 
-    # 1. Explicit, recognized legacy group.
-    if group:
+    # 1. Explicit group supplied by the author.
+    if group and group.strip():
         normalized_group = group.strip().lower()
         if normalized_group in _TOKEN_GROUPS:
             name = (
@@ -265,6 +278,10 @@ def _canonicalize_token(
                 else ident
             )
             return normalized_group, name
+        # Unrecognized: PRESERVE it verbatim (not lowercased — it is the author's
+        # own label, and the compiler lowercases for grouping itself). Falling
+        # through here is what discarded it.
+        return group.strip(), ident
 
     # 2. Color sub-group encoded in the name.
     if head in _COLOR_SUBGROUPS:
@@ -561,18 +578,29 @@ def _resolve_name(
 ) -> str:
     """Default name precedence: explicit override -> manifest ``name`` ->
     README H1 -> uploaded zip filename -> bundle root folder -> constant.
-    Every candidate is clamped to the column length."""
+
+    NEVER TRUNCATES. Every candidate used to be clamped to ``[:255]`` to match the
+    old column width, which stored the brand under a name it never chose and gave no
+    signal that it had happened — strictly worse than rejecting the import, because
+    the loss was invisible. ``design_system.name`` is now unbounded ``Text``, so the
+    clamp had no purpose left; it is removed rather than raised, since any number
+    would reintroduce the same silent edit for a longer name.
+
+    Whitespace is still stripped (that is normalization of a candidate, not loss of
+    brand content), and the constant fallback still applies when no candidate
+    yields anything.
+    """
     for candidate in (name_override, manifest.get("name"), readme_h1):
         if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()[:255]
+            return candidate.strip()
     if source_filename:
         stem = _basename(source_filename)
         if stem.lower().endswith(".zip"):
             stem = stem[:-4]
         if stem.strip():
-            return stem.strip()[:255]
+            return stem.strip()
     stem = root_prefix.rstrip("/").rsplit("/", 1)[-1] if root_prefix else ""
-    return stem[:255] or "Imported Design System"
+    return stem or "Imported Design System"
 
 
 def _collect_tokens(manifest: dict, css_texts: list[str]) -> list[DesignSystemToken]:

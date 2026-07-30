@@ -539,6 +539,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system token: widen group 50 -> 255 (zero token loss) ---
         _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system: free-form brand text -> UNCAPPED TEXT (no cap at all) ---
+        _migrate_uncap_brand_text_columns(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -752,6 +755,116 @@ def _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite) -> Non
             f"ALTER TABLE {_qual('design_system_token')} "
             'ALTER COLUMN "group" TYPE VARCHAR(255)'
         ))
+
+
+#: Every FREE-FORM BRAND TEXT column, as ``(table, column)``. Converted to
+#: unbounded ``TEXT`` by :func:`_migrate_uncap_brand_text_columns`.
+#:
+#: Deliberately EXCLUDED, because they are not brand text and an unbounded enum
+#: column would be a defect rather than a feature: ``design_system_asset.kind``/
+#: ``.mime``, ``design_system_file.kind``/``.mime`` (importer-classified enums and
+#: derived media types) and ``design_system.created_by``/``.updated_by`` (platform
+#: identity strings). The per-asset / per-bundle BYTE limits are untouched — they
+#: are OOM guards, not brand-data limits.
+_BRAND_TEXT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("design_system", "name"),
+    ("design_system_token", "group"),
+    ("design_system_token", "name"),
+    ("design_system_token", "value"),
+    ("design_system_asset", "filename"),
+    ("design_system_file", "path"),
+    ("design_system_template", "name"),
+    ("design_system_template", "entry_path"),
+)
+
+
+def _migrate_uncap_brand_text_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Convert every free-form BRAND TEXT column to unbounded ``TEXT``.
+
+    A length cap on a field the BRAND authors turns the brand away, and because a
+    bundle import is ONE request, a single over-length string failed the WHOLE
+    import — costing every other token in the bundle. Two earlier migrations raised
+    caps (``design_system_token.name`` 100 -> 255,  ``.group`` 50 -> 255) and each
+    was reopened by a longer real-world string, because the NUMBER was never the
+    problem. This removes the bound instead of moving it, for every such column at
+    once (:data:`_BRAND_TEXT_COLUMNS`).
+
+    Superseding, not duplicating, the two widen migrations: they still run first and
+    stay correct (a VARCHAR(50) -> VARCHAR(255) -> TEXT sequence is valid and each
+    step is individually idempotent), and they are kept so a database that has only
+    ever run the older code still reaches a sane intermediate state.
+
+    Idempotent: each column's current type is probed and skipped when it already has
+    no length, so repeated runs — and a run on a fresh ``create_all`` database, where
+    the ORM already declares ``Text`` — are no-ops.
+
+    Dialect behaviour, deliberately not papered over:
+
+    - PostgreSQL / Lakebase (the real target): ``ALTER COLUMN TYPE TEXT`` from
+      ``VARCHAR(n)`` is a no-rewrite change — ``text`` and ``varchar`` share a
+      storage representation, so Postgres only updates the catalog. Existing values
+      are preserved exactly; ``text`` has no length limit to violate.
+      ``design_system.name`` carries a UNIQUE constraint, which is unaffected: a
+      unique btree index over ``text`` is normal, bounded only by the ~2704-byte
+      index-tuple maximum that a design-system name does not approach. If one ever
+      did, the INSERT would fail loudly rather than truncate — so no prefix or
+      expression index is introduced, and the product's name-uniqueness rule is
+      kept.
+    - SQLite (tests only): declared VARCHAR length is NOT ENFORCED and
+      ``ALTER COLUMN TYPE`` does not exist, so this returns early exactly like the
+      two widen migrations. A 1000-character value already round-trips there, which
+      is why the meaningful SQLite assertion is the end-to-end round trip and the
+      ORM declaration rather than the column type.
+
+    Each ALTER is wrapped in its OWN SAVEPOINT so one failure (e.g. insufficient
+    privileges on a locked-down deploy, or an inherited foreign-owned table on a
+    copy-on-write branch fork) cannot poison the outer migration transaction or
+    prevent the remaining columns from being converted.
+    """
+    from sqlalchemy import inspect, text
+
+    if is_sqlite:
+        # Length is unenforced here; see the docstring. Nothing to do.
+        return
+
+    insp = inspector or inspect(conn)
+    for table_name, column_name in _BRAND_TEXT_COLUMNS:
+        try:
+            columns = {
+                c["name"]: c for c in insp.get_columns(table_name, schema=schema)
+            }
+        except Exception:
+            continue  # table absent on this deploy
+        column = columns.get(column_name)
+        if column is None:
+            continue
+        if getattr(column.get("type"), "length", None) is None:
+            continue  # already unbounded TEXT
+
+        logger.info(
+            "Migration: converting %s.%s to TEXT (was length %s)",
+            table_name,
+            column_name,
+            getattr(column.get("type"), "length", None),
+        )
+        try:
+            with conn.begin_nested():
+                # ``group`` is a SQL reserved word; quote every identifier so the
+                # statement is correct for any column in the list.
+                conn.execute(text(
+                    f"ALTER TABLE {_qual(table_name)} "
+                    f'ALTER COLUMN "{column_name}" TYPE TEXT'
+                ))
+        except Exception:
+            logger.warning(
+                "Migration: could not convert %s.%s to TEXT; it keeps its current "
+                "width and the remaining columns are still converted",
+                table_name,
+                column_name,
+                exc_info=True,
+            )
 
 
 def _reassign_new_objects_to_shared_owner(

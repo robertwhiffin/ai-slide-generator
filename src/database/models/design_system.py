@@ -26,6 +26,34 @@ Five tables:
                                rewritten to ``{{ds-asset:ID}}`` — the same
                                projection pattern as ``design_system_token``.
 
+FREE-FORM BRAND TEXT IS STORED UNCAPPED.
+A length cap on a field the BRAND authors turns the brand away, and a bundle
+import is ONE request — so a single over-length string failed the whole import and
+cost every other token in the bundle. Widening a cap (50 -> 255, 100 -> 255) was
+tried twice and reopened twice, because the number was never the problem. These
+columns are therefore unbounded ``Text``:
+
+    design_system.name, .description
+    design_system_token.group, .name, .value
+    design_system_asset.filename
+    design_system_file.path
+    design_system_template.name, .description, .entry_path
+
+Bounded on purpose, because they are NOT brand text:
+
+    design_system_asset.kind, .mime      — importer-classified enum + media type
+    design_system_file.kind, .mime       — same
+    design_system.created_by, .updated_by — platform identity strings
+
+The per-asset / per-bundle BYTE limits below are OOM guards, not brand-data
+limits, and are unaffected: they bound how much binary payload one import may add,
+which is a resource question, not a question about what a brand may call things.
+
+Both layers must move together. The API validators
+(``routes/settings/design_systems.py``) carry no ``max_length`` on these fields
+either — a cap at EITHER layer still rejects the brand, which is exactly how this
+defect survived a round that widened only the storage column.
+
 Binary brand bytes live ONLY in ``design_system_asset``; ``design_system_file``
 stores the (text) bytes of genuinely-new source files and, for assets/fonts,
 only a path reference (``asset_id``, ``data`` NULL) so a bundle's binary payload
@@ -85,7 +113,18 @@ class DesignSystem(Base):
     __tablename__ = "design_system"
 
     id = Column(Integer, primary_key=True)
-    name = Column(String(255), nullable=False, unique=True)
+    # UNCAPPED brand text (see the module note on free-form brand fields). A cap
+    # here silently TRUNCATED an imported name to 255 characters, storing the brand
+    # under a name it never chose.
+    #
+    # ``unique`` is RETAINED on the now-unbounded column. On PostgreSQL/Lakebase a
+    # UNIQUE constraint on ``text`` is a normal btree index; the only limit is the
+    # ~2704-byte per-entry index-tuple maximum, which a design-system NAME does not
+    # approach in practice. If a name ever did, the insert would fail loudly with an
+    # index-row-size error rather than corrupt or truncate anything — so no prefix /
+    # expression index is needed, and none is used. Uniqueness is a real product
+    # rule (the picker addresses systems by name), so it is not dropped.
+    name = Column(Text, nullable=False, unique=True)
     description = Column(Text, nullable=True)
 
     # Authorship + org-default flags (org-shared visibility; no per-user isolation)
@@ -174,8 +213,11 @@ class DesignSystemAsset(Base):
     )
 
     # logo | icon | lockup | illustration | background | font | template_shot
+    # SYSTEM-controlled enum (the importer classifies the asset) — stays bounded.
     kind = Column(String(50), nullable=False)
-    filename = Column(String(255), nullable=False)
+    # UNCAPPED brand text: the filename comes from the brand's own bundle.
+    filename = Column(Text, nullable=False)
+    # SYSTEM-controlled (sniffed/derived media type) — stays bounded.
     mime = Column(String(100), nullable=False)
 
     # Raw bytes. DB column is named "bytes" per spec §6; the Python attribute is
@@ -219,18 +261,19 @@ class DesignSystemToken(Base):
     # anything else under its own generic heading, so no token is dropped for the
     # name of its group.
     # ``group`` is a SQL reserved word; SQLAlchemy quotes the identifier per dialect.
-    # 255, widened from 50 for the same zero-token-loss reason as ``name`` below: a
-    # single longer group name rejected the WHOLE bundle import, so one long group
-    # name cost every other token in the bundle. Existing databases are widened by
-    # ``_migrate_widen_token_group``; this declaration is what ``create_all`` uses
-    # for fresh ones, so the two must stay in step.
-    group = Column(String(255), nullable=False)
-    # 255, widened from 100: a single longer brand token name used to reject the
-    # WHOLE bundle import (zero-token-loss requirement). Existing databases are
-    # widened by ``_migrate_widen_token_name``; this declaration is what
-    # ``create_all`` uses for fresh ones, so the two must stay in step.
-    name = Column(String(255), nullable=False)
-    value = Column(String(255), nullable=False)
+    #
+    # All three are UNCAPPED brand text. They were widened 50 -> 255 and 100 -> 255
+    # in earlier rounds, one cap at a time, and each time a longer real-world string
+    # reopened the same defect: a bundle import is ONE request, so a single
+    # over-length token failed the WHOLE import and cost every other token in the
+    # bundle. Picking a bigger number is not a fix — the requirement is that brand
+    # data is never turned away, which only an UNBOUNDED column satisfies. Existing
+    # databases are converted by ``_migrate_uncap_brand_text_columns``; this
+    # declaration is what ``create_all`` uses for fresh ones, so the two must stay in
+    # step. The compiler imposes no cap of its own (it sanitizes, never rejects).
+    group = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    value = Column(Text, nullable=False)
 
     design_system = relationship("DesignSystem", back_populates="tokens")
 
@@ -271,9 +314,14 @@ class DesignSystemFile(Base):
     )
 
     # Normalized bundle-relative path, e.g. "README.md", "templates/x/index.html".
-    path = Column(String(1024), nullable=False)
+    # UNCAPPED: the path comes from the brand's own bundle layout, and a deeply
+    # nested real bundle can exceed any chosen bound. Zip-slip is still rejected at
+    # import (no absolute paths, no ``..``) — that is a SAFETY check on the path's
+    # SHAPE, which is independent of its length.
+    path = Column(Text, nullable=False)
 
     # readme | skill | css | template | asset | font
+    # SYSTEM-controlled enum + derived media type — both stay bounded.
     kind = Column(String(50), nullable=False)
     mime = Column(String(100), nullable=False)
 
@@ -339,11 +387,13 @@ class DesignSystemTemplate(Base):
         index=True,
     )
 
-    name = Column(String(255), nullable=False)
+    # UNCAPPED brand text: the template's name is the brand's own label for it.
+    name = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
 
     # Normalized bundle-relative path of the entry file, e.g. "templates/x/index.html".
-    entry_path = Column(String(1024), nullable=False)
+    # UNCAPPED for the same reason as ``design_system_file.path``.
+    entry_path = Column(Text, nullable=False)
 
     # Rewritten layout HTML ({{ds-asset:ID}} refs, scripts stripped) + the token
     # stylesheet its var(--…) references depend on.
