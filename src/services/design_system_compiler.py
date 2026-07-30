@@ -138,7 +138,19 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # it) and the version marker moved to a FIXED, name-independent header position.
 # Persisted v11 rows hold short-ramp font sizes labeled as spacing, so the bump is
 # what makes them recompile.
-COMPILER_VERSION = 12
+# v13: font-token OWNERSHIP no longer comes from the numeric ramp map. v12 fixed the
+# ramp-LENGTH coupling but ownership was still read back out of ``{px: name}``,
+# which answers a narrower question than "is this token a font size?" — it keeps one
+# name per DISTINCT px (so the second token at 16px was unowned) and cannot
+# represent a non-px size at all (so ``1rem``/``2em``/``125%``/``clamp(...)`` were
+# all unowned). Both classes of unowned font size printed under ``SPACING TOKENS:``:
+# the v7 small-titles mislabel, third and fourth surfaces. Ownership is now a
+# predicate over the token itself (``_is_font_size_token``: name shape + any CSS
+# font-size value form), applied to EVERY token including duplicates; the px map
+# survives as ``_font_size_px_ramp`` for BAND MATH only. Persisted v12 rows hold
+# non-px and same-px font sizes labeled as spacing, so the bump is what makes them
+# recompile.
+COMPILER_VERSION = 13
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -501,6 +513,32 @@ def _safe_multiline(value: Any) -> str:
 _TYPE_SIZE_NAME_RE = re.compile(r"^(?:fs|font-?size|text)[-_]?\d*($|[-_])", re.IGNORECASE)
 _PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
 
+# A font size may legitimately be declared in any CSS length/relative unit, or by
+# a function that computes one. OWNERSHIP (see ``_font_size_token_pairs``) accepts
+# every form; only :data:`_PX_VALUE_RE` values can contribute to the numeric bands,
+# because only they can be converted to a pixel number without knowing the
+# document's root size or its containing block.
+#
+# This distinction is the whole of the round-6 BLOCKING 1 fix. Ownership used to be
+# read off the px-keyed ramp map, which silently made "is this a font size?"
+# answerable ONLY for a px value that was also the first token at its size — so
+# ``fs-body: 1rem`` and the second token at ``16px`` were both filed under
+# ``SPACING TOKENS:``, the v7 mislabel again.
+_FONT_SIZE_VALUE_RE = re.compile(
+    r"""^\s*(?:
+        [+-]?(?:\d+(?:\.\d+)?|\.\d+)      # a number, with or without a fraction
+        \s*(?:px|pt|pc|in|cm|mm|q         # absolute lengths
+             |r?em|ex|ch|r?lh|ic          # font-relative lengths
+             |v(?:w|h|i|b|min|max)        # viewport-relative lengths
+             |[cdsl]v(?:w|h|i|b|min|max)  # small/large/dynamic/container viewport
+             |cq(?:w|h|i|b|min|max)       # container-query lengths
+             |%)                          # percentage of the inherited size
+        |(?:clamp|calc|min|max)\s*\(.*\)  # a computed size
+        |x{1,3}-large|x{1,3}-small|larger|smaller|medium  # CSS absolute keywords
+    )\s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # A usable ramp needs at least this many distinct sizes; below it the tokens are
 # NOT a scale, so they keep their original group listing (never dropped) and the
 # neutral bands apply.
@@ -565,14 +603,52 @@ def _fmt_px(px: float) -> str:
     return f"{int(px)}px" if px == int(px) else f"{px:g}px"
 
 
-def _font_size_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, str]:
-    """Collect ramp-shaped tokens (font-size-ish name + px value) from EVERY
-    group and return ``{px: token_name}`` (first name per size wins, in
-    deterministic group/name order)."""
+def _is_font_size_token(name: Any, value: Any) -> bool:
+    """True when this token IS a font size, for LABELING purposes.
+
+    OWNERSHIP, and nothing else. Decided by the token's NAME SHAPE plus a value
+    that is any recognizable CSS font size (:data:`_FONT_SIZE_VALUE_RE`) — px or
+    not, first at its size or not. It is deliberately independent of
+    :func:`_font_size_px_ramp`, which is a lossy px-keyed projection built for
+    BAND MATH.
+
+    That independence is the round-6 fix. Ownership was previously read back out
+    of the ramp map's values, which coupled a labeling question to the map's
+    construction and produced two live surfaces of the v7 mislabel:
+
+    * ``{px: name}`` keeps only the FIRST name per distinct pixel value
+      (``setdefault``), so a second token at ``16px`` was not "a font size" and
+      landed under ``SPACING TOKENS:``.
+    * A px-keyed map cannot represent ``1rem`` / ``2em`` / ``125%`` /
+      ``clamp(...)`` at all, so NO non-px font size was ever recognized.
+
+    A map keyed by the thing you can compute bands from can never be the register
+    of what exists — the two answer different questions, so they are now two
+    functions.
+    """
+    if not _TYPE_SIZE_NAME_RE.match(str(name or "").strip()):
+        return False
+    return bool(_FONT_SIZE_VALUE_RE.match(str(value or "")))
+
+
+def _font_size_px_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, str]:
+    """The NUMERIC ramp: ``{px: token_name}`` over font-size tokens with px values.
+
+    Deliberately lossy, and used for BAND MATH ONLY (:func:`_type_scale_section`):
+    one entry per DISTINCT pixel size is exactly right for deriving role bands,
+    since two tokens at 16px describe one rung of the scale. Non-px sizes are
+    absent because they cannot be resolved to a pixel number without the document
+    context, and inventing one would fabricate a numeric contract the brand never
+    stated.
+
+    It must NOT be used to decide labeling or exclusion — that is
+    :func:`_is_font_size_token` / :func:`_font_size_token_pairs`. The token NAMES
+    here are retained only for the deterministic ordering they impose.
+    """
     ramp: dict[float, str] = {}
     for group in sorted(grouped):
         for name, value in grouped[group]:
-            if not _TYPE_SIZE_NAME_RE.match((name or "").strip()):
+            if not _is_font_size_token(name, value):
                 continue
             px_match = _PX_VALUE_RE.match(value or "")
             if not px_match:
@@ -580,11 +656,11 @@ def _font_size_ramp(grouped: dict[str, list[tuple[str, str]]]) -> dict[float, st
             px = float(px_match.group(1))
             if px <= 0:
                 continue
-            ramp.setdefault(px, name.strip())
+            ramp.setdefault(px, str(name).strip())
     return ramp
 
 
-def _ramp_token_pairs(
+def _font_size_token_pairs(
     grouped: dict[str, list[tuple[str, str]]]
 ) -> frozenset[tuple[str, str]]:
     """The exact ``(name, value)`` token pairs BRAND FONT-SIZE TOKENS owns.
@@ -592,35 +668,32 @@ def _ramp_token_pairs(
     Used to suppress those pairs from the type/spacing rule lists and the generic
     sections so each size carries exactly ONE role cue (see ``_scale_section``).
 
-    UNCONDITIONAL as of v12. This was gated on the ramp reaching
-    :data:`_MIN_RAMP_SIZES`, which COUPLED two unrelated questions:
+    Computed by asking :func:`_is_font_size_token` of EVERY token directly. Three
+    rounds of this defect all came from deriving ownership from something narrower
+    than the question:
 
-    1. "Is this token a font size?" — a LABELING question. True of ``fs-16: 16px``
-       whether the bundle ships one such token or twenty.
-    2. "Is the ramp long enough to derive role BANDS from?" — a question about the
-       numeric contract, legitimately answered by ``_MIN_RAMP_SIZES``.
+    1. v12 gated it on the ramp reaching :data:`_MIN_RAMP_SIZES`, so a bundle with
+       one or two font sizes printed them under ``SPACING TOKENS:``.
+    2. Then it was derived from the px-keyed ramp map's VALUES, so the SECOND token
+       sharing a pixel value was not recognized (``setdefault`` keeps the first).
+    3. And that same map made non-px sizes (``1rem``, ``2em``, ``125%``,
+       ``clamp(...)``) unrepresentable, so every one of them was labeled spacing.
 
-    Because one flag answered both, a design system shipping ONE or TWO font-size
-    tokens printed them under ``SPACING TOKENS:`` — presenting brand type sizes to
-    the model as gap values, which is precisely the v7 mislabel that produced the
-    under-sized titles this compiler exists to prevent. A short ramp must not
-    re-enable the defect.
+    Each is the same v7 small-titles mislabel — brand TYPE sizes presented to the
+    model as gap values. The class is closed by taking ownership away from the ramp
+    map entirely: this function iterates tokens, applies the ownership predicate,
+    and keeps ALL matches including duplicates. Only :func:`_type_scale_section`
+    consults the px ramp, and only for band math.
 
-    So the two decisions are now separate: this function answers (1) at ANY count,
-    and only :func:`_type_scale_section` consults ``_MIN_RAMP_SIZES` for (2),
-    falling back to the neutral bands. Nothing is dropped by the wider exclusion —
-    :func:`_font_size_token_section` is likewise unconditional, so every excluded
-    token is listed there under a heading that names its real role.
+    Nothing is dropped by the wider exclusion: :func:`_font_size_token_section`
+    derives from these SAME pairs, so every excluded token is re-homed there under
+    a heading that names its real role.
     """
-    ramp = _font_size_ramp(grouped)
-    if not ramp:
-        return frozenset()
-    ramp_names = set(ramp.values())
     return frozenset(
         (name, value)
         for entries in grouped.values()
         for name, value in entries
-        if (name or "").strip() in ramp_names and _PX_VALUE_RE.match(value or "")
+        if _is_font_size_token(name, value)
     )
 
 
@@ -633,7 +706,7 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     body band and the top. Fewer than 3 distinct sizes is not a usable ramp
     -> neutral default bands.
     """
-    ramp = _font_size_ramp(grouped)
+    ramp = _font_size_px_ramp(grouped)
     sizes = sorted(ramp)
     if len(sizes) < _MIN_RAMP_SIZES:
         return _TYPE_SCALE_NEUTRAL_BLOCK
@@ -997,30 +1070,41 @@ def _font_size_token_section(
     or script, while the region next to it stays numbers-only. Nothing is
     dropped and nothing is mislabeled.
 
-    Ordered by px value (the ramp's own order, ascending) then name, so output
-    stays deterministic. Returns ``None`` only when the design system ships no
-    font-size-shaped token at all, so there is nothing to re-home.
+    Ordered by px value ascending (the ramp's own order) then name, with non-px
+    sizes following the numeric run in name order — they carry no comparable pixel
+    number. Output stays deterministic. Returns ``None`` only when the design system
+    ships no font-size token at all, so there is nothing to re-home.
 
-    UNCONDITIONAL as of v12, tracking ``_ramp_token_pairs``: this section is the
-    HOME of every excluded font size, so it must exist whenever the exclusion does.
-    Gating it on a 3+ ramp while the exclusion was gated the same way kept the two
-    consistent but left the v7 mislabel live below that threshold; now both apply
-    at any count and the pairing still holds — nothing is excluded without being
-    re-homed here.
+    Derives from :func:`_font_size_token_pairs`, the SAME set the exclusion uses, so
+    the two cannot drift: this section is the HOME of every excluded font size, and
+    it exists exactly when the exclusion does. That pairing is what keeps the
+    widened ownership loss-free — every token taken out of the type/spacing lists is
+    listed here instead, whatever its value form and however many tokens share its
+    size.
 
     The heading deliberately does NOT contain the words "BRAND TYPE SCALE": that
     phrase is how callers (and tests) locate the compiler-owned numeric region by
     index, so reusing it here would shadow the real region.
     """
-    ramp_pairs = _ramp_token_pairs(grouped)
-    if not ramp_pairs:
+    font_size_pairs = _font_size_token_pairs(grouped)
+    if not font_size_pairs:
         return None
 
     def _px_of(value: str) -> float:
         match = _PX_VALUE_RE.match(value or "")
         return float(match.group(1)) if match else 0.0
 
-    entries = sorted(ramp_pairs, key=lambda pair: (_px_of(pair[1]), pair[0]))
+    # px sizes ascending first (the ramp's own order), then the non-px ones —
+    # which have no comparable pixel number, so they sort by name after the
+    # numeric run rather than all colliding at 0.0 ahead of it.
+    entries = sorted(
+        font_size_pairs,
+        key=lambda pair: (
+            0 if _PX_VALUE_RE.match(pair[1] or "") else 1,
+            _px_of(pair[1]),
+            pair[0],
+        ),
+    )
     # The heading names the tokens' ROLE without promising that the block below
     # derives its bands from them: with fewer than ``_MIN_RAMP_SIZES`` distinct
     # sizes the numeric contract falls back to the neutral bands, so wording that
@@ -1248,17 +1332,25 @@ def compile_design_system(
             ", ".join(sorted(_CANONICAL_GROUPS)),
         )
 
-    # Tokens: color, type, spacing, shadow — all uncapped. Font-size ramp tokens
-    # are EXCLUDED from the type/spacing rule lists: BRAND TYPE SCALE below is
-    # their authoritative presentation, and listing a size a second time under a
-    # heading naming another role (Claude Design mislabels the ramp as "spacing")
-    # is the competing role cue that produced under-sized titles.
-    ramp_pairs = _ramp_token_pairs(grouped)
+    # Tokens: color, type, spacing, shadow — all uncapped. FONT-SIZE tokens are
+    # EXCLUDED from the type/spacing rule lists: BRAND FONT-SIZE TOKENS is their
+    # authoritative home, and listing a size a second time under a heading naming
+    # another role (Claude Design mislabels the ramp as "spacing") is the competing
+    # role cue that produced under-sized titles.
+    #
+    # Ownership comes from the token itself, NOT from the px-keyed band-math ramp:
+    # any font-size value form, any count, all duplicates. Reading it off that map
+    # is what left non-px sizes and same-px siblings labeled as spacing.
+    font_size_pairs = _font_size_token_pairs(grouped)
     parts.extend(_color_sections(grouped))
-    typography = _scale_section(grouped, "type", "TYPOGRAPHY TOKENS:", exclude=ramp_pairs)
+    typography = _scale_section(
+        grouped, "type", "TYPOGRAPHY TOKENS:", exclude=font_size_pairs
+    )
     if typography:
         parts.append(typography)
-    spacing = _scale_section(grouped, "spacing", "SPACING TOKENS:", exclude=ramp_pairs)
+    spacing = _scale_section(
+        grouped, "spacing", "SPACING TOKENS:", exclude=font_size_pairs
+    )
     if spacing:
         parts.append(spacing)
     parts.extend(_shadow_sections(grouped))
@@ -1266,9 +1358,9 @@ def compile_design_system(
     # Tokens in groups with no canonical emitter — emitted verbatim under their
     # own sanitized group name rather than dropped (the zero-token-loss rule).
     # Placed after the canonical token sections and BEFORE the type-scale region,
-    # so the artifact's token block stays contiguous. The ramp exclusion is passed
-    # through for the same reason the type/spacing lists get it.
-    parts.extend(_additional_token_sections(grouped, exclude=ramp_pairs))
+    # so the artifact's token block stays contiguous. The font-size exclusion is
+    # passed through for the same reason the type/spacing lists get it.
+    parts.extend(_additional_token_sections(grouped, exclude=font_size_pairs))
 
     # The ramp's own token NAMES, under a heading that names their real role.
     # They are excluded from the type/spacing lists above (v7) and are no longer

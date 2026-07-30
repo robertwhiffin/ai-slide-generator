@@ -3459,3 +3459,276 @@ class TestFullWidthDigitsInTokenValues:
             match = _PX_VALUE_RE.match(f"{char}px")
             if match:
                 float(match.group(1))  # must not raise
+
+
+class TestFontTokenOwnershipIsIndependentOfRampConstruction:
+    """BLOCKING 1 (round 6, cross-review): the v7 small-titles mislabel had TWO
+    more live surfaces, both caused by the same structural mistake — the numeric
+    RAMP MAP was doing double duty as the answer to "is this token a font size?".
+
+    ``_font_size_ramp`` returns ``{px: first_token_name}``. Ownership was derived
+    from that map's VALUES, which means:
+
+    1. A second token sharing a pixel value is not in the map (``setdefault`` keeps
+       the first name per distinct px), so it was never recognized as a font size
+       and leaked into ``SPACING TOKENS:``.
+    2. A font size declared in ``rem``/``em``/``%``/``vw``/``clamp()``/``calc()``
+       cannot enter a px-keyed map at all, so NO non-px font size was ever
+       recognized — every one leaked.
+
+    Round 5 decoupled ownership from the ramp's *length*; this decouples it from
+    the ramp's *construction*. Ownership is now computed directly from the tokens
+    (by name shape, any value form, any count, ALL duplicates); the px-keyed map
+    remains, but only for BAND MATH, where one entry per distinct size is correct.
+
+    Two invariants hold for every case below:
+      (a) no font-size token appears under ``SPACING TOKENS:``, and
+      (b) every font-size token still appears SOMEWHERE (keep-everything).
+    All fixtures SYNTHETIC.
+    """
+
+    #: Font-size VALUE forms a brand may legitimately ship. Only the px ones can
+    #: contribute to the numeric bands; all of them are font sizes for LABELING.
+    NON_PX_VALUES = ["1rem", "2em", "125%", "4vw", "clamp(1rem, 2vw, 3rem)",
+                     "calc(1rem + 2px)"]
+
+    @staticmethod
+    def _section(out, heading):
+        """The block under *heading*, or "" when the heading is absent."""
+        if heading not in out:
+            return ""
+        tail = out[out.index(heading):]
+        return tail[: tail.index("\n\n")] if "\n\n" in tail else tail
+
+    def _assert_owned(self, out, font_tokens, *, case):
+        """(a) none under SPACING, (b) every one still emitted."""
+        spacing = self._section(out, "SPACING TOKENS:")
+        generic = self._section(out, "ADDITIONAL BRAND TOKENS")
+        for name, value in font_tokens:
+            assert name not in spacing, (
+                f"{case}: font-size token {name!r} ({value}) mislabeled as SPACING "
+                f"— the v7 small-titles defect:\n{spacing}"
+            )
+            assert name not in generic, (
+                f"{case}: font-size token {name!r} ({value}) restated in the "
+                f"role-less generic section:\n{generic}"
+            )
+            assert f"- {name}: {value}" in out, (
+                f"{case}: font-size token {name!r} ({value}) was DROPPED from the "
+                f"artifact entirely"
+            )
+
+    @pytest.mark.parametrize("count", [0, 1, 2, 3, 4, 10])
+    def test_px_ramp_of_any_length_never_labels_a_font_size_as_spacing(
+        self, session, count
+    ):
+        """Round 5's case, re-pinned across a wider set of lengths (incl. 0 and 4)."""
+        from src.services.design_system_compiler import compile_design_system
+
+        pxs = [12, 64, 16, 40, 24, 32, 48, 20, 14, 80][:count]
+        font_tokens = [(f"fs-{px}", f"{px}px") for px in pxs]
+        tokens = [
+            {"group": "spacing", "name": name, "value": value}
+            for name, value in font_tokens
+        ]
+        tokens.append({"group": "spacing", "name": "gap-8", "value": "8px"})
+
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        self._assert_owned(out, font_tokens, case=f"px ramp of {count}")
+        assert "gap-8: 8px" in self._section(out, "SPACING TOKENS:"), (
+            "a genuine spacing token must still be listed as spacing"
+        )
+
+    @pytest.mark.parametrize("duplicates", [2, 3])
+    def test_every_token_sharing_a_pixel_value_is_owned_not_just_the_first(
+        self, session, duplicates
+    ):
+        """codex's repro: ``{px: name}`` keeps only the FIRST name per distinct px,
+        so the second/third token at 16px leaked into SPACING."""
+        from src.services.design_system_compiler import compile_design_system
+
+        shared = [(f"fs-{suffix}", "16px")
+                  for suffix in ("alpha", "beta", "gamma")[:duplicates]]
+        font_tokens = shared + [("fs-32", "32px"), ("fs-64", "64px")]
+        tokens = [
+            {"group": "spacing", "name": name, "value": value}
+            for name, value in font_tokens
+        ]
+
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        self._assert_owned(out, font_tokens, case=f"{duplicates} tokens at 16px")
+
+    @pytest.mark.parametrize("value", NON_PX_VALUES)
+    def test_a_non_px_font_size_is_owned_as_a_font_size(self, session, value):
+        """A brand declaring its ramp in rem/em/%/vw/clamp()/calc() is still
+        declaring FONT SIZES. A px-keyed map cannot represent them, so every one
+        of these leaked into SPACING."""
+        from src.services.design_system_compiler import compile_design_system
+
+        font_tokens = [("fs-scale", value)]
+        out = compile_design_system(
+            _make_ds(
+                session,
+                tokens=[{"group": "spacing", "name": "fs-scale", "value": value}],
+            )
+        )
+
+        self._assert_owned(out, font_tokens, case=f"non-px value {value!r}")
+
+    def test_all_non_px_font_sizes_together_are_owned(self, session):
+        """codex's second repro verbatim: four non-px font sizes, all in the
+        ``spacing`` group, none of which the px map could see."""
+        from src.services.design_system_compiler import compile_design_system
+
+        font_tokens = [
+            ("fs-rem", "1rem"),
+            ("font-size-em", "2em"),
+            ("text-percent", "125%"),
+            ("fs-clamp", "clamp(1rem, 2vw, 3rem)"),
+        ]
+        tokens = [
+            {"group": "spacing", "name": name, "value": value}
+            for name, value in font_tokens
+        ]
+
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        self._assert_owned(out, font_tokens, case="codex non-px repro")
+
+    def test_mixed_px_and_non_px_font_sizes_are_all_owned(self, session):
+        """A real bundle mixes forms (px for display sizes, rem for body)."""
+        from src.services.design_system_compiler import compile_design_system
+
+        font_tokens = [
+            ("fs-64", "64px"),
+            ("fs-32", "32px"),
+            ("fs-16", "16px"),
+            ("fs-body", "1rem"),
+            ("fs-lead", "1.25em"),
+        ]
+        tokens = [
+            {"group": "spacing", "name": name, "value": value}
+            for name, value in font_tokens
+        ]
+        tokens.append({"group": "spacing", "name": "gap-4", "value": "4px"})
+
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        self._assert_owned(out, font_tokens, case="mixed px + non-px")
+        assert "gap-4: 4px" in self._section(out, "SPACING TOKENS:")
+
+    def test_font_shaped_tokens_inside_a_group_literally_named_spacing(self, session):
+        """The Claude-Design mislabel: the whole ramp filed under ``spacing``.
+        Includes duplicate px and non-px values, the two new surfaces."""
+        from src.services.design_system_compiler import compile_design_system
+
+        font_tokens = [
+            ("fs-sm", "16px"),
+            ("fs-sm-alt", "16px"),
+            ("fs-lg", "2rem"),
+            ("font-size-xl", "48px"),
+        ]
+        tokens = [
+            {"group": "spacing", "name": name, "value": value}
+            for name, value in font_tokens
+        ]
+
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        self._assert_owned(out, font_tokens, case="group literally named spacing")
+
+    def test_font_shaped_tokens_inside_an_unknown_group(self, session):
+        """The generic (no-emitter) path must own them too — a role-less heading is
+        better than SPACING, but the font-size home is better still, and reprinting
+        would restate one size under two headings."""
+        from src.services.design_system_compiler import compile_design_system
+
+        font_tokens = [
+            ("fs-dup-a", "16px"),
+            ("fs-dup-b", "16px"),
+            ("fs-rem", "1.5rem"),
+        ]
+        tokens = [
+            {"group": "brandish", "name": name, "value": value}
+            for name, value in font_tokens
+        ]
+        tokens.append({"group": "brandish", "name": "duration", "value": "200ms"})
+
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        self._assert_owned(out, font_tokens, case="unknown group")
+        assert "duration: 200ms" in self._section(out, "ADDITIONAL BRAND TOKENS"), (
+            "a non-font token in an unknown group must still be emitted there"
+        )
+
+    @pytest.mark.parametrize("count", [0, 1, 2])
+    def test_short_or_absent_ramp_still_falls_back_to_neutral_bands(
+        self, session, count
+    ):
+        """The NUMERIC contract is unchanged: fewer than 3 distinct px sizes is not
+        a usable ramp, so the neutral bands still apply. Ownership widening must not
+        smuggle a band derivation out of one or two sizes."""
+        from src.services.design_system_compiler import compile_design_system
+
+        pxs = [16, 64][:count]
+        out = compile_design_system(
+            _make_ds(
+                session,
+                tokens=[
+                    {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+                    for px in pxs
+                ],
+            )
+        )
+
+        assert "this design system ships no font-size ramp" in out
+        assert "40-52px" in out
+
+    def test_non_px_font_sizes_alone_do_not_derive_numeric_bands(self, session):
+        """Non-px sizes are OWNED for labeling but cannot be converted to px, so a
+        bundle shipping only rem/em sizes still gets the neutral bands rather than
+        an invented numeric contract."""
+        from src.services.design_system_compiler import compile_design_system
+
+        out = compile_design_system(
+            _make_ds(
+                session,
+                tokens=[
+                    {"group": "spacing", "name": "fs-a", "value": "1rem"},
+                    {"group": "spacing", "name": "fs-b", "value": "2rem"},
+                    {"group": "spacing", "name": "fs-c", "value": "3rem"},
+                ],
+            )
+        )
+
+        assert "this design system ships no font-size ramp" in out
+        assert "40-52px" in out
+
+    def test_px_bands_are_unchanged_by_the_presence_of_non_px_font_sizes(
+        self, session
+    ):
+        """A non-px token must not perturb the bands derived from the px ramp: the
+        band math still sees exactly the distinct px sizes."""
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            extract_type_scale_block,
+        )
+
+        px_only = [
+            {"group": "type", "name": "fs-16", "value": "16px"},
+            {"group": "type", "name": "fs-32", "value": "32px"},
+            {"group": "type", "name": "fs-64", "value": "64px"},
+        ]
+        with_extras = px_only + [
+            {"group": "type", "name": "fs-body-rem", "value": "1rem"},
+            {"group": "type", "name": "fs-16-alt", "value": "16px"},
+        ]
+
+        # Distinct names: ``design_system.name`` is UNIQUE.
+        assert extract_type_scale_block(
+            compile_design_system(_make_ds(session, name="PX Only", tokens=px_only))
+        ) == extract_type_scale_block(
+            compile_design_system(_make_ds(session, name="PX Plus", tokens=with_extras))
+        )
