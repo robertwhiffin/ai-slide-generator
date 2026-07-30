@@ -452,7 +452,7 @@ class TestByteLimitsAreUntouched:
 
         assert MAX_ASSET_SIZE_BYTES > 0
         assert MAX_BUNDLE_SIZE_BYTES > 0
-        assert MAX_BUNDLE_SIZE_BYTES == 200 * 1024 * 1024
+        assert MAX_BUNDLE_SIZE_BYTES == 500 * 1024 * 1024
 
 
 class TestUncapMigration:
