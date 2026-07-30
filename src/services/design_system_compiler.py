@@ -115,17 +115,89 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # ONE place, matching CRLF as a single unit — v9 turned a Windows-authored README
 # into a double-spaced one. Persisted v9 rows hold dropped token names and
 # doubled line breaks, so the bump is what makes them recompile.
-COMPILER_VERSION = 10
+# v11: NO token is dropped for the name of its GROUP. The group set was CLOSED
+# (the seven canonical groups) and every token in any other group was omitted with
+# only a log warning, so a bundle grouping its tokens as "color" / "palette" /
+# "typography" / "elevation" — the vocabulary most token tooling uses — lost the
+# ENTIRE group, invisibly. Obvious synonyms are now ALIASED onto the canonical
+# seven (``_GROUP_ALIASES``) so they reach the emitter that labels them correctly,
+# and any group still unknown is emitted verbatim under its own sanitized name
+# (``ADDITIONAL BRAND TOKENS (group: <name>):``) rather than dropped. Group names
+# are sanitized exactly like every other user string — sanitize-not-reject, no
+# length cap, no script restriction. Persisted v10 rows are missing every token in
+# a non-canonical group, so the bump is what makes them recompile and regain them.
+COMPILER_VERSION = 11
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
 _COLOR_GROUPS = ("core", "accents", "ink", "tints")
 
-# Every token group the compiler emits: colors + shadows as :root custom
-# properties, type + spacing as rules. Tokens in any other group are dropped from
-# the prompt and a warning names them so authors notice rather than losing them
-# silently.
-_RECOGNIZED_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing", "shadow"))
+# The CANONICAL token groups, each with a purpose-built emitter: colors +
+# shadows as :root custom properties, type + spacing as rule lists.
+_CANONICAL_GROUPS = frozenset(_COLOR_GROUPS + ("type", "spacing", "shadow"))
+
+# Backwards-compatible alias retained for readers/greppers of the old name.
+_RECOGNIZED_GROUPS = _CANONICAL_GROUPS
+
+# Group-name SYNONYMS folded onto a canonical group (v11). The canonical set is
+# this app's own vocabulary; real token tooling names the same concepts
+# differently ("color"/"palette" for brand colors, "typography" for type,
+# "elevation" for shadows), and every token in such a group used to be DROPPED
+# with only a log line. Aliasing routes them to the emitter that labels them
+# CORRECTLY, which is strictly better than the generic section below — a color
+# reaches the ``:root { --brand-* }`` block and a shadow its own var block.
+#
+# Matching is on the group string lowercased and stripped, so "Color", "COLORS"
+# and " colour " all land together. Only OBVIOUS synonyms belong here: an
+# ambiguous group name ("brand", "semantic", "custom") could hold colors OR
+# spacing OR anything else, and guessing a role for it would re-commit the v7
+# mislabeling defect (a font size printed under ``SPACING TOKENS:`` measurably
+# made the model read it as a gap value). Ambiguous groups therefore fall through
+# to the generic section, which asserts no role at all. Guess only when the
+# author's intent is unmistakable; otherwise pass the name through verbatim.
+_GROUP_ALIASES = {
+    # Colors -> "core" (the same resolution the bundle importer already uses for
+    # manifest ``kind: color``; see design_system_service._KIND_TO_GROUP).
+    "color": "core",
+    "colors": "core",
+    "colour": "core",
+    "colours": "core",
+    "palette": "core",
+    "palettes": "core",
+    # Color SUB-groups: singular/plural spellings of the canonical four.
+    "accent": "accents",
+    "inks": "ink",
+    "tint": "tints",
+    # Typography.
+    "typography": "type",
+    "types": "type",
+    "typeface": "type",
+    "typefaces": "type",
+    "font": "type",
+    "fonts": "type",
+    "text": "type",
+    # Elevation / shadows.
+    "shadows": "shadow",
+    "elevation": "shadow",
+    "elevations": "shadow",
+    # Spacing / layout.
+    "space": "spacing",
+    "spaces": "spacing",
+    "spacings": "spacing",
+    "layout": "spacing",
+}
+
+# Heading for tokens whose group the compiler has no emitter and no alias for.
+# They are emitted VERBATIM under their own group name rather than dropped: the
+# product requirement is that no brand token is ever silently lost, and a token
+# the compiler cannot classify is still brand data the model can use. The heading
+# deliberately asserts NO role (it is not "SPACING TOKENS:"), so an unclassified
+# font size cannot pick up a competing role cue from the label above it.
+_ADDITIONAL_TOKENS_HEADING = "ADDITIONAL BRAND TOKENS (group: %s):"
+
+# Fallback label when a group name is empty once sanitized (e.g. a name made only
+# of control characters). The TOKENS still ship — only the label is substituted.
+_UNLABELED_GROUP = "unlabeled"
 
 # Heading that frames the injected README + SKILL as the authoritative brand
 # operating manual (the huashu / Claude-Design model). Injected in FULL as the
@@ -623,15 +695,36 @@ def _brand_manual_section(skill_md: Optional[str], readme_md: Optional[str]) -> 
     return "\n\n".join([_BRAND_MANUAL_HEADING, *body_parts])
 
 
+def _resolve_group(raw_group: Any) -> str:
+    """Map a stored token group onto a canonical group, or pass it through.
+
+    Canonical groups and their synonyms (:data:`_GROUP_ALIASES`) resolve to the
+    canonical spelling so they reach the purpose-built emitter. ANY other group is
+    returned as its own key — lowercased and stripped so casing/padding variants
+    of the same author-invented group collapse into ONE generic section instead of
+    several — and is emitted under the generic heading. Nothing resolves to
+    "dropped": this function has no failure mode that loses a token.
+    """
+    key = str(raw_group or "").strip().lower()
+    if key in _CANONICAL_GROUPS:
+        return key
+    return _GROUP_ALIASES.get(key, key)
+
+
 def _grouped_tokens(design_system: Any) -> dict[str, list[tuple[str, str]]]:
     """Return ``group -> [(name, value), ...]`` with each list sorted by name.
 
     Sorting here is what makes the output order-independent of however the ORM
     relationship happened to load the rows.
+
+    Group names are resolved through :func:`_resolve_group` HERE, at the one place
+    raw group strings enter the compiler, so every downstream consumer — the
+    emitters, the ramp detector, the generic-section builder — agrees on which
+    group a token belongs to without repeating the aliasing.
     """
     grouped: dict[str, list[tuple[str, str]]] = {}
     for token in getattr(design_system, "tokens", None) or []:
-        grouped.setdefault(token.group, []).append((token.name, token.value))
+        grouped.setdefault(_resolve_group(token.group), []).append((token.name, token.value))
     for group in grouped:
         grouped[group].sort(key=lambda name_value: (name_value[0], name_value[1]))
     return grouped
@@ -733,6 +826,47 @@ def _scale_section(
     lines = [heading]
     lines.extend(f"- {_safe(name)}: {_safe(value)}" for name, value in entries)
     return "\n".join(lines)
+
+
+def _additional_token_sections(
+    grouped: dict[str, list[tuple[str, str]]],
+    *,
+    exclude: frozenset[tuple[str, str]] = frozenset(),
+) -> list[str]:
+    """Emit every token whose group has no canonical emitter, never dropping one.
+
+    One section per unknown group, ordered by resolved group name so output is
+    deterministic. The group NAME is user-controlled text like any other, so it
+    goes through :func:`_safe` at its interpolation point — sanitize-not-reject:
+    no length cap and no script restriction, so a group called
+    ``brand/セマンティック`` or one carrying an emoji survives intact and merely
+    cannot contain a line break or a region sentinel.
+
+    ``exclude`` drops the ``(name, value)`` pairs BRAND TYPE SCALE already owns,
+    exactly as ``_scale_section`` does: a ramp-shaped font size in an unknown group
+    is surfaced by BRAND FONT-SIZE TOKENS, and reprinting it here would restate a
+    size under a second heading (the v7 competing-role-cue defect). Those tokens
+    are still present in the artifact — under the heading that names their real
+    role — so nothing is lost by the exclusion.
+
+    A group whose sanitized name is empty is labeled :data:`_UNLABELED_GROUP`; its
+    tokens are emitted either way. Returns ``[]`` when every group is canonical.
+    """
+    sections: list[str] = []
+    for group in sorted(g for g in grouped if g not in _CANONICAL_GROUPS):
+        entries = [pair for pair in grouped[group] if pair not in exclude]
+        if not entries:
+            continue
+        label = _safe(group).strip() or _UNLABELED_GROUP
+        sections.append(
+            "\n".join(
+                [
+                    _ADDITIONAL_TOKENS_HEADING % label,
+                    *(f"- {_safe(name)}: {_safe(value)}" for name, value in entries),
+                ]
+            )
+        )
+    return sections
 
 
 def _font_size_token_section(
@@ -921,7 +1055,8 @@ def compile_design_system(
     Emitted order: header (stamped with the compiler-version marker) ->
     description -> BRAND MANUAL (README + SKILL, full) -> scope firewall
     (always present: the design system governs STYLE only, never content) ->
-    tokens (color, type, spacing, shadow; all uncapped) -> BRAND TYPE SCALE
+    tokens (color, type, spacing, shadow, then any group with no canonical
+    emitter under ADDITIONAL BRAND TOKENS; all uncapped) -> BRAND TYPE SCALE
     (always present: ramp-derived role anchors, or the neutral default bands
     when no ramp is recognizable) -> fonts (@font-face refs + family listing;
     uncapped) -> templates (closed by the soft-pick enabler) -> SLIDE FRAME
@@ -957,16 +1092,20 @@ def compile_design_system(
 
     grouped = _grouped_tokens(design_system)
 
-    # Surface (don't silently drop) tokens in groups the compiler can't emit.
-    unrecognized = sorted(group for group in grouped if group not in _RECOGNIZED_GROUPS)
-    if unrecognized:
-        logger.warning(
-            "Design system '%s' has token group(s) %s that the compiler does not "
-            "emit; those tokens are omitted from the compiled style. Recognized "
-            "groups: %s.",
+    # Groups with no canonical emitter are EMITTED under the generic heading (see
+    # ``_additional_token_sections``), never dropped. The log line is now
+    # informational — it records which groups took the generic path so an author
+    # can add an alias if the name is a common synonym — and is deliberately INFO,
+    # not WARNING: nothing is lost, so there is nothing to warn about.
+    uncanonical = sorted(group for group in grouped if group not in _CANONICAL_GROUPS)
+    if uncanonical:
+        logger.info(
+            "Design system '%s' has token group(s) %s with no canonical emitter; "
+            "those tokens are emitted verbatim under 'ADDITIONAL BRAND TOKENS'. "
+            "Canonical groups: %s.",
             name,
-            ", ".join(unrecognized),
-            ", ".join(sorted(_RECOGNIZED_GROUPS)),
+            ", ".join(uncanonical),
+            ", ".join(sorted(_CANONICAL_GROUPS)),
         )
 
     # Tokens: color, type, spacing, shadow — all uncapped. Font-size ramp tokens
@@ -983,6 +1122,13 @@ def compile_design_system(
     if spacing:
         parts.append(spacing)
     parts.extend(_shadow_sections(grouped))
+
+    # Tokens in groups with no canonical emitter — emitted verbatim under their
+    # own sanitized group name rather than dropped (the zero-token-loss rule).
+    # Placed after the canonical token sections and BEFORE the type-scale region,
+    # so the artifact's token block stays contiguous. The ramp exclusion is passed
+    # through for the same reason the type/spacing lists get it.
+    parts.extend(_additional_token_sections(grouped, exclude=ramp_pairs))
 
     # The ramp's own token NAMES, under a heading that names their real role.
     # They are excluded from the type/spacing lists above (v7) and are no longer
