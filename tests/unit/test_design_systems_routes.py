@@ -1488,6 +1488,103 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
         assert resp.status_code == 200, resp.text
         assert resp.json()["design_system_id"] is None
 
+    def test_put_with_both_style_sources_normalises_to_design_system(
+        self, db_session, client
+    ):
+        """Item 6, at the ROUTE: an API/MCP caller sending BOTH gets a
+        deterministic design-system-wins result, persisted, with 200 — not a 422
+        that would wedge legacy both-set rows on every save."""
+        from src.database.models import SlideStyleLibrary, UserSession
+
+        ds = self._import(db_session)
+        ds_id = ds.id
+        style = SlideStyleLibrary(name="Acme Both Style", style_content="s")
+        db_session.add(style)
+        db_session.add(
+            UserSession(
+                session_id="sess-both",
+                created_by="api-caller@test.com",
+                agent_config={"tools": []},
+            )
+        )
+        db_session.commit()
+        style_id = style.id
+
+        cm = self._committing_db(db_session)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+            resp = client.put(
+                "/api/sessions/sess-both/agent-config",
+                json={
+                    "tools": [],
+                    "design_system_id": ds_id,
+                    "slide_style_id": style_id,
+                },
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["design_system_id"] == ds_id
+        assert body["slide_style_id"] is None, "both sources were persisted"
+
+        db_session.expire_all()
+        stored = (
+            db_session.query(UserSession)
+            .filter_by(session_id="sess-both")
+            .one()
+            .agent_config
+        )
+        assert stored["design_system_id"] == ds_id
+        assert stored["slide_style_id"] is None
+
+    def test_put_style_with_a_dangling_design_system_keeps_the_style(
+        self, db_session, client
+    ):
+        """The ORDERING that makes exclusivity safe. Normalising BEFORE reference
+        validation would drop a good slide style for a design system that is
+        about to be cleared as dangling, leaving the user with NEITHER."""
+        from src.database.models import DesignSystem, SlideStyleLibrary, UserSession
+
+        ds = self._import(db_session)
+        ds_id = ds.id
+        style = SlideStyleLibrary(name="Acme Order Style", style_content="s")
+        db_session.add(style)
+        db_session.add(
+            UserSession(
+                session_id="sess-order",
+                created_by="user-a@test.com",
+                agent_config={"tools": [], "design_system_id": ds_id},
+            )
+        )
+        db_session.commit()
+        style_id = style.id
+        db_session.query(DesignSystem).filter_by(id=ds_id).delete()
+        db_session.commit()
+
+        cm = self._committing_db(db_session)
+        with patch(
+            "src.api.routes.agent_config._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm):
+            resp = client.put(
+                "/api/sessions/sess-order/agent-config",
+                json={
+                    "tools": [],
+                    "design_system_id": ds_id,
+                    "slide_style_id": style_id,
+                },
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["design_system_id"] is None, "the dangling pin was not cleared"
+        assert body["slide_style_id"] == style_id, (
+            "the user's slide style was dropped for a design system that no "
+            "longer exists — they end up with no style source at all"
+        )
+
     def test_clearing_a_dangling_pin_logs_a_warning_with_ids(self, db_session, client, caplog):
         """(iii) The clear is observable: the warning names the stale id AND the
         session, so support can tell why a user's selection disappeared."""

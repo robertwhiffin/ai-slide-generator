@@ -157,6 +157,48 @@ def resolve_agent_config(raw: Optional[dict]) -> AgentConfig:
     return AgentConfig.model_validate(raw)
 
 
+def normalize_style_source_exclusivity(
+    config: AgentConfig, *, session_id: Optional[str] = None
+) -> bool:
+    """Enforce "a design system and a slide style are MUTUALLY EXCLUSIVE" on WRITE.
+
+    Exclusivity used to live only in the browser, so an API or MCP caller could
+    persist BOTH and generation silently applied design-system precedence — a
+    stored row that disagreed with the deck it produced. Now that MCP sets
+    ``design_system_id``, that path is real.
+
+    NORMALISATION (design system wins, slide style dropped) rather than a 422:
+      * generation has always resolved the design system first, so nothing about
+        the rendered deck changes — the row just stops disagreeing with it;
+      * a 422 would WEDGE the legacy rows this must not break. The frontend PUTs
+        the WHOLE config, so a user sitting on a stored both-set row who changed
+        only their deck prompt would fail every save — precisely the
+        dangling-design-system bug fixed one round earlier;
+      * design-system precedence is already the documented product rule.
+
+    Called from the write path AFTER reference validation, never from a model
+    validator. Ordering is load-bearing: a DANGLING design system can only be
+    detected with a DB lookup, so normalising first would drop a perfectly good
+    slide style and then clear the dead design system too, leaving the user with
+    NEITHER. Reference validation clears the dangling id first; whatever survives
+    is then made exclusive.
+
+    Mutates *config* in place. Returns True when the slide style was dropped.
+    """
+    if config.slide_style_id is None or config.design_system_id is None:
+        return False
+    logger.warning(
+        "agent_config carried BOTH slide_style_id=%s and design_system_id=%s "
+        "(session_id=%s); the design system takes precedence, so the slide style "
+        "is dropped to keep ONE style authority in the prompt",
+        config.slide_style_id,
+        config.design_system_id,
+        session_id,
+    )
+    config.slide_style_id = None
+    return True
+
+
 def sanitize_agent_config_for_persist(
     raw: Optional[dict | AgentConfig],
 ) -> Optional[dict]:
