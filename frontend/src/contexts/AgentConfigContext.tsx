@@ -14,10 +14,11 @@ import React, {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   useRef,
 } from 'react';
 import { useLocation } from 'react-router-dom';
-import { api } from '../services/api';
+import { api, ApiError } from '../services/api';
 import { configApi } from '../api/config';
 import { useToast } from './ToastContext';
 import type { AgentConfig, ToolEntry, ProfileSummary, StyleSource } from '../types/agentConfig';
@@ -316,7 +317,10 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const urlSessionId = urlMatch ? urlMatch[1] : null;
   const isPreSession = !urlSessionId;
 
-  const [agentConfig, setAgentConfig] = useState<AgentConfig>(
+  // The RAW in-memory config. Consumers never read this directly — they read
+  // `agentConfig` below, which is gated on ownership. See the gate's comment for
+  // why that indirection is the whole fix for cross-session leakage.
+  const [rawAgentConfig, setAgentConfig] = useState<AgentConfig>(
     () => {
       const stored = readStoredConfig();
       if (stored) return stored;
@@ -343,6 +347,36 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     configOwnerRef.current = sessionId;
     setConfigOwnerSessionId(sessionId);
   }, []);
+
+  // ------------------------------------------------------------------
+  // THE cross-session isolation gate (structural).
+  //
+  // A config in memory belongs to exactly ONE surface: the session it was
+  // loaded for or explicitly edited in (`configOwnerSessionId`), or the
+  // pre-session surface. When the active surface is NOT that owner — the whole
+  // window between navigating into a session and its own GET resolving — the
+  // in-memory config is FOREIGN, and this gate replaces it wholesale with
+  // defaults for every consumer and every mutator.
+  //
+  // This is deliberately not another field-by-field strip. Entering a session
+  // used to strip only `template_id` from the previous session's config, which
+  // left design system, deck prompt and the TOOL LIST (private Genie space ids)
+  // both visible and writable — and since every mutator builds its PUT by
+  // spreading the current config, editing one field in session B persisted
+  // session A's private tool into B. Four rounds of point-fixes on this state
+  // machine all had the same shape, so the enumeration is gone: there is no list
+  // of protected fields to keep in sync, because NO inherited value survives the
+  // gate. A field added to AgentConfig tomorrow is covered automatically.
+  //
+  // Ownership is claimed by exactly two events, both of which mean "this config
+  // is genuinely this surface's": the session's own GET resolving, and an
+  // explicit user edit (which is intent FOR the visible session and is
+  // immediately persisted by its PUT).
+  const configIsOwnedByActiveSurface = isPreSession || configOwnerSessionId === urlSessionId;
+  const agentConfig = useMemo(
+    () => (configIsOwnedByActiveSurface ? rawAgentConfig : { ...DEFAULT_AGENT_CONFIG }),
+    [configIsOwnedByActiveSurface, rawAgentConfig],
+  );
 
   // ------------------------------------------------------------------
   // THE settle invariant (structural — every async continuation goes
@@ -513,15 +547,21 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     if (isPreSession) return;
 
     // Entering a session (New Deck / session switch): the PREVIOUS surface's
-    // config is still in memory until this session's GET resolves. It is
-    // FOREIGN here — ownership is dropped synchronously so nothing sends it,
-    // and the session-scoped template pin is stripped so the interim UI
-    // never shows another session's pin. This session's own config arrives
-    // with the GET below (which then claims ownership), and an explicit
-    // user edit made in the meantime claims ownership for THIS session and
-    // wins over the later-arriving GET.
+    // config is still in memory until this session's GET resolves. Dropping
+    // ownership synchronously is what makes it invisible AND unsendable — the
+    // isolation gate above swaps the whole foreign config for defaults while the
+    // active surface is not its owner, so no value of another session's can be
+    // rendered or spread into a mutator's PUT.
+    //
+    // There is deliberately no per-field strip here any more. Stripping only
+    // `template_id` and trusting the rest was the CRITICAL leak: session A's
+    // design system, deck prompt and private Genie tool ids stayed live and got
+    // written into session B's stored config by any single-field edit.
+    //
+    // This session's own config arrives with the GET below (which claims
+    // ownership), and an explicit user edit in the meantime claims ownership for
+    // THIS session and wins over the later-arriving GET.
     claimOwnership(null);
-    setAgentConfig(prev => withoutSessionScopedState(prev));
 
     const issuedFor = urlSessionId;
     const issueGen = issuedFor ? nextGeneration(issuedFor) : 0;
@@ -592,6 +632,26 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         });
       })
       .catch(err => {
+        // 404 = this session has no persisted config because it does not exist
+        // on the server YET (a client-generated id for a deck that has not been
+        // sent). That is NOT a foreign config: the pre-session selections the
+        // user just made are their own intent for the deck they are starting, and
+        // carrying them in is the documented behaviour ("a NEW session starts
+        // with template = None, design system carries over"). So this surface
+        // ADOPTS the in-memory config and claims ownership, which lets the
+        // isolation gate expose it again.
+        //
+        // The session-scoped template pin is still dropped — it belongs to the
+        // session it was chosen in, never to a new one.
+        if (err instanceof ApiError && err.status === 404) {
+          settleForSurface(issuedFor, () => {
+            setAgentConfig(prev => withoutSessionScopedState(prev));
+            claimOwnership(issuedFor);
+          });
+          return;
+        }
+        // A genuine failure (network, 500, 403): ownership stays unclaimed, so
+        // the gate keeps showing defaults rather than another session's values.
         console.error('Failed to load agent config for session:', err);
         settleForSurface(issuedFor, () => {
           showToast('Failed to load agent configuration', 'error');
