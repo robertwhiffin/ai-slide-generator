@@ -1219,18 +1219,85 @@ class TestCompilerVersionMarker:
 
 
 class TestVersionMarkerAnchorsAtEndOfHeader:
-    """The version check reads the HEADER LINE, and the header line ends with the
-    marker — so the match must be ANCHORED at the end, not a substring scan.
+    """Version detection must read a position user-controlled text cannot occupy.
 
-    A design system's NAME is interpolated into that same line. With an
-    ``in``-style test, a system NAMED like the marker put the current marker's
-    text on the header of an artifact its own compiler never stamped, so a STALE
-    row read as current and skipped the lazy recompile — the row keeps serving a
-    pre-bump artifact forever. Anchoring at the end restores "only the compiler
-    can claim a version", because the compiler is the one that writes last.
+    Three designs have failed here, each defeated by the design system's NAME,
+    which is interpolated into the very header line the check reads:
+      1. ``marker in artifact``    — any README mentioning it passed.
+      2. ``marker in header line`` — a system NAMED like the marker passed.
+      3. ``header.endswith(marker)`` — a system named EXACTLY the marker passed,
+         because ``SLIDE VISUAL STYLE: [ds-compiler v10]`` ends with it while
+         carrying a pre-version body (the reviewer's repro).
+
+    The check is now an EXACT match against the full header line the compiler
+    itself emits: ``f"{_STYLE_HEADER}: {name} {marker}"``. What makes that
+    unforgeable is the SEPARATOR, not the marker: ``_safe`` strips every line
+    break from the name, so a name can never end one line and start another, and
+    therefore can never produce a header line whose text before the marker is
+    absent. A "marker alone on its own line" rule would NOT be safe — README text
+    goes through ``_safe_multiline``, which preserves newlines by design, so a
+    README line could forge it.
 
     All fixtures SYNTHETIC ("Acme").
     """
+
+    def test_reviewers_exact_spoof_string_reads_stale(self):
+        """The reviewer's repro verbatim: a pre-version artifact whose header line
+        ENDS with the current marker because the name IS the marker."""
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+        )
+
+        assert not compiled_style_content_is_current(
+            "SLIDE VISUAL STYLE: [ds-compiler v10]\nold body"
+        ), "a header line that merely ENDS with the marker still passed as current"
+
+    def test_a_design_system_named_exactly_the_marker_cannot_spoof(self, session):
+        """Named literally '[ds-compiler v10]'. Its OWN fresh compile must read
+        current (it really is current), but a STALE artifact carrying that name
+        must not — the name must buy nothing."""
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        ds = _make_ds(session, name=_COMPILER_VERSION_MARKER, tokens=_TOKENS)
+        assert compiled_style_content_is_current(compile_design_system(ds))
+        # A stale body under a header the NAME alone could have produced.
+        assert not compiled_style_content_is_current(
+            f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER}\n\n(pre-version body)"
+        )
+
+    def test_marker_alone_on_a_body_line_cannot_claim_current(self):
+        """Why 'marker on its own line' was rejected as the rule: README/SKILL
+        text legitimately keeps its newlines, so a body line could forge it."""
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compiled_style_content_is_current,
+        )
+
+        assert not compiled_style_content_is_current(
+            "SLIDE VISUAL STYLE: Acme Design System\n\n"
+            "BRAND MANUAL (the authoritative brand documentation for this design "
+            "system — follow it):\n\n"
+            f"{_COMPILER_VERSION_MARKER}\n\nmore prose"
+        )
+
+    def test_empty_and_whitespace_only_names_do_not_crash_detection(self, session):
+        """Degenerate headers must answer False, not raise."""
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compiled_style_content_is_current,
+        )
+
+        for header in (
+            f"SLIDE VISUAL STYLE:  {_COMPILER_VERSION_MARKER}",
+            f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER} ",
+            f"{_COMPILER_VERSION_MARKER}",
+            "SLIDE VISUAL STYLE: Acme",
+        ):
+            compiled_style_content_is_current(f"{header}\n\nbody")  # must not raise
 
     def test_design_system_named_like_the_marker_still_recompiles(self, session):
         """THE adversarial case: the NAME carries the current marker text, and

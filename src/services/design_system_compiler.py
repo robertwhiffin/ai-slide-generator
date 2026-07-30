@@ -1157,20 +1157,42 @@ def compiled_style_content_is_current(compiled: Optional[str]) -> bool:
     markers existed — and must be recomputed from the row's persisted data via
     ``recompute_compiled_style_content`` before being injected into a prompt.
 
-    The marker is matched on the HEADER LINE ONLY, and ANCHORED AT ITS END: the
-    compiler writes the marker last on that line, so only the compiler can claim
-    a version. A substring test over the header was defeated by the design
-    system's own NAME, which is interpolated into the very same line — a system
-    NAMED ``Acme [ds-compiler v10] Brand`` put the current marker on the header
-    of an artifact its compiler never produced, so a STALE row read as current
-    and permanently skipped the lazy recompile.
+    Detection reads a position that user-controlled text CANNOT occupy: the
+    header line must match the exact shape this module emits —
+    ``f"{_STYLE_HEADER}: {name} {marker}"`` — with a non-empty name segment
+    before the marker.
+
+    Three weaker rules were each defeated by the design system's NAME, which is
+    interpolated into that very line:
+      1. ``marker in artifact``     — any README mentioning the string passed.
+      2. ``marker in header line``  — a system NAMED like the marker passed.
+      3. ``header.endswith(marker)`` — a system named EXACTLY the marker passed:
+         ``SLIDE VISUAL STYLE: [ds-compiler v10]`` ends with the marker while its
+         body is a pre-version artifact.
+
+    What makes the current rule unforgeable is the SEPARATOR, not the marker.
+    ``_safe`` strips every line break from the name, so a name can never end one
+    line and begin another — it cannot produce a header line that lacks the
+    ``"HEADER: "`` prefix, and it cannot make the text before the marker empty.
+    Note a "marker alone on its own line" rule would NOT be safe here: README /
+    SKILL text goes through ``_safe_multiline``, which preserves newlines by
+    design, so a body line could forge it.
 
     Trailing whitespace is tolerated (storage round-trips can add it); that is
-    not a version difference.
+    not a version difference. A row whose name is legitimately the marker text
+    still reads current from its OWN compile, because the prefix and a non-empty
+    name segment are both present.
     """
     if not compiled:
         return False
-    return compiled.split("\n", 1)[0].rstrip().endswith(_COMPILER_VERSION_MARKER)
+    header = compiled.split("\n", 1)[0].rstrip()
+    prefix = f"{_STYLE_HEADER}: "
+    if not header.startswith(prefix) or not header.endswith(_COMPILER_VERSION_MARKER):
+        return False
+    # The name segment between the prefix and the marker must be non-empty, which
+    # is what the compiler always emits and what a bare-marker header lacks.
+    name_segment = header[len(prefix): -len(_COMPILER_VERSION_MARKER)]
+    return bool(name_segment.strip())
 
 
 def ensure_compiled_style_content_current(design_system: Any) -> str:
