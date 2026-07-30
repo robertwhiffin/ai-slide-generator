@@ -55,10 +55,22 @@ from src.services.design_system_compiler import DESIGN_SYSTEM_SCOPE_FIREWALL
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on the layout HTML injected into a prompt. Real Claude-Design
-# template entries measure 24-47 KB; this is ~2.5x that headroom. A layout past
-# the cap falls back to no-template (logged) rather than blowing up the prompt.
-MAX_TEMPLATE_LAYOUT_CHARS = 120_000
+# NO cap on the layout HTML injected into a prompt.
+#
+# There was one (120,000 characters, sized at ~2.5x the 24-47 KB that real
+# Claude-Design template entries measure), and a layout past it made the whole
+# SELECTED-TEMPLATE block fall back to no-template — so a user who explicitly PINNED
+# a template got a deck generated without it, decided by one character
+# (120,000 injected, 120,001 dropped). That is user-supplied BRAND LAYOUT TEXT, and
+# it is not one of the deliberate binary OOM guards: those are the per-asset and
+# per-bundle BYTE limits in ``design_system.py``, which exist so a hostile zip cannot
+# exhaust the worker and which stay exactly as they are. A character cap on brand
+# text is a brand-data limit, and brand data is never turned away or silently
+# dropped.
+#
+# No replacement bound is introduced. If prompt assembly ever needs one, it must be
+# a VISIBLE, REPORTED condition — surfaced to the user, never a silent drop — and
+# that is a product decision, not something to settle here by picking a number.
 
 # Inert placeholder for an unresolvable image/url ref: the minimal valid data
 # URI. Renders as nothing, never fetches, and cannot be mistaken for a real
@@ -838,7 +850,8 @@ def build_selected_template_block(template: Any) -> Optional[str]:
     Appended at prompt-assembly time (``agent_factory``) AFTER the design
     system's compiled artifact — never persisted into it. Returns ``None`` (=
     fall back to no-template behavior, logged) when the template has no usable
-    layout or the layout exceeds :data:`MAX_TEMPLATE_LAYOUT_CHARS`.
+    layout at all. LENGTH is never a reason: the layout is injected in full, at
+    any size (see the note on the removed character cap above).
 
     Framing (Round 2, reconciled with the live Claude Design probe): the layout
     is an edit-in-place STARTING FILE. Their platform seeds the template files
@@ -861,16 +874,6 @@ def build_selected_template_block(template: Any) -> Optional[str]:
             "Pinned template '%s' has no layout HTML; generating without a template", name
         )
         return None
-    if len(layout_html) > MAX_TEMPLATE_LAYOUT_CHARS:
-        logger.warning(
-            "Pinned template '%s' layout is %d chars (cap %d); generating without a "
-            "template",
-            name,
-            len(layout_html),
-            MAX_TEMPLATE_LAYOUT_CHARS,
-        )
-        return None
-
     parts: list[str] = [f"SELECTED SLIDE TEMPLATE: {name}"]
     description = (getattr(template, "description", None) or "").strip()
     if description:

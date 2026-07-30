@@ -939,14 +939,37 @@ class TestBuildSelectedTemplateBlock:
         template.layout_html = "   "
         assert build_selected_template_block(template) is None
 
-    def test_oversized_layout_falls_back_to_none_with_warning(self, session, caplog):
-        from src.services.design_system_templates import (
-            MAX_TEMPLATE_LAYOUT_CHARS,
-            build_selected_template_block,
-        )
+    @pytest.mark.parametrize("layout_chars", [120_000, 120_001, 500_000])
+    def test_a_long_layout_is_never_turned_away(self, session, layout_chars):
+        """SUPERSEDES ``test_oversized_layout_falls_back_to_none_with_warning``.
+
+        That test asserted the DEFECT: a selected template whose layout exceeded
+        120,000 characters was DROPPED ENTIRELY and the deck generated with no
+        template at all. The layout is USER-SUPPLIED BRAND LAYOUT TEXT, and it is not
+        one of the deliberate binary OOM guards (those are the per-asset and
+        per-bundle BYTE limits, which stay), so per the hard requirement it must not
+        be turned away or silently dropped.
+
+        The boundary codex measured was ``120000 emitted=True / 120001
+        emitted=False`` — one character deciding whether the user's pinned template
+        reached the model. The new assertion is strictly stronger: it holds at the
+        old boundary, one past it, and far past it.
+        """
+        from src.services.design_system_templates import build_selected_template_block
 
         _, template = self._template(session)
-        template.layout_html = "x" * (MAX_TEMPLATE_LAYOUT_CHARS + 1)
-        with caplog.at_level(logging.WARNING, logger="src.services.design_system_templates"):
-            assert build_selected_template_block(template) is None
-        assert "layout" in caplog.text.lower()
+        template.layout_html = "<div>" + ("x" * (layout_chars - 11)) + "</div>"
+        assert len(template.layout_html) == layout_chars
+
+        block = build_selected_template_block(template)
+
+        assert block is not None, (
+            f"a {layout_chars}-character brand layout was dropped entirely; the user "
+            "pinned this template and the deck would generate without it"
+        )
+        assert "SELECTED SLIDE TEMPLATE" in block
+        # The layout itself is present, in full — not truncated.
+        assert template.layout_html in block, (
+            "the brand layout was altered or truncated on its way into the prompt"
+        )
+

@@ -129,6 +129,49 @@ class DesignSystemNameConflictError(ValueError):
     """
 
 
+#: Maximum size of a btree index tuple in PostgreSQL (version 4 btrees). A UNIQUE
+#: index over ``design_system.name`` cannot hold a row larger than this.
+_BTREE_MAX_INDEX_ROW_BYTES = 2704
+
+
+def _guard_indexable_name(name: str) -> None:
+    """Reject a name the UNIQUE index physically cannot hold — as a clear 4xx.
+
+    ``design_system.name`` is unbounded ``TEXT`` (brand data is never turned away for
+    its length), but it also carries a UNIQUE constraint, and a btree index tuple
+    cannot exceed :data:`_BTREE_MAX_INDEX_ROW_BYTES`. The interaction is subtle: the
+    index tuple is COMPRESSED, so length alone does not decide. A 5000-byte name that
+    compresses well stores exactly; a 5000-byte incompressible one raises
+    ``ProgramLimitExceeded`` from deep inside the INSERT.
+
+    That error is correct to raise — it fails loudly and never truncates the brand's
+    name — but it reached the import route's generic ``except Exception`` and surfaced
+    as HTTP 500 "Failed to import design system", which tells the user nothing they
+    can act on. This turns it into the error type the routes already map to a 4xx,
+    with a message naming the real limit.
+
+    Compressibility is MEASURED, not assumed, using zlib as a stand-in for Postgres's
+    pglz: both are LZ77-family, so a name zlib cannot bring under the limit is one
+    pglz cannot either. Deliberately conservative — the guard only fires when the
+    compressed size still exceeds the maximum, so a long-but-compressible name (which
+    Postgres genuinely stores) is never turned away.
+    """
+    import zlib
+
+    encoded = name.encode("utf-8")
+    if len(encoded) <= _BTREE_MAX_INDEX_ROW_BYTES:
+        return
+    # Only a name whose COMPRESSED form still overflows the index is unstorable.
+    if len(zlib.compress(encoded, 6)) <= _BTREE_MAX_INDEX_ROW_BYTES:
+        return
+    raise DesignSystemImportError(
+        f"The design system name is too long to index uniquely: it is "
+        f"{len(encoded)} bytes, and a unique name must compress to at most "
+        f"{_BTREE_MAX_INDEX_ROW_BYTES} bytes. Import it with a shorter name "
+        "(the brand's own text is stored uncapped everywhere else)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Small pure helpers
 # ---------------------------------------------------------------------------
@@ -426,6 +469,10 @@ def import_bundle(
             readme_h1=_read_readme_h1(zf, root_prefix, budget),
             source_filename=source_filename,
         )
+
+        # Fail fast, with an actionable message, on a name the UNIQUE index cannot
+        # physically hold — otherwise it surfaces as an opaque 500 from the INSERT.
+        _guard_indexable_name(name)
 
         # Fail fast on a name clash before doing any expensive work.
         existing = db.query(DesignSystem).filter(DesignSystem.name == name).first()
