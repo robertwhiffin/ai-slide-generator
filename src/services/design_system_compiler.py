@@ -150,7 +150,19 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # survives as ``_font_size_px_ramp`` for BAND MATH only. Persisted v12 rows hold
 # non-px and same-px font sizes labeled as spacing, so the bump is what makes them
 # recompile.
-COMPILER_VERSION = 13
+# v14: the font-size NAME HEURISTIC itself, both directions, after five rounds of
+# extending its pattern. The stem is now a WHOLE SEGMENT of the normalized name
+# instead of a prefix, so a CSS property that merely starts with the same letters
+# (``text-indent``, ``text-decoration-thickness``, ``text-gap``) is no longer claimed
+# as a font size — a false claim EVICTED a genuine spacing token from ``SPACING
+# TOKENS:`` and gave a non-size the font-size heading. Separators are decided by
+# UNICODE CATEGORY rather than a hand-listed set of ASCII punctuation, so a
+# typographic separator (en dash, Unicode hyphen, fullwidth period) unifies like
+# ``-`` while script (CJK/Cyrillic/emoji) is preserved. The value grammar gained the
+# ``cap``/``rcap`` unit, a bare ``0`` and the ``small``/``large`` keywords. Persisted
+# v13 rows hold BOTH mislabelings — real sizes printed as spacing AND non-sizes
+# printed as font sizes — so the bump is what makes them recompile.
+COMPILER_VERSION = 14
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -541,7 +553,55 @@ def _safe_multiline(value: Any) -> str:
 # Ramp detection is BY NAME+VALUE PATTERN across ALL token groups, not by
 # group membership: Claude Design manifests mislabel the type ramp (fs-12 …
 # fs-64) as kind "spacing", so the sizes never reach the "type" group.
-_TYPE_SIZE_NAME_RE = re.compile(r"^(?:fs|font-?size|text)[-_]?\d*($|[-_])", re.IGNORECASE)
+#
+# That mislabeling is also why the DECLARED kind cannot be preferred over the name.
+# It is the obvious structural fix — "stop inferring role from the name where the
+# bundle already tells us" — and it was evaluated and rejected on evidence:
+#
+#   1. ``kind`` is never persisted. ``design_system_token`` has exactly
+#      ``(group, name, value)`` (``src/database/models/design_system.py``), and the
+#      importer writes ``DesignSystemToken(group=, name=, value=)``
+#      (``design_system_service.py``). By the time the compiler runs, the manifest's
+#      per-token ``kind`` has already been mapped through ``_KIND_TO_GROUP`` and
+#      collapsed into ``group``; there is no declared kind left to read.
+#   2. Where it IS still visible, it is WRONG for precisely these tokens. A real
+#      Claude Design manifest declares ``{"name": "--fs-12", "value": "12px",
+#      "kind": "spacing"}``. Preferring the declared kind would therefore file the
+#      type ramp as spacing BY CONTRACT — it would re-create the v7 small-titles
+#      defect as designed behaviour rather than close it.
+#
+# So the name heuristic stays, and is instead made structurally sound on both axes:
+# the stem must be a WHOLE SEGMENT (below) and separators are decided by Unicode
+# category (see :data:`_NAME_SEPARATOR_RE`).
+#
+# THE STEM IS A WHOLE SEGMENT, NEVER A PREFIX. Round 7 matched
+# ``^(?:fs|font-?size|text)[-_]?\d*($|[-_])``, where the ``text`` alternative
+# matched the leading four characters of any name, so ``text-indent: 2em``,
+# ``text-decoration-thickness: 2px`` and ``text-gap: 8px`` were all claimed as font
+# sizes. Ownership SUPPRESSES a pair from the spacing list, so the cost was a
+# genuine spacing token evicted from ``SPACING TOKENS:`` while a non-size took the
+# font-size heading. Matching whole segments of the normalized name closes the
+# entire "some CSS property happens to start with these letters" class, rather than
+# denylisting the three properties that were found.
+#
+# Two stems from the obvious candidate list are deliberately ABSENT, both because
+# they are AMBIGUOUS rather than merely awkward:
+#
+# * ``size`` — ``size-gap: 8px`` is a spacing token (and a pinned control). A bare
+#   ``size`` segment does not say WHAT is being sized, so it cannot carry the stem.
+# * ``text`` — the direct cause of the over-inclusive half. ``text`` is the shared
+#   prefix of a large open set of CSS properties that are not font sizes
+#   (``text-indent``, ``text-decoration-thickness``, ``text-align``, ``text-wrap``)
+#   and of brand names that are not either (``text-gap``). Only the explicit
+#   ``text-size`` spelling denotes a size. This is what retires ``text-percent``
+#   and ``text-🎨-body`` from ownership: under a whole-segment rule they are
+#   ``text`` + a word, exactly like ``text-indent``, so claiming them would mean
+#   re-admitting the prefix match that evicts real spacing tokens.
+_TYPE_SIZE_STEMS = ("fs", "font-size", "text-size", "type-scale")
+_TYPE_SIZE_NAME_RE = re.compile(
+    rf"^(?:{'|'.join(_TYPE_SIZE_STEMS)})(?:-?\d+)?(?:$|-)",
+    re.IGNORECASE,
+)
 _PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
 
 # Separator conventions a brand may use between the parts of a token name. A design
@@ -560,7 +620,30 @@ _PX_VALUE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*px\s*$", re.IGNORECASE)
 # that also consumed CJK, Cyrillic and emoji, so a legitimate brand token
 # ``fs-サイズ-24`` normalized to ``fs-24`` and collided with a different rung of the
 # same ramp. Normalization must unify SEPARATOR CONVENTIONS, never erase script.
-_NAME_SEPARATOR_RE = re.compile(r"[-_./\\:|\s]+")
+#
+# Round 7 spelled that class as a HAND-LISTED set of ASCII punctuation, which is the
+# same losing move one level down: a brand using a typographic separator — an en
+# dash ``fs–body`` (U+2013), a Unicode hyphen ``fs‐body`` (U+2010), a fullwidth
+# period ``fs．body`` (U+FF0E) — normalized to a name the stem could not match, and
+# the size printed as spacing again. Extending the list would leave the next
+# separator (em dash, ideographic full stop, non-breaking hyphen, …) broken.
+#
+# So the question is asked of UNICODE, not of a list: a character is a separator
+# when its general category is ``Pd`` (dash punctuation), ``Pc`` (connector, e.g.
+# ``_``) or ``Po`` (other punctuation, e.g. ``.`` ``/`` ``:``), plus any whitespace.
+# Categories are what make the exclusions principled rather than lucky: ``Lo``
+# (CJK ``サ``, Cyrillic) and ``So`` (emoji ``🎨``) are LETTERS and SYMBOLS, never
+# punctuation, so script is preserved and ``fs-サイズ-24`` still cannot collapse onto
+# ``fs-24``. ``Sm`` (math symbols, e.g. ``|`` ``+``) is likewise not punctuation and
+# so not a separator.
+_SEPARATOR_UNICODE_CATEGORIES = frozenset(("Pd", "Pc", "Po"))
+
+
+def _is_name_separator(char: str) -> bool:
+    """True when *char* is a separator CONVENTION rather than part of the name."""
+    return char.isspace() or unicodedata.category(char) in _SEPARATOR_UNICODE_CATEGORIES
+
+
 _CAMEL_HUMP_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 # A font size may legitimately be declared in any CSS length/relative unit, or by
@@ -590,8 +673,20 @@ _CAMEL_HUMP_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # ``var()`` is accepted as a size in its own right: indirecting the scale through a
 # custom property (``fs-body: var(--brand-body)``) is the most common way a design
 # system references its own tokens, and rejecting it printed those sizes as spacing.
+# Round 8 completes the grammar with the three forms codex found still printing as
+# spacing. Each is ordinary CSS, so each was a live surface of the same mislabel:
+#
+# * ``cap`` (and ``rcap``) — the cap-height unit, missing from the font-relative
+#   group. ``fs-body: 2cap`` is a font size stated in the most typographic unit CSS
+#   has.
+# * A BARE ``0`` — the one length that is valid with no unit at all. ``fs-body: 0``
+#   is legal CSS, so rejecting it filed a declared size under spacing. Only zero
+#   qualifies: ``16`` without a unit is not a length.
+# * ``small`` / ``large`` — the base rungs of the CSS absolute-size keyword scale.
+#   The arm covered ``x{1,3}-small``/``x{1,3}-large`` (and ``medium``) but not the
+#   two unprefixed keywords those are derived from.
 _LENGTH_UNITS = r"""(?:px|pt|pc|in|cm|mm|q         # absolute lengths
-             |r?em|ex|ch|r?lh|ic          # font-relative lengths
+             |r?em|ex|ch|r?lh|ic|r?cap    # font-relative lengths
              |v(?:w|h|i|b|min|max)        # viewport-relative lengths
              |[cdsl]v(?:w|h|i|b|min|max)  # small/large/dynamic/container viewport
              |cq(?:w|h|i|b|min|max)       # container-query lengths
@@ -601,6 +696,7 @@ _FONT_SIZE_VALUE_RE = re.compile(
     rf"""^\s*(?:
         (?:\d+(?:\.\d+)?|\.\d+)           # a non-negative number (no sign)
         \s*{_LENGTH_UNITS}
+        |0+(?:\.0+)?                      # a bare zero — the one unitless length
         |var\s*\(\s*--[^)]*\)             # a custom-property reference
         |(?:clamp|calc|min|max)\s*\(      # a computed size, which must CONTAIN a size
             (?=[^)]*(?:
@@ -608,7 +704,8 @@ _FONT_SIZE_VALUE_RE = re.compile(
                 |var\s*\(\s*--
             ))
             .*\)
-        |x{{1,3}}-large|x{{1,3}}-small|larger|smaller|medium  # CSS absolute keywords
+        |x{{1,3}}-large|x{{1,3}}-small    # CSS absolute-size keywords
+        |small|large|larger|smaller|medium
     )\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -688,9 +785,17 @@ def _normalized_token_name(name: Any) -> str:
 
     Never used for OUTPUT: every emitted name is the author's own, verbatim through
     :func:`_safe`. This exists so a house style cannot decide a token's role.
+
+    Separators are identified by UNICODE CATEGORY (:func:`_is_name_separator`), not
+    by a hand-listed set of ASCII punctuation, so a typographic separator (en dash,
+    Unicode hyphen, fullwidth period) unifies exactly like ``-`` while CJK, Cyrillic
+    and emoji — letters and symbols, not punctuation — are preserved.
     """
-    sanitized = _safe(name).strip()
-    return _NAME_SEPARATOR_RE.sub("-", _CAMEL_HUMP_RE.sub("-", sanitized)).strip("-")
+    sanitized = _CAMEL_HUMP_RE.sub("-", _safe(name).strip())
+    collapsed = "".join(
+        "-" if _is_name_separator(char) else char for char in sanitized
+    )
+    return re.sub(r"-+", "-", collapsed).strip("-")
 
 
 def _is_font_size_token(name: Any, value: Any) -> bool:
