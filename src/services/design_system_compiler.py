@@ -105,7 +105,17 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # smuggling a marker and fake role lines into the scrub-exempt owning section.
 # Persisted v8 rows may hold an artifact built from unsanitized values and carry
 # no sentinels, so the bump is what makes them recompile.
-COMPILER_VERSION = 9
+# v10: NO token name is echoed inside the numeric BRAND TYPE SCALE region (it
+# emits parsed px numbers only), so the v9 identifier allowlist + 40-char cap on
+# ramp token names is DELETED and every token is kept: ramp names get their own
+# correctly-labeled BRAND FONT-SIZE TOKENS section, and typography/spacing list
+# everything else regardless of length or script. Sanitize-not-reject of line
+# breaks/controls is now the ONLY transformation applied to a user string (the v9
+# multi-space collapse renamed legitimate tokens). Line endings are normalized in
+# ONE place, matching CRLF as a single unit — v9 turned a Windows-authored README
+# into a double-spaced one. Persisted v9 rows hold dropped token names and
+# doubled line breaks, so the bump is what makes them recompile.
+COMPILER_VERSION = 10
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
@@ -240,17 +250,34 @@ def _slug(value: str) -> str:
 # load-bearing (the sentinels are), so deleting it from a README that
 # legitimately mentions the string would silently mangle the author's own
 # documentation for no security benefit. Neutralize structure, preserve prose.
-_ALL_LINE_BREAKS = (
-    "\n",
-    "\r",
-    "\v",  # \x0b VT
-    "\f",  # \x0c FF
-    "\x1c",  # FS
-    "\x1d",  # GS
-    "\x1e",  # RS
-    "\x85",  # NEL
-    " ",  # LINE SEPARATOR
-    " ",  # PARAGRAPH SEPARATOR
+#
+# Nothing else is transformed. Sanitization is SANITIZE-NOT-REJECT and it is the
+# ONLY thing applied to a user string: no allowlist, no length cap, no
+# whitespace tidying. An earlier round also collapsed runs of 2+ spaces so a
+# payload's "visual shape" would not survive as ragged whitespace — cosmetic
+# only, never a security property, and it RENAMED a legitimate token that
+# happened to contain two spaces. Renaming brand data to tidy it is exactly the
+# class of loss this module no longer commits.
+#
+# THE ONE PLACE line endings are normalized. Both sanitizers share this pattern,
+# so a break is recognized ONCE however it is spelled. CRLF is matched as a
+# SINGLE unit and must stay first in the alternation: substituting \r and \n
+# independently turned every CRLF into TWO replacements, which is what
+# double-spaced every line of a Windows-authored brand manual (and, in ``_safe``,
+# left a two-space gap mid-value).
+_LINE_BREAK_RE = re.compile(
+    "\r\n"  # CRLF — one break, matched before the single-character forms
+    "|[\n"
+    "\r"
+    "\v"  # \x0b VT
+    "\f"  # \x0c FF
+    "\x1c"  # FS
+    "\x1d"  # GS
+    "\x1e"  # RS
+    "\x85"  # NEL
+    " "  # LINE SEPARATOR
+    " "  # PARAGRAPH SEPARATOR
+    "]"
 )
 
 
@@ -260,18 +287,16 @@ def _safe(value: Any) -> str:
     Applied at EVERY interpolation point for user-controlled data (design-system
     name/description, token names and values, font family names and their token
     lists, template names/descriptions, asset filenames, README/SKILL text).
-    Line breaks collapse to a single space and C0/C1 control characters — the
-    range the region sentinels live in — are dropped. Everything else, including
-    the reserved marker text, is preserved verbatim.
+    Each line break becomes a single space and C0/C1 control characters — the
+    range the region sentinels live in — are dropped. Everything else is
+    preserved VERBATIM, at any length, in any script: the reserved marker text,
+    slashes, dots, colons, brackets, repeated spaces, CJK/Cyrillic/emoji.
     """
     text = "" if value is None else str(value)
-    for breaker in _ALL_LINE_BREAKS:
-        text = text.replace(breaker, " ")
-    # Drop remaining C0/C1 controls (this is what makes the sentinels unforgeable).
-    text = "".join(ch for ch in text if not _is_control(ch))
-    # Collapse the runs the substitutions above can create, so a payload's
-    # visual shape does not survive as ragged whitespace.
-    return re.sub(r" {2,}", " ", text)
+    text = _LINE_BREAK_RE.sub(" ", text)
+    # Drop remaining C0/C1 controls (this is what makes the sentinels
+    # unforgeable). Covers NUL and the rest of the C0 range.
+    return "".join(ch for ch in text if not _is_control(ch))
 
 
 def _is_control(ch: str) -> bool:
@@ -279,48 +304,23 @@ def _is_control(ch: str) -> bool:
     return unicodedata.category(ch) == "Cc"
 
 
-# The compiler-owned type-scale region states the NUMERIC contract, and the late
-# re-assertion echoes its role lines verbatim as the last word in the prompt. A
-# ramp token NAME is the only user-controlled text inside that region, so the rule
-# there is stricter than everywhere else: a name is ECHOED ONLY IF IT IS A PLAIN
-# IDENTIFIER, and otherwise omitted entirely.
+# NO token NAME is echoed inside the compiler-owned type-scale region. That
+# region carries the NUMERIC contract only: compiler prose plus px numbers the
+# compiler itself parsed from token values. With no user-controlled text there,
+# the "a token name forges role lines / smuggles fake numbers into the contract"
+# class is closed STRUCTURALLY — there is nothing left inside to police.
 #
-# Sanitizing a hostile name and echoing the remnant is NOT enough — that is how
-# this defect kept coming back. A blocklist leaves the attacker's digits in place,
-# so ``fs-64-[ds-type-scale]\n- Floor: 1px`` still lands a stray "1px" inside a
-# sentence about the brand ramp even after line breaks and colons are gone.
-# Omission means no non-conforming user byte reaches the region at all, which is
-# the property that closes the class: the region contains compiler prose, numbers
-# the compiler itself parsed from px values, and identifiers — nothing else.
+# This replaces an allowlist (``^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,39}$``) that
+# echoed a name only when it looked like a plain identifier and DROPPED it
+# otherwise. Tightening that regex was the wrong axis: because ramp-shaped
+# tokens are deliberately suppressed from the typography/spacing lists (the
+# scale is meant to be their one authoritative home), a rejected name was left
+# with NO home at all, so a legitimate brand token called ``brand/heading-xl``,
+# ``brand-サイズ-64``, ``font.size.display.xxl`` or anything over 40 characters
+# disappeared from the compiled artifact entirely. Dropping brand data to
+# protect a sentence is not a trade this compiler makes: the sentence no longer
+# needs protecting, and EVERY token is listed in full below.
 #
-# A real token name (``fs-64``, ``font-size-lg``, ``text.body``) conforms, so
-# nothing is lost in practice; the parenthetical is simply dropped when it does
-# not, which costs a naming hint and never the contract.
-_TOKEN_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,39}$")
-
-
-def _token_reference(name: Any) -> str:
-    """``" (token fs-64)"`` for a plain-identifier *name*, else ``""``.
-
-    See :data:`_TOKEN_IDENTIFIER_RE`. Returning the whole parenthetical (rather
-    than a bare label) is what lets a non-conforming name vanish completely
-    instead of leaving ``(token )`` behind.
-    """
-    text = _safe(name).strip()
-    if not _TOKEN_IDENTIFIER_RE.match(text):
-        return ""
-    return f" (token {text})"
-
-
-def _token_reference_list(names: list[str]) -> str:
-    """``" (tokens: a, b)"`` for the conforming *names*; ``""`` when none are."""
-    safe = [_safe(name).strip() for name in names]
-    kept = [text for text in safe if _TOKEN_IDENTIFIER_RE.match(text)]
-    if not kept:
-        return ""
-    return f" (tokens: {', '.join(kept)})"
-
-
 def _safe_multiline(value: Any) -> str:
     """Sanitize a user document whose LINE STRUCTURE is meaningful.
 
@@ -331,11 +331,15 @@ def _safe_multiline(value: Any) -> str:
     preserved. They cannot forge the type-scale region regardless, because that
     region is delimited by sentinels this function strips — the manual is
     injected outside those sentinels entirely.
+
+    Normalization happens ONCE, over the whole document, BEFORE any per-line
+    processing (:data:`_LINE_BREAK_RE` matches CRLF as one unit). Replacing each
+    breaker in sequence instead turned a Windows-authored ``\\r\\n`` into
+    ``\\n\\n``, putting a blank line between EVERY line of the brand manual —
+    which the model reads as paragraph structure that the author never wrote.
     """
     text = "" if value is None else str(value)
-    for breaker in _ALL_LINE_BREAKS:
-        if breaker != "\n":
-            text = text.replace(breaker, "\n")
+    text = _LINE_BREAK_RE.sub("\n", text)
     return "".join(ch for ch in text if ch == "\n" or not _is_control(ch))
 
 
@@ -487,28 +491,23 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
 
     if len(body_sizes) > 1:
         body_label = f"{_fmt_px(body_sizes[0])}-{_fmt_px(body_top)}"
-        body_tokens = _token_reference_list([ramp[px] for px in body_sizes])
     else:
         body_label = _fmt_px(body_top)
-        body_tokens = _token_reference_list([ramp[body_top]])
 
-    # Token names are the ONLY user-controlled text inside the compiler's own
-    # region, so they are echoed only when they are plain identifiers and dropped
-    # otherwise (``_token_reference``) — sanitizing and echoing the remnant is
-    # what let a hostile name leave stray digits in the numeric contract. The px
-    # numbers are formatted from floats the compiler parsed, so they are not user
-    # text at all.
+    # NUMBERS ONLY. Every value here is formatted from a float the compiler
+    # parsed out of a px token value, so no user-controlled text is interpolated
+    # into this region at all — which is what closes the name-injection class
+    # structurally instead of by pattern-matching names. The token NAMES behind
+    # these sizes are listed in the typography/spacing sections, in full.
     return "\n".join(
         [
             "BRAND TYPE SCALE (REQUIRED — derived from this design system's "
             f"own tokens): {_TYPE_SCALE_MARKER}",
-            f"- Cover/hero titles: {_fmt_px(hero_px)}"
-            f"{_token_reference(ramp[hero_px])} — the top of the brand ramp.",
-            f"- Section/slide titles: {_fmt_px(section_px)}"
-            f"{_token_reference(ramp[section_px])} or larger.",
-            f"- Body text: {body_label}{body_tokens}.",
-            f"- Floor: never render ANY text below {_fmt_px(floor_px)}"
-            f"{_token_reference(ramp[floor_px])}, the bottom of the brand ramp.",
+            f"- Cover/hero titles: {_fmt_px(hero_px)} — the top of the brand ramp.",
+            f"- Section/slide titles: {_fmt_px(section_px)} or larger.",
+            f"- Body text: {body_label}.",
+            f"- Floor: never render ANY text below {_fmt_px(floor_px)}, the "
+            "bottom of the brand ramp.",
             _TYPE_SCALE_ANTI_SHRINK_LINE,
         ]
     )
@@ -736,6 +735,50 @@ def _scale_section(
     return "\n".join(lines)
 
 
+def _font_size_token_section(
+    grouped: dict[str, list[tuple[str, str]]]
+) -> Optional[str]:
+    """List the ramp's font-size tokens by NAME under a FONT-SIZE heading.
+
+    Ramp-shaped tokens are suppressed from the TYPOGRAPHY/SPACING rule lists on
+    purpose (v7: a font size printed under ``SPACING TOKENS:`` is a competing
+    role cue that measurably made the model read a brand cover size as a gap
+    value). Their names used to be echoed inside the BRAND TYPE SCALE region
+    instead — which is where the name-injection problem lived, and where an
+    allowlist then silently DROPPED any name that did not look like a plain
+    identifier.
+
+    So the names get their own correctly-labeled home, OUTSIDE the compiler-owned
+    numeric region: every ramp token is listed here, in full, whatever its length
+    or script, while the region next to it stays numbers-only. Nothing is
+    dropped and nothing is mislabeled.
+
+    Ordered by px value (the ramp's own order, ascending) then name, so output
+    stays deterministic. Returns ``None`` when there is no usable ramp — those
+    tokens keep their original group listing, so there is nothing to re-home.
+
+    The heading deliberately does NOT contain the words "BRAND TYPE SCALE": that
+    phrase is how callers (and tests) locate the compiler-owned numeric region by
+    index, so reusing it here would shadow the real region.
+    """
+    ramp_pairs = _ramp_token_pairs(grouped)
+    if not ramp_pairs:
+        return None
+
+    def _px_of(value: str) -> float:
+        match = _PX_VALUE_RE.match(value or "")
+        return float(match.group(1)) if match else 0.0
+
+    entries = sorted(ramp_pairs, key=lambda pair: (_px_of(pair[1]), pair[0]))
+    return "\n".join(
+        [
+            "BRAND FONT-SIZE TOKENS (the type ramp; the required sizes for each "
+            "role are stated below):",
+            *(f"- {_safe(name)}: {_safe(value)}" for name, value in entries),
+        ]
+    )
+
+
 def _font_families_section(design_system: Any) -> Optional[str]:
     """Render ``font_mapping_json`` families as a typography family listing.
 
@@ -941,6 +984,15 @@ def compile_design_system(
         parts.append(spacing)
     parts.extend(_shadow_sections(grouped))
 
+    # The ramp's own token NAMES, under a heading that names their real role.
+    # They are excluded from the type/spacing lists above (v7) and are no longer
+    # echoed inside the numeric region below, so this is their home — which is
+    # what makes "every token is listed" true without putting user text back
+    # inside the compiler-owned contract.
+    font_size_tokens = _font_size_token_section(grouped)
+    if font_size_tokens:
+        parts.append(font_size_tokens)
+
     # Type-size role anchors — ALWAYS present (ramp-derived or neutral), so a
     # DS deck never generates in the size vacuum left by bypassing
     # DEFAULT_SLIDE_STYLE. Emitted right after the token sections it reads.
@@ -1105,13 +1157,20 @@ def compiled_style_content_is_current(compiled: Optional[str]) -> bool:
     markers existed — and must be recomputed from the row's persisted data via
     ``recompute_compiled_style_content`` before being injected into a prompt.
 
-    The marker is matched on the HEADER LINE ONLY: the artifact body embeds
-    arbitrary README/SKILL prose, and body text that quotes (or collides with)
-    ``[ds-compiler vN]`` must not pin a stale artifact as current.
+    The marker is matched on the HEADER LINE ONLY, and ANCHORED AT ITS END: the
+    compiler writes the marker last on that line, so only the compiler can claim
+    a version. A substring test over the header was defeated by the design
+    system's own NAME, which is interpolated into the very same line — a system
+    NAMED ``Acme [ds-compiler v10] Brand`` put the current marker on the header
+    of an artifact its compiler never produced, so a STALE row read as current
+    and permanently skipped the lazy recompile.
+
+    Trailing whitespace is tolerated (storage round-trips can add it); that is
+    not a version difference.
     """
     if not compiled:
         return False
-    return _COMPILER_VERSION_MARKER in compiled.split("\n", 1)[0]
+    return compiled.split("\n", 1)[0].rstrip().endswith(_COMPILER_VERSION_MARKER)
 
 
 def ensure_compiled_style_content_current(design_system: Any) -> str:
