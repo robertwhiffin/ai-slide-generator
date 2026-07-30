@@ -85,13 +85,20 @@ from src.core.database import Base
 # analogous to ``image_service.MAX_FILE_SIZE``. Kept here next to the models so
 # every writer shares one source of truth. Bytes are only ever persisted in the
 # dedicated ``design_system_asset`` table.
-MAX_ASSET_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB per individual asset
-MAX_BUNDLE_SIZE_BYTES = 200 * 1024 * 1024  # 200 MB per uploaded design-system bundle
-# NOTE: bytes are persisted in-row in ``design_system_asset`` (Lakebase Postgres).
-# Raising the bundle cap to 200 MB means a single import can add up to ~200 MB of
-# BLOB rows; large blobs bloat the row store and every copy-on-write branch fork.
-# This is a deliberate limit bump, not a storage re-architecture — revisit
-# out-of-row/object-store offloading if bundles routinely approach this size.
+MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB per individual asset
+MAX_BUNDLE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB per uploaded design-system bundle
+# These are OOM / decompression-bomb guards, NOT brand-data limits: they exist so a
+# hostile zip cannot exhaust the worker, so they are sized to be unreachable by any
+# plausible real brand rather than to police brand content. A real 134 MB bundle
+# (141.9 MB uncompressed) left only ~1.4x headroom under the previous 200 MB bundle
+# cap — too tight for a brand that adds a few more asset families — so the caps are
+# 500 MB per bundle (~3.5x that bundle) and 100 MB per asset (~5x the largest entry
+# seen in it, 19 MB). Both stay FINITE for exactly the bomb-guard reason.
+# NOTE: bytes are persisted in-row in ``design_system_asset`` (Lakebase Postgres), so
+# a single import can add up to ~500 MB of BLOB rows; large blobs bloat the row store
+# and every copy-on-write branch fork. This is a deliberate limit bump, not a storage
+# re-architecture — revisit out-of-row/object-store offloading if bundles routinely
+# approach this size.
 
 # JSON on SQLite (tests); JSONB on PostgreSQL/Lakebase so the parsed manifest can
 # later be introspected/indexed natively. Mirrors the ImageAsset.tags convention.
@@ -297,7 +304,7 @@ class DesignSystemFile(Base):
     - REFERENCE rows (``kind`` in ``asset``/``font``): a path-metadata pointer to
       a ``design_system_asset`` row (``asset_id``) whose bytes are ALREADY stored
       there; ``data`` is NULL. The bundle's binary payload is never double-stored
-      (a 200 MB bundle must not be duplicated); resolve their bytes via ``asset``.
+      (a 500 MB bundle must not be duplicated); resolve their bytes via ``asset``.
 
     ``path`` is the normalized, bundle-relative path. Zip-slip is rejected at
     import time: no absolute paths and no ``..`` parent-directory traversal.

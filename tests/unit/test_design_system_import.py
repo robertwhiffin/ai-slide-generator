@@ -15,7 +15,11 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
-from tests.unit.conftest_design_system import make_bundle_zip
+from tests.unit.conftest_design_system import (
+    MANIFEST_FILENAME,
+    make_bundle_zip,
+    make_declared_size_bundle_zip,
+)
 
 
 @pytest.fixture
@@ -162,8 +166,11 @@ class TestImportValidation:
         from src.database.models.design_system import MAX_ASSET_SIZE_BYTES
         from src.services.design_system_service import DesignSystemImportError, import_bundle
 
-        big = b"x" * (MAX_ASSET_SIZE_BYTES + 1)
-        zip_bytes = make_bundle_zip(files={"assets/huge.png": big})
+        # DECLARED oversize (cheap zip), so this does not allocate MAX_ASSET_SIZE_BYTES
+        # in the test process just because the cap was raised.
+        zip_bytes = make_declared_size_bundle_zip(
+            {"assets/huge.png": MAX_ASSET_SIZE_BYTES + 1}
+        )
         with pytest.raises(DesignSystemImportError) as exc:
             import_bundle(session, zip_bytes=zip_bytes, user="u")
         assert "too large" in str(exc.value).lower()
@@ -176,10 +183,11 @@ class TestImportValidation:
         from src.services.design_system_service import DesignSystemImportError, import_bundle
 
         # Several individually-legal assets whose sum exceeds the bundle cap.
-        chunk = b"y" * (MAX_ASSET_SIZE_BYTES - 1)
-        count = (MAX_BUNDLE_SIZE_BYTES // len(chunk)) + 2
-        files = {f"assets/img-{i}.png": chunk for i in range(count)}
-        zip_bytes = make_bundle_zip(files=files)
+        chunk = MAX_ASSET_SIZE_BYTES - 1
+        count = (MAX_BUNDLE_SIZE_BYTES // chunk) + 2
+        zip_bytes = make_declared_size_bundle_zip(
+            {f"assets/img-{i}.png": chunk for i in range(count)}
+        )
         with pytest.raises(DesignSystemImportError) as exc:
             import_bundle(session, zip_bytes=zip_bytes, user="u")
         assert "bundle" in str(exc.value).lower()
@@ -191,8 +199,9 @@ class TestImportValidation:
         from src.services.design_system_service import DesignSystemImportError, import_bundle
 
         # Oversized (and never even parsed — the size guard fires first).
-        huge_manifest = "{" + (" " * (MAX_ASSET_SIZE_BYTES + 1))
-        zip_bytes = make_bundle_zip(manifest=huge_manifest)
+        zip_bytes = make_declared_size_bundle_zip(
+            {MANIFEST_FILENAME: MAX_ASSET_SIZE_BYTES + 1}, manifest=None
+        )
         with pytest.raises(DesignSystemImportError) as exc:
             import_bundle(session, zip_bytes=zip_bytes, user="u")
         assert "too large" in str(exc.value).lower()
@@ -203,11 +212,74 @@ class TestImportValidation:
         from src.database.models.design_system import MAX_ASSET_SIZE_BYTES
         from src.services.design_system_service import DesignSystemImportError, import_bundle
 
-        huge_css = ":root{}\n/*" + ("a" * (MAX_ASSET_SIZE_BYTES + 1)) + "*/"
-        zip_bytes = make_bundle_zip(css=huge_css)
+        zip_bytes = make_declared_size_bundle_zip(
+            {"colors_and_type.css": MAX_ASSET_SIZE_BYTES + 1}, css=None
+        )
         with pytest.raises(DesignSystemImportError) as exc:
             import_bundle(session, zip_bytes=zip_bytes, user="u")
         assert "too large" in str(exc.value).lower()
+
+    def test_asset_declaring_over_100mb_is_rejected_not_materialised(self, session):
+        """The per-asset guard still bites at the RAISED 100 MB boundary.
+
+        Pinned to the concrete cap (not just ``MAX_ASSET_SIZE_BYTES + 1``) so a future
+        cap change cannot make this pass vacuously. The entry DECLARES >100 MB in its
+        zip header but is kilobytes on disk, so the assertion is that the guard reads
+        the declared size and refuses — never allocating 100 MB, never OOMing, and
+        never silently dropping the entry.
+        """
+        import zipfile as zipfile_mod
+
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        over_100mb = 100 * 1024 * 1024 + 1
+        zip_bytes = make_declared_size_bundle_zip({"assets/bomb.png": over_100mb})
+
+        reads: list[str] = []
+        original_read = zipfile_mod.ZipFile.read
+
+        def spy_read(self, name, *args, **kwargs):
+            reads.append(getattr(name, "filename", name))
+            return original_read(self, name, *args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(zipfile_mod.ZipFile, "read", spy_read)
+        try:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(session, zip_bytes=zip_bytes, user="u")
+        finally:
+            monkeypatch.undo()
+
+        # VISIBLE + ACTIONABLE: names the offending entry and the limit it broke.
+        message = str(exc.value)
+        assert "assets/bomb.png" in message
+        assert str(over_100mb) in message
+        assert str(100 * 1024 * 1024) in message
+        assert "too large" in message.lower()
+        # PRE-MATERIALISATION: the bomb's bytes were never handed to zf.read.
+        assert "assets/bomb.png" not in reads
+
+    def test_cumulative_bundle_guard_still_trips_above_500mb(self, session):
+        """The cumulative guard still bites at the RAISED 500 MB boundary.
+
+        Individually-legal entries (each under the 100 MB per-asset cap) whose DECLARED
+        sizes sum past 500 MB must be refused by the running total that spans manifest +
+        CSS + assets — proving the bundle cap is still cumulative, not per-entry.
+        """
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        per_entry = 90 * 1024 * 1024  # legal on its own (< 100 MB)
+        entries = {f"assets/img-{i}.png": per_entry for i in range(6)}  # 540 MB declared
+        assert sum(entries.values()) > 500 * 1024 * 1024
+        assert max(entries.values()) < 100 * 1024 * 1024  # none trips the per-asset cap
+
+        zip_bytes = make_declared_size_bundle_zip(entries)
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="u")
+
+        message = str(exc.value)
+        assert "bundle" in message.lower()
+        assert str(500 * 1024 * 1024) in message
 
     def test_duplicate_name_raises_conflict(self, session):
         from src.services.design_system_service import (

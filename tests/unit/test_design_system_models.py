@@ -409,9 +409,11 @@ class TestByteStorageGuardrails:
 
         assert MAX_ASSET_SIZE_BYTES > 0
         assert MAX_BUNDLE_SIZE_BYTES >= MAX_ASSET_SIZE_BYTES
-        # Concrete caps: 50 MB per individual asset, 200 MB per bundle.
-        assert MAX_ASSET_SIZE_BYTES == 50 * 1024 * 1024
-        assert MAX_BUNDLE_SIZE_BYTES == 200 * 1024 * 1024
+        # Concrete caps: 100 MB per individual asset, 500 MB per bundle. Sized to be
+        # unreachable by a real brand bundle (they are OOM/bomb guards, not brand-data
+        # limits) while staying FINITE so a hostile zip cannot exhaust the worker.
+        assert MAX_ASSET_SIZE_BYTES == 100 * 1024 * 1024
+        assert MAX_BUNDLE_SIZE_BYTES == 500 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------

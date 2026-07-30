@@ -197,6 +197,44 @@ def templated_bundle_files() -> dict:
     }
 
 
+def make_declared_size_bundle_zip(
+    entries: dict,
+    *,
+    manifest: Optional[dict] = "__default__",
+    css: Optional[str] = COLORS_AND_TYPE_CSS,
+    root_prefix: str = "",
+) -> bytes:
+    """Build a bundle whose ``entries`` DECLARE a large uncompressed size cheaply.
+
+    ``entries`` maps ``{arcname: declared_uncompressed_bytes}``. Each entry is
+    written as highly-compressible NUL bytes streamed a megabyte at a time, so the
+    zip header advertises the full size (what the importer's pre-materialisation
+    size guard reads) while the zip on disk stays kilobytes — a faithful
+    decompression bomb that never allocates the declared size in the test process.
+
+    Use this instead of ``b"x" * (CAP + 1)`` so a guard test does not allocate
+    hundreds of megabytes just because the caps were raised.
+    """
+    if manifest == "__default__":
+        manifest = default_manifest()
+
+    buf = io.BytesIO()
+    chunk = b"\0" * (1024 * 1024)
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if manifest is not None:
+            body = manifest if isinstance(manifest, str) else json.dumps(manifest)
+            zf.writestr(root_prefix + MANIFEST_FILENAME, body)
+        if css is not None:
+            zf.writestr(root_prefix + "colors_and_type.css", css)
+        for arcname, declared in entries.items():
+            with zf.open(root_prefix + arcname, "w") as handle:
+                remaining = declared
+                while remaining > 0:
+                    handle.write(chunk[: min(remaining, len(chunk))])
+                    remaining -= min(remaining, len(chunk))
+    return buf.getvalue()
+
+
 def make_bundle_zip(
     *,
     manifest: Optional[dict] = "__default__",
