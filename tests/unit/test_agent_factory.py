@@ -375,7 +375,12 @@ def test_design_system_takes_precedence_over_slide_style():
 
     config = AgentConfig(design_system_id=99, slide_style_id=42)
     ds = MagicMock()
-    ds.compiled_style_content = "DS-MARKER " + _COMPILER_VERSION_MARKER
+    # Real artifact shape: the header line is "HEADER: <name> <marker>", which is
+    # what version detection matches exactly (a bare "text <marker>" line is a
+    # pre-version artifact and correctly recompiles).
+    ds.compiled_style_content = (
+        "SLIDE VISUAL STYLE: DS-MARKER " + _COMPILER_VERSION_MARKER + "\n\nbody"
+    )
     style = MagicMock()
     style.style_content = "LEGACY-STYLE-MARKER"
     style.image_guidelines = None
