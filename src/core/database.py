@@ -533,13 +533,14 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system (v1): add font_mapping_json to pre-existing tables ---
         _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite)
 
-        # --- design system token: widen name 100 -> 255 (zero token loss) ---
-        _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite)
-
-        # --- design system token: widen group 50 -> 255 (zero token loss) ---
-        _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite)
-
         # --- design system: free-form brand text -> UNCAPPED TEXT (no cap at all) ---
+        # SUPERSEDES the two ``design_system_token`` widen migrations (name 100 ->
+        # 255, group 50 -> 255). Their target columns are now unbounded ``TEXT``,
+        # which is strictly wider than anything they could produce, so running them
+        # can only ever move a column the WRONG way — see
+        # :func:`_migrate_widen_token_name` for the oscillation and the startup
+        # failure that caused. They are retained as documented no-ops rather than
+        # deleted, so a reader of this list can see what happened to them.
         _migrate_uncap_brand_text_columns(conn, inspector, schema, _qual, is_sqlite)
 
         # --- keep newly created objects owned by the shared role (prod forks) ---
@@ -655,106 +656,56 @@ def _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlit
 
 
 def _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite) -> None:
-    """Widen ``design_system_token.name`` from VARCHAR(100) to VARCHAR(255).
+    """RETIRED no-op: ``design_system_token.name`` 100 -> 255, superseded by TEXT.
 
-    The zero-token-loss requirement: a brand token whose NAME exceeded 100
-    characters did not merely get dropped, it made the ENTIRE bundle import fail,
-    so one long name cost every other token in the bundle. The API validator and
-    the ORM declaration are widened alongside this ALTER (fresh databases come
-    from ``create_all``; this handles ones an earlier deploy provisioned).
+    This once issued ``ALTER COLUMN name TYPE VARCHAR(255)`` for the
+    zero-token-loss requirement (a name over 100 characters failed the ENTIRE
+    bundle import, costing every other token in it). 255 was then reopened by a
+    longer real string, and :func:`_migrate_uncap_brand_text_columns` removed the
+    bound instead of moving it again. ``TEXT`` is strictly wider than VARCHAR(255),
+    so there is no longer any state from which this migration's target is an
+    improvement — it can only NARROW a column the newer migration widened.
 
-    Idempotent: the current width is probed first and the ALTER is skipped when it
-    is already >= 255, so repeated migration runs are a no-op.
+    It did exactly that, because its skip guard read ``length is None`` — the
+    signature of an unbounded ``TEXT`` column, i.e. the WIDEST possible state — as
+    "no width yet, needs widening". Two concrete failures on PostgreSQL 14:
 
-    Dialect behaviour differs and is deliberately NOT papered over:
-    - PostgreSQL / Lakebase (the real target): ``ALTER COLUMN TYPE VARCHAR(255)``
-      is a widening of the same base type, which Postgres performs without
-      rewriting the table and without a lock beyond the brief catalog update.
-    - SQLite (tests only): declared VARCHAR length is NOT ENFORCED, so there is
-      nothing to widen — a 200-char name already round-trips. Attempting
-      ``ALTER COLUMN TYPE`` there would raise (SQLite has no such statement), and
-      rebuilding the table would be a destructive no-value operation. So this
-      returns early, which is asserted by a test rather than assumed.
+    1. The schema OSCILLATED instead of converging. A fresh ``create_all``
+       database starts at ``text``; run 1 narrowed it to ``varchar(255)``; the
+       uncap migration then converted it back on run 2, and so on. (The uncap
+       migration could not repair it within the SAME run because it read column
+       types from the shared inspector, whose reflection cache still described the
+       pre-ALTER state, so it skipped those columns as "already unbounded".)
+    2. Worse, it could HARD-FAIL STARTUP. Once a token longer than 255 characters
+       existed — which is the entire point of the uncap migration — the narrowing
+       ALTER raised ``StringDataRightTruncation``, and because the SAVEPOINT here
+       was not wrapped in a try/except, the error escaped and aborted the single
+       transaction that carries EVERY migration. A database holding legitimate
+       brand data could not boot.
 
-    Wrapped in a SAVEPOINT so a failure (e.g. insufficient privileges on a
-    locked-down deploy) cannot poison the outer migration transaction: the column
-    stays at its old width and the rest of the migrations still apply.
+    So the function is retired to a no-op rather than repaired: a widener whose
+    target is now ``TEXT`` must never fire. It is kept (as is its call site's
+    comment) so this history is discoverable, and because deleting a migration
+    function that historical databases' logs refer to loses that thread. The
+    SQLite contract it always had is unchanged and still asserted by tests: length
+    is unenforced there, so there was never anything to do.
+
+    Convergence on every dialect is now owned solely by
+    :func:`_migrate_uncap_brand_text_columns`, which re-reads the LIVE column type
+    per column and is a true fixpoint.
     """
-    from sqlalchemy import inspect, text
-
-    if is_sqlite:
-        # Length is unenforced here; see the docstring. Nothing to do.
-        return
-
-    insp = inspector or inspect(conn)
-    try:
-        columns = {c["name"]: c for c in insp.get_columns("design_system_token", schema=schema)}
-    except Exception:
-        return
-    column = columns.get("name")
-    if column is None:
-        return
-
-    current_length = getattr(column.get("type"), "length", None)
-    if current_length is not None and current_length >= 255:
-        return  # already widened
-
-    logger.info(
-        "Migration: widening design_system_token.name to VARCHAR(255) "
-        f"(was {current_length})"
-    )
-    with conn.begin_nested():
-        conn.execute(text(
-            f"ALTER TABLE {_qual('design_system_token')} "
-            "ALTER COLUMN name TYPE VARCHAR(255)"
-        ))
+    return
 
 
 def _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite) -> None:
-    """Widen ``design_system_token.group`` from VARCHAR(50) to VARCHAR(255).
+    """RETIRED no-op: ``design_system_token.group`` 50 -> 255, superseded by TEXT.
 
-    The same zero-token-loss requirement that widened ``name``, applied to the
-    GROUP: a 51-character group name was rejected with ``string_too_long``, which
-    failed the ENTIRE bundle import — so one long group name cost every other token
-    in the bundle. No token may be turned away for the name of its group, and the
-    compiler imposes no cap of its own (it sanitizes group names rather than
-    rejecting them), so storage and the API validator are what had to move.
-
-    Idempotent, dialect-safe and SAVEPOINT-wrapped exactly like
-    :func:`_migrate_widen_token_name` — see that docstring for why SQLite returns
-    early (declared VARCHAR length is not enforced there, and ``ALTER COLUMN TYPE``
-    does not exist) and why the widening is cheap on PostgreSQL/Lakebase (same base
-    type, no table rewrite).
+    Retired for exactly the reasons given in :func:`_migrate_widen_token_name` —
+    same oscillation, same potential startup abort, same superseding migration.
+    ``design_system_token.group`` is in :data:`_BRAND_TEXT_COLUMNS`, so its
+    conversion to unbounded ``TEXT`` is guaranteed there instead.
     """
-    from sqlalchemy import inspect, text
-
-    if is_sqlite:
-        # Length is unenforced here; see ``_migrate_widen_token_name``.
-        return
-
-    insp = inspector or inspect(conn)
-    try:
-        columns = {c["name"]: c for c in insp.get_columns("design_system_token", schema=schema)}
-    except Exception:
-        return
-    column = columns.get("group")
-    if column is None:
-        return
-
-    current_length = getattr(column.get("type"), "length", None)
-    if current_length is not None and current_length >= 255:
-        return  # already widened
-
-    logger.info(
-        "Migration: widening design_system_token.group to VARCHAR(255) "
-        f"(was {current_length})"
-    )
-    with conn.begin_nested():
-        # ``group`` is a SQL reserved word — quote the identifier.
-        conn.execute(text(
-            f"ALTER TABLE {_qual('design_system_token')} "
-            'ALTER COLUMN "group" TYPE VARCHAR(255)'
-        ))
+    return
 
 
 #: Every FREE-FORM BRAND TEXT column, as ``(table, column)``. Converted to
@@ -829,25 +780,33 @@ def _migrate_uncap_brand_text_columns(
         # Length is unenforced here; see the docstring. Nothing to do.
         return
 
-    insp = inspector or inspect(conn)
     for table_name, column_name in _BRAND_TEXT_COLUMNS:
+        # Reflect with a FRESH inspector per column, deliberately NOT the shared one
+        # ``_run_migrations`` threads through: an inspector caches its reflection,
+        # so a shared one answers with the schema as it was when first read. That
+        # staleness is not hypothetical — it is why this migration used to SKIP the
+        # two ``design_system_token`` columns that ran right before it, leaving them
+        # narrowed. Deciding on a live read is what makes this a true fixpoint from
+        # any starting state.
         try:
             columns = {
-                c["name"]: c for c in insp.get_columns(table_name, schema=schema)
+                c["name"]: c
+                for c in inspect(conn).get_columns(table_name, schema=schema)
             }
         except Exception:
             continue  # table absent on this deploy
         column = columns.get(column_name)
         if column is None:
             continue
-        if getattr(column.get("type"), "length", None) is None:
+        current_length = getattr(column.get("type"), "length", None)
+        if current_length is None:
             continue  # already unbounded TEXT
 
         logger.info(
             "Migration: converting %s.%s to TEXT (was length %s)",
             table_name,
             column_name,
-            getattr(column.get("type"), "length", None),
+            current_length,
         )
         try:
             with conn.begin_nested():
