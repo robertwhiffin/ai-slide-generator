@@ -233,7 +233,10 @@ class TestColorTokens:
 
         ds = _make_ds(session, tokens=_TOKENS)
         out = compile_design_system(ds)
-        assert out.startswith("SLIDE VISUAL STYLE: Acme Design System")
+        # v12: the version marker occupies a FIXED slot before the name, so the
+        # name follows it rather than opening the line.
+        assert out.startswith("SLIDE VISUAL STYLE: ")
+        assert out.splitlines()[0].endswith("Acme Design System")
 
     def test_color_values_present(self, session):
         from src.services.design_system_compiler import compile_design_system
@@ -1155,8 +1158,9 @@ class TestCompilerVersionMarker:
 
         out = compile_design_system(_make_ds(session, tokens=_TOKENS))
         header = out.splitlines()[0]
-        assert header.startswith("SLIDE VISUAL STYLE: Acme Design System")
-        assert _COMPILER_VERSION_MARKER in header
+        # v12: marker in a fixed, name-independent slot; the name follows it.
+        assert header.startswith(f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER}")
+        assert header.endswith("Acme Design System")
 
     def test_fresh_compile_and_recompute_are_current(self, session):
         from src.services.design_system_compiler import (
@@ -1226,9 +1230,12 @@ class TestCompilerVersionMarker:
             f"This synthetic readme mentions {_COMPILER_VERSION_MARKER} in prose."
         )
         assert not compiled_style_content_is_current(stale_with_body_collision)
-        # And a marker genuinely on the header line still reads current.
+        # And a marker in its genuine FIXED header slot still reads current. (v12:
+        # the old trailing-marker layout is now itself the spoof shape — a NAME can
+        # end with the marker — so it must NOT be accepted; see
+        # TestVersionMarkerPositionIsNameIndependent.)
         assert compiled_style_content_is_current(
-            f"SLIDE VISUAL STYLE: Acme Design System {_COMPILER_VERSION_MARKER}\n\nbody"
+            f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER} Acme Design System\n\nbody"
         )
 
 
@@ -1381,7 +1388,7 @@ class TestVersionMarkerAnchorsAtEndOfHeader:
         )
 
         assert compiled_style_content_is_current(
-            f"SLIDE VISUAL STYLE: Acme Design System {_COMPILER_VERSION_MARKER}  \n\nbody"
+            f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER} Acme Design System  \n\nbody"
         )
 
 
@@ -3003,3 +3010,191 @@ class TestFontSizeNeverLabeledSpacingAtAnyRampLength:
         )
         assert "this design system ships no font-size ramp" in out
         assert "40-52px" in out
+
+
+class TestVersionMarkerPositionIsNameIndependent:
+    """BLOCKING 2 (round 5, cross-review): version currency was still derived from
+    "what the header line ENDS WITH", and the header line ends with user-controlled
+    text by construction — the design system NAME is interpolated into it.
+
+    A system NAMED ``Evil Brand [ds-compiler v12]`` produced the header
+    ``SLIDE VISUAL STYLE: Evil Brand [ds-compiler v12]``, which satisfied both the
+    prefix rule AND the endswith rule AND left a non-empty name segment — so a
+    STALE pre-version body under that name read as CURRENT and never recompiled.
+    Trailing space / trailing newline variants passed too.
+
+    The fix is the reviewer's SIMPLIFICATION: stop asking what the header ends
+    with. The marker is emitted in a FIXED position where no user text can precede
+    it — immediately after the constant ``SLIDE VISUAL STYLE:`` label — and
+    detection is an exact positional prefix match. The name follows the marker, so
+    whatever the name contains it can only ever appear AFTER the compared region.
+
+    All fixtures SYNTHETIC ("Acme", "Evil Brand" — invented).
+    """
+
+    _SPOOF_NAME = "Evil Brand [ds-compiler v12]"
+
+    def _stale_bodies(self):
+        from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
+
+        marker = _COMPILER_VERSION_MARKER
+        return {
+            "name ends with the marker": (
+                f"SLIDE VISUAL STYLE: Evil Brand {marker}\nSTALE PRE-VERSION BODY"
+            ),
+            "trailing space": (
+                f"SLIDE VISUAL STYLE: Evil Brand {marker} \nSTALE PRE-VERSION BODY"
+            ),
+            "trailing newline": (
+                f"SLIDE VISUAL STYLE: Evil Brand {marker}\n\nSTALE PRE-VERSION BODY"
+            ),
+        }
+
+    def test_name_ending_with_the_marker_reads_stale(self):
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+        )
+
+        for label, artifact in self._stale_bodies().items():
+            assert not compiled_style_content_is_current(artifact), (
+                f"{label}: a NAME ending with the marker passed as current, so a "
+                "stale artifact would never recompile"
+            )
+
+    def test_spoof_named_system_actually_recompiles_on_read(self, session):
+        """End-to-end consequence: the read-through seam must REBUILD such a row,
+        not serve the stale text."""
+        from src.services.design_system_compiler import (
+            ensure_compiled_style_content_current,
+        )
+
+        ds = _make_ds(session, name=self._SPOOF_NAME, tokens=_TOKENS)
+        ds.compiled_style_content = (
+            f"SLIDE VISUAL STYLE: {self._SPOOF_NAME}\nSTALE PRE-VERSION BODY"
+        )
+        session.commit()
+
+        out = ensure_compiled_style_content_current(ds)
+        assert "STALE PRE-VERSION BODY" not in out, "stale artifact was served as-is"
+        assert "BRAND COLOR TOKENS:" in out, "row was not actually recompiled"
+
+    def test_a_systems_own_fresh_compile_still_reads_current(self, session):
+        """The spoof-shaped name must not be PENALISED either: its own genuine
+        compile is current, whatever the name contains."""
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        for name in (self._SPOOF_NAME, "Acme Design System", "[ds-compiler v12]"):
+            ds = _make_ds(session, name=name, tokens=_TOKENS)
+            assert compiled_style_content_is_current(compile_design_system(ds)), (
+                f"a genuine fresh compile of {name!r} was misread as stale"
+            )
+
+    def test_marker_precedes_the_name_in_the_emitted_header(self, session):
+        """The structural property the check relies on: the compared region is a
+        CONSTANT prefix, and the user-controlled name only ever follows it."""
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            _STYLE_HEADER,
+            compile_design_system,
+        )
+
+        ds = _make_ds(session, name=self._SPOOF_NAME, tokens=_TOKENS)
+        header = compile_design_system(ds).split("\n", 1)[0]
+
+        expected_prefix = f"{_STYLE_HEADER}: {_COMPILER_VERSION_MARKER}"
+        assert header.startswith(expected_prefix)
+        # The name follows the compared region, so it cannot influence the verdict.
+        # Its marker-SHAPED text is stripped in this slot (see
+        # test_name_cannot_contribute_marker_text_to_the_header), so what remains
+        # here is the name's non-marker content — present, and strictly AFTER the
+        # prefix.
+        assert header[len(expected_prefix):].strip() == "Evil Brand"
+
+    def test_older_marker_in_the_fixed_position_still_reads_stale(self):
+        """A genuinely older artifact — right shape, wrong version — is stale."""
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+        )
+
+        assert not compiled_style_content_is_current(
+            "SLIDE VISUAL STYLE: [ds-compiler v11] Acme Design System\n\nold body"
+        )
+
+    def test_legacy_row_whose_name_smuggled_the_current_marker_reads_stale(self):
+        """Found while fixing this: POSITION ALONE was not enough, via LEGACY rows.
+
+        A system named ``"[ds-compiler v12] Evil"`` compiled by the v11 compiler
+        (which emitted name-then-marker) produced a header whose LEADING characters
+        are byte-for-byte the current prefix while its body is v11 — so a pure
+        prefix rule read it as current and it never recompiled. Detection therefore
+        also requires EXACTLY ONE marker-shaped substring on the header line.
+        """
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compiled_style_content_is_current,
+        )
+
+        legacy_v11_row = (
+            f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER} Evil [ds-compiler v11]"
+            "\nSTALE v11 BODY"
+        )
+        assert not compiled_style_content_is_current(legacy_v11_row), (
+            "a legacy row whose NAME carried the current marker passed as current"
+        )
+
+    def test_name_cannot_contribute_marker_text_to_the_header(self, session):
+        """The emission-side half: marker-SHAPED text (any version) is stripped from
+        the name in the header slot, so no name can put a second marker there.
+
+        Scoped to the name deliberately — README/SKILL prose keeps its marker
+        mentions, which an earlier round established must not be scrubbed.
+        """
+        from src.services.design_system_compiler import (
+            _MARKER_LIKE_RE,
+            compile_design_system,
+        )
+
+        for name in (
+            "[ds-compiler v12] Evil",
+            "Evil [ds-compiler v11]",
+            "[ds-compiler v99] Acme [ds-compiler v3]",
+        ):
+            header = compile_design_system(
+                _make_ds(session, name=name, tokens=_TOKENS)
+            ).split("\n", 1)[0]
+            assert len(_MARKER_LIKE_RE.findall(header)) == 1, (
+                f"name {name!r} contributed extra marker text to: {header!r}"
+            )
+
+    def test_a_name_made_only_of_marker_text_falls_back_to_the_default_label(
+        self, session
+    ):
+        """Stripping must not leave the header nameless."""
+        from src.services.design_system_compiler import (
+            _COMPILER_VERSION_MARKER,
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        out = compile_design_system(
+            _make_ds(session, name=_COMPILER_VERSION_MARKER, tokens=_TOKENS)
+        )
+        assert out.split("\n", 1)[0].endswith("Design System")
+        assert compiled_style_content_is_current(out)
+
+    def test_readme_prose_keeps_its_marker_mentions(self, session):
+        """The strip is NAME-scoped: an author documenting the marker string in
+        their README must not have their documentation mangled."""
+        from src.services.design_system_compiler import compile_design_system
+
+        readme = (
+            "# Acme brand manual\n\n"
+            "Our tooling stamps [ds-compiler v12] into compiled output.\n"
+        )
+        out = compile_design_system(
+            _make_ds(session, tokens=_TOKENS), readme_md=readme
+        )
+        assert "stamps [ds-compiler v12] into compiled output" in out

@@ -141,6 +141,32 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 COMPILER_VERSION = 12
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
+# The EXACT, name-independent header prefix every compiled artifact opens with.
+# Currency is decided by comparing against this constant (see
+# ``compiled_style_content_is_current``), which is safe precisely because nothing
+# user-controlled can appear before or inside it — the design-system name follows
+# it. Deriving currency from the END of the header instead was spoofable by a name
+# that ended with the marker.
+_HEADER_VERSION_PREFIX = f"{_STYLE_HEADER}: {_COMPILER_VERSION_MARKER}"
+
+# Marker-SHAPED text, at ANY version number. Removed from the design-system NAME
+# where it is interpolated into the header (:func:`_header_safe_name`), which is
+# what makes the fixed marker slot the compiler's alone.
+#
+# Position ALONE is not sufficient, and a bare prefix comparison hid one last
+# spoof: a system named ``"[ds-compiler v12] Evil"`` compiled by the OLD v11
+# compiler emits ``SLIDE VISUAL STYLE: [ds-compiler v12] Evil [ds-compiler v11]``,
+# whose leading characters are byte-for-byte the CURRENT prefix — so the stale v11
+# artifact reads current. The name must therefore not be able to contribute marker
+# text at ANY position in that line.
+#
+# Scoped to the NAME deliberately. README / SKILL prose keeps its marker mentions
+# untouched (an earlier round established that scrubbing an author's own
+# documentation is destructive and buys nothing, since prose lives outside the
+# header line): the name is a short identifier occupying a STRUCTURALLY RESERVED
+# slot, which is a different thing from documentation.
+_MARKER_LIKE_RE = re.compile(r"\[ds-compiler\s+v[0-9]+\]", re.IGNORECASE)
+
 # Canonical color-group ordering -> deterministic, human-meaningful sections.
 _COLOR_GROUPS = ("core", "accents", "ink", "tints")
 
@@ -386,6 +412,27 @@ def _safe(value: Any) -> str:
 def _is_control(ch: str) -> bool:
     """True for C0/C1 control characters (Unicode category ``Cc``)."""
     return unicodedata.category(ch) == "Cc"
+
+
+def _header_safe_name(value: Any) -> str:
+    """Sanitize the design-system name for the version-stamped HEADER line.
+
+    :func:`_safe` plus removal of marker-SHAPED text (:data:`_MARKER_LIKE_RE`).
+    The header line is the ONE place the artifact makes a machine-readable claim
+    about itself — which compiler version produced it — so it is the one place a
+    user string must not be able to contribute marker text. Everywhere else the
+    name is emitted, and everywhere the README/SKILL prose is emitted, marker
+    mentions survive untouched.
+
+    Any version number is matched, not just the current one: the spoof that
+    motivated this used the CURRENT marker in the name of a row compiled by an
+    OLDER compiler, so matching only the current version would have left the
+    mirror-image case (an older marker in the name of a current row) open.
+
+    A name that consists entirely of marker text collapses to empty; the caller
+    falls back to the default label, so the header never loses its name segment.
+    """
+    return _MARKER_LIKE_RE.sub("", _safe(value)).strip()
 
 
 # NO token NAME is echoed inside the compiler-owned type-scale region. That
@@ -1108,12 +1155,30 @@ def compile_design_system(
     """
     parts: list[str] = []
 
-    name = _safe(getattr(design_system, "name", None) or "Design System") or "Design System"
+    # ``_header_safe_name`` also strips marker-shaped text: this name lands in the
+    # version-stamped header slot, so it must not be able to contribute a marker at
+    # any position on that line (see ``_MARKER_LIKE_RE``).
+    name = (
+        _header_safe_name(getattr(design_system, "name", None) or "Design System")
+        or "Design System"
+    )
     # The version marker rides on the header line (no schema change) so persisted
     # artifacts self-describe which compiler produced them — see
-    # ``compiled_style_content_is_current``. The name is sanitized so a design
-    # system called "Acme\n..." cannot inject additional header lines.
-    parts.append(f"{_STYLE_HEADER}: {name} {_COMPILER_VERSION_MARKER}")
+    # ``compiled_style_content_is_current``.
+    #
+    # POSITION IS THE SECURITY PROPERTY (v12). The marker sits in a FIXED slot
+    # immediately after the constant ``SLIDE VISUAL STYLE:`` label, BEFORE the
+    # name, so the compared region is a compiler-owned constant that no user text
+    # can precede or extend. Emitting it after the name instead made currency a
+    # function of what the header ENDED WITH — and the header ends with
+    # user-controlled text by construction, because the name is interpolated into
+    # it. A design system named ``Evil Brand [ds-compiler v12]`` therefore made a
+    # STALE pre-version body read as current, so it never recompiled.
+    #
+    # The name still follows in full (nothing is hidden from the model); it simply
+    # cannot reach the region the version check reads. The name is sanitized as
+    # well, so it cannot inject additional header lines.
+    parts.append(f"{_HEADER_VERSION_PREFIX} {name}")
 
     # A short frontmatter-style description/identity caption comes FIRST (huashu /
     # Claude Code skill convention: blurb -> manual); the full brand manual below
@@ -1345,42 +1410,67 @@ def compiled_style_content_is_current(compiled: Optional[str]) -> bool:
     markers existed — and must be recomputed from the row's persisted data via
     ``recompute_compiled_style_content`` before being injected into a prompt.
 
-    Detection reads a position that user-controlled text CANNOT occupy: the
-    header line must match the exact shape this module emits —
-    ``f"{_STYLE_HEADER}: {name} {marker}"`` — with a non-empty name segment
-    before the marker.
+    Detection is an EXACT POSITIONAL MATCH against
+    :data:`_HEADER_VERSION_PREFIX` — the constant
+    ``"SLIDE VISUAL STYLE: [ds-compiler vN]"`` that every compiled artifact opens
+    with. The design-system name follows that prefix, so no user-controlled text
+    can precede, interrupt or extend the compared region.
 
-    Three weaker rules were each defeated by the design system's NAME, which is
-    interpolated into that very line:
+    FOUR weaker rules were each defeated by the design system's NAME, because
+    every one of them read a position the name is interpolated into:
       1. ``marker in artifact``     — any README mentioning the string passed.
       2. ``marker in header line``  — a system NAMED like the marker passed.
-      3. ``header.endswith(marker)`` — a system named EXACTLY the marker passed:
-         ``SLIDE VISUAL STYLE: [ds-compiler v10]`` ends with the marker while its
-         body is a pre-version artifact.
+      3. ``header.endswith(marker)`` — a system named EXACTLY the marker passed.
+      4. ``prefix + non-empty name segment + endswith(marker)`` — a system named
+         ``Evil Brand [ds-compiler vN]`` satisfied all three clauses at once, so a
+         STALE pre-version body under that name read as current and NEVER
+         recompiled (the round-5 repro, incl. trailing-space/newline variants).
 
-    What makes the current rule unforgeable is the SEPARATOR, not the marker.
-    ``_safe`` strips every line break from the name, so a name can never end one
-    line and begin another — it cannot produce a header line that lacks the
-    ``"HEADER: "`` prefix, and it cannot make the text before the marker empty.
-    Note a "marker alone on its own line" rule would NOT be safe here: README /
-    SKILL text goes through ``_safe_multiline``, which preserves newlines by
-    design, so a body line could forge it.
+    Each fix tightened WHAT was compared while leaving WHERE it was compared
+    user-influenced. Position is the fix: currency is no longer a function of what
+    the header ends with, because a compiler-owned constant now occupies the front
+    of the line and the name can only ever appear after it.
 
-    Trailing whitespace is tolerated (storage round-trips can add it); that is
-    not a version difference. A row whose name is legitimately the marker text
-    still reads current from its OWN compile, because the prefix and a non-empty
-    name segment are both present.
+    Trailing whitespace is tolerated (storage round-trips can add it); that is not
+    a version difference. A row whose name legitimately contains the marker text
+    still reads current from its OWN compile — the name buys nothing either way,
+    which is the point.
+
+    Three conditions, because position alone left one spoof reachable through
+    LEGACY rows. A v12 header must:
+
+    1. START with the exact current prefix followed by its separating space
+       (position), and
+    2. carry a NON-EMPTY name segment after it — the compiler always emits one
+       (an empty name falls back to the default label), so a bare-prefix header is
+       not something this compiler can produce, and
+    3. contain EXACTLY ONE marker-shaped substring (:data:`_MARKER_LIKE_RE`) —
+       i.e. the compiler's own.
+
+    Condition 2 closes the last case, which only a PERSISTED pre-v12 artifact can
+    exhibit: a system named ``"[ds-compiler v12] Evil"`` compiled by the v11
+    compiler (name-then-marker layout) produced
+    ``SLIDE VISUAL STYLE: [ds-compiler v12] Evil [ds-compiler v11]``, whose leading
+    characters ARE the current prefix while its body is v11. Counting markers makes
+    that header answer False on the SECOND marker, so the row recompiles. Such a
+    header is unreachable from v12 emission — ``_header_safe_name`` strips
+    marker-shaped text from the name — so this condition guards history, not the
+    current writer.
     """
     if not compiled:
         return False
     header = compiled.split("\n", 1)[0].rstrip()
-    prefix = f"{_STYLE_HEADER}: "
-    if not header.startswith(prefix) or not header.endswith(_COMPILER_VERSION_MARKER):
+    separator = f"{_HEADER_VERSION_PREFIX} "
+    if not header.startswith(separator):
         return False
-    # The name segment between the prefix and the marker must be non-empty, which
-    # is what the compiler always emits and what a bare-marker header lacks.
-    name_segment = header[len(prefix): -len(_COMPILER_VERSION_MARKER)]
-    return bool(name_segment.strip())
+    # A name segment is always emitted (empty names fall back to the default
+    # label), so a header that stops at the prefix was not written by this
+    # compiler.
+    if not header[len(separator):].strip():
+        return False
+    # Exactly one marker: the compiler's own, in its slot. A second one means the
+    # name smuggled marker text (only possible in a pre-v12 persisted artifact).
+    return len(_MARKER_LIKE_RE.findall(header)) == 1
 
 
 def ensure_compiled_style_content_current(design_system: Any) -> str:
