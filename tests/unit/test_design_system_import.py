@@ -505,3 +505,97 @@ class TestTokenNameColumnWidthMigration:
         from src.database.models.design_system import DesignSystemToken
 
         assert DesignSystemToken.__table__.c.name.type.length == 255
+
+
+class TestTokenGroupWidth:
+    """BLOCKING 4a (round 5, cross-review): a 51-character GROUP name was rejected
+    at the API validator with ``string_too_long``, so a bundle carrying one long
+    group name failed to import — turning a token away for the NAME OF ITS GROUP,
+    which the zero-token-loss requirement rules out. Worse than the silent drop the
+    compiler stopped doing: one long group name cost every other token in the
+    bundle.
+
+    ``design_system_token.group`` is widened 50 -> 255 to match ``name`` and
+    ``value``, with the same hand-rolled idempotent ALTER used for ``name``.
+
+    All fixtures SYNTHETIC.
+    """
+
+    def test_api_validator_accepts_a_200_char_group(self):
+        from src.api.routes.settings.design_systems import TokenIn
+
+        token = TokenIn(group="g" * 200, name="tok", value="#123456")
+        assert token.group == "g" * 200
+
+    def test_orm_group_column_is_declared_255(self):
+        """``create_all()`` uses the ORM declaration for FRESH databases, so it must
+        be widened alongside the ALTER for existing ones."""
+        from src.database.models.design_system import DesignSystemToken
+
+        assert DesignSystemToken.__table__.c.group.type.length == 255
+
+    def test_a_200_char_group_compiles_and_keeps_its_tokens(self):
+        """End to end: the long group must reach the compiled artifact, not just be
+        storable."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+        from sqlalchemy.pool import StaticPool
+
+        from src.core.database import Base
+        from src.database.models.design_system import DesignSystem, DesignSystemToken
+        from src.services.design_system_compiler import compile_design_system
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        long_group = "g" * 200
+        with Session(engine) as session:
+            ds = DesignSystem(name="Acme Width DS", version=1)
+            ds.tokens.append(
+                DesignSystemToken(group=long_group, name="tok-long", value="#0A0B0C")
+            )
+            session.add(ds)
+            session.commit()
+            session.refresh(ds)
+            out = compile_design_system(ds)
+        engine.dispose()
+
+        assert "tok-long: #0A0B0C" in out, "token with a 200-char group was dropped"
+
+    def test_widen_group_helper_is_a_noop_on_sqlite(self):
+        """Same dialect contract as the name widening: SQLite does not enforce
+        VARCHAR length, so the helper returns early rather than attempting an
+        ALTER COLUMN TYPE that SQLite cannot run."""
+        from sqlalchemy import create_engine, inspect, text
+        from sqlalchemy.pool import StaticPool
+
+        from src.core.database import Base, _migrate_widen_token_group
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            inspector = inspect(conn)
+            _migrate_widen_token_group(conn, inspector, None, lambda t: f'"{t}"', True)
+            conn.execute(text(
+                "INSERT INTO design_system "
+                "(name, version, published, is_active, is_default, created_at, updated_at) "
+                "VALUES ('Acme Group Width', 1, 0, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+            ds_id = conn.execute(text("SELECT id FROM design_system")).scalar()
+            conn.execute(
+                text(
+                    "INSERT INTO design_system_token (design_system_id, \"group\", name, value) "
+                    "VALUES (:ds, :grp, 'tok', '64px')"
+                ),
+                {"ds": ds_id, "grp": "g" * 200},
+            )
+            got = conn.execute(text('SELECT "group" FROM design_system_token')).scalar()
+        assert got == "g" * 200
+        engine.dispose()

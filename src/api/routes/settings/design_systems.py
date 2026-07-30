@@ -58,7 +58,14 @@ class TokenIn(BaseModel):
     # of the zero-token-loss requirement. Real design systems ship descriptive
     # names ("brand-semantic-surface-elevated-interactive-hover"), so the limit
     # exists only to match storage, not to police naming.
-    group: str = Field(..., min_length=1, max_length=50)
+    #
+    # ``group`` is 255 for exactly the same reason. It was 50, which rejected a
+    # 51-character group name with ``string_too_long`` — turning a token away for
+    # the NAME OF ITS GROUP, the one thing the zero-token-loss requirement forbids,
+    # and failing the whole bundle to do it. The compiler imposes no cap of its own
+    # (it sanitizes group names, never rejects them), so this bound exists only to
+    # match ``design_system_token.group``.
+    group: str = Field(..., min_length=1, max_length=255)
     name: str = Field(..., min_length=1, max_length=255)
     value: str = Field(..., min_length=1, max_length=255)
 
