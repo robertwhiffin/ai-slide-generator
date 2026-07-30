@@ -214,9 +214,17 @@ class DesignSystemToken(Base):
         index=True,
     )
 
-    # core | accents | ink | tints | type | spacing.
+    # Canonically core | accents | ink | tints | type | spacing | shadow, but ANY
+    # string is accepted: the compiler aliases known synonyms onto those and emits
+    # anything else under its own generic heading, so no token is dropped for the
+    # name of its group.
     # ``group`` is a SQL reserved word; SQLAlchemy quotes the identifier per dialect.
-    group = Column(String(50), nullable=False)
+    # 255, widened from 50 for the same zero-token-loss reason as ``name`` below: a
+    # single longer group name rejected the WHOLE bundle import, so one long group
+    # name cost every other token in the bundle. Existing databases are widened by
+    # ``_migrate_widen_token_group``; this declaration is what ``create_all`` uses
+    # for fresh ones, so the two must stay in step.
+    group = Column(String(255), nullable=False)
     # 255, widened from 100: a single longer brand token name used to reject the
     # WHOLE bundle import (zero-token-loss requirement). Existing databases are
     # widened by ``_migrate_widen_token_name``; this declaration is what

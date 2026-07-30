@@ -536,6 +536,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system token: widen name 100 -> 255 (zero token loss) ---
         _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system token: widen group 50 -> 255 (zero token loss) ---
+        _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -701,6 +704,53 @@ def _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite) -> None
         conn.execute(text(
             f"ALTER TABLE {_qual('design_system_token')} "
             "ALTER COLUMN name TYPE VARCHAR(255)"
+        ))
+
+
+def _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Widen ``design_system_token.group`` from VARCHAR(50) to VARCHAR(255).
+
+    The same zero-token-loss requirement that widened ``name``, applied to the
+    GROUP: a 51-character group name was rejected with ``string_too_long``, which
+    failed the ENTIRE bundle import — so one long group name cost every other token
+    in the bundle. No token may be turned away for the name of its group, and the
+    compiler imposes no cap of its own (it sanitizes group names rather than
+    rejecting them), so storage and the API validator are what had to move.
+
+    Idempotent, dialect-safe and SAVEPOINT-wrapped exactly like
+    :func:`_migrate_widen_token_name` — see that docstring for why SQLite returns
+    early (declared VARCHAR length is not enforced there, and ``ALTER COLUMN TYPE``
+    does not exist) and why the widening is cheap on PostgreSQL/Lakebase (same base
+    type, no table rewrite).
+    """
+    from sqlalchemy import inspect, text
+
+    if is_sqlite:
+        # Length is unenforced here; see ``_migrate_widen_token_name``.
+        return
+
+    insp = inspector or inspect(conn)
+    try:
+        columns = {c["name"]: c for c in insp.get_columns("design_system_token", schema=schema)}
+    except Exception:
+        return
+    column = columns.get("group")
+    if column is None:
+        return
+
+    current_length = getattr(column.get("type"), "length", None)
+    if current_length is not None and current_length >= 255:
+        return  # already widened
+
+    logger.info(
+        "Migration: widening design_system_token.group to VARCHAR(255) "
+        f"(was {current_length})"
+    )
+    with conn.begin_nested():
+        # ``group`` is a SQL reserved word — quote the identifier.
+        conn.execute(text(
+            f"ALTER TABLE {_qual('design_system_token')} "
+            'ALTER COLUMN "group" TYPE VARCHAR(255)'
         ))
 
 
