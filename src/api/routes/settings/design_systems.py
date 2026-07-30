@@ -52,22 +52,24 @@ router = APIRouter(prefix="/design-systems", tags=["design-systems"])
 
 
 class TokenIn(BaseModel):
-    # name is 255 to match ``design_system_token.name``. It was 100, which made a
-    # single long brand token name reject the ENTIRE bundle import — worse than
-    # the silent drop the compiler already stopped doing, and a direct violation
-    # of the zero-token-loss requirement. Real design systems ship descriptive
-    # names ("brand-semantic-surface-elevated-interactive-hover"), so the limit
-    # exists only to match storage, not to police naming.
+    # NO max_length on any of the three. These are FREE-FORM BRAND TEXT, and the
+    # storage columns are unbounded ``Text`` (see
+    # ``database/models/design_system.py``); the two layers must move TOGETHER,
+    # because a cap at EITHER one still turns the brand away with
+    # ``string_too_long`` — which is exactly how this defect survived the round that
+    # widened only the storage column.
     #
-    # ``group`` is 255 for exactly the same reason. It was 50, which rejected a
-    # 51-character group name with ``string_too_long`` — turning a token away for
-    # the NAME OF ITS GROUP, the one thing the zero-token-loss requirement forbids,
-    # and failing the whole bundle to do it. The compiler imposes no cap of its own
-    # (it sanitizes group names, never rejects them), so this bound exists only to
-    # match ``design_system_token.group``.
-    group: str = Field(..., min_length=1, max_length=255)
-    name: str = Field(..., min_length=1, max_length=255)
-    value: str = Field(..., min_length=1, max_length=255)
+    # The caps were 50/100, then 255/255. Each widening was reopened by a longer
+    # real-world string, because the NUMBER was never the problem: a bundle import
+    # is one request, so one over-length token failed the WHOLE import and cost
+    # every other token in the bundle. The compiler imposes no cap of its own (it
+    # sanitizes, never rejects), so nothing downstream needs a bound either.
+    #
+    # ``min_length=1`` is KEPT: an empty group/name/value is a malformed token, not
+    # brand data. Only the MAXIMUM is a brand-hostile limit.
+    group: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    value: str = Field(..., min_length=1)
 
 
 class TokenOut(TokenIn):
@@ -164,14 +166,16 @@ class DesignSystemDetail(DesignSystemSummary):
 
 class DesignSystemCreate(BaseModel):
     """Structured (in-app) create — thin. Assets arrive via /import."""
-    name: str = Field(..., min_length=1, max_length=255)
+    # UNCAPPED, matching the unbounded ``design_system.name`` column; ``min_length``
+    # is kept because an empty name is malformed. See ``TokenIn``.
+    name: str = Field(..., min_length=1)
     description: Optional[str] = None
     tokens: Optional[List[TokenIn]] = None
     manifest_json: Optional[dict] = None
 
 
 class DesignSystemUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    name: Optional[str] = Field(None, min_length=1)
     description: Optional[str] = None
     tokens: Optional[List[TokenIn]] = None
     manifest_json: Optional[dict] = None

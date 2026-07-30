@@ -423,17 +423,26 @@ class TestLongTokenNamesImportSuccessfully:
         ]
         assert [t.name for t in tokens][1] == _LONG_120
 
-    def test_255_is_the_boundary_and_beyond_it_still_validates(self):
-        """255 is accepted; a name longer than the column can hold is rejected at
-        the API layer rather than truncated silently in storage."""
-        import pytest as _pytest
-        from pydantic import ValidationError
+    def test_there_is_no_upper_boundary_on_a_brand_token_name(self):
+        """SUPERSEDES ``test_255_is_the_boundary_and_beyond_it_still_validates``.
 
+        That test asserted 256 characters were REJECTED, which was the defect: a
+        bundle import is one request, so rejecting one long token failed the whole
+        import and cost every other token in the bundle. Two rounds raised the
+        boundary (100 -> 255) and a longer real string reopened it each time,
+        because the number was never the problem.
+
+        Free-form brand text is now UNCAPPED at both the validator and the column,
+        so this asserts the absence of a boundary — a strictly stronger property
+        than "the boundary sits at 255", and one no future length can defeat.
+        """
         from src.api.routes.settings.design_systems import TokenIn
 
-        assert TokenIn(group="type", name="z" * 255, value="1px").name == "z" * 255
-        with _pytest.raises(ValidationError):
-            TokenIn(group="type", name="z" * 256, value="1px")
+        for length in (255, 256, 1000, 10_000):
+            token = TokenIn(group="type", name="z" * length, value="1px")
+            assert len(token.name) == length, (
+                f"a {length}-character brand token name was altered or rejected"
+            )
 
 
 class TestTokenNameColumnWidthMigration:
@@ -499,12 +508,19 @@ class TestTokenNameColumnWidthMigration:
         assert got == "w" * 200
         engine.dispose()
 
-    def test_orm_column_is_declared_255(self):
-        """The ORM declaration is what create_all() uses for FRESH databases, so
-        it must be widened alongside the ALTER for existing ones."""
+    def test_orm_column_is_declared_uncapped(self):
+        """SUPERSEDES ``test_orm_column_is_declared_255``. The ORM declaration is
+        what ``create_all()`` uses for FRESH databases, so it must match the
+        migration for existing ones — and the target is now NO cap at all, not a
+        wider one. Asserting the absence of a length is strictly stronger than
+        asserting a specific width."""
+        from sqlalchemy import Text
+
         from src.database.models.design_system import DesignSystemToken
 
-        assert DesignSystemToken.__table__.c.name.type.length == 255
+        column = DesignSystemToken.__table__.c.name
+        assert column.type.length is None
+        assert isinstance(column.type, Text)
 
 
 class TestTokenGroupWidth:
@@ -527,12 +543,17 @@ class TestTokenGroupWidth:
         token = TokenIn(group="g" * 200, name="tok", value="#123456")
         assert token.group == "g" * 200
 
-    def test_orm_group_column_is_declared_255(self):
-        """``create_all()`` uses the ORM declaration for FRESH databases, so it must
-        be widened alongside the ALTER for existing ones."""
+    def test_orm_group_column_is_declared_uncapped(self):
+        """SUPERSEDES ``test_orm_group_column_is_declared_255`` — same reasoning as
+        the token NAME column: ``create_all()`` uses this declaration for fresh
+        databases, and the target is now no cap at all."""
+        from sqlalchemy import Text
+
         from src.database.models.design_system import DesignSystemToken
 
-        assert DesignSystemToken.__table__.c.group.type.length == 255
+        column = DesignSystemToken.__table__.c.group
+        assert column.type.length is None
+        assert isinstance(column.type, Text)
 
     def test_a_200_char_group_compiles_and_keeps_its_tokens(self):
         """End to end: the long group must reach the compiled artifact, not just be
