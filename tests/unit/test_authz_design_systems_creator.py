@@ -763,3 +763,169 @@ def test_exact_identity_match_still_authorizes_the_real_creator(
 
     resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by its author"})
     assert resp.status_code == 200, resp.text
+
+
+# --- (l) BLANKNESS is a PROPERTY, not a list of code points ------------------
+#
+# Round 2 review: U+2800 BRAILLE PATTERN BLANK renders nothing but its category
+# is ``So`` (symbol), so the category test counted it as visible content and an
+# all-invisible identity authorized as CREATOR on an author-less row.
+#
+# The previous two rounds each added the specific code points that had just been
+# demonstrated (Cf/Cc/Zs/Zl/Zp, then the Hangul fillers). That is the pattern the
+# reviewer told us to stop: the property is "renders no visible glyph", and the
+# test below is table-driven over that property rather than over examples we
+# happened to think of.
+
+# Every character here renders as NOTHING. Grouped by why a category-only test
+# misses it, so a future reader can see the shape of the class.
+_NON_RENDERING = [
+    # Zs/Zl/Zp separators
+    ("space", " "),
+    ("ideographic_space_U3000", "　"),
+    ("nbsp_U00A0", " "),
+    ("ogham_space_U1680", " "),
+    ("en_quad_U2000", " "),
+    ("hair_space_U200A", " "),
+    ("narrow_nbsp_U202F", " "),
+    ("medium_math_space_U205F", " "),
+    ("line_separator_U2028", " "),
+    ("paragraph_separator_U2029", " "),
+    # Cf format
+    ("zwsp_U200B", "​"),
+    ("zwnj_U200C", "‌"),
+    ("zwj_U200D", "‍"),
+    ("lrm_U200E", "‎"),
+    ("word_joiner_U2060", "⁠"),
+    ("bom_UFEFF", "﻿"),
+    ("soft_hyphen_U00AD", "­"),
+    ("mongolian_vowel_sep_U180E", "᠎"),
+    # Cc control
+    ("tab", "\t"),
+    ("newline", "\n"),
+    ("nul", "\x00"),
+    # Lo letters that render nothing (the round-1 finding)
+    ("hangul_filler_U3164", "ㅤ"),
+    ("hangul_choseong_filler_U115F", "ᅟ"),
+    ("hangul_jungseong_filler_U1160", "ᅠ"),
+    # So symbol that renders nothing (the round-2 finding)
+    ("braille_blank_U2800", "⠀"),
+    # Mn combining mark with no standalone glyph
+    ("combining_grave_U0300", "̀"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "char"), _NON_RENDERING, ids=[label for label, _ in _NON_RENDERING]
+)
+def test_every_non_rendering_character_is_blank(label, char):
+    """The PROPERTY, asserted directly on the predicate: a string made only of
+    non-rendering characters names nobody."""
+    from src.api.routes.settings.design_systems import _is_blank_identity
+
+    assert _is_blank_identity(char), f"{label} was treated as visible content"
+    assert _is_blank_identity(char * 5)
+    # Mixed with each other, still blank.
+    assert _is_blank_identity(char + "⠀​ ㅤ")
+
+
+# NUL cannot travel through ``DEV_USER_ID``: ``os.environ`` rejects an embedded
+# null byte ("ValueError: embedded null byte"), so the END-TO-END case cannot be
+# expressed via the env var. The PREDICATE is still asserted for it above — that
+# is where NUL's blankness is pinned.
+_NON_RENDERING_ENV_SAFE = [
+    (label, char) for label, char in _NON_RENDERING if "\x00" not in char
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "char"),
+    _NON_RENDERING_ENV_SAFE,
+    ids=[label for label, _ in _NON_RENDERING_ENV_SAFE],
+)
+def test_non_rendering_identity_is_admin_only_end_to_end(
+    client, db_session, non_admin, monkeypatch, label, char
+):
+    """The authz consequence, through the real gate: caller AND owner both set to
+    the invisible value must NOT satisfy the creator branch."""
+    monkeypatch.setenv("DEV_USER_ID", char)
+    ds = _seed(db_session, char)
+
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via invisible identity"})
+    assert put.status_code == 403, f"PUT with {label} -> {put.status_code} {put.text}"
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, f"DELETE with {label} -> {delete.status_code}"
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+def test_reviewers_exact_braille_repro_denies(client, db_session, non_admin, monkeypatch):
+    """The reviewer's verbatim case: U+2800 as both caller and created_by."""
+    monkeypatch.setenv("DEV_USER_ID", "⠀")
+    ds = _seed(db_session, "⠀")
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+def test_a_visible_character_is_never_treated_as_blank():
+    """The inverse property. A FALSE DENY of a legitimate creator is also a
+    defect, so anything that renders must stay non-blank — including scripts and
+    symbols that a naive 'strip everything unusual' rule would eat."""
+    from src.api.routes.settings.design_systems import _is_blank_identity
+
+    for visible in (
+        "creator@test.com",
+        "a",
+        "0",
+        "-",
+        ".",
+        "_",
+        "ㅎ",              # real Hangul letter (NOT a filler)
+        "サイズ",           # Katakana
+        "Кириллица",       # Cyrillic
+        "🎨",              # emoji: So, but it DOES render
+        "⠁",              # braille with dots raised — renders
+        "⠀a⠀",   # invisible padding around a real character
+    ):
+        assert not _is_blank_identity(visible), f"{visible!r} was wrongly called blank"
+
+
+def test_normal_email_creator_is_still_allowed(client, db_session, non_admin, as_creator):
+    """End-to-end no-false-deny: identical raw values still authorize."""
+    ds = _seed(db_session, CREATOR)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by its real author"})
+    assert resp.status_code == 200, resp.text
+
+
+# The exact-identity contract MUST NOT regress: the reviewer confirmed raw
+# trailing-space and case differences correctly DENY, and blankness normalization
+# must not quietly become a looser comparison.
+_STILL_DENIED = [
+    ("trailing_space_owner", f"{CREATOR} ", CREATOR),
+    ("trailing_space_caller", CREATOR, f"{CREATOR} "),
+    ("leading_space_owner", f" {CREATOR}", CREATOR),
+    ("case_upper_owner", CREATOR.upper(), CREATOR),
+    ("case_upper_caller", CREATOR, CREATOR.upper()),
+    ("braille_padded_owner", f"⠀{CREATOR}", CREATOR),
+    ("zwsp_padded_caller", CREATOR, f"{CREATOR}​"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "owner", "caller"),
+    _STILL_DENIED,
+    ids=[label for label, _, _ in _STILL_DENIED],
+)
+def test_exact_identity_contract_does_not_regress(
+    client, db_session, non_admin, monkeypatch, label, owner, caller
+):
+    monkeypatch.setenv("DEV_USER_ID", caller)
+    ds = _seed(db_session, owner)
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403, label
+    db_session.refresh(ds)
+    assert ds.is_active is True
