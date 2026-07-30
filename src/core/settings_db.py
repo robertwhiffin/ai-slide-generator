@@ -72,18 +72,26 @@ def get_default_slide_style_id() -> Optional[int]:
     Used by both the browser chat flow and the MCP ``create_deck`` tool so new
     sessions pick up the user-configured default when no explicit
     ``slide_style_id`` is supplied.
+
+    BOTH queries order by id, so when several rows tie the LOWEST id wins. That
+    is not cosmetic: the frontend applies exactly this rule
+    (``AgentConfigContext.pickSeededDefaultStyle`` sorts by id), and an unordered
+    ``.first()`` has no defined row order — so with more than one candidate the
+    two sides could resolve DIFFERENT styles, non-deterministically. Ordering by
+    id is stable and unaffected by renaming a style.
     """
     from src.database.models import SlideStyleLibrary
 
     try:
         with get_db_session() as db:
-            # Primary: explicit default
+            # Primary: explicit default (lowest id among ties)
             style = (
                 db.query(SlideStyleLibrary.id)
                 .filter(
                     SlideStyleLibrary.is_default == True,  # noqa: E712
                     SlideStyleLibrary.is_active == True,  # noqa: E712
                 )
+                .order_by(SlideStyleLibrary.id)
                 .first()
             )
             if style:
@@ -96,6 +104,7 @@ def get_default_slide_style_id() -> Optional[int]:
                     SlideStyleLibrary.is_system == True,  # noqa: E712
                     SlideStyleLibrary.is_active == True,  # noqa: E712
                 )
+                .order_by(SlideStyleLibrary.id)
                 .first()
             )
             return style.id if style else None
