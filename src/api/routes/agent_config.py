@@ -189,9 +189,18 @@ async def get_agent_config(session_id: str):
     # Only the PIN sanitizer runs here, never the strict half: a bogus
     # slide_style_id must not make a session UNLOADABLE (it is already
     # unsaveable), and a read is not the place to reject stored state.
+    had_design_system = config.design_system_id is not None
     await asyncio.to_thread(_sanitize_stale_pins, config, session_id=session_id)
     result = config.model_dump()
     result["is_configured"] = raw is not None
+    # Out-of-band flag (like ``is_configured``, not part of AgentConfig): tells the
+    # client its stored DESIGN SYSTEM disappeared, so the cleared dropdown can be
+    # EXPLAINED rather than just silently reading "None". Deliberately specific to
+    # the design system — a stale TEMPLATE clear is routine (the re-upload
+    # workflow re-mints ids) and does not warrant a user-facing notice.
+    result["design_system_unavailable"] = (
+        had_design_system and config.design_system_id is None
+    )
     return result
 
 

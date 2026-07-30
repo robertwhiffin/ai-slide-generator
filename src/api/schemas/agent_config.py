@@ -1,9 +1,20 @@
 """Pydantic models for agent_config JSON stored on sessions and profiles."""
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, Union
+import logging
+from typing import Annotated, Any, Final, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
+
+# The provenance values a STORED config may legitimately carry. Anything else is
+# coerced on read (see ``resolve_agent_config``).
+_VALID_STYLE_SOURCES: Final = frozenset({"seeded", "user"})
+
+# Sentinel telling "key absent" apart from "key present and null". An explicit
+# null is the LEGACY shape and must stay distinguishable from a malformed value.
+_ABSENT: Final[Any] = object()
 
 
 class GenieTool(BaseModel):
@@ -110,9 +121,39 @@ class AgentConfig(BaseModel):
 
 
 def resolve_agent_config(raw: Optional[dict]) -> AgentConfig:
-    """Parse agent_config JSON from DB, returning defaults if None."""
+    """Parse agent_config JSON from DB, returning defaults if None.
+
+    ``style_source`` FAILS SOFT. It is a ``Literal["seeded", "user"]``, so an
+    unexpected stored value (hand-edited row, a different writer's version, a
+    partial migration) used to raise ``ValidationError`` out of this function —
+    which every config LOAD goes through — making the session unloadable over a
+    piece of METADATA about a choice rather than the choice itself.
+
+    An unrecognized value is coerced to ``"user"``, with a warning. That is the
+    safe direction: ``"user"`` is the NON-OVERRIDING branch, so a config whose
+    provenance cannot be read is never re-seeded with the org default over
+    something a person may have deliberately selected. An explicit ``null`` (and
+    an absent key) is NOT malformed — it is the legacy shape and is preserved, so
+    the caller can apply the legacy rule to it.
+
+    Only the READ path is lenient; constructing an ``AgentConfig`` directly still
+    validates strictly, so the type stays meaningful in code.
+    """
     if raw is None:
         return AgentConfig()
+    style_source = raw.get("style_source", _ABSENT)
+    if style_source is not _ABSENT and style_source is not None:
+        # Membership is tested only for str: an UNHASHABLE stored value (a list,
+        # a dict) would raise TypeError out of a set lookup, which is the very
+        # failure mode this guard exists to prevent.
+        if not isinstance(style_source, str) or style_source not in _VALID_STYLE_SOURCES:
+            logger.warning(
+                "Stored agent_config has an unrecognized style_source %r; "
+                "treating it as user-chosen (the non-overriding reading) so the "
+                "config still loads and no selection is silently replaced",
+                style_source,
+            )
+            raw = {**raw, "style_source": "user"}
     return AgentConfig.model_validate(raw)
 
 

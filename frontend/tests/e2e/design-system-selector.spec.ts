@@ -849,12 +849,19 @@ test.describe('AgentConfigBar — design system selector', () => {
 
     // Now a SECOND edit whose PUT FAILS — the revert must land on the
     // post-PUT {ds:1}, NOT the stale GET's {ds:2}.
-    await page.getByTestId('style-selector').selectOption('2');
+    //
+    // The probe is the DECK PROMPT selector, not the slide style: a style and a
+    // design system are now mutually exclusive, so editing the style would
+    // legitimately clear design_system_id and this assertion could no longer
+    // distinguish "stash regressed to the stale GET" from "exclusivity did its
+    // job". The deck prompt is orthogonal to the style slot, so it still probes
+    // exactly what this test is about.
+    await page.getByTestId('deck-prompt-selector').selectOption('2');
     await page.waitForTimeout(500);
     await expect(page.getByTestId('design-system-selector')).toHaveValue('1');
 
     // And the next edit's wire body builds from {ds:1}, never {ds:2}.
-    await page.getByTestId('style-selector').selectOption('1');
+    await page.getByTestId('deck-prompt-selector').selectOption('1');
     await expect.poll(() => putBodies.length).toBeGreaterThan(2);
     const lastPut = JSON.parse(putBodies[putBodies.length - 1]);
     expect(lastPut.design_system_id).toBe(1); // post-PUT truth, not stale 2
@@ -1011,11 +1018,16 @@ test.describe('AgentConfigBar — design system selector', () => {
     // ignored the generation verdict and called setAgentConfig(stale)).
     await expect(page.getByTestId('style-selector')).toHaveValue('1');
 
-    // (b) The next edit's WIRE body builds from the newer value. A DS change
-    // preserves slide_style_id, so the PUT body reveals the base style:
-    // post-fix 1, pre-fix 2 (built from the regressed visible state).
+    // (b) The next edit's WIRE body builds from the newer value. The probe is a
+    // DECK PROMPT change, which is orthogonal to the style slot and so leaves
+    // slide_style_id alone: the PUT body reveals the base style, post-fix 1 and
+    // pre-fix 2 (built from the regressed visible state). It used to be a DESIGN
+    // SYSTEM change, on the reasoning that a DS change preserves
+    // slide_style_id — no longer true now that the two style sources are
+    // mutually exclusive (choosing a DS clears the style), which would make this
+    // read null for a reason that has nothing to do with the race under test.
     const putsBefore = putBodies.length;
-    await page.getByTestId('design-system-selector').selectOption('2');
+    await page.getByTestId('deck-prompt-selector').selectOption('2');
     await expect.poll(() => putBodies.length).toBeGreaterThan(putsBefore);
     const nextEdit = JSON.parse(putBodies[putBodies.length - 1]);
     expect(nextEdit.slide_style_id).toBe(1); // newer value, never stale 2
@@ -1612,12 +1624,35 @@ test.describe('persisted style provenance', () => {
     expect((await readStored(page))?.design_system_id ?? null).toBeNull();
   });
 
-  test('a LEGACY stored config with no provenance field behaves safely', async ({ page }) => {
-    // Written before provenance existed. Such a config was mirrored from the
-    // seeded profile, so it is treated as SEEDED — exactly the behaviour those
-    // configs already had, so the safe default cannot resurrect the old bug.
+  test('a LEGACY stored config with no provenance field is NOT overridden', async ({ page }) => {
+    // Written before provenance existed. This test previously asserted the
+    // OPPOSITE — that such a config is treated as SEEDED and the org-default
+    // design system is substituted in — on the reasoning that these configs were
+    // mirrored from the seeded profile.
+    //
+    // That reasoning does not hold for the case that matters: a config whose
+    // only edit was choosing "Design System: None" is byte-identical to a
+    // mirrored seeded one (no style_source, no ids, no tools), so "seeded" threw
+    // away a deliberate user choice — the very bug provenance was introduced to
+    // fix, arriving through another door. Absence of the marker on an EXISTING
+    // STORED config is therefore USER-CHOSEN; only a genuinely new surface (no
+    // stored config at all) is seeded, which the test below pins.
     await mockOrgDefaults(page);
     await seedStoredConfig(page, { ...baseConfig });
+
+    await page.goto('/');
+    await expect(page.getByTestId('agent-config-bar')).toBeVisible();
+    await page.getByTestId('agent-config-toggle').click();
+
+    // The stored config's own style slot survives; no design system is injected.
+    await expect(page.getByTestId('design-system-selector')).toHaveValue('');
+    await expect(page.getByTestId('style-selector')).toHaveValue(String(SEEDED_STYLE_ID));
+  });
+
+  test('with NOTHING stored, the org-default design system is still seeded', async ({ page }) => {
+    // The other side of the rule above: protecting existing stored configs must
+    // not disable org-default seeding for a genuinely new surface.
+    await mockOrgDefaults(page);
 
     await page.goto('/');
     await expect(page.getByTestId('agent-config-bar')).toBeVisible();
