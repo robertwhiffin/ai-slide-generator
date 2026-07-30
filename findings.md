@@ -188,3 +188,86 @@ all five tokens still emit.
 | `mypy src` | 551 in 84 files | 551 in 84 files | **0** |
 
 Test-name diff against the round-7 baseline junit: **0 disappeared**, 18 added.
+
+---
+
+## Item 3 — B3: `model_dump()` was not the choke point
+
+**Status: FIXED.** Spec: `tests/unit/test_style_exclusivity_chokepoint.py`, new class
+`TestModelDumpIsNotTheChokepoint` (8 tests).
+
+### RED first — codex's five bypass rows + the exclude_none assertion
+
+On the committed tip:
+
+```
+model_dump()            ['design_system_id']                 <- the only path that worked
+model_dump_json()       slide_style_id":7 present -> True    <- BYPASS
+dict(model)             ['slide_style_id', 'design_system_id'] <- BYPASS
+raw attrs               7 3                                  <- BYPASS
+exclude_none=True keys  ['design_system_id','slide_style_id','tools']
+                        slide_style_id present? True value: None   <- CONTRACT VIOLATION
+```
+
+`SessionManager.create_session` (`session_manager.py:109-154`) took an
+`agent_config` **raw dict** and assigned it straight onto the ORM row — a real,
+reachable bypass, confirmed by a test that captures the row it adds.
+
+4 of 8 tests failed RED (the 4 real defects); the 4 controls passed.
+
+### Fix
+
+* The `model_dump` override is replaced by a **`@model_serializer(mode="wrap")`**.
+  Overriding one method only covers callers who choose it; pydantic v2's
+  `model_dump_json` serializes through its Rust core and never calls a python
+  override. A model serializer is what `model_dump`, `model_dump_json` **and nested
+  serialization** all funnel through — the last of which the old override never
+  reached at all.
+* **`exclude_none` regression**: the slide style is now *removed* from the dump when
+  `exclude_none=True` and nulled otherwise, so the option's contract holds.
+* **`create_session`** normalizes its raw dict via a new
+  `normalize_agent_config_dict`, which applies no policy of its own — it parses to
+  the model and serializes back, so whatever the model enforces the dict inherits.
+  It fails soft (an unparseable dict is stored as supplied, with a warning) so a
+  normalizer cannot turn a previously-working create into a 500.
+* **Not** a per-call-site normalization: one helper, used at the one raw-dict
+  persister, deriving its rule from the model.
+
+### The one row I did NOT "fix", deliberately, with the boundary asserted
+
+`dict(model)` still shows both ids. It invokes no serializer — it is attribute
+iteration, the same act as reading `config.slide_style_id`, which the PUT ordering
+**requires** to keep working: `_validate_references` must see a dangling design
+system *before* exclusivity is applied, or a user holding a dead pin plus a real
+slide style ends up with neither. So the model must be able to hold both
+transiently. Rather than paper over it, the spec asserts the boundary explicitly
+(`test_dict_of_model_is_raw_attribute_access_and_is_not_a_persist_path`) and pins the
+two tests that protect the ordering. Raw ORM assignment and bulk update are the same
+category; the reachable one (`create_session`) is fixed where it persists.
+
+### Semantics re-proven unchanged
+
+```
+model_dump / model_dump_json / exclude_none / sanitize_for_persist /
+normalize_dict / in-place helper / nested dump / nested json
+   -> all ['design_system_id']            (DS-WINS)
+ds-only    -> ['design_system_id']        (untouched)
+style-only -> ['slide_style_id']          (untouched)
+both-set constructs fine                  (NOT a 422; legacy rows still HEAL)
+```
+
+All 81 tests across `test_style_exclusivity_chokepoint.py`,
+`test_agent_config_schema.py`, `test_agent_config_routes.py` and
+`test_chat_style_exclusivity.py` pass, so the application paths codex confirmed
+(agent PUT, agent-patch-legacy, all three chat branches, profile-create,
+duplicate-session, MCP create, sanitize_agent_config_for_persist) still hold.
+
+### Gates
+
+| Gate | Before | After | Net-new |
+|---|---|---|---|
+| `pytest tests/unit` | 2484 passed, 11 skipped | 2492 passed, 11 skipped | +8, 0 failures |
+| `ruff check src tests` | 2176 | 2176 | **0** |
+| `mypy src` | 551 in 84 files | 551 in 84 files | **0** |
+
+0 tests disappeared against the round-7 baseline junit.
