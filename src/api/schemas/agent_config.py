@@ -119,6 +119,58 @@ class AgentConfig(BaseModel):
             seen.add(key)
         return self
 
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict:
+        """Serialize, enforcing ONE style authority.
+
+        THE CHOKEPOINT for style-source exclusivity. Every write path that persists
+        an agent config — the agent-config PUT, PATCH /tools and the GET stale-pin
+        heal, the three chat branches, MCP create, profile create/update, profile
+        load, and session duplicate — produces its stored dict by calling this
+        method, directly or through :func:`sanitize_agent_config_for_persist`. So
+        normalizing HERE means every one of them inherits the rule, including a path
+        added tomorrow that nobody remembers to annotate.
+
+        This replaces per-route enforcement, which was the wrong altitude. Five
+        routes were fixed one at a time (chat-create, chat-client-id, chat-update,
+        agent-put, mcp-create) and three were still bypassing it — ``_save_agent_config``
+        (reached by PATCH /tools and the GET heal), ``create_profile``, and
+        ``duplicate_session`` — each persisting ``slide_style_id`` AND
+        ``design_system_id``, which generation then silently disambiguated by
+        design-system precedence: a stored row disagreeing with the deck it produced.
+        Adding a fourth call would have left the same hole open for the fifth path.
+
+        Semantics are unchanged from :func:`normalize_style_source_exclusivity`:
+        DESIGN SYSTEM WINS and the slide style is dropped, never a 422 — a 422 would
+        wedge legacy both-set rows on every save (the frontend PUTs the WHOLE config,
+        so a user holding such a row could not save an unrelated edit). Legacy
+        both-set rows therefore HEAL on write.
+
+        The dump is normalized rather than the model mutated: serialization must not
+        have side effects on the object being serialized (a GET that dumps for a
+        RESPONSE would otherwise silently edit the caller's in-memory config).
+        Routes that need the model itself normalized — the PUT, which must order this
+        AFTER its DB reference validation — still call
+        :func:`normalize_style_source_exclusivity` explicitly, and the two agree by
+        construction: both drop exactly ``slide_style_id``.
+        """
+        dumped = super().model_dump(*args, **kwargs)
+        # Guard the key lookups: a caller may dump a subset (``include=``/
+        # ``exclude=``), in which case there is nothing to reconcile.
+        if (
+            dumped.get("slide_style_id") is not None
+            and dumped.get("design_system_id") is not None
+        ):
+            logger.warning(
+                "agent_config carried BOTH slide_style_id=%s and "
+                "design_system_id=%s at persistence; the design system takes "
+                "precedence, so the slide style is dropped to keep ONE style "
+                "authority in the prompt",
+                dumped["slide_style_id"],
+                dumped["design_system_id"],
+            )
+            dumped["slide_style_id"] = None
+        return dumped
+
 
 def resolve_agent_config(raw: Optional[dict]) -> AgentConfig:
     """Parse agent_config JSON from DB, returning defaults if None.
