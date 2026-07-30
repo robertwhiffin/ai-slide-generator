@@ -615,3 +615,151 @@ def test_frozen_org_default_denial_explains_why_without_leaking_the_row(
     )
     for leak in ("Acme Confidential Fixture", CREATOR):
         assert leak not in detail, f"denial leaked {leak!r}: {detail!r}"
+
+
+# --- (k) HANGUL FILLERS are blank, and identity is compared EXACTLY ----------
+#
+# Two defects in the creator check, found by an adversarial review.
+#
+# (i) The Hangul filler characters — U+3164 HANGUL FILLER and U+115F HANGUL
+#     CHOSEONG FILLER — render as nothing, but NFKC maps them to U+1160 / U+115F
+#     whose category is Lo (a LETTER). The invisible-category test therefore read
+#     them as real, visible content: an author-less row whose ``created_by`` was
+#     a filler could be claimed by any caller presenting the same filler, exactly
+#     the hole the zero-width cases (i) closed for Cf.
+#
+# (ii) The comparison stripped BOTH sides (``(x or "").strip()``) before testing
+#      identity, which contradicts the documented "exact identity match": it made
+#      ``"creator@test.com "`` and ``"creator@test.com"`` the same principal. The
+#      blank DETERMINATION may normalize; the identity COMPARISON may not.
+
+# Each of these renders as nothing but survives NFKC as category Lo.
+_HANGUL_FILLER_BLANKS = [
+    ("hangul_filler", "ㅤ"),
+    ("hangul_choseong_filler", "ᅟ"),
+    ("hangul_jungseong_filler", "ᅠ"),
+    ("filler_with_spaces", "  ㅤ \t"),
+    ("filler_with_zwsp", "​ㅤ"),
+    ("two_fillers", "ㅤᅟ"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_authorship_is_admin_only_for_non_admin(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(k1) Filler as OWNER *and* as CALLER — the both-sides claim. A visually
+    empty author names nobody, so the row is admin-only."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via filler authorship"})
+    assert put.status_code == 403, (
+        f"PUT with {label} caller+owner -> {put.status_code} {put.text}"
+    )
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} caller+owner -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_owner_denies_a_real_caller(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(k2) Filler as OWNER only: a real caller must not inherit an author-less
+    row either."""
+    monkeypatch.setenv("DEV_USER_ID", OTHER)
+    ds = _seed(db_session, blank)
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_caller_cannot_claim_a_real_owner(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(k3) Filler as CALLER only: a blank caller matches nobody."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, CREATOR)
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_authorship_still_manageable_by_admin(
+    client, db_session, admin, monkeypatch, label, blank
+):
+    """(k4) The admin fallback still applies, so these rows stay cleanable."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Adopted by an admin"})
+    assert resp.status_code == 200, resp.text
+
+
+# Identity pairs that differ ONLY by surrounding whitespace or by case. The
+# documented contract is an EXACT match, so each must be DENIED.
+_NON_IDENTICAL_IDENTITIES = [
+    ("owner_trailing_space", f"{CREATOR} ", CREATOR),
+    ("caller_trailing_space", CREATOR, f"{CREATOR} "),
+    ("owner_leading_space", f" {CREATOR}", CREATOR),
+    ("caller_leading_tab", CREATOR, f"\t{CREATOR}"),
+    ("case_differs_upper", CREATOR.upper(), CREATOR),
+    ("case_differs_caller", CREATOR, CREATOR.upper()),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "owner", "caller"),
+    _NON_IDENTICAL_IDENTITIES,
+    ids=[label for label, _, _ in _NON_IDENTICAL_IDENTITIES],
+)
+def test_identity_is_compared_exactly_without_mutual_stripping(
+    client, db_session, non_admin, monkeypatch, label, owner, caller
+):
+    """(k5) The comparison must not normalize either side. Mutual ``.strip()``
+    made a padded name the same principal as the bare one; case has always been
+    (and stays) significant."""
+    monkeypatch.setenv("DEV_USER_ID", caller)
+    ds = _seed(db_session, owner)
+
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+def test_exact_identity_match_still_authorizes_the_real_creator(
+    client, db_session, non_admin, as_creator
+):
+    """(k6) The exactness must not break the happy path it protects."""
+    ds = _seed(db_session, CREATOR)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by its author"})
+    assert resp.status_code == 200, resp.text
