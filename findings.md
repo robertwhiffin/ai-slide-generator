@@ -102,3 +102,89 @@ No test disappeared. The two pre-existing SQLite widener specs
 and `::test_widen_group_helper_is_a_noop_on_sqlite`) still pass — they assert the
 no-op-on-SQLite contract, which retirement preserves and strengthens (now a no-op
 on every dialect).
+
+---
+
+## Item 2 — B1: font-size ownership was wrong in BOTH directions
+
+**Status: FIXED.** Spec: `tests/unit/test_design_system_compiler.py`, new class
+`TestFontSizeOwnershipIsDecidedOnTheVisibleToken` (11 tests).
+
+### RED first — all seven of codex's rows reproduced verbatim
+
+Probing `_is_font_size_token` on the committed tip:
+
+```
+dotted-fs      'fs.body'            '16px'                   font=False   <- FALSE NEGATIVE
+snake          'font_size_body'     '16px'                   font=False   <- FALSE NEGATIVE
+camel          'fontSizeBody'       '16px'                   font=False   <- FALSE NEGATIVE
+dotted         'font.size.body'     '16px'                   font=False   <- FALSE NEGATIVE
+var-ref        'fs-var'             'var(--x)'               font=False   <- FALSE NEGATIVE
+invalid-negative   'fs-neg'     '-8px'                   font=True        <- FALSE POSITIVE
+invalid-function   'fs-calc'    'calc(not css at all)'   font=True        <- FALSE POSITIVE
+```
+
+And the U+001F ordering case — one string, two answers:
+
+```
+raw name        'fs\x1f-body'
+ownership(raw)  False  <- classification runs BEFORE sanitization -> filed as SPACING
+emitted name    'fs-body' -> visible token is 'fs-body'
+ownership(safe) True   <- what the VISIBLE token would decide
+```
+
+9 of 11 tests failed RED; the two controls passed from the start.
+
+### Fix
+
+* **Name normalization** (`_normalized_token_name`): sanitize, split camelCase
+  humps, collapse separator runs to a single `-`. So `fs.body` / `font_size_body` /
+  `fontSizeBody` / `font.size.body` all reach `_TYPE_SIZE_NAME_RE` in a form it
+  recognizes. The separator class is `[-_./\\:|\s]+` and deliberately **not**
+  `[^0-9A-Za-z]` — see the regression note below.
+* **Value grammar**: added a `var(--…)` arm (indirecting the scale through a custom
+  property is the commonest way a DS references its own tokens); removed the leading
+  `[+-]?` (there is no negative font size); and `calc()`/`clamp()`/`min()`/`max()`
+  now require their contents to hold at least one length/percentage or custom
+  property, so `calc(not css at all)` is no longer claimed.
+* **Ordering**: ownership is decided on the **sanitized** name, so the string that
+  decides is the string that emits.
+* The **px-only ramp for band math is unchanged** — a non-px value still contributes
+  no numeric band (codex's endorsed call), asserted directly.
+
+### A real regression I caught and fixed mid-flight
+
+My first normalization used `[^0-9A-Za-z]+`, which erased CJK/emoji: `fs-サイズ-24`
+normalized to `fs-24` and collided with another rung of the same ramp. Corrected to
+punctuation/whitespace only — normalization must unify separator conventions, never
+erase script. Verified: `'fs-サイズ-24'` normalizes to itself, as does
+`'text-🎨-body'`.
+
+### One pre-existing assertion changed — with its stronger-successor argument
+
+`TestEveryTokenNameIsKept::test_type_scale_region_emits_numbers_and_no_token_name`
+asserted `"24px" in region` for section/upper-mid. That assertion **encoded the very
+defect under repair**. Proof from the pristine tree:
+
+```
+BASELINE ramp: {64.0: 'fs-xxx…', 24.0: 'fs-サイズ-24', 18.0: 'text-🎨-body', 12.0: 'fs-12'}
+BASELINE owns font-size/heading-xl: False
+```
+
+The fixture ships a 40px rung named `font-size/heading-xl`; the slash meant it was
+not recognized as a font size, so **40px was missing from the ramp entirely** and
+24px became upper-mid by default. With separators unified the ramp is complete
+(12/18/24/40/64) and 40px is the correct upper-mid. The assertion is now `"40px" in
+region` — strictly stronger, because it is made over the ramp the fixture always
+described rather than the truncated one the defect produced. Nothing was dropped:
+all five tokens still emit.
+
+### Gates
+
+| Gate | Before | After | Net-new |
+|---|---|---|---|
+| `pytest tests/unit` | 2473 passed, 11 skipped | 2484 passed, 11 skipped | +11 (new class), 0 failures |
+| `ruff check src tests` | 2176 | 2176 | **0** |
+| `mypy src` | 551 in 84 files | 551 in 84 files | **0** |
+
+Test-name diff against the round-7 baseline junit: **0 disappeared**, 18 added.

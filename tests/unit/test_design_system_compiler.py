@@ -2332,7 +2332,15 @@ class TestEveryTokenNameIsKept:
         assert region is not None
         # The numbers the compiler parsed from the px values.
         assert "64px" in region  # hero = ramp top
-        assert "24px" in region  # section = upper-mid
+        # Section = upper-mid. This asserted 24px until round 7, which was the
+        # SYMPTOM of a defect in the fixture's own ramp: ``font-size/heading-xl``
+        # (40px) was not recognized as a font size, because ownership only accepted
+        # ``-``/``_`` as a name separator, so that rung was MISSING from the ramp and
+        # 24px became upper-mid by default. With the separator conventions unified
+        # the ramp is complete, and 40px is the correct upper-mid of
+        # 12/18/24/40/64 — a stronger assertion, over the ramp the fixture always
+        # described.
+        assert "40px" in region  # section = upper-mid
         assert "18px" in region  # body band
         assert "12px" in region  # floor = ramp bottom
         # No token NAME, and no name-echo scaffolding, inside the region.
@@ -4053,3 +4061,233 @@ class TestCurrencyRestsOnAStructuralSentinel:
         # re-assertion still recovers its region.
         assert "[ds-compiler v13]" in system_prompt
         assert TYPE_SCALE_REASSERTION_HEADING in system_prompt
+
+
+class TestFontSizeOwnershipIsDecidedOnTheVisibleToken:
+    """B1, round 7: font-size OWNERSHIP was still wrong in BOTH directions.
+
+    Ownership is decided by :func:`_is_font_size_token` — a NAME-shape test plus a
+    VALUE-grammar test. Both halves were too literal, so the round-6 fix (decoupling
+    ownership from the ramp map) left three distinct defects live.
+
+    FALSE NEGATIVES — a real font size printed under ``SPACING TOKENS:``, which is
+    the v7 small-titles mislabel on its FIFTH surface. The name regex only accepted
+    ``-``/``_`` as the separator after the ``fs``/``font-size``/``text`` stem, so
+    every other separator convention a brand may legitimately use missed:
+
+        ``fs.body`` ``font_size_body`` ``fontSizeBody`` ``font.size.body``
+
+    and the value grammar had no arm for a custom-property reference, so a size
+    declared as ``var(--brand-body)`` — the single most common way a design system
+    indirects its own scale — missed as well.
+
+    FALSE POSITIVES — a value that is NOT a font size claimed as one. The grammar
+    accepted a leading ``-`` (there is no such thing as a negative font size) and
+    accepted ``calc(`` followed by anything at all, because the arm was
+    ``calc\\s*\\(.*\\)``. The cost is not cosmetic: ownership SUPPRESSES the token
+    from ``SPACING TOKENS:``, so a genuine spacing token like ``-8px`` was REMOVED
+    from the spacing list and re-homed under a font-size heading.
+
+    ORDERING — classification ran on the RAW name while emission ran on the
+    SANITIZED one, so ``fs\\x1f-body`` was filed under spacing while the visible
+    token emitted as ``fs-body: 1rem``. One string, two answers; the artifact
+    contradicted itself.
+
+    The px-only ramp for BAND MATH is deliberately unchanged: a non-px value must
+    not fabricate a numeric band.
+
+    Invariants for every case: the claim is correct, and NOTHING is dropped.
+    All fixtures SYNTHETIC.
+    """
+
+    @staticmethod
+    def _section(out, heading):
+        if heading not in out:
+            return ""
+        tail = out[out.index(heading):]
+        return tail[: tail.index("\n\n")] if "\n\n" in tail else tail
+
+    #: codex's five FALSE-NEGATIVE rows: a real font size, printed as SPACING.
+    #: ``(token_name, value)`` — every separator convention plus the var() ref.
+    FALSE_NEGATIVES = [
+        ("fs.body", "16px"),
+        ("font_size_body", "16px"),
+        ("fontSizeBody", "16px"),
+        ("font.size.body", "16px"),
+        ("fs-var", "var(--x)"),
+    ]
+
+    #: codex's two FALSE-POSITIVE rows: NOT font sizes, but claimed as such.
+    FALSE_POSITIVES = [
+        ("fs-neg", "-8px"),
+        ("fs-calc", "calc(not css at all)"),
+    ]
+
+    @pytest.mark.parametrize(("name", "value"), FALSE_NEGATIVES)
+    def test_a_real_font_size_is_never_printed_as_spacing(self, session, name, value):
+        """The five false negatives: each IS a font size and must be owned."""
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        assert _is_font_size_token(name, value), (
+            f"{name!r}: {value!r} is a font size but ownership says it is not — it "
+            "will be printed under SPACING TOKENS:, the v7 small-titles mislabel"
+        )
+
+        tokens = [
+            {"group": "spacing", "name": name, "value": value},
+            {"group": "spacing", "name": "gap-8", "value": "8px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        assert name not in self._section(out, "SPACING TOKENS:"), (
+            f"font-size token {name!r} mislabeled as SPACING:\n"
+            f"{self._section(out, 'SPACING TOKENS:')}"
+        )
+        # Keep-everything: still emitted, under its real role.
+        assert f"- {name}: {value}" in out, f"token {name!r} was DROPPED entirely"
+        assert "gap-8: 8px" in self._section(out, "SPACING TOKENS:"), (
+            "a genuine spacing token must still be listed as spacing"
+        )
+
+    @pytest.mark.parametrize(("name", "value"), FALSE_POSITIVES)
+    def test_a_value_that_is_not_a_css_length_is_not_a_font_size(
+        self, session, name, value
+    ):
+        """The two false positives: a negative length and a malformed calc().
+
+        Neither is a valid CSS font size, so neither may be claimed — otherwise a
+        real SPACING token is suppressed from the spacing list.
+        """
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        assert not _is_font_size_token(name, value), (
+            f"{name!r}: {value!r} is NOT a valid CSS font size but ownership claims "
+            "it is, which removes it from SPACING TOKENS:"
+        )
+
+        tokens = [{"group": "spacing", "name": name, "value": value}]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        # It belongs to spacing (its declared group), and is never dropped.
+        assert f"- {name}: {value}" in out, f"token {name!r} was DROPPED entirely"
+        assert name in self._section(out, "SPACING TOKENS:"), (
+            f"{name!r} ({value}) is not a font size, so it must stay in its declared "
+            f"spacing group:\n{self._section(out, 'SPACING TOKENS:')}"
+        )
+
+    def test_ownership_is_decided_on_the_sanitized_name_not_the_raw_one(self, session):
+        """The ordering bug: the classified string must be the EMITTED string.
+
+        A raw ``\\x1f`` inside the name made classification (raw: not a font size)
+        disagree with emission (sanitized: ``fs-body``, plainly a font size). The
+        artifact then showed ``fs-body: 1rem`` under a spacing heading.
+        """
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        raw_name = "fs\x1f-body"
+        value = "1rem"
+
+        assert _is_font_size_token(raw_name, value), (
+            "ownership must be decided on the sanitized name: the token EMITS as "
+            "'fs-body', which is unambiguously a font size"
+        )
+
+        tokens = [
+            {"group": "spacing", "name": raw_name, "value": value},
+            {"group": "spacing", "name": "gap-8", "value": "8px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        # The compiler's own region sentinels are U+001F, so the artifact
+        # legitimately contains that byte; what must not survive is the one inside
+        # the USER's token name.
+        assert raw_name not in out, "the raw, unsanitized token name reached the artifact"
+        assert "fs-body" not in self._section(out, "SPACING TOKENS:"), (
+            "the visible token 'fs-body: 1rem' was filed under SPACING while its raw "
+            f"form decided ownership:\n{self._section(out, 'SPACING TOKENS:')}"
+        )
+        assert "- fs-body: 1rem" in out, "the sanitized token was dropped entirely"
+
+    def test_controls_that_already_passed_keep_passing(self, session):
+        """The controls codex confirmed green, re-pinned so the fix cannot regress them.
+
+        ``size-gap: 8px`` stays spacing (a 'size' name that is NOT a font-size stem),
+        ``fs-brand: #fff`` stays spacing (a font-size NAME with a non-length value),
+        and a font size in an unknown group is still owned.
+        """
+        from src.services.design_system_compiler import (
+            _is_font_size_token,
+            compile_design_system,
+        )
+
+        assert not _is_font_size_token("size-gap", "8px")
+        assert not _is_font_size_token("fs-brand", "#fff")
+        assert _is_font_size_token("fs-body", "18px")
+
+        tokens = [
+            {"group": "spacing", "name": "size-gap", "value": "8px"},
+            {"group": "spacing", "name": "fs-brand", "value": "#fff"},
+            {"group": "totally-unknown-group", "name": "fs-body", "value": "18px"},
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        spacing = self._section(out, "SPACING TOKENS:")
+        assert "size-gap: 8px" in spacing
+        assert "fs-brand: #fff" in spacing
+        assert "fs-body" not in spacing, (
+            "a font size in an unknown group must still be owned as a font size"
+        )
+        for name, value in (
+            ("size-gap", "8px"),
+            ("fs-brand", "#fff"),
+            ("fs-body", "18px"),
+        ):
+            assert f"- {name}: {value}" in out, f"token {name!r} was DROPPED"
+
+    def test_three_tokens_at_one_size_all_emit_with_no_spacing_section(self, session):
+        """The other passing control: duplicates at 16px, no spacing section, neutral bands."""
+        from src.services.design_system_compiler import compile_design_system
+
+        tokens = [
+            {"group": "type", "name": f"fs-dup-{index}", "value": "16px"}
+            for index in range(3)
+        ]
+        out = compile_design_system(_make_ds(session, tokens=tokens))
+
+        assert "SPACING TOKENS:" not in out, (
+            "no token here is spacing, so the artifact must not invent the section"
+        )
+        for index in range(3):
+            assert f"- fs-dup-{index}: 16px" in out, (
+                f"duplicate-size token fs-dup-{index} was dropped"
+            )
+
+    def test_non_px_font_sizes_still_do_not_fabricate_numeric_bands(self, session):
+        """The px-only ramp is deliberately kept (codex endorsed this call).
+
+        A ``var()`` reference is OWNED for labeling but cannot be resolved to a
+        pixel number, so it must not contribute a band — the artifact falls back to
+        the neutral default bands rather than inventing a number the brand never
+        stated.
+        """
+        from src.services.design_system_compiler import (
+            _font_size_px_ramp,
+            _is_font_size_token,
+        )
+
+        grouped = {"type": [("fs-body", "var(--x)"), ("fs-lead", "1.5rem")]}
+
+        assert _is_font_size_token("fs-body", "var(--x)")
+        assert _is_font_size_token("fs-lead", "1.5rem")
+        assert _font_size_px_ramp(grouped) == {}, (
+            "a non-px font size must not fabricate a numeric band"
+        )
