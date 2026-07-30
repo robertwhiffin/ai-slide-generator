@@ -229,13 +229,21 @@ _FONT_MAPPING = {
 
 class TestColorTokens:
     def test_header_and_name(self, session):
-        from src.services.design_system_compiler import compile_design_system
+        from src.services.design_system_compiler import (
+            _CURRENCY_SENTINEL,
+            compile_design_system,
+            strip_type_scale_region_markers,
+        )
 
         ds = _make_ds(session, tokens=_TOKENS)
         out = compile_design_system(ds)
         # v12: the version marker occupies a FIXED slot before the name, so the
         # name follows it rather than opening the line.
-        assert out.startswith("SLIDE VISUAL STYLE: ")
+        # v13: the PERSISTED artifact leads with the currency sentinel (a control
+        # sequence, stripped before injection), so the MODEL-FACING text is what
+        # opens with the header — assert on the text the model actually receives.
+        assert strip_type_scale_region_markers(out).startswith("SLIDE VISUAL STYLE: ")
+        assert out.startswith(_CURRENCY_SENTINEL)
         assert out.splitlines()[0].endswith("Acme Design System")
 
     def test_color_values_present(self, session):
@@ -441,12 +449,19 @@ class TestBrandManualWiring:
         assert "Founded in a fixture in 2020" in ds.compiled_style_content
 
     def test_recompute_no_manual_without_source_files(self, session):
-        from src.services.design_system_compiler import recompute_compiled_style_content
+        from src.services.design_system_compiler import (
+            recompute_compiled_style_content,
+            strip_type_scale_region_markers,
+        )
 
         ds = _make_ds(session, tokens=_TOKENS)  # no files
         recompute_compiled_style_content(ds)
         assert "BRAND MANUAL" not in ds.compiled_style_content
-        assert ds.compiled_style_content.startswith("SLIDE VISUAL STYLE:")
+        # v13: the persisted artifact leads with the currency sentinel; the header
+        # opens the MODEL-FACING text.
+        assert strip_type_scale_region_markers(
+            ds.compiled_style_content
+        ).startswith("SLIDE VISUAL STYLE:")
 
     def test_recompute_ignores_reference_rows(self, session):
         """asset/font REFERENCE rows carry ``data=None`` and are never manual text."""
@@ -788,11 +803,16 @@ class TestDeterminism:
         assert out == out_reversed
 
     def test_empty_design_system_has_header_and_contract(self, session):
-        from src.services.design_system_compiler import compile_design_system
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            strip_type_scale_region_markers,
+        )
 
         ds = _make_ds(session, description=None, tokens=None, assets=None, manifest_json=None)
         out = compile_design_system(ds)
-        assert out.startswith("SLIDE VISUAL STYLE:")
+        # v13: header opens the MODEL-FACING text (the raw artifact leads with the
+        # currency sentinel).
+        assert strip_type_scale_region_markers(out).startswith("SLIDE VISUAL STYLE:")
         assert "BRAND COLOR TOKENS" not in out
         assert "BRAND FONT" not in out
         assert "SLIDE TEMPLATES" not in out
@@ -899,7 +919,10 @@ class TestRecompute:
 
 class TestBackwardCompat:
     def test_legacy_ds_has_no_manual_shadow_or_fonts(self, session):
-        from src.services.design_system_compiler import compile_design_system
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            strip_type_scale_region_markers,
+        )
 
         ds = _make_ds(session, tokens=_TOKENS, assets=_IMAGE_ASSETS, manifest_json=_MANIFEST)
         out = compile_design_system(ds)
@@ -907,7 +930,8 @@ class TestBackwardCompat:
         assert "BRAND SHADOWS" not in out      # no shadow tokens
         assert "BRAND FONT FAMILIES" not in out  # no font mapping
         assert "BRAND FONTS:" not in out       # no font assets
-        assert out.startswith("SLIDE VISUAL STYLE:")
+        # v13: header opens the MODEL-FACING text.
+        assert strip_type_scale_region_markers(out).startswith("SLIDE VISUAL STYLE:")
         assert "BRAND COLOR TOKENS" in out
         assert "BRAND IMAGE ASSETS" in out     # contract always present
 
@@ -1154,13 +1178,17 @@ class TestCompilerVersionMarker:
     lazily recompute them via ``recompute_compiled_style_content``."""
 
     def test_compiled_output_carries_marker_in_header_line(self, session):
+        """The human-readable marker stays on the header line — it is greppable in
+        logs and in a stored row. v13 only stops it being the CURRENCY CHECK; it is
+        still emitted, in its fixed name-independent slot."""
         from src.services.design_system_compiler import (
             _COMPILER_VERSION_MARKER,
             compile_design_system,
+            strip_type_scale_region_markers,
         )
 
         out = compile_design_system(_make_ds(session, tokens=_TOKENS))
-        header = out.splitlines()[0]
+        header = strip_type_scale_region_markers(out).splitlines()[0]
         # v12: marker in a fixed, name-independent slot; the name follows it.
         assert header.startswith(f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER}")
         assert header.endswith("Acme Design System")
@@ -1217,12 +1245,20 @@ class TestCompilerVersionMarker:
         assert DESIGN_SYSTEM_SCOPE_FIREWALL in out
         assert "Start from the best-matching template above if one fits the request." in out
 
-    def test_marker_only_matches_on_the_header_line(self):
-        """A marker string that appears in the BODY (e.g. a README that quotes
-        or collides with '[ds-compiler vN]') must NOT make a stale artifact read
-        as current — the check is pinned to the header line only."""
+    def test_marker_text_alone_never_confers_currency(self, session):
+        """A marker string anywhere in the TEXT — body prose or a hand-built header
+        line — must NOT make a stale artifact read as current.
+
+        v13 strengthens this: the marker no longer confers currency in ANY position,
+        including its own fixed header slot. Only the structural sentinel does, and a
+        hand-assembled header cannot carry one (``_safe`` strips the control
+        character it is built from from every user string). The previous version of
+        this test asserted that a hand-built header line READ AS CURRENT — which is
+        exactly the evasion codex demonstrated, so that assertion is inverted here.
+        """
         from src.services.design_system_compiler import (
             _COMPILER_VERSION_MARKER,
+            compile_design_system,
             compiled_style_content_is_current,
         )
 
@@ -1233,12 +1269,14 @@ class TestCompilerVersionMarker:
             f"This synthetic readme mentions {_COMPILER_VERSION_MARKER} in prose."
         )
         assert not compiled_style_content_is_current(stale_with_body_collision)
-        # And a marker in its genuine FIXED header slot still reads current. (v12:
-        # the old trailing-marker layout is now itself the spoof shape — a NAME can
-        # end with the marker — so it must NOT be accepted; see
-        # TestVersionMarkerPositionIsNameIndependent.)
-        assert compiled_style_content_is_current(
+        # A hand-built header carrying the marker in its genuine fixed slot is STILL
+        # stale: it has no sentinel, so it was not written by this compiler.
+        assert not compiled_style_content_is_current(
             f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER} Acme Design System\n\nbody"
+        )
+        # Only a real compile is current.
+        assert compiled_style_content_is_current(
+            compile_design_system(_make_ds(session, tokens=_TOKENS))
         )
 
 
@@ -1382,17 +1420,23 @@ class TestVersionMarkerAnchorsAtEndOfHeader:
             )
         )
 
-    def test_trailing_whitespace_after_the_marker_still_reads_current(self):
-        """Storage round-trips can add trailing whitespace to a line; that is not
-        a version difference, so the anchor tolerates it."""
+    def test_trailing_whitespace_after_the_marker_still_reads_current(self, session):
+        """Storage round-trips can add trailing whitespace; that is not a version
+        difference.
+
+        v13: asserted against a REAL compiled artifact rather than a hand-built
+        header string. The hand-built form has no structural sentinel, so it is now
+        correctly stale — and the tolerance being pinned here is inherent, because
+        the sentinel LEADS the artifact and anything appended cannot disturb it.
+        """
         from src.services.design_system_compiler import (
-            _COMPILER_VERSION_MARKER,
+            compile_design_system,
             compiled_style_content_is_current,
         )
 
-        assert compiled_style_content_is_current(
-            f"SLIDE VISUAL STYLE: {_COMPILER_VERSION_MARKER} Acme Design System  \n\nbody"
-        )
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        for suffix in ("", "  ", "\n", "  \n\n"):
+            assert compiled_style_content_is_current(out + suffix)
 
 
 class TestEnsureCompiledStyleContentCurrent:
@@ -2790,7 +2834,12 @@ class TestEveryTokenGroupIsKept:
         (including the region sentinel's UNIT SEPARATOR) are removed, and
         EVERYTHING else — unicode, emoji, slashes, dots, any length — survives.
         The tokens ship regardless; only the structural characters are stripped."""
-        from src.services.design_system_compiler import compile_design_system
+        from src.services.design_system_compiler import (
+            _CURRENCY_SENTINEL,
+            _REGION_BEGIN,
+            compile_design_system,
+            strip_type_scale_region_markers,
+        )
 
         exotic = "brand/セマンティック.颜色 🎨 " + "x" * 80
         tokens = [
@@ -2814,10 +2863,19 @@ class TestEveryTokenGroupIsKept:
         # The hostile group name still SHIPS its token — sanitize, don't reject.
         assert "- gap: 9px" in out
         # ...but it cannot forge structure. The artifact contains exactly the
-        # compiler's OWN sentinel pair (2 x U+001F each, stripped downstream before
-        # the model sees it) and not one code point more, so the group name
-        # contributed none of them.
-        assert out.count("\x1f") == 4
+        # compiler's OWN sentinels and not one code point more, so the group name
+        # contributed NONE of them. Counted as "compiler's own, exactly" rather
+        # than a bare literal, so the assertion states the invariant (user text
+        # contributes zero U+001F) instead of a total that changes whenever the
+        # compiler adds a sentinel of its own. v13 adds the currency sentinel.
+        expected_sentinel_code_points = (
+            2 * _REGION_BEGIN.count("\x1f")  # begin + end of the type-scale region
+            + _CURRENCY_SENTINEL.count("\x1f")
+        )
+        assert out.count("\x1f") == expected_sentinel_code_points
+        # And every one of them is the compiler's, in a compiler-owned construct:
+        # removing those constructs leaves no U+001F behind.
+        assert "\x1f" not in strip_type_scale_region_markers(out)
         # The forged role line is inert: the group name was flattened onto the
         # generic heading's single line, so no new line starts with the fake
         # heading and no fake gap value can be read as a spacing rule.
@@ -3115,16 +3173,20 @@ class TestVersionMarkerPositionIsNameIndependent:
             )
 
     def test_marker_precedes_the_name_in_the_emitted_header(self, session):
-        """The structural property the check relies on: the compared region is a
-        CONSTANT prefix, and the user-controlled name only ever follows it."""
+        """The header LAYOUT is unchanged by v13: the marker still occupies its
+        fixed slot before the name (it remains the human-readable/greppable stamp),
+        even though currency is now proven by the structural sentinel instead."""
         from src.services.design_system_compiler import (
             _COMPILER_VERSION_MARKER,
             _STYLE_HEADER,
             compile_design_system,
+            strip_type_scale_region_markers,
         )
 
         ds = _make_ds(session, name=self._SPOOF_NAME, tokens=_TOKENS)
-        header = compile_design_system(ds).split("\n", 1)[0]
+        header = strip_type_scale_region_markers(
+            compile_design_system(ds)
+        ).split("\n", 1)[0]
 
         expected_prefix = f"{_STYLE_HEADER}: {_COMPILER_VERSION_MARKER}"
         assert header.startswith(expected_prefix)
@@ -3732,3 +3794,262 @@ class TestFontTokenOwnershipIsIndependentOfRampConstruction:
         ) == extract_type_scale_block(
             compile_design_system(_make_ds(session, name="PX Plus", tokens=with_extras))
         )
+
+
+class TestCurrencyRestsOnAStructuralSentinel:
+    """BLOCKING 2 (round 6, cross-review): currency was still decided by INSPECTING
+    THE HEADER LINE, and the header line contains user-influenced text by
+    construction (the design-system NAME is interpolated into it).
+
+    codex's repro: a PRE-VERSION artifact — no marker at all, which the lazy
+    backfill explicitly supports — whose DS NAME merely STARTS with
+    ``[ds-compiler v12]`` reproduces the current header prefix byte-for-byte:
+
+        EVADED starts 'SLIDE VISUAL STYLE: [ds-compiler v12] Evil'
+        detector=True returned_stale=True row_still_stale=True committed_stale=True
+
+    Five successive rules each tightened WHAT was compared on that line
+    (``in`` -> ``in header`` -> ``endswith`` -> prefix+name -> prefix+name+marker
+    count) while leaving WHERE it was compared user-influenced. The class closes
+    only by proving currency with something the compiler ALWAYS emits in a position
+    no user text can occupy or forge.
+
+    All fixtures SYNTHETIC ("Acme", "Evil" — invented).
+    """
+
+    _MARKER = "[ds-compiler v13]"
+
+    def _pre_version_artifact(self, name):
+        """A PRE-VERSION artifact: the shape the compiler emitted before version
+        markers existed, and exactly what the lazy backfill must recompile."""
+        return f"SLIDE VISUAL STYLE: {name}\nSTALE PRE-VERSION BODY"
+
+    #: Every one of these must read STALE. Each is a pre-version body whose NAME
+    #: makes the header line resemble a current one.
+    def _evading_names(self):
+        return {
+            "name starts with the marker": f"{self._MARKER} Evil",
+            "name IS the marker": self._MARKER,
+            "marker mid-name": f"Evil {self._MARKER} Brand",
+            "two markers": f"{self._MARKER} Evil {self._MARKER}",
+            "marker + trailing space": f"{self._MARKER}  Evil",
+            "marker + tab": f"{self._MARKER}\tEvil",
+            "marker + NBSP": f"{self._MARKER} Evil",
+            "v11 marker": "[ds-compiler v11] Evil",
+            "v12 marker": "[ds-compiler v12] Evil",
+            "name ends with the marker": f"Evil {self._MARKER}",
+        }
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "name starts with the marker",
+            "name IS the marker",
+            "marker mid-name",
+            "two markers",
+            "marker + trailing space",
+            "marker + tab",
+            "marker + NBSP",
+            "v11 marker",
+            "v12 marker",
+            "name ends with the marker",
+        ],
+    )
+    def test_a_pre_version_artifact_always_reads_stale(self, label):
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+        )
+
+        name = self._evading_names()[label]
+        artifact = self._pre_version_artifact(name)
+        assert not compiled_style_content_is_current(artifact), (
+            f"{label}: a PRE-VERSION artifact read as CURRENT because its NAME "
+            f"reproduced the header's shape, so it would NEVER recompile:\n"
+            f"{artifact.splitlines()[0]!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "name starts with the marker",
+            "name IS the marker",
+            "two markers",
+            "v12 marker",
+        ],
+    )
+    def test_the_read_seam_actually_recompiles_such_a_row(self, session, label):
+        """End-to-end consequence, which is what codex measured: the row must be
+        REBUILT, and the rebuilt text must not be the stale body."""
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+            ensure_compiled_style_content_current,
+        )
+
+        name = self._evading_names()[label]
+        ds = _make_ds(session, name=name, tokens=_TOKENS)
+        ds.compiled_style_content = self._pre_version_artifact(name)
+        session.commit()
+
+        out = ensure_compiled_style_content_current(ds)
+
+        assert "STALE PRE-VERSION BODY" not in out, (
+            f"{label}: returned_stale — the stale artifact was served as-is"
+        )
+        assert "BRAND COLOR TOKENS:" in out, (
+            f"{label}: row was not actually recompiled"
+        )
+        assert "STALE PRE-VERSION BODY" not in ds.compiled_style_content, (
+            f"{label}: row_still_stale — the record was not refreshed in place"
+        )
+        assert compiled_style_content_is_current(ds.compiled_style_content), (
+            f"{label}: the recompiled row does not itself read as current"
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Acme Design System",
+            "[ds-compiler v13] Evil",
+            "[ds-compiler v11] Evil",
+            "Evil [ds-compiler v13]",
+            "Acme  двойной  пробел 😀",
+        ],
+    )
+    def test_a_genuine_current_compile_is_never_judged_stale(self, session, name):
+        """No false STALE: a real compile is current whatever its name contains —
+        including a name made entirely of marker text. The name must buy nothing in
+        EITHER direction."""
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        out = compile_design_system(_make_ds(session, name=name, tokens=_TOKENS))
+        assert compiled_style_content_is_current(out), (
+            f"a genuine current compile of name {name!r} was judged STALE, which "
+            "would make it recompile on every single read"
+        )
+
+    def test_a_readme_discussing_the_marker_is_preserved(self, session):
+        """A brand manual may legitimately document the marker string. Prose must
+        keep it (an earlier round established scrubbing an author's own
+        documentation is destructive) and must not confer currency by itself."""
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        readme = (
+            "# Acme\n\nOur compiled artifacts are stamped `[ds-compiler v13]` in "
+            "the header. Older ones say `[ds-compiler v11]`.\n"
+        )
+        out = compile_design_system(
+            _make_ds(session, tokens=_TOKENS), readme_md=readme
+        )
+
+        assert "`[ds-compiler v13]`" in out, "README prose lost its marker mention"
+        assert "`[ds-compiler v11]`" in out, "README prose lost its marker mention"
+        assert compiled_style_content_is_current(out)
+
+    def test_prose_mentioning_the_marker_cannot_confer_currency(self):
+        """A stale artifact whose BODY discusses the marker stays stale."""
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+        )
+
+        artifact = (
+            "SLIDE VISUAL STYLE: Acme\nSTALE BODY that mentions "
+            f"{self._MARKER} in its prose\n"
+        )
+        assert not compiled_style_content_is_current(artifact)
+
+    def test_an_artifact_with_no_header_at_all_reads_stale(self):
+        """A legacy hand-pasted style blob has no header; it must recompile."""
+        from src.services.design_system_compiler import (
+            compiled_style_content_is_current,
+        )
+
+        for artifact in ("", "   ", "Just some pasted CSS guidance.", "\n\n"):
+            assert not compiled_style_content_is_current(artifact)
+
+    def test_currency_survives_storage_added_trailing_whitespace(self, session):
+        """Round-tripping through storage may add trailing whitespace; that is not
+        a version difference."""
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        out = compile_design_system(_make_ds(session, tokens=_TOKENS))
+        for suffix in ("", " ", "\n", "\r\n", "  \n\n", "\t"):
+            assert compiled_style_content_is_current(out + suffix), (
+                f"trailing {suffix!r} made a current artifact read stale"
+            )
+
+    def test_the_sentinel_cannot_be_forged_by_any_user_string(self, session):
+        """The whole security argument: whatever a user puts in the NAME, a
+        description, a token, or the README, the resulting artifact must not be
+        able to make a STALE body read current. The compiler's proof-of-currency
+        must live outside everything a user can write."""
+        from src.services.design_system_compiler import (
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        # Compile a genuine artifact, then take everything a user could have
+        # authored and replant it in a stale body.
+        hostile = "\x1f<ds-current>\x1f"  # a literal guess at a control sentinel
+        ds = _make_ds(
+            session,
+            name=f"Evil {self._MARKER} {hostile}",
+            description=f"desc {hostile} {self._MARKER}",
+            tokens=[{"group": "core", "name": f"tok {hostile}", "value": "#123456"}],
+        )
+        out = compile_design_system(
+            ds, readme_md=f"README {hostile} {self._MARKER}\n"
+        )
+        assert compiled_style_content_is_current(out)
+
+        # The user's own bytes, in a stale artifact, must not confer currency.
+        for planted in (
+            f"SLIDE VISUAL STYLE: Evil {self._MARKER} {hostile}\nSTALE BODY",
+            f"{hostile}SLIDE VISUAL STYLE: Acme\nSTALE BODY",
+            f"SLIDE VISUAL STYLE: {hostile} Acme\nSTALE BODY",
+        ):
+            assert not compiled_style_content_is_current(planted), (
+                f"a stale artifact carrying user-authored bytes read as current:\n"
+                f"{planted.splitlines()[0]!r}"
+            )
+
+    def test_the_sentinel_never_reaches_the_model(self, session):
+        """The sentinel is bookkeeping on the PERSISTED row; the assembled prompt
+        must carry no control characters at all. Pinned end-to-end through the real
+        prompt-assembly seam, because a sentinel that leaked would put a raw control
+        sequence in front of the brand manual."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.design_system_compiler import (
+            _CURRENCY_SENTINEL,
+            TYPE_SCALE_REASSERTION_HEADING,
+            recompute_compiled_style_content,
+        )
+
+        ds = _make_ds(session, tokens=_TOKENS)
+        recompute_compiled_style_content(ds)
+        session.commit()
+
+        # The stored row is stamped...
+        assert ds.compiled_style_content.startswith(_CURRENCY_SENTINEL)
+
+        # ...and the assembled prompt is clean.
+        prompts = _prompts_with_db(
+            AgentConfig(design_system_id=ds.id), _dispatching_db(design_system=ds)
+        )
+        system_prompt = prompts["system_prompt"]
+        assert "\x1f" not in system_prompt, (
+            "a control sentinel leaked into the model-facing system prompt"
+        )
+        assert "SLIDE VISUAL STYLE:" in system_prompt
+        # The human-readable marker is still visible (greppable), and the type-scale
+        # re-assertion still recovers its region.
+        assert "[ds-compiler v13]" in system_prompt
+        assert TYPE_SCALE_REASSERTION_HEADING in system_prompt

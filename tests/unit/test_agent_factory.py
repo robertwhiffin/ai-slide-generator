@@ -325,18 +325,24 @@ def test_design_system_id_resolves_compiled_style_content():
     """A selected design system's compiled_style_content reaches the pre-assembled
     system prompt via the existing seam."""
     from src.api.schemas.agent_config import AgentConfig
-    from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
+    from src.services.design_system_compiler import (
+        _COMPILER_VERSION_MARKER,
+        _CURRENCY_SENTINEL,
+    )
 
     config = AgentConfig(design_system_id=99)
     ds = MagicMock()
-    # Marker-current artifact -> injected verbatim (stale-artifact recompute is
-    # covered by the state matrix in test_ds_generation_state_matrix.py).
-    # Shaped like real compiler output: the version marker sits in a FIXED slot
-    # right after the constant header label and BEFORE the name (v12 — deriving
-    # currency from the END of the line was spoofable by a name ending with the
-    # marker), with the artifact body on the lines below.
+    # CURRENT artifact -> injected verbatim (stale-artifact recompute is covered by
+    # the state matrix in test_ds_generation_state_matrix.py).
+    #
+    # Shaped like real compiler output. v13: currency is proven by the leading
+    # structural sentinel, NOT by the header line — the header contains the
+    # user-controlled name by construction, and five successive header rules were
+    # each defeated through it. The human-readable marker still rides on the header
+    # in its fixed slot, so both are present here.
     ds.compiled_style_content = (
-        "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " ACME-DS-COMPILED"
+        _CURRENCY_SENTINEL
+        + "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " ACME-DS-COMPILED"
         + "\n\n:root { --brand-core-primary: #123456; }"
     )
     db = _dispatching_db(design_system=ds)
@@ -353,12 +359,17 @@ def test_design_system_id_resolves_in_edit_mode():
     editing-prompt seam, exactly as generation does — so on-brand styling applies
     when refining an existing deck, not just when generating a new one."""
     from src.api.schemas.agent_config import AgentConfig
-    from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
+    from src.services.design_system_compiler import (
+        _COMPILER_VERSION_MARKER,
+        _CURRENCY_SENTINEL,
+    )
 
     config = AgentConfig(design_system_id=99)
     ds = MagicMock()
+    # v13: the leading structural sentinel is what makes this artifact CURRENT.
     ds.compiled_style_content = (
-        "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " ACME-DS-EDIT-MARKER"
+        _CURRENCY_SENTINEL
+        + "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " ACME-DS-EDIT-MARKER"
         + "\n\n:root { --brand-core-primary: #123456; }"
     )
     db = _dispatching_db(design_system=ds)
@@ -372,15 +383,19 @@ def test_design_system_id_resolves_in_edit_mode():
 def test_design_system_takes_precedence_over_slide_style():
     """When both are set, the design system wins and the slide style is not used."""
     from src.api.schemas.agent_config import AgentConfig
-    from src.services.design_system_compiler import _COMPILER_VERSION_MARKER
+    from src.services.design_system_compiler import (
+        _COMPILER_VERSION_MARKER,
+        _CURRENCY_SENTINEL,
+    )
 
     config = AgentConfig(design_system_id=99, slide_style_id=42)
     ds = MagicMock()
-    # Real artifact shape (v12): the header line is "HEADER: <marker> <name>",
-    # which is what version detection matches positionally (a header carrying a
-    # SECOND marker, or none, is a pre-v12 artifact and correctly recompiles).
+    # Real artifact shape (v13): a leading currency sentinel — which is what version
+    # detection reads — then the header line "HEADER: <marker> <name>". An artifact
+    # with no sentinel (any pre-v13 row) correctly recompiles.
     ds.compiled_style_content = (
-        "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " DS-MARKER\n\nbody"
+        _CURRENCY_SENTINEL
+        + "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " DS-MARKER\n\nbody"
     )
     style = MagicMock()
     style.style_content = "LEGACY-STYLE-MARKER"
