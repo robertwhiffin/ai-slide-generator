@@ -52,8 +52,14 @@ router = APIRouter(prefix="/design-systems", tags=["design-systems"])
 
 
 class TokenIn(BaseModel):
+    # name is 255 to match ``design_system_token.name``. It was 100, which made a
+    # single long brand token name reject the ENTIRE bundle import — worse than
+    # the silent drop the compiler already stopped doing, and a direct violation
+    # of the zero-token-loss requirement. Real design systems ship descriptive
+    # names ("brand-semantic-surface-elevated-interactive-hover"), so the limit
+    # exists only to match storage, not to police naming.
     group: str = Field(..., min_length=1, max_length=50)
-    name: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=255)
     value: str = Field(..., min_length=1, max_length=255)
 
 

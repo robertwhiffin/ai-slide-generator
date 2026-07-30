@@ -217,7 +217,11 @@ class DesignSystemToken(Base):
     # core | accents | ink | tints | type | spacing.
     # ``group`` is a SQL reserved word; SQLAlchemy quotes the identifier per dialect.
     group = Column(String(50), nullable=False)
-    name = Column(String(100), nullable=False)
+    # 255, widened from 100: a single longer brand token name used to reject the
+    # WHOLE bundle import (zero-token-loss requirement). Existing databases are
+    # widened by ``_migrate_widen_token_name``; this declaration is what
+    # ``create_all`` uses for fresh ones, so the two must stay in step.
+    name = Column(String(255), nullable=False)
     value = Column(String(255), nullable=False)
 
     design_system = relationship("DesignSystem", back_populates="tokens")

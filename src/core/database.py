@@ -533,6 +533,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system (v1): add font_mapping_json to pre-existing tables ---
         _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system token: widen name 100 -> 255 (zero token loss) ---
+        _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -643,6 +646,62 @@ def _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlit
     conn.execute(text(
         f"ALTER TABLE {_qual('design_system')} ADD COLUMN font_mapping_json {col_type} NULL"
     ))
+
+
+def _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Widen ``design_system_token.name`` from VARCHAR(100) to VARCHAR(255).
+
+    The zero-token-loss requirement: a brand token whose NAME exceeded 100
+    characters did not merely get dropped, it made the ENTIRE bundle import fail,
+    so one long name cost every other token in the bundle. The API validator and
+    the ORM declaration are widened alongside this ALTER (fresh databases come
+    from ``create_all``; this handles ones an earlier deploy provisioned).
+
+    Idempotent: the current width is probed first and the ALTER is skipped when it
+    is already >= 255, so repeated migration runs are a no-op.
+
+    Dialect behaviour differs and is deliberately NOT papered over:
+    - PostgreSQL / Lakebase (the real target): ``ALTER COLUMN TYPE VARCHAR(255)``
+      is a widening of the same base type, which Postgres performs without
+      rewriting the table and without a lock beyond the brief catalog update.
+    - SQLite (tests only): declared VARCHAR length is NOT ENFORCED, so there is
+      nothing to widen — a 200-char name already round-trips. Attempting
+      ``ALTER COLUMN TYPE`` there would raise (SQLite has no such statement), and
+      rebuilding the table would be a destructive no-value operation. So this
+      returns early, which is asserted by a test rather than assumed.
+
+    Wrapped in a SAVEPOINT so a failure (e.g. insufficient privileges on a
+    locked-down deploy) cannot poison the outer migration transaction: the column
+    stays at its old width and the rest of the migrations still apply.
+    """
+    from sqlalchemy import inspect, text
+
+    if is_sqlite:
+        # Length is unenforced here; see the docstring. Nothing to do.
+        return
+
+    insp = inspector or inspect(conn)
+    try:
+        columns = {c["name"]: c for c in insp.get_columns("design_system_token", schema=schema)}
+    except Exception:
+        return
+    column = columns.get("name")
+    if column is None:
+        return
+
+    current_length = getattr(column.get("type"), "length", None)
+    if current_length is not None and current_length >= 255:
+        return  # already widened
+
+    logger.info(
+        "Migration: widening design_system_token.name to VARCHAR(255) "
+        f"(was {current_length})"
+    )
+    with conn.begin_nested():
+        conn.execute(text(
+            f"ALTER TABLE {_qual('design_system_token')} "
+            "ALTER COLUMN name TYPE VARCHAR(255)"
+        ))
 
 
 def _reassign_new_objects_to_shared_owner(
