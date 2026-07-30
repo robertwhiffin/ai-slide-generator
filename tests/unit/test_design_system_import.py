@@ -349,3 +349,159 @@ class TestDefaultNamePrecedence:
             source_filename="acme.zip",
         )
         assert ds.name == "Explicit Name"
+
+
+# ---------------------------------------------------------------------------
+# Long token NAMES must not fail the whole bundle import
+# ---------------------------------------------------------------------------
+#
+# The user requirement is ZERO brand-token loss. The compiler stopped dropping
+# names, but the STORAGE/VALIDATION layers still rejected them: TokenIn capped
+# name at 100 chars and design_system_token.name was VARCHAR(100). That is worse
+# than a silent drop — one long token name rejected the ENTIRE import, so a
+# bundle with 400 good tokens and one 120-char name imported nothing.
+#
+# Both layers are widened to 255. All fixtures SYNTHETIC.
+
+# NOTE: deliberately NOT prefixed "brand-". ``_normalize_token_ident`` strips that
+# namespace by design so manifest tokens dedup against CSS ``:root`` vars, which
+# would change the stored name and make these assertions test the wrong thing.
+_LONG_120 = "display-heading-size-token-" + "x" * 93
+_LONG_200 = "semantic-surface-elevated-interactive-hover-token-" + "y" * 150
+
+
+class TestLongTokenNamesImportSuccessfully:
+    def test_token_in_accepts_a_120_and_200_char_name(self):
+        """The API-layer validator must not be the thing that loses brand data."""
+        from src.api.routes.settings.design_systems import TokenIn
+
+        assert len(_LONG_120) == 120
+        assert len(_LONG_200) == 200
+        for name in (_LONG_120, _LONG_200):
+            token = TokenIn(group="type", name=name, value="64px")
+            assert token.name == name
+
+    def test_bundle_with_long_token_names_imports_and_compiles(self, session):
+        """End to end: a bundle carrying both long names imports SUCCESSFULLY and
+        both names reach the compiled artifact."""
+        from src.services.design_system_compiler import compile_design_system
+        from src.services.design_system_service import import_bundle
+        from tests.unit.conftest_design_system import default_manifest
+
+        manifest = default_manifest()
+        manifest["name"] = "Acme Long Token Names"
+        manifest["tokens"] = [
+            {"group": "type", "name": _LONG_120, "value": "64px"},
+            {"group": "type", "name": _LONG_200, "value": "40px"},
+            {"group": "core", "name": "primary", "value": "#123456"},
+        ]
+
+        ds = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(manifest=manifest),
+            user="creator@test.com",
+        )
+        session.commit()
+
+        stored = {token.name for token in ds.tokens}
+        assert _LONG_120 in stored, "120-char token name was not persisted"
+        assert _LONG_200 in stored, "200-char token name was not persisted"
+
+        compiled = compile_design_system(ds)
+        assert _LONG_120 in compiled
+        assert _LONG_200 in compiled
+
+    def test_one_long_name_does_not_reject_the_other_tokens(self):
+        """The failure mode that made this BLOCKING: a single long name used to
+        take the whole bundle down with it."""
+        from src.api.routes.settings.design_systems import TokenIn
+
+        tokens = [
+            TokenIn(group="core", name="primary", value="#123456"),
+            TokenIn(group="type", name=_LONG_120, value="64px"),
+            TokenIn(group="core", name="secondary", value="#234567"),
+        ]
+        assert [t.name for t in tokens][1] == _LONG_120
+
+    def test_255_is_the_boundary_and_beyond_it_still_validates(self):
+        """255 is accepted; a name longer than the column can hold is rejected at
+        the API layer rather than truncated silently in storage."""
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        from src.api.routes.settings.design_systems import TokenIn
+
+        assert TokenIn(group="type", name="z" * 255, value="1px").name == "z" * 255
+        with _pytest.raises(ValidationError):
+            TokenIn(group="type", name="z" * 256, value="1px")
+
+
+class TestTokenNameColumnWidthMigration:
+    """The hand-rolled idempotent migration (there is no Alembic in this repo).
+
+    On Postgres the widening is a real ``ALTER COLUMN TYPE VARCHAR(255)``, which
+    is safe and non-rewriting. On SQLite ``VARCHAR(n)`` length is NOT enforced at
+    all, so the migration is deliberately a NO-OP there rather than faking a
+    table rebuild — asserted below so nobody "fixes" it into one.
+    """
+
+    def test_migration_is_idempotent_run_twice(self):
+        """Running the whole migration set twice must not error."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+
+        from src.core.database import Base, _run_migrations
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        _run_migrations(engine)
+        _run_migrations(engine)  # second pass must be a clean no-op
+        engine.dispose()
+
+    def test_widen_helper_is_a_noop_on_sqlite(self):
+        """SQLite does not enforce VARCHAR length, so there is nothing to do —
+        and attempting an ALTER COLUMN TYPE there would raise."""
+        from sqlalchemy import create_engine, inspect, text
+        from sqlalchemy.pool import StaticPool
+
+        from src.core.database import Base, _migrate_widen_token_name
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            inspector = inspect(conn)
+            _migrate_widen_token_name(
+                conn, inspector, None, lambda t: f'"{t}"', True
+            )
+            # A 200-char name round-trips regardless (length is unenforced here).
+            conn.execute(text(
+                "INSERT INTO design_system "
+                "(name, version, published, is_active, is_default, created_at, updated_at) "
+                "VALUES ('Acme Width', 1, 0, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+            ds_id = conn.execute(text("SELECT id FROM design_system")).scalar()
+            conn.execute(
+                text(
+                    "INSERT INTO design_system_token (design_system_id, \"group\", name, value) "
+                    "VALUES (:ds, 'type', :name, '64px')"
+                ),
+                {"ds": ds_id, "name": "w" * 200},
+            )
+            got = conn.execute(text("SELECT name FROM design_system_token")).scalar()
+        assert got == "w" * 200
+        engine.dispose()
+
+    def test_orm_column_is_declared_255(self):
+        """The ORM declaration is what create_all() uses for FRESH databases, so
+        it must be widened alongside the ALTER for existing ones."""
+        from src.database.models.design_system import DesignSystemToken
+
+        assert DesignSystemToken.__table__.c.name.type.length == 255
