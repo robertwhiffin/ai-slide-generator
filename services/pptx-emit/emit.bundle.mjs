@@ -15429,6 +15429,7 @@ async function emitPptx(slides2, outPath, fontMode = "universal", title = "slide
       if (r.kind === "rect") emitRect(s, r);
       else if (r.kind === "image") emitImage(s, r);
       else if (r.kind === "text") emitText(s, r, fontMode);
+      else if (r.kind === "background") emitBackground(s, r);
     }
   }
   await pptx.writeFile({ fileName: outPath });
@@ -15448,6 +15449,13 @@ function emitRect(s, r) {
     s.addShape("roundRect", opts);
   } else {
     s.addShape("rect", opts);
+  }
+}
+function emitBackground(s, r) {
+  if (typeof r.src === "string" && r.src) {
+    s.background = r.src.startsWith("data:") ? { data: r.src } : { path: r.src };
+  } else if (r.fill) {
+    s.background = { color: r.fill };
   }
 }
 function emitImage(s, r) {

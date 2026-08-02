@@ -65,7 +65,12 @@ export interface TextRecord {
   rotate?: number;
   _depth?: number;
 }
-export type SlideRecord = RectRecord | ImageRecord | TextRecord;
+export interface BackgroundRecord {
+  kind: 'background';
+  src?: string;   // data/URL for an image background
+  fill?: string;  // hex color background (omitted for white — slides default white)
+}
+export type SlideRecord = RectRecord | ImageRecord | TextRecord | BackgroundRecord;
 
 export interface SlideExtract {
   width: number;
@@ -456,18 +461,42 @@ const WALKER_SOURCE = `
         }
         const borderColor = parseColor(cs.borderTopColor);
         const borderW = parseFloat(cs.borderTopWidth) || 0;
-        if (fill || borderW > 0) {
-          const rect = {
-            kind: 'rect',
-            x: box.x, y: box.y, w: box.w, h: box.h,
-            fill: fill ? fill.hex : null,
-            stroke: borderW > 0 && borderColor ? borderColor.hex : null,
-            strokeW: borderW,
-            radius: parseRadius(cs),
-            _depth: depth,
-          };
-          if (shadow) rect.shadow = shadow;
-          records.push(rect);
+        // A full-bleed element (covers the whole slide) IS the slide background:
+        // set it as the PPTX slide background rather than a slide-sized shape/image
+        // that sits on top and is awkward to select/edit. A plain white background
+        // emits nothing at all — slides already default to white.
+        const fullBleed = box.x <= 1 && box.y <= 1 &&
+          box.w >= rootRect.width - 2 && box.h >= rootRect.height - 2;
+
+        if (fullBleed && borderW === 0 && (el.dataset.bgRaster || fill)) {
+          // Full-bleed url() photo is emitted BEFORE the gradient overlay below so a
+          // combined gradient-scrim + url-photo cover layers correctly (photo as the
+          // background, scrim painted over it).
+          if (el.dataset.bgRaster) {
+            records.push({ kind: 'background', src: el.dataset.bgRaster });
+          } else if (fill.hex !== 'FFFFFF') {
+            records.push({ kind: 'background', fill: fill.hex });
+          }
+          // white fill → nothing (default white slide)
+        } else {
+          if (fill || borderW > 0) {
+            const rect = {
+              kind: 'rect',
+              x: box.x, y: box.y, w: box.w, h: box.h,
+              fill: fill ? fill.hex : null,
+              stroke: borderW > 0 && borderColor ? borderColor.hex : null,
+              strokeW: borderW,
+              radius: parseRadius(cs),
+              _depth: depth,
+            };
+            if (shadow) rect.shadow = shadow;
+            records.push(rect);
+          }
+          // Non-full-bleed background-image url() (rasterized to el.dataset.bgRaster
+          // by the export pre-pass, since pptxgenjs can't read CSS backgrounds).
+          if (el.dataset.bgRaster) {
+            records.push(Object.assign({ kind: 'image' }, box, { src: el.dataset.bgRaster, _depth: depth + 0.3 }));
+          }
         }
         // Optional gradient raster overlay on top (so gradient visuals
         // retain their full color range). If canvas rasterization fails
@@ -507,11 +536,12 @@ const WALKER_SOURCE = `
         return;
       }
 
-      // 3. <img>.
+      // 3. <img>. Prefer el.dataset.rasterSrc — the export pre-pass sets it for
+      // SVG sources (pptxgenjs can't embed image/svg+xml), rasterized to PNG.
       if (el.tagName === 'IMG' && el.src) {
         const ibox = rotation !== null ? getRotatedBox(el, box, rotation) : box;
         const rec = Object.assign({ kind: 'image' }, ibox, {
-          src: el.currentSrc || el.src,
+          src: el.dataset.rasterSrc || el.currentSrc || el.src,
           _depth: depth,
         });
         if (rotation !== null) rec.rotate = rotation;
@@ -568,6 +598,99 @@ const FONT_REWRITE_SRC = `
   });
 })();
 `;
+
+/**
+ * Rasterize export-hostile assets to PNG dataURLs before the (synchronous) walker runs.
+ *
+ * Two things pptxgenjs / the records path can't handle, both rendered fine by the browser:
+ *   1. `background-image: url(...)` on a div — the walker only reads `<img>`/canvas/gradient,
+ *      so full-bleed CSS backgrounds (Tellr covers/dividers) never became image records.
+ *   2. SVG `<img>` sources — pptxgenjs.addImage can't embed `data:image/svg+xml`.
+ *
+ * For both we draw the already-decoded pixels onto a 2x canvas and stamp the PNG dataURL onto
+ * the element (`dataset.bgRaster` / `dataset.rasterSrc`); the walker then emits image records
+ * from those. Runs in the iframe context (`win`) so getComputedStyle/canvas match what's shown.
+ * Best-effort throughout: any failure just leaves the element to the walker's old behavior.
+ */
+async function rasterizeExportAssets(win: any, root: HTMLElement): Promise<void> {
+  const doc = root.ownerDocument!;
+  const loadImage = (url: string): Promise<any> =>
+    new Promise((resolve) => {
+      const img = new win.Image();
+      let settled = false;
+      let timer: any;
+      // A stalled fetch (hung/blocked remote resource) would otherwise never fire
+      // onload/onerror, leaving this promise pending and blocking the whole export.
+      // Cap the wait so the loop moves on (element falls back to walker behavior).
+      const finish = (val: any) => { if (settled) return; settled = true; clearTimeout(timer); resolve(val); };
+      timer = setTimeout(() => finish(null), 5000);
+      img.onload = () => finish(img);
+      img.onerror = () => finish(null);
+      img.src = url;
+    });
+  const toCanvasPng = (
+    img: any, boxW: number, boxH: number, mode: 'cover' | 'fit',
+  ): string | null => {
+    try {
+      const scale = 2; // supersample so logos/backgrounds stay crisp when scaled in PPT
+      const cw = Math.max(1, Math.round(boxW * scale));
+      const ch = Math.max(1, Math.round(boxH * scale));
+      const c = doc.createElement('canvas');
+      c.width = cw; c.height = ch;
+      const ctx = c.getContext('2d');
+      if (!ctx) return null;
+      if (mode === 'cover') {
+        const iw = img.naturalWidth || img.width;
+        const ih = img.naturalHeight || img.height;
+        if (!iw || !ih) return null;
+        const s = Math.max(cw / iw, ch / ih); // fill box, center-crop (background-size: cover)
+        const dw = iw * s, dh = ih * s;
+        ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+      } else {
+        ctx.drawImage(img, 0, 0, cw, ch); // stretch to box (aspect already matches for logos)
+      }
+      return c.toDataURL('image/png');
+    } catch { return null; }
+  };
+
+  const els = [root, ...Array.from(root.querySelectorAll('*'))] as HTMLElement[];
+  for (const el of els) {
+    let cs: CSSStyleDeclaration;
+    try { cs = win.getComputedStyle(el); } catch { continue; }
+
+    // (1) url() background image. Act whenever a url() layer is present — including a
+    // combined `linear-gradient(scrim), url(photo)`, where we rasterize the photo and let
+    // the walker rasterize the gradient scrim separately on top. Pure gradients (no url)
+    // fall through to the walker.
+    const bg = cs.backgroundImage;
+    if (bg && bg !== 'none' && bg.indexOf('url(') !== -1) {
+      const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
+      const r = el.getBoundingClientRect();
+      if (m && r.width >= 8 && r.height >= 8) {
+        const img = await loadImage(m[1]);
+        if (img) {
+          const mode = cs.backgroundSize === 'contain' ? 'fit' : 'cover';
+          const png = toCanvasPng(img, r.width, r.height, mode);
+          if (png) el.dataset.bgRaster = png;
+        }
+      }
+    }
+
+    // (2) SVG <img> — rasterize the already-rendered element to PNG.
+    if (el.tagName === 'IMG') {
+      const im = el as HTMLImageElement;
+      const src = im.currentSrc || im.src;
+      if (src && (src.indexOf('image/svg') !== -1 || /\.svg(\?|#|$)/i.test(src))) {
+        try { if (im.decode) await im.decode(); } catch { /* fall through */ }
+        const r = im.getBoundingClientRect();
+        if (r.width >= 1 && r.height >= 1) {
+          const png = toCanvasPng(im, r.width, r.height, 'fit');
+          if (png) el.dataset.rasterSrc = png;
+        }
+      }
+    }
+  }
+}
 
 /** Mount a hidden iframe, step each slide, collect records via the walker. */
 export async function extractSlideRecordsForExport(
@@ -678,7 +801,11 @@ export async function extractSlideRecordsForExport(
       try {
         const root = d.querySelector(
           `section.slide-container[data-slide-index="${i}"]`
-        );
+        ) as HTMLElement | null;
+        if (root) {
+          try { await rasterizeExportAssets(w, root); }
+          catch (e) { console.warn(`[walker] asset rasterization failed on slide ${i}:`, e); }
+        }
         extract = root ? (w as any).__extractSlide(root) : null;
       } catch (e) {
         console.error(`[walker] extract failed on slide ${i}:`, e);
