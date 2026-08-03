@@ -45,7 +45,7 @@
 
 | Path | Change |
 |---|---|
-| `frontend/src/components/Layout/AppLayout.tsx:54,69,862-879` | Replace `SelectionRibbon`+`SlidePanel` with `SlideViewer`; drop `scrollTarget`/`scrollToSlide` |
+| `frontend/src/components/Layout/AppLayout.tsx` | Replace `SelectionRibbon`+`SlidePanel` with `SlideViewer`; drop `scrollTarget`/`scrollToSlide` (see Task 8 for search patterns) |
 | `frontend/src/components/SlidePanel/SlideSelection.tsx:3,32` | Delete (checkbox selection retired) |
 | `frontend/src/components/SlidePanel/SelectionRibbon.tsx` | Delete (replaced by `ThumbnailRibbon`) |
 | `frontend/src/utils/slideReplacements.ts:1` | Remove `isContiguous` (only consumer was `SlideSelection.tsx:32`) |
@@ -1119,12 +1119,10 @@ Then remove `isContiguous` from `src/utils/slideReplacements.ts` (verify no othe
 Spec §2 requires **both** left panels (nav/options and chat) to be collapsible with
 persisted state.
 
-First check whether either already collapses: `grep -n "collaps\|isOpen\|sidebar" frontend/src/components/Layout/AppLayout.tsx frontend/src/components/Layout/app-sidebar.tsx`
-
-- If collapse behaviour exists (e.g. a sidebar primitive), reuse it and only add
-  persistence if missing.
-- If not, add a persisted boolean per panel in `AppLayout`, following the
-  `localStorage` read/write pattern from `ViewerContext`:
+**Pre-check:** The nav sidebar uses `SidebarProvider` from `@/ui/sidebar` (a Shadcn primitive
+that handles collapse state automatically). The chat panel has **no** existing collapse
+behaviour. Reuse the Shadcn collapse for the nav (no changes needed) and add persistence
+for the chat panel following the `localStorage` read/write pattern from `ViewerContext`:
 
 ```tsx
 const PANEL_STATE_KEY = 'tellr-panel-collapsed';
@@ -1158,19 +1156,21 @@ Append to `frontend/tests/e2e/slide-viewer.spec.ts`:
 
 ```typescript
 import { mockFindings } from '../fixtures/findings';
+import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpers';
 
 test.describe('flip-through viewer', () => {
   test.beforeEach(async ({ page }) => {
     await setupMocks(page);
+    await mockSessionWithSlides(page);
     await page.addInitScript(
       findings => { (window as any).__TELLR_TEST_FINDINGS__ = findings; },
       mockFindings,
     );
   });
 
-  // Replace with the helper this repo already uses to reach a deck-loaded session.
+  // Use the established helper from session-helpers to reach a deck-loaded session
   const openDeck = async (page: import('@playwright/test').Page) => {
-    await page.goto('/sessions/test-session-id/edit');
+    await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
     await expect(page.getByTestId('slide-viewer')).toBeVisible();
   };
 
@@ -1189,7 +1189,7 @@ test.describe('flip-through viewer', () => {
     await page.keyboard.press('ArrowRight');
     await expect(page.getByTestId('stage-position')).toContainText('2 /');
 
-    const chat = page.locator('textarea, input[type="text"]').first();
+    const chat = page.getByTestId('chat-input');
     await chat.click();
     await chat.press('ArrowRight');
     await expect(page.getByTestId('stage-position')).toContainText('2 /');  // unchanged
@@ -1260,7 +1260,8 @@ test.describe('flip-through viewer', () => {
     await openDeck(page);
     await page.keyboard.press('End');
     // Auto-reveal (spec §4): the last thumbnail must be scrolled into view.
-    const lastThumb = page.getByTestId('ribbon-thumb-13');   // original_deck.html has 14 slides
+    // tests/sample_htmls/original_deck.html contains 15 slides (indices 0–14)
+    const lastThumb = page.getByTestId('ribbon-thumb-14');
     await expect(lastThumb).toHaveAttribute('data-current', 'true');
     await expect(lastThumb).toBeInViewport();
   });
@@ -1328,14 +1329,15 @@ Cover, per spec §9.1:
 
 - [ ] **Step 3: Correct `frontend-overview.md`**
 
-Each row below is currently stated as fact and is now false. Fix all six:
+Each row below is currently stated as fact and is now false. Fix all seven (note: duplicate
+rows for `SlidePanel`, `SlideTile` at `:299-300` and `:302-303`):
 
 | Location | Currently says | Correct to |
 |---|---|---|
 | `:48-50` | "Click slide preview – scrolls the main SlidePanel to that slide"; "Click checkbox – toggles slide selection for chat context (contiguous only)"; `SlidePanel` "Accepts `scrollToSlide` prop" | Ribbon click *selects* the slide; the stage renders one slide; no checkboxes; no `scrollToSlide` |
 | `:54` | "`scrollTarget: { index, key } \| null` – coordinates ribbon-to-panel navigation" | Removed; current-slide index lives in `ViewerContext` |
 | `:110` | "### 3. Selection Context" — `selectedIndices`, "Enforces contiguous selections via `utils/slideReplacements.ts::isContiguous`" | Retired. Describe `ViewerContext` instead; note conversational targeting arrives in PRD workstream 7 |
-| `:299-309` | Component rows for `SlidePanel`, `SlideTile`, `SelectionRibbon`+`SlideSelection` | Rows for `SlideViewer`, `SlideStage`, `ThumbnailRibbon`, `FeedbackDrawer`; drop deleted files |
+| `:299-309` | Duplicate rows: `SlidePanel`, `SlideTile` appear twice (`:299-300` and `:302-303`). Also contains rows for `SelectionRibbon`+`SlideSelection` | Remove duplicates; replace `SelectionRibbon`, `SlideSelection`, and the second `SlidePanel`/`SlideTile` rows with `SlideViewer`, `SlideStage`, `ThumbnailRibbon`, `FeedbackDrawer` |
 | `:368-376` | "### Selecting Slides and Navigation"; "`SelectionContext` cleared after fresh slides arrive"; "Ribbon navigation: … scrolls `SlidePanel` … via `scrollToSlide`" | Rewrite for the new model |
 | `:509-511` | "4. Navigate slides – Click slide preview in ribbon to scroll main panel"; "6. Refine slides – Use checkbox in ribbon to select contiguous slides" | Rewrite; no checkbox step |
 
