@@ -29,7 +29,7 @@ Today `SlidePanel` renders every slide in one scrolling column. Two problems:
 
 An earlier draft of this spec claimed speaker notes already existed and merely
 needed a UI. **That was wrong.** The codebase contains read-side plumbing only —
-`domWalker.ts:92` and `export.py:1225` read `speaker_notes` / `notes` with `||`
+`domWalker.ts:92-93` and `export.py:1225` read `speaker_notes` / `notes` with `||`
 fallbacks, and `domWalker.ts:129` round-trips them through a `<script
 id="speaker-notes">` blob on the export path. But:
 
