@@ -19,10 +19,12 @@ import type { SlideDeck } from '../../types/slide';
 import { useViewer } from '../../contexts/ViewerContext';
 import { buildSlideDocument } from '../../services/slideDocument';
 
-// Thumbnail scale: ribbon is w-40 (160px), p-2 gives ~144px inner width.
-// Scale = 144 / 1280 ≈ 0.1125. Container uses padding-top: 56.25% (16:9) to
-// reserve exactly the right height so the scaled iframe doesn't overflow.
-const PREVIEW_SCALE = 0.1125;
+// Thumbnail scale: ribbon is w-40 (160px). The clip boundary for the iframe
+// is 160 − 16 (ribbon p-2, 8px each side) − 2 (button border, 1px each side)
+// − 8 (button p-1, 4px each side) = 134px.
+// Scale = 134 / 1280 ≈ 0.1047 so the 1280-wide document fits exactly.
+// Container uses padding-top: 56.25% (16:9) to reserve the right height.
+const PREVIEW_SCALE = 134 / 1280;
 
 interface ThumbnailRibbonProps {
   slideDeck: SlideDeck;
