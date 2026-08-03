@@ -28,10 +28,18 @@ Today `SlidePanel` renders every slide in one scrolling column. Two problems:
 ### 1.1 On speaker notes (deferred)
 
 An earlier draft of this spec claimed speaker notes already existed and merely
-needed a UI. **That was wrong.** The codebase contains read-side plumbing only —
-`domWalker.ts:92-94` and `export.py:1225` read `speaker_notes` / `notes` with `||`
-fallbacks, and `domWalker.ts:129` round-trips them through a `<script
-id="speaker-notes">` blob on the export path. But:
+needed a UI. **That was wrong.** The codebase contains read-side plumbing only, in
+two **independent** places (not one pipeline):
+
+- **Frontend export walker:** `domWalker.ts:92-94` reads `speaker_notes` / `notes`
+  with `||` fallbacks and serialises them to JSON; `domWalker.ts:129` injects that
+  JSON as a `<script id="speaker-notes">` blob, which `domWalker.ts:695` reads back
+  out per slide during extraction.
+- **Backend huashu export route:** `export.py:1225` separately reads
+  `slide.get("speaker_notes") or slide.get("notes") or ""` off the deck returned by
+  `chat_service.get_slides()` when assembling `slides_with_html`.
+
+But:
 
 - there is no `notes` field on the domain model (`src/domain/slide_deck.py`);
 - it is not declared on the `Slide` TypeScript type;
@@ -75,7 +83,7 @@ scrolling list to a stage. Both left panels become collapsible.
 |---|---|---|
 | Nav / options (far left) | Becomes **collapsible** | Collapsed state persisted |
 | Chat | Becomes **collapsible** | Collapsed state persisted; unchanged internally |
-| Thumbnail ribbon | **New**, vertical, scrolls down | Left of the stage |
+| Thumbnail ribbon | **New**, vertical, scrolls down | Left of the stage; see §4 for styling |
 | Stage | **Replaces scroll list** — one slide, large | Uses the freed real estate |
 | Drawer | **New**, under the stage, tabbed shell | One tab now (AI feedback); notes later |
 
@@ -98,9 +106,12 @@ long decks, and it makes drag-to-reorder a simple vertical list.
 ## 4. The thumbnail ribbon
 
 - Vertical strip of slide thumbnails, index-labelled, scrolls independently.
-- Current slide clearly marked (border/ring, consistent with existing selection
-  styling; see `SlideSelection.css` for reference: blue border #3b82f6, subtle
-  background tint, shadow).
+- Current slide clearly marked (border/ring; use similar styling to the current
+  selection indicator: blue border #3b82f6, subtle background tint, shadow).
+  Reference `SlideSelection.css` for the selected-state colors and effects, but
+  note that the ribbon's scaled thumbnails differ from its grid-based tile layout
+  — adapt the colors and shadow treatment but size thumbnails vertically without
+  the full-width tiles.
 - **Unseen-feedback indicator:** a slide with AI feedback the user has not yet
   viewed shows a **highlight** — a small dot or accent edge in a distinct color
   (e.g., red/orange indicator, or a top accent stripe) positioned consistently on
@@ -177,9 +188,11 @@ and three actions:
 **Focus rule (important):** paging keys must only fire when focus is **not** inside
 a text input, textarea, contentEditable, or the chat composer. Pressing `→` while
 typing a chat message must never move the slide. Guard on the active element; do not
-rely on stopping propagation at the drawer. This rule matters more than it looks
-today — the inline WYSIWYG editor (workstream 8) will put editable regions directly
-on the stage.
+rely on stopping propagation at the drawer. This generic guard covers all current
+inputs (chat composer) and future ones (e.g., notes editor on the drawer) — no
+change needed when new editable regions are added to the stage or drawer. This rule
+matters more than it looks today — the inline WYSIWYG editor (workstream 8) will put
+editable regions directly on the stage.
 
 `Escape` returns focus from the drawer to the stage.
 
