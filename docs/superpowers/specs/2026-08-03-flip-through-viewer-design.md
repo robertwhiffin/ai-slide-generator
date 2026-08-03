@@ -95,7 +95,8 @@ long decks, and it makes drag-to-reorder a simple vertical list.
 ## 3. The stage
 
 - Renders exactly one slide, scaled to fit its region while preserving aspect ratio.
-- Paging: ribbon click, on-screen ◀ ▶ controls, and keyboard (§6).
+- Paging: ribbon click, on-screen ◀ ▶ controls, keyboard (§6), and **scroll over the
+  stage** (§4.1).
 - The current slide is the single source of "where am I" for the drawer, and is
   addressable so chat can reference it.
 - Slide rendering reuses the existing sandboxed-render approach from `SlideTile` —
@@ -120,7 +121,28 @@ long decks, and it makes drag-to-reorder a simple vertical list.
   reconciliation when a slide is re-reviewed). Choose styling that does not
   conflict with the current-slide border.
 - **Drag to reorder**, reusing the existing `@dnd-kit` wiring from `SlidePanel`.
-- Auto-scrolls to keep the current slide in view when paging by keyboard.
+- **Always reveals the current slide.** However the slide changes — keyboard, arrow
+  controls, stage scroll, or programmatically — the ribbon scrolls so the current
+  slide is visible. The displayed slide is never off-screen in the ribbon.
+
+### 4.1 Scroll semantics (Google Slides model)
+
+Scroll means different things over the two regions. This is deliberate:
+
+| Gesture | Effect |
+|---|---|
+| Scroll wheel **over the ribbon** | Scrolls the thumbnail list **only**. The stage does *not* change. Lets the user browse a long deck without losing their place. |
+| Scroll wheel **over the stage** | **Advances/reverses the slide** — the stage is a pager, not a scrolling document. The ribbon follows to keep the new slide visible. |
+| **Click a thumbnail** | Selects that slide; stage changes to it. |
+
+So the ribbon can be temporarily scrolled away from the current slide while
+browsing — that is correct and expected. Selection only changes on click (or via
+stage scroll / keys / arrows), and any selection change re-reveals the current slide
+in the ribbon.
+
+Stage scrolling should be **discretised** — one slide per scroll gesture, not
+proportional to scroll delta — with enough debounce/threshold that a single
+trackpad flick does not skip several slides.
 
 **Retired:** checkbox selection and the `MessageSquare` "add to chat context"
 button. Slide targeting becomes conversational (PRD §6.1, workstream 7). Removing
@@ -153,6 +175,34 @@ is a drop-in addition rather than a restructure.
   boolean, deliberately *not* a count of findings. Counts need dedupe, decrement on
   dismissal, and reconciliation on re-review; a highlight needs none of that.
   Cleared once the user views that tab for that slide.
+
+### 5.1.1 What "unseen" means, and where it lives
+
+Seen-state is stored **client-side in `localStorage`**, not in the database.
+
+- **Per-user for free.** Client-side storage is inherently per-browser, so one user
+  marking a finding read never clears another user's highlight on a shared deck — no
+  server-side per-user keying required.
+- **Survives reload**, unlike pure in-memory view state: reopening a deck does not
+  re-highlight feedback you have already read.
+- **`localStorage`, not a cookie.** Cookies are transmitted on every HTTP request,
+  are capped around 4KB, and this data never needs to reach the server. `localStorage`
+  avoids all three, and matches the mechanism already used for drawer state and
+  pre-session config (`AgentConfigContext.tsx`).
+- **Keying:** scope the entry by deck/session identity *and* finding id, so seen-state
+  from one deck cannot leak into another.
+- **Bound the growth.** Prune entries for decks that no longer exist (or cap total
+  size) so the store does not accumulate indefinitely.
+
+**Accepted trade-off:** seen-state does not follow the user to another browser or
+device — they will see the highlight again there. Judged not worth a database table
+and a persistence endpoint for a read-marker on advisory feedback. If this becomes a
+real annoyance, promoting it to server-side storage is a self-contained later change,
+and the `seen` field on `SlideFinding` (§7) already gives it a home.
+
+Consequence for scope: the `seen` flag on incoming findings (§7) is treated as an
+initial value only; this workstream owns the seen-state lifecycle entirely client-side
+and needs **nothing** from workstream 5 to do it.
 - **Persisted, resizable.** Open/closed state, height (user-draggable), and active
   tab all persist across slide changes and across reloads via `localStorage`
   (matching the existing pre-session-config pattern; see `AgentConfigContext.tsx`
@@ -245,16 +295,23 @@ endpoint in this workstream — the endpoint does not exist yet.
 
 - Renders a fixture deck (use `tests/sample_htmls/original_deck.html`, which
   contains a multi-slide test deck suitable for pagination testing), pages through
-  all slides via ribbon, buttons, and keyboard.
+  all slides via ribbon, buttons, keyboard, and stage scroll.
+- **Scroll semantics (§4.1):** wheel over the ribbon scrolls thumbnails without
+  changing the stage; wheel over the stage changes slide and the ribbon follows.
+- Stage scroll advances exactly one slide per gesture — a single trackpad flick does
+  not skip several.
+- The current slide is always visible in the ribbon after any selection change,
+  including when the ribbon had been scrolled away from it.
 - Keyboard paging does **not** fire while typing in the chat input.
 - Empty state shown for slides with no findings (not a blank panel).
 - Unseen-feedback highlight appears on the ribbon thumbnail and the tab, and clears
   once viewed.
+- Seen-state persists across a page reload (§5.1.1) and is scoped per deck — findings
+  in one deck do not affect highlights in another.
 - Drawer height and open/closed state survive slide changes and a page reload.
 - Drag-reorder still works from the ribbon.
 - Both left panels collapse and their state persists across reload.
 - Apply / Dismiss / Discuss fire their callbacks (Dismiss also updates the view).
-- Ribbon auto-scrolls to keep the current slide visible when paging by keyboard.
 - No changes under `src/` — `git diff --stat` touches `frontend/` only.
 - Existing E2E suite still passes (Playwright, `frontend/`), updated where it
   asserted the old scrolling list or checkbox selection.
