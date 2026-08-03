@@ -29,7 +29,7 @@ Today `SlidePanel` renders every slide in one scrolling column. Two problems:
 
 An earlier draft of this spec claimed speaker notes already existed and merely
 needed a UI. **That was wrong.** The codebase contains read-side plumbing only —
-`domWalker.ts:92-93` and `export.py:1225` read `speaker_notes` / `notes` with `||`
+`domWalker.ts:92-94` and `export.py:1225` read `speaker_notes` / `notes` with `||`
 fallbacks, and `domWalker.ts:129` round-trips them through a `<script
 id="speaker-notes">` blob on the export path. But:
 
@@ -99,18 +99,25 @@ long decks, and it makes drag-to-reorder a simple vertical list.
 
 - Vertical strip of slide thumbnails, index-labelled, scrolls independently.
 - Current slide clearly marked (border/ring, consistent with existing selection
-  styling).
+  styling; see `SlideSelection.css` for reference: blue border #3b82f6, subtle
+  background tint, shadow).
 - **Unseen-feedback indicator:** a slide with AI feedback the user has not yet
-  viewed shows a **highlight** (dot / accent edge) — deliberately *not* a count.
-  A boolean is far cheaper to keep correct than a count (no dedupe, no decrement on
-  dismissal, no reconciliation when a slide is re-reviewed).
+  viewed shows a **highlight** — a small dot or accent edge in a distinct color
+  (e.g., red/orange indicator, or a top accent stripe) positioned consistently on
+  the thumbnail. This is deliberately *not* a count. A boolean is far cheaper to
+  keep correct than a count (no dedupe, no decrement on dismissal, no
+  reconciliation when a slide is re-reviewed). Choose styling that does not
+  conflict with the current-slide border.
 - **Drag to reorder**, reusing the existing `@dnd-kit` wiring from `SlidePanel`.
 - Auto-scrolls to keep the current slide in view when paging by keyboard.
 
 **Retired:** checkbox selection and the `MessageSquare` "add to chat context"
 button. Slide targeting becomes conversational (PRD §6.1, workstream 7). Removing
 them is in scope here; the `@slide` reference chip that replaces them is **not** —
-it belongs with workstream 7.
+it belongs with workstream 7. With checkbox selection retired, the current
+contiguous-only constraint in `SlideSelection.tsx` becomes dead code and should
+be removed (or left in place if it imposes no maintenance burden, but it is not
+needed for the new single-slide viewer).
 
 ---
 
@@ -137,7 +144,8 @@ is a drop-in addition rather than a restructure.
   Cleared once the user views that tab for that slide.
 - **Persisted, resizable.** Open/closed state, height (user-draggable), and active
   tab all persist across slide changes and across reloads via `localStorage`
-  (matching the existing pre-session-config pattern).
+  (matching the existing pre-session-config pattern; see `AgentConfigContext.tsx`
+  for reference implementation).
 
 ### 5.2 AI feedback tab
 
@@ -222,8 +230,9 @@ endpoint in this workstream — the endpoint does not exist yet.
 
 ## 9. Verification
 
-- Renders a fixture deck (use `tests/sample_htmls/`), pages through all slides via
-  ribbon, buttons, and keyboard.
+- Renders a fixture deck (use `tests/sample_htmls/original_deck.html`, which
+  contains a multi-slide test deck suitable for pagination testing), pages through
+  all slides via ribbon, buttons, and keyboard.
 - Keyboard paging does **not** fire while typing in the chat input.
 - Empty state shown for slides with no findings (not a blank panel).
 - Unseen-feedback highlight appears on the ribbon thumbnail and the tab, and clears
