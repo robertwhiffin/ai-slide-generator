@@ -154,8 +154,8 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
   );
 
   // Memoise the document builder on deck-level inputs (css, external_scripts,
-  // scripts), matching SlideSelection.tsx:40-67. Rebuilding only when those
-  // change keeps thumbnail renders cheap across slide navigation.
+  // scripts). Rebuilding only when those change keeps thumbnail renders cheap
+  // across slide navigation.
   const previewDocument = useMemo(() => {
     const inlineScripts = slideDeck.scripts
       ? `

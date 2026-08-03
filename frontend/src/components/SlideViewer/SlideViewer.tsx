@@ -1,11 +1,33 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { Edit3, Trash2 } from 'lucide-react';
+import { Button } from '@/ui/button';
+import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
+import type { VerificationResult } from '../../types/verification';
 import type { DrawerCallbacks, SlideFinding } from '../../types/finding';
 import { ViewerProvider, useViewer } from '../../contexts/ViewerContext';
 import { SlideStage } from './SlideStage';
 import { ThumbnailRibbon } from './ThumbnailRibbon';
 import { FeedbackDrawer } from './FeedbackDrawer';
 import { loadSeen, markSeen } from './seenState';
+import { HTMLEditorModal } from '../SlidePanel/HTMLEditorModal';
+import { VerificationBadge } from '../SlidePanel/VerificationBadge';
+import { ConfirmDialog } from '../ConfirmDialog';
+import { PresentationMode } from '../PresentationMode';
+import { api } from '../../services/api';
+
+interface SlideContext {
+  indices: number[];
+  slide_htmls: string[];
+}
 
 interface SlideViewerProps {
   slideDeck: SlideDeck | null;
@@ -13,6 +35,17 @@ interface SlideViewerProps {
   findings: SlideFinding[];
   callbacks: DrawerCallbacks;
   onReorder: (from: number, to: number) => void;
+  // CRUD props (optional — absent in read-only contexts)
+  onSlideChange?: (slideDeck: SlideDeck) => void;
+  onSendMessage?: (content: string, slideContext?: SlideContext) => void;
+  readOnly?: boolean;
+  lockedBy?: string | null;
+  onVerificationComplete?: () => void;
+  sessionId?: string | null;
+}
+
+export interface SlideViewerHandle {
+  openPresentationMode: () => void;
 }
 
 /**
@@ -24,12 +57,11 @@ interface SlideViewerProps {
  * element, not the inner shadow element. For this app there are no shadow-DOM inputs
  * in the viewer, so this is a non-issue — a shadow host is not a typing target.
  *
- * Iframes: when focus moves inside the sandboxed slide iframe, document.activeElement
- * in the parent is the <iframe> element itself (tagName 'IFRAME'). isTypingTarget
- * returns false for IFRAME, so paging keys still fire. This is CORRECT — the stage
- * iframe uses sandbox="allow-scripts" (no allow-forms), so there are no real input
- * fields inside it that a user can type into. Paging whilst focused on the iframe
- * is expected and desirable behaviour.
+ * Iframes: when focus moves inside the slide iframe, keydown events fire in the
+ * iframe's separate browsing context and never reach the parent window listener.
+ * In the parent, document.activeElement becomes the <iframe> element itself
+ * (tagName 'IFRAME'). isTypingTarget returns false for IFRAME, so paging keys
+ * still fire when focus is on the iframe — correct behaviour for this viewer.
  */
 function isTypingTarget(el: Element | null): boolean {
   if (!el) return false;
@@ -39,13 +71,57 @@ function isTypingTarget(el: Element | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 
-const ViewerBody: React.FC<Omit<SlideViewerProps, 'slideDeck'> & { slideDeck: SlideDeck }> = ({
+// Internal: renders the viewer body, always within a ViewerProvider.
+const ViewerBody = forwardRef<
+  SlideViewerHandle,
+  Omit<SlideViewerProps, 'slideDeck'> & { slideDeck: SlideDeck }
+>(({
   slideDeck, deckKey, findings, callbacks, onReorder,
-}) => {
+  onSlideChange, readOnly = false, lockedBy = null,
+  onVerificationComplete, sessionId,
+}, ref) => {
   const { currentIndex, next, prev, first, last, activeTab, drawerOpen } = useViewer();
   const [seen, setSeen] = useState<Set<string>>(() => loadSeen(deckKey));
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const stageRef = useRef<HTMLDivElement | null>(null);
+
+  // Stage CRUD state
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [verificationResults, setVerificationResults] = useState<
+    Map<number, VerificationResult | undefined>
+  >(() => {
+    const m = new Map<number, VerificationResult | undefined>();
+    slideDeck.slides.forEach((s, i) => { m.set(i, s.verification); });
+    return m;
+  });
+  const [isManualVerifying, setIsManualVerifying] = useState(false);
+  const [isStale, setIsStale] = useState(false);
+  const [isPresentationMode, setIsPresentationMode] = useState(false);
+  const deckEditCounterRef = useRef(0);
+  const slideDeckRef = useRef(slideDeck);
+  slideDeckRef.current = slideDeck;
+
+  const isVersionConflict = (error: unknown): boolean =>
+    error instanceof Error && 'status' in error && (error as { status: unknown }).status === 409;
+
+  const refreshDeck = async () => {
+    if (!sessionId || !onSlideChange) return;
+    const result = await api.getSlides(sessionId);
+    if (result.slide_deck) onSlideChange(result.slide_deck);
+  };
+
+  // Sync verification results when deck changes
+  useEffect(() => {
+    setVerificationResults(prev => {
+      const m = new Map(prev);
+      slideDeck.slides.forEach((s, i) => {
+        if (s.verification !== m.get(i)) m.set(i, s.verification);
+      });
+      return m;
+    });
+    setIsStale(false);
+  }, [slideDeck]);
 
   // When the deck changes, reload persisted seen-state and clear transient dismissals.
   // dismissed must also reset: a finding dismissed in deck A must not suppress a
@@ -135,14 +211,176 @@ const ViewerBody: React.FC<Omit<SlideViewerProps, 'slideDeck'> & { slideDeck: Sl
     callbacks.onDismissFinding(findingId);
   }, [callbacks, deckKey]);
 
+  // CRUD handlers for the stage toolbar
+  const handleDeleteConfirm = async () => {
+    if (!sessionId || !onSlideChange) return;
+    setShowDeleteConfirm(false);
+    const editId = ++deckEditCounterRef.current;
+    try {
+      await api.deleteSlide(currentIndex, sessionId);
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        onSlideChange(result.slide_deck);
+      }
+    } catch (error) {
+      console.error('Failed to delete:', error);
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      } else {
+        alert('Failed to delete slide');
+      }
+    }
+  };
+
+  const handleUpdateSlide = async (html: string) => {
+    if (!sessionId || !onSlideChange) return;
+    const editId = ++deckEditCounterRef.current;
+    try {
+      await api.updateSlide(currentIndex, html, sessionId);
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        onSlideChange(result.slide_deck);
+      }
+      setIsStale(true);
+    } catch (error) {
+      console.error('Failed to update:', error);
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      }
+      throw error;
+    }
+  };
+
+  const handleVerify = async () => {
+    if (!sessionId || isManualVerifying) return;
+    setIsManualVerifying(true);
+    try {
+      const result = await api.verifySlide(sessionId, currentIndex);
+      const verification: VerificationResult = {
+        ...result,
+        rating: result.rating as VerificationResult['rating'],
+        timestamp: new Date().toISOString(),
+      };
+      setVerificationResults(prev => new Map(prev).set(currentIndex, verification));
+      setIsStale(false);
+      // Persist to server
+      try {
+        await api.updateSlideVerification(currentIndex, sessionId, verification);
+        const currentDeck = slideDeckRef.current;
+        if (onSlideChange && currentDeck) {
+          const updatedSlides = [...currentDeck.slides];
+          updatedSlides[currentIndex] = { ...updatedSlides[currentIndex], verification };
+          onSlideChange({ ...currentDeck, slides: updatedSlides });
+        }
+      } catch {
+        // Non-fatal — UI already updated
+      }
+      onVerificationComplete?.();
+    } catch (error) {
+      console.error('Verification failed:', error);
+    } finally {
+      setIsManualVerifying(false);
+    }
+  };
+
+  // Expose presentation mode control via ref
+  useImperativeHandle(ref, () => ({
+    openPresentationMode: () => setIsPresentationMode(true),
+  }));
+
+  const currentSlide = slideDeck.slides[currentIndex];
+
   return (
     <div data-testid="slide-viewer" className="flex h-full min-h-0 flex-1">
+      {/* Delete confirm dialog */}
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        title="Delete Slide"
+        message={`Delete slide ${currentIndex + 1}?`}
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
+
+      {/* HTML editor modal */}
+      {isEditing && currentSlide && (
+        <HTMLEditorModal
+          html={currentSlide.html}
+          slideDeck={slideDeck}
+          slide={currentSlide}
+          onSave={async (html) => {
+            await handleUpdateSlide(html);
+            setIsEditing(false);
+          }}
+          onCancel={() => setIsEditing(false)}
+        />
+      )}
+
+      {/* Presentation mode */}
+      {isPresentationMode && (
+        <PresentationMode
+          slideDeck={slideDeck}
+          onExit={() => setIsPresentationMode(false)}
+          startIndex={currentIndex}
+        />
+      )}
+
       <ThumbnailRibbon
         slideDeck={slideDeck}
         unseenSlideIndices={unseenSlideIndices}
         onReorder={onReorder}
       />
       <div className="flex min-h-0 flex-1 flex-col">
+        {/* Stage toolbar — per-slide CRUD controls */}
+        {!readOnly && currentSlide && (
+          <div
+            data-testid="stage-toolbar"
+            className="flex shrink-0 items-center justify-between border-b border-border bg-card px-3 py-1.5"
+          >
+            {lockedBy && (
+              <span className="text-xs text-amber-700">
+                <span className="font-medium">{lockedBy}</span> is editing
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-1">
+              <VerificationBadge
+                data-testid="stage-verification-badge"
+                slideIndex={currentIndex}
+                sessionId={sessionId ?? ''}
+                verificationResult={verificationResults.get(currentIndex)}
+                isVerifying={isManualVerifying}
+                onVerify={handleVerify}
+                isStale={isStale}
+              />
+              <Tooltip text="Edit slide HTML">
+                <Button
+                  data-testid="stage-edit-slide"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setIsEditing(true)}
+                  className="h-7 w-7"
+                  aria-label="Edit slide HTML"
+                >
+                  <Edit3 className="size-3.5" />
+                </Button>
+              </Tooltip>
+              <Tooltip text="Delete slide" align="end">
+                <Button
+                  data-testid="stage-delete-slide"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="h-7 w-7 text-destructive hover:text-destructive"
+                  aria-label="Delete slide"
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </Tooltip>
+            </div>
+          </div>
+        )}
+
         {/* tabIndex makes the stage a focus target so Escape can return focus here. */}
         <div ref={stageRef} tabIndex={-1} className="flex min-h-0 flex-1 outline-none">
           <SlideStage
@@ -159,22 +397,28 @@ const ViewerBody: React.FC<Omit<SlideViewerProps, 'slideDeck'> & { slideDeck: Sl
       </div>
     </div>
   );
-};
+});
 
-export const SlideViewer: React.FC<SlideViewerProps> = ({ slideDeck, ...rest }) => {
-  if (!slideDeck || slideDeck.slides.length === 0) {
+ViewerBody.displayName = 'ViewerBody';
+
+export const SlideViewer = forwardRef<SlideViewerHandle, SlideViewerProps>(
+  ({ slideDeck, ...rest }, ref) => {
+    if (!slideDeck || slideDeck.slides.length === 0) {
+      return (
+        <div
+          data-testid="slide-viewer-empty"
+          className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
+        >
+          No slides yet — generate a deck to get started.
+        </div>
+      );
+    }
     return (
-      <div
-        data-testid="slide-viewer-empty"
-        className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
-      >
-        No slides yet — generate a deck to get started.
-      </div>
+      <ViewerProvider slideCount={slideDeck.slides.length}>
+        <ViewerBody ref={ref} slideDeck={slideDeck} {...rest} />
+      </ViewerProvider>
     );
   }
-  return (
-    <ViewerProvider slideCount={slideDeck.slides.length}>
-      <ViewerBody slideDeck={slideDeck} {...rest} />
-    </ViewerProvider>
-  );
-};
+);
+
+SlideViewer.displayName = 'SlideViewer';

@@ -14,16 +14,13 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import type { Slide, SlideDeck } from '../../types/slide';
+import type { SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { ConfirmDialog } from '../ConfirmDialog';
-import { useSelection } from '../../contexts/SelectionContext';
-import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
-import { useToast } from '../../contexts/ToastContext';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { useDeckExport } from '../../hooks/useDeckExport';
 
 interface SlideContext {
   indices: number[];
@@ -56,18 +53,19 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
-  const [isExportingPDF, setIsExportingPDF] = useState(false);
-  const [isExportingPPTX, setIsExportingPPTX] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const [presentationStartIndex, setPresentationStartIndex] = useState(0);
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const [deleteSlideIndex, setDeleteSlideIndex] = useState<number | null>(null);
-  const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
-  const { showToast } = useToast();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const { handleExportPDF, handleExportPPTX, handleSaveAsHTML } = useDeckExport({
+    slideDeck,
+    sessionId,
+    onExportStatusChange,
+  });
 
   // Auto-verification state
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
@@ -126,7 +124,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         if (result.slide_deck && deckEditCounterRef.current === editId) {
           onSlideChange?.(result.slide_deck);
         }
-        clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
         if (isVersionConflict(error)) {
@@ -159,7 +156,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange?.(result.slide_deck);
       }
-      clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
       if (isVersionConflict(error)) {
@@ -181,7 +177,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange?.(result.slide_deck);
       }
-      clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
       if (isVersionConflict(error)) {
@@ -216,7 +211,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     if (!slide) return;
 
     setOptimizingSlideIndex(index);
-    clearSelection();
 
     const slideContext = {
       indices: [index],
@@ -244,258 +238,27 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   }, [slideDeck]);
 
-  const handleExportPDF = async () => {
-    if (!slideDeck || isExportingPDF) return;
 
-    setIsExportingPDF(true);
-    setShowExportMenu(false);
-    onExportStatusChange?.('Exporting PDF...');
-    try {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      const filename = `${slideDeck.title || 'slides'}_${timestamp}.pdf`;
-      
-      await exportSlideDeckToPDF(slideDeck, filename, {
-        format: 'a4',
-        orientation: 'landscape',
-        scale: 1.2,
-        waitForCharts: 2000,
-        imageQuality: 0.85,
-      });
-    } catch (error) {
-      console.error('PDF export failed:', error);
-      const message = error instanceof Error 
-        ? error.message 
-        : 'Failed to export PDF. Please try again.';
-      alert(message);
-    } finally {
-      setIsExportingPDF(false);
-      onExportStatusChange?.(null);
-    }
-  };
-
-  const handleExportPPTX = async () => {
-    if (!slideDeck || !sessionId || isExportingPPTX) return;
-
-    setIsExportingPPTX(true);
-    setShowExportMenu(false);
-    onExportStatusChange?.('Generating PPTX…');
-
-    const downloadBlob = (blob: Blob, suffix = '') => {
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const timestamp = new Date().toISOString().slice(0, 10);
-      const trailing = suffix ? `_${suffix}` : '';
-      a.download = `${slideDeck.title || 'slides'}_${timestamp}${trailing}.pptx`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    };
-
-    try {
-      // Try the Claude Design path first.
-      const result = await api.exportPptxHuashu(sessionId);
-      downloadBlob(result.blob);
-      onExportStatusChange?.(null);
-      if (result.failures.length === 0) {
-        showToast(`PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
-      } else {
-        // Per-slide failures get logged for the developer; user sees a
-        // softer info toast so they know not all slides made it in.
-        console.warn('[huashu] per-slide failures:', result.failures);
-        showToast(
-          `PPTX: ${result.succeeded}/${result.totalSlides} slides exported (${result.failures.length} rejected — see console)`,
-          'info',
-        );
-      }
-    } catch (error) {
-      // Fallback path: if the Claude Design path isn't bootstrapped on this
-      // deployment (returns 503), retry via the records pipeline so the
-      // user still gets a working export.
-      const status = (error as any)?.status;
-      const message = error instanceof Error ? error.message : '';
-      const isUnavailable =
-        status === 503 ||
-        /huashu pipeline not available/i.test(message) ||
-        /pipeline (?:still )?installing/i.test(message);
-      if (isUnavailable) {
-        try {
-          onExportStatusChange?.('Falling back to records pipeline (slower)…');
-          const blob = await api.exportPptxEditable(slideDeck, sessionId, 'universal');
-          downloadBlob(blob);
-          onExportStatusChange?.(null);
-          showToast('PPTX downloaded (records pipeline)', 'success');
-          return;
-        } catch (fallbackErr) {
-          console.error('PPTX records-fallback export failed:', fallbackErr);
-          const fbMsg = fallbackErr instanceof Error ? fallbackErr.message : 'Failed to export PPTX.';
-          alert(fbMsg);
-          return;
-        } finally {
-          setIsExportingPPTX(false);
-          onExportStatusChange?.(null);
-        }
-      }
-      console.error('PPTX export failed:', error);
-      const failures = (error as any)?.failures;
-      if (Array.isArray(failures) && failures.length > 0) {
-        console.warn('[huashu] per-slide failures (all rejected):', failures);
-      }
-      alert(message || 'Failed to export PPTX. Please try again.');
-    } finally {
-      setIsExportingPPTX(false);
-      onExportStatusChange?.(null);
-    }
-  };
-
-  const handleSaveAsHTML = () => {
-    if (!slideDeck) return;
-
-    const slidesHtml = slideDeck.slides
-      .map((slide, index) => {
-        const slideScripts = slide.scripts || '';
-        return `
-    <div class="slide-wrapper" data-slide-index="${index}">
-      <div class="slide-container">
-        ${slide.html}
-      </div>
-      ${slideScripts ? `<script>
-        (function() {
-          ${slideScripts}
-        })();
-      </script>` : ''}
-    </div>`;
-      })
-      .join('\n');
-
-    // Multi-slide wrapper/reset layout for the standalone export document.
-    const wrapperStyle = `
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: auto;
-      background: #f9fafb;
-    }
-    body {
-      padding: 40px 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 40px;
-    }
-    .slide-wrapper {
-      width: 100%;
-      max-width: 1280px;
-      margin: 0 auto;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      page-break-after: always;
-    }
-    .slide-container {
-      width: 1280px;
-      height: 720px;
-      max-width: 100%;
-      max-height: calc(100vh - 80px);
-      position: relative;
-      background: #ffffff;
-      overflow: auto;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border-radius: 8px;
-    }
-    .slide-container > * {
-      width: 100%;
-      min-height: 100%;
-    }
-    canvas {
-      max-width: 100%;
-      height: auto;
-    }`;
-
-    const bootstrapScripts = `
-    function waitForChartJs(callback, maxAttempts = 50) {
-      let attempts = 0;
-      const check = () => {
-        attempts++;
-        if (typeof Chart !== 'undefined') {
-          callback();
-        } else if (attempts < maxAttempts) {
-          setTimeout(check, 100);
-        } else {
-          console.error('Chart.js failed to load');
-        }
-      };
-      check();
-    }
-
-    function initializeCharts() {
-      try {
-        ${slideDeck.scripts || ''}
-      } catch (err) {
-        console.error('Chart initialization error:', err);
-      }
-    }
-
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        waitForChartJs(initializeCharts);
-      });
-    } else {
-      waitForChartJs(initializeCharts);
-    }`;
-
-    const html = buildSlideDocument(
-      `<title>${slideDeck.title || 'Presentation'}</title>\n${slidesHtml}`,
-      {
-        css: slideDeck.css,
-        externalScripts: slideDeck.external_scripts,
-        extraHeadStyle: wrapperStyle,
-        scripts: bootstrapScripts,
-      }
-    );
-
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(slideDeck.title || 'presentation').replace(/[^a-z0-9]/gi, '-').toLowerCase()}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
 
   const openPresentationFromActive = useCallback(() => {
     const total = slideDeck?.slides.length ?? 0;
     let idx = 0;
 
-    if (selectedIndices.length > 0) {
-      // Explicit selection wins — clicking a tile is an unambiguous "current".
-      idx = selectedIndices[0];
-    } else {
-      // No selection: pick the slide spanning a virtual trigger line ~25% from
-      // the top of the viewport. As you scroll, the trigger only advances when
-      // one tile's bottom crosses above the line, so there's no oscillation
-      // between two equally-visible tiles. Pattern used by docs-site TOCs.
-      const triggerY = window.innerHeight * 0.25;
-      for (const [tileIndex, el] of slideRefs.current) {
-        const r = el.getBoundingClientRect();
-        if (r.top <= triggerY && r.bottom > triggerY) {
-          idx = tileIndex;
-          break;
-        }
+    // Pick the slide spanning a virtual trigger line ~25% from the top of the
+    // viewport. As you scroll, the trigger only advances when one tile's bottom
+    // crosses above the line, so there's no oscillation between equally-visible tiles.
+    const triggerY = window.innerHeight * 0.25;
+    for (const [tileIndex, el] of slideRefs.current) {
+      const r = el.getBoundingClientRect();
+      if (r.top <= triggerY && r.bottom > triggerY) {
+        idx = tileIndex;
+        break;
       }
     }
 
     setPresentationStartIndex(Math.max(0, Math.min(idx, Math.max(0, total - 1))));
     setIsPresentationMode(true);
-  }, [selectedIndices, slideDeck]);
+  }, [slideDeck]);
 
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
@@ -503,24 +266,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     exportHTML: handleSaveAsHTML,
     openPresentationMode: openPresentationFromActive,
   }));
-
-  useEffect(() => {
-    if (!slideDeck) {
-      clearSelection();
-      return;
-    }
-
-    const validIndices = selectedIndices.filter(
-      index => index >= 0 && index < slideDeck.slides.length,
-    );
-
-    if (validIndices.length !== selectedIndices.length) {
-      const slides: Slide[] = validIndices
-        .map(index => slideDeck.slides[index])
-        .filter((slide): slide is Slide => Boolean(slide));
-      setSelection(validIndices, slides);
-    }
-  }, [slideDeck, selectedIndices, clearSelection, setSelection]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
