@@ -147,10 +147,15 @@ trackpad flick does not skip several slides.
 **Retired:** checkbox selection and the `MessageSquare` "add to chat context"
 button. Slide targeting becomes conversational (PRD §6.1, workstream 7). Removing
 them is in scope here; the `@slide` reference chip that replaces them is **not** —
-it belongs with workstream 7. With checkbox selection retired, the current
-contiguous-only constraint in `SlideSelection.tsx` becomes dead code and should
-be removed (or left in place if it imposes no maintenance burden, but it is not
-needed for the new single-slide viewer).
+it belongs with workstream 7.
+
+With checkbox selection retired, the contiguous-only constraint becomes dead code:
+`isContiguous` is defined in `utils/slideReplacements.ts:1` and its **only** consumer
+is `SlideSelection.tsx:32`. Remove both the call site and the now-orphaned helper if
+nothing else picks it up. Note that `frontend-overview.md:110` and
+`technical-doc-template.md:44` both present contiguous selection as a standing
+invariant — those references must be corrected (§9.2), not left describing a rule
+that no longer exists.
 
 ---
 
@@ -291,7 +296,78 @@ endpoint in this workstream — the endpoint does not exist yet.
 
 ---
 
-## 9. Verification
+## 9. Technical documentation (in scope)
+
+Documentation is part of this workstream, not a follow-up. The repo rule in
+`.cursor/rules/readme-summary.mdc` requires companion docs in `docs/technical/` to be
+updated whenever underlying behaviour changes, and this workstream changes behaviour
+that is currently documented as fact.
+
+Follow `docs/technical/technical-doc-template.md` for structure and tone (lead with
+outcomes, tables for mappings, call out invariants, reference real paths in
+backticks).
+
+### 9.1 New: `docs/technical/slide-viewer.md`
+
+A focused doc for the new surface — the stage, ribbon, and drawer. The template's
+extend-vs-create rule (§5) says create new for a major feature area; the drawer and
+review-feedback surface qualify. Cover:
+
+- **Architecture snapshot** — stage / ribbon / drawer and how they relate to
+  `AppLayout` and the chat panel.
+- **Scroll semantics (§4.1)** — the ribbon-browses / stage-pages split, and the
+  invariant that the current slide is always revealed in the ribbon. This is
+  non-obvious and will be broken by future edits if undocumented.
+- **Keyboard model and the focus guard (§6)** — including *why* the guard is generic
+  (workstream 8 adds editable regions to the stage).
+- **Drawer state** — sticky tab, stays-on-empty, persisted height/open state, and the
+  tabbed-shell-with-one-tab decision plus its reason (notes land later).
+- **Seen-state (§5.1.1)** — `localStorage`, per-user by construction, key scoping,
+  growth bound, and the recorded trade-off that it does not cross browsers/devices.
+- **Data contracts** — the `SlideFinding` / `DrawerCallbacks` interfaces (§7), and
+  that findings are supplied as props with the producer deferred to workstream 5.
+- **Extension guidance** — how to add a drawer tab; how the inline editor
+  (workstream 8) is expected to layer onto the stage.
+
+### 9.2 Update: `docs/technical/frontend-overview.md`
+
+This workstream makes several statements in the existing overview **actively wrong**.
+Each must be corrected, not merely supplemented:
+
+| Location | Currently documents | Needs |
+|---|---|---|
+| `:48-50` | "Click slide preview – scrolls the main SlidePanel"; "Click checkbox – toggles slide selection (contiguous only)"; `scrollToSlide` prop | Ribbon click *selects*; stage shows one slide; no checkboxes |
+| `:54` | `scrollTarget: { index, key }` coordinating "ribbon-to-panel navigation" | Replaced by current-slide state |
+| `:110` | Selection Context section — `selectedIndices`, and "enforces contiguous selections via `utils/slideReplacements.ts::isContiguous`" | Retired — describe what replaces it, and note conversational targeting arrives in workstream 7 |
+| `:299-309` | Component rows for `SlidePanel`, `SlideTile`, `SelectionRibbon`/`SlideSelection` | New stage/ribbon/drawer components |
+| `:368-376` | "Selecting Slides and Navigation" flow; `SelectionContext` cleared after slides arrive | Rewrite for the new model |
+| `:509-511` | User flow: "use checkbox in ribbon to select contiguous slides for chat context" | Rewrite; no checkbox step |
+
+Also remove the **contiguous-selection invariant** where the docs present it as a
+rule that must not break (the template itself cites it as an example invariant at
+`technical-doc-template.md:44`) — it ceases to exist.
+
+### 9.3 Index and cross-references
+
+- **`README.md`** — add `slide-viewer.md` to the documentation table (`:131-142`).
+- **`docs-site/sidebars.js`** — add the new doc (it lists `technical/*` entries
+  explicitly at `:49`/`:60`; without an entry it will not appear on the published
+  site).
+- **Cross-link** `slide-viewer.md` ↔ `frontend-overview.md`, and reference
+  `presentation-mode.md` (adjacent single-slide surface) so the set stays coherent.
+- Check `docs/user-guide/` for screenshots or instructions describing the scrolling
+  list or checkbox selection; flag anything stale rather than silently leaving it.
+
+### 9.4 Scope boundary
+
+Document **what this workstream ships**. Do not document the review agents, the
+builder, or conversational targeting as though they exist — reference them as
+forthcoming (PRD workstreams 5 and 7) where a reader needs to understand why a
+callback is currently a stub.
+
+---
+
+## 10. Verification
 
 - Renders a fixture deck (use `tests/sample_htmls/original_deck.html`, which
   contains a multi-slide test deck suitable for pagination testing), pages through
@@ -312,6 +388,15 @@ endpoint in this workstream — the endpoint does not exist yet.
 - Drag-reorder still works from the ribbon.
 - Both left panels collapse and their state persists across reload.
 - Apply / Dismiss / Discuss fire their callbacks (Dismiss also updates the view).
-- No changes under `src/` — `git diff --stat` touches `frontend/` only.
+- No changes under `src/` — `git diff --stat` touches `frontend/` and `docs/` only.
 - Existing E2E suite still passes (Playwright, `frontend/`), updated where it
   asserted the old scrolling list or checkbox selection.
+
+**Documentation (§9):**
+- `docs/technical/slide-viewer.md` exists and covers scroll semantics, the focus
+  guard, drawer state, seen-state, and the data contracts.
+- No statement in `docs/technical/frontend-overview.md` still describes checkbox
+  selection, contiguous-only selection, `scrollToSlide`/`scrollTarget`, or
+  ribbon-scrolls-the-panel navigation. Grepping the doc for `checkbox` and
+  `contiguous` returns nothing stale.
+- `README.md` doc table and `docs-site/sidebars.js` both list the new doc.
