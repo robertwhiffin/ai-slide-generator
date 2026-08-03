@@ -959,13 +959,20 @@ const ViewerBody: React.FC<Omit<SlideViewerProps, 'slideDeck'> & { slideDeck: Sl
   }, [visible, seen]);
 
   // Viewing the feedback tab for a slide marks that slide's findings read (spec §5.1.1).
+  // `seen` is deliberately NOT in the dependency array: this effect *sets* seen, so
+  // depending on it would re-run the effect on its own update. Read the current value
+  // through the setter instead, which keeps the effect idempotent and loop-free.
   useEffect(() => {
     if (!drawerOpen || activeTab !== 'feedback') return;
-    const unread = currentFindings.filter(f => !seen.has(f.id)).map(f => f.id);
-    if (unread.length === 0) return;
-    markSeen(deckKey, unread);
-    setSeen(prev => new Set([...prev, ...unread]));
-  }, [drawerOpen, activeTab, currentFindings, seen, deckKey]);
+    const ids = currentFindings.map(f => f.id);
+    if (ids.length === 0) return;
+    setSeen(prev => {
+      const unread = ids.filter(id => !prev.has(id));
+      if (unread.length === 0) return prev;      // no change → no re-render
+      markSeen(deckKey, unread);
+      return new Set([...prev, ...unread]);
+    });
+  }, [drawerOpen, activeTab, currentFindings, deckKey]);
 
   const handleDismiss = useCallback((findingId: string) => {
     setDismissed(prev => new Set(prev).add(findingId));
@@ -1260,7 +1267,9 @@ test.describe('flip-through viewer', () => {
     await openDeck(page);
     await page.keyboard.press('End');
     // Auto-reveal (spec §4): the last thumbnail must be scrolled into view.
-    // tests/sample_htmls/original_deck.html contains 15 slides (indices 0–14)
+    // tests/sample_htmls/original_deck.html contains 15 slides (indices 0–14):
+    // grep finds 14 divs with class="slide" AND 1 div with class="slide title-slide" = 15 total.
+    // BeautifulSoup find_all('div', class_='slide') matches both, returning all 15.
     const lastThumb = page.getByTestId('ribbon-thumb-14');
     await expect(lastThumb).toHaveAttribute('data-current', 'true');
     await expect(lastThumb).toBeInViewport();
