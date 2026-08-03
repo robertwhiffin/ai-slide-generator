@@ -41,7 +41,7 @@ export function markSeen(deckKey: string, findingIds: string[]): void {
   const merged = new Set([...(store[deckKey] ?? []), ...findingIds]);
   store[deckKey] = Array.from(merged);
 
-  // Trim oldest insertion-ordered deck keys if we exceed the cap.
+  // Trim oldest insertion-ordered deck keys if we exceed the cap (ES2015+ guarantees Object.keys order = insertion order for non-integer string keys, which deckKey always is).
   const keys = Object.keys(store);
   if (keys.length > MAX_DECKS) {
     for (const stale of keys.slice(0, keys.length - MAX_DECKS)) {

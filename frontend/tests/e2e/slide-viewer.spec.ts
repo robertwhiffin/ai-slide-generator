@@ -48,6 +48,6 @@ test.describe('seen-state persistence', () => {
       return Object.keys(JSON.parse(localStorage.getItem(m.SEEN_STORAGE_KEY) ?? '{}')).length;
     });
 
-    expect(deckCount).toBeLessThanOrEqual(50);   // MAX_DECKS
+    expect(deckCount).toBe(50);   // MAX_DECKS — exact, so a no-op or a bad trim fails
   });
 });
