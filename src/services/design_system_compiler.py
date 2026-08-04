@@ -162,7 +162,20 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # ``cap``/``rcap`` unit, a bare ``0`` and the ``small``/``large`` keywords. Persisted
 # v13 rows hold BOTH mislabelings — real sizes printed as spacing AND non-sizes
 # printed as font sizes — so the bump is what makes them recompile.
-COMPILER_VERSION = 14
+# v15: two changes to what the artifact CONTAINS, so persisted v14 rows are stale in
+# two independent ways and the bump is what makes them recompile.
+#
+# * The font-size VALUE grammar gained the CSS-wide keywords (``inherit``,
+#   ``initial``, ``unset``, ``revert``, ``revert-layer``) and the missing
+#   root-relative units (``rex``/``rch``/``ric``). A persisted v14 row printed
+#   ``fs-body: inherit`` under ``SPACING TOKENS:`` — hard rule B, a font size
+#   labelled as spacing.
+# * The brand's own token GROUP LABEL is emitted again, as quoted DATA on its own
+#   line below the constant heading (:data:`_GROUP_LABEL_LINE_PREFIX`). A persisted
+#   v14 row shows the model ``ADDITIONAL BRAND TOKENS (set 2):`` with the brand's
+#   word for the group missing entirely, so the grouping intent is absent from
+#   exactly the rows that already exist.
+COMPILER_VERSION = 15
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -302,6 +315,39 @@ _ADDITIONAL_TOKENS_HEADING = "ADDITIONAL BRAND TOKENS:"
 # from the compiler's own deterministic group ordering, never from user text. A
 # single unknown group needs no discriminator and gets the bare constant.
 _ADDITIONAL_TOKENS_HEADING_INDEXED = "ADDITIONAL BRAND TOKENS (set %d):"
+
+# The brand's OWN label for the group, carried as DATA on a line inside the section.
+#
+# Keeping user text out of the heading (above) was right, but the previous round drew
+# the wrong conclusion from it — that the label was worth nothing and could simply be
+# dropped. It is the brand's GROUPING INTENT: a brand that files tokens under
+# ``brand-semantic``, or under a non-Latin label, said something, and silently
+# discarding it is the same class of loss as truncating a name. No token was ever
+# lost, but the author's word for the group never reached the model at all.
+#
+# So the label is emitted where the artifact reads DATA rather than instruction:
+# below the constant heading, in explicitly QUOTED value position, on its own line.
+#
+#     ADDITIONAL BRAND TOKENS (set 2):
+#     - Grouped by the brand as: "brand-semantic"
+#     - tok-one: #123456
+#
+# That satisfies both constraints at once, and it does so POSITIONALLY — the same
+# lesson as the version marker and the numeric region — rather than by filtering,
+# which is what could not be made to work in the heading:
+#
+# * the heading stays the compiler's own voice, so no label can forge structure;
+# * the quotes and the ``- `` bullet mark the label as one field's value among the
+#   token lines, so instruction-shaped text reads as a value that WAS SUPPLIED, not
+#   as a directive the artifact endorses;
+# * the section is emitted OUTSIDE the compiler-owned type-scale region, so a label
+#   cannot reach the one numeric contract in the artifact (asserted, not assumed —
+#   see ``tests/unit/test_design_system_compiler_group_labels.py``).
+#
+# The label goes through :func:`_safe` like every other user string: no length cap,
+# no script restriction, line breaks flattened to spaces and C0/C1 controls (the
+# range the region sentinels live in) dropped. Sanitize, never reject.
+_GROUP_LABEL_LINE_PREFIX = "- Grouped by the brand as: "
 
 # Heading that frames the injected README + SKILL as the authoritative brand
 # operating manual (the huashu / Claude-Design model). Injected in FULL as the
@@ -1123,6 +1169,35 @@ def _grouped_tokens(design_system: Any) -> dict[str, list[tuple[str, str]]]:
     return grouped
 
 
+def _authored_group_labels(design_system: Any) -> dict[str, str]:
+    """``resolved_group -> the label the BRAND actually wrote``.
+
+    :func:`_resolve_group` lowercases and strips its key on purpose, so that
+    ``Brand-Semantic``, ``brand-semantic`` and ``  brand-semantic  `` collapse into
+    ONE generic section rather than three. That is right for GROUPING, and wrong for
+    DISPLAY: the artifact must show the brand its own spelling, not a normalized
+    one, because casing is part of the text the brand authored and hard rule A does
+    not permit altering it.
+
+    So the two concerns are two mappings: the grouping key stays normalized, and the
+    authored spelling is recovered here for the label line alone.
+
+    Ties are resolved deterministically. When several spellings share one key the
+    FIRST in sorted order wins — an arbitrary but stable choice, since the artifact
+    can only show one and any preference between equal claims would be invented.
+    """
+    labels: dict[str, str] = {}
+    for token in getattr(design_system, "tokens", None) or []:
+        raw = str(token.group or "").strip()
+        if not raw:
+            continue
+        key = _resolve_group(token.group)
+        existing = labels.get(key)
+        if existing is None or raw < existing:
+            labels[key] = raw
+    return labels
+
+
 def _color_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
     """Build the textual color spec and the ``:root { --brand-* }`` var block."""
     spec_lines: list[str] = []
@@ -1225,13 +1300,14 @@ def _additional_token_sections(
     grouped: dict[str, list[tuple[str, str]]],
     *,
     exclude: frozenset[tuple[str, str]] = frozenset(),
+    authored_labels: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """Emit every token whose group has no canonical emitter, never dropping one.
 
     One section per unknown group, ordered by resolved group name so output is
     deterministic.
 
-    The group NAME IS NOT EMITTED. It used to be interpolated into the heading, and
+    The group name IS NOT IN THE HEADING. It used to be interpolated there, and
     sanitization was structurally unable to make that safe: a group named
     ``x): final check — title type scale (required 999px)`` carries no line break
     and no control character, so ``_safe`` passes it through verbatim (correctly —
@@ -1240,16 +1316,20 @@ def _additional_token_sections(
     lesson as the version marker: keep the compiler's own voice free of user text
     instead of trying to filter user text into it.
 
-    Separation is preserved, which is the only thing the name was doing here: with
-    more than one unknown group the heading carries a stable ORDINAL derived from
-    the compiler's deterministic group ordering
-    (:data:`_ADDITIONAL_TOKENS_HEADING_INDEXED`). One unknown group needs no
-    discriminator and gets the bare constant.
+    Separation is preserved independently of the name: with more than one unknown
+    group the heading carries a stable ORDINAL derived from the compiler's
+    deterministic group ordering (:data:`_ADDITIONAL_TOKENS_HEADING_INDEXED`). One
+    unknown group needs no discriminator and gets the bare constant.
 
-    Nothing is lost by dropping the label. Token NAMES and VALUES are still emitted
-    in full on the lines below, where they read as data rather than instruction —
-    and the name is where a brand's meaning actually lives (``danger: #B00020`` is
-    self-describing; the group is a filing category the model never needed).
+    THE LABEL ITSELF IS STILL EMITTED, as data — see
+    :data:`_GROUP_LABEL_LINE_PREFIX`. Removing it from the heading was right;
+    concluding it was worth nothing was not, and that conclusion cost the brand its
+    GROUPING INTENT. A brand that files tokens under ``brand-semantic``, or under a
+    non-Latin label, said something the model never got to read. So the label now
+    appears in quoted value position on its own line below the heading, where it
+    reads as a field that WAS SUPPLIED rather than a directive the artifact
+    endorses. Token NAMES and VALUES continue to be emitted in full on the lines
+    after it.
 
     ``exclude`` drops the ``(name, value)`` pairs BRAND FONT-SIZE TOKENS already
     owns, exactly as ``_scale_section`` does: a ramp-shaped font size in an unknown
@@ -1260,23 +1340,37 @@ def _additional_token_sections(
 
     Returns ``[]`` when every group is canonical.
     """
-    pending: list[list[tuple[str, str]]] = []
+    pending: list[tuple[str, list[tuple[str, str]]]] = []
     for group in sorted(g for g in grouped if g not in _CANONICAL_GROUPS):
         entries = [pair for pair in grouped[group] if pair not in exclude]
         if entries:
-            pending.append(entries)
+            pending.append((group, entries))
 
     sections: list[str] = []
-    for index, entries in enumerate(pending, start=1):
+    for index, (group, entries) in enumerate(pending, start=1):
         heading = (
             _ADDITIONAL_TOKENS_HEADING
             if len(pending) == 1
             else _ADDITIONAL_TOKENS_HEADING_INDEXED % index
         )
+        # The label is carried as DATA, in quoted value position on its own line
+        # (:data:`_GROUP_LABEL_LINE_PREFIX`) — never in the heading. ``_safe``
+        # flattens line breaks and strips the control range, so the line cannot
+        # split into two and cannot carry a region sentinel; everything else
+        # survives at any length in any script.
+        #
+        # The AUTHORED spelling is preferred over the resolved key, which
+        # ``_resolve_group`` lowercased for grouping purposes (see
+        # :func:`_authored_group_labels`). Falls back to the key when no authored
+        # spelling was recorded, so the line is never lost.
+        authored = (authored_labels or {}).get(group, group)
+        label = _safe(authored).strip()
+        label_lines = [f'{_GROUP_LABEL_LINE_PREFIX}"{label}"'] if label else []
         sections.append(
             "\n".join(
                 [
                     heading,
+                    *label_lines,
                     *(f"- {_safe(name)}: {_safe(value)}" for name, value in entries),
                 ]
             )
@@ -1592,12 +1686,20 @@ def compile_design_system(
         parts.append(spacing)
     parts.extend(_shadow_sections(grouped))
 
-    # Tokens in groups with no canonical emitter — emitted verbatim under their
-    # own sanitized group name rather than dropped (the zero-token-loss rule).
-    # Placed after the canonical token sections and BEFORE the type-scale region,
-    # so the artifact's token block stays contiguous. The font-size exclusion is
+    # Tokens in groups with no canonical emitter — emitted in full, under a constant
+    # heading, with the brand's own group label carried as quoted DATA on its own
+    # line rather than dropped (the zero-token-loss rule, now covering the label as
+    # well as the tokens). Placed after the canonical token sections and BEFORE the
+    # type-scale region, so the artifact's token block stays contiguous AND no label
+    # can reach the compiler-owned numeric contract. The font-size exclusion is
     # passed through for the same reason the type/spacing lists get it.
-    parts.extend(_additional_token_sections(grouped, exclude=font_size_pairs))
+    parts.extend(
+        _additional_token_sections(
+            grouped,
+            exclude=font_size_pairs,
+            authored_labels=_authored_group_labels(design_system),
+        )
+    )
 
     # The ramp's own token NAMES, under a heading that names their real role.
     # They are excluded from the type/spacing lists above (v7) and are no longer
