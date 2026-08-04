@@ -130,46 +130,95 @@ class DesignSystemNameConflictError(ValueError):
 
 
 #: Maximum size of a btree index tuple in PostgreSQL (version 4 btrees). A UNIQUE
-#: index over ``design_system.name`` cannot hold a row larger than this.
+#: index over ``design_system.name`` cannot hold an entry larger than this.
 _BTREE_MAX_INDEX_ROW_BYTES = 2704
 
+#: Bytes of that maximum the index tuple's own header consumes, so the largest NAME
+#: that fits is this much smaller. Measured against a live PostgreSQL 14 by binary
+#: search, and quoted to the user only as ADVICE — the database, not this number,
+#: decides (see :func:`translate_name_index_limit_error`).
+_INDEX_TUPLE_OVERHEAD_BYTES = 12
 
-def _guard_indexable_name(name: str) -> None:
-    """Reject a name the UNIQUE index physically cannot hold — as a clear 4xx.
+#: Practical ceiling on a design-system name, for the user-facing message.
+MAX_INDEXABLE_NAME_BYTES = _BTREE_MAX_INDEX_ROW_BYTES - _INDEX_TUPLE_OVERHEAD_BYTES
 
-    ``design_system.name`` is unbounded ``TEXT`` (brand data is never turned away for
-    its length), but it also carries a UNIQUE constraint, and a btree index tuple
-    cannot exceed :data:`_BTREE_MAX_INDEX_ROW_BYTES`. The interaction is subtle: the
-    index tuple is COMPRESSED, so length alone does not decide. A 5000-byte name that
-    compresses well stores exactly; a 5000-byte incompressible one raises
-    ``ProgramLimitExceeded`` from deep inside the INSERT.
+#: PostgreSQL class 54 — "program limit exceeded"; 54000 is what an oversized btree
+#: index tuple raises. Matched on the SQLSTATE rather than the message where the
+#: driver exposes it, since the message is localizable and version-dependent.
+_PROGRAM_LIMIT_EXCEEDED_SQLSTATE = "54000"
 
-    That error is correct to raise — it fails loudly and never truncates the brand's
-    name — but it reached the import route's generic ``except Exception`` and surfaced
-    as HTTP 500 "Failed to import design system", which tells the user nothing they
-    can act on. This turns it into the error type the routes already map to a 4xx,
-    with a message naming the real limit.
+#: Fragments identifying the same condition when no SQLSTATE is available (a
+#: non-psycopg driver, or an error already flattened to a string).
+_INDEX_ROW_SIZE_MARKERS = (
+    "index row size",
+    "index row requires",
+    "btree version",
+    "values larger than 1/3 of a buffer page",
+)
 
-    Compressibility is MEASURED, not assumed, using zlib as a stand-in for Postgres's
-    pglz: both are LZ77-family, so a name zlib cannot bring under the limit is one
-    pglz cannot either. Deliberately conservative — the guard only fires when the
-    compressed size still exceeds the maximum, so a long-but-compressible name (which
-    Postgres genuinely stores) is never turned away.
+
+class DesignSystemNameTooLongError(ValueError):
+    """The name overflowed the UNIQUE index on ``design_system.name``.
+
+    Routes map this to HTTP 400. It is raised in REACTION to the database refusing
+    the write, never in anticipation of it.
     """
-    import zlib
 
-    encoded = name.encode("utf-8")
-    if len(encoded) <= _BTREE_MAX_INDEX_ROW_BYTES:
+
+def _is_name_index_limit_error(exc: BaseException) -> bool:
+    """True when *exc* is Postgres refusing to index an oversized name.
+
+    Checks the SQLSTATE on the driver exception (and on any ``orig`` SQLAlchemy
+    wrapped), falling back to message markers for drivers that expose no code.
+    """
+    seen: set[int] = set()
+    candidate: Optional[BaseException] = exc
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        code = getattr(candidate, "pgcode", None) or getattr(candidate, "sqlstate", None)
+        if code == _PROGRAM_LIMIT_EXCEEDED_SQLSTATE:
+            return True
+        candidate = getattr(candidate, "orig", None) or candidate.__cause__
+
+    message = str(exc).lower()
+    return any(marker in message for marker in _INDEX_ROW_SIZE_MARKERS)
+
+
+def translate_name_index_limit_error(exc: BaseException, *, name: Optional[str]) -> None:
+    """Re-raise *exc* as :class:`DesignSystemNameTooLongError` if that is what it is.
+
+    THE DATABASE IS THE AUTHORITY. ``design_system.name`` is unbounded ``TEXT``
+    (brand text is never capped or truncated) carrying a UNIQUE constraint, so it is
+    backed by a btree whose per-entry tuple cannot exceed
+    :data:`_BTREE_MAX_INDEX_ROW_BYTES`. Whether a given name fits is Postgres's
+    determination, made when the row is written; this function's only job is to
+    notice that determination and say something actionable about it. A caller wraps
+    its write and calls this from the ``except``.
+
+    This REPLACES a predictor. The previous version ran ``zlib.compress`` as a
+    stand-in for pglz and refused a name whose compressed size still exceeded the
+    limit — reasoning that both are LZ77-family, so what zlib cannot shrink pglz
+    cannot either. The premise does not hold: a btree key is NOT pglz-compressed into
+    the index, so the compressed size of the name has no bearing on the size of the
+    index tuple. Measured against a live PostgreSQL, the guard passed 2700-, 3000- and
+    3500-byte names that Postgres then rejected — producing exactly the HTTP 500 it
+    existed to prevent — and it was never called on the create or rename paths at all.
+    Reaction has no equivalent failure mode: whatever the server's page size, btree
+    version or collation, the error it actually raises is the error translated here.
+
+    The name is never TRUNCATED to make it fit. Storing a brand under a name it did
+    not choose is worse than refusing the write, and the caller can retry with a
+    shorter one.
+    """
+    if not _is_name_index_limit_error(exc):
         return
-    # Only a name whose COMPRESSED form still overflows the index is unstorable.
-    if len(zlib.compress(encoded, 6)) <= _BTREE_MAX_INDEX_ROW_BYTES:
-        return
-    raise DesignSystemImportError(
-        f"The design system name is too long to index uniquely: it is "
-        f"{len(encoded)} bytes, and a unique name must compress to at most "
-        f"{_BTREE_MAX_INDEX_ROW_BYTES} bytes. Import it with a shorter name "
-        "(the brand's own text is stored uncapped everywhere else)."
-    )
+    measured = f" (it is {len(name.encode('utf-8'))} bytes)" if name else ""
+    raise DesignSystemNameTooLongError(
+        f"The design system name is too long to index uniquely{measured}. The "
+        f"database limits a unique name to roughly {MAX_INDEXABLE_NAME_BYTES} bytes; "
+        "use a shorter name (the brand's own text is stored uncapped everywhere "
+        "else, and is never truncated)."
+    ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +519,10 @@ def import_bundle(
             source_filename=source_filename,
         )
 
-        # Fail fast, with an actionable message, on a name the UNIQUE index cannot
-        # physically hold — otherwise it surfaces as an opaque 500 from the INSERT.
-        _guard_indexable_name(name)
-
+        # Whether the UNIQUE index can hold this name is Postgres's call, made at the
+        # commit below; predicting it here was measurably wrong (see
+        # translate_name_index_limit_error).
+        #
         # Fail fast on a name clash before doing any expensive work.
         existing = db.query(DesignSystem).filter(DesignSystem.name == name).first()
         if existing:
@@ -515,8 +564,15 @@ def import_bundle(
 
     db.add(design_system)
     # Flush assigns primary keys so {{ds-asset:ID}} placeholders point at real ids
-    # and each asset-reference file row resolves its asset_id.
-    db.flush()
+    # and each asset-reference file row resolves its asset_id. It is also where the
+    # UNIQUE index on ``name`` first has to hold the value, so an unindexable name
+    # surfaces HERE — as the database's own error, translated into the 4xx the route
+    # already maps rather than escaping as an opaque 500.
+    try:
+        db.flush()
+    except Exception as exc:
+        translate_name_index_limit_error(exc, name=name)
+        raise
     # Materialize addressable template entities (v1 Phase 4) AFTER the flush so
     # the rewritten layout's {{ds-asset:ID}} refs point at real asset ids. Local
     # import: design_system_templates imports this module for nothing, but the
@@ -525,7 +581,14 @@ def import_bundle(
 
     materialize_templates(design_system)
     recompute_compiled_style_content(design_system)
-    db.commit()
+    # The flush above normally raises first, but the index is only DEFINITELY
+    # exercised at the commit (a deferrable constraint, a different flush order), so
+    # the same translation guards both rather than assuming which one fires.
+    try:
+        db.commit()
+    except Exception as exc:
+        translate_name_index_limit_error(exc, name=name)
+        raise
     db.refresh(design_system)
 
     logger.info(
