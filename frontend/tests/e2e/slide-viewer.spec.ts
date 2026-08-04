@@ -323,4 +323,49 @@ test.describe('flip-through viewer', () => {
     await expect(page.getByTestId('stage-toolbar')).toBeVisible();
     await expect(page.getByTestId('stage-optimize-layout')).toBeVisible();
   });
+
+  // ── Drag-reorder from the ribbon (spec §4, §10) ───────────────────────────
+
+  test('dragging a thumbnail reorders the deck via the reorder endpoint', async ({ page }) => {
+    // Capture the reorder request so we assert the deck mutation actually fires
+    // with the right permutation, rather than only that a drag gesture happened.
+    const reorderBodies: Array<{ new_order: number[] }> = [];
+    await page.route('**/api/slides/reorder', async (route) => {
+      reorderBodies.push(route.request().postDataJSON());
+      // Echo a deck so the optimistic update is not rolled back.
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockSlidesResponse.slide_deck),
+      });
+    });
+
+    await openDeck(page);
+
+    const source = page.getByTestId('ribbon-thumb-0');
+    const target = page.getByTestId('ribbon-thumb-2');
+    const from = await source.boundingBox();
+    const to = await target.boundingBox();
+    if (!from || !to) throw new Error('ribbon thumbnails have no layout box');
+
+    // dnd-kit's PointerSensor needs discrete pointer events with intermediate
+    // moves; a single mouse.move() jump does not cross its activation threshold.
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.down();
+    for (let step = 1; step <= 6; step++) {
+      await page.mouse.move(
+        from.x + from.width / 2,
+        from.y + from.height / 2 + ((to.y - from.y) * step) / 6,
+        { steps: 2 },
+      );
+    }
+    await page.mouse.up();
+
+    // The reorder request must have fired with a genuine permutation.
+    await expect.poll(() => reorderBodies.length, { timeout: 5000 }).toBeGreaterThan(0);
+    const order = reorderBodies[0].new_order;
+    expect(order).toHaveLength(3);
+    expect([...order].sort()).toEqual([0, 1, 2]);
+    expect(order).not.toEqual([0, 1, 2]);
+  });
 });
