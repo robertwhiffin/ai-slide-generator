@@ -295,9 +295,9 @@ For presentation mode and raw HTML views, all slides are rendered together. Thes
 ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 ```
 
-#### 5.4 Slide Selection & Context
-- `SelectionContext` tracks selected slide indices/HTML.
-- `SlideSelection` and `SlideTile` share this context so the user can highlight slides before requesting edits.
+#### 5.4 Slide Context
+- The current slide index is tracked by `ViewerContext` in the flip-through viewer.
+- The chat panel receives slide context (index + HTML) when the user asks to refine a specific slide.
 - Backend becomes the single source of truth for script state.
 
 ---

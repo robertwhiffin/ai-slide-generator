@@ -58,6 +58,7 @@ const sidebars = {
         'technical/llm-as-judge-verification',
         'technical/multi-user-concurrency',
         'technical/presentation-mode',
+        'technical/slide-viewer',
         'technical/profile-switch-genie-flow',
         'technical/save-points-versioning',
         'technical/url-routing',
