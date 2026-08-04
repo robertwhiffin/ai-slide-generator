@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` checks setup status via `/api/setup/status` and shows `WelcomeSetup` if not configured; otherwise wraps the tree in `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider`, `AgentConfigProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
+- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` checks setup status via `/api/setup/status` and shows `WelcomeSetup` if not configured; otherwise wraps the tree in `SessionProvider`, `GenerationProvider`, `ToastProvider`, `AgentConfigProvider`, `TourProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://127.0.0.1:8000` in dev, relative URLs in production).
 
 ---
@@ -293,7 +293,7 @@ interface SlideStyle {
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
-| `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
+| `src/components/ChatPanel/ChatInput.tsx` | Textarea for composing prompts; accepts an optional `badge?: React.ReactNode` slot above the textarea (currently no caller supplies one) | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides. Still exists but is no longer the primary slide surface — `SlideViewer` fulfils that role. | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview tile used within `SlidePanel` for the tab-based view. Still exists; not the primary slide surface. | Prop callbacks to `SlidePanel` |
@@ -307,7 +307,6 @@ interface SlideStyle {
 | `src/components/SlideViewer/SlideStage.tsx` | Renders one slide at a time in a sandboxed iframe via `buildSlideDocument`. Handles wheel-paging. | None (renders via `buildSlideDocument`) |
 | `src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled thumbnails. Drives slide selection on click. Drag-reorder via `@dnd-kit`. Amber unseen dot per slide with unread findings. | `onReorder` callback to `AppLayout` |
 | `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Apply / Dismiss / Discuss actions (stubs until PRD workstream 5 ships). | None (prop callbacks only) |
-| `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 | `src/components/AgentConfigBar/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.patchTools` |
@@ -326,7 +325,6 @@ interface SlideStyle {
 | `src/components/ChatPanel/PromptEditorModal.tsx` | Expanded modal editor for composing longer prompts with save and send actions | None (callback props) |
 | `src/components/ChatPanel/ErrorDisplay.tsx` | Inline error banner with dismiss button, shown below chat input on API errors | None (props only) |
 | `src/components/ChatPanel/LoadingIndicator.tsx` | Animated loading indicator with rotating message, shown during slide edits | None (props only) |
-| `src/components/ChatPanel/SelectionBadge.tsx` | Badge in ChatInput showing the current slide selection range with a clear button | None (props only) |
 | `src/components/config/GoogleSlidesAuthForm.tsx` | Google OAuth credentials upload and user authorization flow for Google Slides export | `configApi.uploadGoogleCredentials`, `configApi.getGoogleCredentialsStatus`, `configApi.deleteGoogleCredentials`, `api.getGoogleSlidesAuthUrl` |
 | `src/components/config/ConfirmDialog.tsx` | Reusable confirmation dialog for destructive actions (deleting profiles, changing defaults) | None (props only) |
 | `src/components/config/ContributorsManager.tsx` | Profile sharing UI; add/update/remove contributors (users/groups) with permission levels | `configApi.listContributors`, `configApi.addContributor`, `configApi.updateContributor`, `configApi.removeContributor`, `configApi.searchIdentities` |
@@ -340,17 +338,17 @@ interface SlideStyle {
 ### Initialization
 
 1. `AppLayout` renders with `slideDeck = null`
-2. `SelectionProvider` ensures any component can call `useSelection()`
-3. Session created on "New Session" click: `createNewSession()` → `api.createSession({ sessionId })` → `navigate()`
+2. Session created on "New Session" click: `createNewSession()` → `api.createSession({ sessionId })` → `navigate()`
 
 ### Generating / Editing Slides
 
 1. User enters prompt in `ChatInput`
-2. `handleSendMessage` packages text and optional `slideContext`:
+2. `handleSendMessage` in `AppLayout` forwards text and an optional `slideContext` supplied by the caller (e.g., a per-slide refine action):
    ```typescript
+   // slideContext is passed explicitly by the caller, not derived from SelectionContext
    slideContext = {
-     indices: selectedIndices,
-     slide_htmls: selectedSlides.map(s => s.html),
+     indices: [currentIndex],
+     slide_htmls: [currentSlide.html],
    };
    ```
 3. `api.sendMessage` POSTs to `/api/chat`:
