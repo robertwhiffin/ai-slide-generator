@@ -685,8 +685,33 @@ _CAMEL_HUMP_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # * ``small`` / ``large`` — the base rungs of the CSS absolute-size keyword scale.
 #   The arm covered ``x{1,3}-small``/``x{1,3}-large`` (and ``medium``) but not the
 #   two unprefixed keywords those are derived from.
+#
+# Round 9 found the CSS-WIDE KEYWORDS missing, and this time the grammar was
+# audited AS A WHOLE against the CSS font-size spec rather than extended by the
+# one form that was reported. Four rounds of "add the value that was found" is
+# itself the defect: each fix left the grammar a proper subset of legal CSS, so
+# the next ordinary declaration reopened hard rule B. The clauses below are now
+# the spec's own list — CSS-wide keywords, absolute-size keywords, relative-size
+# keywords, ``<length>``, ``<percentage>``, math functions, ``var()``, unitless
+# zero — and ``tests/unit/test_design_system_compiler_font_size_grammar.py`` pins
+# every one of them at the ARTIFACT level, so a future narrowing fails a test
+# instead of shipping a mislabel.
+#
+# The keywords are the most consequential of the misses: ``font-size: inherit`` is
+# how a design system says "match the parent", and ``initial``/``unset``/``revert``/
+# ``revert-layer`` are valid on EVERY CSS property, so all five are ordinary things
+# to find in a brand's token file. They carry no computable pixel number, which is
+# exactly why they belong here and not in :data:`_PX_VALUE_RE`: ownership asks "is
+# this a font size?", while the px ramp asks "what number is it?" — the round-6
+# separation of those two questions is what lets a keyword be correctly LABELLED
+# without inventing a size for the band math.
+_CSS_WIDE_KEYWORDS = r"inherit|initial|unset|revert-layer|revert"
+
+# ``revert-layer`` precedes ``revert`` so the longer keyword is matched whole. The
+# trailing ``\s*$`` anchor would force a backtrack anyway, but relying on that makes
+# the alternation's correctness depend on the engine rather than on the order.
 _LENGTH_UNITS = r"""(?:px|pt|pc|in|cm|mm|q         # absolute lengths
-             |r?em|ex|ch|r?lh|ic|r?cap    # font-relative lengths
+             |r?em|r?ex|r?ch|r?lh|r?ic|r?cap  # font-relative lengths (+ root variants)
              |v(?:w|h|i|b|min|max)        # viewport-relative lengths
              |[cdsl]v(?:w|h|i|b|min|max)  # small/large/dynamic/container viewport
              |cq(?:w|h|i|b|min|max)       # container-query lengths
@@ -706,6 +731,7 @@ _FONT_SIZE_VALUE_RE = re.compile(
             .*\)
         |x{{1,3}}-large|x{{1,3}}-small    # CSS absolute-size keywords
         |small|large|larger|smaller|medium
+        |{_CSS_WIDE_KEYWORDS}             # CSS-wide keywords, legal on any property
     )\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
