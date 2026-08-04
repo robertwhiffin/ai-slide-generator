@@ -2996,7 +2996,11 @@ class TestEveryTokenGroupIsKept:
 
     def test_casing_and_padding_variants_collapse_into_one_section(self, session):
         """Otherwise ``Semantic``/``semantic``/`` SEMANTIC `` would emit three
-        separate sections for what the author means as one group."""
+        separate sections for what the author means as one group.
+
+        GROUPING normalizes; DISPLAY does not. The key is lowercased and stripped so
+        the variants collapse, while the label shows one spelling verbatim.
+        """
         from src.services.design_system_compiler import compile_design_system
 
         tokens = [
@@ -3014,7 +3018,13 @@ class TestEveryTokenGroupIsKept:
         # The authored spelling wins over the lowercased grouping key. Several
         # spellings share this key, so the first in sorted order is shown — an
         # arbitrary but STABLE choice, since only one can be displayed.
-        assert '- Grouped by the brand as: "SEMANTIC"' in out
+        #
+        # CHANGED (round 10): the spelling is shown VERBATIM, so the winner keeps the
+        # padding the brand wrote. Stripping it was display-normalising a user string,
+        # and only control/sentinel bytes may be removed. The padded spelling also now
+        # WINS the tie (a leading space sorts before "S"/"s"), which is the same
+        # stable rule applied to unmodified text.
+        assert '- Grouped by the brand as: " SEMANTIC "' in out
         for name, value in (("a-warn", "#F0A000"), ("b-info", "#0070F0"), ("c-ok", "#00A050")):
             assert f"- {name}: {value}" in out
 

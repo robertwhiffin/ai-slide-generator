@@ -353,6 +353,100 @@ class TestTheLabelCannotBecomeAnInstruction:
 
         assert _label_line("Brand-Semantic") in compiled
 
+    def test_the_authored_whitespace_is_preserved(self, session):
+        """A space is neither a control nor a sentinel byte, so it is not removed.
+
+        The rule this module has been held to throughout is that ONLY control and
+        sentinel bytes may be removed from a user string — which is why a
+        300-character label is uncapped and why an earlier round's multi-space
+        collapse was reverted for RENAMING a legitimate token. Leading/trailing
+        spaces the brand authored are in the same class: display-normalising them is
+        data loss, silent, and indistinguishable to the brand from a bug.
+
+        The quotes make the padding legible rather than ambiguous — the whole point
+        of quoted value position is that the value's extent is explicit.
+        """
+        compiled = _compiled_with_group(session, " Brand Semantic ")
+
+        assert _label_line(" Brand Semantic ") in compiled
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            pytest.param(" leading", id="leading"),
+            pytest.param("trailing ", id="trailing"),
+            pytest.param("  two both  ", id="both-doubled"),
+            pytest.param(" 意味論 ", id="padded-cjk"),
+            pytest.param("inner  double", id="inner-run-untouched"),
+        ],
+    )
+    def test_padded_labels_round_trip_verbatim(self, session, label):
+        """Whatever spacing the brand wrote is what the artifact shows."""
+        compiled = _compiled_with_group(session, label)
+
+        assert json.loads(_label_value_text(compiled)) == label
+
+    def test_a_line_break_still_becomes_a_space_and_is_kept(self, session):
+        """Preserving spaces must not disturb the ONE transformation that remains.
+
+        ``_safe`` flattens a break to a space — that is structural, not cosmetic, and
+        it stays. The flattened result is then displayed verbatim, padding included.
+        """
+        compiled = _compiled_with_group(session, "first\nsecond")
+
+        assert json.loads(_label_value_text(compiled)) == "first second"
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            pytest.param(" ", id="single-space"),
+            pytest.param("   ", id="several-spaces"),
+            pytest.param("\t", id="tab"),
+            pytest.param("\n", id="newline-only"),
+            pytest.param("\x00\x01", id="controls-only"),
+        ],
+    )
+    def test_a_label_that_is_only_whitespace_emits_no_line(self, session, label):
+        """The one case handled explicitly rather than by blanket-stripping.
+
+        A label that is nothing BUT whitespace has no spelling to show. Emitting
+        ``- Grouped by the brand as: "   "`` would put an apparently-empty field in
+        front of the model — a claim that the brand grouped its tokens under
+        something, with nothing legible to read — so this case gets no line at all,
+        exactly as a group with no label recorded does. That is a genuine ambiguity
+        being handled, not the whitespace of a REAL label being discarded.
+
+        The tokens are still emitted; only the label line is absent.
+        """
+        compiled = _compiled_with_group(session, label, name="tok-one", value="#0A0B0C")
+
+        assert _GROUP_LABEL_LINE_PREFIX not in compiled
+        assert "- tok-one: #0A0B0C" in compiled, "the tokens must survive regardless"
+
+    def test_padding_variants_still_share_one_section(self, session):
+        """Preserving the spelling must not undo the grouping it came from.
+
+        ``_resolve_group`` strips its KEY on purpose so `` semantic `` and
+        ``semantic`` collapse; that stays true while the DISPLAYED label keeps its
+        padding. Grouping and display are two concerns, and only display changed.
+        """
+        ds = _make_ds(
+            session,
+            name="Acme Padding Variants",
+            tokens=[
+                {"group": " brand-pad ", "name": "tok-a", "value": "#123456"},
+                {"group": "brand-pad", "name": "tok-b", "value": "#654321"},
+            ],
+        )
+
+        compiled = compile_design_system(ds)
+
+        assert compiled.count(_GROUP_LABEL_LINE_PREFIX) == 1, (
+            "padding variants must collapse into ONE labelled section"
+        )
+        assert "- tok-a: #123456" in compiled
+        assert "- tok-b: #654321" in compiled
+
     def test_casing_variants_still_share_one_section(self, session):
         """Preserving the spelling must not undo the grouping it came from."""
         ds = _make_ds(
