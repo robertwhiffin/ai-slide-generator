@@ -524,6 +524,12 @@ def _run_migrations(engine, schema: str | None = None):
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
+        # --- agent_config: style precedence in the DB, for the raw-SQL writers no
+        # --- Python-side bind hook can see (PostgreSQL only; no-op on SQLite) ---
+        _migrate_agent_config_precedence_trigger(
+            conn, inspector, schema, _qual, is_sqlite
+        )
+
         # --- design system library: additive design_system(+asset/+token) tables ---
         _migrate_design_system_tables(conn, schema)
 
@@ -898,6 +904,135 @@ def _ensure_llm_judge_backend_default(
         logger.debug(
             "Migration: skip llm_judge_backend server default alter: %s", ex
         )
+
+
+#: The one place the precedence rule is written in SQL. ``$$``-quoted so the body
+#: needs no escaping, and named after the rule rather than the tables, since both
+#: ``agent_config`` columns share it.
+_AGENT_CONFIG_PRECEDENCE_FUNCTION = "tellr_agent_config_precedence"
+
+#: Trigger name, per table. Contains "agent_config" so the tests (and a human
+#: reading ``pg_trigger``) can find every installation of the rule.
+_AGENT_CONFIG_TRIGGER = "trg_agent_config_precedence"
+
+#: Both columns the rule governs (``src/database/types.py``).
+_AGENT_CONFIG_TABLES = ("user_sessions", "config_profiles")
+
+
+def _migrate_agent_config_precedence_trigger(conn, inspector, schema, _qual, is_sqlite):
+    """Enforce agent_config style precedence in the DATABASE (PostgreSQL only).
+
+    ``NormalizedAgentConfig`` (``src/database/types.py``) is the primary enforcement
+    and covers every writer that goes through a column object. RAW SQL does not:
+    ``conn.execute(text("INSERT ..."))`` hands the statement to the driver as
+    written, so no Python-side hook is positioned to intervene, and a both-set
+    config reached real PostgreSQL intact. The database is the only place downstream
+    of EVERY writer, so the rule is restated here as a ``BEFORE INSERT OR UPDATE``
+    trigger.
+
+    Same rule, same direction: DESIGN SYSTEM WINS, ``slide_style_id`` is set to
+    NULL, and the row is stored. Deliberately NOT a ``RAISE`` — an exception here
+    would be the 422 that already wedged every legacy both-set row on every save,
+    one layer lower and harder to see. Only the contradiction is repaired; every
+    other key, including ones no model knows about, is left exactly as written.
+
+    IDEMPOTENT, and converging from ANY starting state. ``CREATE OR REPLACE
+    FUNCTION`` plus ``DROP TRIGGER IF EXISTS`` then ``CREATE TRIGGER`` reaches the
+    same end state whether the trigger is absent, present, or present in an older
+    form — so a re-run is a no-op and an upgrade needs no version check. That
+    property is the whole point: the two brand-text column migrations on this branch
+    inferred "needs migrating" from a state their own predecessor produced, so they
+    fought each other and the schema OSCILLATED between runs instead of converging
+    (see :func:`_migrate_widen_token_name`).
+
+    PER-ITEM CONTAINMENT. Every statement runs inside a SAVEPOINT and failures are
+    logged, never raised. The whole migration run shares one transaction, so an
+    escaping error would abort every LATER migration too — a database that merely
+    lacks permission to create a trigger (a copy-on-write branch whose service
+    principal does not own the inherited table) must still boot with the Python-side
+    normalization doing its job.
+
+    No-op on SQLite: the body is PL/pgSQL and SQLite has neither the language nor
+    the JSON operators, so the SQLite suite is untouched.
+    """
+    if is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    present = []
+    for table in _AGENT_CONFIG_TABLES:
+        try:
+            cols = {c["name"] for c in inspector.get_columns(table, schema=schema)}
+        except Exception:
+            cols = set()
+        if "agent_config" in cols:
+            present.append(table)
+    if not present:
+        return
+
+    # ``jsonb`` for the key test and the edit (``json`` has neither ``->``-comparable
+    # equality nor ``jsonb_set``), then back out through ``::text`` so the assignment
+    # re-parses into whichever of ``json``/``jsonb`` the column actually declares —
+    # PL/pgSQL coerces ``NEW.agent_config`` to the column's own type, so the function
+    # fits both without knowing which it is. Key ORDER is not preserved through
+    # jsonb, which is why the tests assert on the parsed authorities rather than on
+    # the stored byte string.
+    function_sql = f"""
+        CREATE OR REPLACE FUNCTION {_AGENT_CONFIG_PRECEDENCE_FUNCTION}()
+        RETURNS trigger AS $$
+        BEGIN
+            IF NEW.agent_config IS NOT NULL
+               AND jsonb_typeof(NEW.agent_config::jsonb) = 'object'
+               AND COALESCE(NEW.agent_config::jsonb -> 'slide_style_id', 'null'::jsonb)
+                   <> 'null'::jsonb
+               AND COALESCE(NEW.agent_config::jsonb -> 'design_system_id', 'null'::jsonb)
+                   <> 'null'::jsonb
+            THEN
+                RAISE LOG 'agent_config carried BOTH style authorities; '
+                          'design system wins, slide style dropped';
+                NEW.agent_config := jsonb_set(
+                    NEW.agent_config::jsonb, '{{slide_style_id}}', 'null'::jsonb
+                )::text;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """
+
+    try:
+        with conn.begin_nested():
+            conn.execute(text(function_sql))
+    except Exception as ex:
+        logger.debug(
+            "Migration: skip agent_config precedence function: %s", ex
+        )
+        return
+
+    for table in present:
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    text(
+                        f'DROP TRIGGER IF EXISTS {_AGENT_CONFIG_TRIGGER} '
+                        f"ON {_qual(table)}"
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"CREATE TRIGGER {_AGENT_CONFIG_TRIGGER} "
+                        f"BEFORE INSERT OR UPDATE OF agent_config ON {_qual(table)} "
+                        "FOR EACH ROW EXECUTE FUNCTION "
+                        f"{_AGENT_CONFIG_PRECEDENCE_FUNCTION}()"
+                    )
+                )
+            logger.info(
+                f"Migration: agent_config precedence trigger installed on {table}"
+            )
+        except Exception as ex:
+            logger.debug(
+                "Migration: skip agent_config precedence trigger on %s: %s", table, ex
+            )
 
 
 def _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite) -> None:

@@ -6,6 +6,7 @@ that code, and every new writer is a fresh chance to bypass it.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -33,9 +34,26 @@ class NormalizedAgentConfig(TypeDecorator):
       closed this either;
     * ``SessionManager.create_session`` — handed a raw dict it never parsed.
 
-    A bind hook is the actual boundary: SQLAlchemy routes every INSERT and UPDATE
-    parameter through it, whatever produced the value, so a write path added tomorrow
-    inherits the rule without knowing it exists.
+    A bind hook is the actual boundary for every writer that goes through a COLUMN
+    OBJECT: SQLAlchemy routes those INSERT and UPDATE parameters through it, whatever
+    produced the value, so a write path added tomorrow inherits the rule without
+    knowing it exists. A cross-vendor review confirmed that covers core
+    insert/update/executemany, ORM attribute assignment, ``Query.update``,
+    ``bulk_save_objects`` and ``merge``, and found exactly TWO shapes it did not:
+
+    * **an ORM JSON column assigned a ``str``** — the hook ran but returned early on
+      ``not isinstance(value, dict)``. A JSON-object string is the same config in
+      transport form, so it is now parsed, normalized and re-serialized (see
+      :meth:`process_bind_param`). The guard's real subjects — ``None`` and blobs
+      that are not configs — still pass through untouched.
+    * **raw SQL** — ``conn.execute(text("INSERT ..."))`` never mentions a column
+      object, so the statement text goes to the driver as written and NOTHING in
+      SQLAlchemy is positioned to intervene. No Python-side hook can close this. The
+      only place downstream of every writer is the database, so the rule is ALSO a
+      PostgreSQL ``BEFORE INSERT OR UPDATE`` trigger, installed by
+      ``src.core.database._migrate_agent_config_precedence_trigger``. The two layers
+      state the same rule and agree on precedence; the trigger is the backstop, not
+      the primary path.
 
     DESIGN SYSTEM WINS and the slide style is dropped — deliberately NOT a 422. The
     frontend PUTs the WHOLE config, so rejecting a both-set config would wedge every
@@ -60,14 +78,61 @@ class NormalizedAgentConfig(TypeDecorator):
     def process_bind_param(self, value: Any, dialect: Any) -> Any:
         """Normalize on the way to the database.
 
-        Non-dict values pass through untouched: the column is JSON, not
-        ``AgentConfig``, and ``None`` ("no config at all", which is not an empty
-        config) must stay as it was given.
+        Handles the config in either of the two forms a writer supplies it: a
+        ``dict``, or a JSON-OBJECT STRING. The string form is the same config in
+        transport, and the previous ``isinstance(value, dict)`` guard returned it
+        untouched, so ``row.agent_config = '{"slide_style_id": 7,
+        "design_system_id": 9}'`` stored BOTH authorities on real PostgreSQL. It is
+        normalized by parsing, applying precedence, and re-serializing — the caller
+        gets back the same encoding it used.
+
+        Everything else passes through EXACTLY as given:
+
+        * ``None`` — "no config at all", which is not an empty config;
+        * a non-JSON string, or JSON that is not an object (a scalar, an array) —
+          not a config, so not this rule's business;
+        * malformed JSON — see below.
+
+        MALFORMED INPUT IS NEVER AN ERROR HERE. A bind hook runs inside somebody
+        else's write, so raising turns a save into a 500 on a path that has no idea
+        this rule exists. Unparseable bytes are therefore stored as the caller
+        supplied them; the column is ``JSON``, so the database still gets its own
+        say on whether they are valid.
         """
+        if isinstance(value, str):
+            return self._normalize_json_object_string(value)
         if not isinstance(value, dict):
             return value
-        if value.get("slide_style_id") is None or value.get("design_system_id") is None:
+        normalized = self._normalize_mapping(value)
+        return value if normalized is None else normalized
+
+    def _normalize_json_object_string(self, value: str) -> str:
+        """Apply precedence inside a JSON-object string, preserving the encoding.
+
+        Returns *value* itself unless it parses as a JSON OBJECT that actually
+        carries both authorities, so every other string — including one that is not
+        JSON at all — is passed through byte-for-byte rather than re-serialized.
+        """
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
             return value
+        if not isinstance(parsed, dict):
+            return value
+        normalized = self._normalize_mapping(parsed)
+        if normalized is None:
+            return value
+        return json.dumps(normalized)
+
+    @staticmethod
+    def _normalize_mapping(value: dict) -> Optional[dict]:
+        """The rule itself. ``None`` means "nothing to repair", not "empty config".
+
+        DESIGN SYSTEM WINS and the slide style is dropped. Returns a COPY, so a
+        value being persisted never has its caller's dict edited underneath it.
+        """
+        if value.get("slide_style_id") is None or value.get("design_system_id") is None:
+            return None
         logger.warning(
             "agent_config reached the database carrying BOTH slide_style_id=%s and "
             "design_system_id=%s; the design system takes precedence, so the slide "
@@ -75,7 +140,6 @@ class NormalizedAgentConfig(TypeDecorator):
             value["slide_style_id"],
             value["design_system_id"],
         )
-        # A COPY: the caller keeps whatever it handed us.
         normalized = dict(value)
         normalized["slide_style_id"] = None
         return normalized
