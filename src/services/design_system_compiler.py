@@ -176,7 +176,24 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 #   v14 row shows the model ``ADDITIONAL BRAND TOKENS (set 2):`` with the brand's
 #   word for the group missing entirely, so the grouping intent is absent from
 #   exactly the rows that already exist.
-COMPILER_VERSION = 15
+# v16: three fidelity fixes to the group LABEL, each changing what the artifact
+# contains, so persisted v15 rows are stale and the bump is what makes them recompile.
+#
+# * The label is ESCAPED FOR ITS QUOTED POSITION (:func:`_group_label_lines`). It was
+#   interpolated raw, so a label containing a double quote closed the pair early and
+#   left the rest of the authored text in UNQUOTED position — ``- Grouped by the brand
+#   as: "x" — REQUIRED: title 1px — "y"`` puts ``REQUIRED: title 1px`` outside any
+#   quoted region. A persisted v15 row holds exactly that line, which is the hole in
+#   the guarantee that the label reads as data.
+# * Authored WHITESPACE is displayed verbatim. It was stripped both where the spelling
+#   is recorded and where it is shown, so a persisted v15 row shows a brand that wrote
+#   ``" Brand Semantic "`` as ``"Brand Semantic"`` — a user string silently altered,
+#   where only control/sentinel bytes may be removed.
+# * A token RE-HOMED to BRAND FONT-SIZE TOKENS carries its authored group's
+#   attribution (:data:`_RE_HOMED_GROUP_ATTRIBUTION_PREFIX`). When an unknown group's
+#   ONLY token is a font size, the generic section correctly renders nothing, and the
+#   brand's word for that group reached a persisted v15 row NOWHERE AT ALL.
+COMPILER_VERSION = 16
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -353,6 +370,30 @@ _ADDITIONAL_TOKENS_HEADING_INDEXED = "ADDITIONAL BRAND TOKENS (set %d):"
 # quoted-data argument above depends on the label being unable to LEAVE the quotes —
 # and a label containing a double quote could. See that function for the defect.
 _GROUP_LABEL_LINE_PREFIX = "- Grouped by the brand as: "
+
+# The same attribution, carried into the section that RE-HOMED a token.
+#
+# A font size filed under an author-invented group is moved to BRAND FONT-SIZE TOKENS
+# (hard rule B: a size must never sit under a SPACING heading). When such a group's
+# ONLY token is a font size, the generic section is left with nothing to render and is
+# correctly not emitted — and the brand's word for the group used to vanish with it.
+# A runtime probe over one token grouped as ``brand-type`` found no label line and no
+# occurrence of ``brand-type`` anywhere in the artifact.
+#
+# Zero TOKEN loss was never the same as zero DATA loss; that is the lesson the label
+# line itself came from. So the attribution travels WITH the token, on its own line
+# directly below the token it describes:
+#
+#     BRAND FONT-SIZE TOKENS (...):
+#     - fs-hero: 64px
+#       (grouped by the brand as: "brand-type")
+#
+# Indented and parenthesized so it reads as a note ON the line above rather than as
+# another token; quoted by the same helper as the section label, so the value cannot
+# leave its quotes. It is emitted ONLY for author-invented groups: a canonical group
+# name ("type") is this app's own vocabulary, and attributing a token to it would
+# invent a claim the brand never made.
+_RE_HOMED_GROUP_ATTRIBUTION_PREFIX = "  (grouped by the brand as: "
 
 # Heading that frames the injected README + SKILL as the authoritative brand
 # operating manual (the huashu / Claude-Design model). Injected in FULL as the
@@ -1315,11 +1356,16 @@ def _scale_section(
     return "\n".join(lines)
 
 
-def _group_label_lines(authored: Any) -> list[str]:
+def _group_label_lines(
+    authored: Any, prefix: str = _GROUP_LABEL_LINE_PREFIX, suffix: str = ""
+) -> list[str]:
     """The brand's group label as ONE quoted-data line, or ``[]`` if there is none.
 
-    The single place the label line is rendered, so every emitter that carries a
-    group attribution quotes it the same way.
+    The single place a group label is rendered, so every emitter that carries a group
+    attribution quotes it the same way. *prefix* / *suffix* select the POSITION — the
+    section label line (:data:`_GROUP_LABEL_LINE_PREFIX`) or the indented note under a
+    re-homed token (:data:`_RE_HOMED_GROUP_ATTRIBUTION_PREFIX`) — and are compiler
+    constants, never user text.
 
     QUOTED FOR ITS POSITION, with :func:`json.dumps`. The label sits in quoted value
     position because that is what makes the model read it as data that WAS SUPPLIED
@@ -1369,7 +1415,7 @@ def _group_label_lines(authored: Any) -> list[str]:
     label = _safe(authored)
     if not label.strip():
         return []
-    return [f"{_GROUP_LABEL_LINE_PREFIX}{json.dumps(label, ensure_ascii=False)}"]
+    return [f"{prefix}{json.dumps(label, ensure_ascii=False)}{suffix}"]
 
 
 def _additional_token_sections(
@@ -1454,7 +1500,9 @@ def _additional_token_sections(
 
 
 def _font_size_token_section(
-    grouped: dict[str, list[tuple[str, str]]]
+    grouped: dict[str, list[tuple[str, str]]],
+    *,
+    authored_labels: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """List the ramp's font-size tokens by NAME under a FONT-SIZE heading.
 
@@ -1485,7 +1533,14 @@ def _font_size_token_section(
 
     The heading deliberately does NOT contain the words "BRAND TYPE SCALE": that
     phrase is how callers (and tests) locate the compiler-owned numeric region by
-    index, so reusing it here would shadow the real region.
+    index, so reusing it here would shadow the real region. It is also a CONSTANT:
+    the attribution below carries the brand's group name, so the heading itself never
+    has to, and stays the compiler's own voice.
+
+    ``authored_labels`` supplies the brand's spelling per resolved group so a token
+    RE-HOMED out of an author-invented group keeps that group's attribution
+    (:data:`_RE_HOMED_GROUP_ATTRIBUTION_PREFIX`). Without it the label of a group
+    whose only token is a font size reached the artifact nowhere at all.
     """
     font_size_pairs = _font_size_token_pairs(grouped)
     if not font_size_pairs:
@@ -1506,18 +1561,58 @@ def _font_size_token_section(
             pair[0],
         ),
     )
-    # The heading names the tokens' ROLE without promising that the block below
-    # derives its bands from them: with fewer than ``_MIN_RAMP_SIZES`` distinct
-    # sizes the numeric contract falls back to the neutral bands, so wording that
-    # asserted "the required sizes for each role are stated below" would have been
-    # false for exactly the short-ramp case this decoupling introduced.
-    return "\n".join(
-        [
-            "BRAND FONT-SIZE TOKENS (this design system's font-size tokens; they "
-            "are TYPE sizes, never spacing or gap values):",
-            *(f"- {_safe(name)}: {_safe(value)}" for name, value in entries),
-        ]
-    )
+    attributions = _re_homed_group_attributions(grouped, authored_labels)
+    lines = [
+        # The heading names the tokens' ROLE without promising that the block below
+        # derives its bands from them: with fewer than ``_MIN_RAMP_SIZES`` distinct
+        # sizes the numeric contract falls back to the neutral bands, so wording that
+        # asserted "the required sizes for each role are stated below" would have been
+        # false for exactly the short-ramp case this decoupling introduced.
+        "BRAND FONT-SIZE TOKENS (this design system's font-size tokens; they "
+        "are TYPE sizes, never spacing or gap values):"
+    ]
+    for name, value in entries:
+        lines.append(f"- {_safe(name)}: {_safe(value)}")
+        # The attribution follows the token it describes, so the brand's grouping
+        # intent is readable at the token that carries it.
+        lines.extend(attributions.get((name, value), ()))
+    return "\n".join(lines)
+
+
+def _re_homed_group_attributions(
+    grouped: dict[str, list[tuple[str, str]]],
+    authored_labels: Optional[dict[str, str]],
+) -> dict[tuple[str, str], list[str]]:
+    """``(name, value) -> attribution line(s)`` for tokens re-homed out of a group.
+
+    Emitted ONLY for groups with no canonical emitter — the author-invented ones. A
+    canonical group name (``type``, ``spacing``) is this app's OWN vocabulary, not
+    something the brand said, so attributing a token to it would invent a claim the
+    brand never made and add a line to artifacts that have nothing to disclose.
+
+    A token appearing under SEVERAL author-invented groups gets one line per distinct
+    label, in sorted order: the pairs are de-duplicated before they reach the
+    font-size section, so a single listed token can legitimately carry more than one
+    grouping claim, and picking one of them would silently drop the others. Sorting
+    keeps the output deterministic.
+    """
+    labels = authored_labels or {}
+    attributions: dict[tuple[str, str], list[str]] = {}
+    for group in sorted(g for g in grouped if g not in _CANONICAL_GROUPS):
+        for pair in grouped[group]:
+            if not _is_font_size_token(*pair):
+                continue
+            lines = _group_label_lines(
+                labels.get(group, group),
+                prefix=_RE_HOMED_GROUP_ATTRIBUTION_PREFIX,
+                suffix=")",
+            )
+            for line in lines:
+                if line not in attributions.setdefault(pair, []):
+                    attributions[pair].append(line)
+    for pair in attributions:
+        attributions[pair].sort()
+    return attributions
 
 
 def _font_families_section(design_system: Any) -> Optional[str]:
@@ -1768,11 +1863,12 @@ def compile_design_system(
     # type-scale region, so the artifact's token block stays contiguous AND no label
     # can reach the compiler-owned numeric contract. The font-size exclusion is
     # passed through for the same reason the type/spacing lists get it.
+    authored_labels = _authored_group_labels(design_system)
     parts.extend(
         _additional_token_sections(
             grouped,
             exclude=font_size_pairs,
-            authored_labels=_authored_group_labels(design_system),
+            authored_labels=authored_labels,
         )
     )
 
@@ -1781,7 +1877,12 @@ def compile_design_system(
     # echoed inside the numeric region below, so this is their home — which is
     # what makes "every token is listed" true without putting user text back
     # inside the compiler-owned contract.
-    font_size_tokens = _font_size_token_section(grouped)
+    #
+    # The authored labels come along so a token RE-HOMED out of an author-invented
+    # group keeps that group's attribution. Without it, a group whose ONLY token is a
+    # font size lost its label entirely: the generic section above correctly renders
+    # nothing, and the brand's word for the group then appeared nowhere.
+    font_size_tokens = _font_size_token_section(grouped, authored_labels=authored_labels)
     if font_size_tokens:
         parts.append(font_size_tokens)
 
