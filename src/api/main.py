@@ -526,16 +526,27 @@ async def get_current_user():
     
     Also includes the user's Databricks ID and group IDs from the permission
     context, which are used for profile permission checks.
+
+    ``is_admin`` is a UX-only signal so the frontend can hide admin surfaces
+    the caller cannot use; it is NOT authorization. Every admin route keeps
+    ``Depends(require_admin)`` and those 403s remain the real protection. It
+    is derived from that same primitive (``is_caller_admin``), so it cannot
+    advertise access the server would refuse, and it fails closed.
     """
+    from src.api.routes._authz import is_caller_admin
     from src.core.permission_context import get_permission_context
-    
+
     ctx_user = get_ctx_user()
     perm_ctx = get_permission_context()
-    
+
+    # Never raises (fails closed to False), so it cannot break identity resolution.
+    is_admin = is_caller_admin()
+
     if ctx_user:
         result = {
             "username": ctx_user,
             "display_name": ctx_user,
+            "is_admin": is_admin,
         }
         # Include permission context info if available
         if perm_ctx:
@@ -553,12 +564,14 @@ async def get_current_user():
             "username": user.user_name,
             "display_name": user.display_name or user.user_name,
             "user_id": user.id,
+            "is_admin": is_admin,
         }
     except Exception as e:
         logger.warning(f"Failed to get current user: {e}")
         return {
             "username": "user",
             "display_name": "User",
+            "is_admin": is_admin,
         }
 
 
