@@ -332,9 +332,8 @@ def test_an_unindexable_design_system_name_fails_as_a_clear_4xx_not_a_500(pg_eng
     """A name too large for the UNIQUE btree must be a clear 4xx, not an opaque 500.
 
     ``design_system.name`` carries a UNIQUE constraint, and a unique btree index
-    tuple cannot exceed 2704 bytes. A COMPRESSIBLE name of any length is fine (pglz
-    compresses the tuple — a 5000-byte run of one character stores exactly), but an
-    INCOMPRESSIBLE name of ~2692+ bytes raises ``ProgramLimitExceeded``:
+    tuple cannot exceed 2704 bytes, so an INCOMPRESSIBLE name of ~2692+ bytes raises
+    ``ProgramLimitExceeded``:
 
         index row size 5016 exceeds btree version 4 maximum 2704
         for index "design_system_name_key"
@@ -342,47 +341,39 @@ def test_an_unindexable_design_system_name_fails_as_a_clear_4xx_not_a_500(pg_eng
     It fails LOUDLY and never truncates, which is the right direction. But it landed
     in the import route's generic ``except Exception`` and surfaced as
     **HTTP 500 "Failed to import design system"** — a message that tells the user
-    nothing about what to change, for what is a legitimate upload. Whatever is
-    decided about the constraint itself (see findings.md), a 500 here is a bug, so
-    the service raises the same error type the route already maps to a 4xx and the
-    message names the actual limit.
+    nothing about what to change, for what is a legitimate upload. A 500 here is a
+    bug, so the service raises the error type the routes map to a 4xx, with a message
+    naming the real limit.
+
+    This test originally drove a PREDICTOR (``_guard_indexable_name``, which ran
+    ``zlib.compress`` as a stand-in for pglz and decided in advance). The prediction
+    was unsound — a btree key is not pglz-compressed into the index, so a 2700-byte
+    name passed the guard and Postgres rejected it anyway — and it was removed. The
+    invariant under test is unchanged; what produces it is now REACTIVE, so the test
+    drives the translator with the database's own error. Per-route coverage on all
+    three write paths lives in
+    ``test_design_system_name_index_limit_postgres.py``.
     """
     import random
     import string
 
     from src.services.design_system_service import (
-        DesignSystemImportError,
-        _guard_indexable_name,
+        DesignSystemNameTooLongError,
+        translate_name_index_limit_error,
     )
 
     _create_all(pg_engine)
 
     # Genuinely incompressible text, seeded so the case is deterministic. A PATTERNED
     # string will not do: an arithmetic sequence over the alphabet compresses to ~256
-    # bytes, so Postgres really does store it and the guard correctly stays quiet.
+    # bytes, so Postgres really does store it and nothing should be raised.
     alphabet = string.ascii_letters + string.digits
     rng = random.Random(7)
     unindexable = "".join(rng.choice(alphabet) for _ in range(4000))
-    # Proven below against the live database, not merely asserted here.
-
-    with pytest.raises(DesignSystemImportError) as excinfo:
-        _guard_indexable_name(unindexable)
-
-    message = str(excinfo.value)
-    assert "name" in message.lower()
-    # Actionable: says it is too long and gives the bound the user must get under.
-    assert "2704" in message or "too long" in message.lower()
-
-    # A compressible name of the SAME length is accepted, because Postgres really
-    # does store it — the guard must not turn away a name the database can hold.
     compressible = "A" * 4000
-    _guard_indexable_name(compressible)
 
-    # And a short name is untouched.
-    _guard_indexable_name("Synthetic Brand")
-
-    # The guard's verdicts must match what the LIVE database does, or it drifts into
-    # a guess. Both names are offered to Postgres directly.
+    # A compressible name of the SAME length is stored, byte for byte, because
+    # Postgres really does hold it — no code may turn away a name the database keeps.
     with pg_engine.begin() as conn:
         design_system_id = _insert_design_system(conn, name=compressible)
     with pg_engine.connect() as conn:
@@ -392,10 +383,25 @@ def test_an_unindexable_design_system_name_fails_as_a_clear_4xx_not_a_500(pg_eng
         ).scalar_one()
     assert stored == compressible, "the compressible name must store exactly"
 
+    # The incompressible one is refused by the DATABASE — the authority on the
+    # question — and that real error is what gets translated.
     with pytest.raises(Exception) as db_error:  # ProgramLimitExceeded
         with pg_engine.begin() as conn:
             _insert_design_system(conn, name=unindexable)
     assert "index row size" in str(db_error.value), (
-        "the name the guard rejects must be the name Postgres cannot index: "
-        f"{db_error.value}"
+        f"the fixture must be a name Postgres cannot index: {db_error.value}"
+    )
+
+    with pytest.raises(DesignSystemNameTooLongError) as excinfo:
+        translate_name_index_limit_error(db_error.value, name=unindexable)
+
+    message = str(excinfo.value)
+    assert "name" in message.lower()
+    # Actionable: says it is too long and gives the bound the user must get under.
+    assert "2692" in message or "too long" in message.lower()
+
+    # An UNRELATED database error must pass straight through untouched, or this
+    # translation would mislabel every other failure as a naming problem.
+    translate_name_index_limit_error(
+        ValueError("some entirely unrelated failure"), name=unindexable
     )

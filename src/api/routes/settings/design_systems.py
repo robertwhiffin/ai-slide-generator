@@ -41,6 +41,8 @@ from src.services.design_system_compiler import recompute_compiled_style_content
 from src.services.design_system_service import (
     DesignSystemImportError,
     DesignSystemNameConflictError,
+    DesignSystemNameTooLongError,
+    translate_name_index_limit_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -520,6 +522,11 @@ async def import_design_system(
     except DesignSystemNameConflictError as e:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    # A name the UNIQUE index cannot hold is the CALLER's to fix, so it must not fall
+    # through to the generic 500 below — a 500 on a legitimate upload is a bug.
+    except DesignSystemNameTooLongError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except DesignSystemImportError as e:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -563,14 +570,24 @@ def create_design_system(
             ds.tokens.append(DesignSystemToken(group=tok.group, name=tok.name, value=tok.value))
 
         db.add(ds)
-        db.flush()
-        recompute_compiled_style_content(ds)
-        db.commit()
+        # The UNIQUE index on ``name`` has to hold the value here; whether it can is
+        # the database's call, so its refusal is translated into a 400 rather than
+        # predicted beforehand (see translate_name_index_limit_error).
+        try:
+            db.flush()
+            recompute_compiled_style_content(ds)
+            db.commit()
+        except Exception as exc:
+            translate_name_index_limit_error(exc, name=request.name)
+            raise
         db.refresh(ds)
         logger.info(f"Created design system: {ds.name} (id={ds.id})")
         return _detail(ds)
     except HTTPException:
         raise
+    except DesignSystemNameTooLongError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating design system: {e}", exc_info=True)
@@ -648,14 +665,24 @@ def update_design_system(
 
         ds.version = (ds.version or 1) + 1
         ds.updated_by = _current_user()
-        db.flush()
-        recompute_compiled_style_content(ds)
-        db.commit()
+        # As on create: a rename the UNIQUE index cannot hold is refused by the
+        # database, and its refusal becomes a 400. The rollback in the handler below
+        # leaves the row's existing name intact.
+        try:
+            db.flush()
+            recompute_compiled_style_content(ds)
+            db.commit()
+        except Exception as exc:
+            translate_name_index_limit_error(exc, name=request.name)
+            raise
         db.refresh(ds)
         logger.info(f"Updated design system: {ds.name} (id={ds.id})")
         return _detail(ds)
     except HTTPException:
         raise
+    except DesignSystemNameTooLongError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         db.rollback()
         logger.error(f"Error updating design system {ds_id}: {e}", exc_info=True)
