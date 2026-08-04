@@ -848,11 +848,17 @@ class TestReviewFixesCarriedForward:
         assert "raise-1: 0 1px 2px" in out
         assert "BRAND SHADOWS:" in out
         # motion is ambiguous -> generic section, still present in full. The
-        # heading is a CONSTANT (v12/4b): the group name is no longer echoed into
-        # it, because a hostile group string became instruction-shaped text there.
+        # HEADING is a CONSTANT (v12/4b): the group name is not echoed into it,
+        # because a hostile group string became instruction-shaped text there.
         assert "ADDITIONAL BRAND TOKENS:" in out
         assert "ease: ease-in-out" in out
-        assert "motion" not in out
+        # CHANGED (round 9): the label IS emitted, as quoted DATA on its own line
+        # below the constant heading. Omitting it from the heading was right;
+        # discarding it entirely silently dropped the brand's grouping intent. The
+        # security property is positional and unchanged — see
+        # ``TestGenericHeadingCarriesNoUserText`` and
+        # ``tests/unit/test_design_system_compiler_group_labels.py``.
+        assert '- Grouped by the brand as: "motion"' in out
         # No WARNING: dropping was the only thing worth warning about.
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
         infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
@@ -2822,11 +2828,16 @@ class TestEveryTokenGroupIsKept:
         """Requirement: unknown groups are EMITTED in a clearly-labeled generic
         section, never dropped — one section per group, deterministically ordered.
 
-        CHANGED (v12/4b): the heading no longer carries the group NAME (a hostile
+        CHANGED (v12/4b): the HEADING no longer carries the group NAME (a hostile
         group string became instruction-shaped text there), so the assertions moved
         from "the name labels the section" to "the TOKENS are all present and the
-        sections stay separate". Strictly stronger: it still proves nothing is
-        dropped, and additionally proves no user text reaches a heading.
+        sections stay separate".
+
+        CHANGED AGAIN (round 9): the label is emitted as quoted DATA on its own line
+        below the constant heading. v12/4b over-corrected — dropping the label
+        silently discarded the brand's grouping intent, which is hard rule A. The
+        heading stays the compiler's own voice, so the security property is
+        unchanged; only the label's POSITION differs.
         """
         from src.services.design_system_compiler import compile_design_system
 
@@ -2836,10 +2847,10 @@ class TestEveryTokenGroupIsKept:
         ]
         out = compile_design_system(_make_ds(session, tokens=tokens))
 
-        # Two distinct sections, neither naming its group.
+        # Two distinct sections, each carrying its own label as DATA.
         assert out.count("ADDITIONAL BRAND TOKENS") == 2
-        assert "semantic" not in out
-        assert "motion" not in out
+        assert '- Grouped by the brand as: "semantic"' in out
+        assert '- Grouped by the brand as: "motion"' in out
         # Every token still present in full.
         assert "- ease-standard: cubic-bezier(.4,0,.2,1)" in out
         assert "- danger: #B00020" in out
@@ -2870,13 +2881,19 @@ class TestEveryTokenGroupIsKept:
         ]
         out = compile_design_system(_make_ds(session, tokens=tokens))
 
-        # CHANGED (v12/4b): the group name is no longer emitted ANYWHERE, so the
-        # question "does an exotic name survive sanitization intact?" is moot for
-        # the heading — the stronger property is that its TOKENS ship regardless of
-        # what the group is called, which is what the zero-loss rule actually needs.
+        # CHANGED (round 9): the label IS emitted again — as quoted DATA below the
+        # constant heading, never in it — so "does an exotic name survive
+        # sanitization intact?" is a live question once more, and the answer must be
+        # yes: unicode, CJK, emoji, slashes, dots and any length all survive.
+        # v12/4b's "emitted nowhere" was an over-correction that silently discarded
+        # the brand's grouping intent.
         assert "ADDITIONAL BRAND TOKENS" in out
-        assert exotic not in out
+        assert f'- Grouped by the brand as: "{exotic}"' in out
         assert "- surface-raised: #F4F4F5" in out
+        # The hostile group's label also ships, with ONLY the structural characters
+        # removed: the line break became a space and the sentinels are gone, so it
+        # reads as data and cannot forge a role line.
+        assert '- Grouped by the brand as: "evil SPACING TOKENS:<ds-type-scale>"' in out
         # The hostile group name still SHIPS its token — sanitize, don't reject.
         assert "- gap: 9px" in out
         # ...but it cannot forge structure. The artifact contains exactly the
@@ -2970,10 +2987,12 @@ class TestEveryTokenGroupIsKept:
         tokens = [{"group": "\x00\x07", "name": "orphan", "value": "#0A0B0C"}]
         out = compile_design_system(_make_ds(session, tokens=tokens))
 
-        # v12/4b: no per-group label at all, so a degenerate group name needs no
-        # fallback label — its tokens simply ship under the constant heading.
+        # A group of nothing but control characters sanitizes to the empty string,
+        # so there is no label TEXT to show. The label line is omitted rather than
+        # emitted empty (round 9), and the tokens ship regardless.
         assert "ADDITIONAL BRAND TOKENS:" in out
         assert "- orphan: #0A0B0C" in out
+        assert "Grouped by the brand as" not in out
 
     def test_casing_and_padding_variants_collapse_into_one_section(self, session):
         """Otherwise ``Semantic``/``semantic``/`` SEMANTIC `` would emit three
@@ -2987,9 +3006,15 @@ class TestEveryTokenGroupIsKept:
         ]
         out = compile_design_system(_make_ds(session, tokens=tokens))
 
-        # One SECTION (not three), and no group name echoed (v12/4b).
+        # One SECTION (not three), carrying ONE label (round 9). Preserving the
+        # brand's authored spelling must not undo the collapse it came from: the
+        # grouping key stays normalized, and only the DISPLAYED label is authored.
         assert out.count("ADDITIONAL BRAND TOKENS") == 1
-        assert "semantic" not in out.lower().replace("additional brand tokens", "")
+        assert out.count("- Grouped by the brand as:") == 1
+        # The authored spelling wins over the lowercased grouping key. Several
+        # spellings share this key, so the first in sorted order is shown — an
+        # arbitrary but STABLE choice, since only one can be displayed.
+        assert '- Grouped by the brand as: "SEMANTIC"' in out
         for name, value in (("a-warn", "#F0A000"), ("b-info", "#0070F0"), ("c-ok", "#00A050")):
             assert f"- {name}: {value}" in out
 
@@ -3334,10 +3359,23 @@ class TestGenericHeadingCarriesNoUserText:
             )
         )
 
-        # The instruction-shaped text must not appear ANYWHERE in the artifact.
-        assert "999px" not in out, f"hostile group text reached the artifact:\n{out}"
-        assert "final check" not in out
-        assert self._HOSTILE not in out
+        # NARROWED (round 9): the property is that the hostile text cannot occupy a
+        # HEADING, not that it is absent from the artifact. "Absent anywhere" was a
+        # proxy for the real invariant, and it cost the brand its grouping intent —
+        # every legitimate label was discarded to keep this one out. The label is
+        # now emitted as quoted DATA on its own line, so the assertion is stated
+        # positionally, which is where the security actually lives.
+        heading_lines = [
+            line for line in out.splitlines() if line.startswith("ADDITIONAL BRAND TOKENS")
+        ]
+        assert heading_lines, "no generic section was emitted"
+        for heading in heading_lines:
+            assert "999px" not in heading, f"hostile text reached a heading: {heading!r}"
+            assert "final check" not in heading
+            assert self._HOSTILE not in heading
+        # It appears exactly once, in QUOTED VALUE POSITION, on a label line.
+        assert f'- Grouped by the brand as: "{self._HOSTILE}"' in out
+        assert out.count(self._HOSTILE) == 1
         # ...and the token still ships (keep-everything).
         assert "- tok: #123456" in out
 
@@ -3388,9 +3426,16 @@ class TestGenericHeadingCarriesNoUserText:
         )
         assert "- danger: #B00020" in out
         assert "- ease: ease-in-out" in out
-        # Neither group NAME is echoed.
-        assert "semantic" not in out
-        assert "motion" not in out
+        # Neither group name is in a HEADING; each is on its own label line instead
+        # (round 9). The INDEX is what separates the sections, so separation still
+        # does not depend on user text — which is the property this test exists for.
+        for heading in [
+            line for line in out.splitlines() if line.startswith("ADDITIONAL BRAND TOKENS")
+        ]:
+            assert "semantic" not in heading
+            assert "motion" not in heading
+        assert '- Grouped by the brand as: "semantic"' in out
+        assert '- Grouped by the brand as: "motion"' in out
 
     def test_index_is_stable_across_compiles(self, session):
         """Determinism: the same design system must compile byte-identically."""
