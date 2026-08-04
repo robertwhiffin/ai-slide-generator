@@ -746,21 +746,42 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // Reorder handler — lifted from SlidePanel so SlideViewer can call it.
   const handleReorderSlides = useCallback(async (from: number, to: number) => {
     if (!displayDeck || !sessionId || isReadOnly) return;
+    if (!sessionId) {
+      alert('Session not initialized');
+      return;
+    }
     const newSlides = [...displayDeck.slides];
     const [moved] = newSlides.splice(from, 1);
     newSlides.splice(to, 0, moved);
+    // Optimistic update
     setSlideDeckGated({ ...displayDeck, slides: newSlides }, displayDeck.version);
+    const editId = ++deckVersionRef.current;
     try {
       const newOrder = newSlides.map((_, idx) =>
         displayDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
       );
       await api.reorderSlides(newOrder, sessionId);
       const result = await api.getSlides(sessionId);
-      if (result.slide_deck) setSlideDeckGated(result.slide_deck, result.slide_deck.version);
+      if (result.slide_deck && deckVersionRef.current === editId) {
+        setSlideDeckGated(result.slide_deck, result.slide_deck.version);
+      }
     } catch (error) {
       console.error('Failed to reorder slides:', error);
-      // Revert optimistic update
-      setSlideDeckGated(displayDeck, displayDeck.version, true);
+      const isVersionConflict =
+        error instanceof Error && 'status' in error && (error as { status: unknown }).status === 409;
+      if (isVersionConflict) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        try {
+          const result = await api.getSlides(sessionId);
+          if (result.slide_deck) setSlideDeckGated(result.slide_deck, result.slide_deck.version, true);
+        } catch (refreshErr) {
+          console.error('Failed to refresh after conflict:', refreshErr);
+        }
+      } else {
+        // Revert optimistic update
+        setSlideDeckGated(displayDeck, displayDeck.version, true);
+        alert('Failed to reorder slides');
+      }
     }
   }, [displayDeck, sessionId, isReadOnly, setSlideDeckGated]);
 

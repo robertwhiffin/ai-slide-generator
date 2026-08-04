@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Edit3, Trash2 } from 'lucide-react';
+import { Edit3, LayoutGrid, Trash2 } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
@@ -23,6 +23,7 @@ import { VerificationBadge } from '../SlidePanel/VerificationBadge';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
+import { useAutoVerification } from '../../hooks/useAutoVerification';
 
 interface SlideContext {
   indices: number[];
@@ -77,7 +78,7 @@ const ViewerBody = forwardRef<
   Omit<SlideViewerProps, 'slideDeck'> & { slideDeck: SlideDeck }
 >(({
   slideDeck, deckKey, findings, callbacks, onReorder,
-  onSlideChange, readOnly = false, lockedBy = null,
+  onSlideChange, onSendMessage, readOnly = false, lockedBy = null,
   onVerificationComplete, sessionId,
 }, ref) => {
   const { currentIndex, next, prev, first, last, activeTab, drawerOpen } = useViewer();
@@ -88,15 +89,22 @@ const ViewerBody = forwardRef<
   // Stage CRUD state
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  // Capture the slide index at the moment the modal is opened so that concurrent
+  // paging (Finding 4) cannot redirect the edit/delete onto a different slide.
+  const [indexWhenOpened, setIndexWhenOpened] = useState<number>(0);
+
+  // Verification results keyed by slide_id (not array index) so deck mutations
+  // (delete, reorder) cannot shift the index → result mapping (Finding 6).
   const [verificationResults, setVerificationResults] = useState<
-    Map<number, VerificationResult | undefined>
+    Map<string, VerificationResult | undefined>
   >(() => {
-    const m = new Map<number, VerificationResult | undefined>();
-    slideDeck.slides.forEach((s, i) => { m.set(i, s.verification); });
+    const m = new Map<string, VerificationResult | undefined>();
+    slideDeck.slides.forEach((s) => { m.set(s.slide_id, s.verification); });
     return m;
   });
   const [isManualVerifying, setIsManualVerifying] = useState(false);
-  const [isStale, setIsStale] = useState(false);
+  // Per-slide stale tracking: a Set of slide_ids edited after their last verification.
+  const [staleSlideIds, setStaleSlideIds] = useState<Set<string>>(new Set());
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const deckEditCounterRef = useRef(0);
   const slideDeckRef = useRef(slideDeck);
@@ -111,16 +119,17 @@ const ViewerBody = forwardRef<
     if (result.slide_deck) onSlideChange(result.slide_deck);
   };
 
-  // Sync verification results when deck changes
+  // Sync verification results (keyed by slide_id) when deck changes.
+  // Also clear all stale flags — a fresh deck fetch means verifications are current.
   useEffect(() => {
     setVerificationResults(prev => {
       const m = new Map(prev);
-      slideDeck.slides.forEach((s, i) => {
-        if (s.verification !== m.get(i)) m.set(i, s.verification);
+      slideDeck.slides.forEach((s) => {
+        if (s.verification !== m.get(s.slide_id)) m.set(s.slide_id, s.verification);
       });
       return m;
     });
-    setIsStale(false);
+    setStaleSlideIds(new Set());
   }, [slideDeck]);
 
   // When the deck changes, reload persisted seen-state and clear transient dismissals.
@@ -135,6 +144,8 @@ const ViewerBody = forwardRef<
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(document.activeElement)) return;
+      // Finding 4: suppress paging while the HTML editor or delete confirm dialog is open.
+      if (isEditing || showDeleteConfirm) return;
       switch (e.key) {
         case 'ArrowRight': case 'ArrowDown': case 'PageDown': e.preventDefault(); next(); break;
         case 'ArrowLeft':  case 'ArrowUp':   case 'PageUp':   e.preventDefault(); prev(); break;
@@ -157,7 +168,7 @@ const ViewerBody = forwardRef<
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [next, prev, first, last]);
+  }, [next, prev, first, last, isEditing, showDeleteConfirm]);
 
   const visible = useMemo(
     () => findings.filter(f => !dismissed.has(f.id)),
@@ -211,13 +222,15 @@ const ViewerBody = forwardRef<
     callbacks.onDismissFinding(findingId);
   }, [callbacks, deckKey]);
 
-  // CRUD handlers for the stage toolbar
+  // CRUD handlers for the stage toolbar.
+  // Both use `indexWhenOpened` (captured at modal-open time) rather than `currentIndex`
+  // so that paging after the modal opens cannot redirect the operation to a different slide.
   const handleDeleteConfirm = async () => {
     if (!sessionId || !onSlideChange) return;
     setShowDeleteConfirm(false);
     const editId = ++deckEditCounterRef.current;
     try {
-      await api.deleteSlide(currentIndex, sessionId);
+      await api.deleteSlide(indexWhenOpened, sessionId);
       const result = await api.getSlides(sessionId);
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange(result.slide_deck);
@@ -236,13 +249,16 @@ const ViewerBody = forwardRef<
   const handleUpdateSlide = async (html: string) => {
     if (!sessionId || !onSlideChange) return;
     const editId = ++deckEditCounterRef.current;
+    const slideId = slideDeck.slides[indexWhenOpened]?.slide_id;
     try {
-      await api.updateSlide(currentIndex, html, sessionId);
+      await api.updateSlide(indexWhenOpened, html, sessionId);
       const result = await api.getSlides(sessionId);
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange(result.slide_deck);
       }
-      setIsStale(true);
+      if (slideId) {
+        setStaleSlideIds(prev => new Set(prev).add(slideId));
+      }
     } catch (error) {
       console.error('Failed to update:', error);
       if (isVersionConflict(error)) {
@@ -255,6 +271,7 @@ const ViewerBody = forwardRef<
 
   const handleVerify = async () => {
     if (!sessionId || isManualVerifying) return;
+    const slideId = slideDeck.slides[currentIndex]?.slide_id;
     setIsManualVerifying(true);
     try {
       const result = await api.verifySlide(sessionId, currentIndex);
@@ -263,8 +280,14 @@ const ViewerBody = forwardRef<
         rating: result.rating as VerificationResult['rating'],
         timestamp: new Date().toISOString(),
       };
-      setVerificationResults(prev => new Map(prev).set(currentIndex, verification));
-      setIsStale(false);
+      if (slideId) {
+        setVerificationResults(prev => new Map(prev).set(slideId, verification));
+        setStaleSlideIds(prev => {
+          const next = new Set(prev);
+          next.delete(slideId);
+          return next;
+        });
+      }
       // Persist to server
       try {
         await api.updateSlideVerification(currentIndex, sessionId, verification);
@@ -285,6 +308,38 @@ const ViewerBody = forwardRef<
     }
   };
 
+  // Finding 3: "Optimize layout" for the current slide via the chat agent.
+  const handleOptimizeLayout = useCallback(() => {
+    if (!onSendMessage) return;
+    const slide = slideDeck.slides[currentIndex];
+    if (!slide) return;
+    const slideContext: SlideContext = {
+      indices: [currentIndex],
+      slide_htmls: [slide.html],
+    };
+    const message = `Optimize the layout of this slide to make good use of the slide real estate whilst preventing content overflow. Return only the HTML for this slide, no other text.
+
+      CRITICAL REQUIREMENTS:
+      1. Preserve ALL <canvas> elements exactly - do NOT modify, remove, rename, or change their id attributes
+      2. Keep all canvas elements in the same positions relative to their containers
+      3. Do NOT modify any chart-related HTML structure
+      4. Only adjust spacing, padding, margins, font sizes, and positioning of text and container elements
+      5. Maintain the 1280x720px slide dimensions
+      6. Do NOT add, remove, or modify any <script> tags - chart scripts are handled separately
+
+      Focus on optimizing text layout, container sizing, and spacing while keeping all chart elements completely unchanged.`;
+    onSendMessage(message, slideContext);
+  }, [onSendMessage, currentIndex, slideDeck.slides]);
+
+  // Finding 2: auto-verify newly-generated slides on the viewer path.
+  useAutoVerification({
+    slideDeck,
+    sessionId: sessionId ?? null,
+    onVerificationComplete,
+    onSlideChange,
+    deckEditCounterRef,
+  });
+
   // Expose presentation mode control via ref
   useImperativeHandle(ref, () => ({
     openPresentationMode: () => setIsPresentationMode(true),
@@ -298,7 +353,7 @@ const ViewerBody = forwardRef<
       <ConfirmDialog
         open={showDeleteConfirm}
         title="Delete Slide"
-        message={`Delete slide ${currentIndex + 1}?`}
+        message={`Delete slide ${indexWhenOpened + 1}?`}
         onConfirm={handleDeleteConfirm}
         onCancel={() => setShowDeleteConfirm(false)}
       />
@@ -306,9 +361,9 @@ const ViewerBody = forwardRef<
       {/* HTML editor modal */}
       {isEditing && currentSlide && (
         <HTMLEditorModal
-          html={currentSlide.html}
+          html={slideDeck.slides[indexWhenOpened]?.html ?? currentSlide.html}
           slideDeck={slideDeck}
-          slide={currentSlide}
+          slide={slideDeck.slides[indexWhenOpened] ?? currentSlide}
           onSave={async (html) => {
             await handleUpdateSlide(html);
             setIsEditing(false);
@@ -344,21 +399,41 @@ const ViewerBody = forwardRef<
               </span>
             )}
             <div className="ml-auto flex items-center gap-1">
-              <VerificationBadge
-                data-testid="stage-verification-badge"
-                slideIndex={currentIndex}
-                sessionId={sessionId ?? ''}
-                verificationResult={verificationResults.get(currentIndex)}
-                isVerifying={isManualVerifying}
-                onVerify={handleVerify}
-                isStale={isStale}
-              />
+              {/* Finding 5: wrap VerificationBadge so data-testid reaches the DOM */}
+              <span data-testid="stage-verification-badge">
+                <VerificationBadge
+                  slideIndex={currentIndex}
+                  sessionId={sessionId ?? ''}
+                  verificationResult={verificationResults.get(currentSlide.slide_id)}
+                  isVerifying={isManualVerifying}
+                  onVerify={handleVerify}
+                  isStale={staleSlideIds.has(currentSlide.slide_id)}
+                />
+              </span>
+              {/* Finding 3: Optimize layout button */}
+              {onSendMessage && (
+                <Tooltip text="Optimize layout">
+                  <Button
+                    data-testid="stage-optimize-layout"
+                    variant="ghost"
+                    size="icon"
+                    onClick={handleOptimizeLayout}
+                    className="h-7 w-7"
+                    aria-label="Optimize slide layout"
+                  >
+                    <LayoutGrid className="size-3.5" />
+                  </Button>
+                </Tooltip>
+              )}
               <Tooltip text="Edit slide HTML">
                 <Button
                   data-testid="stage-edit-slide"
                   variant="ghost"
                   size="icon"
-                  onClick={() => setIsEditing(true)}
+                  onClick={() => {
+                    setIndexWhenOpened(currentIndex);
+                    setIsEditing(true);
+                  }}
                   className="h-7 w-7"
                   aria-label="Edit slide HTML"
                 >
@@ -370,7 +445,10 @@ const ViewerBody = forwardRef<
                   data-testid="stage-delete-slide"
                   variant="ghost"
                   size="icon"
-                  onClick={() => setShowDeleteConfirm(true)}
+                  onClick={() => {
+                    setIndexWhenOpened(currentIndex);
+                    setShowDeleteConfirm(true);
+                  }}
                   className="h-7 w-7 text-destructive hover:text-destructive"
                   aria-label="Delete slide"
                 >

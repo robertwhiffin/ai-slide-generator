@@ -21,6 +21,7 @@ import { api } from '../../services/api';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { useSession } from '../../contexts/SessionContext';
 import { useDeckExport } from '../../hooks/useDeckExport';
+import { useAutoVerification } from '../../hooks/useAutoVerification';
 
 interface SlideContext {
   indices: number[];
@@ -67,16 +68,18 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     onExportStatusChange,
   });
 
-  // Auto-verification state
-  const [isAutoVerifying, setIsAutoVerifying] = useState(false);
-  const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
-  const autoVerifyTriggeredRef = useRef<Set<string>>(new Set());
-  const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
-
   const deckEditCounterRef = useRef(0);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
+
+  // Auto-verification: shared hook — handles dedupe, staleness, and session resets.
+  const { verifyingSlides } = useAutoVerification({
+    slideDeck,
+    sessionId,
+    onVerificationComplete,
+    onSlideChange,
+    deckEditCounterRef,
+  });
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -288,93 +291,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       }
     }
   }, [scrollToSlide, viewMode]);
-
-  const runAutoVerification = useCallback(async (slidesToVerify: Array<{ index: number; contentHash: string }>) => {
-    if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
-    const capturedSessionId = sessionId;
-
-    const editIdAtStart = deckEditCounterRef.current;
-    setIsAutoVerifying(true);
-    console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
-
-    setVerifyingSlides(new Set(slidesToVerify.map(s => s.index)));
-
-    const verificationPromises = slidesToVerify.map(async ({ index, contentHash }) => {
-      try {
-        autoVerifyTriggeredRef.current.add(contentHash);
-        console.log(`[Auto-verify] Verifying slide ${index + 1} (hash: ${contentHash.substring(0, 8)}...)`);
-        await api.verifySlide(capturedSessionId, index);
-        console.log(`[Auto-verify] Slide ${index + 1} verified`);
-        return { index, success: true };
-      } catch (error) {
-        console.error(`[Auto-verify] Failed to verify slide ${index + 1}:`, error);
-        return { index, success: false, error };
-      }
-    });
-
-    await Promise.all(verificationPromises);
-
-    if (sessionIdRef.current !== capturedSessionId) {
-      console.log('[Auto-verify] Session changed, discarding stale results');
-      setIsAutoVerifying(false);
-      setVerifyingSlides(new Set());
-      return;
-    }
-
-    try {
-      const result = await api.getSlides(capturedSessionId);
-      const currentDeck = slideDeckRef.current;
-      if (result.slide_deck && currentDeck && deckEditCounterRef.current === editIdAtStart) {
-        const serverSlides = result.slide_deck.slides || [];
-        const mergedSlides = currentDeck.slides.map((localSlide) => {
-          const match = serverSlides.find(
-            (s: { content_hash?: string }) => s.content_hash && s.content_hash === localSlide.content_hash
-          );
-          if (match?.verification) {
-            return { ...localSlide, verification: match.verification };
-          }
-          return localSlide;
-        });
-        onSlideChange?.({ ...currentDeck, slides: mergedSlides });
-      }
-    } catch (error) {
-      console.error('[Auto-verify] Failed to refresh verification:', error);
-    }
-
-    setVerifyingSlides(new Set());
-    setIsAutoVerifying(false);
-    console.log('[Auto-verify] Completed');
-
-    onVerificationComplete?.();
-  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
-
-  useEffect(() => {
-    if (!slideDeck || !sessionId || isAutoVerifying) return;
-
-    const slidesNeedingVerification = slideDeck.slides
-      .map((slide, index) => ({
-        index,
-        slide,
-        contentHash: slide.content_hash || '',
-      }))
-      .filter(({ slide, contentHash }) => {
-        if (slide.verification) return false;
-        if (!contentHash) return false;
-        if (autoVerifyTriggeredRef.current.has(contentHash)) return false;
-        return true;
-      });
-
-    if (slidesNeedingVerification.length > 0) {
-      console.log(`[Auto-verify] Found ${slidesNeedingVerification.length} slides needing verification`);
-      runAutoVerification(slidesNeedingVerification);
-    }
-  }, [slideDeck, sessionId, isAutoVerifying, runAutoVerification]);
-
-  useEffect(() => {
-    autoVerifyTriggeredRef.current.clear();
-    setIsAutoVerifying(false);
-    setVerifyingSlides(new Set());
-  }, [sessionId]);
 
   if (!slideDeck) {
     return (
