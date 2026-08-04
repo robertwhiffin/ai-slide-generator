@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './components/Layout/AppLayout';
 import { AdminPage } from './components/Admin/AdminPage';
+import { useCurrentUser } from './hooks/useCurrentUser';
 import { WelcomeSetup } from './components/Setup';
 import './index.css';
 import { SelectionProvider } from './contexts/SelectionContext';
@@ -12,6 +13,25 @@ import { ToastProvider } from './contexts/ToastContext';
 import { TourProvider } from './contexts/TourContext';
 import { AppTour } from './components/Tour/AppTour';
 import { WelcomeModal } from './components/Tour/WelcomeModal';
+
+/**
+ * Renders the admin page only for admins; sends everyone else to "/".
+ *
+ * UX gate ONLY — it hides a page a non-admin cannot use anyway. The admin API
+ * routes each enforce their own server-side admin check, and those 403s are the
+ * real protection; nothing here is trusted for authorization.
+ *
+ * While identity is still resolving the verdict is UNKNOWN, so this renders
+ * nothing: showing the page would flash admin content at a non-admin, and
+ * redirecting would bounce a genuine admin off their own page.
+ */
+function RequireAdmin({ children }: { children: React.ReactNode }) {
+  const { isAdmin, loading } = useCurrentUser();
+
+  if (loading) return null;
+  if (!isAdmin) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
 
 function AppRoutes() {
   // Single stable key so AppLayout (and sidebar / Recent Decks) stays mounted when
@@ -30,7 +50,8 @@ function AppRoutes() {
       <Route path="/design-systems" element={<AppLayout key={layoutKey} initialView="design_systems" />} />
       <Route path="/images" element={<AppLayout key={layoutKey} initialView="images" />} />
       <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
-      <Route path="/admin" element={<AdminPage />} />
+      {/* /feedback redirects here, so it inherits this gate for free. */}
+      <Route path="/admin" element={<RequireAdmin><AdminPage /></RequireAdmin>} />
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
