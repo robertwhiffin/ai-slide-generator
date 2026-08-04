@@ -147,7 +147,7 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
   // Mirror SlidePanel.tsx:83-88 exactly: PointerSensor + KeyboardSensor with
   // sortableKeyboardCoordinates. No modifiers in SlidePanel, so none here either.
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     }),

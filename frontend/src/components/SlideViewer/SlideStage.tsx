@@ -77,6 +77,14 @@ export const SlideStage: React.FC<SlideStageProps> = ({ slides, css, externalScr
       </Button>
 
       <div className="aspect-video h-full max-h-full w-full max-w-full bg-white shadow-lg">
+        {/* pointer-events: none so wheel and click land on the stage container,
+            not inside the sandboxed iframe. Without this the iframe covers all
+            but a ~16px frame of the stage, and wheel events over the slide are
+            dispatched in the iframe's own browsing context — never reaching the
+            onWheel handler above, so scroll-to-page (spec §4.1) only worked in
+            a margin no user aims at. ThumbnailRibbon does the same for its
+            preview iframes. Slides are non-interactive today; the inline editor
+            (workstream 8) will need its own hit target layered on top. */}
         <iframe
           key={slide.slide_id}
           title={`Slide ${currentIndex + 1}`}
@@ -84,6 +92,7 @@ export const SlideStage: React.FC<SlideStageProps> = ({ slides, css, externalScr
           sandbox="allow-scripts"
           srcDoc={srcDoc}
           className="size-full border-0"
+          style={{ pointerEvents: 'none' }}
         />
       </div>
 

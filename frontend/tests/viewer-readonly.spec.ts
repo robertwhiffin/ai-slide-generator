@@ -42,4 +42,21 @@ test.describe('Read-only Viewer', () => {
     // Chat panel should be visible with history
     await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible();
   });
+
+  test('view mode keeps the verification badge but hides mutating controls', async ({ page }) => {
+    await page.goto(`/sessions/${TEST_SESSION_ID}/view`);
+    await expect(page.getByTestId('slide-viewer')).toBeVisible();
+
+    // The stage toolbar must render for read-only viewers so verification
+    // ratings stay visible on the share-link route. The pre-viewer SlideTile
+    // kept its badge outside the readOnly gate; gating the whole toolbar
+    // silently removed RAG visibility for anyone on /view.
+    await expect(page.getByTestId('stage-toolbar')).toBeVisible();
+    await expect(page.getByTestId('stage-verification-badge')).toBeVisible();
+
+    // ...but nothing that mutates the deck may be reachable.
+    await expect(page.getByTestId('stage-edit-slide')).toHaveCount(0);
+    await expect(page.getByTestId('stage-delete-slide')).toHaveCount(0);
+    await expect(page.getByTestId('stage-optimize-layout')).toHaveCount(0);
+  });
 });
