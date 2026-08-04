@@ -1723,7 +1723,13 @@ test.describe('explicit Design System = None survives', () => {
     await page.goto('/');
     await expect(page.getByTestId('agent-config-bar')).toBeVisible();
     await page.getByTestId('agent-config-toggle').click();
-    // The org default is preselected; the user explicitly clears it.
+    // The org default is preselected; the user explicitly clears it. Asserted
+    // rather than assumed: "None survives" only means anything if there was a
+    // non-None value to clear, so a regression that stopped seeding the org
+    // default would otherwise leave this test passing vacuously.
+    await expect(page.getByTestId('design-system-selector')).toHaveValue(
+      String(ORG_DEFAULT_DS_ID),
+    );
     await page.getByTestId('design-system-selector').selectOption('');
     await expect
       .poll(async () => (await readStored(page))?.design_system_id ?? null)
