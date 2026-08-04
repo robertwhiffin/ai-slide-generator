@@ -297,7 +297,11 @@ ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 
 #### 5.4 Slide Context
 - The current slide index is tracked by `ViewerContext` in the flip-through viewer.
-- The chat panel receives slide context (index + HTML) when the user asks to refine a specific slide.
+- `ChatPanel` still accepts an explicit `slideContext` (indices + HTML) through its imperative
+  `sendMessage(content, slideContext)` API, but no UI affordance supplies one today: checkbox
+  selection was retired with the flip-through viewer, and conversational slide targeting
+  (the `@slide` reference chip) arrives in PRD workstream 7. Until then, chat messages
+  carry no slide context unless a programmatic caller passes it.
 - Backend becomes the single source of truth for script state.
 
 ---
