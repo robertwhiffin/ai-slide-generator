@@ -4,6 +4,18 @@
  * The headline Phase-4 capability: POST a .zip bundle to
  * /api/settings/design-systems/import. Surfaces 400/validation and 409 conflict
  * errors clearly, and reports the imported system to the parent on success.
+ *
+ * THE NAME FIELD CARRIES NO LENGTH CAP, deliberately. The design-system name is
+ * free-form brand text, and no brand data may be turned away or silently altered.
+ * That rule was closed at the ORM (uncapped TEXT), at the Pydantic validators and
+ * in the importer's name resolution — while this input kept `maxLength={255}`, so a
+ * 300-character brand name lost 45 characters in the DOM before any request
+ * existed. A cap here is the one that users actually hit, and it is the only one
+ * that destroys the data with no error to show for it.
+ *
+ * `tests/e2e/design-system-brand-text-uncapped.spec.ts` asserts on the OUTBOUND
+ * REQUEST rather than the input value: `maxLength` truncates the value itself, so a
+ * DOM-only assertion would agree with the clipped string and pass.
  */
 
 import React, { useState, useRef, useEffect } from 'react';
@@ -144,7 +156,6 @@ export const DesignSystemUploadDialog: React.FC<DesignSystemUploadDialogProps> =
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Override the manifest name (e.g. to import a copy)"
-                maxLength={255}
                 disabled={uploading}
                 className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               />
