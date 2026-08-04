@@ -75,15 +75,22 @@ test.describe('Slide security — Presentation mode iframe lockdown (AISEC-248)'
     await enterPresentationMode(page);
 
     // The mocked deck (mockSlidesResponse) has 3 slides; the counter overlay
-    // reads "<current> / <total>".
-    const counter = page.getByText(/^\s*1\s*\/\s*3\s*$/);
+    // reads "<current> / <total>". Scope to the presentation overlay via its
+    // z-index: the flip-through viewer's stage renders its own "<n> / <total>"
+    // indicator (data-testid="stage-position") behind the portal, so an
+    // unscoped getByText matches two elements and trips strict mode.
+    const counter = page
+      .locator('div[style*="z-index: 10000"]')
+      .filter({ hasText: /^\s*1\s*\/\s*3\s*$/ });
     await expect(counter).toBeVisible({ timeout: 10000 });
 
     // Drive navigation through the parent-window keydown listener that the key
     // bridge forwards into.
     await page.keyboard.press('ArrowRight');
 
-    await expect(page.getByText(/^\s*2\s*\/\s*3\s*$/)).toBeVisible({ timeout: 10000 });
+    await expect(
+      page.locator('div[style*="z-index: 10000"]').filter({ hasText: /^\s*2\s*\/\s*3\s*$/ }),
+    ).toBeVisible({ timeout: 10000 });
   });
 });
 
