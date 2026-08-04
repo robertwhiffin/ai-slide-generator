@@ -99,19 +99,18 @@ test.describe('flip-through viewer', () => {
   };
 
   /**
-   * Click a thumbnail by test-id.
+   * Click a thumbnail by test-id, using a REAL user click.
    *
-   * ThumbnailRibbon spreads dnd-kit's `{...listeners}` (PointerSensor) onto each
-   * thumbnail `<button>`. In Playwright's headless browser the PointerSensor
-   * activates on pointerdown and adds a capture click-stopper to the document
-   * before pointerup fires, which causes `.click()` to silently do nothing.
-   *
-   * Using `dispatchEvent('click')` instead: it fires a DOM click event directly
-   * on the element, bypassing the pointer pipeline. The click still bubbles
-   * through React's synthetic event system and calls `onClick` normally.
+   * This must stay a real `.click()`. An earlier version used
+   * `dispatchEvent('click')` to work around the click being swallowed, on the
+   * assumption that it was a Playwright headless artifact. It was not: the
+   * ribbon's PointerSensor had no `activationConstraint`, so dnd-kit activated
+   * on pointerdown and installed a capture-phase click-stopper before pointerup
+   * — meaning real users could not select a slide either. Synthesising the
+   * event hid a genuine product bug. Keep real input here so a regression fails.
    */
   const thumbClick = async (page: import('@playwright/test').Page, testId: string) => {
-    await page.getByTestId(testId).dispatchEvent('click');
+    await page.getByTestId(testId).click();
   };
 
   // ── Stage: single slide, prev/next controls ──────────────────────────────
@@ -160,17 +159,40 @@ test.describe('flip-through viewer', () => {
   test('wheel over the ribbon does not change the slide; wheel over the stage does', async ({ page }) => {
     await openDeck(page);
 
-    // Wheel on the ribbon: the ribbon has no onWheel handler so the slide must NOT change.
-    // Use dispatchEvent to target the ribbon element directly, bypassing the iframe
-    // hit-detection issue that can affect page.mouse.wheel() when the cursor lands on
-    // the slide preview iframe inside the stage.
-    await page.getByTestId('thumbnail-ribbon').dispatchEvent('wheel', { deltaY: 300 });
+    // These must stay REAL wheel gestures at real coordinates. An earlier
+    // version dispatched synthetic wheel events straight at the elements to
+    // "bypass iframe hit-detection" — which hid a genuine bug: the stage iframe
+    // covered all but a ~16px frame and swallowed the gesture, so scroll-to-page
+    // (spec §4.1) did not work anywhere a user would actually scroll. The iframe
+    // now has pointer-events: none. Synthetic events would pass either way.
+
+    // Wheel over the ribbon scrolls thumbnails only — the slide must NOT change.
+    const ribbon = (await page.getByTestId('thumbnail-ribbon').boundingBox())!;
+    await page.mouse.move(ribbon.x + ribbon.width / 2, ribbon.y + ribbon.height / 2);
+    await page.mouse.wheel(0, 300);
     await expect(page.getByTestId('stage-position')).toContainText('1 /');  // unchanged
 
-    // Wheel on the stage: dispatched directly on slide-stage so it reaches the React
-    // onWheel handler even when the iframe inside the stage would otherwise capture
-    // pointer events.
-    await page.getByTestId('slide-stage').dispatchEvent('wheel', { deltaY: 300 });
+    // Wheel over the CENTRE of the stage (i.e. over the rendered slide) pages it.
+    const stage = (await page.getByTestId('slide-stage').boundingBox())!;
+    await page.mouse.move(stage.x + stage.width / 2, stage.y + stage.height / 2);
+    await page.mouse.wheel(0, 300);
+    await expect(page.getByTestId('stage-position')).toContainText('2 /');
+  });
+
+  test('clicking the rendered slide does not trap focus and break keyboard paging', async ({ page }) => {
+    await openDeck(page);
+
+    // Regression guard: the stage iframe used to receive pointer events, so
+    // clicking a slide moved focus into its browsing context. document.activeElement
+    // in the parent became the IFRAME, keydowns never reached the window listener,
+    // and paging died permanently — Escape could not recover it either, because the
+    // iframe is inside stageRef so the containment check skipped the refocus.
+    const frame = (await page.getByTestId('slide-stage-frame').boundingBox())!;
+    await page.mouse.click(frame.x + frame.width / 2, frame.y + frame.height / 2);
+
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('IFRAME');
+
+    await page.keyboard.press('ArrowRight');
     await expect(page.getByTestId('stage-position')).toContainText('2 /');
   });
 
@@ -286,14 +308,50 @@ test.describe('flip-through viewer', () => {
 
   test('chat panel toggle collapses the panel and state survives reload', async ({ page }) => {
     await openDeck(page);
-    // The toggle button must be reachable and functional.
-    await expect(page.getByTestId('toggle-chat-panel')).toBeVisible();
-    await page.getByTestId('toggle-chat-panel').click();
+    const toggle = page.getByTestId('toggle-chat-panel');
+    await expect(toggle).toBeVisible();
 
-    // After reload the toggle is still reachable (panel is still collapsed).
+    // Assert the actual collapsed STATE, not merely that the toggle still
+    // exists — an earlier version only checked button visibility and would
+    // have passed with persistence entirely absent.
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    // The chat composer is visible while expanded.
+    await expect(page.getByTestId('chat-input')).toBeVisible();
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // Collapsed hides rather than unmounts, so the input stays in the DOM but
+    // is not visible. Both matter: hidden (not removed) preserves chat state.
+    await expect(page.getByTestId('chat-input')).toBeHidden();
+    await expect(page.getByTestId('chat-input')).toHaveCount(1);
+
     await page.reload();
     await expect(page.getByTestId('slide-viewer')).toBeVisible();
-    await expect(page.getByTestId('toggle-chat-panel')).toBeVisible();
+    await expect(page.getByTestId('toggle-chat-panel'))
+      .toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByTestId('chat-input')).toBeHidden();
+  });
+
+  test('nav sidebar collapsed state survives reload', async ({ page }) => {
+    // Spec §2/§10 require BOTH left panels to persist. The nav sidebar is a
+    // Shadcn SidebarProvider, which writes a `sidebar_state` cookie on toggle
+    // but never read it back — so its collapsed state was lost on every reload
+    // until AppLayout passed defaultOpen from that cookie.
+    await openDeck(page);
+
+    // ui/sidebar.tsx puts data-state on the wrapper div that also carries
+    // data-side/data-collapsible.
+    const sidebarState = () =>
+      page.locator('div[data-state][data-side]').first().getAttribute('data-state');
+
+    // Use the header SidebarTrigger, not SidebarRail: both are labelled
+    // "Toggle Sidebar", but the rail is tabIndex={-1} decoration.
+    await page.locator('button[data-sidebar="trigger"]').click();
+    await expect.poll(sidebarState).toBe('collapsed');
+
+    await page.reload();
+    await expect(page.getByTestId('slide-viewer')).toBeVisible();
+    await expect.poll(sidebarState).toBe('collapsed');
   });
 
   // ── Stage toolbar affordances ─────────────────────────────────────────────

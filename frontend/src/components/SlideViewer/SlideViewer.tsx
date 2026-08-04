@@ -58,11 +58,19 @@ export interface SlideViewerHandle {
  * element, not the inner shadow element. For this app there are no shadow-DOM inputs
  * in the viewer, so this is a non-issue — a shadow host is not a typing target.
  *
- * Iframes: when focus moves inside the slide iframe, keydown events fire in the
- * iframe's separate browsing context and never reach the parent window listener.
- * In the parent, document.activeElement becomes the <iframe> element itself
- * (tagName 'IFRAME'). isTypingTarget returns false for IFRAME, so paging keys
- * still fire when focus is on the iframe — correct behaviour for this viewer.
+ * Iframes: keydown inside the slide iframe fires in the iframe's own browsing
+ * context and never reaches this parent window listener, and in the parent
+ * document.activeElement would become the <iframe> element itself. That used to
+ * break paging permanently — one click on the slide moved focus into the iframe
+ * and every subsequent arrow key was lost (Escape could not recover it either,
+ * because the iframe is inside stageRef, so the containment check below skipped
+ * the refocus). The stage iframe therefore sets pointer-events: none
+ * (SlideStage.tsx), so focus cannot land in it at all.
+ *
+ * Workstream 8 (inline WYSIWYG editing) MUST keep this in mind: making the slide
+ * interactive means focus can enter the iframe again. Its editable regions need
+ * to live in the parent document, or the focus/keyboard model needs revisiting —
+ * isTypingTarget alone will not save you, because the events never arrive.
  */
 function isTypingTarget(el: Element | null): boolean {
   if (!el) return false;
@@ -103,6 +111,7 @@ const ViewerBody = forwardRef<
     return m;
   });
   const [isManualVerifying, setIsManualVerifying] = useState(false);
+  const [isOptimizing, setIsOptimizing] = useState(false);
   // Per-slide stale tracking: a Set of slide_ids edited after their last verification.
   const [staleSlideIds, setStaleSlideIds] = useState<Set<string>>(new Set());
   const [isPresentationMode, setIsPresentationMode] = useState(false);
@@ -251,13 +260,22 @@ const ViewerBody = forwardRef<
     const slideId = slideDeck.slides[indexWhenOpened]?.slide_id;
     try {
       await api.updateSlide(indexWhenOpened, html, sessionId);
+      // Drop the slide's verification before refreshing the deck. Editing the
+      // HTML invalidates it: the server keys verifications by content_hash, so
+      // it will no longer match, and leaving the old result in place renders a
+      // confidently-green badge describing content that no longer exists. The
+      // pre-viewer SlideTile did the same (cleared the result on save) rather
+      // than only marking it stale. Note a stale FLAG alone is not enough here:
+      // onSlideChange below re-runs the deck-sync effect, which resets
+      // staleSlideIds, so the flag would be wiped immediately.
+      if (slideId) {
+        await api.updateSlideVerification(indexWhenOpened, sessionId, null);
+      }
       const result = await api.getSlides(sessionId);
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange(result.slide_deck);
       }
-      if (slideId) {
-        setStaleSlideIds(prev => new Set(prev).add(slideId));
-      }
+      onVerificationComplete?.();
     } catch (error) {
       console.error('Failed to update:', error);
       if (isVersionConflict(error)) {
@@ -308,10 +326,19 @@ const ViewerBody = forwardRef<
   };
 
   // Finding 3: "Optimize layout" for the current slide via the chat agent.
+  // Guarded against re-entry: this triggers a full LLM slide regeneration, the
+  // most expensive operation in the app, and without a guard N clicks queue N
+  // agent runs. The pre-viewer SlidePanel guarded on optimizingSlideIndex and
+  // disabled its button while in flight; keep that behaviour.
   const handleOptimizeLayout = useCallback(() => {
-    if (!onSendMessage) return;
+    if (!onSendMessage || isOptimizing) return;
     const slide = slideDeck.slides[currentIndex];
     if (!slide) return;
+    setIsOptimizing(true);
+    // The agent reply arrives through chat, not a promise we can await, so
+    // release the guard on a short timer — long enough to swallow a double
+    // click, short enough not to strand the control if the request fails.
+    window.setTimeout(() => setIsOptimizing(false), 3000);
     const slideContext: SlideContext = {
       indices: [currentIndex],
       slide_htmls: [slide.html],
@@ -328,7 +355,7 @@ const ViewerBody = forwardRef<
 
       Focus on optimizing text layout, container sizing, and spacing while keeping all chart elements completely unchanged.`;
     onSendMessage(message, slideContext);
-  }, [onSendMessage, currentIndex, slideDeck.slides]);
+  }, [onSendMessage, isOptimizing, currentIndex, slideDeck.slides]);
 
   // Finding 2: auto-verify newly-generated slides on the viewer path.
   useAutoVerification({
@@ -386,8 +413,12 @@ const ViewerBody = forwardRef<
         onReorder={onReorder}
       />
       <div className="flex min-h-0 flex-1 flex-col">
-        {/* Stage toolbar — per-slide CRUD controls */}
-        {!readOnly && currentSlide && (
+        {/* Stage toolbar. Rendered for read-only viewers too: the verification
+            badge and the "X is editing" lock notice must stay visible on the
+            share-link/view route and during save-point preview, matching the
+            old SlideTile, which gated only the mutating controls (edit, delete,
+            optimize) and kept the badge outside the gate. */}
+        {currentSlide && (
           <div
             data-testid="stage-toolbar"
             className="flex shrink-0 items-center justify-between border-b border-border bg-card px-3 py-1.5"
@@ -410,7 +441,7 @@ const ViewerBody = forwardRef<
                 />
               </span>
               {/* Finding 3: Optimize layout button */}
-              {onSendMessage && (
+              {!readOnly && onSendMessage && (
                 <Tooltip text="Optimize layout">
                   <Button
                     data-testid="stage-optimize-layout"
@@ -424,36 +455,40 @@ const ViewerBody = forwardRef<
                   </Button>
                 </Tooltip>
               )}
-              <Tooltip text="Edit slide HTML">
-                <Button
-                  data-testid="stage-edit-slide"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => {
-                    setIndexWhenOpened(currentIndex);
-                    setIsEditing(true);
-                  }}
-                  className="h-7 w-7"
-                  aria-label="Edit slide HTML"
-                >
-                  <Edit3 className="size-3.5" />
-                </Button>
-              </Tooltip>
-              <Tooltip text="Delete slide" align="end">
-                <Button
-                  data-testid="stage-delete-slide"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => {
-                    setIndexWhenOpened(currentIndex);
-                    setShowDeleteConfirm(true);
-                  }}
-                  className="h-7 w-7 text-destructive hover:text-destructive"
-                  aria-label="Delete slide"
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
-              </Tooltip>
+              {!readOnly && (
+                <>
+                  <Tooltip text="Edit slide HTML">
+                    <Button
+                      data-testid="stage-edit-slide"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => {
+                        setIndexWhenOpened(currentIndex);
+                        setIsEditing(true);
+                      }}
+                      className="h-7 w-7"
+                      aria-label="Edit slide HTML"
+                    >
+                      <Edit3 className="size-3.5" />
+                    </Button>
+                  </Tooltip>
+                  <Tooltip text="Delete slide" align="end">
+                    <Button
+                      data-testid="stage-delete-slide"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => {
+                        setIndexWhenOpened(currentIndex);
+                        setShowDeleteConfirm(true);
+                      }}
+                      className="h-7 w-7 text-destructive hover:text-destructive"
+                      aria-label="Delete slide"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </Tooltip>
+                </>
+              )}
             </div>
           </div>
         )}

@@ -788,6 +788,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [displayDeck, sessionId, isReadOnly, setSlideDeckGated]);
 
+  // Nav sidebar collapse is owned by SidebarProvider, which persists to the
+  // `sidebar_state` cookie but never reads it back. Read it here so the nav
+  // panel's collapsed state survives a reload like the chat panel's does.
+  // Computed once per mount: the provider only consumes defaultOpen initially.
+  const navSidebarDefaultOpen = useMemo(() => {
+    const match = document.cookie.match(/(?:^|;\s*)sidebar_state=(true|false)/);
+    return match ? match[1] === 'true' : true;
+  }, []);
+
   // Collapsible panel state, persisted across reloads.
   const PANEL_STATE_KEY = 'tellr-panel-collapsed';
   const [collapsed, setCollapsed] = useState<{ nav: boolean; chat: boolean }>(() => {
@@ -822,7 +831,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       : 'Create a private copy in My Sessions';
 
   return (
-    <SidebarProvider className="h-svh max-h-svh">
+    // defaultOpen reads back the sidebar_state cookie that SidebarProvider
+    // writes on every toggle (ui/sidebar.tsx). Without it the provider always
+    // defaults to open, so the nav panel's collapsed state did not survive a
+    // reload — spec §2/§10 require BOTH left panels to persist.
+    <SidebarProvider className="h-svh max-h-svh" defaultOpen={navSidebarDefaultOpen}>
       <AppSidebar
         currentView={viewMode}
         onViewChange={handleViewChange}

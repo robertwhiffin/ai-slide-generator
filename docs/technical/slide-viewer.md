@@ -63,9 +63,26 @@ Keyboard navigation is driven by a `window`-level `keydown` listener in `SlideVi
 
 The reason matters: PRD workstream 8 will add inline WYSIWYG editable regions directly on the stage. If the guard used propagation-stopping, events inside those editable regions would stop propagating before reaching the window listener — which looks correct today but would silently break the moment workstream 8 adds an editable element that captures keydown for its own editing. The `document.activeElement` check covers any future editable element automatically, without any change to the guard.
 
-**Iframe boundary:** When focus moves inside the sandboxed slide iframe, keydown events fire in the iframe's separate browsing context and **never reach the parent `window` listener**. In the parent, `document.activeElement` becomes the `<iframe>` element itself (`tagName === 'IFRAME'`). `isTypingTarget` returns `false` for `IFRAME`, so paging keys still fire when the iframe is focused — the correct behaviour for this viewer.
+**Iframe boundary (INVARIANT — the stage iframe must not receive pointer events):**
+Keydown inside the slide iframe fires in the iframe's own browsing context and
+**never reaches the parent `window` listener**, and in the parent
+`document.activeElement` becomes the `<iframe>` element itself.
 
-Note: the `sandbox="allow-scripts"` attribute on the slide iframe does not prevent inputs inside it from being interactive. The `sandbox` attribute governs capabilities such as form submission and navigation; it does not disable input elements.
+That is why `SlideStage` renders the iframe with `pointer-events: none`. Without it
+the iframe swallowed input in two user-visible ways: a single click on the slide
+moved focus into the iframe and killed keyboard paging permanently (and `Escape`
+could not recover it, because the iframe is *inside* `stageRef`, so the containment
+check skipped the refocus), and wheel-over-the-stage paging did not work anywhere
+except a ~16px margin around the slide, because the iframe covered the rest.
+`ThumbnailRibbon` does the same for its preview iframes.
+
+Do not "fix" a future interaction bug by re-enabling pointer events on the stage
+iframe. Slides are non-interactive by design in this workstream.
+
+Note: the `sandbox="allow-scripts"` attribute does **not** make iframe content
+non-interactive. `sandbox` governs capabilities such as form submission and
+navigation; it does not disable input elements or stop them receiving focus. The
+`pointer-events: none` rule is what keeps focus out, not `sandbox`.
 
 ### Security Invariant — `buildSlideDocument`
 
@@ -184,9 +201,31 @@ Speaker notes are the first planned second tab (PRD workstream TBD).
 
 ### Inline WYSIWYG editor (workstream 8)
 
-PRD workstream 8 will add editable text regions directly on the slide in the stage iframe. The keyboard focus guard (`isTypingTarget`) already handles this correctly: when an editable region inside the iframe is focused, `document.activeElement` in the parent is the `<iframe>` element, not the inner editable node. The guard returns `false` for `IFRAME`, so arrow-key paging still works when the user is not actively editing. When the user clicks into an editable region, the iframe takes focus and the guard fires on subsequent keydowns only if focus remains on the iframe wrapper.
+PRD workstream 8 will add editable text regions on the slide. **Read the iframe-boundary
+invariant above before starting** — this is the part of the design most likely to trip you up.
 
-No changes to the focus guard are needed when workstream 8 ships. The only requirement is that editable regions fire a focus event that moves `document.activeElement` to the iframe (this is automatic browser behaviour).
+The stage iframe currently sets `pointer-events: none`, so the slide cannot take focus at
+all. Making the slide editable means undoing that, and the moment focus can enter the
+iframe, two things break:
+
+- **Keyboard paging stops.** Keydowns fire in the iframe's browsing context and never reach
+  the parent `window` listener. `isTypingTarget` cannot help: it never runs, because the
+  event does not arrive. This is not a guard bug — it is a browsing-context boundary.
+- **Wheel-to-page stops** over the slide area, for the same reason.
+
+Two workable approaches, in order of preference:
+
+1. **Keep editing in the parent document.** Overlay editable regions positioned over the
+   slide rather than inside the iframe. The existing focus guard then works unchanged,
+   because `document.activeElement` is a real parent-document element and
+   `isTypingTarget` sees it (`INPUT`/`TEXTAREA`/`contentEditable`).
+2. **If editing must live inside the iframe,** forward keyboard events out with a
+   `postMessage` bridge — `KEY_BRIDGE_SCRIPT` in `frontend/src/services/slideDocument.ts`
+   already does exactly this for presentation mode (`includeKeyBridge`). You would then
+   need an explicit "am I editing?" signal so paging is suppressed during editing rather
+   than inferred from focus.
+
+Either way, the paging and focus model needs revisiting; it will not carry over for free.
 
 ---
 
