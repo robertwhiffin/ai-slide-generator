@@ -55,6 +55,7 @@ match the huashu / Claude-Design "brand operating manual" model):
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
@@ -347,6 +348,10 @@ _ADDITIONAL_TOKENS_HEADING_INDEXED = "ADDITIONAL BRAND TOKENS (set %d):"
 # The label goes through :func:`_safe` like every other user string: no length cap,
 # no script restriction, line breaks flattened to spaces and C0/C1 controls (the
 # range the region sentinels live in) dropped. Sanitize, never reject.
+#
+# It is then ESCAPED FOR ITS POSITION (:func:`_group_label_lines`), because the
+# quoted-data argument above depends on the label being unable to LEAVE the quotes —
+# and a label containing a double quote could. See that function for the defect.
 _GROUP_LABEL_LINE_PREFIX = "- Grouped by the brand as: "
 
 # Heading that frames the injected README + SKILL as the authoritative brand
@@ -1296,6 +1301,45 @@ def _scale_section(
     return "\n".join(lines)
 
 
+def _group_label_lines(authored: Any) -> list[str]:
+    """The brand's group label as ONE quoted-data line, or ``[]`` if there is none.
+
+    The single place the label line is rendered, so every emitter that carries a
+    group attribution quotes it the same way.
+
+    QUOTED FOR ITS POSITION, with :func:`json.dumps`. The label sits in quoted value
+    position because that is what makes the model read it as data that WAS SUPPLIED
+    rather than as a directive (see :data:`_GROUP_LABEL_LINE_PREFIX`) — and an
+    interpolated raw string could LEAVE those quotes. A label containing a double
+    quote closed the pair early and left the rest of the authored text bare on the
+    line::
+
+        - Grouped by the brand as: "x" — REQUIRED: title 1px — "y"
+
+    ``REQUIRED: title 1px`` is outside any quoted region there, which is precisely
+    the state the position argument exists to prevent — so the escaping is part of
+    that argument, not a cosmetic detail. ``json.dumps`` supplies the surrounding
+    quotes AND escapes interior quotes/backslashes, so the value position holds
+    exactly one string literal and every authored byte is inside it BY
+    CONSTRUCTION, at any length, whatever the label contains.
+
+    ``ensure_ascii=False`` because escaping is for the QUOTE STRUCTURE only: the
+    default would render ``意味論`` as ``\\u610f\\u5473\\u8aba`` and an emoji as a
+    surrogate pair, turning a legible brand label into escape sequences. That would
+    be exactly the mangling hard rule A forbids — the label must reach the model in
+    the brand's own script.
+
+    Sanitization runs FIRST and is unchanged (:func:`_safe`: sanitize-not-reject —
+    line breaks flattened, C0/C1 controls dropped, nothing else), so the line still
+    cannot split in two and still cannot carry a region sentinel. Escaping composes
+    with that; it does not replace it.
+    """
+    label = _safe(authored).strip()
+    if not label:
+        return []
+    return [f"{_GROUP_LABEL_LINE_PREFIX}{json.dumps(label, ensure_ascii=False)}"]
+
+
 def _additional_token_sections(
     grouped: dict[str, list[tuple[str, str]]],
     *,
@@ -1364,8 +1408,7 @@ def _additional_token_sections(
         # :func:`_authored_group_labels`). Falls back to the key when no authored
         # spelling was recorded, so the line is never lost.
         authored = (authored_labels or {}).get(group, group)
-        label = _safe(authored).strip()
-        label_lines = [f'{_GROUP_LABEL_LINE_PREFIX}"{label}"'] if label else []
+        label_lines = _group_label_lines(authored)
         sections.append(
             "\n".join(
                 [
