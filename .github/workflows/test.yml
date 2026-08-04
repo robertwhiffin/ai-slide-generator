@@ -476,6 +476,7 @@ jobs:
       fail-fast: false
       matrix:
         test:
+          - admin-route-gate
           - chat-ui
           - css-bg-export
           - deck-integrity
