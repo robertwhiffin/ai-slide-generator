@@ -1187,14 +1187,28 @@ def _authored_group_labels(design_system: Any) -> dict[str, str]:
     So the two concerns are two mappings: the grouping key stays normalized, and the
     authored spelling is recovered here for the label line alone.
 
+    THE SPELLING IS RECORDED VERBATIM, whitespace included. It used to be stripped
+    here (and again at the point of display), so a brand that authored
+    ``" Brand Semantic "`` was shown ``"Brand Semantic"``. Only control and sentinel
+    bytes may be removed from a user string — the rule that keeps a 300-character
+    label uncapped, and that already forced the revert of an earlier round's
+    multi-space collapse for RENAMING a legitimate token. A space is neither, so
+    normalising it away is the same class of silent loss.
+
+    Emptiness is decided on the STRIPPED text, because a group whose name is nothing
+    but whitespace has no spelling for the artifact to show; the display decision
+    lives in :func:`_group_label_lines`, which handles that case explicitly.
+
     Ties are resolved deterministically. When several spellings share one key the
     FIRST in sorted order wins — an arbitrary but stable choice, since the artifact
     can only show one and any preference between equal claims would be invented.
+    Sorting compares the verbatim spellings, so the choice stays a pure function of
+    what the brand wrote.
     """
     labels: dict[str, str] = {}
     for token in getattr(design_system, "tokens", None) or []:
-        raw = str(token.group or "").strip()
-        if not raw:
+        raw = str(token.group or "")
+        if not raw.strip():
             continue
         key = _resolve_group(token.group)
         existing = labels.get(key)
@@ -1333,9 +1347,27 @@ def _group_label_lines(authored: Any) -> list[str]:
     line breaks flattened, C0/C1 controls dropped, nothing else), so the line still
     cannot split in two and still cannot carry a region sentinel. Escaping composes
     with that; it does not replace it.
+
+    WHITESPACE IS DISPLAYED VERBATIM. It was stripped here (and again where the
+    spelling is recorded, :func:`_authored_group_labels`), so a brand that authored
+    ``" Brand Semantic "`` was shown ``"Brand Semantic"``. Only control and sentinel
+    bytes may be removed from a user string; a space is neither, and the quotes make
+    padding legible rather than ambiguous — stating a value's exact extent is what
+    quoted position is FOR, so preserving the spaces makes the line more precise, not
+    less. The one transformation that remains is ``_safe``'s break-to-space
+    flattening, which is structural.
+
+    Stripping survives for the EMPTINESS DECISION only. A label that is nothing but
+    whitespace has no spelling to show, and ``- Grouped by the brand as: "   "``
+    would assert to the model that the brand grouped these tokens under something
+    while giving it nothing legible to read — an apparently-empty field is worse than
+    no field. That case therefore emits NO line, exactly as an absent label does; the
+    tokens below are unaffected. This is the one genuine ambiguity preserving
+    whitespace creates, and it is handled here rather than by blanket-stripping every
+    real label to avoid it.
     """
-    label = _safe(authored).strip()
-    if not label:
+    label = _safe(authored)
+    if not label.strip():
         return []
     return [f"{_GROUP_LABEL_LINE_PREFIX}{json.dumps(label, ensure_ascii=False)}"]
 
