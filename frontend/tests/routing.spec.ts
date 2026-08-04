@@ -49,13 +49,15 @@ test.describe('URL Routing', () => {
     await mockSessionWithSlides(page, 'test-session-id');
     await page.goto('/sessions/test-session-id/edit');
     await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible();
-    await expect(page.locator('[data-testid="slide-panel"]')).toBeVisible();
+    // SlidePanel was replaced by SlideViewer in the flip-through viewer workstream.
+    await expect(page.locator('[data-testid="slide-viewer"]')).toBeVisible();
   });
 
   test('session view URL loads read-only viewer', async ({ page }) => {
     await mockSessionWithSlides(page, 'test-session-id');
     await page.goto('/sessions/test-session-id/view');
-    await expect(page.locator('[data-testid="slide-panel"]')).toBeVisible();
+    // SlidePanel was replaced by SlideViewer in the flip-through viewer workstream.
+    await expect(page.locator('[data-testid="slide-viewer"]')).toBeVisible();
   });
 
   test('unknown path redirects to help page', async ({ page }) => {
