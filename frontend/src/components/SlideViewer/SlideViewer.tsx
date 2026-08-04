@@ -484,9 +484,14 @@ export const SlideViewer = forwardRef<SlideViewerHandle, SlideViewerProps>(
       return (
         <div
           data-testid="slide-viewer-empty"
-          className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
+          className="flex flex-1 items-center justify-center"
         >
-          No slides yet — generate a deck to get started.
+          {/* Copy preserved from the pre-viewer SlidePanel empty state: this
+              workstream replaced the slide surface, not its wording. */}
+          <div className="text-center text-muted-foreground">
+            <p className="text-lg font-medium">No slides yet</p>
+            <p className="mt-2 text-sm">Send a message to generate slides</p>
+          </div>
         </div>
       );
     }

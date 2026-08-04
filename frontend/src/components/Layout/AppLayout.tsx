@@ -905,7 +905,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   >
                     <span className="text-xs">{collapsed.chat ? '›' : '‹'}</span>
                   </button>
-                  <div className={collapsed.chat ? 'hidden' : 'flex flex-col flex-1 min-h-0'}>
+                  {/* Stable key: React must reconcile this as the SAME element
+                      across collapse toggles, or ChatPanel remounts and the
+                      conversation state (and any in-flight stream) is lost. */}
+                  <div
+                    key="chat-panel-body"
+                    className={collapsed.chat ? 'hidden' : 'flex flex-col flex-1 min-h-0'}
+                  >
                     <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
                       <AgentConfigBar />
                     </div>
