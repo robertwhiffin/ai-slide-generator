@@ -58,7 +58,7 @@ test.describe('Presentation Mode', () => {
     await expect(overlay).toBeVisible({ timeout: 5000 });
 
     // Verify slide counter is showing (confirms presentation is functional)
-    await expect(page.getByText(/1\s*\/\s*\d+/)).toBeVisible();
+    await expect(presentationOverlay(page).getByText(/1\s*\/\s*\d+/)).toBeVisible();
 
     // Wait well beyond the 3s mentions polling interval.
     // Before the fix, the first polling response would re-render SlidePanel,
@@ -68,7 +68,7 @@ test.describe('Presentation Mode', () => {
 
     // Presentation overlay must still be visible
     await expect(overlay).toBeVisible();
-    await expect(page.getByText(/1\s*\/\s*\d+/)).toBeVisible();
+    await expect(presentationOverlay(page).getByText(/1\s*\/\s*\d+/)).toBeVisible();
   });
 
   test('keyboard navigation still works after polling-driven re-renders', async ({ page }) => {
@@ -85,12 +85,12 @@ test.describe('Presentation Mode', () => {
     await presentButton.click();
 
     await expect(presentationOverlay(page)).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText(/1\s*\/\s*\d+/)).toBeVisible();
+    await expect(presentationOverlay(page).getByText(/1\s*\/\s*\d+/)).toBeVisible();
 
     // Wait past the polling interval, then advance.
     await page.waitForTimeout(5000);
     await page.keyboard.press('ArrowRight');
-    await expect(page.getByText(/2\s*\/\s*\d+/)).toBeVisible({ timeout: 2000 });
+    await expect(presentationOverlay(page).getByText(/2\s*\/\s*\d+/)).toBeVisible({ timeout: 2000 });
   });
 
   test('opens in full-window mode by default, does not request browser fullscreen', async ({ page }) => {

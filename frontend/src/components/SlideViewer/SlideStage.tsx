@@ -46,9 +46,14 @@ export const SlideStage: React.FC<SlideStageProps> = ({ slides, css, externalScr
     return (
       <div
         data-testid="slide-stage-empty"
-        className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
+        className="flex flex-1 items-center justify-center"
       >
-        No slides yet — generate a deck to get started.
+        {/* Matches the SlideViewer empty state, which preserves the wording the
+            pre-viewer SlidePanel used. */}
+        <div className="text-center text-muted-foreground">
+          <p className="text-lg font-medium">No slides yet</p>
+          <p className="mt-2 text-sm">Send a message to generate slides</p>
+        </div>
       </div>
     );
   }
