@@ -70,6 +70,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
   const deckVersionRef = useRef<number>(0);
+  // Separate counter for reorder staleness guard — must NOT alias deckVersionRef
+  // (which is reserved exclusively for server-version gating in setSlideDeckGated).
+  const deckEditCounterRef = useRef<number>(0);
 
   const loadVersionsRef = useRef<(() => Promise<void>) | null>(null);
 
@@ -755,14 +758,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     newSlides.splice(to, 0, moved);
     // Optimistic update
     setSlideDeckGated({ ...displayDeck, slides: newSlides }, displayDeck.version);
-    const editId = ++deckVersionRef.current;
+    const editId = ++deckEditCounterRef.current;
     try {
       const newOrder = newSlides.map((_, idx) =>
         displayDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
       );
       await api.reorderSlides(newOrder, sessionId);
       const result = await api.getSlides(sessionId);
-      if (result.slide_deck && deckVersionRef.current === editId) {
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
         setSlideDeckGated(result.slide_deck, result.slide_deck.version);
       }
     } catch (error) {
