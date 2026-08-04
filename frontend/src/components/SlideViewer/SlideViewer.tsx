@@ -120,15 +120,14 @@ const ViewerBody = forwardRef<
   };
 
   // Sync verification results (keyed by slide_id) when deck changes.
+  // Build a fresh Map from the incoming slides so stale entries for deleted
+  // (or reindexed) slides are automatically pruned — a key that isn't in the
+  // current slide list simply won't appear in the new Map.
   // Also clear all stale flags — a fresh deck fetch means verifications are current.
   useEffect(() => {
-    setVerificationResults(prev => {
-      const m = new Map(prev);
-      slideDeck.slides.forEach((s) => {
-        if (s.verification !== m.get(s.slide_id)) m.set(s.slide_id, s.verification);
-      });
-      return m;
-    });
+    const m = new Map<string, VerificationResult | undefined>();
+    slideDeck.slides.forEach((s) => { m.set(s.slide_id, s.verification); });
+    setVerificationResults(m);
     setStaleSlideIds(new Set());
   }, [slideDeck]);
 
