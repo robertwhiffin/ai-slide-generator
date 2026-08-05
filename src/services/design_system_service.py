@@ -331,7 +331,8 @@ def _canonicalize_token(
     so the same underlying token dedups regardless of source. Group precedence:
 
     1. An explicit ``group`` the author supplied. A RECOGNIZED one is normalized to
-       its canonical spelling; ANY OTHER is preserved VERBATIM (see below).
+       its canonical spelling; ANY OTHER is preserved VERBATIM — casing AND
+       whitespace (see below).
     2. A color sub-group encoded in the name (core/accents/ink/tints).
     3. The manifest ``kind`` (color -> core, font -> type, spacing -> spacing,
        shadow -> shadow).
@@ -350,6 +351,16 @@ def _canonicalize_token(
     under a role-less generic heading, dropping nothing — so preserving the author's
     string costs nothing downstream and is what makes "every token persists with its
     group" true.
+
+    Stripping is used for the LOOKUP KEY and the EMPTINESS CHECK ONLY, never for the
+    value returned. That split is the same one the compiler applies internally
+    (``design_system_compiler._resolve_group`` normalizes its grouping key while
+    ``_authored_group_labels`` records the spelling verbatim), and it has to hold at
+    BOTH boundaries: returning ``group.strip()`` here destroyed the authored padding
+    before any row was written, so the compiler was faithfully preserving whitespace
+    that no longer existed by the time it ran — the fix was real and unobservable
+    through the actual upload path. A group that is nothing BUT whitespace still
+    falls through to inference, because it names nothing to preserve.
 
     The name is the stripped identifier, minus a leading color sub-group segment
     when that segment determined the group.
@@ -370,10 +381,13 @@ def _canonicalize_token(
                 else ident
             )
             return normalized_group, name
-        # Unrecognized: PRESERVE it verbatim (not lowercased — it is the author's
-        # own label, and the compiler lowercases for grouping itself). Falling
-        # through here is what discarded it.
-        return group.strip(), ident
+        # Unrecognized: PRESERVE it verbatim — casing AND whitespace. It is the
+        # author's own label, and the compiler normalizes for grouping itself.
+        # Falling through here is what discarded it entirely; returning
+        # ``group.strip()`` then discarded the authored PADDING, which made the
+        # compiler's whitespace fidelity unobservable in production because this
+        # boundary had already destroyed the spacing upstream of it.
+        return group, ident
 
     # 2. Color sub-group encoded in the name.
     if head in _COLOR_SUBGROUPS:
@@ -537,9 +551,12 @@ def import_bundle(
         tokens = _collect_tokens(manifest, _decode_css_texts(css_sources))
         assets, files = _collect_assets_and_files(zf, root_prefix, budget, css_sources)
 
+    # Stored VERBATIM; the strip decides only whether the brand wrote a description
+    # at all (a whitespace-only one describes nothing, so it stays NULL). Same split
+    # as the token group and the name above — normalize the check, never the value.
     raw_description = manifest.get("description")
     description = (
-        raw_description.strip()
+        raw_description
         if isinstance(raw_description, str) and raw_description.strip()
         else None
     )
@@ -696,13 +713,24 @@ def _resolve_name(
     clamp had no purpose left; it is removed rather than raised, since any number
     would reintroduce the same silent edit for a longer name.
 
-    Whitespace is still stripped (that is normalization of a candidate, not loss of
-    brand content), and the constant fallback still applies when no candidate
-    yields anything.
+    NEVER EDITS THE AUTHORED TEXT EITHER. Whitespace used to be stripped from the
+    winning candidate on the grounds that it "normalizes a candidate" — but the
+    candidate IS the stored value, so that was the same silent edit as the truncation
+    above, in miniature: a brand that titled its system ``"  Acme  "`` was stored
+    under a title it did not write, and the rename endpoint (which assigns
+    ``request.name`` unstripped) preserved the very same text the importer edited.
+    Stripping decides only WHETHER a candidate has content; what gets returned is
+    what the brand wrote.
+
+    The PATH-derived candidates (zip filename, bundle root folder) are the exception
+    and stay normalized — a filesystem name is not authored prose, and its padding is
+    an artifact of the filesystem rather than a brand's choice.
+
+    The constant fallback still applies when no candidate yields anything.
     """
     for candidate in (name_override, manifest.get("name"), readme_h1):
         if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+            return candidate
     if source_filename:
         stem = _basename(source_filename)
         if stem.lower().endswith(".zip"):
