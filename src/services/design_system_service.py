@@ -661,17 +661,58 @@ def _read_manifest(zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget")
     return manifest
 
 
-_MARKDOWN_H1_RE = re.compile(r"^#\s+(.+?)\s*#*\s*$")
+#: An ATX H1 line, split into MARKDOWN SYNTAX and authored CONTENT.
+#:
+#: SYNTAX — consumed, because it is markup the brand did not author as text: any
+#: indentation before the ``#``, the ``#`` itself, the ONE whitespace character that
+#: makes the line a heading rather than a ``#hashtag``, and an optional closing ``#``
+#: run at the end of the line.
+#:
+#: CONTENT — everything else, captured VERBATIM. The group is bounded by ``$`` with no
+#: ``\s*`` adjacent to it, so a heading's own leading/trailing padding is CONTENT and
+#: reaches the caller intact, in any Unicode whitespace class.
+#:
+#: The previous pattern (``^#\s+(.+?)\s*#*\s*$``, matched against a ``.strip()``-ed
+#: line, with a third ``.strip()`` on the captured group) destroyed that padding: the
+#: ``\s+`` delimiter was GREEDY, so it swallowed every space the author put before the
+#: title, and the lazy ``.+?`` surrendered every space after it to ``\s*``. The loss is
+#: PERMANENT rather than cosmetic, because this candidate is stored as
+#: ``design_system.name``.
+#:
+#: WHAT LINES MATCH IS UNCHANGED — deliberately, so no bundle's naming falls through
+#: differently than before. The delimiter is still ``\s`` (Python's Unicode class, so
+#: an EM SPACE after the ``#`` still opens a heading, as it did), still requires at
+#: least one character, and the ``#`` run is still a single ``#`` (H1 only, per this
+#: module's contract). Only the CONTENT BOUNDARY moved: exactly one delimiter
+#: character is syntax, and the rest belongs to the brand.
+#:
+#: The closing ``#`` run must be preceded by whitespace to count as a delimiter, which
+#: is what CommonMark requires — so ``# Title #`` drops it, while ``# Title#`` keeps
+#: the ``#`` as the authored content it is.
+_MARKDOWN_H1_RE = re.compile(r"^\s*#\s(.*?)(?:[ \t]+#+[ \t]*)?$")
 
 
 def _read_readme_h1(
     zf: zipfile.ZipFile, root_prefix: str, budget: "_SizeBudget"
 ) -> Optional[str]:
-    """First ATX ``# Heading`` of the bundle's root README.md, or None.
+    """First ATX ``# Heading`` of the bundle's root README.md, VERBATIM, or None.
 
     Budgeted like every other bundle read. Any failure (no README, undecodable
     bytes, no heading) degrades to None — naming falls through to the next
     candidate.
+
+    THE HEADING CONTENT IS AUTHORED BRAND TEXT and is returned exactly as written,
+    including leading/trailing whitespace of ANY Unicode class (EM SPACE, NBSP,
+    IDEOGRAPHIC SPACE). This candidate becomes ``design_system.name``, so editing it
+    here destroys the brand's own title in storage — the same silent edit
+    :func:`_resolve_name` stopped committing for the manifest name and the upload
+    override, arriving by a different route.
+
+    Normalization is confined to the two places it decides something rather than
+    changes something: the line's own trailing LINE TERMINATOR (a file-format
+    artifact, not authored padding, removed so a heading is recognizable at all) and
+    the EMPTINESS CHECK below, where a heading that is nothing but whitespace states
+    no title and must fall through to the next candidate.
     """
     readme_entry = next(
         (
@@ -688,10 +729,19 @@ def _read_readme_h1(
         text = budget.read(zf, readme_entry).decode("utf-8", errors="replace")
     except Exception:
         return None
+    # ``splitlines`` already removes the line TERMINATOR however it is spelled
+    # (CRLF included), so no ``.strip()`` is needed to recognize a heading — and a
+    # ``.strip()`` here would silently take the authored padding with it.
     for line in text.splitlines():
-        match = _MARKDOWN_H1_RE.match(line.strip())
-        if match and match.group(1).strip():
-            return match.group(1).strip()
+        match = _MARKDOWN_H1_RE.match(line)
+        if not match:
+            continue
+        heading = match.group(1)
+        # STRIPPED ONLY TO DECIDE, never to store: a heading that is nothing but
+        # whitespace names nothing, so keep looking. What is RETURNED is the
+        # brand's own text.
+        if heading.strip():
+            return heading
     return None
 
 
