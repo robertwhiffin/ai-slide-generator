@@ -427,6 +427,96 @@ class TestTheSameClassElsewhereInTheImporter:
 
         assert imported.name == "  Padded Override  "
 
+    #: Padding shapes for a README H1, one per Unicode whitespace class a brand can
+    #: actually type into a heading. EM SPACE is the reviewer's reproducer; the ASCII
+    #: space and the NO-BREAK SPACE are here because the fix must be about the
+    #: WHITESPACE CLASS, not about one code point that happened to be reported.
+    _PADDED_H1 = (
+        pytest.param(" ", id="em-space"),
+        pytest.param(" ", id="ascii-space"),
+        pytest.param(" ", id="no-break-space"),
+        pytest.param("　", id="ideographic-space"),
+    )
+
+    @pytest.mark.parametrize("pad", _PADDED_H1)
+    def test_a_padded_readme_h1_name_is_stored_as_authored(self, session, pad):
+        """The README H1 is the brand's own title for its system, in its own file.
+
+        THE LAST NAME CANDIDATE STILL EDITED ON INGRESS. The previous round fixed the
+        manifest-name and the upload-form override, but the H1 reaches ``_resolve_name``
+        already normalised — ``_read_readme_h1`` matched on ``line.strip()``, and its
+        regex ate the padding via ``\\s+``/``\\s*`` before ``.strip()``-ing the captured
+        group a third time. So the candidate ``_resolve_name`` faithfully returns
+        verbatim was never the authored text, and the loss is PERMANENT: the padding is
+        gone from the database, not merely from a display.
+
+        A heading's MARKDOWN DELIMITERS are syntax and are correctly removed (the
+        leading ``#`` run, the optional closing ``#`` run). Its CONTENT is prose.
+        """
+        from src.services.design_system_service import import_bundle
+        from tests.unit.conftest_design_system import SVG_LOGO
+
+        authored = f"{pad} README Brand {pad}"
+        manifest = default_manifest()
+        # The H1 must be the ONLY name source, so the earlier candidates are absent:
+        # no override argument, and no manifest ``name`` key at all.
+        manifest.pop("name")
+        manifest["globalCssPaths"] = []
+        manifest["tokens"] = [{"group": "core", "name": "t", "value": "#123456"}]
+        imported = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(
+                manifest=manifest,
+                css=None,
+                files={
+                    # ``# `` is the markdown delimiter — the hash plus the ONE space
+                    # that makes the line a heading. Everything after it is the
+                    # brand's authored heading content, padding included.
+                    "README.md": f"# {authored}\n\nSynthetic body prose.\n".encode(),
+                    "assets/logo.svg": SVG_LOGO,
+                },
+            ),
+            user="u",
+        )
+
+        assert imported.name == authored, (
+            "the importer edited the brand's README heading before storing it as the "
+            "design system's name"
+        )
+
+    def test_a_whitespace_only_readme_h1_still_falls_through(self, session):
+        """The EMPTINESS half of the split, for the H1 candidate.
+
+        A heading that is nothing but whitespace states no title, so naming must fall
+        through to the next candidate exactly as it does when there is no README at
+        all — here the zip filename. Only the emptiness CHECK may normalise; what gets
+        stored is what the brand wrote.
+        """
+        from src.services.design_system_service import import_bundle
+        from tests.unit.conftest_design_system import SVG_LOGO
+
+        manifest = default_manifest()
+        manifest.pop("name")
+        manifest["globalCssPaths"] = []
+        manifest["tokens"] = [{"group": "core", "name": "t", "value": "#123456"}]
+        imported = import_bundle(
+            session,
+            zip_bytes=make_bundle_zip(
+                manifest=manifest,
+                css=None,
+                files={
+                    "README.md": "#     \n\nSynthetic body prose.\n".encode(),
+                    "assets/logo.svg": SVG_LOGO,
+                },
+            ),
+            user="u",
+            source_filename="acme-fallthrough-bundle.zip",
+        )
+
+        assert imported.name == "acme-fallthrough-bundle", (
+            "a whitespace-only heading was treated as a usable name"
+        )
+
     def test_a_padded_description_is_stored_as_authored(self, session):
         """The description is free prose, emitted as the artifact's caption."""
         from src.services.design_system_service import import_bundle
