@@ -63,12 +63,14 @@ Keyboard navigation is driven by a `window`-level `keydown` listener in `SlideVi
 
 The reason matters: PRD workstream 8 will add inline WYSIWYG editable regions directly on the stage. If the guard used propagation-stopping, events inside those editable regions would stop propagating before reaching the window listener — which looks correct today but would silently break the moment workstream 8 adds an editable element that captures keydown for its own editing. The `document.activeElement` check covers any future editable element automatically, without any change to the guard.
 
-**Iframe boundary (INVARIANT — the stage iframe must not receive pointer events):**
+**Iframe boundary (INVARIANT — the stage iframe must take neither pointer nor keyboard focus):**
 Keydown inside the slide iframe fires in the iframe's own browsing context and
 **never reaches the parent `window` listener**, and in the parent
 `document.activeElement` becomes the `<iframe>` element itself.
 
-That is why `SlideStage` renders the iframe with `pointer-events: none`. Without it
+That is why `SlideStage` renders the iframe with **both** `pointer-events: none` **and**
+`tabIndex={-1}`. Both are required: `pointer-events` only blocks the mouse, so on its own a
+Tab key still moves focus into the iframe and reintroduces the trap below. Without it
 the iframe swallowed input in two user-visible ways: a single click on the slide
 moved focus into the iframe and killed keyboard paging permanently (and `Escape`
 could not recover it, because the iframe is *inside* `stageRef`, so the containment
@@ -76,13 +78,18 @@ check skipped the refocus), and wheel-over-the-stage paging did not work anywher
 except a ~16px margin around the slide, because the iframe covered the rest.
 `ThumbnailRibbon` does the same for its preview iframes.
 
-Do not "fix" a future interaction bug by re-enabling pointer events on the stage
-iframe. Slides are non-interactive by design in this workstream.
+**Accepted trade-off:** because the slide cannot receive pointer events, users cannot select
+or copy text out of a slide, follow in-slide links, or use Chart.js hover tooltips. Those all
+worked when the slide was a scrolling tile. The stage is a pager, so this is judged an
+acceptable loss for now — but it IS a loss, not a no-op, and it is the reason to be careful
+about "just re-enabling pointer events" to fix a future interaction bug. If in-slide
+interaction is wanted back, it needs a deliberate design that keeps paging and focus working
+(see the workstream 8 notes below).
 
 Note: the `sandbox="allow-scripts"` attribute does **not** make iframe content
 non-interactive. `sandbox` governs capabilities such as form submission and
 navigation; it does not disable input elements or stop them receiving focus. The
-`pointer-events: none` rule is what keeps focus out, not `sandbox`.
+`pointer-events: none` + `tabIndex={-1}` pair is what keeps focus out, not `sandbox`.
 
 ### Security Invariant — `buildSlideDocument`
 
@@ -204,9 +211,9 @@ Speaker notes are the first planned second tab (PRD workstream TBD).
 PRD workstream 8 will add editable text regions on the slide. **Read the iframe-boundary
 invariant above before starting** — this is the part of the design most likely to trip you up.
 
-The stage iframe currently sets `pointer-events: none`, so the slide cannot take focus at
-all. Making the slide editable means undoing that, and the moment focus can enter the
-iframe, two things break:
+The stage iframe currently sets `pointer-events: none` and `tabIndex={-1}`, so the slide
+takes neither mouse nor keyboard focus. Making the slide editable means undoing that, and the
+moment focus can enter the iframe, two things break:
 
 - **Keyboard paging stops.** Keydowns fire in the iframe's browsing context and never reach
   the parent `window` listener. `isTypingTarget` cannot help: it never runs, because the

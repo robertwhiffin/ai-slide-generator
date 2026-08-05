@@ -104,6 +104,9 @@ const Thumb: React.FC<ThumbProps> = ({
           srcDoc={slideDoc}
           scrolling="no"
           sandbox="allow-scripts"
+          /* Not a tab stop: thumbnails are selected via their button, and a Tab
+             into a preview iframe traps focus and kills keyboard paging. */
+          tabIndex={-1}
           style={{
             position: 'absolute',
             top: 0,

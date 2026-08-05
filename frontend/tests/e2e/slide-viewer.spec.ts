@@ -358,7 +358,8 @@ test.describe('flip-through viewer', () => {
 
   test('stage-edit-slide opens the HTML editor modal', async ({ page }) => {
     await openDeck(page);
-    // Wait for the stage toolbar (only visible when readOnly=false, i.e. lock acquired).
+    // Wait for the stage toolbar (renders for read-only viewers too; the mutating
+    // controls inside it are what readOnly gates).
     await expect(page.getByTestId('stage-toolbar')).toBeVisible();
     await page.getByTestId('stage-edit-slide').click();
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();

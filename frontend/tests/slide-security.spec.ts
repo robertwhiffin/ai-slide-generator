@@ -36,11 +36,17 @@ async function enterPresentationMode(page: import('@playwright/test').Page) {
   await expect(presentButton).toBeVisible({ timeout: 15000 });
   await presentButton.click();
 
-  // PresentationMode renders an iframe via a portal on <body>. It is uniquely
-  // identifiable by tabIndex={-1} — the SlidePanel preview/main iframes (also
-  // titled "Slide N"/"Slide N preview") do not set tabindex, so this selector
-  // resolves to exactly the presentation iframe.
-  const iframe = page.locator('iframe[title^="Slide"][tabindex="-1"]');
+  // PresentationMode renders an iframe via a portal on <body>, inside a fixed
+  // overlay at z-index 9999. Scope to that overlay.
+  //
+  // Do NOT go back to `iframe[title^="Slide"][tabindex="-1"]`: tabindex="-1" is
+  // no longer unique to presentation mode. The flip-through viewer's stage and
+  // ribbon iframes now set it too, deliberately — without it a Tab moves focus
+  // into a slide iframe, where keydown never reaches the parent window listener,
+  // silently killing keyboard paging with no Escape recovery.
+  const iframe = page
+    .locator('div[style*="z-index: 9999"] iframe[title^="Slide"]')
+    .first();
   await expect(iframe).toBeVisible({ timeout: 10000 });
   return iframe;
 }
