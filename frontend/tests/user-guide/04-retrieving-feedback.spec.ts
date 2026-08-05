@@ -84,7 +84,13 @@ test.describe('User Guide: Retrieving Feedback', () => {
     await capture.capture({
       step: '01',
       name: 'admin-feedback-tab',
-      description: 'Open the Admin page — the Feedback tab is selected by default',
+      // The generated prose must describe what the step ACTUALLY does. This claimed
+      // the Feedback tab was selected by default; #214 made Usage the default
+      // (`AdminPage.tsx`: useState<TabId>('usage')) and the step above now clicks
+      // Feedback explicitly, so the sentence documented a behaviour the reader would
+      // not see. ``description`` is the single source for both the ``### Step`` heading
+      // and the image alt text in `shared.ts: generateMarkdown`.
+      description: 'Open the Admin page and select the Feedback tab',
       highlightSelector: '#feedback-tab',
     });
 
