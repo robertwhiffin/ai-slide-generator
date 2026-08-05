@@ -89,6 +89,11 @@ export const SlideStage: React.FC<SlideStageProps> = ({ slides, css, externalScr
           key={slide.slide_id}
           title={`Slide ${currentIndex + 1}`}
           data-testid="slide-stage-frame"
+          /* Keyboard focus must not enter the iframe either: pointer-events:none
+             only blocks the mouse. A Tab into it silently kills keyboard paging
+             (events fire in the iframe context) with no Escape recovery, since
+             the iframe is inside stageRef. PresentationMode does the same. */
+          tabIndex={-1}
           sandbox="allow-scripts"
           srcDoc={srcDoc}
           className="size-full border-0"

@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Edit3, LayoutGrid, Trash2 } from 'lucide-react';
+import { Edit3, LayoutGrid, Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
@@ -64,8 +64,10 @@ export interface SlideViewerHandle {
  * break paging permanently — one click on the slide moved focus into the iframe
  * and every subsequent arrow key was lost (Escape could not recover it either,
  * because the iframe is inside stageRef, so the containment check below skipped
- * the refocus). The stage iframe therefore sets pointer-events: none
- * (SlideStage.tsx), so focus cannot land in it at all.
+ * the refocus). The stage iframe therefore sets BOTH pointer-events: none and
+ * tabIndex={-1} (SlideStage.tsx). Both are needed: pointer-events only blocks the
+ * mouse, so without tabIndex={-1} a Tab could still move focus into the iframe and
+ * reintroduce the same trap. The ribbon's preview iframes do the same.
  *
  * Workstream 8 (inline WYSIWYG editing) MUST keep this in mind: making the slide
  * interactive means focus can enter the iframe again. Its editable regions need
@@ -138,6 +140,9 @@ const ViewerBody = forwardRef<
     slideDeck.slides.forEach((s) => { m.set(s.slide_id, s.verification); });
     setVerificationResults(m);
     setStaleSlideIds(new Set());
+    // Release the optimize guard: the agent's edit has landed. Keyed to the deck
+    // rather than a timer so the control stays disabled for the whole run.
+    setIsOptimizing(false);
   }, [slideDeck]);
 
   // When the deck changes, reload persisted seen-state and clear transient dismissals.
@@ -257,20 +262,17 @@ const ViewerBody = forwardRef<
   const handleUpdateSlide = async (html: string) => {
     if (!sessionId || !onSlideChange) return;
     const editId = ++deckEditCounterRef.current;
-    const slideId = slideDeck.slides[indexWhenOpened]?.slide_id;
     try {
       await api.updateSlide(indexWhenOpened, html, sessionId);
-      // Drop the slide's verification before refreshing the deck. Editing the
-      // HTML invalidates it: the server keys verifications by content_hash, so
-      // it will no longer match, and leaving the old result in place renders a
-      // confidently-green badge describing content that no longer exists. The
-      // pre-viewer SlideTile did the same (cleared the result on save) rather
-      // than only marking it stale. Note a stale FLAG alone is not enough here:
-      // onSlideChange below re-runs the deck-sync effect, which resets
-      // staleSlideIds, so the flag would be wiped immediately.
-      if (slideId) {
-        await api.updateSlideVerification(indexWhenOpened, sessionId, null);
-      }
+      // No explicit verification-clear call is needed, and adding one is harmful:
+      // the server keys verifications by content_hash, so editing the HTML means
+      // the old result simply stops matching and get_slide_deck returns no
+      // verification for this slide. (The backend's clear endpoint is an explicit
+      // no-op for exactly this reason — src/api/routes/slides.py.) An extra
+      // round-trip here would only add failure surface: a non-2xx would throw
+      // past the modal's success path, so a slide edit that ALREADY persisted
+      // would be reported to the user as a failure with their buffer still open.
+      // The refreshed deck below is what clears the stale badge.
       const result = await api.getSlides(sessionId);
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange(result.slide_deck);
@@ -287,7 +289,15 @@ const ViewerBody = forwardRef<
   };
 
   const handleVerify = async () => {
-    if (!sessionId || isManualVerifying) return;
+    // readOnly must gate this: the toolbar now renders for read-only viewers so
+    // the badge stays visible, and VerificationBadge exposes a verify affordance
+    // whenever there is no result yet. Without this guard a save-point preview or
+    // a CAN_EDIT user who does not hold the editing lock could bill an LLM-judge
+    // run and mutate shared verification state from a surface that is supposed to
+    // be read-only (and while previewing, key it to the previewed deck's hash).
+    // A true share-link viewer is stopped by the backend's CAN_EDIT check, but
+    // those two cases pass it, so the UI has to say no.
+    if (readOnly || !sessionId || isManualVerifying) return;
     const slideId = slideDeck.slides[currentIndex]?.slide_id;
     setIsManualVerifying(true);
     try {
@@ -334,11 +344,12 @@ const ViewerBody = forwardRef<
     if (!onSendMessage || isOptimizing) return;
     const slide = slideDeck.slides[currentIndex];
     if (!slide) return;
+    // Held until the deck actually changes (see the release effect below), NOT
+    // on a timer: an agent run takes 20-30s, so a short timer would reopen the
+    // double-spend window for most of the run. This matches what the pre-viewer
+    // SlidePanel did — it held optimizingSlideIndex until the deck arrived and
+    // disabled the control meanwhile.
     setIsOptimizing(true);
-    // The agent reply arrives through chat, not a promise we can await, so
-    // release the guard on a short timer — long enough to swallow a double
-    // click, short enough not to strand the control if the request fails.
-    window.setTimeout(() => setIsOptimizing(false), 3000);
     const slideContext: SlideContext = {
       indices: [currentIndex],
       slide_htmls: [slide.html],
@@ -442,16 +453,21 @@ const ViewerBody = forwardRef<
               </span>
               {/* Finding 3: Optimize layout button */}
               {!readOnly && onSendMessage && (
-                <Tooltip text="Optimize layout">
+                <Tooltip text={isOptimizing ? 'Optimizing layout…' : 'Optimize layout'}>
                   <Button
                     data-testid="stage-optimize-layout"
                     variant="ghost"
                     size="icon"
                     onClick={handleOptimizeLayout}
+                    // Disabled for the whole run, so the user gets feedback
+                    // instead of a dead-looking button they reasonably re-click.
+                    disabled={isOptimizing}
                     className="h-7 w-7"
                     aria-label="Optimize slide layout"
                   >
-                    <LayoutGrid className="size-3.5" />
+                    {isOptimizing
+                      ? <Loader2 className="size-3.5 animate-spin" />
+                      : <LayoutGrid className="size-3.5" />}
                   </Button>
                 </Tooltip>
               )}
