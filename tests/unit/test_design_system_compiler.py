@@ -2205,6 +2205,52 @@ class TestReadmeLineEndingsAreNormalizedOnce:
         )
         assert "# Acme skill\n- Rule one\n- Rule two" in out
 
+    def test_an_indented_first_line_keeps_its_authored_indentation(self, session):
+        """Round 12 audit: the brand manual's ``.strip()`` was not blank-line-only.
+
+        ``_brand_manual_section`` ``.strip()``-ed each document, which is a WHITESPACE
+        strip rather than a blank-line strip — so it also removed the INDENTATION of the
+        document's first line and the trailing spaces of its last. In markdown, leading
+        indentation is not decoration: four spaces is a code block, two is a nested list
+        item. A manual that opens with an indented code sample was therefore re-rendered
+        as prose for the model.
+
+        Same class as the name/description strips this round removed, found by auditing
+        the rest of the display side under the same rule. ``_safe_multiline`` already
+        drops every control character except ``\\n`` and normalizes every line-break
+        spelling — that part is load-bearing; the whitespace strip on top was aesthetic.
+        """
+        from src.services.design_system_compiler import compile_design_system
+
+        readme = "    indented-code-sample --brand-token: 4px;\nProse after.\n"
+        out = compile_design_system(
+            _make_ds(session, tokens=_TOKENS), readme_md=readme
+        )
+
+        assert "    indented-code-sample --brand-token: 4px;" in out, (
+            "the brand manual lost its first line's authored indentation, so an "
+            "opening code block reads to the model as prose"
+        )
+
+    def test_a_manual_of_only_whitespace_still_omits_the_block(self, session):
+        """The emptiness half, which the strip was legitimately doing.
+
+        A README of blank lines is not a brand manual, so the heading must not appear
+        with an empty body under it.
+        """
+        from src.services.design_system_compiler import (
+            _BRAND_MANUAL_HEADING,
+            compile_design_system,
+        )
+
+        out = compile_design_system(
+            _make_ds(session, tokens=_TOKENS), readme_md="  \n\n  \n", skill_md=None
+        )
+
+        assert _BRAND_MANUAL_HEADING not in out, (
+            "a whitespace-only manual emitted an empty BRAND MANUAL block"
+        )
+
     @pytest.mark.parametrize(
         ("label", "breaker"),
         [
@@ -3334,6 +3380,237 @@ class TestVersionMarkerPositionIsNameIndependent:
             _make_ds(session, tokens=_TOKENS), readme_md=readme
         )
         assert "stamps [ds-compiler v12] into compiled output" in out
+
+
+class TestTheCompiledArtifactShowsTheAuthoredNameAndDescription:
+    """Round 12 BLOCKING: the STORED name/description were verbatim, but the
+    COMPILED, MODEL-FACING artifact stripped their padding back off.
+
+    Round 11 stopped the importer editing brand text on its way to the database, and
+    that fix is real — a probe through ``import_bundle`` confirms the rows hold
+    ``'  Manifest Name  '`` and ``'  Manifest Description  '``. The compiler then
+    undid it at the one seam that matters to the model::
+
+        stored name        = '  Manifest Name  '
+        stored description = '  Manifest Description  '
+        compiled header    = 'SLIDE VISUAL STYLE: [ds-compiler v16] Manifest Name'
+        compiled descr     = 'Manifest Description'
+
+    So the brand's own text was preserved everywhere except where it is actually
+    read. ``_header_safe_name(...).strip()`` and ``_safe(description).strip()`` are
+    the two operations, and both strips are AESTHETIC.
+
+    THE RULE THIS CLASS ENCODES. Normalize at display ONLY where it is
+    security-load-bearing — control characters, sentinels, forgeable structure —
+    never for tidiness. That is what makes this consistent with
+    ``test_a_tab_is_stored_verbatim_and_sanitized_only_for_display`` rather than in
+    tension with it: a TAB is category ``Cc``, the character class the region
+    sentinels and the currency sentinel are built from, so dropping it at display is
+    what makes those sentinels unforgeable. An ordinary space is category ``Zs`` and
+    carries no such duty.
+
+    THE NAME LANDS IN THE HEADER LINE, so the padding must not buy any structural
+    power. The tests below prove it cannot, and they are the reason this change is
+    safe rather than merely desirable:
+
+    * Currency is decided by ``compiled.startswith(_CURRENCY_SENTINEL)`` — a U+001F
+      sentinel at offset zero, ahead of the header. ``_safe`` strips every ``Cc``
+      character from the name, so no name can contain one, let alone precede one.
+    * The name cannot open a NEW line: ``_safe`` maps every line-break spelling to a
+      single space, so a padded name stays on the header line it was interpolated
+      into.
+    * The name cannot contribute MARKER text at any position on that line
+      (``_MARKER_LIKE_RE``, still applied before the padding is preserved).
+
+    All fixtures SYNTHETIC ("Acme", invented padding).
+    """
+
+    _PADDED_NAME = "  Padded Acme Brand  "
+    _PADDED_DESCRIPTION = "  Padded synthetic description  "
+
+    def _raw(self, session, **kwargs):
+        """The PERSISTED artifact, sentinels intact — what currency is read from."""
+        from src.services.design_system_compiler import compile_design_system
+
+        return compile_design_system(_make_ds(session, tokens=_TOKENS, **kwargs))
+
+    def _compiled(self, session, **kwargs):
+        """The MODEL-FACING text: the persisted artifact with its sentinels removed."""
+        from src.services.design_system_compiler import strip_type_scale_region_markers
+
+        return strip_type_scale_region_markers(self._raw(session, **kwargs))
+
+    def test_the_header_carries_the_names_authored_padding(self, session):
+        """The header's name segment is the brand's own text, padding included."""
+        from src.services.design_system_compiler import _HEADER_VERSION_PREFIX
+
+        header = self._compiled(session, name=self._PADDED_NAME).split("\n", 1)[0]
+
+        assert header == f"{_HEADER_VERSION_PREFIX} {self._PADDED_NAME}", (
+            "the compiler edited the brand's name before showing it to the model"
+        )
+
+    def test_the_description_line_carries_its_authored_padding(self, session):
+        """The description is the artifact's caption — free prose, not a key."""
+        out = self._compiled(
+            session, name="Acme Padded Descr DS", description=self._PADDED_DESCRIPTION
+        )
+
+        assert out.split("\n")[2] == self._PADDED_DESCRIPTION, (
+            "the compiler edited the brand's description before showing it"
+        )
+
+    @pytest.mark.parametrize(
+        "pad",
+        [
+            pytest.param(" ", id="ascii-space"),
+            pytest.param("  ", id="two-ascii-spaces"),
+            pytest.param(" ", id="em-space"),
+            pytest.param(" ", id="no-break-space"),
+            pytest.param("　", id="ideographic-space"),
+        ],
+    )
+    def test_padding_of_any_whitespace_class_survives_to_the_header(self, session, pad):
+        """``Zs`` is not ``Cc``: no whitespace class is security-load-bearing here."""
+        from src.services.design_system_compiler import _HEADER_VERSION_PREFIX
+
+        name = f"{pad}Acme {pad.strip() or 'sp'}{ord(pad[0])}{pad}"
+        header = self._compiled(session, name=name).split("\n", 1)[0]
+
+        assert header == f"{_HEADER_VERSION_PREFIX} {name}"
+
+    def test_a_padded_name_cannot_break_the_header_structure(self, session):
+        """THE SAFETY PROOF the padding must earn.
+
+        Whatever whitespace the name carries, the artifact must still be exactly ONE
+        header line, opening with the compiler's constant prefix, carrying exactly one
+        marker, and reading as CURRENT from its own compile.
+        """
+        from src.services.design_system_compiler import (
+            _HEADER_VERSION_PREFIX,
+            _MARKER_LIKE_RE,
+            compile_design_system,
+            compiled_style_content_is_current,
+        )
+
+        hostile_pads = (
+            "  ",
+            " ",
+            "  ",
+            # Whitespace-looking payloads that ARE control characters: these must
+            # still be dropped, which is the guard this change must not weaken.
+            "\t\t",
+            "\x0b",
+            "\x1f",
+            # A line-break spelling: must not open a second line.
+            " ",
+        )
+        for index, pad in enumerate(hostile_pads):
+            name = f"{pad}Acme Header Probe {index}{pad}"
+            out = compile_design_system(_make_ds(session, name=name, tokens=_TOKENS))
+
+            assert compiled_style_content_is_current(out), (
+                f"pad {pad!r} broke the currency sentinel"
+            )
+            body = out[out.index(_HEADER_VERSION_PREFIX):]
+            header = body.split("\n", 1)[0]
+            assert header.startswith(_HEADER_VERSION_PREFIX), (
+                f"pad {pad!r} displaced the constant header prefix: {header!r}"
+            )
+            assert len(_MARKER_LIKE_RE.findall(header)) == 1, (
+                f"pad {pad!r} changed the marker count on the header line: {header!r}"
+            )
+            # The name never reaches the region the currency check compares.
+            assert out.index(_HEADER_VERSION_PREFIX) < out.index("Acme Header Probe")
+
+    def test_a_name_that_is_only_whitespace_still_falls_back_to_the_label(self, session):
+        """Preserving padding must not leave the header nameless.
+
+        A name of nothing but whitespace is the emptiness case, and the emptiness
+        CHECK is exactly where normalization is still legitimate.
+        """
+        from src.services.design_system_compiler import (
+            _HEADER_VERSION_PREFIX,
+            compiled_style_content_is_current,
+            strip_type_scale_region_markers,
+        )
+
+        raw = self._raw(session, name="   ")
+
+        assert (
+            strip_type_scale_region_markers(raw).split("\n", 1)[0]
+            == f"{_HEADER_VERSION_PREFIX} Design System"
+        )
+        # Currency is read from the PERSISTED artifact, whose sentinel
+        # ``strip_type_scale_region_markers`` deliberately removes.
+        assert compiled_style_content_is_current(raw)
+
+    def test_a_whitespace_only_description_is_still_omitted(self, session):
+        """The same emptiness rule for the caption: no blank line in its slot."""
+        out = self._compiled(
+            session, name="Acme Blank Caption DS", description="   "
+        )
+
+        # Line 2 is the blank separator; line 3 must be the next real block, not a
+        # whitespace-only caption.
+        assert out.split("\n")[2].strip() != ""
+
+    def test_an_already_uploaded_v16_row_self_heals_into_the_padded_form(self, session):
+        """THE BUMP IS PART OF THE FIX, not bookkeeping.
+
+        Compiled output changed for every existing row, so a persisted v16 artifact
+        holds the STRIPPED name while its own column holds the padded one. It must read
+        STALE and be rebuilt by the lazy recompute-on-read, or a system uploaded before
+        this round keeps showing the model a name its owner did not write.
+
+        This also pins the bump itself: with ``COMPILER_VERSION`` left at 16 a v16 row
+        reads CURRENT and is served as-is, so the two ``.strip()`` removals would never
+        reach an already-uploaded design system.
+        """
+        from src.services.design_system_compiler import (
+            _HEADER_VERSION_PREFIX,
+            compiled_style_content_is_current,
+            ensure_compiled_style_content_current,
+            strip_type_scale_region_markers,
+        )
+
+        ds = _make_ds(session, name=self._PADDED_NAME, tokens=_TOKENS)
+        # The artifact the PREVIOUS compiler persisted for this very row: same name
+        # column, stripped in the header, and — critically — carrying a WELL-FORMED v16
+        # CURRENCY SENTINEL at offset zero, because that is what currency is read from.
+        # A hand-built body with no sentinel would read stale whatever the version, so
+        # it could not tell a missing bump from a present one.
+        stale = (
+            "\x1f<ds-compiler v16>\x1f"
+            f"SLIDE VISUAL STYLE: [ds-compiler v16] {self._PADDED_NAME.strip()}\n\n"
+            "BRAND COLOR TOKENS:\n- core:\n  - primary: #123456"
+        )
+        ds.compiled_style_content = stale
+        session.commit()
+
+        assert not compiled_style_content_is_current(stale), (
+            "a v16 artifact read as current, so it would never be rebuilt"
+        )
+        header = strip_type_scale_region_markers(
+            ensure_compiled_style_content_current(ds)
+        ).split("\n", 1)[0]
+        assert header == f"{_HEADER_VERSION_PREFIX} {self._PADDED_NAME}", (
+            "the read-through seam did not restore the authored padding"
+        )
+
+    def test_a_control_character_in_the_name_is_still_dropped_at_display(self, session):
+        """The guard that MUST NOT weaken, restated for the name.
+
+        A TAB is ``Cc`` — the class the sentinels are built from. It is stored
+        verbatim by the importer and dropped here, at the interpolation boundary.
+        """
+        from src.services.design_system_compiler import _HEADER_VERSION_PREFIX
+
+        header = self._compiled(session, name="\tAcme Tabbed\t").split("\n", 1)[0]
+
+        assert header == f"{_HEADER_VERSION_PREFIX} Acme Tabbed", (
+            "a control character reached the header line"
+        )
 
 
 class TestGenericHeadingCarriesNoUserText:

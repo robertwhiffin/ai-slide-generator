@@ -193,7 +193,31 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 #   attribution (:data:`_RE_HOMED_GROUP_ATTRIBUTION_PREFIX`). When an unknown group's
 #   ONLY token is a font size, the generic section correctly renders nothing, and the
 #   brand's word for that group reached a persisted v15 row NOWHERE AT ALL.
-COMPILER_VERSION = 16
+# v17: the design-system NAME and DESCRIPTION are emitted with their authored
+# whitespace, so persisted v16 rows hold an artifact whose brand text differs from the
+# brand text in their own columns, and the bump is what makes them recompile.
+#
+# Round 11 stopped the IMPORTER editing these two strings, and that half held — the
+# rows store ``"  Manifest Name  "`` and ``"  Manifest Description  "``. The compiler
+# then stripped the padding back off at the display seam, which is the seam that
+# matters: ``_header_safe_name(...).strip()`` and ``_safe(description).strip()``
+# produced ``SLIDE VISUAL STYLE: [ds-compiler v16] Manifest Name``. So the fidelity fix
+# was invisible in exactly the artifact the model reads.
+#
+# THE RULE, stated once for the whole module: normalize at display ONLY where it is
+# SECURITY-LOAD-BEARING — control characters, sentinels, forgeable structure — and
+# never for aesthetics. Ordinary whitespace (category ``Zs``) is not a security
+# concern; C0/C1 controls (category ``Cc``) are, because the region delimiters and the
+# currency sentinel are built from them. Both strips removed here were aesthetic; every
+# ``Cc`` filter is untouched.
+#
+# The NAME lands in the version-stamped header line, and preserving its padding buys it
+# no structural power: ``_safe`` still flattens every line-break spelling to one space
+# (so it cannot open a line) and still drops every ``Cc`` character (so it cannot carry
+# a sentinel), ``_MARKER_LIKE_RE`` still removes marker-shaped text from this slot, and
+# currency is decided at OFFSET ZERO of the artifact — ahead of the header line
+# entirely — by :data:`_CURRENCY_SENTINEL`.
+COMPILER_VERSION = 17
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -587,10 +611,27 @@ def _header_safe_name(value: Any) -> str:
     OLDER compiler, so matching only the current version would have left the
     mirror-image case (an older marker in the name of a current row) open.
 
-    A name that consists entirely of marker text collapses to empty; the caller
-    falls back to the default label, so the header never loses its name segment.
+    THE AUTHORED WHITESPACE IS PRESERVED. This used to end in ``.strip()``, which
+    made the model-facing header disagree with the stored row: a system named
+    ``"  Manifest Name  "`` was persisted verbatim (round 11) and then compiled to
+    ``SLIDE VISUAL STYLE: [ds-compiler v16] Manifest Name``. That strip was
+    AESTHETIC — ordinary whitespace is category ``Zs``, and nothing in this module's
+    structure rests on it. What IS load-bearing stays exactly as it was: ``_safe``
+    drops every ``Cc`` control (the class the region delimiters and the currency
+    sentinel are built from) and flattens every line-break spelling to one space, and
+    the marker strip above runs first. So a padded name cannot open a line, cannot
+    contain a sentinel, and cannot contribute marker text — the three things the
+    header line's integrity actually depends on. Currency itself is decided at offset
+    zero of the artifact, ahead of this line entirely
+    (:func:`compiled_style_content_is_current`).
+
+    A name that consists entirely of marker text — or entirely of whitespace —
+    collapses to something the caller reads as empty, and it falls back to the default
+    label, so the header never loses its name segment. That EMPTINESS CHECK is the one
+    place normalization still belongs, and it lives in the caller: this function
+    returns the brand's text, and the caller decides whether there is any.
     """
-    return _MARKER_LIKE_RE.sub("", _safe(value)).strip()
+    return _MARKER_LIKE_RE.sub("", _safe(value))
 
 
 # NO token NAME is echoed inside the compiler-owned type-scale region. That
@@ -1159,6 +1200,24 @@ def build_type_scale_reassertion(
     )
 
 
+def _trim_blank_lines(text: str) -> str:
+    """Drop WHOLLY BLANK lines from each end of *text*, leaving every line's own
+    indentation and inner blank lines untouched.
+
+    The blank-line half of what a bare ``.strip()`` used to do here, without the
+    aesthetic half. A leading run of empty lines would open a gap under the BRAND
+    MANUAL heading, so removing it is structural; the SPACES INSIDE the first
+    surviving line are markdown the brand authored, so they stay.
+    """
+    lines = text.split("\n")
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
 def _brand_manual_section(skill_md: Optional[str], readme_md: Optional[str]) -> Optional[str]:
     """Assemble the BRAND MANUAL block: the FULL README then the FULL SKILL.md.
 
@@ -1172,9 +1231,18 @@ def _brand_manual_section(skill_md: Optional[str], readme_md: Optional[str]) -> 
     # (markdown), so they are normalized rather than flattened — see
     # ``_safe_multiline``. They are injected OUTSIDE the type-scale region, so
     # they cannot reach the numeric contract regardless.
-    readme = _safe_multiline(readme_md).strip()
-    skill = _safe_multiline(skill_md).strip()
-    body_parts = [part for part in (readme, skill) if part]
+    #
+    # BLANK LINES are trimmed from each end, INDENTATION is not (v17). This used to be
+    # a bare ``.strip()``, which is a WHITESPACE strip: it also removed the authored
+    # indentation of the document's FIRST line and the trailing spaces of its LAST. In
+    # markdown that indentation is content — four spaces is a code block, two is a
+    # nested list item — so a manual opening with an indented code sample was handed to
+    # the model as prose. Only the blank lines around the document are the compiler's
+    # to normalize, because those are what would otherwise open a gap under the
+    # heading.
+    readme = _trim_blank_lines(_safe_multiline(readme_md))
+    skill = _trim_blank_lines(_safe_multiline(skill_md))
+    body_parts = [part for part in (readme, skill) if part.strip()]
     if not body_parts:
         return None
     return "\n\n".join([_BRAND_MANUAL_HEADING, *body_parts])
@@ -1771,10 +1839,14 @@ def compile_design_system(
     # ``_header_safe_name`` also strips marker-shaped text: this name lands in the
     # version-stamped header slot, so it must not be able to contribute a marker at
     # any position on that line (see ``_MARKER_LIKE_RE``).
-    name = (
-        _header_safe_name(getattr(design_system, "name", None) or "Design System")
-        or "Design System"
-    )
+    #
+    # The authored WHITESPACE survives (v17) — the name reaches the model as the brand
+    # wrote it. Only EMPTINESS is decided on the stripped form, so a name that is
+    # nothing but whitespace (or nothing but marker text) still yields the default
+    # label instead of a header with no name segment. Deciding on ``.strip()`` while
+    # emitting the original is the same split the importer applies on ingress.
+    safe_name = _header_safe_name(getattr(design_system, "name", None) or "Design System")
+    name = safe_name if safe_name.strip() else "Design System"
     # The version marker rides on the header line (no schema change) so persisted
     # artifacts self-describe which compiler produced them — see
     # ``compiled_style_content_is_current``.
@@ -1802,8 +1874,15 @@ def compile_design_system(
     # Claude Code skill convention: blurb -> manual); the full brand manual below
     # is the first FULL/substantive block. It is a one-line caption, so it is
     # flattened like every other single-line user string.
-    description = _safe(getattr(design_system, "description", None)).strip()
-    if description:
+    #
+    # Emitted with its authored whitespace (v17): the caption is free prose the brand
+    # wrote, and a ``.strip()`` here was purely cosmetic — it made the model-facing
+    # caption differ from the stored column for no structural gain. ``_safe`` still
+    # removes what matters (controls, line breaks), so the caption cannot become two
+    # blocks or carry a sentinel. Emptiness is still decided on the stripped form, so a
+    # whitespace-only description contributes no blank caption block.
+    description = _safe(getattr(design_system, "description", None))
+    if description.strip():
         parts.append(description)
 
     brand_manual = _brand_manual_section(skill_md, readme_md)
