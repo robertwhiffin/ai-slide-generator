@@ -47,7 +47,41 @@ async function setupDesignSystemMocks(page: Page) {
   });
 }
 
+/**
+ * Mock the identity endpoint the /admin route gate reads.
+ *
+ * /admin is now gated on `is_admin` from GET /api/user/current
+ * (`hooks/useCurrentUser.ts` -> the gate in `AdminPage`). This suite predates the
+ * gate and mocked only its own sub-resources, so with no identity route every
+ * spec below rendered NOTHING and failed with `element(s) not found` — the page
+ * chrome was never reached, so none of the panel assertions ran at all.
+ *
+ * The gate itself is NOT relaxed here, and these specs do not re-test it: they
+ * exercise the admin PANELS, which requires being an admin, so the suite states
+ * that precondition explicitly instead of depending on an unmocked fetch. The
+ * gate's own behaviour (non-admin redirected, admin admitted, no pre-resolution
+ * flash) is owned by `admin-route-gate.spec.ts` and stays the only place that
+ * varies `is_admin`.
+ */
+async function setupAdminIdentityMock(page: Page) {
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        username: 'admin@test.com',
+        display_name: 'admin@test.com',
+        is_admin: true,
+      }),
+    });
+  });
+}
+
 test.describe('Admin Page', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupAdminIdentityMock(page);
+  });
+
   test('renders page with Feedback and Google Slides tabs', async ({ page }) => {
     await page.goto('/admin');
     await expect(page.getByRole('tab', { name: 'Feedback' })).toBeVisible();
