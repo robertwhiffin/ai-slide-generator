@@ -711,7 +711,12 @@ def materialize_templates(design_system: Any) -> list[Any]:
         if not isinstance(entry, dict):
             continue
         raw_name = entry.get("name")
-        name = raw_name.strip() if isinstance(raw_name, str) else ""
+        # Stored VERBATIM. The strip decides only WHETHER the entry names a layout
+        # (a whitespace-only name names none, so it is skipped as before); the value
+        # persisted is the brand's own words. Editing it here was the same silent
+        # boundary edit as the token group's — see
+        # ``design_system_service._canonicalize_token``.
+        name = raw_name if isinstance(raw_name, str) and raw_name.strip() else ""
         if not name:
             continue
         entry_path = next(
@@ -746,7 +751,7 @@ def materialize_templates(design_system: Any) -> list[Any]:
         )
         raw_description = entry.get("description")
         description = (
-            raw_description.strip()
+            raw_description
             if isinstance(raw_description, str) and raw_description.strip()
             else None
         )
