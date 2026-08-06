@@ -179,6 +179,83 @@ test.describe('flip-through viewer', () => {
     await expect(page.getByTestId('stage-position')).toContainText('2 /');
   });
 
+  test('the slide is scaled to fit the stage, not clipped', async ({ page }) => {
+    // Regression: SlideStage rendered the iframe with `size-full` and NO transform,
+    // so the element box was ~504x364 while the slide content laid out at its
+    // intrinsic 1280x720 — overflowing left and right, clipping the title. Spec §3
+    // requires the slide "scaled to fit its region while preserving aspect ratio".
+    // SlideTile and ThumbnailRibbon both scale via transform; the stage did not.
+    await openDeck(page);
+    const frame = page.getByTestId('slide-stage-frame');
+
+    const g = await frame.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      const m = new DOMMatrixReadOnly(cs.transform);
+      return {
+        cssWidth: parseFloat(cs.width),
+        cssHeight: parseFloat(cs.height),
+        scaleX: m.a,
+        scaleY: m.d,
+      };
+    });
+
+    // The iframe must lay out at the slide's intrinsic size...
+    expect(g.cssWidth).toBe(1280);
+    expect(g.cssHeight).toBe(720);
+    // ...and be scaled DOWN to fit (uniformly, preserving aspect ratio).
+    expect(g.scaleX).toBeGreaterThan(0);
+    expect(g.scaleX).toBeLessThan(1);
+    expect(g.scaleY).toBeCloseTo(g.scaleX, 5);
+
+    // The painted result must fit inside the stage.
+    const stage = (await page.getByTestId('slide-stage').boundingBox())!;
+    const painted = (await frame.boundingBox())!;
+    expect(painted.width).toBeLessThanOrEqual(stage.width + 1);
+    expect(painted.height).toBeLessThanOrEqual(stage.height + 1);
+  });
+
+  test('the viewer fits the viewport and both arrows are reachable', async ({ page }) => {
+    // Regression: the stage column had flex-1 but no min-w-0, and a flex item
+    // defaults to min-width:auto — so it refused to shrink below its content
+    // width, overflowed past the ribbon, and pushed the stage's right edge (with
+    // the next arrow on it) outside the window. The user saw a clipped '>'.
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await openDeck(page);
+
+    const vw = page.viewportSize()!.width;
+    const stage = (await page.getByTestId('slide-stage').boundingBox())!;
+    expect(stage.x + stage.width).toBeLessThanOrEqual(vw + 1);
+
+    // Both paging arrows must be inside the viewport, not just in the DOM.
+    for (const id of ['stage-prev', 'stage-next']) {
+      const b = (await page.getByTestId(id).boundingBox())!;
+      expect(b.x).toBeGreaterThanOrEqual(0);
+      expect(b.x + b.width, `${id} is clipped by the viewport`).toBeLessThanOrEqual(vw + 1);
+    }
+
+    // And the document itself must not scroll horizontally.
+    const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(scrollW).toBeLessThanOrEqual(vw + 1);
+  });
+
+  test('a small mouse-wheel notch pages the slide', async ({ page }) => {
+    // Regression: WHEEL_THRESHOLD was 40, tuned for trackpad flicks (deltaY 100+).
+    // A real mouse wheel emits deltaY ~3-5 per notch, so every notch was swallowed
+    // and scroll-to-page did nothing on a mouse. The old test only used wheel(0,300),
+    // which is why it passed.
+    await openDeck(page);
+    const stage = (await page.getByTestId('slide-stage').boundingBox())!;
+    await page.mouse.move(stage.x + stage.width / 2, stage.y + stage.height / 2);
+
+    await page.mouse.wheel(0, 4);
+    await expect(page.getByTestId('stage-position')).toContainText('2 /');
+
+    // And it must still be ONE slide per gesture, not proportional to delta.
+    await page.waitForTimeout(400);
+    await page.mouse.wheel(0, -4);
+    await expect(page.getByTestId('stage-position')).toContainText('1 /');
+  });
+
   test('clicking the rendered slide does not trap focus and break keyboard paging', async ({ page }) => {
     await openDeck(page);
 
