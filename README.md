@@ -139,6 +139,7 @@ Step-by-step instructions with screenshots:
 
 | Document | Description |
 |----------|-------------|
+| [Slide Viewer](docs/technical/slide-viewer.md) | Flip-through stage, thumbnail ribbon, AI feedback drawer |
 | [Real-Time Streaming](docs/technical/real-time-streaming.md) | SSE events, conversation persistence |
 | [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, CSS merging |
 | [Slide Editing](docs/technical/slide-editing-robustness-fixes.md) | Deck preservation, validation |

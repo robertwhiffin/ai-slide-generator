@@ -7,15 +7,12 @@ import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { api, type StreamEvent } from '../../services/api';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
-import { SelectionBadge } from './SelectionBadge';
 import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
-import { useSelection } from '../../contexts/SelectionContext';
 import { useSession } from '../../contexts/SessionContext';
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useGeneration } from '../../contexts/GenerationContext';
-import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
 interface SlideContext {
   indices: number[];
@@ -54,12 +51,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const navigate = useNavigate();
-  const {
-    selectedIndices,
-    selectedSlides,
-    hasSelection,
-    clearSelection,
-  } = useSelection();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { agentConfig, refreshConfig } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
@@ -71,8 +62,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setClearedForSessionId(sessionId);
     setMessages([]);
   }
-
-  useKeyboardShortcuts();
 
   // Show session error
   useEffect(() => {
@@ -186,15 +175,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       setLoadingMessage(getRotatingLoadingMessage(messageIndexRef.current));
     }, 3000);
 
-    // Use explicit slide context if provided, otherwise use selection context
-    const slideContext = explicitSlideContext ?? (
-      hasSelection && selectedIndices.length > 0
-        ? {
-            indices: selectedIndices,
-            slide_htmls: selectedSlides.map(slide => slide.html),
-          }
-        : undefined
-    );
+    // Use explicit slide context if provided, otherwise none.
+    // Selection context was retired when checkbox selection was removed (workstream 4).
+    const slideContext = explicitSlideContext;
 
     // Handle streaming events
     const handleStreamEvent = (event: StreamEvent) => {
@@ -293,7 +276,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             }).catch(() => {
               onSlidesGenerated(event.slides!, nextRawHtml);
             });
-            clearSelection();
           }
 
           if (event.replacement_info && slideContext) {
@@ -362,13 +344,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         </div>
         <div className="flex-1">
           <h2 className="text-sm font-medium text-foreground">AI Assistant</h2>
-          {hasSelection ? (
-            <p className="text-xs text-primary font-medium">
-              {selectedIndices.length} slide{selectedIndices.length === 1 ? '' : 's'} selected
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">Ask me to create or edit slides</p>
-          )}
+          <p className="text-xs text-muted-foreground">Ask me to create or edit slides</p>
         </div>
       </div>
 
@@ -392,17 +368,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             ? 'Exit preview mode to send messages...'
             : isInitializing
             ? 'Initializing session...'
-            : hasSelection
-            ? 'Describe changes to selected slides...'
             : 'Ask to generate or modify slides...'
-        }
-        badge={
-          hasSelection ? (
-            <SelectionBadge
-              selectedIndices={selectedIndices}
-              onClear={clearSelection}
-            />
-          ) : undefined
         }
       />
 

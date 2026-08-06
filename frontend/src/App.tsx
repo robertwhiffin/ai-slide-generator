@@ -4,7 +4,6 @@ import { AppLayout } from './components/Layout/AppLayout';
 import { AdminPage } from './components/Admin/AdminPage';
 import { WelcomeSetup } from './components/Setup';
 import './index.css';
-import { SelectionProvider } from './contexts/SelectionContext';
 import { AgentConfigProvider } from './contexts/AgentConfigContext';
 import { SessionProvider } from './contexts/SessionContext';
 import { GenerationProvider } from './contexts/GenerationContext';
@@ -95,7 +94,6 @@ function App() {
   return (
     <SessionProvider>
       <GenerationProvider>
-        <SelectionProvider>
           <ToastProvider>
             <AgentConfigProvider>
               <TourProvider>
@@ -105,7 +103,6 @@ function App() {
               </TourProvider>
             </AgentConfigProvider>
           </ToastProvider>
-        </SelectionProvider>
       </GenerationProvider>
     </SessionProvider>
   );
