@@ -295,9 +295,13 @@ For presentation mode and raw HTML views, all slides are rendered together. Thes
 ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 ```
 
-#### 5.4 Slide Selection & Context
-- `SelectionContext` tracks selected slide indices/HTML.
-- `SlideSelection` and `SlideTile` share this context so the user can highlight slides before requesting edits.
+#### 5.4 Slide Context
+- The current slide index is tracked by `ViewerContext` in the flip-through viewer.
+- `ChatPanel` still accepts an explicit `slideContext` (indices + HTML) through its imperative
+  `sendMessage(content, slideContext)` API, but no UI affordance supplies one today: checkbox
+  selection was retired with the flip-through viewer, and conversational slide targeting
+  (the `@slide` reference chip) arrives in PRD workstream 7. Until then, chat messages
+  carry no slide context unless a programmatic caller passes it.
 - Backend becomes the single source of truth for script state.
 
 ---

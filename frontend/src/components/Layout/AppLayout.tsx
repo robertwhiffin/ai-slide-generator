@@ -1,9 +1,10 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { SlideDeck } from '../../types/slide';
+import type { SlideFinding } from '../../types/finding';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
-import { SlidePanel, type SlidePanelHandle } from '../SlidePanel/SlidePanel';
-import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
+import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
+import { useDeckExport } from '../../hooks/useDeckExport';
 import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
@@ -51,7 +52,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
-  const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [isDuplicating, setIsDuplicating] = useState(false);
   const isDuplicatingRef = useRef(false);
@@ -66,10 +66,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const [showDuplicateConfirm, setShowDuplicateConfirm] = useState(false);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
-  const slidePanelRef = useRef<SlidePanelHandle>(null);
+  const slideViewerRef = useRef<SlideViewerHandle>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
   const deckVersionRef = useRef<number>(0);
+  // Separate counter for reorder staleness guard — must NOT alias deckVersionRef
+  // (which is reserved exclusively for server-version gating in setSlideDeckGated).
+  const deckEditCounterRef = useRef<number>(0);
 
   const loadVersionsRef = useRef<(() => Promise<void>) | null>(null);
 
@@ -442,10 +445,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     deckVersionRef.current = 0;
   }, [sessionId]);
 
-  const handleSlideNavigate = useCallback((index: number) => {
-    setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
-  }, []);
-
   const handleSendMessage = useCallback((content: string, slideContext?: { indices: number[]; slide_htmls: string[] }) => {
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
@@ -665,17 +664,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
 
-  const handleExportPPTX = useCallback(() => {
-    slidePanelRef.current?.exportPPTX();
-  }, []);
-
-  const handleExportPDF = useCallback(() => {
-    slidePanelRef.current?.exportPDF();
-  }, []);
-
-  const handleExportHTML = useCallback(() => {
-    slidePanelRef.current?.exportHTML();
-  }, []);
+  const { handleExportPDF, handleExportPPTX, handleSaveAsHTML: handleExportHTML } = useDeckExport({
+    slideDeck: displayDeck,
+    sessionId,
+    onExportStatusChange: setExportStatus,
+  });
 
   const handleExportGoogleSlides = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
@@ -725,7 +718,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [sessionId, slideDeck, showToast, openOAuthPopup]);
 
   const handlePresent = useCallback(() => {
-    slidePanelRef.current?.openPresentationMode();
+    slideViewerRef.current?.openPresentationMode();
   }, []);
 
   const handleViewChange = useCallback(
@@ -740,6 +733,83 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     },
     [navigate]
   );
+
+  // Findings have no producing endpoint yet (PRD workstream 5). Tests inject
+  // fixtures on window; production renders an empty list.
+  const [testFindings, setTestFindings] = useState<SlideFinding[]>([]);
+  useEffect(() => {
+    const injected = (window as unknown as { __TELLR_TEST_FINDINGS__?: SlideFinding[] })
+      .__TELLR_TEST_FINDINGS__;
+    if (injected) setTestFindings(injected);
+  }, []);
+
+  // Stable findings identity — prevents unnecessary re-renders in SlideViewer.
+  const stableFindings = useMemo(() => testFindings, [testFindings]);
+
+  // Reorder handler — lifted from SlidePanel so SlideViewer can call it.
+  const handleReorderSlides = useCallback(async (from: number, to: number) => {
+    if (!displayDeck || !sessionId || isReadOnly) return;
+    if (!sessionId) {
+      alert('Session not initialized');
+      return;
+    }
+    const newSlides = [...displayDeck.slides];
+    const [moved] = newSlides.splice(from, 1);
+    newSlides.splice(to, 0, moved);
+    // Optimistic update
+    setSlideDeckGated({ ...displayDeck, slides: newSlides }, displayDeck.version);
+    const editId = ++deckEditCounterRef.current;
+    try {
+      const newOrder = newSlides.map((_, idx) =>
+        displayDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
+      );
+      await api.reorderSlides(newOrder, sessionId);
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        setSlideDeckGated(result.slide_deck, result.slide_deck.version);
+      }
+    } catch (error) {
+      console.error('Failed to reorder slides:', error);
+      const isVersionConflict =
+        error instanceof Error && 'status' in error && (error as { status: unknown }).status === 409;
+      if (isVersionConflict) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        try {
+          const result = await api.getSlides(sessionId);
+          if (result.slide_deck) setSlideDeckGated(result.slide_deck, result.slide_deck.version, true);
+        } catch (refreshErr) {
+          console.error('Failed to refresh after conflict:', refreshErr);
+        }
+      } else {
+        // Revert optimistic update
+        setSlideDeckGated(displayDeck, displayDeck.version, true);
+        alert('Failed to reorder slides');
+      }
+    }
+  }, [displayDeck, sessionId, isReadOnly, setSlideDeckGated]);
+
+  // Nav sidebar collapse is owned by SidebarProvider, which persists to the
+  // `sidebar_state` cookie but never reads it back. Read it here so the nav
+  // panel's collapsed state survives a reload like the chat panel's does.
+  // Computed once per mount: the provider only consumes defaultOpen initially.
+  const navSidebarDefaultOpen = useMemo(() => {
+    const match = document.cookie.match(/(?:^|;\s*)sidebar_state=(true|false)/);
+    return match ? match[1] === 'true' : true;
+  }, []);
+
+  // Collapsible panel state, persisted across reloads.
+  const PANEL_STATE_KEY = 'tellr-panel-collapsed';
+  const [collapsed, setCollapsed] = useState<{ nav: boolean; chat: boolean }>(() => {
+    try {
+      const raw = localStorage.getItem(PANEL_STATE_KEY);
+      return raw ? { nav: false, chat: false, ...JSON.parse(raw) } : { nav: false, chat: false };
+    } catch {
+      return { nav: false, chat: false };
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(collapsed)); } catch { /* non-fatal */ }
+  }, [collapsed]);
 
   const viewOnlyReason =
     !isLockHolder && editingLockHolder
@@ -761,7 +831,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       : 'Create a private copy in My Sessions';
 
   return (
-    <SidebarProvider className="h-svh max-h-svh">
+    // defaultOpen reads back the sidebar_state cookie that SidebarProvider
+    // writes on every toggle (ui/sidebar.tsx). Without it the provider always
+    // defaults to open, so the nav panel's collapsed state did not survive a
+    // reload — spec §2/§10 require BOTH left panels to persist.
+    <SidebarProvider className="h-svh max-h-svh" defaultOpen={navSidebarDefaultOpen}>
       <AppSidebar
         currentView={viewMode}
         onViewChange={handleViewChange}
@@ -829,60 +903,78 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
-                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col" data-tour="chat-panel">
-                  <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
-                    <AgentConfigBar />
-                  </div>
-                  <ChatPanel
-                    key="chat-panel"
-                    ref={chatPanelRef}
-                    rawHtml={rawHtml}
-                    disabled={isReadOnly}
-                    onGenerationStart={onGenerationStart}
-                    previewMessages={previewVersion != null ? previewMessages : null}
-                    onSlidesGenerated={async (deck, raw) => {
-                      onGenerationComplete();
-                      setSlideDeckGated(deck, deck.version);
-                      setRawHtml(raw);
-                      setLastSavedTime(new Date());
-                      setSessionsRefreshKey((prev) => prev + 1);
-                      if (sessionId) {
-                        try {
-                          await loadVersions();
-                        } catch (e) {
-                          console.warn('Failed to refresh versions:', e);
+                {/* Chat panel — collapse hides but does NOT unmount to preserve state */}
+                <div
+                  className={`border-r border-border bg-card flex flex-col transition-all duration-200 ${collapsed.chat ? 'w-10 min-w-[2.5rem] overflow-hidden' : 'w-[32%] min-w-[260px]'}`}
+                  data-tour="chat-panel"
+                >
+                  {/* Chat collapse toggle */}
+                  <button
+                    data-testid="toggle-chat-panel"
+                    onClick={() => setCollapsed(prev => ({ ...prev, chat: !prev.chat }))}
+                    className="shrink-0 flex items-center justify-center h-8 border-b border-border bg-card hover:bg-accent text-muted-foreground"
+                    title={collapsed.chat ? 'Expand chat' : 'Collapse chat'}
+                    aria-expanded={!collapsed.chat}
+                  >
+                    <span className="text-xs">{collapsed.chat ? '›' : '‹'}</span>
+                  </button>
+                  {/* Stable key: React must reconcile this as the SAME element
+                      across collapse toggles, or ChatPanel remounts and the
+                      conversation state (and any in-flight stream) is lost. */}
+                  <div
+                    key="chat-panel-body"
+                    className={collapsed.chat ? 'hidden' : 'flex flex-col flex-1 min-h-0'}
+                  >
+                    <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
+                      <AgentConfigBar />
+                    </div>
+                    <ChatPanel
+                      key="chat-panel"
+                      ref={chatPanelRef}
+                      rawHtml={rawHtml}
+                      disabled={isReadOnly}
+                      onGenerationStart={onGenerationStart}
+                      previewMessages={previewVersion != null ? previewMessages : null}
+                      onSlidesGenerated={async (deck, raw) => {
+                        onGenerationComplete();
+                        setSlideDeckGated(deck, deck.version);
+                        setRawHtml(raw);
+                        setLastSavedTime(new Date());
+                        setSessionsRefreshKey((prev) => prev + 1);
+                        if (sessionId) {
+                          try {
+                            await loadVersions();
+                          } catch (e) {
+                            console.warn('Failed to refresh versions:', e);
+                          }
                         }
-                      }
+                      }}
+                      viewOnlyReason={viewOnlyReason}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex-1 bg-background min-w-0" data-tour="slide-viewer">
+                  <SlideViewer
+                    ref={slideViewerRef}
+                    key={versionKey}
+                    slideDeck={displayDeck}
+                    deckKey={sessionId ?? 'no-session'}
+                    findings={stableFindings}
+                    callbacks={{
+                      onApplyFinding: (id) => console.info('[viewer] apply finding', id),
+                      onDismissFinding: (id) => console.info('[viewer] dismiss finding', id),
+                      onDiscussFinding: (id) => console.info('[viewer] discuss finding', id),
                     }}
-                    viewOnlyReason={viewOnlyReason}
-                  />
-                </div>
-
-                <div data-tour="selection-ribbon">
-                  <SelectionRibbon
-                    key={versionKey}
-                    slideDeck={displayDeck}
-                    onSlideNavigate={handleSlideNavigate}
-                    versionKey={versionKey}
-                  />
-                </div>
-
-                <div className="flex-1 bg-background" data-tour="slide-panel">
-                  <SlidePanel
-                    key={versionKey}
-                    ref={slidePanelRef}
-                    slideDeck={displayDeck}
-                    rawHtml={rawHtml}
+                    onReorder={handleReorderSlides}
                     onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
                       setSlideDeckGated(deck, deck.version);
                     }}
-                    scrollToSlide={scrollTarget}
                     onSendMessage={isReadOnly ? undefined : handleSendMessage}
-                    onExportStatusChange={setExportStatus}
-                    versionKey={versionKey}
                     readOnly={isReadOnly}
                     lockedBy={!isLockHolder ? editingLockHolder : null}
                     onVerificationComplete={handleVerificationComplete}
+                    sessionId={sessionId}
                   />
                 </div>
               </div>
