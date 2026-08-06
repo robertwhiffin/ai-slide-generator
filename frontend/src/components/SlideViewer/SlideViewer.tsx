@@ -423,7 +423,10 @@ const ViewerBody = forwardRef<
         unseenSlideIndices={unseenSlideIndices}
         onReorder={onReorder}
       />
-      <div className="flex min-h-0 flex-1 flex-col">
+      {/* min-w-0 is load-bearing: a flex item defaults to min-width:auto, so this
+          column refused to shrink below its content width and overflowed past the
+          ribbon — pushing the stage (and its right-hand next arrow) off-screen. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Stage toolbar. Rendered for read-only viewers too: the verification
             badge and the "X is editing" lock notice must stay visible on the
             share-link/view route and during save-point preview, matching the
