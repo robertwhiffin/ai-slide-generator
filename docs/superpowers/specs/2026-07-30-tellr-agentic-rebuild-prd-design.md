@@ -252,6 +252,34 @@ slide viewer** (retire the scroll list), plus a redesigned direct editor.
 
 ### 6.2 Flip-through viewer
 
+> ✅ **DONE — shipped (workstream 6).** Branch `feat/flip-through-viewer`, built
+> against fixture data and verified on a devloop deploy against a prod Lakebase
+> branch. Spec: `docs/superpowers/specs/2026-08-03-flip-through-viewer-design.md`;
+> plan: `docs/superpowers/plans/2026-08-03-flip-through-viewer.md`; technical doc:
+> `docs/technical/slide-viewer.md`.
+>
+> **Landed:** single-slide stage (aspect-fit, arrow/keyboard/wheel paging, one slide
+> per gesture); vertical thumbnail ribbon with real scaled previews, drag-reorder and
+> unseen-feedback dots; tabbed feedback drawer (resizable, persisted) with
+> Apply/Dismiss/Discuss; checkbox + contiguous selection retired (`SelectionContext`,
+> `SelectionRibbon`, `SlideSelection`, `isContiguous` all deleted); per-slide CRUD
+> (edit HTML, delete, verification badge, optimize layout) migrated onto the stage;
+> export/present rewired so they no longer route through `SlidePanel`'s ref.
+>
+> **Consumed as a stub, as planned:** findings arrive as props typed by
+> `SlideFinding`/`DrawerCallbacks` and are hard-wired to `[]` in production — the
+> producing backend is **workstream 5**, so Apply and Discuss currently only log.
+> The drawer's empty state is therefore expected, not a defect.
+>
+> **Deliberately deferred:** speaker notes (no domain field exists; the drawer is a
+> one-tab shell so notes drop in without restructuring) and the `@slide` reference
+> chip (§6.1, **workstream 7**).
+>
+> **Note for workstream 8:** the stage iframe sets `pointer-events: none` and
+> `tabIndex={-1}`, because focus inside it never delivers keydown to the parent —
+> inline editing must put its editable regions in the parent document or revisit the
+> focus/keyboard model. `docs/technical/slide-viewer.md` has the detail.
+
 - Replace the scroll-through-all `SlidePanel` with a **single-slide stage** paged
   through like PowerPoint/Google Slides (◀ ▶, thumbnail rail, keyboard).
 - Below the current slide: a **collapsible AI feedback drawer** showing that
@@ -450,7 +478,7 @@ defines the end state and the seams.
 | 3 | **MLflow rebuild** — always-on nested tracing + scorer framework; delete fallback/auto-skip hacks | 1 | M | |
 | 4 | **LangGraph core** — supervisor + builder, deck-spec state, two front doors; replaces the monolith | 2 | L | The big one |
 | 5 | **Review subsystem** — 3 agents as scorers + remediation loop | 3, 4 | L | Review = eval |
-| 6 | **Flip-through viewer + feedback drawer** — new slide stage + AI feedback UI | — (stub) | M | Largely independent |
+| 6 | ✅ **DONE** — **Flip-through viewer + feedback drawer** — new slide stage + AI feedback UI | — (stub) | M | Shipped on `feat/flip-through-viewer`; see §6.2 for what landed vs. deferred |
 | 7 | **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | |
 | 8 | **Inline WYSIWYG editor** — click-to-edit, move/resize, drag-reorder, raw-HTML escape hatch | 6 | L | Largest FE build |
 
@@ -459,8 +487,8 @@ defines the end state and the seams.
 - **1 and 2** are small, independent, and safe to land first.
 - **3** depends on UC being available (1).
 - **4** is the keystone; **5 and 7** build on it.
-- **6** can be built against a stub deck and merged independently; **8** builds on
-  **6**.
+- **6** ✅ **is done** — it was built against a stub deck and merged independently,
+  as planned. **8** builds on **6** and is now unblocked.
 
 ---
 
