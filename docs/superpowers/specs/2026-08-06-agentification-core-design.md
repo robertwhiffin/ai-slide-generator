@@ -108,7 +108,7 @@ Verified-resolving set:
 | `langgraph` | 1.0.3 (transitive) | **1.2.10** (explicit pin) |
 | `langchain` | 1.0.5 | **1.3.14** |
 | `langchain-core` | 1.0.4 | **1.5.3** |
-| `langgraph-checkpoint` | 3.0.0 | **4.1.1** |
+| `langgraph-checkpoint` | 3.0.1 | **4.1.1** |
 
 **OPEN DESIGN QUESTION (Postgres checkpointer):** §5.7 requires a Lakebase-backed
 checkpointer as a "correctness requirement." However, `langgraph-checkpoint` 4.1.1 provides
@@ -156,7 +156,7 @@ Generation is reached through **four** entrypoints in `frontend/src/services/api
 | Entry | Line | Shape |
 |---|---|---|
 | `streamChat` | :782 | SSE, live streaming |
-| `submitChatAsync` + `pollChat` | :876, :557 | fire-and-poll, `after_message_id` cursor |
+| `submitChatAsync` + `pollChat` | :876, :910 | fire-and-poll, `after_message_id` cursor |
 | `startPolling` | :933 | polling driver |
 | `sendMessage` | :584 | non-streaming |
 
@@ -629,11 +629,17 @@ Two properties this buys:
 - If a fix round runs, the **fix reviewer** writes the version it chose (fixed or
   original).
 
-The invariant this buys: **an unreviewed slide never exists in Lakebase.** Content and
-its verification record are written together, and there is no window in which a raw
-builder output is visible before review. This is why the earlier "builders write their
-own row" invariant moved to the reviewers — each reviewer still writes only its own
-slide's `(session_id, position)` row, so row-per-slide and no-contention both hold.
+The invariant this buys: **an unreviewed slide never exists in Lakebase**, with one
+exception: a terminal-failure placeholder. When a builder fails after retry, a visibly-marked
+placeholder is written to preserve the deck's completeness (§8); this placeholder is a terminal,
+unreviewed state that must be treated as "committed/landed" for both the reorder-buffer release
+query (§6.2) and the all-slides-landed deck-review trigger (§5.4, §6.1), so the deck reviewer
+runs and the user can retry the position individually. Content and its verification record are
+written together for all other slides, and there is no window in which a raw builder output is
+visible before review. This is why the earlier "builders write their own row" invariant moved
+to the reviewers — each reviewer still writes only its own slide's `(session_id, position)` row,
+so row-per-slide and no-contention both hold. The exact row representation of the placeholder
+(flag, sentinel, or other marker) is an implementation detail.
 
 The **foreman is a deterministic orchestration service, not an agent** — see §5.1 for
 why every one of its responsibilities is deterministic. In LangGraph terms it is the
