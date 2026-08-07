@@ -4,9 +4,9 @@
 **Date:** 2026-08-06
 **Parent:** `2026-07-30-tellr-agentic-rebuild-prd-design.md` (workstreams 4 + 7, merged)
 **Scope:** Replace the single-agent HTML emitter with a LangGraph multi-agent system:
-a conversational architect, a build foreman, parallel per-slide builders, and a
-review→fix→review loop. Includes conversational multi-target editing and the deck
-spec that both build and review are driven by.
+a conversational architect, a data analyst, a deterministic build-foreman service,
+parallel per-slide builders, and a review→fix→review loop. Includes conversational
+multi-target editing and the deck spec that both build and review are driven by.
 
 **This is a clean-slate rebuild, not a refactor.** `src/services/agent.py` (1,863
 lines), the intent-detection regexes in `src/api/services/chat_service.py`, and
@@ -83,8 +83,9 @@ decks) must be verifiable against known-good current behaviour — especially ex
 which PRD §3 makes a no-regression gate. If the migration and the agent rewrite land
 together and decks come back wrong, we cannot tell which half did it.
 
-**This prerequisite is load-bearing twice over:** for parallel builder writes, and for
-incremental slide delivery (§6.2).
+**This prerequisite is load-bearing twice over:** for the parallel per-slide writes
+(one row per reviewer-cleared slide — §5.5), and for incremental slide delivery
+(§6.2).
 
 ### 2.2 Dependency stack upgrade
 
@@ -300,8 +301,8 @@ tool grants**, living in the repo, reviewed in PRs, tested in CI.
 
 Not a single system prompt, for a structural reason: `AgentConfig`
 (`src/api/schemas/agent_config.py:58`) is **singular** — one `system_prompt`, one
-`slide_editing_instructions`, one `slide_style_id`, one tool list. With eight roles it
-cannot express per-role behaviour.
+`slide_editing_instructions`, one `slide_style_id`, one tool list. With seven agent
+roles it cannot express per-role behaviour.
 
 `src/core/prompt_modules.py` is already a skill system in embryo: 11 named composable
 modules (`BASE_PROMPT`, `SLIDE_GUIDELINES`, `CHART_JS_RULES`, `IMAGE_SUPPORT`, …)
@@ -327,87 +328,197 @@ admin route for `system_prompt` or `slide_editing_instructions` — the settings
 expose only deck prompts, slide styles, contributors and identities. Core agent
 behaviour already lives in `prompt_modules.py`.
 
-The existing split is preserved:
+The existing split is preserved and gains a third axis (tone, §5.2):
 
-| Stays admin-editable (user-facing taste) | Becomes in-repo skills (agent innards) |
+| Stays admin/user-editable (user-facing taste) | Becomes in-repo skills (agent innards) |
 |---|---|
-| Deck prompts (`SlideDeckPromptLibrary`, has UI) | architect / analyst / foreman / builder / fixer / reviewer behaviour |
-| Slide styles (`slide_style_library` + `image_guidelines`, has UI) | review criteria + output schemas |
+| Deck prompts (`SlideDeckPromptLibrary`, has UI) — *what* the deck says | architect / analyst / builder / fixer / reviewer behaviour |
+| Slide styles (`slide_style_library` + `image_guidelines`, has UI) — *how* it looks | review criteria + output schemas |
+| Tone / communication guidelines (§5.2) — *how* it reads | |
 
 Consequence: `ConfigPrompts.system_prompt` and `slide_editing_instructions` become
 dead columns and are retired.
 
-**The eight skills:** `architect`, `data_analyst`, `foreman`, `builder`, `fixer`,
+**Seven agent skills:** `architect`, `data_analyst`, `builder`, `fixer`,
 `build_reviewer`, `fix_reviewer`, `deck_reviewer`.
+
+**The foreman is not a skill — it is a deterministic orchestration service** (§5.5).
+Everything it does (dispatch one builder per slide from the spec's slide list, route
+builder→reviewer, route findings by the reviewer's own objective/subjective tag, count
+landed slides to trigger deck review, enforce the concurrency cap / ascending dispatch
+/ retry queue, release the reorder buffer) is deterministic. The one "AI decision" —
+what to fix versus surface — was already made upstream by the reviewer's
+self-classification (PRD §7.2). So the foreman holds no LLM reasoning, maps onto
+LangGraph's topology + conditional edges + `Send` fan-out + a scheduler, and becomes
+directly unit-testable rather than something tests must stub (§9).
 
 ### 5.2 Roles
 
+Agents are drawn as `[ ]`; the foreman is a `( )` service, not an agent.
+
 ```
-  USER ⇄ ARCHITECT  ── narrative, design intent, converses, surfaces findings
-              │            (this IS the supervisor — no separate router tier)
-              │  "I need to see X"
-              ├──▶ DATA ANALYST ──▶ gatherers: Genie | Genie Agent | MCP | tools
-              │         └── returns synthesis + key figures w/ provenance
+  USER ⇄ [ARCHITECT] ── narrative, design intent, tone, converses, surfaces findings
+              │             (this IS the supervisor — no separate router tier)
+              │  structured data request
+              ├──▶ [DATA ANALYST] ──▶ gatherers: Genie | Genie Agent | MCP | tools
+              │         └── success | missing-data | no-tool  (synthesis, not analysis)
               │
-              ▼  deck spec
-          FOREMAN  ── orchestration only: dispatches builders, distributes
-              │        narrative contracts, briefs reviewers, sole CSS writer
+              ▼  deck spec (structured output)
+        (FOREMAN)  ── deterministic orchestration service: dispatches builders,
+              │        distributes narrative contracts, routes the build chain,
+              │        sole CSS writer. No LLM reasoning.
       ┌───────┼────────────────┐
       ▼       ▼                ▼
-  BUILDERS  REVIEWERS   (slide HTML ⇄ Lakebase rows, never LLM context)
-  (1/slide,  (1/slide)
-   parallel)     │
-      └── 1 fix round max ──┘
+ [BUILDERS] [REVIEWERS]  (reviewers write clean/chosen HTML ⇄ Lakebase rows)
+ (1/slide,  → [FIXER] → [FIX REVIEWER]
+  parallel)  └── 1 fix round max ──┘
                 ▼
-        DECK REVIEWER (after all slides land; non-blocking)
+        [DECK REVIEWER] (after all slides land; non-blocking)
                 ▼
-        ARCHITECT surfaces findings to user
+        [ARCHITECT] surfaces findings to user
 ```
 
-**Architect** owns the conversation, the narrative, and design intent. It *is* the
-supervisor; there is no separate router tier, because there is no reason for the user
-to talk to a router that proxies to the persona they actually want. On the one-shot
-path it is entered at a different edge with conversation skipped — which is how PRD
-§9.2's contract is preserved without a second code path.
+The rest of §5.2 defines each agent in detail: its purpose, what it receives, what it
+returns, and its testable contract.
 
-**Data analyst** receives "I need to see X" and decides how to get it, returning
-synthesis plus the figures that matter with provenance — not raw rows. Two side
-benefits: `cap_tool_output` currently *truncates* large Genie results before the model
-reasons over them, so an analyst converts truncation-loss into deliberate
-summarisation; and it concentrates user-scoped data access in one role, which is the
-natural OBO boundary.
+#### 5.2.1 Architect
 
-**Foreman** is pure orchestration and authors nothing. It parses the spec, dispatches
-one builder per slide, gives each its narrative contract (*what you may assume, what
-you hand off*), and briefs the reviewers with the same spec the builders received.
+The conversationalist and orchestrator. It holds the session state and is the only
+agent the user talks to directly. There is no separate router tier — there is no
+reason for the user to talk to a router that proxies to the persona they actually
+want. On the one-shot path (§6.4) it is entered at a different edge with conversation
+skipped, which is how PRD §9.2's contract is preserved without a second code path.
 
-It is also the **sole writer of deck-level CSS**. This is forced by the domain model,
-not a preference: `SlideDeck` has exactly one CSS field and one scripts field for the
-whole deck (`knit()` at `slide_deck.py:323` emits a single `<style>` block;
-`update_css()` at :97 replaces it wholesale; `_extract_css_from_response` at
-`agent.py:1195` concatenates every `<style>` tag). n builders each emitting `<style>`
-is a write collision on shared deck state. Builders emit body HTML only.
+**Behaviour — build comprehensive, data-driven narratives.** Its headline job is to
+propose and refine a narrative, not to wait for a fully-specified brief (PRD §5.1).
+Some of today's generation prompt material (`prompt_modules.py` — `GENERATION_GOALS`,
+`PRESENTATION_GUIDELINES`) is a starting point for this skill.
 
-Design is therefore **decided by the architect and enforced by the foreman** —
-deciding and enforcing are different jobs.
+**Data awareness.** The architect must know what data is *available to ask for* without
+holding the tools itself (the analyst holds them — §5.2.2). It is handed the **tool
+manifest** — names and descriptions from `AgentConfig.tools` (Genie `space_name` +
+`description`, MCP `server_name` + `description`, vector index names, etc.,
+`src/api/schemas/agent_config.py:9-49`) — as context. This lets it (a) make specific
+data requests to the analyst and (b) surface those asks back to the user ("I'll pull
+revenue-per-customer from the Sales Genie space — is that the right source?").
 
-**Builders** each produce one slide's body HTML from their brief, in parallel, writing
-their own `session_slides` row. Slide HTML never passes through an LLM context; agents
-pass references and load from Lakebase.
+**Extensible tone (new — third config axis).** Tone and communication style are
+**not** centrally mandated. The architect skill reads a **tone/communication
+guideline** from config and applies it. This is distinct from deck prompts (*what* the
+deck says) and slide styles (*how* it looks): tone is *how it reads*. **This
+workstream ships the consumption hook plus a sensible in-repo default; the
+user-authoring UI and its library model are a separate, later PR** (like row-per-slide
+— the graph core only assumes the hook exists). See §10.
+
+**Two output types — this is the testable contract:**
+- **Conversational output** → prose directed to the user (chat).
+- **Structured output** → the deck spec (§4) handed down to sub-agents. The structured
+  form is what specs and tests assert against; the prose is not.
+
+#### 5.2.2 Data analyst
+
+Takes a data request from the architect and produces one of **three outcomes**:
+
+1. **Success** — got the data, returns a synthesised result.
+2. **Missing data** — the tool ran but has nothing (e.g. "checked the numbers
+   database; no rows for that company").
+3. **No tool** — no tool is available for the request (e.g. asked to web-search with
+   no web-search tool granted).
+
+**Its real task is synthesis, not analysis.** The retrieval tools do the analysis and
+the summarisation — in a Databricks deployment Genie is the primary tool and already
+returns a summary. So:
+
+- **Single source → pass through, do not re-summarise.** Summarising an
+  already-summarised Genie answer degrades it.
+- **Synthesis only engages with 2+ sources** — combining multiple tools/MCPs into one
+  argument is the only case that needs the analyst to reason over results.
+
+Whether an output is already summarised is a **per-tool property declared on the
+tool**, not something the analyst infers. (This resolves the earlier `cap_tool_output`
+truncation concern: retrieval tools return summaries sized to survive the cap, rather
+than raw rows that get clipped mid-reasoning.)
+
+**Concentrates user-scoped data access in one role** — the natural OBO boundary.
+
+**Contract — standardise the request so the response is testable.** A poor request
+("revenue per customer over time") is untestable because it under-specifies: what time
+bound, which metrics, how summarised, what units. So the analyst receives a
+**structured request** (metric, time bound, grouping, units, …) and returns a
+**structured response** whose shape is one of the three outcomes above. Standardising
+the request is what lets §9 assert that a valid request yields one of three valid
+response shapes — the deterministic-ish test for a non-deterministic agent.
+
+#### 5.2.3 Builders
+
+Straightforward and ephemeral. **Receives** one slide's instructions plus the style
+sheet (the CSS contract). **Produces and returns** that slide's body HTML. Emits body
+HTML only, never `<style>` — deck-level CSS has a single writer (§5.5), and n builders
+each emitting `<style>` would collide on shared deck state (`knit()` at
+`slide_deck.py:323` emits one `<style>` block; `update_css()` at :97 replaces it
+wholesale).
 
 One hazard is already mitigated: `_deduplicate_canvas_ids` (`agent.py:984`) suffixes
 canvas IDs with a per-call uuid, so parallel builders will not collide on Chart.js
 canvas IDs provided each call dedups independently. This behaviour must be preserved.
 
-**Reviewers** — one per slide, scoring against a strict multi-criteria schema. One
-reviewer with multiple criteria, not three agents per slide: scalability comes from
-adding fields to the schema, and the cost profile stays n rather than 3n. Objective
-defects get **one** fix round; anything surviving becomes a surfaced finding.
+#### 5.2.4 Build reviewer
 
-**Deck reviewer** runs once all slides land, for genuinely global checks — arc,
+**Receives** a builder's output. **Evaluates** it against criteria defined in the
+review skill, returning the **structured output also defined in the skill** — one
+reviewer with multiple criteria, not three agents per slide, so scalability comes from
+adding schema fields and the cost profile stays n rather than 3n. Each finding is
+self-classified **objective** (auto-fixable) or **subjective** (surface to user), per
+PRD §7.2 — the reviewer is best placed to know which.
+
+**The build reviewer writes clean slides to Lakebase.** If the review passes with no
+significant (objective) fix required, the build reviewer writes the slide's
+`session_slides` row and `verification_map` entry itself. This means **an unreviewed
+slide never exists in Lakebase** (see §5.5 for why writes moved from builders to
+reviewers).
+
+#### 5.2.5 Fixer
+
+Ephemeral. **Receives** the builder's output and the reviewer's output, and is
+prompted to make **minimal edits** that resolve the objective findings. A builder's
+disposition is to *author*; a fixer's is *minimal change* — hand an authoring agent
+broken HTML and it re-authors the slide, potentially undoing what already passed
+review or (once WYSIWYG lands) a user's manual edits. Builder and fixer are therefore
+separate skills over shared fragments (§5.6).
+
+#### 5.2.6 Fix reviewer
+
+**Receives** three things: the builder's original output, the build reviewer's finding,
+and the fixer's output. **Evaluates and decides** whether to accept the fixed version
+or keep the original — it is a chooser, not just a re-checker. This is what makes a
+bad fix safe (PRD §7.3): if the fix resolved the finding but introduced a new defect,
+the fix reviewer keeps the original and surfaces the finding instead.
+
+Original + new gives it a **diff**, so the "did the fix introduce a new defect?" check
+is scoped to what changed. It degrades gracefully (if the fixer rewrote the whole
+slide, the diff is the whole slide, so it becomes a full review), and it detects a
+fixer that changed nothing (identical HTML) or overreached (diff far larger than the
+finding warranted).
+
+**The fix reviewer writes the winning version to Lakebase** — fixed or original,
+whichever it chose. (§5.5.)
+
+#### 5.2.7 Deck reviewer
+
+Runs once all slides have landed, for genuinely global checks — narrative arc,
 conclusion, cross-slide repetition. Per-slide reviewers cannot see cross-deck
-consistency, so all global checks belong here; per-slide reviewers do receive the CSS
-contract, so they can catch local violations of the deck's design system.
+consistency, so all global checks belong here; per-slide reviewers *do* receive the
+CSS contract, so they catch local violations of the deck's design system. Its findings
+route to the main chat (deck-level) per PRD §6.3. Non-fatal: it runs after the deck is
+already usable (§8).
+
+#### 5.2.8 Foreman (orchestration service, not an agent)
+
+See §5.5. The foreman receives the deck spec, dispatches builders and routes the
+build chain, returns status updates and surfaced findings up to the architect↔user
+chat, and is the **sole writer of deck-level CSS** — design is *decided* by the
+architect and *enforced* by the foreman (deciding and enforcing are different jobs).
+It contains no LLM reasoning.
 
 ### 5.3 Agent lifetimes
 
@@ -415,15 +526,15 @@ contract, so they can catch local violations of the deck's design system.
 only durable *state* is the deck spec and the slide rows. Everything else is transient
 by construction.
 
-| Agent | Lifetime | Holds |
+| Component | Lifetime | Holds |
 |---|---|---|
 | Architect | the session | the conversation |
 | Data analyst | one gathering request | nothing between requests |
-| Foreman | one build turn | deck-wide turn state (what has landed / is outstanding) |
 | Builders | **ephemeral** — one slide, one invocation | nothing |
 | Fixer | ephemeral — one fix | nothing |
 | Reviewers | the review→fix→review loop only | nothing (findings are *input*) |
 | Deck reviewer | its own pass | nothing |
+| *Foreman (service, not an agent)* | one build turn | deck-wide turn state (what has landed / is outstanding) — this is **graph/checkpointer state**, not agent memory |
 
 **Findings are input, not memory.** Reviewers are briefed with the finding rather than
 remembering it. Because the fix loop is capped at 1, re-review input is bounded to
@@ -446,55 +557,53 @@ Two properties this buys:
 ### 5.4 The build chain
 
 ```
-FOREMAN ──dispatch──▶ BUILDER ──▶ BUILD_REVIEWER ──findings──▶ FOREMAN
-                                                                  │
-                    (objective) ──▶ FIXER ──▶ FIX_REVIEWER ──▶ FOREMAN
-                    (subjective) ──────────────────────────▶ surfaced
-                    (all slides landed?) ──▶ DECK_REVIEWER
+(FOREMAN) ─dispatch─▶ [BUILDER] ─▶ [BUILD_REVIEWER] ─┬─ clean ─▶ writes row ─▶ (FOREMAN)
+                                                      │
+                                    (objective finding)
+                                                      ▼
+                                   [FIXER] ─▶ [FIX_REVIEWER] ─▶ writes winner ─▶ (FOREMAN)
+                                                      │  (fixed OR original)
+                    (subjective findings) ────────────────────────────▶ surfaced
+                    (all slides landed?) ─────────────────────────────▶ [DECK_REVIEWER]
 ```
 
-- **builder → reviewer is a direct edge.** The reviewer starts as soon as its slide
-  exists; no foreman round-trip.
-- **Findings return to the foreman**, because it is the only thing holding deck-wide
-  state: which findings are objective (dispatch to fixer) versus subjective
-  (surface), and *when all slides have landed* so deck review can start. A builder
-  knows only about its own slide. This dispatch is code, not an LLM call.
-- PRD §7.2 has the reviewer self-classify `auto_fixable`: the **judgment** is the
-  reviewer's, **acting** on it is the foreman's.
+- **builder → build reviewer is a direct edge.** The reviewer starts as soon as its
+  slide exists; no foreman round-trip.
+- **Findings return to the foreman**, because the foreman holds the deck-wide turn
+  state: it routes objective findings to the fixer and surfaces subjective ones, and
+  it counts landed slides to know *when all have landed* so deck review can start. A
+  builder knows only about its own slide. This routing is code, not an LLM call — the
+  reviewer already tagged each finding objective/subjective (PRD §7.2), so the
+  foreman only acts on that tag.
 - **The fix loop is capped at 1, always.** A defect surviving its one fix becomes a
   surfaced finding, never an infinite retry. Nothing is silently dropped.
+- **Re-review uses a fresh reviewer instance**, not the same conversation. An agent
+  asked "was your own finding addressed?" is biased toward defending or confirming it,
+  which is not an independent check. Fresh-and-briefed is structurally identical to
+  the first review, so there is no separate "re-review mode" to build.
 
-**Re-review uses a fresh reviewer instance**, not the same conversation. An agent
-asked "was your own finding addressed?" is biased toward defending or confirming it,
-which is not an independent check. Fresh-and-briefed is also structurally identical to
-the first review, so there is no separate "re-review mode" to build.
+### 5.5 Reviewers write to Lakebase; the foreman is a service
 
-### 5.5 The fix reviewer takes three inputs
+**The reviewer that clears a slide writes it** — not the builder:
 
-`{build_reviewer finding, original HTML, new HTML}`.
+- If the build review passes with no objective fix, the **build reviewer** writes the
+  slide's `session_slides` row and `verification_map` entry.
+- If a fix round runs, the **fix reviewer** writes the version it chose (fixed or
+  original).
 
-Not merely "was the finding addressed?" — PRD §7.3 requires auto-fixes pass back
-through review so a **bad fix** cannot slip through. A reviewer that only checks the
-finding cannot catch a fix that resolved it while breaking something else (a colour
-violation, a broken chart, an overflow). So the fix reviewer asks: *was the finding
-addressed, and did the fix introduce any new defect?*
+The invariant this buys: **an unreviewed slide never exists in Lakebase.** Content and
+its verification record are written together, and there is no window in which a raw
+builder output is visible before review. This is why the earlier "builders write their
+own row" invariant moved to the reviewers — each reviewer still writes only its own
+slide's `(session_id, position)` row, so row-per-slide and no-contention both hold.
 
-Original + new gives it a **diff**, so the new-defect check is scoped to what actually
-changed rather than re-assessing the slide from scratch. Three consequences:
-
-- It **degrades gracefully.** If the fixer rewrote the whole slide, the diff *is* the
-  whole slide, so the check automatically becomes a full review. Rigour scales with
-  change size, with no extra logic.
-- It detects a fixer that **changed nothing** (identical HTML) and one that
-  **overreached** (a diff far larger than the finding warranted). The latter matters
-  because the fixer's whole disposition is minimal change.
-- Diff-scoping leaves no hole: a pre-existing defect the fixer left alone was already
-  assessed by the build reviewer.
-
-**Implementation consequence:** the pre-fix HTML must survive until the fix reviewer
-runs, but the builder's row is already written. That is **graph state for the duration
-of the turn**, not durable state — i.e. the checkpointer's job, and multi-worker safe
-because the checkpointer is Lakebase-backed.
+The **foreman is a deterministic orchestration service, not an agent** — see §5.1 for
+why every one of its responsibilities is deterministic. In LangGraph terms it is the
+graph topology, the conditional edges, the `Send` fan-out for parallel builders, and
+the scheduler enforcing the concurrency cap / ascending dispatch / retry queue (§8).
+It holds deck-wide turn state (what has landed, what is outstanding, pre-fix HTML held
+until the fix reviewer runs) as **checkpointer state** — durable in Lakebase and
+multi-worker safe, never in-process memory.
 
 ### 5.6 Builder and fixer are separate skills
 
@@ -523,14 +632,16 @@ across requests must be visible to all workers or able to detect its own stalene
 ### 6.1 Interactive build turn
 
 User message → architect. If the intent is discussion, it replies and nothing touches
-the deck (PRD §4.1: no brainstorm/build toggle). If it needs data, the analyst gathers
-and returns synthesis. When the intent is to build, the architect writes or updates
-the deck spec and hands it to the foreman, which dispatches builders in parallel. Each
-builder writes its row and hands directly to a build reviewer. Findings return to the
-foreman: objective → fixer → fix reviewer; subjective → surfaced. When all positions
-are committed, the deck reviewer runs behind a non-blocking flag. The architect
-surfaces findings — deck-level to the main chat, slide-level to the per-slide drawer
-(PRD §6.3).
+the deck (PRD §4.1: no brainstorm/build toggle). If it needs data, the architect sends
+a structured request to the analyst, which returns success / missing-data / no-tool.
+When the intent is to build, the architect writes or updates the deck spec and hands
+it to the foreman service, which dispatches builders in parallel. Each builder hands
+directly to a build reviewer, and the reviewer that clears a slide writes its
+`session_slides` row (so an unreviewed slide never persists — §5.5). Findings return
+to the foreman: objective → fixer → fix reviewer (which writes the winning version);
+subjective → surfaced. When all positions are committed, the deck reviewer runs behind
+a non-blocking flag. The architect surfaces findings — deck-level to the main chat,
+slide-level to the per-slide drawer (PRD §6.3).
 
 ### 6.2 Incremental, sequentially-ordered slide delivery
 
@@ -642,11 +753,19 @@ progress is not watching a spinner) and for the §1.1 showcase story.
   `reasoning`/`info`/`tool_*` from replay as agent-internal noise; activity messages
   get the same treatment, keeping them out of the architect's context.
 
-### 7.4 Deck review progress
+### 7.4 Per-slide and deck-level review progress
 
-An "Agentic deck review in progress" flag, which **must be non-blocking**: editing,
-export and presenting stay live while it runs (PRD §7.4). A flag that gates export is
-a serial gate wearing a spinner.
+Because reviewers write the slide (§5.5), **a slide appears in the viewer only once it
+is review-clean** — it never appears and then silently changes under the user (no
+flapping). The cost is that first-paint of each slide includes one review pass; this
+is a deliberate refinement of PRD §7.4's "show the deck first, reviewers run after"
+(see §11). Objective fixes happen before the slide is shown; **subjective** findings
+still arrive afterwards into the drawer, so the masking §7.4 relies on still holds for
+those.
+
+The whole-deck pass gets an **"Agentic deck review in progress" flag, which must be
+non-blocking**: editing, export and presenting stay live while it runs (PRD §7.4). A
+flag that gates export is a serial gate wearing a spinner.
 
 ### 7.5 Permissions
 
@@ -722,7 +841,11 @@ tested alone with a fabricated brief, no graph and no LLM. A builder takes
 `{position, purpose, brief, css_contract, assumes, hands_off}`; a fix reviewer takes
 `{finding, original_html, new_html}`.
 
-**1. Deterministic graph tests with stubbed agents.** The valuable target is the
+Because the **foreman is a service, not an agent** (§5.5), its logic is tested
+directly rather than stubbed — the orchestration decisions below are ordinary unit
+tests with no model in the loop.
+
+**1. Deterministic graph/orchestration tests.** The valuable target is the
 orchestration, not the model's prose. With stub agents returning canned outputs, all of
 §8 is deterministic and fast: the foreman dispatches ascending; the cap holds at 15;
 a freed slot takes the lowest outstanding position; retries jump the queue; the buffer
@@ -735,6 +858,13 @@ This is the one place non-determinism is unavoidable, so assertions are on
 with a valid `auto_fixable` flag; whether it says "busy layout" or "cluttered" is not a
 test's business. Marked `live` and excluded from CI via the existing `-m 'not live'`
 convention.
+
+The **analyst's standardised request contract** (§5.2.2) is the leverage point for
+this layer: a valid structured request (metric, time bound, grouping, units) must
+yield a response that is exactly one of the three valid outcome shapes — success,
+missing-data, no-tool. The *content* is non-deterministic; the *shape* is asserted.
+Fixtures cover single-source pass-through (no re-summarisation) and multi-source
+synthesis (a combined result).
 
 **3. Concurrency and multi-worker tests.** The bug class this rebuild exists to
 remove. Parallel builders writing distinct `session_slides` rows must not collide; the
@@ -765,8 +895,13 @@ would leave the two describing different decks.
   (workstream 3). This spec assumes the model endpoint is configurable rather than
   hardcoded at `src/core/defaults.py:31`, and that tracing is available; it does not
   build either.
-- **Per-agent model routing** — deferred in PRD §8.1, though the eight-skill split
+- **Per-agent model routing** — deferred in PRD §8.1, though the seven-skill split
   makes it cheap later (a reviewer could run a cheaper model).
+- **Tone/communication authoring UI + library model** — this workstream ships only the
+  architect's **consumption hook and an in-repo default** tone guideline (§5.2.1). The
+  user-facing authoring surface (a `tone_library`-style model plus admin/user UI,
+  the third editable axis alongside deck prompts and slide styles) is a separate PR,
+  landing alongside like row-per-slide. The graph core only assumes the hook exists.
 - **Speaker notes** — deferred in workstream 6 and still absent from the domain model.
 - Export, permissions, and data-tool internals (PRD §11) are reused, not rebuilt.
 
@@ -778,7 +913,9 @@ Recorded so the divergences are deliberate rather than drift:
 
 | PRD says | This spec says | Why |
 |---|---|---|
-| §4 diagram: supervisor → builder → reviewers | A **foreman** tier sits between | Parallel per-slide builds need an orchestrator that owns the CSS contract and dispatch |
+| §4 diagram: supervisor → builder → reviewers | A **foreman** tier sits between — as a **deterministic orchestration service, not an agent** | Parallel per-slide builds need an orchestrator that owns the CSS contract and dispatch; all of its work is deterministic (the reviewer already tagged what to fix), so it carries no LLM reasoning and becomes directly unit-testable |
+| §7.4: show the deck first, reviewers run after, findings arrive later | **Reviewers write the slide**, so a slide appears only once review-clean; subjective findings still arrive later | No visible flapping (a slide never appears then silently changes under the user). Cost: first-paint includes one review pass |
+| — (not mentioned) | **Tone** as a third user-editable config axis (hook here, UI later) | Communication style is neither *what* the deck says (deck prompts) nor *how* it looks (slide styles); it should not be centrally mandated |
 | §7: reviewers run after a build | Reviewers are **briefed by the foreman** with the spec | Checking against the contract the builders were given beats checking against inferred intent |
 | §7.1: three review agents (content / design / narrative) | **One** slide reviewer with a strict multi-criteria schema, plus a deck reviewer | Cost stays n rather than 3n; scalability comes from adding criteria fields |
 | §4 diagram: data tools called by builder + reviewers | A **data analyst** agent owns gathering and synthesis | Resolves data once above the fan-out; avoids n builders each querying; converts `cap_tool_output` truncation into deliberate summarisation |
