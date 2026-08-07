@@ -72,11 +72,12 @@ debt** — it is a shadow copy of deck state. Instead the deck becomes rows:
   *"legacy, for raw HTML view."*
 - **The deck-spec column (§4) lands in this same migration**, not a second one.
 
-Measured blast radius: `deck_json` has 18 references, **17 of them in
+Measured blast radius: `deck_json` has 20 references, **18 of them in
 `session_manager.py`** — already effectively encapsulated. `knit()`
 (`slide_deck.py:323`) already does the stitching and does not care whether slides came
-from JSON or rows. The largest number is `html_content`: **59 references across 12
-files**, including the export chain (`html_to_pptx.py`, `html_to_google_slides.py`).
+from JSON or rows. The largest number is `html_content`: **60 references across 12 `src`
+Python files**, including the export chain (`html_to_pptx.py`,
+`html_to_google_slides.py`).
 
 Sequenced first because a schema migration on live production data (v0.4.1, real
 decks) must be verifiable against known-good current behaviour — especially export,
@@ -107,7 +108,7 @@ Verified-resolving set:
 | `langgraph` | 1.0.3 (transitive) | **1.2.10** (explicit pin) |
 | `langchain` | 1.0.5 | **1.3.14** |
 | `langchain-core` | 1.0.4 | **1.5.3** |
-| `langgraph-checkpoint` | 3.0.1 | **4.1.1** |
+| `langgraph-checkpoint` | 3.0.0 | **4.1.1** |
 
 Also in this PR:
 
@@ -128,7 +129,7 @@ Also in this PR:
   be left dangling meanwhile.
 
 Blast radius is small: no code imports the top-level `langchain` meta-package. All
-imports are `langchain_core.*` (19 sites), `langchain_community.chat_message_histories`
+imports are `langchain_core.*` (18 sites), `langchain_community.chat_message_histories`
 (3), and one `langchain_classic.agents`.
 
 ---
@@ -149,9 +150,9 @@ Generation is reached through **four** entrypoints in `frontend/src/services/api
 | `sendMessage` | :584 | non-streaming |
 
 **The binding constraint:** `slides` is carried only on the terminal `COMPLETE` event
-(`streaming_callback.py:371`; `StreamEvent.slides` is documented "for complete
-event"). There is no incremental slide event today. Per-slide delivery (§6.2)
-therefore changes **both** transports.
+(emitted at `streaming_callback.py:371`; `StreamEvent.slides` is documented "for
+complete event" at `streaming.py:34`). There is no incremental slide event today.
+Per-slide delivery (§6.2) therefore changes **both** transports.
 
 The polling path is the harder one: `poll_chat` (`chat.py:556`) does not relay live
 events at all — it reads persisted `SessionMessage` rows and converts them via
@@ -271,8 +272,17 @@ change — one hop, never two:
   resulting HTML change is **agent-originated**, so it does not re-trigger a spec
   update; the spec already says what was intended.
 
-A provenance flag on the write is required. `Slide.modified_by`
-(`src/domain/slide.py:63`) is the natural home.
+A provenance flag on the write is required, distinguishing human-originated from
+agent-originated slide writes. **`Slide.modified_by` cannot carry this** — both edit
+paths stamp the logged-in human's username (`chat_service.py:2373` on the agent-edit
+path, `:2650` on the direct/WYSIWYG path, both via `get_current_username()`), so after
+an agent rebuild during a chat turn it holds the human who initiated the turn,
+indistinguishable from a direct human edit. The field also already has a load-bearing,
+user-facing meaning (rendered as author attribution at `SlideTile.tsx:310` and
+`SessionHistory.tsx:367`), so it cannot be repurposed. **A new provenance field
+distinct from author attribution is therefore needed — its exact shape (a column on
+`session_slides`, added in the §2.1 migration) is an open question for the
+implementation plan.**
 
 ### 4.6 Deck-level spec edits
 
@@ -323,10 +333,12 @@ There is also an MLflow consequence: PRD §7.1 wants verdicts as first-class
 assessments, and the eval harness can only distinguish a quality regression from a
 criteria edit if the criteria are versioned and identifiable.
 
-**In-repo is making existing reality explicit, not adding a restriction.** There is no
-admin route for `system_prompt` or `slide_editing_instructions` — the settings routes
-expose only deck prompts, slide styles, contributors and identities. Core agent
-behaviour already lives in `prompt_modules.py`.
+**In-repo is making existing reality explicit, not adding a restriction.** Core agent
+behaviour already lives in `prompt_modules.py`. While the settings UI routes
+(`src/api/routes/settings/`) expose only deck prompts, slide styles, contributors and
+identities, `system_prompt` and `slide_editing_instructions` are writable via
+`PUT /agent-config` and `POST /profiles` (`agent_config.py:104`, `profiles.py:124`),
+and are actively consumed at runtime (`agent_factory.py:155-168`).
 
 The existing split is preserved and gains a third axis (tone, §5.2):
 
@@ -336,8 +348,10 @@ The existing split is preserved and gains a third axis (tone, §5.2):
 | Slide styles (`slide_style_library` + `image_guidelines`, has UI) — *how* it looks | review criteria + output schemas |
 | Tone / communication guidelines (§5.2) — *how* it reads | |
 
-Consequence: `ConfigPrompts.system_prompt` and `slide_editing_instructions` become
-dead columns and are retired.
+Consequence: `ConfigPrompts.system_prompt` and `slide_editing_instructions` (currently
+populated on profiles and writable via agent-config routes) are retired. This is a
+deliberate breaking change — existing custom prompts must be migrated to in-repo skills,
+and the migration story should be documented in the implementation plan.
 
 **Seven agent skills:** `architect`, `data_analyst`, `builder`, `fixer`,
 `build_reviewer`, `fix_reviewer`, `deck_reviewer`.
@@ -455,8 +469,9 @@ Straightforward and ephemeral. **Receives** one slide's instructions plus the st
 sheet (the CSS contract). **Produces and returns** that slide's body HTML. Emits body
 HTML only, never `<style>` — deck-level CSS has a single writer (§5.5), and n builders
 each emitting `<style>` would collide on shared deck state (`knit()` at
-`slide_deck.py:323` emits one `<style>` block; `update_css()` at :97 replaces it
-wholesale).
+`slide_deck.py:323` emits one `<style>` block; `update_css()` at :97 delegates to
+`merge_css()`, which merges selectors: replacement selectors override matching ones,
+new selectors are appended, and existing selectors not in the replacement are preserved).
 
 One hazard is already mitigated: `_deduplicate_canvas_ids` (`agent.py:984`) suffixes
 canvas IDs with a per-call uuid, so parallel builders will not collide on Chart.js
