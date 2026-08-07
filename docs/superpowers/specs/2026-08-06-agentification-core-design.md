@@ -27,8 +27,8 @@ front of it." Four specific problems this workstream fixes:
    `_parse_slide_replacements` (`agent.py:1047`) reverse-engineers which slides
    changed. A 15-slide deck takes a long time and the user sees nothing until it is
    entirely finished.
-3. **Regex intent detection.** `_detect_generation_intent`, `_detect_edit_intent`,
-   `_detect_add_intent`, `_parse_slide_references` (`chat_service.py:1768–1902`)
+3. **Regex intent detection.** `_detect_generation_intent` (`chat_service.py:1768`), `_detect_edit_intent` (`:1826`),
+   `_detect_add_intent` (`:1691`), and `_parse_slide_references` (`:1851`)
    infer what the user wants from ~40 brittle patterns.
 4. **In-process session state.** `self.sessions` is a plain dict (`agent.py:812`),
    which is incorrect under multiple uvicorn worker processes (PRD §12.1).
@@ -110,6 +110,16 @@ Verified-resolving set:
 | `langchain-core` | 1.0.4 | **1.5.3** |
 | `langgraph-checkpoint` | 3.0.0 | **4.1.1** |
 
+**OPEN DESIGN QUESTION (Postgres checkpointer):** §5.7 requires a Lakebase-backed
+checkpointer as a "correctness requirement." However, `langgraph-checkpoint` 4.1.1 provides
+only `base`, `memory`, and `serde` savers — no Postgres saver. The Postgres saver lives in a
+separate package, `langgraph-checkpoint-postgres`, which §2.2's table omits. That package's
+metadata requires `psycopg>=3.2.0` (psycopg3), whereas this project pins only
+`psycopg2-binary==2.9.10` (psycopg2). The durable Lakebase checkpointer must therefore either
+(a) depend on an unlisted package that introduces a conflicting DB driver, or (b) be a
+custom `BaseCheckpointSaver` written over the existing psycopg2/SQLAlchemy connection. The
+table below should be updated to reflect the actual resolved set once this decision is made.
+
 Also in this PR:
 
 - **Reconcile the `mlflow` pin conflict** (PRD §12.1 flags it; it is real):
@@ -130,7 +140,8 @@ Also in this PR:
 
 Blast radius is small: no code imports the top-level `langchain` meta-package. All
 imports are `langchain_core.*` (18 sites), `langchain_community.chat_message_histories`
-(3), and one `langchain_classic.agents`.
+(2), and one `langchain_classic.agents`. The `chat_message_histories` count is 2 because the
+surviving surface is `chat_service.py:18` after `agent.py:21` is deleted in this workstream.
 
 ---
 
@@ -145,7 +156,7 @@ Generation is reached through **four** entrypoints in `frontend/src/services/api
 | Entry | Line | Shape |
 |---|---|---|
 | `streamChat` | :782 | SSE, live streaming |
-| `submitChatAsync` + `pollChat` | :876, :910 | fire-and-poll, `after_message_id` cursor |
+| `submitChatAsync` + `pollChat` | :876, :557 | fire-and-poll, `after_message_id` cursor |
 | `startPolling` | :933 | polling driver |
 | `sendMessage` | :584 | non-streaming |
 
@@ -154,7 +165,7 @@ Generation is reached through **four** entrypoints in `frontend/src/services/api
 complete event" at `streaming.py:34`). There is no incremental slide event today.
 Per-slide delivery (§6.2) therefore changes **both** transports.
 
-The polling path is the harder one: `poll_chat` (`chat.py:556`) does not relay live
+The polling path is the harder one: `poll_chat` (`chat.py:557`) does not relay live
 events at all — it reads persisted `SessionMessage` rows and converts them via
 `msg_to_stream_event` (`session_manager.py:2000`), which hardcodes three types and
 defaults everything else to `assistant`.
@@ -491,6 +502,18 @@ significant (objective) fix required, the build reviewer writes the slide's
 `session_slides` row and `verification_map` entry itself. This means **an unreviewed
 slide never exists in Lakebase** (see §5.5 for why writes moved from builders to
 reviewers).
+
+**OPEN DESIGN QUESTION (verification_map concurrency):** `verification_map` is currently
+a JSON-blob column on the single `SessionSlideDeck` row. The `save_verification` function
+(`session_manager.py:1136–1148`) performs a read-modify-write of the whole blob: load the
+JSON, update the dict with the new content hash, serialize back. With N concurrent
+reviewers committing in parallel (the entire purpose of row-per-slide architecture), this
+pattern reintroduces the lost-update race the row-per-slide prerequisite exists to prevent
+— concurrent readers all see the same initial state, each writes its update, and all but
+the last write is clobbered. Either (a) `verification_map` must be migrated to a keyed
+structure (e.g., a `verification_entries` table with rows `(session_id, content_hash, ...)`),
+or (b) the single-blob approach must be guarded by the deck's `version` counter (accepting
+409 collisions and retry logic). This decision is deferred to the implementation plan.
 
 #### 5.2.5 Fixer
 
