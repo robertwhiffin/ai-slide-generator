@@ -58,12 +58,14 @@ debt** — it is a shadow copy of deck state. Instead the deck becomes rows:
 
 - **`session_slides`** — one row per slide, keyed `(session_id, position)`, carrying
   the fields `Slide` already has (`src/domain/slide.py:32`: `html`, `slide_id`,
-  `scripts`, `created_by/at`, `modified_by/at`) plus `id` and `position`. **This is
-  the deck's source of truth.** Builders write their own row: no contention, no
-  promotion step, no shadow copy.
+  `scripts`, `created_by/at`, `modified_by/at`) plus `id`, `position`, and a
+  **per-slide verification field** (see §5.2.4 — verification moves off the shared
+  `verification_map` blob onto the row, for the same no-contention reason). **This is
+  the deck's source of truth.** The reviewer that clears a slide writes its row (§5.5):
+  no contention, no promotion step, no shadow copy.
 - **`SessionSlideDeck`** — keeps deck-level state (CSS contract, scripts, title,
-  `version`, `locked_by`/`locked_at`, `verification_map`); loses `deck_json` as
-  source of truth.
+  `version`, `locked_by`/`locked_at`); loses `deck_json` as source of truth, and
+  loses `verification_map` (now per-row).
 - **`SlideDeckVersion`** (`session.py:296`) — **unchanged, stays a JSON blob.** A
   blob is the right shape for an immutable append-only snapshot; it is only wrong for
   concurrently-mutated live state. Two shapes for two jobs is correct, not
@@ -109,16 +111,27 @@ Verified-resolving set:
 | `langchain` | 1.0.5 | **1.3.14** |
 | `langchain-core` | 1.0.4 | **1.5.3** |
 | `langgraph-checkpoint` | 3.0.1 | **4.1.1** |
+| `langgraph-checkpoint-postgres` | — (absent) | **added** (the Lakebase saver) |
+| `psycopg` (psycopg3) | — (absent) | **added** |
+| `psycopg2-binary` | 2.9.10 | **removed** |
 
-**OPEN DESIGN QUESTION (Postgres checkpointer):** §5.7 requires a Lakebase-backed
-checkpointer as a "correctness requirement." However, `langgraph-checkpoint` 4.1.1 provides
-only `base`, `memory`, and `serde` savers — no Postgres saver. The Postgres saver lives in a
-separate package, `langgraph-checkpoint-postgres`, which §2.2's table omits. That package's
-metadata requires `psycopg>=3.2.0` (psycopg3), whereas this project pins only
-`psycopg2-binary==2.9.10` (psycopg2). The durable Lakebase checkpointer must therefore either
-(a) depend on an unlisted package that introduces a conflicting DB driver, or (b) be a
-custom `BaseCheckpointSaver` written over the existing psycopg2/SQLAlchemy connection. The
-table below should be updated to reflect the actual resolved set once this decision is made.
+**Postgres checkpointer — decided: adopt `langgraph-checkpoint-postgres` and upgrade to
+psycopg3.** §5.7 requires a Lakebase-backed checkpointer, and `langgraph-checkpoint`
+4.1.1 ships only `base`/`memory`/`serde` savers — the Postgres saver lives in the
+separate `langgraph-checkpoint-postgres`, which requires `psycopg>=3.2.0` (psycopg3),
+conflicting with the current `psycopg2-binary` pin. Rather than hand-roll a custom
+`BaseCheckpointSaver` over psycopg2, we take the official saver and move the app to
+psycopg3. This is a fundamental redesign; carrying the maintained checkpointer is worth
+a driver upgrade.
+
+The migration is smaller than the driver swap sounds: **no code imports `psycopg2`
+directly** (verified — it is used only as SQLAlchemy's default dialect behind a bare
+`postgresql://` URL at `database.py:237,255`). SQLAlchemy 2.0 speaks psycopg3 via the
+`postgresql+psycopg://` scheme, so the change is chiefly the connection-string scheme
+plus the requirements pin, not a rewrite. The **OBO token-injection hook**
+(`database.py:306`, `provide_token`) and `sslmode=require` must be re-verified on the
+psycopg3 dialect — that is the one place the driver swap could bite — and this must be
+proven against the Databricks pip proxy (both new packages resolvable there).
 
 Also in this PR:
 
@@ -177,10 +190,12 @@ defaults everything else to `assistant`.
 - `version` — optimistic lock; clients send what they read, stale writes get **409**.
 - `locked_by`/`locked_at` — deck lock, explicitly for "an agent is modifying slides",
   auto-expiring.
-- `verification_map` — findings keyed by **content hash**, deliberately kept out of
-  `deck_json` so they survive regeneration. `compute_slide_hash`
-  (`src/utils/slide_hash.py:52`) already exists. This is already the right model for
-  per-slide findings (PRD §12.1 "finding persistence").
+- `verification_map` — today a content-hash-keyed blob kept out of `deck_json` so
+  findings survive regeneration; `compute_slide_hash` (`src/utils/slide_hash.py:52`)
+  already exists. The **content-hash keying is the right model** for per-slide findings
+  (PRD §12.1 "finding persistence") and is kept; the **shared blob is not** — it moves
+  onto the per-slide row (§2.1, §5.2.4) to avoid reintroducing single-row write
+  contention.
 - `UserSession.agent_config` (JSON) and `experiment_id` — per-session config and
   MLflow linkage already have homes.
 
@@ -261,6 +276,11 @@ Every mutation path that must trigger it:
 | Tour demo slides | `tour.py:117` | slides appended |
 | Agent edit | chat | already spec-driven |
 
+Deck-level **design-contract** changes (switching `slide_style_id`, or a future
+deck-CSS edit) are deliberately *not* in this table: they mutate a deck-level spec
+field with no per-slide HTML change and follow the confirm-then-rebuild-all path in
+§4.6, not the automatic per-slide trigger.
+
 - The rebuild is **async and debounced/coalesced**. A WYSIWYG session emits many
   small edits; an LLM spec review per edit batch would be brutal on cost and latency,
   and must never make a direct edit feel slow (PRD §7.4). The spec may go briefly
@@ -283,17 +303,20 @@ change — one hop, never two:
   resulting HTML change is **agent-originated**, so it does not re-trigger a spec
   update; the spec already says what was intended.
 
-A provenance flag on the write is required, distinguishing human-originated from
-agent-originated slide writes. **`Slide.modified_by` cannot carry this** — both edit
-paths stamp the logged-in human's username (`chat_service.py:2373` on the agent-edit
-path, `:2650` on the direct/WYSIWYG path, both via `get_current_username()`), so after
-an agent rebuild during a chat turn it holds the human who initiated the turn,
-indistinguishable from a direct human edit. The field also already has a load-bearing,
-user-facing meaning (rendered as author attribution at `SlideTile.tsx:310` and
-`SessionHistory.tsx:367`), so it cannot be repurposed. **A new provenance field
-distinct from author attribution is therefore needed — its exact shape (a column on
-`session_slides`, added in the §2.1 migration) is an open question for the
-implementation plan.**
+**No stored provenance flag is needed — origin is known from the code path.** The two
+writes arrive through structurally different entry points: a human HTML edit comes via
+the `PATCH /slides/{index}` route (the WYSIWYG path, §4.4), while an agent write
+happens inside the graph when a reviewer commits a row (§5.5). Each caller already
+knows which it is, so the "does this write trigger a spec update?" decision is made at
+the call site — the HTML-change trigger fires only on the human route. Nothing has to
+be persisted on the row and read back later to reconstruct origin.
+
+(This is why `Slide.modified_by` is *not* pressed into service: it stamps the
+logged-in human's username on both paths — `chat_service.py:2373` on the agent-edit
+path, `:2650` on the direct path, both via `get_current_username()` — and is already
+load-bearing as user-facing author attribution at `SlideTile.tsx:310` and
+`SessionHistory.tsx:367`. It could not carry origin even if we wanted it to, and it
+does not need to.)
 
 ### 4.6 Deck-level spec edits
 
@@ -311,9 +334,16 @@ This needs no new mechanism: scoring slides against the spec is already the
 reviewers' job. A blanket rebuild-all was rejected — expensive, and it destroys
 manual edits on slides that were still fine.
 
----
-
-## 5. Agents
+**Design-contract changes are the exception — they confirm first, then rebuild all.**
+Changing the deck's *design contract* (switching `slide_style_id` on the agent config,
+or a future deck-CSS edit) mutates a deck-level spec field with no per-slide HTML
+change, so it is not one of the §4.4 slide-HTML triggers. And unlike an audience
+change, a restyle genuinely affects every slide — re-review-then-selective-rebuild
+would flag all of them anyway. So a design-contract change is an **explicit,
+user-confirmed action**: the architect asks *"this restyles the whole deck and rebuilds
+every slide — proceed?"* before kicking off the rebuild. This is the one place a
+rebuild-all is correct, and gating it on confirmation keeps it from firing by accident
+(and from silently discarding manual per-slide edits).
 
 ### 5.1 Definitions are in-repo skills
 
@@ -499,21 +529,27 @@ PRD §7.2 — the reviewer is best placed to know which.
 
 **The build reviewer writes clean slides to Lakebase.** If the review passes with no
 significant (objective) fix required, the build reviewer writes the slide's
-`session_slides` row and `verification_map` entry itself. This means **an unreviewed
+`session_slides` row — HTML and its verification record together, in the one write
+(verification is a per-row field now, not a shared blob). This means **an unreviewed
 slide never exists in Lakebase** (see §5.5 for why writes moved from builders to
 reviewers).
 
-**OPEN DESIGN QUESTION (verification_map concurrency):** `verification_map` is currently
-a JSON-blob column on the single `SessionSlideDeck` row. The `save_verification` function
-(`session_manager.py:1136–1148`) performs a read-modify-write of the whole blob: load the
-JSON, update the dict with the new content hash, serialize back. With N concurrent
-reviewers committing in parallel (the entire purpose of row-per-slide architecture), this
-pattern reintroduces the lost-update race the row-per-slide prerequisite exists to prevent
-— concurrent readers all see the same initial state, each writes its update, and all but
-the last write is clobbered. Either (a) `verification_map` must be migrated to a keyed
-structure (e.g., a `verification_entries` table with rows `(session_id, content_hash, ...)`),
-or (b) the single-blob approach must be guarded by the deck's `version` counter (accepting
-409 collisions and retry logic). This decision is deferred to the implementation plan.
+**Verification is a per-slide field, not a shared blob.** `verification_map` is
+currently a JSON-blob column on the single `SessionSlideDeck` row, and
+`save_verification` (`session_manager.py:1136–1148`) does a read-modify-write of the
+whole blob: load JSON, add the content-hash key, serialize back. With N reviewers
+committing in parallel (the whole point of the architecture) that is a lost-update
+race — every reviewer reads the same initial map, and all but the last write is
+clobbered. It would reintroduce exactly the single-row contention the row-per-slide
+prerequisite exists to remove.
+
+So **verification moves onto the slide's own row**: the review record is written to
+the reviewer's `session_slides` row alongside its HTML, in the same write. No shared
+blob, no read-modify-write, no cross-reviewer contention — the same reason the deck
+became rows in the first place. **This is folded into the §2.1 row-per-slide
+prerequisite PR** (the `session_slides` schema carries a verification field, and
+`save_verification`'s blob path is retired). Keying stays by content hash so records
+still survive regeneration (PRD §12.1); it simply lives per-row rather than in one map.
 
 #### 5.2.5 Fixer
 
@@ -625,7 +661,7 @@ Two properties this buys:
 **The reviewer that clears a slide writes it** — not the builder:
 
 - If the build review passes with no objective fix, the **build reviewer** writes the
-  slide's `session_slides` row and `verification_map` entry.
+  slide's `session_slides` row — HTML and the verification record in one write (§5.2.4).
 - If a fix round runs, the **fix reviewer** writes the version it chose (fixed or
   original).
 
