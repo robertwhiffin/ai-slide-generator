@@ -1392,6 +1392,7 @@ class SlideWriter:
     ) -> List[Dict[str, Any]]:
         """List all slides from from_position onward, in order."""
         from src.database.models.session import SessionSlide
+        from src.utils.slide_hash import compute_slide_hash
 
         with get_db_session() as db:
             session = self.session_manager._get_session_or_raise(db, session_id)
@@ -1404,9 +1405,34 @@ class SlideWriter:
 
             result = []
             for row in rows:
-                slide_dict = self.get_slide(session_id, row.position)
-                if slide_dict:
-                    result.append(slide_dict)
+                # Inline row-to-dict conversion (avoid N+1 query pattern)
+                slide_dict = {
+                    "id": row.id,
+                    "session_id": row.session_id,
+                    "position": row.position,
+                    "html": row.html,
+                    "slide_id": row.slide_id,
+                    "scripts": row.scripts,
+                    "created_by": row.created_by,
+                    "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+                    "modified_by": row.modified_by,
+                    "modified_at": row.modified_at.isoformat() + "Z" if row.modified_at else None,
+                    "content_hash": compute_slide_hash(row.html),
+                }
+                
+                if row.verification_record:
+                    try:
+                        slide_dict["verification_record"] = json.loads(row.verification_record)
+                    except json.JSONDecodeError:
+                        slide_dict["verification_record"] = None
+                
+                if row.deck_spec_slide:
+                    try:
+                        slide_dict["deck_spec_slide"] = json.loads(row.deck_spec_slide)
+                    except json.JSONDecodeError:
+                        slide_dict["deck_spec_slide"] = None
+                
+                result.append(slide_dict)
 
             return result
 
