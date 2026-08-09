@@ -19,7 +19,7 @@
 ## Handoff — What PR3 Can Assume Once This Lands
 
 **Exact table and column names:**
-- `session_slides` table: `id` (PK), `session_id` (FK to `user_sessions.id`), `position` (0-indexed integer), `html` (slide body HTML, not full document), `slide_id` (optional UUID), `scripts` (Chart.js etc.), `created_by` (username), `created_at` (ISO timestamp), `modified_by` (username), `modified_at` (ISO timestamp), `verification_record` (JSON, nullable, keyed by `content_hash` if present, carries review findings), `deck_spec_slide` (JSON, nullable, the slide's spec fragment from §4), composite primary key `(session_id, position)`.
+- `session_slides` table: `id` (unique index, not PK), `session_id` (FK to `user_sessions.id`), `position` (0-indexed integer), `html` (slide body HTML, not full document), `slide_id` (optional UUID), `scripts` (Chart.js etc.), `created_by` (username), `created_at` (ISO timestamp), `modified_by` (username), `modified_at` (ISO timestamp), `verification_record` (JSON, nullable, keyed by `content_hash` if present, carries review findings), `deck_spec_slide` (JSON, nullable, the slide's spec fragment from §4). **Composite primary key: `(session_id, position)` — one row per slide position, immutable once set.**
 - `session_slide_decks` loses `deck_json` and `verification_map` as columns (data migrated to rows and verification_record); keeps `title`, `version`, `locked_by`, `locked_at`, `css` (deck-level CSS), `scripts_content` (deck-level scripts), `created_at`, `updated_at`, `modified_by`.
 - `slide_deck_versions` gains `deck_spec_json` column (immutable snapshot of the full deck spec at save-point time).
 
@@ -841,7 +841,7 @@ def main(argv: list | None = None) -> int:
             print("No sessions to backfill")
             return 0
 
-        print(f"Backfilling {len(session_ids)} session(s) {'' if args.yes is False else '(dry-run)'}")
+        print(f"Backfilling {len(session_ids)} session(s) {'(dry-run)' if args.yes is False else ''}")
 
         total_inserted = 0
         total_skipped = 0
