@@ -111,9 +111,18 @@ Verified-resolving set:
 | `langchain` | 1.0.5 | **1.3.14** |
 | `langchain-core` | 1.0.4 | **1.5.3** |
 | `langgraph-checkpoint` | 3.0.1 | **4.1.1** |
-| `langgraph-checkpoint-postgres` | — (absent) | **added** (the Lakebase saver) |
-| `psycopg` (psycopg3) | — (absent) | **added** |
+| `langgraph-prebuilt` | 1.0.x (transitive) | **1.1.0** — *not* 1.2.x; no such version exists |
+| `langgraph-sdk` | transitive | **0.4.2** (the proxy's maximum) |
+| `langgraph-checkpoint-postgres` | — (absent) | **3.1.1** (the Lakebase saver) — the proxy **403s 3.1.2**, so pin 3.1.1 |
+| `psycopg` (psycopg3) | — (absent) | **added** (`>=3.2.0`) |
+| `psycopg-pool` | — (absent) | **added** (`>=3.2.0`) — required by the saver |
+| `orjson` | — (absent) | **added** (`>=3.11.5`) — required by the saver |
 | `psycopg2-binary` | 2.9.10 | **removed** |
+
+The `langgraph-prebuilt` / `langgraph-sdk` / `psycopg-pool` / `orjson` rows and the
+3.1.1 pin were established by proxy dry-runs while planning PR2; an earlier draft of
+this table was incomplete. **Treat the pins as verified-against-the-proxy, and re-verify
+before merging** — proxy availability moves.
 
 **Postgres checkpointer — decided: adopt `langgraph-checkpoint-postgres` and upgrade to
 psycopg3.** §5.7 requires a Lakebase-backed checkpointer, and `langgraph-checkpoint`
