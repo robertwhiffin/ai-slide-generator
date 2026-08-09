@@ -350,7 +350,7 @@ class Skill(BaseModel):
     tools: list[str]
     
     class Config:
-        frozen = True
+        frozen = False  # Allow composition helpers to work with Skill instances
 ```
 
 - [ ] **Step 3: Create stub skill files**
@@ -1214,7 +1214,51 @@ def build_reviewer_node(state: GraphState, config: AgentConfig, position: int,
         }
 ```
 
-- [ ] **Step 3: Implement fixer_node**
+- [ ] **Step 3: Implement router functions**
+
+```python
+def architect_router(state: GraphState) -> str:
+    """Route architect output by intent."""
+    intent = state.get("intent", "discuss")
+    if intent == "discuss":
+        return "discuss"
+    elif intent == "build":
+        return "build"
+    elif intent == "ask_data":
+        return "ask_data"
+    elif intent == "edit":
+        return "edit"
+    else:
+        return "discuss"
+
+def reviewer_router(state: GraphState, position: int, findings: list | None) -> str:
+    """Route build_reviewer output: clean lands, findings go to foreman."""
+    if findings:
+        return "findings"
+    else:
+        return "land"
+
+def foreman_router(state: GraphState) -> str:
+    """Route foreman: dispatch builders, fix findings, review deck, or end."""
+    outstanding = state.get("builder_queue", [])
+    fix_map = state.get("fix_map", {})
+    landed = state.get("landed_positions", set())
+    total_positions = len(state["deck_spec"].slides) if state.get("deck_spec") else 0
+    
+    # If there are unfixed findings, route to fixer
+    if fix_map:
+        return "fix"
+    # If there are outstanding positions, dispatch builders
+    elif outstanding:
+        return "build"
+    # If all positions landed, do deck review
+    elif landed and len(landed) == total_positions:
+        return "deck_review"
+    else:
+        return "end"
+```
+
+- [ ] **Step 3b: Implement fixer_node**
 
 ```python
 def fixer_node(state: GraphState, config: AgentConfig, position: int, 
