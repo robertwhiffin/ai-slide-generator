@@ -227,7 +227,7 @@ def write_deck_spec(self, session_id: str, spec: Dict[str, Any]) -> None:
 | `tests/unit/test_session_slides_migration.py` | Create | Unit tests for schema migration: column existence, idempotency. |
 | `tests/unit/test_session_slides_schema.py` | Create | Unit tests: insert/read/reorder/placeholder logic for `session_slides` rows. |
 | `tests/integration/test_export_parity.py` | Create | E2E: export sample real decks via new row-based `get_slide_deck()`, compare to current exports. |
-| `tests/integration/test_save_point_restore.py` | Modify | Extend existing restore tests to verify deck spec is preserved in `SlideDeckVersion`. |
+| `tests/integration/test_savepoint_e2e.py` | Modify | Extend existing restore tests to verify deck spec is preserved in `SlideDeckVersion`. |
 | `docs/technical/schema-migration-row-per-slide.md` | Create | Operator runbook: migration steps, backfill, verification, rollback procedure. |
 
 ---
@@ -841,7 +841,7 @@ def main(argv: list | None = None) -> int:
             print("No sessions to backfill")
             return 0
 
-        print(f"Backfilling {len(session_ids)} session(s) {'(dry-run)' if args.yes is False else ''}")
+        print(f"Backfilling {len(session_ids)} session(s) {'' if args.yes is False else '(dry-run)'}")
 
         total_inserted = 0
         total_skipped = 0
@@ -926,10 +926,10 @@ Expected: Test is minimal; skip if test harness is complex.
 
 - [ ] **Step 3: Update write_slide_deck to dual-write**
 
-In `src/api/services/session_manager.py`, find the `write_slide_deck` method (around line 650). Add dual-write logic:
+In `src/api/services/session_manager.py`, find the `save_slide_deck` method (around line 844). Add dual-write logic:
 
 ```python
-def write_slide_deck(
+def save_slide_deck(
     self,
     session_id: str,
     deck_dict: Dict[str, Any],
@@ -1284,10 +1284,9 @@ class SlideWriter:
         is provided, it is written with the HTML. If deck_spec_slide is provided,
         it is persisted; if None, existing deck_spec_slide is left unchanged.
         """
-        from src.core.database import get_db_session
-        from src.database.models.session import SessionSlide, UserSession
-        from sqlalchemy import and_
         from datetime import datetime
+        from sqlalchemy import and_
+        from src.database.models.session import SessionSlide, UserSession
 
         if modified_by is None:
             modified_by = get_current_username()
@@ -1339,9 +1338,8 @@ class SlideWriter:
         position: int,
     ) -> Optional[Dict[str, Any]]:
         """Retrieve a single slide row as a dict."""
-        from src.core.database import get_db_session
-        from src.database.models.session import SessionSlide
         from sqlalchemy import and_
+        from src.database.models.session import SessionSlide
 
         with get_db_session() as db:
             session = self.session_manager._get_session_or_raise(db, session_id)
@@ -1383,7 +1381,6 @@ class SlideWriter:
                     result["deck_spec_slide"] = None
 
             # Compute content hash
-            from src.utils.slide_hash import compute_slide_hash
             result["content_hash"] = compute_slide_hash(row.html)
 
             return result
@@ -1394,7 +1391,6 @@ class SlideWriter:
         from_position: int = 0,
     ) -> List[Dict[str, Any]]:
         """List all slides from from_position onward, in order."""
-        from src.core.database import get_db_session
         from src.database.models.session import SessionSlide
 
         with get_db_session() as db:
@@ -1420,9 +1416,8 @@ class SlideWriter:
         position: int,
     ) -> None:
         """Delete a slide row."""
-        from src.core.database import get_db_session
-        from src.database.models.session import SessionSlide
         from sqlalchemy import and_
+        from src.database.models.session import SessionSlide
 
         with get_db_session() as db:
             session = self.session_manager._get_session_or_raise(db, session_id)
@@ -1451,7 +1446,6 @@ class SlideWriter:
         and a sentinel value so the UI can show it as failed. The position is marked
         as "landed" so reorder buffer release and deck-review trigger both proceed.
         """
-        from datetime import datetime
         placeholder_html = f'<div class="slide placeholder" data-error="{error_message}"><p>Slide generation failed. <a href="">Retry</a></p></div>'
         self.write_slide(
             session_id=session_id,
@@ -1637,7 +1631,7 @@ git commit -m "test(export): verify PPTX and Google Slides export parity with ro
 ## Task 9: Save-point restore verification
 
 **Files:**
-- Modify: `tests/integration/test_save_point_restore.py` (existing file; add spec snapshot checks)
+- Modify: `tests/integration/test_savepoint_e2e.py` (existing file; add spec snapshot checks)
 
 **Interfaces:**
 - Consumes: Existing save-point restore flow
@@ -1645,7 +1639,7 @@ git commit -m "test(export): verify PPTX and Google Slides export parity with ro
 
 - [ ] **Step 1: Extend restore tests to verify spec**
 
-In `tests/integration/test_save_point_restore.py`, add tests:
+In `tests/integration/test_savepoint_e2e.py`, add tests:
 
 ```python
 def test_restore_preserves_deck_spec():
@@ -1658,7 +1652,7 @@ def test_restore_preserves_deck_spec():
 - [ ] **Step 2: Run tests**
 
 ```bash
-pytest tests/integration/test_save_point_restore.py -v
+pytest tests/integration/test_savepoint_e2e.py -v
 ```
 
 Expected: PASS
@@ -1666,7 +1660,7 @@ Expected: PASS
 - [ ] **Step 3: Commit**
 
 ```bash
-git add tests/integration/test_save_point_restore.py
+git add tests/integration/test_savepoint_e2e.py
 git commit -m "test(restore): verify deck spec is restored alongside deck_json at save points"
 ```
 
