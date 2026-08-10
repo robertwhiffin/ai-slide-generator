@@ -442,16 +442,18 @@ Produces:
 from typing_extensions import TypedDict
 
 class GraphState(TypedDict):
-    """LangGraph state dict."""
+    """LangGraph state dict. Fan-in keys carry reducers — see Step 1 for why."""
     session_id: str
-    conversation: list[dict]  # [{role, content, agent?}]
+    conversation: list[dict]                              # [{role, content, agent?}]
     deck_spec: DeckSpec | None
-    current_deck: dict  # {slides: [...], css: ...}
-    findings: list[Finding]  # accumulated, routed later
-    builder_queue: list[int]  # outstanding slide positions
-    landed_positions: set[int]  # committed to Lakebase
-    fix_map: dict[int, dict]  # position -> {original_html, finding}
     error_state: dict | None
+    findings: Annotated[list[dict], operator.add]
+    landed_positions: Annotated[set[int], union_set]
+    placeheld_positions: Annotated[set[int], union_set]
+    slides: Annotated[dict[int, dict], merge_dict]        # position -> {html, scripts}
+    dispatched_at: Annotated[dict[int, float], merge_dict]
+    retry_count: Annotated[dict[int, int], merge_dict]
+    fix_map: Annotated[dict[int, dict], merge_dict]
 
 # In checkpointer.py:
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -473,24 +475,62 @@ def get_checkpointer() -> BaseCheckpointSaver:
 
 `src/services/langgraph_state.py`:
 ```python
+import operator
+from typing import Annotated, Any
 from typing_extensions import TypedDict
+
 from src.domain.deck_spec import DeckSpec
 
+
+def merge_dict(a: dict, b: dict) -> dict:
+    """Last-writer-wins per key. Each branch owns its own position key, so
+    concurrent builders never contend on the same key."""
+    out = dict(a or {})
+    out.update(b or {})
+    return out
+
+
+def union_set(a: set, b: set) -> set:
+    return set(a or set()) | set(b or set())
+
+
 class GraphState(TypedDict):
+    # Single-writer keys (only the architect/foreman write these) — no reducer needed.
     session_id: str
     conversation: list[dict]
     deck_spec: DeckSpec | None
-    current_deck: dict
-    findings: list[dict]
-    builder_queue: list[int]
-    landed_positions: set[int]
-    fix_map: dict[int, dict]
     error_state: dict | None
+
+    # FAN-IN KEYS. Every key written by more than one concurrent branch MUST carry a
+    # reducer, or LangGraph raises:
+    #   InvalidUpdateError: At key 'x': Can receive only one value per step.
+    # Verified against the installed langgraph: 4 parallel Send branches writing all
+    # four keys below merge cleanly with these reducers.
+    findings: Annotated[list[dict], operator.add]        # accumulate across slides
+    landed_positions: Annotated[set[int], union_set]     # committed positions
+    placeheld_positions: Annotated[set[int], union_set]  # terminal failures (§5.5)
+    slides: Annotated[dict[int, dict], merge_dict]       # position -> {html, scripts}
+    dispatched_at: Annotated[dict[int, float], merge_dict]  # position -> dispatch ts
+    retry_count: Annotated[dict[int, int], merge_dict]   # position -> attempts
+    fix_map: Annotated[dict[int, dict], merge_dict]      # position -> {original_html,
+                                                        #              original_scripts,
+                                                        #              finding}
 ```
 
-- [ ] **Step 2: Write tests for state shape**
+> **`fix_map` carries `original_scripts` as well as `original_html`.** The fix reviewer
+> compares original vs fixed for *both* (spec §5.5's three inputs), and an earlier draft
+> read `fix_map[position]["scripts"]`, a key that was never written.
 
-`tests/unit/test_langgraph_state.py`: Validate required fields, check that state can be serialized/deserialized for checkpointing.
+- [ ] **Step 2: Write tests for state shape and fan-in**
+
+`tests/unit/test_langgraph_state.py`:
+- Required keys present; `DeckSpec` round-trips through the serializer.
+- **Reducer tests, one per fan-in key:** two simulated concurrent updates merge rather
+  than collide — `findings` concatenates, `landed_positions`/`placeheld_positions` union,
+  `slides`/`dispatched_at`/`retry_count`/`fix_map` merge per key.
+- **A compiled-graph fan-in test:** dispatch N stub builders via `Send` and assert all N
+  results survive. This is the test that actually catches a missing reducer; a
+  dict-merge unit test alone does not, because the error is raised by the runtime.
 
 - [ ] **Step 3: Implement the custom checkpoint saver**
 
@@ -832,35 +872,68 @@ def foreman_node(state: GraphState) -> dict:
 - [ ] **Step 6: Implement builder_node (skeleton)**
 
 ```python
-def builder_node(state: GraphState, config: AgentConfig, idx: int) -> dict:
-    """Build one slide."""
-    # Receive spec_slide + current_deck CSS
-    # Call builder skill
-    # Return {html, scripts}
-    # Forward to build_reviewer (direct edge, not via foreman)
+def builder_node(payload: dict) -> dict:
+    """Build one slide.
+
+    THE SEND PAYLOAD IS THIS NODE'S ENTIRE INPUT. When a node is reached via
+    Send("builder", {...}), it receives that dict — not GraphState. So everything
+    the builder needs must be in the payload the router built:
+        {"session_id", "position", "slide_spec", "css_contract", "resolved_data"}
+    Extra positional params (state, config, idx) are invalid: LangGraph calls
+    node(input) or node(input, config) and would raise
+    "TypeError: builder_node() missing 1 required positional argument".
+    """
+    # Call builder skill with payload["slide_spec"] + payload["css_contract"]
+    # Return {"slides": {payload["position"]: {"html": ..., "scripts": ...}}}
+    #   -> merged by the slides reducer; keyed by position so branches never collide.
+    # Then the static builder -> build_reviewer edge carries it onward.
 ```
+
+> **Payload vs state is the one thing to get right in this phase.** A `Send`-reached node
+> cannot read `state["deck_spec"]`, so the router must copy the per-slide brief, the CSS
+> contract and any resolved data into the payload. Returning position-keyed dicts is what
+> lets the reducers merge concurrent branches.
 
 - [ ] **Step 7: Implement build_reviewer_node (skeleton)**
 
 ```python
-def build_reviewer_node(state: GraphState, config: AgentConfig, idx: int) -> dict:
-    """Review builder output; route findings or write row."""
-    # Receive {html, scripts} from builder
-    # Call build_reviewer skill
-    # If clean: write row via SlideWriter; mark position as landed
-    # If findings: return findings back to foreman
+def build_reviewer_node(payload: dict) -> dict:
+    """Review builder output; write the row if clean, else hand the fix over.
+
+    Reached by the static builder -> build_reviewer edge, so it receives whatever
+    builder_node returned, merged with the branch payload: position, html, scripts,
+    plus the brief/CSS contract it needs as the review rubric.
+    """
+    # Call build_reviewer skill (multi-criteria; each finding self-tags
+    #   objective|subjective per PRD §7.2)
+    # If no objective findings:
+    #     SlideWriter().write_slide(session_id, position, html, scripts,
+    #                               verification_record=record)
+    #     return {"landed_positions": {position},
+    #             "findings": subjective_findings}
+    # Else:
+    #     return {"fix_map": {position: {"original_html": html,
+    #                                    "original_scripts": scripts,
+    #                                    "finding": objective_finding}},
+    #             "findings": subjective_findings}
 ```
+
+> Note the return shapes are **`GraphState` keys with reducers** (`landed_positions`,
+> `fix_map`, `findings`) — not ad-hoc keys like `{"action": "land"}`. An earlier draft
+> returned keys no node ever read, which is why `foreman_router` could only ever
+> return `END` and the graph was dead on arrival.
 
 - [ ] **Step 8: Write tests**
 
-`tests/unit/test_graph_state_machine.py`:
-- Test architect node output shape
-- Test architect_router paths
-- Test foreman dispatch of N builders
-- Test builder node produces HTML
-- Test build_reviewer node produces findings
-
-(Use mocks for LLM calls.)
+`tests/unit/test_graph_state_machine.py` (mock the LLM calls):
+- Architect node output shape; `architect_router` paths.
+- Builder node produces `{"slides": {position: {...}}}` — position-keyed, so reducers
+  merge it.
+- Build reviewer: clean verdict → `landed_positions` written and `SlideWriter.write_slide`
+  called; findings verdict → `fix_map` populated with original html **and** scripts.
+- **Every node's return keys are a subset of `GraphState`'s keys.** Add one test that
+  asserts this across all nodes — it is the cheap guard against the "returns keys nobody
+  reads" class of bug, which is otherwise invisible until the graph silently ends.
 
 - [ ] **Step 9: Commit**
 
@@ -1309,57 +1382,83 @@ Connect the nodes:
 - [ ] **Step 1: Implement builder_node (complete)**
 
 ```python
-def builder_node(state: GraphState, config: AgentConfig, position: int) -> dict:
-    slide_spec = state["deck_spec"].slides[position]
-    css = state["current_deck"]["css"]
+def builder_node(payload: dict) -> dict:
+    """Build one slide. `payload` is the Send arg — NOT GraphState.
+
+    Verified: a Send-reached node receives only the payload dict; state keys such as
+    deck_spec are not visible. foreman_router must therefore pre-copy everything
+    needed here (see Phase 5 Step 6).
+    """
+    position = payload["position"]
     output = call_skill_with_llm(
         "builder",
         input={
             "position": position,
-            "slide_spec": slide_spec,
-            "css_contract": css,
-            "deck_spec": state["deck_spec"],
-            "resolved_data": state["deck_spec"].resolved_data
-        }
+            "slide_spec": payload["slide_spec"],       # this slide's brief only
+            "css_contract": payload["css_contract"],   # foreman-owned, read-only
+            "assumes": payload["assumes"],             # narrative contract
+            "hands_off": payload["hands_off"],
+            "resolved_data": payload["resolved_data"], # analyst synthesis
+        },
     )
+    # Position-keyed so the `slides` reducer merges concurrent branches.
     return {
-        "html": output["html"],
-        "scripts": output["scripts"],
-        "position": position
+        "slides": {position: {"html": output["html"], "scripts": output["scripts"]}},
+        "dispatched_at": {},   # stamped by the foreman, not here
     }
 ```
+
+> **Do not index the spec by list position.** `SlideSpec` carries an explicit `position`
+> field, so `deck_spec.slides[position]` diverges from the intended slide after a delete
+> or a partial multi-target rebuild. The router looks the brief up **by** `position` and
+> passes it in, which removes the trap from every downstream node.
 
 - [ ] **Step 2: Implement build_reviewer_node (complete)**
 
 ```python
-def build_reviewer_node(state: GraphState, config: AgentConfig, position: int, 
-                        html: str, scripts: str) -> dict:
+def build_reviewer_node(payload: dict) -> dict:
+    """Review one slide. Reached by the static builder -> build_reviewer edge, so it
+    sees the builder's output merged with the branch payload."""
+    position = payload["position"]
+    session_id = payload["session_id"]
+    html, scripts = payload["html"], payload["scripts"]
+
     output = call_skill_with_llm(
         "build_reviewer",
         input={
             "html": html,
             "scripts": scripts,
-            "deck_spec": state["deck_spec"],
-            "slide_spec": state["deck_spec"].slides[position]
-        }
+            "slide_spec": payload["slide_spec"],     # the rubric the builder was given
+            "css_contract": payload["css_contract"],
+            "resolved_data": payload["resolved_data"],
+        },
     )
-    if output["verdict"] == "clean":
-        # Write row
-        write_reviewed_slide(
-            state["session_id"], position, html, scripts,
-            verification_record={"timestamp": now(), ...}
+    # Each finding self-tags objective|subjective (PRD §7.2).
+    objective = [f for f in output["findings"] if f["objective"]]
+    subjective = [f for f in output["findings"] if not f["objective"]]
+
+    if not objective:
+        # Reviewer writes the row: an unreviewed slide never persists (spec §5.5).
+        SlideWriter().write_slide(
+            session_id, position, html, scripts,
+            verification_record=build_verification_record(output),
         )
-        return {"action": "land", "position": position}
-    else:
-        # Return findings to foreman
-        return {
-            "action": "findings",
-            "position": position,
-            "findings": output["findings"],
-            "html": html,  # hold for fix reviewer
-            "scripts": scripts
-        }
+        return {"landed_positions": {position}, "findings": subjective}
+
+    return {
+        "fix_map": {position: {
+            "original_html": html,
+            "original_scripts": scripts,
+            "finding": objective[0],
+        }},
+        "findings": subjective,
+    }
 ```
+
+> Returns are `GraphState` keys with reducers, so concurrent reviewers merge instead of
+> colliding. `SlideWriter` is instantiated (its methods take `self`), and per PR1's
+> contract `verification_record=None` would *preserve* an existing record — so pass an
+> explicit record when writing a fresh verdict.
 
 - [ ] **Step 3: Implement router functions**
 
@@ -1378,109 +1477,179 @@ def architect_router(state: GraphState) -> str:
     else:
         return "discuss"
 
-def reviewer_router(state: GraphState, position: int, findings: list | None) -> str:
-    """Route build_reviewer output: clean lands, findings go to foreman."""
-    if findings:
-        return "findings"
-    else:
-        return "land"
+def reviewer_router(state: GraphState) -> str:
+    """After a build review: hand over to the fixer, or back to the foreman.
 
-def foreman_router(state: GraphState) -> str:
-    """Route foreman: dispatch builders, fix findings, review deck, or end."""
-    outstanding = state.get("builder_queue", [])
-    fix_map = state.get("fix_map", {})
-    landed = state.get("landed_positions", set())
-    total_positions = len(state["deck_spec"].slides) if state.get("deck_spec") else 0
-    
-    # If there are unfixed findings, route to fixer
-    if fix_map:
-        return "fix"
-    # If there are outstanding positions, dispatch builders
-    elif outstanding:
-        return "build"
-    # If all positions landed, do deck review
-    elif landed and len(landed) == total_positions:
-        return "deck_review"
-    else:
-        return "end"
+    A conditional-edge router takes (state) — or (state, config) — ONLY. Extra
+    positional params raise "TypeError: route() missing 2 required positional
+    arguments". Per-branch facts must be read out of state, not passed in.
+    """
+    return "fix" if state.get("fix_map") else "land"
+
+
+def foreman_router(state: GraphState):
+    """Dispatch the next ascending batch, or advance the turn.
+
+    Returns list[Send] for fan-out, or a node name. Reads ONLY keys that nodes
+    actually write (see the reducers in Phase 1) — the earlier draft read
+    `builder_queue`, which nothing wrote, so it always fell through to END and the
+    graph never built a deck.
+    """
+    if state.get("fix_map"):
+        return "fixer"
+
+    batch = next_dispatch_batch(state)                    # Phase 4, ascending
+    if batch:
+        return [
+            Send("builder", build_branch_payload(state, p))  # Send(node, arg)
+            for p in batch
+        ]
+
+    if all_positions_committed(state):   # landed | placeheld covers every spec position
+        return "deck_reviewer"
+    return END
+
+
+def build_branch_payload(state: GraphState, position: int) -> dict:
+    """Everything a Send-reached branch needs, because it cannot see GraphState."""
+    spec = state["deck_spec"]
+    slide = spec.slide_at(position)      # lookup BY position, not list index
+    return {
+        "session_id": state["session_id"],
+        "position": position,
+        "slide_spec": slide,
+        "assumes": slide.assumes,
+        "hands_off": slide.hands_off,
+        "css_contract": spec.design_contract,
+        "resolved_data": spec.resolved_data,
+    }
 ```
+
+> `all_positions_committed` must count **placeheld** positions as committed, otherwise a
+> single terminal builder failure means deck review never fires and the turn never ends
+> (spec §5.5). `len(landed) == len(spec.slides)` is the wrong predicate for that reason.
 
 - [ ] **Step 3b: Implement fixer_node**
 
 ```python
-def fixer_node(state: GraphState, config: AgentConfig, position: int, 
-               finding: dict, html: str, scripts: str) -> dict:
+def fixer_node(state: GraphState) -> dict:
+    """Make the minimal change that resolves one objective finding.
+
+    Takes (state) only. Picks the lowest outstanding fix so behaviour is
+    deterministic when several positions need fixing in the same turn.
+    """
+    position = min(p for p, e in state["fix_map"].items() if e is not None)
+    entry = state["fix_map"][position]
+
     output = call_skill_with_llm(
         "fixer",
         input={
-            "original_html": html,
-            "original_scripts": scripts,
-            "finding": finding,
-            "css_contract": state["current_deck"]["css"],
-            "deck_spec": state["deck_spec"]
-        }
+            "finding": entry["finding"],
+            "original_html": entry["original_html"],
+            "original_scripts": entry["original_scripts"],
+            "css_contract": state["deck_spec"].design_contract,
+            "slide_spec": state["deck_spec"].slide_at(position),
+        },
     )
     return {
-        "position": position,
-        "fixed_html": output["html"],
-        "fixed_scripts": output["scripts"],
-        "original_html": html
+        "fix_target": position,
+        "fixed": {position: {"html": output["html"], "scripts": output["scripts"]}},
     }
 ```
+
+Add the two keys this introduces to `GraphState` (Phase 1 Step 1):
+
+```python
+    fix_target: int | None                                # position currently in the fixer
+    fixed: Annotated[dict[int, dict], merge_dict]         # position -> {html, scripts}
+```
+
+> **Fixer and builder are separate skills** over shared fragments (spec §5.6): the
+> builder authors, the fixer makes the minimal change. Handing broken HTML to an
+> authoring agent gets the slide re-authored, which can undo what already passed review
+> and — once WYSIWYG lands — overwrite a user's manual edits.
 
 - [ ] **Step 4: Implement fix_reviewer_node**
 
 ```python
-def fix_reviewer_node(state: GraphState, config: AgentConfig, position: int,
-                      finding: dict, original_html: str, fixed_html: str,
-                      fixed_scripts: str) -> dict:
+def fix_reviewer_node(state: GraphState) -> dict:
+    """Choose fixed-or-original and write the winner (spec §5.5).
+
+    Three inputs: the finding, the original, and the fix. Original + fixed gives a
+    diff, so "did the fix introduce a new defect?" is scoped to what changed.
+    """
+    position = state["fix_target"]                 # set by the fixer
+    entry = state["fix_map"][position]
+    original_html = entry["original_html"]
+    original_scripts = entry["original_scripts"]   # NOT entry["scripts"] — that key
+                                                   # never existed in an earlier draft
+    fixed_html = state["fixed"][position]["html"]
+    fixed_scripts = state["fixed"][position]["scripts"]
+
     output = call_skill_with_llm(
         "fix_reviewer",
         input={
+            "finding": entry["finding"],
             "original_html": original_html,
             "fixed_html": fixed_html,
-            "finding": finding,
-            "deck_spec": state["deck_spec"]
-        }
+            "slide_spec": state["deck_spec"].slide_at(position),
+        },
     )
-    choice_html = fixed_html if output["choice"] == "fixed" else original_html
-    choice_scripts = fixed_scripts if output["choice"] == "fixed" else state["fix_map"][position]["scripts"]
-    
-    write_reviewed_slide(
-        state["session_id"], position, choice_html, choice_scripts,
-        verification_record={...}
+    chose_fixed = output["choice"] == "fixed"
+    html = fixed_html if chose_fixed else original_html
+    scripts = fixed_scripts if chose_fixed else original_scripts
+
+    SlideWriter().write_slide(
+        state["session_id"], position, html, scripts,
+        verification_record=build_verification_record(output),
     )
-    
-    if output["choice"] == "original":
-        # Surface the finding
-        return {"action": "surface_finding", "position": position, "finding": finding}
-    else:
-        return {"action": "land", "position": position}
+
+    # Clear the fix entry so foreman_router stops routing to the fixer, and land the
+    # position either way — one fix round only; a survivor becomes a surfaced finding.
+    return {
+        "landed_positions": {position},
+        "fix_map": {position: None},          # tombstone; merge_dict overwrites the key
+        "findings": [] if chose_fixed else [entry["finding"]],
+    }
 ```
+
+> **The one-round cap is enforced here, not by a counter.** The fix entry is cleared
+> whichever version wins, so no position can enter the fixer twice.
 
 - [ ] **Step 5: Implement foreman dispatch and routing**
 
 ```python
-def foreman_node(state: GraphState, config: AgentConfig) -> dict:
-    # Receive findings from build/fix reviewers
-    # Dispatch builders in ascending order, respecting cap
-    to_dispatch = foreman_service.dispatch_builders(
-        state["deck_spec"], state["landed_positions"]
-    )
-    
-    # Route findings
-    for finding in state["findings"]:
-        if finding["auto_fixable"]:
-            # Send to fixer (added to Send list)
-            pass
-        else:
-            # Surface (added to state["findings"])
-            pass
-    
-    return {
-        "builds_to_dispatch": to_dispatch,
-        # ...
-    }
+def foreman_node(state: GraphState) -> dict:
+    """Advance turn state. Dispatch itself lives in foreman_router — Send objects
+    must be RETURNED from a conditional edge, never written into state. The earlier
+    draft returned {"builds_to_dispatch": [...]}, a key nothing read, so nothing was
+    ever dispatched."""
+    now = time.time()
+    updates: dict = {}
+
+    batch = next_dispatch_batch(state)
+    if batch:
+        updates["dispatched_at"] = {
+            p: now for p in batch if p not in state.get("dispatched_at", {})
+        }
+
+    stalled = stalled_positions(state, now)
+    if stalled:
+        writer = SlideWriter()
+        for pos in stalled:
+            writer.commit_placeholder(
+                state["session_id"], pos,
+                error_message="timeout: position did not complete",
+            )
+        updates["placeheld_positions"] = set(stalled)
+
+    return updates
+```
+
+> Finding routing needs no loop here: the build reviewer already tagged each finding and
+> put objective ones into `fix_map`, so `foreman_router` only has to check whether
+> `fix_map` is non-empty. Subjective findings accumulate in `findings` via the reducer
+> and are surfaced by the architect at the end of the turn.
 ```
 
 - [ ] **Step 6: Hook all nodes into graph**
@@ -2057,50 +2226,81 @@ def gate_fixer_output(html: str) -> None:
 
 - [ ] **Step 1: Review existing safety infrastructure**
 
-Check `src/api/routes/chat.py` for `_run_output_safety_gate` (line 97). Reuse that for fixer output.
-
-- [ ] **Step 2: Wrap builder output in untrusted-data**
-
-```python
-def build_reviewer_node(..., html: str, scripts: str):
-    # Wrap HTML in <untrusted-data>
-    html_wrapped = f'<untrusted-data source="builder">{html}</untrusted-data>'
-    
-    # Apply safety gate
-    try:
-        _run_output_safety_gate(html_wrapped, scripts)
-    except UnsafeContentError as e:
-        return {"error": f"unsafe content: {e}", "position": position}
-```
-
-- [ ] **Step 3: Gate fixer output**
+**Relocate the gate first.** `_run_output_safety_gate` lives in `src/services/agent.py:97`
+(not `chat.py`), and Phase 9 deletes that file — so move it to
+`src/services/output_safety.py` and re-point the existing importers (`chat.py:37` imports
+`UnsafeContentError` from `src.services.agent` and uses it at `:265` and `:398`). Its real
+signature and semantics:
 
 ```python
-def fixer_node(...) -> dict:
-    fixed_html = output["html"]
-    
-    # Cap output
-    from src.utils.text_caps import cap_tool_output
-    fixed_html = cap_tool_output(fixed_html, limit=32768)
-    
-    # Gate it
-    try:
-        _run_output_safety_gate(fixed_html, output["scripts"])  # scripts is str
-    except UnsafeContentError as e:
-        # Return original (not the unsafe fixed version)
-        return {"error": f"fixer produced unsafe content: {e}", "use_original": True}
+def _run_output_safety_gate(html_output, regenerate, session_id, on_retry=None):
+    """-> (safe_html, retried). `regenerate` is a ZERO-ARG CALLABLE the gate invokes
+    itself if scan_html_for_unsafe_patterns finds something; it retries once, then
+    raises UnsafeContentError. It scans HTML ONLY — never scripts."""
 ```
 
-- [ ] **Step 4: Gate data analyst output**
+- [ ] **Step 2: Wrap untrusted content with `spotlight()`, never a hand-rolled f-string**
 
-Wrap data analyst result in `<untrusted-data source="data_analyst">...</untrusted-data>`.
+```python
+from src.utils.spotlight import spotlight
+
+# In build_reviewer_node, before handing builder HTML to the reviewer LLM:
+html_for_review = spotlight("builder", html, session_id=session_id)
+```
+
+`spotlight(source, text, *, scan=True, session_id=None)` (`src/utils/spotlight.py:22`)
+applies `cap_tool_output`, **neutralises embedded `<untrusted-data>` openers/closers** so
+a payload cannot break out of its own wrapper, and runs injection scanning. An
+f-string wrapper does none of that — and that escape was a previously-fixed review
+finding, so re-introducing it is a regression, not a new bug. Spec §8.1 requires this at
+**every** boundary, which includes agent-shaped producers (builder, fixer, analyst).
+
+- [ ] **Step 3: Gate fixer output with the correct signature**
+
+```python
+def fixer_node(state: GraphState) -> dict:
+    ...
+    def _regenerate() -> str:
+        """Zero-arg retry the gate can call: re-run the fixer with a corrective
+        instruction appended."""
+        return call_skill_with_llm("fixer", input={**fix_input,
+                                                  "corrective": SAFETY_CORRECTIVE})["html"]
+
+    try:
+        safe_html, retried = _run_output_safety_gate(
+            output["html"], _regenerate, state["session_id"]
+        )
+    except UnsafeContentError:
+        # Keep the original; the fix reviewer will surface the finding instead.
+        return {"fix_target": position,
+                "fixed": {position: {"html": entry["original_html"],
+                                     "scripts": entry["original_scripts"]}}}
+```
+
+> **Gate coverage gap, stated explicitly.** The gate scans HTML only, so passing
+> `scripts` to it (as an earlier draft did, in the `regenerate` slot) both crashes and
+> gives zero script coverage. Slide scripts still get their own validation via the
+> Chart.js/JS checks the builder pipeline already runs; if script-level safety scanning is
+> wanted, that is a separate change to `scan_html_for_unsafe_patterns`, not something the
+> current gate provides.
+
+- [ ] **Step 4: Wrap data analyst and tool output**
+
+The analyst is an agent, not a tool, so it does not inherit the tool-boundary wrapping
+automatically. Wrap every gatherer result it returns with `spotlight("data_analyst", ...)`
+before it reaches the architect, and keep the existing per-tool `spotlight` calls in
+`src/services/tools/*` intact.
 
 - [ ] **Step 5: Test security gates**
 
 `tests/unit/test_security_gates.py`:
-- Test that reviewer rejects unsafe HTML
-- Test that fixer output is gated
-- Test that data analyst output is wrapped
+- Unsafe builder HTML → gate retries once via `regenerate`, then raises
+  `UnsafeContentError`; assert the fix path falls back to the original.
+- **Delimiter breakout:** builder HTML containing a literal `</untrusted-data>` is
+  neutralised by `spotlight` (assert the payload cannot terminate its wrapper).
+- Analyst output is wrapped before reaching the architect.
+- The gate is called with a **callable** in the `regenerate` slot — a test that passes a
+  string and expects `TypeError` documents the contract.
 
 - [ ] **Step 6: Commit**
 
