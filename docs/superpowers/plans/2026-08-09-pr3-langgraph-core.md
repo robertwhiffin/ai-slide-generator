@@ -817,11 +817,16 @@ def data_analyst_node(state: GraphState, config: AgentConfig) -> dict:
 - [ ] **Step 5: Implement foreman_node (skeleton)**
 
 ```python
-def foreman_node(state: GraphState, config: AgentConfig) -> dict:
-    """Foreman dispatcher: queue builders, enforce cap, return Send list."""
-    # Extract spec and positions to build
-    # Determine which positions are outstanding (not in landed_positions)
-    # Return Send([Send(("builder", idx, spec_slide) for each idx in ascending order)])
+def foreman_node(state: GraphState) -> dict:
+    """Advance the turn: stamp dispatches, placehold stalls, emit releasable slides.
+
+    A LangGraph node takes (state) or (state, config) only — no extra positional
+    args. Per-branch data arrives via the Send payload, not extra parameters.
+
+    NOTE: the node does NOT dispatch. Fan-out happens in foreman_router, because
+    Send objects must be returned from a conditional edge (see Phase 5 Step 6):
+        Send("builder", {"position": p, "slide_spec": ...})   # Send(node, arg)
+    """
 ```
 
 - [ ] **Step 6: Implement builder_node (skeleton)**
@@ -1137,96 +1142,146 @@ git commit -m "feat(skills): deck reviewer for global narrative checks"
 
 ---
 
-### Phase 4: Foreman Service
+### Phase 4: Foreman Orchestration (worker pool over a checkpointed queue)
 
-#### Task 4.1: Foreman deterministic orchestration
+#### Why this shape — LangGraph's superstep barrier (measured, not assumed)
+
+**LangGraph executes in supersteps with a barrier: a node re-runs only after *every*
+branch dispatched in the previous step has finished.** Probed against the installed
+`langgraph==1.0.3`: an orchestrator that `Send`s a batch of 2 workers over 5 positions
+woke exactly **4 times, always on a completed batch** — `done=[]`, `done=[0,1]`,
+`done=[0,1,2,3]`, `done=[0,1,2,3,4]`. It never woke when an individual worker finished.
+
+Two consequences, and they killed the earlier design for this phase:
+
+1. **There is no "a slot freed, dispatch the next position" event to hook.** A foreman
+   that dispatches `cap` builders and expects re-entry per completion cannot exist.
+2. **A wall-clock release timeout evaluated inside the foreman node can never fire while
+   a position is actually stalled** — the node only runs once the stalled batch is done,
+   which is the one moment the timeout is not needed.
+
+So the cap and the ordering live in **state**, not in the dispatch call:
+
+- **State holds the queue.** `builder_queue` (ascending positions) and
+  `landed_positions` live in `GraphState`, therefore in the checkpointer, therefore
+  visible to every uvicorn worker. This is also the fix for the old design's
+  `ForemanState` — a bare class that was never instantiated or persisted, which would
+  have re-introduced the in-process `self.sessions` bug class (PRD §12.1).
+- **A routing function dispatches the lowest `cap` outstanding positions each superstep**
+  by returning `Send("builder", {...})` objects. `Send` objects must be **returned from a
+  conditional-edge router**, never written into state (verified signature:
+  `Send(node: str, arg: Any)`).
+- **`max_concurrency` is the belt to the queue's braces.** `invoke(..., {"max_concurrency": 15})`
+  is honoured by the runtime and caps in-flight branches independently of batch size.
+- **Ordered *release* is decoupled from batch completion.** The reorder buffer is a pure
+  function of `landed_positions`: emit position *n* only once all positions `< n` are
+  committed. Probed with position 1 deliberately slow over 6 positions: emission order
+  was still `[0,1,2,3,4,5]`. The user-visible guarantee holds.
+
+**Net behavioural difference from the original spec §8 wording:** dispatch proceeds in
+ascending order in batches bounded by the cap, rather than backfilling individual slots
+the instant one frees. Ordered release, the cap, and retry priority all survive; only
+"per-slot backfill" does not, because the runtime provides no such event.
+
+#### Task 4.1: Queue-driven dispatch and ordered release
 
 **Files:**
-- Create: `src/services/foreman_service.py`
+- Create: `src/services/foreman_service.py` (pure functions over state — no instance state)
 - Create: `tests/unit/test_foreman_orchestration.py`
+- Create: `tests/integration/test_foreman_graph.py` (compiled-graph behaviour)
 
 **Interfaces:**
 
-Produces:
 ```python
-class ForemanState:
-    """Foreman turn state (persisted to checkpointer)."""
-    outstanding_positions: list[int]  # positions not yet landed, in order
-    builder_queue: deque[int]  # dispatch queue (ascending by position)
-    fix_map: dict[int, dict]  # position → {original_html, finding}
-    landed_positions: set[int]  # committed positions
-    concurrent_builders: int = 0
+# src/services/foreman_service.py
+# NOTE: no ForemanState class and no instance attributes. Every function below is a pure
+# function of GraphState, so the checkpointer is the only home for turn state.
 
-class ForemanService:
-    def __init__(self, cap: int = 15, release_timeout: int = 300):
-        self.cap = cap
-        self.release_timeout = release_timeout
-    
-    def dispatch_builders(self, spec: DeckSpec, current_landed: set[int]) -> list[Send]:
-        """Return list of Send() calls to dispatch up to `cap` builders."""
-        
-    def on_builder_complete(self, position: int, html: str, scripts: str) -> dict:
-        """Builder finished; send to reviewer. Route findings if clean."""
-        
-    def on_review_complete(self, position: int, findings: list | None) -> dict:
-        """Review finished; route findings or mark landed."""
-        
-    def on_fix_complete(self, position: int, choice: str, html: str) -> dict:
-        """Fix review finished; mark landed."""
-        
-    def get_releasable_slides(self, current_landed: set[int]) -> list[int]:
-        """Return positions that are now releasable (all prior ones landed)."""
+CAP = 15
+RELEASE_TIMEOUT_S = 300
+
+def outstanding_positions(state: GraphState) -> list[int]:
+    """Positions in the spec that are neither landed nor placeheld, ascending."""
+
+def next_dispatch_batch(state: GraphState, cap: int = CAP) -> list[int]:
+    """The lowest `cap` outstanding positions, ascending.
+
+    Retries need no special case: a failed position stays outstanding, so it is
+    always ranked ahead of higher unstarted positions by construction.
+    """
+
+def releasable_positions(state: GraphState) -> list[int]:
+    """Prefix of positions that are all committed — the reorder buffer.
+
+    Emit n only once every position < n is in landed_positions. Placeheld
+    positions count as committed (spec §5.5), else one terminal failure would
+    stall the deck forever.
+    """
+
+def stalled_positions(state: GraphState, now: float,
+                      timeout_s: int = RELEASE_TIMEOUT_S) -> list[int]:
+    """Dispatched positions whose elapsed time exceeds the timeout.
+
+    Uses dispatch timestamps recorded in state (NOT in-process), so the check is
+    correct across workers and across checkpoint restores.
+    """
 ```
 
-- [ ] **Step 1: Write deterministic dispatch tests**
+- [ ] **Step 1: Write the deterministic unit tests (pure functions, no graph, no LLM)**
 
 `tests/unit/test_foreman_orchestration.py`:
-- Test dispatch: cap=15, positions 0–30 → first dispatch is 0–14 in order
-- Test release: dispatch 0–14, complete 0–10, release only 0–10; complete 11, release 11; complete 15–19, not released (12–14 missing)
-- Test retry queue: position 5 failed → retry; when slot frees, take 5, not 20
-- Test release timeout: position 10 blocks 11–14 for 300s → release after timeout, mark 10 as placeholder
+- `next_dispatch_batch`: 31 positions, cap 15 → `[0..14]` ascending; after 0–9 land →
+  next batch starts at 10 and still ascends.
+- **Retry priority:** position 5 failed and 15–30 unstarted → 5 appears in the next
+  batch, ahead of 20.
+- `releasable_positions`: landed `{0..10}` → release `0..10`; then landed `{0..10, 15..19}`
+  → still only `0..10` (11–14 missing); land 11 → release 11.
+- **Placeholder counts as committed:** landed `{0,1,3}`, position 2 placeheld → release
+  `0..3`, and the all-landed predicate that triggers deck review is satisfied.
+- `stalled_positions`: dispatched at T, now = T + timeout + 1 → reported stalled.
 
-- [ ] **Step 2: Implement ForemanService**
+> These tests pin the *policy*. They pass whether or not the graph wiring is right, which
+> is exactly why Step 3 exists — the earlier version of this plan had only these, and
+> would have shipped green with the wrong runtime behaviour.
 
-```python
-class ForemanService:
-    def __init__(self, cap: int = 15, release_timeout: int = 300):
-        self.cap = cap
-        self.release_timeout = release_timeout
-    
-    def dispatch_builders(self, spec: DeckSpec, current_landed: set[int]) -> list[Send]:
-        outstanding = [s.position for s in spec.slides if s.position not in current_landed]
-        to_dispatch = []
-        for pos in sorted(outstanding)[:self.cap]:
-            to_dispatch.append(Send(("builder", pos, spec.slides[pos])))
-        return to_dispatch
-    
-    def get_releasable_slides(self, all_positions: list[int], landed: set[int]) -> list[int]:
-        releasable = []
-        for pos in sorted(all_positions):
-            if pos not in landed:
-                break
-            releasable.append(pos)
-        return releasable
-```
+- [ ] **Step 2: Implement the pure functions**
 
-- [ ] **Step 3: Implement retry queue logic**
+Implement the four functions above over `GraphState`. Keep them total and side-effect
+free so they are trivially testable and safe to call from a router.
 
-When a builder fails, re-enter the position at the head of the queue (lowest position gets next slot).
+- [ ] **Step 3: Write the compiled-graph behavioural tests (the ones that matter)**
 
-- [ ] **Step 4: Implement release timeout**
+`tests/integration/test_foreman_graph.py` — build the real graph with **stub** builder /
+reviewer nodes (canned outputs, no LLM), compile it, and assert on observed runtime
+behaviour:
+- **Cap holds:** 40 positions, `max_concurrency=15` → peak simultaneous builder
+  invocations never exceeds 15 (count with a shared counter in the stub).
+- **Ascending dispatch:** the first batch is `0..14`; no higher position is ever
+  dispatched while a lower one is still outstanding.
+- **Ordered release with a slow position:** make position 1 slow → emitted order is
+  still strictly ascending `0,1,2,…`.
+- **Barrier is acknowledged, not fought:** assert the orchestrator wakes once per
+  completed batch (the probe above), so a future change that assumes per-completion
+  wakeups fails loudly here instead of silently degrading.
+- **Terminal failure:** force position 7 to fail twice → it becomes a placeholder,
+  release proceeds past it, and deck review still triggers.
 
-Track when each position entered outstanding. If timeout reached and position not landed, treat as placeholder; release later slides.
+- [ ] **Step 4: Record dispatch timestamps in state**
 
-- [ ] **Step 5: Run tests**
+On dispatch, write `dispatched_at[position] = time.time()` into `GraphState` (reduced —
+see Phase 1's reducers). Never hold it on a service instance: the worker that resumes a
+checkpoint is not necessarily the worker that dispatched.
 
-All deterministic tests should pass (no LLM).
+- [ ] **Step 5: Run both suites**
+
+Unit tests (fast, no graph) and the compiled-graph integration tests must both pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/services/foreman_service.py tests/unit/test_foreman_orchestration.py
-git commit -m "feat(orchestration): foreman with cap/dispatch/retry/timeout logic"
+git add src/services/foreman_service.py tests/unit/test_foreman_orchestration.py \
+        tests/integration/test_foreman_graph.py
+git commit -m "feat(orchestration): queue-driven dispatch with ordered release"
 ```
 
 ---
@@ -1431,9 +1486,13 @@ def foreman_node(state: GraphState, config: AgentConfig) -> dict:
 - [ ] **Step 6: Hook all nodes into graph**
 
 ```python
+from langgraph.graph import StateGraph, START, END   # START is a sentinel, not "START"
+from langgraph.types import Send
+
+
 def build_graph(config):
     graph = StateGraph(GraphState)
-    
+
     graph.add_node("architect", architect_node)
     graph.add_node("data_analyst", data_analyst_node)
     graph.add_node("foreman", foreman_node)
@@ -1442,44 +1501,76 @@ def build_graph(config):
     graph.add_node("fixer", fixer_node)
     graph.add_node("fix_reviewer", fix_reviewer_node)
     graph.add_node("deck_reviewer", deck_reviewer_node)
-    
-    # Edges
-    graph.add_edge("START", "architect")
+
+    graph.add_edge(START, "architect")
     graph.add_conditional_edges(
         "architect",
         architect_router,
-        {"discuss": END, "build": "foreman", "ask_data": "data_analyst", "edit": "architect"}
+        {"discuss": END, "build": "foreman", "ask_data": "data_analyst", "edit": "architect"},
     )
-    graph.add_edge("data_analyst", "architect")  # back to architect for context
-    graph.add_edge("foreman", "builder")  # via Send()
+    graph.add_edge("data_analyst", "architect")
+
+    # Foreman fans out via Send from its ROUTER (not a static edge — a static
+    # foreman->builder edge alongside this router fires builder unconditionally
+    # every superstep and loops to GraphRecursionError).
+    graph.add_conditional_edges(
+        "foreman",
+        foreman_router,                    # returns list[Send] | str
+        ["builder", "fixer", "deck_reviewer", END],
+    )
+
+    # Every builder branch is reviewed, then returns to the foreman, which is the
+    # single place deck-wide state is updated.
     graph.add_edge("builder", "build_reviewer")
     graph.add_conditional_edges(
         "build_reviewer",
-        reviewer_router,
-        {"land": "foreman", "findings": "foreman"}
-    )
-    graph.add_conditional_edges(
-        "foreman",
-        foreman_router,
-        {"build": "builder", "fix": "fixer", "deck_review": "deck_reviewer", "end": END}
+        reviewer_router,                   # "land" | "fix"
+        {"land": "foreman", "fix": "fixer"},
     )
     graph.add_edge("fixer", "fix_reviewer")
     graph.add_edge("fix_reviewer", "foreman")
     graph.add_edge("deck_reviewer", END)
-    
+
     # Shared saver; session isolation comes from thread_id at invoke time:
-    #   graph.invoke(state, config={"configurable": {"thread_id": session_id}})
+    #   graph.invoke(state, config={"configurable": {"thread_id": session_id},
+    #                               "max_concurrency": CAP})
     return graph.compile(checkpointer=get_checkpointer())
+
+
+def foreman_router(state: GraphState):
+    """Dispatch the next ascending batch, or advance the turn.
+
+    Returns Send objects (fan-out) or a single next-node name. Send objects MUST be
+    returned from here — writing them into state does nothing.
+    """
+    if state.get("fix_map"):
+        return "fixer"
+    batch = next_dispatch_batch(state)                 # Phase 4 pure function
+    if batch:
+        return [
+            Send("builder", {"position": p, "slide_spec": spec_for(state, p)})
+            for p in batch                              # already ascending
+        ]
+    if all_positions_committed(state):                  # placeholders count as committed
+        return "deck_reviewer"
+    return END
 ```
+
+> **`reviewer_router` returns only `"land"` or `"fix"`.** The earlier draft mapped both
+> branches to `"foreman"`, which made the conditional a no-op that could have been a
+> plain edge — and hid the fact that the fix path exists.
 
 - [ ] **Step 7: Write integration tests**
 
-`tests/integration/test_build_chain.py`:
-- Test full build chain: architect → foreman → builder → reviewer → land (no findings)
-- Test build chain with findings: builder → reviewer → foreman → fixer → fix_reviewer → land
-- Test parallel builders (dispatch 3, all complete, all land)
-- Test cap enforcement (dispatch 15, queue 16–30, as slots free take lowest outstanding)
-- Test deck review triggers after all slides land
+`tests/integration/test_build_chain.py` (stub agent nodes, real compiled graph):
+- Full build chain: architect → foreman → builder → reviewer → land, no findings.
+- With findings: builder → reviewer → fixer → fix_reviewer → foreman → land.
+- Parallel builders: dispatch 3, all complete, all land.
+- **Cap and ordering** are asserted in `tests/integration/test_foreman_graph.py`
+  (Phase 4 Step 3) against the compiled graph, since batch-level behaviour is only
+  observable there — do not re-assert "as slots free take lowest outstanding" here, as
+  the runtime provides no per-slot event (Phase 4 preamble).
+- Deck review triggers once every position is committed, including placeholders.
 
 - [ ] **Step 8: Commit**
 
@@ -1847,12 +1938,9 @@ def create_placeholder_slide(session_id: str, position: int, error: str) -> None
     writer = SlideWriter()
     writer.commit_placeholder(session_id, position, error_message=error)
 
-# Release timeout:
-class ForemanState:
-    position_start_time: dict[int, float] = {}  # position → when it entered outstanding
-    
-def check_release_timeout(self, now: float) -> list[int]:
-    """Return positions that should release due to timeout (300s default)."""
+# Release timeout — state-based, not instance-based:
+#   dispatched_at: dict[int, float] lives in GraphState (so, in the checkpointer).
+#   stalled_positions(state, now, timeout_s) is the Phase 4 pure function.
 ```
 
 - [ ] **Step 1: Implement retry logic**
@@ -1884,36 +1972,60 @@ def create_placeholder_slide(session_id: str, position: int, error: str) -> None
     writer.commit_placeholder(session_id, position, error_message=error)
 ```
 
-- [ ] **Step 3: Implement release timeout**
+- [ ] **Step 3: Implement release timeout (state-based)**
 
 ```python
-def foreman_node(...):
+def foreman_node(state: GraphState) -> dict:
+    """Advance the turn. All timing state comes from GraphState, never from an
+    instance attribute — the worker resuming a checkpoint is not necessarily the
+    worker that dispatched."""
     now = time.time()
-    released_by_timeout = []
-    for pos in sorted(foreman_state.outstanding_positions):
-        if pos not in foreman_state.position_start_time:
-            foreman_state.position_start_time[pos] = now
-        
-        elapsed = now - foreman_state.position_start_time[pos]
-        if elapsed > 300 and pos not in foreman_state.landed_positions:
-            # Timeout; release later slides
-            released_by_timeout.append(pos)
-            # Create a timeout placeholder via SlideWriter.commit_placeholder
-            from src.api.services.slide_repository import SlideWriter
-            writer = SlideWriter()
-            writer.commit_placeholder(session_id, pos, error_message="timeout: position did not complete")
-    
-    return {"released_by_timeout": released_by_timeout}
+    updates: dict = {}
+
+    # 1. Stamp newly dispatched positions (merged via the dispatched_at reducer).
+    batch = next_dispatch_batch(state)
+    if batch:
+        updates["dispatched_at"] = {p: now for p in batch
+                                    if p not in state.get("dispatched_at", {})}
+
+    # 2. Convert stalled positions into placeholders so release can proceed.
+    stalled = stalled_positions(state, now)          # Phase 4 pure function
+    if stalled:
+        writer = SlideWriter()
+        for pos in stalled:
+            writer.commit_placeholder(
+                state["session_id"], pos,
+                error_message="timeout: position did not complete",
+            )
+        updates["placeheld_positions"] = stalled
+
+    # 3. Emit whatever is now releasable, in ascending order.
+    updates["released"] = releasable_positions(state)
+    return updates
 ```
 
-- [ ] **Step 4: Test retry and placeholder**
+> **Known limitation, stated deliberately.** Because of the superstep barrier (Phase 4
+> preamble), `foreman_node` runs between batches — so the timeout is evaluated at batch
+> boundaries, not the instant a position exceeds it. It therefore bounds *how long a
+> stall can block release* to roughly one batch, rather than to exactly
+> `RELEASE_TIMEOUT_S`. That is acceptable: the guarantee users need is "a stalled slide
+> cannot block the deck indefinitely," not millisecond precision. Do not attempt to fix
+> this with a wall-clock timer inside a node — the runtime gives no such hook, and the
+> earlier draft's attempt could never fire while a position was actually stalled.
 
-`tests/unit/test_error_handling.py`:
-- Test builder fails first time, retries, succeeds
-- Test builder fails twice, creates placeholder
-- Test placeholder marked for user visibility
-- Test timeout releases later slides
-- Test placeholder counts as landed for buffer release and deck review
+- [ ] **Step 4: Test retry, placeholder, and timeout**
+
+`tests/unit/test_error_handling.py` (pure functions):
+- Builder fails once then succeeds (retry path).
+- Builder fails twice → `commit_placeholder` called with the error message.
+- `stalled_positions` reports a position past the timeout and ignores one within it.
+- **Placeholder counts as committed** for both `releasable_positions` and the
+  all-committed predicate that triggers deck review.
+
+`tests/integration/test_foreman_graph.py` (compiled graph — see Phase 4 Step 3):
+- Force position 7 to fail twice → placeholder written, release proceeds past it, deck
+  review still fires. This is the test that proves the *runtime* behaviour, not just the
+  policy.
 
 - [ ] **Step 5: Commit**
 
