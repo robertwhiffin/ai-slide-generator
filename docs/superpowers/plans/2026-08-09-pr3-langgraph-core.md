@@ -1275,13 +1275,32 @@ CAP = 15
 RELEASE_TIMEOUT_S = 300
 
 def outstanding_positions(state: GraphState) -> list[int]:
-    """Positions in the spec that are neither landed nor placeheld, ascending."""
+    """Spec positions that still need work: not landed, not placeheld, ascending.
+
+    NOTE this includes positions currently IN FLIGHT — it means "not finished",
+    not "not started". Use next_dispatch_batch for anything that dispatches.
+    """
 
 def next_dispatch_batch(state: GraphState, cap: int = CAP) -> list[int]:
-    """The lowest `cap` outstanding positions, ascending.
+    """The lowest `cap` positions that need work AND are not already in flight.
 
-    Retries need no special case: a failed position stays outstanding, so it is
-    always ranked ahead of higher unstarted positions by construction.
+        in_flight = dispatched_at.keys() - landed - placeheld - failed_awaiting_retry
+        candidates = outstanding_positions(state) - in_flight
+        return sorted(candidates)[:cap - len(in_flight)]
+
+    **Excluding in-flight positions is not optional.** The foreman re-runs on a
+    partially completed batch (say 3 of 5 landed and one failed back to it), so a
+    batch computed from `outstanding_positions` alone would re-dispatch the two
+    siblings that are still running — duplicating LLM spend and racing two writers
+    onto the same slide row.
+
+    **And subtracting in-flight from the cap is what makes the cap real:** the cap
+    bounds *concurrent* builders, so dispatching `cap` fresh positions while N are
+    already running would allow up to `cap + N`.
+
+    Retries need no special case beyond clearing their in-flight marker: a failed
+    position is still outstanding, so it re-enters ahead of higher unstarted
+    positions by construction (ascending order does the prioritisation).
     """
 
 def releasable_positions(state: GraphState) -> list[int]:
@@ -1313,6 +1332,13 @@ def stalled_positions(state: GraphState, now: float,
 - **Placeholder counts as committed:** landed `{0,1,3}`, position 2 placeheld → release
   `0..3`, and the all-landed predicate that triggers deck review is satisfied.
 - `stalled_positions`: dispatched at T, now = T + timeout + 1 → reported stalled.
+- **No re-dispatch of in-flight positions** (partially completed batch): cap 5,
+  positions `0..9`, `dispatched_at = {0..4}`, landed `{0,1,2}`, position 3 failed and
+  awaiting retry → the next batch must contain **3** (retry) and **5, 6** (fresh), and
+  must **NOT** contain 4, which is still running. Without this, two writers race the same
+  slide row and the LLM spend doubles.
+- **The cap counts in-flight work:** with 2 positions in flight and cap 5, the next batch
+  is at most 3 — never 5.
 
 > These tests pin the *policy*. They pass whether or not the graph wiring is right, which
 > is exactly why Step 3 exists — the earlier version of this plan had only these, and
