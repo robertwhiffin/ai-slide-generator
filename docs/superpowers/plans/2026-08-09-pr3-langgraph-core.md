@@ -7,7 +7,14 @@
 **Architecture:** A LangGraph state machine with 7 agent skills (in-repo, versioned) plus one deterministic orchestration service. State persists to Lakebase via a custom `BaseCheckpointSaver` over the existing
 SQLAlchemy engine (spec §2.2 — *not* `langgraph-checkpoint-postgres`). Two entry points: conversational (architect-driven, interruptible) and one-shot (prompt→deck, no interrupts, preserves MCP contracts). Reviewers write clean slides; builders never write rows. Foreman handles cap/dispatch/retry logic deterministically. Findings route to chat (deck-level) or drawer (per-slide). Incremental delivery via `slide_ready` events on SSE and slide-cursor on polling.
 
-**Tech Stack:** Python 3.11, LangGraph 1.2.10, LangChain 1.3.14, langgraph-checkpoint-postgres 4.1.1, psycopg3, SQLAlchemy 2.0 (`postgresql+psycopg://` scheme), pytest, TypeScript/React.
+**Tech Stack:** Python 3.11, LangGraph 1.2.10, LangChain 1.3.14, `langgraph-checkpoint`
+4.1.1 (for `BaseCheckpointSaver` + `JsonPlusSerializer` only), **psycopg2-binary 2.9.10 and
+the existing `postgresql://` URLs — unchanged**, SQLAlchemy 2.0, pytest, TypeScript/React.
+
+> **Explicitly NOT used: `langgraph-checkpoint-postgres`, psycopg3, or the
+> `postgresql+psycopg://` scheme.** Spec §2.2 was amended to reverse that decision, and
+> PR2 does not install any of them — see the Checkpointer note below for why (the official
+> saver holds a raw connection and so never receives a refreshed OAuth token).
 
 ## Global Constraints
 
