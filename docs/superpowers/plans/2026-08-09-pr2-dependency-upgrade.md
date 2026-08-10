@@ -50,6 +50,36 @@
   2. Resolve together (no `ResolutionImpossible`).
   3. Deliver what PR3 needs: langgraph-checkpoint 4.1.1 available for PR3's custom saver.
 
+> ### ⚠️ The dry-run must NOT resolve the current files — that check is vacuous
+>
+> `pip install --dry-run -e .` against today's `pyproject.toml` proves nothing:
+> **`langgraph` is not pinned there at all**, and `langchain` is only bounded as
+> `>=0.3.0` (`pyproject.toml:31`). The command would succeed while resolving the *old*
+> stack, and the gate would pass before anything had been upgraded.
+>
+> So verification is **two-phase**:
+>
+> - **Phase A — explicit specs, before editing any file.** Resolve the *candidate* set by
+>   naming versions on the command line, so the resolver is actually tested:
+>   ```bash
+>   pip install --dry-run --index-url https://pypi-proxy.dev.databricks.com/simple/ \
+>       "langgraph==1.2.10" "langchain==1.3.14" "langchain-core==1.5.3" \
+>       "langgraph-checkpoint==4.1.1" "langgraph-prebuilt==1.1.0" \
+>       "langgraph-sdk==0.4.2" "mlflow==3.14.0" \
+>       "databricks-langchain==0.9.0" "psycopg2-binary==2.9.10" \
+>       "fastapi<0.137" "starlette<1.3"
+>   ```
+>   Record the resolved set. If `databricks-langchain==0.9.0` conflicts with
+>   `langchain-core==1.5.3`, that surfaces **here** — before any file is touched — and the
+>   fix (upgrading `databricks-langchain`, up to 0.20.0 on the proxy) belongs in Task 2.
+> - **Phase B — `-e .`, after Task 2 has written the pins.** Only then does resolving the
+>   project files mean anything. Task 2 must therefore be followed by a re-run of this
+>   test, not preceded by it.
+>
+> Keep the committed test asserting **Phase A** (explicit specs), because that is the
+> assertion that still fails loudly if the proxy's availability shifts under us. Add
+> Phase B as the post-pin regression check.
+
 ---
 
 ### Step 1: Write the proxy verification test
