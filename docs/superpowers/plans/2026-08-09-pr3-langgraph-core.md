@@ -1753,6 +1753,108 @@ git commit -m "feat(graph): full build chain with builder → reviewer → fixer
 
 ### Phase 6: Data Flow and Routing
 
+#### Task 6.0: Spec propagation — mutation triggers (§4.4) and deck-level edits (§4.6)
+
+Spec §4.4 and §4.6 had **no tasks at all** in earlier drafts of this plan. §4.5 calls this
+propagation rule "the cycle break", so without it the deck spec silently drifts from the
+deck on every direct edit and the reviewers then flag the drift as defects.
+
+**Files:**
+- Modify: `src/api/routes/slides.py` (hook the six mutation paths), `src/api/routes/tour.py`
+- Create: `src/services/spec_sync.py` (debounced rebuild trigger)
+- Create: `tests/integration/test_spec_propagation.py`
+
+**The rule (§4.5): propagation is provenance-directed, one hop, never two.**
+Origin is known from the **code path**, not a stored flag — a human edit arrives via the
+`PATCH /slides/{index}` route; an agent write happens inside the graph. So the trigger
+fires only on the human routes.
+
+- [ ] **Step 1: Hook every HTML-mutating route (all six verified to exist)**
+
+| Route | Line | Why it must trigger |
+|---|---|---|
+| `PATCH /slides/{index}` | `slides.py:179` | content changed (WYSIWYG, ws 8) |
+| `PUT /slides/reorder` | `slides.py:112` | **narrative arc changed with NO HTML change** — a content-hash trigger misses this entirely |
+| `POST /slides/{index}/duplicate` | `slides.py:247` | slide added |
+| `DELETE /slides/{index}` | `slides.py:315` | slide removed |
+| `POST /slides/versions/{n}/restore` | `slides.py:796` | whole deck replaced |
+| `POST /tour/demo-deck/{id}/slides` | `tour.py:117` | slides appended |
+
+Each calls `spec_sync.mark_dirty(session_id)` **after** a successful write. Agent-written
+slides do **not** call it (the spec already says what was intended).
+
+- [ ] **Step 2: Make the rebuild async and debounced**
+
+```python
+# src/services/spec_sync.py
+DEBOUNCE_S = 30
+
+def mark_dirty(session_id: str) -> None:
+    """Record that the deck diverged from its spec. Cheap and synchronous.
+
+    Must NOT run an LLM inline: a WYSIWYG session emits many small edits, and
+    spec §4.4 requires this never make a direct edit feel slow (§7.4).
+    """
+
+def rebuild_if_due(session_id: str, now: float) -> bool:
+    """Coalesce: rebuild once the deck has been quiet for DEBOUNCE_S.
+
+    The dirty marker lives in the DB (not in-process) so it is visible to whichever
+    worker picks it up — same multi-worker constraint as everything else here.
+    """
+```
+
+Drive `rebuild_if_due` from the existing job queue rather than a new scheduler. The spec
+may be briefly stale; it is advisory for existing content and the reviewers are the
+backstop (§4.3).
+
+- [ ] **Step 3: Deck-level spec edits (§4.6) — re-review, rebuild only failures**
+
+A deck-level change ("actually this is for a CFO") invalidates every slide *logically*, so:
+1. Re-review **all** slides against the new spec (cheap, parallel).
+2. Rebuild **only** those that contradict it — preserves still-valid work, including
+   manual edits.
+3. The architect reports what it is about to rebuild **before** doing it.
+
+- [ ] **Step 4: Design-contract changes are confirm-then-rebuild-all**
+
+Changing the design contract (`slide_style_id`, or a future deck-CSS edit) mutates a
+deck-level spec field with **no per-slide HTML change**, so it is not one of the Step 1
+triggers. It genuinely affects every slide, so the architect asks *"this restyles the whole
+deck and rebuilds every slide — proceed?"* and only then rebuilds all. This is the one
+place rebuild-all is correct, and the confirmation stops it firing by accident and
+silently discarding manual per-slide edits.
+
+- [ ] **Step 5: Snapshot the spec with save points**
+
+`SlideDeckVersion` must carry `deck_spec_json` (PR1 adds the column) so restoring a save
+point restores the spec with the deck. Otherwise the restored spec describes a deck that no
+longer exists — and Step 1 would then "correct" the deck to match a stale spec.
+
+- [ ] **Step 6: Test propagation**
+
+`tests/integration/test_spec_propagation.py`:
+- Human `PATCH` → spec updates to *describe* the edit, and the slide is **not** rebuilt
+  (rebuilding would overwrite the user's work — actively hostile once WYSIWYG lands).
+- **Reorder with byte-identical HTML** → spec arc still updates. This is the case a
+  content-hash trigger silently misses.
+- Agent write → **no** spec-rebuild trigger (one hop, never two: no loop).
+- Debounce: 10 rapid edits → exactly one rebuild.
+- Deck-level audience change → all slides re-reviewed, only failures rebuilt, user told
+  first.
+- Design-contract change → confirmation required before any rebuild.
+- Save-point restore → deck and spec restored together.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/services/spec_sync.py src/api/routes/slides.py src/api/routes/tour.py \
+        tests/integration/test_spec_propagation.py
+git commit -m "feat(spec): provenance-directed spec propagation and rebuild triggers"
+```
+
+---
+
 #### Task 6.1: Multi-target editing and natural language resolution
 
 **Files:**
@@ -1852,29 +1954,62 @@ Must remain unchanged (no signature changes).
 
 - [ ] **Step 2: Implement one-shot entry point**
 
-Add to `langgraph_agent.py`:
+**The MCP contract is async fire-and-poll — do not make it synchronous.** Verified:
+`create_deck` calls `enqueue_create_job(...)` and returns
+`{"session_id", "request_id", "status": "pending"}` (`mcp_server.py:385-399`); the job
+queue worker then calls `chat_service.send_message_streaming` (`job_queue.py:202`), and
+the caller polls `get_deck_status`. Both tool descriptions state this. So the integration
+point is **the queue worker**, not the tool functions.
+
 ```python
-def run_one_shot_build(prompt: str, config: AgentConfig, 
-                       num_slides: int, slide_style_id: str,
-                       deck_prompt_id: str) -> dict:
-    """Run full build→review→remediate without conversation."""
-    # Create a session
-    # Initialize graph state with no conversation
-    # Seed architect with: "Build a {num_slides}-slide deck: {prompt}"
-    # Run graph to completion (no interrupts)
-    # Extract final deck + review summary
-    # Return {deck, review_summary, status}
+# src/services/langgraph_agent.py
+def run_one_shot_build(session_id: str, prompt: str, config: AgentConfig,
+                       num_slides: int | None = None,
+                       slide_style_id: int | None = None,
+                       deck_prompt_id: int | None = None) -> dict:
+    """Run architect -> build -> review -> fix to completion, no conversation.
+
+    Called from the QUEUE WORKER (not from the MCP tool), so it may block: the
+    caller already has its request_id and is polling. Interrupts disabled;
+    ambiguity resolved by choosing a sensible default and reporting the
+    assumption in the review summary (spec §5.1 / §6.4).
+
+    Note the Optional[int] types — they match the real tool signatures
+    (mcp_server.py:307-322); an earlier draft had `slide_style_id: str`.
+    """
+    # graph.invoke(initial_state, config={"configurable": {"thread_id": session_id},
+    #                                     "max_concurrency": CAP})   # no emitter
+    # -> {"deck": ..., "review_summary": ..., "assumptions": [...]}
 ```
 
-- [ ] **Step 3: Modify MCP routes**
+- [ ] **Step 3: Integrate at the queue worker, leaving the tool signatures untouched**
 
-`create_deck` and `edit_deck` routes call `run_one_shot_build` and return the same contract (session_id, request_id, status).
+Modify `src/api/services/job_queue.py` so the worker dispatches to `run_one_shot_build`
+instead of `send_message_streaming` when the flag is on (Phase 11). `create_deck` /
+`edit_deck` / `get_deck_status` / `get_deck` in `mcp_server.py` are **unchanged** — that is
+what "contracts preserved" (PRD §9.2) actually requires. The worker must keep writing the
+same `ChatRequest` status transitions and the same result payload shape, since
+`get_deck_status` reads them.
 
-- [ ] **Step 4: Test one-shot path**
+- [ ] **Step 3b: Retire `_check_contiguous` for the graph path**
+
+`_check_contiguous` (`mcp_server.py:667`) rejects disjoint `slide_indices`, and its
+docstring says why: `_parse_slide_replacements` "assume[s] the caller-supplied slide range
+is a single contiguous slice". PR3 deletes that pipeline, and multi-target editing is spec
+§6.3's headline criterion — so leaving the check in place would mean MCP callers still
+can't do the feature this workstream exists to deliver. Remove it on the graph path and add
+a test that `edit_deck(slide_indices=[1, 5, 9])` succeeds.
+
+- [ ] **Step 4: Test the one-shot path**
 
 `tests/integration/test_one_shot_build.py`:
-- Test create_deck: prompt → deck returned in one call, no conversation
-- Test that create_deck contracts are unchanged
+- `create_deck` returns `{session_id, request_id, status: "pending"}` **immediately** and
+  does not block on the build.
+- Polling `get_deck_status` transitions pending → ready and returns the same field set as
+  today (`slide_count`, `title`, `deck`, `html_document`, `deck_url`, …).
+- No clarifying question is ever emitted on this path; ambiguity appears as a reported
+  assumption instead.
+- `edit_deck` with **disjoint** indices `[1, 5, 9]` produces three independent edits.
 
 - [ ] **Step 5: Commit**
 
@@ -2420,49 +2555,85 @@ git commit -m "feat(security): gate reviewer input and fixer output through safe
 
 **Interfaces:**
 
-Produces regression tests for retired regexes (RC10–RC15 and related):
+**The RC rules, read off the code — not guessed.** PRD §12.1 and spec §9.4 are explicit
+that each RC encodes a previously-shipped bug fix and is "a test checklist for the
+supervisor's intent handling, not merely dead code to delete". An earlier draft of this
+plan mapped RC10–RC15 to ordinals / ranges / relative references. **Every one of those
+was wrong**, which would have shipped six real regressions with a green suite.
+
+There are also **RC1–RC15**, not six rules — the spec's "and related" is nine more.
+Verified semantics and sources:
+
+| Rule | Actual behaviour it protects | Source |
+|---|---|---|
+| RC1 | Validate the LLM response is real slide HTML in editing mode; retry once if not | `agent.py:941` |
+| RC2 | Add-vs-edit intent detection; insert at the right position; warn on slide loss | `agent.py:913`, `chat_service.py:1691` |
+| RC3 | **Never destroy the deck on an editing failure** | `chat_service.py` (deck-preservation path) |
+| RC4 | Canvas-ID deduplication so charts don't collide; rewrite `getElementById`/`querySelector` | `agent.py:984` |
+| RC5 | Validate/repair JavaScript syntax in slide scripts | `agent.py` (JS validation) |
+| RC6 | Restore the deck from the DB when the in-process cache is empty (survives restarts) | `chat_service.py:1956` |
+| RC7 | Log final script status (diagnostic only — no behaviour to preserve) | `chat_service.py` |
+| RC8 | Synthesise `slide_context` from a parsed reference; reject out-of-range indices | `chat_service.py` |
+| RC9 | Add **with** a slide reference (e.g. "add a slide after slide 3") | `chat_service.py` |
+| **RC10** | **Edit intent with NO slide reference → ask for clarification, don't guess** | `chat_service.py:367, 880` |
+| **RC11** | **Conflict between UI selection and a text reference → clarify** | `chat_service.py:649, 673, 684` |
+| **RC12** | **Generation intent while a deck exists → ask "add or replace?"** | `chat_service.py:335, 844` |
+| **RC13** | **Auto-create `slide_context` from a text reference ("edit slide 7")** | `chat_service.py:398, 908` |
+| **RC14** | **Validate `slide_context` indices against actual backend deck state** | `chat_service.py:948` |
+| RC15 | Canvas-ID reference rewriting in scripts | `chat_service.py` (~2400) |
+
 ```python
-def test_rc10_ordinal_references():
-    """Slide references like 'slide 5' are resolved correctly."""
-    spec = DeckSpec(slides=[...])
-    refs = resolve_slide_references("update slide 5", spec)
-    assert 5 in refs
+# tests/integration/test_regression_checklist.py — behavioural, against the compiled graph
 
-def test_rc11_range_references():
-    """Slide ranges like 'slides 2-4' are resolved correctly."""
-    refs = resolve_slide_references("slides 2-4", spec)
-    assert refs == [2, 3, 4]
+def test_rc10_edit_without_reference_asks_for_clarification():
+    """'make it bolder' with a deck present must NOT silently pick a slide."""
+    out = run_turn(graph, deck_with(5), "make it bolder")
+    assert out.asked_for_clarification
+    assert out.slides_changed == []
 
-def test_rc12_relative_references():
-    """Relative references like 'after slide 3' work."""
-    refs = resolve_slide_references("add a slide after slide 3", spec)
-    # Should affect position 4 and beyond
+def test_rc12_generation_intent_with_existing_deck_asks_add_or_replace():
+    out = run_turn(graph, deck_with(5), "create a deck about pricing")
+    assert out.asked_add_or_replace
+    assert out.slides_changed == []          # nothing until the user answers
 
-# ... RC13, RC14, RC15, etc.
+def test_rc11_selection_text_conflict_is_surfaced():
+    out = run_turn(graph, deck_with(9), "update slide 7", selection=[2])
+    assert out.asked_for_clarification       # 7 vs 2 — do not pick one
 
-def test_concurrency_no_lost_updates():
-    """Parallel builders writing distinct rows do not collide."""
-    # Simulate 15 builders writing simultaneously
-    # Verify all 15 rows exist and are correct
-    
-def test_export_parity_pptx():
-    """PPTX export produces same output as before."""
-    # Generate a deck via graph
-    # Export to PPTX
-    # Compare with fixture (or at least verify no errors)
+def test_rc13_text_reference_targets_that_slide():
+    out = run_turn(graph, deck_with(9), "edit slide 7 to add a chart")
+    assert out.slides_changed == [6]         # 0-based
+
+def test_rc14_stale_index_is_rejected():
+    out = run_turn(graph, deck_with(3), "edit slide 9")
+    assert out.rejected_out_of_range
+    assert out.slides_changed == []
+
+def test_rc3_deck_survives_a_failed_edit():
+    out = run_turn(graph, deck_with(5), "edit slide 2", force_builder_failure=True)
+    assert out.deck_slide_count == 5         # placeholder at most; never destroyed
 ```
 
-- [ ] **Step 1: Write regression checklist tests**
+> **These must run against the compiled graph, not the reference resolver.** The
+> behaviour being protected is the architect's *intent handling* — "ask rather than
+> guess". A unit test on a parser cannot observe whether the graph asked a clarifying
+> question instead of editing a slide.
 
-`tests/integration/test_regression_checklist.py`:
-- RC10: ordinal references
-- RC11: range references
-- RC12: relative references
-- RC13: add vs. replace
-- RC14: multiple independent edits
-- RC15: slide context awareness
+```python
+def test_concurrency_no_lost_updates():
+    """Parallel builders writing distinct rows do not collide."""
+    # 15 concurrent writes -> assert all 15 rows exist and are correct
 
-(Copy exact semantics from the old regex rules.)
+def test_export_parity_pptx():
+    """PPTX export still works on a graph-produced deck (PRD §3 gate)."""
+```
+
+- [ ] **Step 1: Write the regression checklist tests**
+
+`tests/integration/test_regression_checklist.py` — one test per rule in the table above,
+using its **verified** semantics. RC7 needs no test (logging only). RC4/RC5/RC15 are
+script-integrity rules the builder pipeline still owes; assert them on graph output rather
+than on the retired regex.
 
 - [ ] **Step 2: Write concurrency tests**
 
@@ -2540,24 +2711,53 @@ def send_message(session_id: str, message: str) -> dict:
     }
 ```
 
-- [ ] **Step 3: Delete agent.py**
+- [ ] **Step 3: Work the deletion inventory BEFORE deleting anything**
+
+Deleting `agent.py` breaks these — all verified present, none of them optional:
+
+| Consumer | What it needs | Action |
+|---|---|---|
+| `src/services/__init__.py:3` | `from src.services.agent import SlideGeneratorAgent, create_agent` | **Breaks `import src.services` package-wide.** Remove the re-export. |
+| `src/api/routes/chat.py:37` | `UnsafeContentError` (used at `:265`, `:398`) | Re-point to `src/services/output_safety.py` (Phase 8 Step 1 relocates it) |
+| `src/services/agent_factory.py` | builds `SlideGeneratorAgent` | Delete or reduce to graph config assembly |
+| `src/api/services/chat_service.py:32` | imports the agent | Already rewritten in Step 2 |
+| `tests/unit/test_agent_safety_gate.py` | the safety gate | Re-point to the relocated module |
+| `tests/unit/test_add_position_bug.py` | `_detect_add_intent`, `TestRC14StateValidation` | Replace with the RC behavioural tests (Task 9.1) |
+| `tests/unit/test_slide_editing_robustness.py` | edit pipeline internals | Replace with graph-level equivalents |
+| `tests/unit/test_agent.py`, `test_agent_factory.py` | the monolith | Delete once superseded |
+
+**`llm_judge.py` is NOT safely deletable in PR3.** It exists (492 lines) and has a live
+production consumer: `src/api/routes/verification.py:18,221` calls `evaluate_with_judge`
+via `src/services/evaluation/__init__.py:7`, so removing it breaks `POST /verification`.
+Two unit tests import it directly. **Leave it in place** — the review skills that replace
+it are a later workstream, and the earlier "(if it exists; moved to skills in PR5)" hedge
+was not resolvable inside this PR.
 
 ```bash
+# Only after the table above is done:
 git rm src/services/agent.py
 ```
 
-- [ ] **Step 4: Verify imports**
+- [ ] **Step 4: Verify nothing still imports the deleted module**
 
-Scan for remaining imports of old classes; update or delete.
+```bash
+grep -rn "from src.services.agent\|import src.services.agent" src/ tests/   # expect none
+python -c "import src.services"                                             # must not raise
+pytest tests/unit -q                                                        # must be green
+```
 
-- [ ] **Step 5: Run unit tests**
+- [ ] **Step 5: Confirm the flag still has a path to fall back to**
 
-Ensure no broken imports or stale tests.
+This step runs **after** Phase 11 has landed the flag (see the sequencing note there). If
+`LANGGRAPH_ENABLED=false` no longer has a working legacy path once `agent.py` is gone, then
+the flag is decorative — so either the flag's "off" state must be a hard error with a clear
+message, or these deletions wait for the flag to be removed entirely. Decide explicitly and
+record which.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/api/services/chat_service.py
+git add src/api/services/chat_service.py src/services/__init__.py src/api/routes/chat.py tests/
 git rm src/services/agent.py
 git commit -m "refactor(agent): delete monolith and regex intent layer; delegate to graph"
 ```
@@ -2565,6 +2765,74 @@ git commit -m "refactor(agent): delete monolith and regex intent layer; delegate
 ---
 
 ### Phase 10: Frontend Integration
+
+#### Task 10.0: Prerequisites the frontend work depends on
+
+Three gaps that had no tasks in earlier drafts. Each blocks something later in this phase.
+
+- [ ] **Step 1: Reconcile the reviewer schema with `finding.ts` (spec §7.1's named seam)**
+
+Spec §7.1: "the reviewer's strict schema and that union must be kept in step — that is the
+seam where they meet." They currently disagree:
+
+| `frontend/src/types/finding.ts` | Reviewer output (Phase 3) |
+|---|---|
+| `id: string` | *absent* — so Apply/Dismiss/Discuss have nothing to key on |
+| `slideIndex: number` | *never populated* |
+| `category: 'content' \| 'design' \| 'narrative'` | `category` (same values) |
+| `message: string` | `description` — **different name** |
+| `seen: boolean` | n/a (client-side lifecycle) |
+| — | `severity`, `objective` — **unmodelled on the frontend** |
+
+Resolution: the reviewer emits `id` (stable per finding, so the drawer callbacks work) and
+`slide_index`; rename its `description` → `message` to match the shipped UI type; add
+`severity` to the TS interface. **Do not surface `objective` findings** — those are
+auto-fixed before the slide is shown (spec §7.4), so the drawer only ever receives
+subjective ones. Update `finding.ts` and `DrawerCallbacks` in the same commit as the
+reviewer schema, and add a test asserting a reviewer payload deserialises into
+`SlideFinding` without loss.
+
+- [ ] **Step 2: Add a frontend unit-test runner (there isn't one)**
+
+`frontend/package.json`'s only test script is `playwright test`; there is no vitest/jest,
+no `@testing-library`, and zero `*.test.tsx` files. So any task that writes a component
+test needs a runner first. Either:
+- **(a)** add `vitest` + `@testing-library/react` + a `test:unit` script (new dev
+  dependency, fast component tests), or
+- **(b)** write these as Playwright specs under `frontend/tests/`, matching the existing
+  E2E convention and adding no dependency.
+
+Pick one and apply it consistently; **(b)** is the lower-risk default since it matches
+what the repo already does. Whichever is chosen, no task may assume `*.test.tsx` files run
+without it.
+
+- [ ] **Step 3: Migrate the retired prompt columns (spec §5.1 requires this)**
+
+`ConfigPrompts.system_prompt` and `ConfigPrompts.slide_editing_instructions` are
+**`Column(Text, nullable=False)`** (`src/database/models/prompts.py:39-40`) and are
+**live**: written via `PUT /agent-config` (`agent_config.py:104`) and `POST /profiles`
+(`profiles.py:124`), read by the frontend (`types/agentConfig.ts:47-48`,
+`AgentConfigContext.tsx:392-393`), consumed at runtime by
+`agent_factory.py:155-168`, and back-filled into `agent_config` by
+`migrate_profiles_to_agent_config.py:44-54`. So retiring them is a **deliberate breaking
+change**, not deleting something already dead.
+
+The migration story:
+1. **Inventory** which profiles hold a *custom* value (differing from the packaged
+   default) — those encode real user intent.
+2. **Report, don't silently drop.** Custom prompts have no automatic equivalent in the
+   in-repo skills, so surface them (log + admin notice) so they can be re-expressed as a
+   tone guideline (§5.2.1) or a deck prompt.
+3. **Make the columns nullable** in a `_migrate_*` helper (they are `nullable=False`
+   today, so a plain "stop writing them" leaves inserts failing), stop reading them in
+   `agent_factory`, and remove them from `AgentConfig` and the frontend types.
+4. **Drop the columns in a later PR**, once no deployment writes them — same
+   additive-then-subtractive shape PR1 uses.
+
+Add a test that a profile carrying a custom `system_prompt` still loads after the
+migration, and that a fresh profile can be created without those fields.
+
+---
 
 #### Task 10.1: Two-view toggle (spec view)
 
@@ -2823,11 +3091,28 @@ git commit -m "feat(ui): findings in drawer with Apply/Dismiss/Discuss callbacks
 
 ### Phase 11: Big-Bang Release & Flag Strategy
 
+> ## ⚠️ SEQUENCING: this phase must land BEFORE Phase 9.2's deletions
+>
+> Phase 9.2 runs `git rm src/services/agent.py` and guts `chat_service.py`. If the flag
+> lands after that, then `LANGGRAPH_ENABLED=false` — **the stated default, and the Risks
+> table's own mitigation ("start with flag=false")** — selects a legacy path that no longer
+> exists, so the app is broken in its default configuration.
+>
+> Execute in this order:
+> 1. **Phase 11** — add the flag with both paths live (old agent still present).
+> 2. Dogfood on a devloop with `LANGGRAPH_ENABLED=true`.
+> 3. **Phase 9.2** — only once the graph path is trusted, delete the monolith and either
+>    remove the flag or make its "off" state a hard error with a clear message.
+>
+> Phase 9.1's *tests* can run at their existing position; it is only 9.2's deletions that
+> must move after this phase.
+
 #### Task 11.1: Feature flags and gradual rollout
 
 **Files:**
 - Create: `src/core/flags.py`
-- Modify: `src/api/routes/chat.py`, `src/api/services/chat_service.py`, `src/core/dependencies.py`
+- Modify: `src/api/routes/chat.py`, `src/api/services/chat_service.py`,
+  `src/api/services/job_queue.py` (the one-shot path — Task 6.2 Step 3)
 
 **Interfaces:**
 
@@ -2835,12 +3120,20 @@ Produces:
 ```python
 # flags.py
 class FeatureFlags:
-    LANGGRAPH_ENABLED: bool  # if False, use old agent
-    
-def should_use_langgraph(config: AgentConfig) -> bool:
-    """Check if graph is enabled for this session."""
-    return FeatureFlags.LANGGRAPH_ENABLED or config.use_experimental_graph
+    LANGGRAPH_ENABLED: bool   # if False, use the existing agent path
+
+def should_use_langgraph() -> bool:
+    """Env-only for the first pass. Deliberately NOT per-session."""
+    return FeatureFlags.LANGGRAPH_ENABLED
 ```
+
+> An earlier draft read `config.use_experimental_graph`, a field that does not exist on
+> `AgentConfig` (`src/api/schemas/agent_config.py:58`). Either add it — with the schema,
+> validator, route and frontend-type changes that implies — or keep the flag env-only.
+> **Env-only is the recommendation:** per-session opt-in means two engines running against
+> the same deck table concurrently, which is a much larger surface than a big-bang cutover
+> needs (PRD §10 is explicit that we do not release until the whole system is coherent).
+> There is no `src/core/dependencies.py` in this repo, so it is dropped from the file list.
 
 - [ ] **Step 1: Create flags module**
 
@@ -2993,12 +3286,37 @@ Spec coverage:
 - [ ] Testing (regression checklist, concurrency, export) — Phase 9
 - [ ] UI (spec view toggle, context clearing, findings drawer) — Phase 10
 - [ ] Feature flag (gradual rollout) — Phase 11
+- [ ] **Spec propagation: §4.4 mutation triggers, §4.5 cycle break, §4.6 deck-level
+      edits** — Phase 6.0
+- [ ] **`finding.ts` ↔ reviewer-schema reconciliation (§7.1's named seam)** — Phase 10.0
+- [ ] **`ConfigPrompts` prompt-column migration (required by §5.1)** — Phase 10.0
+- [ ] **Frontend unit-test runner (none exists today)** — Phase 10.0
+- [ ] **Deletion inventory for `agent.py`; `llm_judge.py` stays (live consumer)** — Phase 9.2
 
-Placeholder scan: None — all steps have concrete code or test cases.
+**Placeholder scan:** *not* clean. Several steps are still headings without bodies —
+Task 2.2 Steps 3–4, Task 3.1 Step 3, Task 3.2 Step 3, Task 3.3 Steps 2 and 4, Task 3.4
+Step 2 — and inline placeholders remain (`"[To be filled in Phase 2]"`,
+`"[full prompt from spec §5.2.1]"`, `# ... add other nodes ...`,
+`skills = {"architect": ..., ...}`). **These must be filled before execution**; the skill
+prompt bodies in particular are the substance of Phases 2–3, not boilerplate.
 
-Type consistency: Checked across phases (e.g., `DeckSpec`, `GraphState`, `SlideWriter.write_slide` signatures; `scripts: str` throughout).
+**Type consistency:** the known conflicts are resolved — `scripts: str` throughout (per
+`src/domain/slide.py:52`), `SlideWriter` at `src/api/services/slide_repository.py` with
+instance methods, `StreamEvent.type` (not `event_type`), `fix_map` entries carrying
+`original_scripts`, and `deck_spec_json` owned by PR1 as `Column(Text)`. Re-verify after
+any change to PR1's contract.
 
-No gaps identified.
+**Known open items (not gaps in coverage, but unresolved decisions):**
+- Whether Phase 9.2's deletions make the flag's "off" state a hard error or wait for flag
+  removal (Phase 11 sequencing note).
+- Frontend test-runner choice: add vitest, or write Playwright specs (Phase 10.0 Step 2).
+- Custom `system_prompt` values have no automatic equivalent in the in-repo skills; the
+  migration reports them for manual re-expression rather than converting them.
+
+**Honesty note:** an earlier revision of this checklist claimed "no placeholders", "type
+consistency checked" and "no gaps identified" while all three were false. A checklist that
+asserts completeness it hasn't verified is worse than no checklist — it suppresses exactly
+the review that would catch the gap.
 
 ---
 
