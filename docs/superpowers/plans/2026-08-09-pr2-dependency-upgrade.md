@@ -10,6 +10,15 @@
 
 ---
 
+## Environment Assumptions
+
+This plan assumes the following environment:
+- **Python version:** 3.10+ (per `pyproject.toml` line 9)
+- **Package managers:** `pip>=21.0` available (for `--dry-run` verification); `uv` optional (configured in `pyproject.toml` but not required for this plan's steps)
+- **Proxy access:** Direct connectivity to `https://pypi-proxy.dev.databricks.com/simple/` for dependency resolution verification
+
+---
+
 ## Global Constraints
 
 - **LangGraph pin:** 1.2.10 (explicit). This is the spec requirement; no 1.2.11+ available on proxy yet.
@@ -17,7 +26,7 @@
 - **LangChain versions:** `langchain==1.3.14`, `langchain-core==1.5.3`, `langchain-community==0.4.1+` (resolvable).
 - **LangChain-classic:** Pin or remove (imported transitively; disappears in PR3 when AgentExecutor is deleted).
 - **LangGraph-checkpoint:** 4.1.1 (explicit).
-- **LangGraph-checkpoint-postgres:** Added; requires `psycopg>=3.2.0`.
+- **LangGraph-checkpoint-postgres:** 3.1.1 (explicit; proxy 403s 3.1.2). Real deps: `langgraph-checkpoint<5.0.0,>=4.1.0`, `orjson>=3.11.5`, `psycopg-pool>=3.2.0`, `psycopg>=3.2.0`.
 - **Psycopg transition:** Remove `psycopg2-binary` entirely; add `psycopg>=3.2.0` (psycopg3). Connection string scheme changes to `postgresql+psycopg://` for Lakebase.
 - **MLflow pin conflict:** `requirements.txt` says 3.6.0, `pyproject.toml` says >=3.11.0,<4. Reconcile to `mlflow==3.11.0–3.14.0` (resolvable and available on proxy). Pin to the highest version available on the proxy at time of writing.
 - **FastAPI/Starlette bounds:** Keep `fastapi>=0.104.0,<0.137` and `starlette<1.3` — they guard a regression in `tests/unit/test_app_wiring.py`.
@@ -46,7 +55,7 @@
 |---|---|---|
 | `requirements.txt` | Modify | Pin frozen versions: LangGraph 1.2.10, psycopg3, langchain-checkpoint, mlflow. Remove psycopg2-binary. |
 | `pyproject.toml` | Modify | Update ranges for langchain, langchain-core, mlflow; add langgraph deps; add psycopg; remove psycopg2-binary. |
-| `src/core/database.py` | Modify (lines 237, 255) | Change connection string scheme from `postgresql://` to `postgresql+psycopg://` (if autoscaling or provisioned Lakebase). Verify OBO hook at line 306 works unchanged. |
+| `src/core/database.py` | Modify (lines 237, 255) | Change connection string scheme from `postgresql://` to `postgresql+psycopg://`: line 237 (autoscaling Lakebase), line 255 (provisioned Lakebase). Both require the same change: schema URL `postgresql+psycopg://...`. Verify OBO hook at line 306 works unchanged. |
 | `tests/integration/test_database_connection.py` | Create/Modify | Integration test: verify OBO token injection works on psycopg3 against a Lakebase endpoint (skip if not Lakebase). |
 | `tests/unit/test_dependencies_resolve.py` | Create | Unit test: dry-run dependency resolution against the Databricks proxy; fail if any package is 404. |
 | `docs/technical/migration-notes.md` | Create | Document the psycopg2 → psycopg3 migration for operators: why, what changed in connection strings, how to verify. |
@@ -86,6 +95,7 @@ test — it runs offline by inspecting package metadata from the proxy.
 Skip in CI if the proxy is unreachable, but run locally during development
 to catch dependency conflicts early.
 """
+import os
 import subprocess
 import sys
 
@@ -108,7 +118,7 @@ def test_dependencies_resolve_on_proxy():
             "--index-url", "https://pypi-proxy.dev.databricks.com/simple/",
             "-e", ".",  # Install from current project (uses pyproject.toml)
         ],
-        cwd="/Users/robert.whiffin/Documents/slide-generator/ai-slide-generator",
+        cwd=os.getcwd(),  # Use current working directory (portable across developers and CI)
         capture_output=True,
         text=True,
     )
@@ -126,9 +136,17 @@ def test_dependencies_resolve_on_proxy():
     
     # Extract and print the resolved versions
     # This is informational; later tasks will pin these exact versions.
+    packages_found = []
     for line in result.stdout.split('\n'):
         if 'langgraph' in line or 'langchain' in line or 'psycopg' in line or 'mlflow' in line:
+            packages_found.append(line)
             print(f"RESOLVED: {line}")
+    
+    # Fail fast if no packages matched (indicates pip --dry-run may have failed silently)
+    assert len(packages_found) > 0, (
+        f"No packages matched in dry-run output. pip --dry-run may not be supported "
+        f"or output format differs. Check pip version and --dry-run flag support."
+    )
 
 
 def test_critical_packages_on_proxy():
@@ -211,9 +229,12 @@ RESOLVED: langgraph==1.2.10
 RESOLVED: langgraph-prebuilt==1.1.0  (← NOT 1.2.10; spec is wrong)
 RESOLVED: langchain==1.3.14
 RESOLVED: langchain-core==1.5.3
+RESOLVED: langchain-classic==[version]  (← Must resolve! Imported by src/services/agent.py:20)
 RESOLVED: psycopg==3.2.X (or higher)
 RESOLVED: mlflow==3.11.0 (or 3.12.0, 3.13.0, 3.14.0; record the max)
 ```
+
+**Critical:** Verify that `langchain-classic` resolves either transitively (via `langchain-community`) or explicitly. This package is imported by `src/services/agent.py:20` and MUST be available during PR2 (deleted in PR3). If it does not appear in the output, explicitly add it to the critical packages check in step 1 (`test_critical_packages_on_proxy`) to verify availability.
 
 If resolution fails, the error will say which package/version is unavailable or conflicts. **Record these findings in the plan's "Verification Results" section below (after Task 3).**
 
@@ -303,7 +324,7 @@ langchain-text-splitters==1.0.0
 langgraph==1.2.10
 langgraph-prebuilt==1.1.0
 langgraph-checkpoint==4.1.1
-langgraph-checkpoint-postgres==<version-from-task-1>
+langgraph-checkpoint-postgres==3.1.1
 psycopg==<version-from-task-1>
 psycopg-pool==<version-from-task-1>
 mlflow==<highest-version-from-task-1>
@@ -311,7 +332,7 @@ mlflow==<highest-version-from-task-1>
 
 **Also remove:** `psycopg2-binary==2.9.10` (entire line deleted).
 
-**Do NOT add** `langchain-classic` if it does not exist — it comes in transitively via `langchain-community`. Pin or remove only if it causes a conflict.
+**Pin explicitly** `langchain-classic` — it is imported by `src/services/agent.py:20` (`from langchain_classic.agents import AgentExecutor, create_tool_calling_agent`) and MUST resolve during PR2 (do NOT remove). Only delete this import in PR3 when AgentExecutor is removed. Verify the pinned `langchain-community` version resolves `langchain-classic` transitively; if conflict, pin explicitly or wait for removal in PR3.
 
 - [ ] **Step 1: Edit requirements.txt**
 
@@ -360,13 +381,17 @@ Open `pyproject.toml` and make the changes above.
 
 ### Step 3: Verify no syntax errors
 
-Run:
+For `requirements.txt`, spot-check the format:
 ```bash
-cd /Users/robert.whiffin/Documents/slide-generator/ai-slide-generator
-python -m py_compile requirements.txt pyproject.toml
+grep -E "^[a-z]" /Users/robert.whiffin/Documents/slide-generator/ai-slide-generator/requirements.txt | head -10
 ```
 
-(Actually, `requirements.txt` is not Python; just open it and check for typos. For `pyproject.toml`, use `python -c "import tomllib; tomllib.load(open('pyproject.toml', 'rb'))"`.)
+For `pyproject.toml`, validate the TOML syntax:
+```bash
+python -c "import tomllib; print('OK')" 2>/dev/null || python -c "import tomli as tomllib; print('OK')"
+```
+
+This works on Python 3.10+ by falling back to tomli if tomllib is unavailable.
 
 - [ ] **Step 3: Syntax check**
 
@@ -501,17 +526,16 @@ if is_lakebase_environment():
 
 This hook works identically on psycopg3 — it just injects the OAuth token. No changes needed.
 
-**Add a comment** above the function to note psycopg3 compatibility:
+**Add a comment** above the decorator (line 305) to note psycopg3 compatibility:
 
 ```python
 if is_lakebase_environment():
+    # OBO token-injection hook: works identically on psycopg3 (postgresql+psycopg://)
+    # and psycopg2. The dialect parameter is unused; this hook operates at the
+    # connection level, injecting fresh OAuth tokens for each new connection.
     @event.listens_for(engine, "do_connect")
     def provide_token(dialect, conn_rec, cargs, cparams):
-        """Inject current OAuth token for new database connections.
-        
-        Works identically with psycopg3 (postgresql+psycopg://) and psycopg2.
-        The dialect parameter is unused; this hook operates at the connection level.
-        """
+        """Inject current OAuth token for new database connections."""
         global _postgres_token
         
         # Get token (generates if not yet available)
@@ -582,7 +606,7 @@ from src.core.database import (
     get_engine,
     get_session_local,
     is_lakebase_environment,
-    _get_database_url,
+    _get_database_url,  # Note: uses internal function; acceptable for testing (mirrors unit tests)
 )
 
 
@@ -793,6 +817,8 @@ Run the command above.
 
 ### Step 2: Check for import errors
 
+**Important Note:** Import verification (below) catches module presence but NOT API compatibility. For example, an import may succeed but function signatures or class attributes may have changed in the upgraded version. The real safety gate is the full pytest test suite (Step 1). Use this step only to catch missing packages; do NOT rely on it to verify compatibility.
+
 If any test fails with `ImportError` or `ModuleNotFoundError`, the dependency was not installed correctly. Run:
 
 ```bash
@@ -808,6 +834,8 @@ print('All imports successful')
 ```
 
 If this fails, re-check Task 2 and ensure `pip install -e .` succeeded.
+
+**If imports succeed but tests in Step 1 fail:** The issue is likely API incompatibility, not installation — check test output carefully and refer to the upgraded package's changelog.
 
 - [ ] **Step 2: Verify imports**
 
@@ -1158,7 +1186,9 @@ Open the spec and verify the resolved versions match (or correct) the spec's tab
 
 ```bash
 cd /Users/robert.whiffin/Documents/slide-generator/ai-slide-generator
-git add final_proxy_check.log
+# Extract versions from final_proxy_check.log (do NOT commit the log file)
+FINAL_VERSIONS=$(grep -E "Successfully|langgraph|langchain|psycopg|mlflow" final_proxy_check.log | head -10)
+
 git commit -m "chore: final proxy resolution verification for PR2
 
 Verified final dependency set resolves on Databricks proxy:
@@ -1175,7 +1205,12 @@ Proxy: https://pypi-proxy.dev.databricks.com/simple/
 Ready for merge. PR3 can depend on this stack.
 
 Co-authored-by: Isaac"
+
+# Clean up the temporary log file (do not commit transient build artifacts)
+rm -f final_proxy_check.log
 ```
+
+**IMPORTANT:** Do NOT commit `final_proxy_check.log` to git. Build/verification logs are transient artifacts; record the version information in the commit message instead (as shown above). Add this file to `.gitignore` if it is likely to be regenerated.
 
 - [ ] **Step 4: Final commit**
 
@@ -1242,7 +1277,7 @@ These corrections must be applied to `docs/superpowers/specs/2026-08-06-agentifi
 
 ---
 
-## Summary — 5-Phase Overview
+## Summary — 7-Phase Overview
 
 1. **Task 1: Verify** — Dry-run resolution on proxy; confirm all packages available and compatible. Record actual versions.
 2. **Task 2: Pin** — Update `requirements.txt` and `pyproject.toml` with verified versions.
