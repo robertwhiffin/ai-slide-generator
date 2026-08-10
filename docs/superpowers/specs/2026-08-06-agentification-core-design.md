@@ -113,34 +113,58 @@ Verified-resolving set:
 | `langgraph-checkpoint` | 3.0.1 | **4.1.1** |
 | `langgraph-prebuilt` | 1.0.x (transitive) | **1.1.0** — *not* 1.2.x; no such version exists |
 | `langgraph-sdk` | transitive | **0.4.2** (the proxy's maximum) |
-| `langgraph-checkpoint-postgres` | — (absent) | **3.1.1** (the Lakebase saver) — the proxy **403s 3.1.2**, so pin 3.1.1 |
-| `psycopg` (psycopg3) | — (absent) | **added** (`>=3.2.0`) |
-| `psycopg-pool` | — (absent) | **added** (`>=3.2.0`) — required by the saver |
-| `orjson` | — (absent) | **added** (`>=3.11.5`) — required by the saver |
-| `psycopg2-binary` | 2.9.10 | **removed** |
+| `psycopg2-binary` | 2.9.10 | **retained** (see below) |
 
-The `langgraph-prebuilt` / `langgraph-sdk` / `psycopg-pool` / `orjson` rows and the
-3.1.1 pin were established by proxy dry-runs while planning PR2; an earlier draft of
-this table was incomplete. **Treat the pins as verified-against-the-proxy, and re-verify
-before merging** — proxy availability moves.
+**No longer required:** `langgraph-checkpoint-postgres` (and with it `psycopg`,
+`psycopg-pool`, `orjson`) — the custom saver decision above removes the dependency, and
+with it the forced psycopg2→psycopg3 migration. `psycopg2-binary` therefore stays on its
+current pin unless the driver upgrade is pursued separately on its own merits.
 
-**Postgres checkpointer — decided: adopt `langgraph-checkpoint-postgres` and upgrade to
-psycopg3.** §5.7 requires a Lakebase-backed checkpointer, and `langgraph-checkpoint`
-4.1.1 ships only `base`/`memory`/`serde` savers — the Postgres saver lives in the
-separate `langgraph-checkpoint-postgres`, which requires `psycopg>=3.2.0` (psycopg3),
-conflicting with the current `psycopg2-binary` pin. Rather than hand-roll a custom
-`BaseCheckpointSaver` over psycopg2, we take the official saver and move the app to
-psycopg3. This is a fundamental redesign; carrying the maintained checkpointer is worth
-a driver upgrade.
+The `langgraph-prebuilt` and `langgraph-sdk` rows were established by proxy dry-runs
+while planning PR2; an earlier draft of this table was incomplete and also listed the
+saver's transitive dependencies. **Treat the pins as verified-against-the-proxy and
+re-verify before merging** — proxy availability moves (it currently 403s, for example,
+`mlflow==3.15.1` and `databricks-sdk==0.125.0` while serving 3.14.0 / 0.120.0).
 
-The migration is smaller than the driver swap sounds: **no code imports `psycopg2`
-directly** (verified — it is used only as SQLAlchemy's default dialect behind a bare
-`postgresql://` URL at `database.py:237,255`). SQLAlchemy 2.0 speaks psycopg3 via the
-`postgresql+psycopg://` scheme, so the change is chiefly the connection-string scheme
-plus the requirements pin, not a rewrite. The **OBO token-injection hook**
-(`database.py:306`, `provide_token`) and `sslmode=require` must be re-verified on the
-psycopg3 dialect — that is the one place the driver swap could bite — and this must be
-proven against the Databricks pip proxy (both new packages resolvable there).
+**Postgres checkpointer — decided: write a custom `BaseCheckpointSaver` over the
+existing SQLAlchemy engine.** (This reverses an earlier draft of this section, which
+chose the official `langgraph-checkpoint-postgres` saver. The reasoning that supported
+that choice did not survive verification — see below.)
+
+§5.7 requires a Lakebase-backed checkpointer. `langgraph-checkpoint` 4.1.1 ships only
+`base`/`memory`/`serde` savers; the Postgres saver lives in the separate
+`langgraph-checkpoint-postgres`. Verified against the 3.1.1 wheel, that package:
+
+- installs as **`langgraph.checkpoint.postgres`**, exporting
+  `PostgresSaver` / `BasePostgresSaver` / `ShallowPostgresSaver` / `Conn`;
+- constructs as **`PostgresSaver(conn: Conn, pipe=None, serde=None)`** — it takes a live
+  psycopg connection or pool. There is **no `connection_string=` and no `schema=`
+  parameter**; its table names are hard-coded;
+- **requires an explicit `setup()`** call to create its four tables ("MUST be called
+  directly by the user the first time checkpointer is used").
+
+**The blocking problem is OAuth token refresh.** Lakebase connections authenticate with
+an OAuth token that expires after an hour, refreshed on a 50-minute timer
+(`TOKEN_REFRESH_INTERVAL_SECONDS`, `database.py:39-40`). That token reaches connections
+**only** through `provide_token`, a SQLAlchemy `do_connect` event listener registered on
+the *engine* (`database.py:303-312`). A `PostgresSaver` holding a raw psycopg connection
+never traverses that listener, so it would receive no refreshed token and its writes
+would begin failing roughly an hour into every deployment's life — in production only,
+and invisibly to any test that mocks the database.
+
+A custom saver over the existing engine inherits `provide_token`, the refresh timer,
+`sslmode=require`, the connection pool and the schema-qualification behaviour for free.
+That is worth more than the maintained saver's convenience, because the alternative is
+re-implementing exactly that token plumbing ourselves and owning its failure modes.
+
+**Consequence for the dependency work:** `langgraph-checkpoint-postgres` is no longer
+required, so the psycopg3 upgrade is no longer forced by the checkpointer. It may still
+be worth doing on its own merits (psycopg2 is in maintenance mode), but it becomes
+optional and separable rather than a prerequisite. If it is retained: no code imports
+`psycopg2` directly (it is only SQLAlchemy's default dialect behind a bare
+`postgresql://` URL at `database.py:237,255`), SQLAlchemy 2.0 reaches psycopg3 via
+`postgresql+psycopg://`, and `provide_token` plus `sslmode=require` must be re-verified
+on that dialect.
 
 Also in this PR:
 
@@ -877,7 +901,22 @@ with them.
   ready, later slides are released and *n* slots in late or becomes a placeholder.
   Sequential ordering is the default, not a hostage — otherwise PRD §14's
   latency-regression risk arrives by the back door.
-- **Concurrency cap: 15 builders**, dispatched in **ascending position order.**
+- **Concurrency cap: 15 builders**, dispatched in **ascending position order** — via a
+  worker-pool-over-a-checkpointed-queue, for a reason that is not obvious:
+  **LangGraph executes in supersteps with a barrier.** A node re-runs only once *all*
+  branches dispatched in the previous step have completed. So the naive shape — a
+  foreman node that `Send`s the lowest 15 outstanding positions and is re-entered as
+  each finishes — cannot work: the foreman would only wake after all 15 finished,
+  making "as slots free, take the lowest outstanding" impossible and preventing the
+  release timeout from ever firing *while* a position is actually stalled (the only
+  time it matters). `invoke(..., {"max_concurrency": 15})` would give the cap for free
+  but not ascending slot allocation. Since ordered release is what makes progress feel
+  immediate (see below), the design is instead a **fixed pool of worker branches
+  pulling positions from a queue held in checkpointed state** — the queue, not the
+  dispatch call, enforces both the cap and the ordering, and it survives the barrier.
+  **A test that exercises the scheduler in isolation will pass regardless; the
+  behavioural test must run against the compiled graph**, or the shipped behaviour
+  silently degrades to "dispatch 15, wait for all 15, dispatch the next 15."
   - Ascending order is load-bearing, not tidiness. Release requires all positions
     *< n* committed, so dispatching lowest-first means releases begin almost
     immediately. Dispatching from the end would leave the buffer holding every
