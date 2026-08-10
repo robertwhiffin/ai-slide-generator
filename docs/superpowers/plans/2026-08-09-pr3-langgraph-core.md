@@ -81,16 +81,48 @@
 **Assumed signatures and facts:**
 
 - **`langgraph==1.2.10`** is resolvable (no `ResolutionImpossible`); all transitive deps OK
-- **`langgraph-checkpoint-postgres>=4.1.1`** is installed and `psycopg>=3.2.0` (psycopg3) compatible
-- **`PostgresCheckpointer` class** from `langgraph_checkpoint_postgres.postgres` is importable:
-  ```python
-  from langgraph_checkpoint_postgres.postgres import PostgresCheckpointer
-  # Usage: checkpointer = PostgresCheckpointer(connection, schema="public")
-  ```
-- **SQLAlchemy can connect via `postgresql+psycopg://` scheme** (no changes to `database.py` driver string needed; just works)
-- **OBO token hook** (`database.py:306 provide_token`) still injects token into the connection and works with psycopg3
+- **`langgraph-checkpoint==4.1.1`** is installed, providing `BaseCheckpointSaver` and the
+  `JsonPlusSerializer` — that is all PR3 needs from the checkpoint packages.
+- **`langgraph-checkpoint-postgres` is deliberately NOT used** (spec §2.2, as amended).
+  PR2 does not install it, and PR3 must not import it. See "Checkpointer" below.
+- **psycopg2 remains the DB driver.** PR2 no longer performs a psycopg3 migration, so do
+  not assume `psycopg`, `psycopg-pool`, or a `postgresql+psycopg://` URL.
+- **`src/core/database.py` is unchanged by PR2** — the SQLAlchemy engine, its
+  `provide_token` `do_connect` listener (`database.py:303-312`), the 50-minute token
+  refresh (`TOKEN_REFRESH_INTERVAL_SECONDS`, `database.py:39-40`) and `sslmode=require`
+  all behave exactly as they do today. **PR3's checkpointer depends on that.**
 - **Lakebase endpoint is reachable from app** (prod + devloop forks); checkpointer writes land in same Lakebase catalog where session state lives
-- **If any psycopg3 migration issue surfaces, PR2 contact is debug point.**
+
+**Checkpointer — custom `BaseCheckpointSaver` over the existing SQLAlchemy engine.**
+
+Why not the official saver (verified against the `langgraph-checkpoint-postgres==3.1.1`
+wheel): it installs as `langgraph.checkpoint.postgres` exporting `PostgresSaver` (there
+is no `PostgresCheckpointer`), and its constructor is
+`PostgresSaver(conn: Conn, pipe=None, serde=None)` — it takes a **live psycopg
+connection or pool**, with no `connection_string=` and no `schema=` parameter. Because it
+holds a raw connection, it never traverses `provide_token`, which is the **only** path by
+which Lakebase's OAuth token reaches a connection. The token expires after an hour and
+the refresh timer feeds only the SQLAlchemy path, so the official saver's writes would
+begin failing roughly an hour into every deployment — in production only, and invisibly
+to any test that mocks the database.
+
+A custom saver over `get_engine()` inherits token injection, the refresh timer, the
+connection pool, `sslmode=require` and schema qualification for free.
+
+**Requirements on the custom saver:**
+- Subclass `langgraph.checkpoint.base.BaseCheckpointSaver`; implement the sync methods
+  the compiled graph uses (`get_tuple`, `list`, `put`, `put_writes`) over the existing
+  engine/session, reusing `JsonPlusSerializer` for payloads.
+- Provide a **`setup()`-equivalent** that creates its tables idempotently. Follow this
+  repo's migration convention — a `_migrate_*(conn, inspector, schema, _qual, is_sqlite)`
+  helper wired into `_run_migrations()` (`src/core/database.py:417`), *not* Alembic
+  (this repo has none) and not a bespoke bootstrap path.
+- **One shared saver instance**, not one per session. Session isolation comes from
+  passing `config={"configurable": {"thread_id": <session_id>}}` on **every**
+  `graph.invoke` / `astream` call — omitting it raises
+  `ValueError: Checkpointer requires one or more of the following 'configurable' keys`.
+  A per-session saver would also open a connection per session against a `pool_size=80`
+  engine.
 
 ---
 
@@ -422,11 +454,19 @@ class GraphState(TypedDict):
     error_state: dict | None
 
 # In checkpointer.py:
-from langgraph_checkpoint_postgres.postgres import PostgresCheckpointer
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
-def get_checkpointer(ws: WorkspaceClient, session_id: str) -> PostgresCheckpointer:
-    """Return a PostgresCheckpointer configured for the session."""
-    # Connect to Lakebase, create checkpointer
+class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
+    """Checkpoint saver over the app's existing SQLAlchemy engine.
+
+    Deliberately NOT langgraph-checkpoint-postgres — see the Checkpointer note
+    above. Going through the engine is what gives us OBO token injection and
+    the 50-minute refresh.
+    """
+
+def get_checkpointer() -> BaseCheckpointSaver:
+    """Return the process-wide shared saver (no session argument — session
+    isolation is per-invoke thread_id, not per-saver)."""
 ```
 
 - [ ] **Step 1: Define GraphState TypedDict**
@@ -452,24 +492,76 @@ class GraphState(TypedDict):
 
 `tests/unit/test_langgraph_state.py`: Validate required fields, check that state can be serialized/deserialized for checkpointing.
 
-- [ ] **Step 3: Implement checkpointer getter**
+- [ ] **Step 3: Implement the custom checkpoint saver**
 
 `src/core/checkpointer.py`:
 ```python
-from langgraph_checkpoint_postgres.postgres import PostgresCheckpointer
-from src.core.database import get_engine, get_session_maker
+from langgraph.checkpoint.base import BaseCheckpointSaver, Checkpoint, CheckpointTuple
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-def get_checkpointer(session_id: str) -> PostgresCheckpointer:
-    """Return a PostgresCheckpointer for the session."""
-    # Get Lakebase connection via existing database.py
-    engine = get_engine()
-    # Return checkpointer (schema="public", or config-driven)
-    return PostgresCheckpointer(connection_string=..., schema="tellr_checkpoints")
+from src.core.database import get_session_maker
+
+
+class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
+    """LangGraph checkpoint saver over the app's SQLAlchemy engine.
+
+    Every DB round-trip goes through the existing session maker, so it inherits
+    provide_token (OBO injection), the 50-minute token refresh, sslmode=require,
+    the connection pool and schema qualification.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(serde=JsonPlusSerializer())
+        self._session_maker = get_session_maker()
+
+    # Implement the sync surface the compiled graph uses:
+    def get_tuple(self, config) -> CheckpointTuple | None: ...
+    def list(self, config, *, filter=None, before=None, limit=None): ...
+    def put(self, config, checkpoint: Checkpoint, metadata, new_versions): ...
+    def put_writes(self, config, writes, task_id, task_path="") -> None: ...
+
+
+_saver: SqlAlchemyCheckpointSaver | None = None
+
+
+def get_checkpointer() -> SqlAlchemyCheckpointSaver:
+    """Process-wide shared saver. Session isolation is the per-invoke thread_id."""
+    global _saver
+    if _saver is None:
+        _saver = SqlAlchemyCheckpointSaver()
+    return _saver
 ```
 
-- [ ] **Step 4: Test checkpointer construction**
+Storage: two tables (`graph_checkpoints`, `graph_checkpoint_writes`) keyed by
+`(thread_id, checkpoint_ns, checkpoint_id)`, created by the migration in Step 3b.
 
-Verify that checkpointer can be instantiated (mock DB if needed).
+- [ ] **Step 3b: Add the schema migration (this repo's convention, NOT Alembic)**
+
+Add `_migrate_graph_checkpoints(conn, inspector, schema, _qual, is_sqlite)` to
+`src/core/database.py` and call it from `_run_migrations()` (`database.py:417`),
+alongside the existing `_migrate_*` helpers. Follow their established shape: guard every
+`CREATE TABLE` / `ADD COLUMN` behind an `inspector` check so it is idempotent, qualify
+names with `_qual()`, and branch on `is_sqlite` so the unit-test path works. There is no
+Alembic in this repo — `Base.metadata.create_all()` plus these helpers is the mechanism.
+
+- [ ] **Step 4: Test the saver against a real database, not a mock**
+
+`tests/unit/test_checkpointer.py` (sqlite via the `is_sqlite` path) — round-trip a
+checkpoint through `put` → `get_tuple`, assert `list` ordering, and assert `put_writes`
+then replay. Then a `@pytest.mark.live` test against Lakebase asserting a write
+**succeeds on a connection issued by the shared engine**.
+
+> **Do not mock the database in this step.** Mocking is precisely what would hide the
+> failure mode that drove this design: a saver that holds its own connection appears to
+> work in tests and then stops writing about an hour into a real deployment, when the
+> OAuth token expires. The value of this test is that it exercises the engine path.
+
+- [ ] **Step 4b: Assert `thread_id` is always supplied**
+
+Add a test that compiling with the saver and invoking **without**
+`config={"configurable": {"thread_id": ...}}` raises `ValueError` — then assert the
+app's own invoke helper always sets it from `session_id`. This pins the contract in a
+test rather than relying on every future call site remembering it.
 
 - [ ] **Step 5: Commit**
 
@@ -1375,7 +1467,9 @@ def build_graph(config):
     graph.add_edge("fix_reviewer", "foreman")
     graph.add_edge("deck_reviewer", END)
     
-    return graph.compile(checkpointer=get_checkpointer(...))
+    # Shared saver; session isolation comes from thread_id at invoke time:
+    #   graph.invoke(state, config={"configurable": {"thread_id": session_id}})
+    return graph.compile(checkpointer=get_checkpointer())
 ```
 
 - [ ] **Step 7: Write integration tests**
@@ -2383,11 +2477,17 @@ If PR1 differs from these assumptions, Phase 1 needs adjustment:
 
 If PR2 differs, Phase 1.4 needs adjustment:
 
-1. **`langgraph==1.2.10`** resolvable (verified against Databricks pip proxy).
-2. **`langgraph-checkpoint-postgres>=4.1.1` + `psycopg>=3.2.0`** both installed.
-3. **`PostgresCheckpointer` importable** from `langgraph_checkpoint_postgres.postgres`.
-4. **SQLAlchemy connection works via `postgresql+psycopg://` scheme** (no code change needed; just works).
-5. **OBO token hook (`database.py:306`) still injects token** into psycopg3 connections.
+1. **`langgraph==1.2.10`** resolvable (verified against the Databricks pip proxy), with
+   `langgraph-checkpoint==4.1.1`, `langgraph-prebuilt==1.1.0`, `langgraph-sdk==0.4.2`.
+2. **`langgraph.checkpoint.base.BaseCheckpointSaver` and `JsonPlusSerializer`
+   importable** — that is the entire checkpoint surface PR3 needs.
+3. **`langgraph-checkpoint-postgres` is NOT installed**, and PR3 must not import it.
+4. **`psycopg2-binary==2.9.10` unchanged; connection strings stay `postgresql://`.**
+   No psycopg3.
+5. **`src/core/database.py` untouched by PR2** — `get_engine()`/`get_session_maker()`,
+   the `provide_token` `do_connect` listener (`database.py:303-312`), the 50-minute
+   token refresh and `sslmode=require` all behave as they do today. PR3's custom saver
+   is built directly on this, so it is the load-bearing promise.
 
 ### What Future Workstreams Can Assume (PR3 Hands Off)
 
