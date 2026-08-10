@@ -6,7 +6,8 @@
 
 **Architecture:** This PR is purely dependency hygiene — all changes live in `requirements.txt` and `pyproject.toml`. The app boots and all existing tests pass with the upgraded stack. No code imports or uses LangGraph yet (that is PR3); no connection-string changes or driver swaps. `src/core/database.py` is untouched. Verification is done via dry-run and explicit proxy-resolution testing before merge.
 
-**Tech Stack:** Python 3.10+, LangGraph 1.2.10, LangChain 1.3.14, langchain-core 1.5.3, langchain-checkpoint 4.1.1 (no psycopg3; psycopg2-binary 2.9.10 continues).
+**Tech Stack:** Python 3.10+, LangGraph 1.2.10, LangChain 1.3.14, langchain-core 1.5.3,
+**langgraph**-checkpoint 4.1.1 (no psycopg3; psycopg2-binary 2.9.10 continues).
 
 ---
 
@@ -469,17 +470,42 @@ Once PR2 merges, PR3 (the LangGraph core) can assume:
 
 ### Dependency Stack (Proven Resolvable on Proxy)
 
-**Exact pinned versions:**
-- `langgraph==1.2.10` (explicitly pinned; available and working)
-- `langchain==1.3.14` (explicitly pinned)
-- `langchain-core==1.5.3` (explicitly pinned)
-- `langchain-checkpoint==4.1.1` (pulled transitively by langgraph 1.2.10, per spec §2.2: `langgraph-checkpoint<5.0.0,>=4.1.0`)
-- `langchain-prebuilt` (pulled transitively by langgraph 1.2.10, per spec §2.2: `langgraph-prebuilt<1.2.0,>=1.1.0`)
-- `langgraph-sdk` (pulled transitively by langgraph 1.2.10, per spec §2.2: `langgraph-sdk<0.5.0,>=0.4.2`)
-- `mlflow==3.14.0` (pinned; reconciles requirement.txt 3.6.0 vs pyproject >=3.11.0,<4)
+**Exact pinned versions — all pinned explicitly, none left to transitive resolution:**
+- `langgraph==1.2.10`
+- `langchain==1.3.14`
+- `langchain-core==1.5.3`
+- **`langgraph-checkpoint==4.1.1`** — pin explicitly, do NOT leave transitive
+- **`langgraph-prebuilt==1.1.0`** — pin explicitly (1.1.0 is the proxy maximum; there is
+  no 1.2.x)
+- **`langgraph-sdk==0.4.2`** — pin explicitly (0.4.2 is the proxy maximum)
+- `mlflow==3.14.0` (reconciles requirements.txt 3.6.0 vs pyproject >=3.11.0,<4; the proxy
+  403s 3.15.1)
 - `psycopg2-binary==2.9.10` (unchanged; no psycopg3)
 
-**All verified to resolve together on the Databricks pip proxy without conflict.**
+> **Why the last three must be explicit pins, not "pulled transitively".** PR3 names
+> `langgraph-checkpoint` 4.1.1 as its critical path (it subclasses `BaseCheckpointSaver`
+> from it). langgraph 1.2.10's real constraint is `langgraph-checkpoint<5.0.0,>=4.1.0`, so
+> transitive resolution is free to hand PR3 a 4.2.x that PR3 was never tested against.
+> Pinning removes that drift.
+>
+> **Provenance of those ranges:** they come from the **`langgraph==1.2.10` wheel
+> metadata**, read directly:
+> ```
+> Requires-Dist: langchain-core<2,>=1.4.7
+> Requires-Dist: langgraph-checkpoint<5.0.0,>=4.1.0
+> Requires-Dist: langgraph-prebuilt<1.2.0,>=1.1.0
+> Requires-Dist: langgraph-sdk<0.5.0,>=0.4.2
+> ```
+> An earlier revision attributed these specifiers to spec §2.2. **It does not contain
+> them** — §2.2 has a version *table*, not requirement ranges. Cite the wheel, not the spec.
+
+**Package names:** they are `langgraph-checkpoint`, `langgraph-prebuilt`, `langgraph-sdk`.
+`langchain-checkpoint` and `langchain-prebuilt` **do not exist**; an earlier revision used
+those names here, which would have failed at install time.
+
+**All verified to resolve together on the Databricks pip proxy without conflict**
+(including `databricks-langchain==0.9.0` alongside `langchain-core==1.5.3`, confirmed by
+dry-run — no upgrade of `databricks-langchain` is forced).
 
 ### Database Layer (Unchanged)
 
