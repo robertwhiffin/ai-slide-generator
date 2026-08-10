@@ -4,7 +4,8 @@
 
 **Goal:** Replace the single-agent HTML emitter with a LangGraph-based multi-agent system: architect supervisor, data analyst, parallel per-slide builders, reviewers, a deterministic foreman service, and a review/fix loop. Includes deck spec, incremental slide delivery, multi-target editing, and streaming attribution.
 
-**Architecture:** A LangGraph state machine with 7 agent skills (in-repo, versioned) plus one deterministic orchestration service. State persists to Lakebase via `langgraph-checkpoint-postgres`. Two entry points: conversational (architect-driven, interruptible) and one-shot (prompt→deck, no interrupts, preserves MCP contracts). Reviewers write clean slides; builders never write rows. Foreman handles cap/dispatch/retry logic deterministically. Findings route to chat (deck-level) or drawer (per-slide). Incremental delivery via `slide_ready` events on SSE and slide-cursor on polling.
+**Architecture:** A LangGraph state machine with 7 agent skills (in-repo, versioned) plus one deterministic orchestration service. State persists to Lakebase via a custom `BaseCheckpointSaver` over the existing
+SQLAlchemy engine (spec §2.2 — *not* `langgraph-checkpoint-postgres`). Two entry points: conversational (architect-driven, interruptible) and one-shot (prompt→deck, no interrupts, preserves MCP contracts). Reviewers write clean slides; builders never write rows. Foreman handles cap/dispatch/retry logic deterministically. Findings route to chat (deck-level) or drawer (per-slide). Incremental delivery via `slide_ready` events on SSE and slide-cursor on polling.
 
 **Tech Stack:** Python 3.11, LangGraph 1.2.10, LangChain 1.3.14, langgraph-checkpoint-postgres 4.1.1, psycopg3, SQLAlchemy 2.0 (`postgresql+psycopg://` scheme), pytest, TypeScript/React.
 
@@ -164,7 +165,7 @@ connection pool, `sslmode=require` and schema qualification for free.
 | `src/api/mcp_server.py` | One-shot path: enter graph at architect with conversation skipped; no contract change |
 | `src/api/schemas/streaming.py` | Add `slide_ready` event type; add optional `agent` and `slide_cursor` fields to `StreamEvent` |
 | `frontend/src/services/api.ts` | Add slide cursor to polling; handle `slide_ready` event |
-| `frontend/src/types/streaming.ts` | Add `slide_ready` event, `agent` field, update `StreamEventType` union |
+| `frontend/src/services/api.ts` | Add `slide_ready` to the `StreamEventType` union (`:62`) plus `agent`/`position`/`html`/`scripts` on `StreamEvent`. **There is no `frontend/src/types/streaming.ts`** — these types live in `api.ts`. |
 | `frontend/src/views/SessionChat.tsx` | Add spec view toggle; wire context clearing (clears chat + transcript, keeps spec) |
 | `frontend/src/components/FeedbackDrawer.tsx` | Wire findings to Apply/Discuss callbacks (stub was already there) |
 
@@ -1894,98 +1895,190 @@ git commit -m "feat(mcp): one-shot path (create_deck / edit_deck contracts prese
 
 **Interfaces:**
 
-Produces:
-```python
-# In streaming.py, new event type:
-class SlideReadyEvent(StreamEvent):
-    event_type: Literal["slide_ready"]
-    position: int
-    html: str
-    scripts: str  # JavaScript source text, not dict
-    
-# New field on StreamEvent:
-agent: str | None = None  # "architect", "builder", "reviewer", etc.
-slide_cursor: int | None = None  # for polling: which slide position was most recently delivered
+**Ground truth to build on** (`src/api/schemas/streaming.py`): the field is **`type`**, not
+`event_type` (`:39`, `type: StreamEventType = Field(...)`), and `to_sse()` renders
+`self.type.value` (`:62`). So `slide_ready` must be a member of the
+**`StreamEventType` enum** — subclassing with a `Literal` will not satisfy `.value`.
 
-# Polling path updates:
-def poll_chat(session_id: str, after_message_id: int, slide_cursor: int) -> list[StreamEvent]:
-    # Return events after message_id AND slides with position > slide_cursor
-```
-
-- [ ] **Step 1: Update StreamEvent schema**
+- [ ] **Step 1: Extend the enum and the model (do not subclass)**
 
 ```python
+# src/api/schemas/streaming.py
+class StreamEventType(str, Enum):
+    ASSISTANT = "assistant"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    ERROR = "error"
+    COMPLETE = "complete"
+    SESSION_TITLE = "session_title"
+    SESSION_CREATED = "session_created"
+    SLIDE_READY = "slide_ready"        # NEW — must be an enum member
+
 class StreamEvent(BaseModel):
-    event_type: StreamEventType
-    content: str | None = None
-    agent: str | None = None  # attribution
-    position: int | None = None  # for slide_ready
-    html: str | None = None  # for slide_ready
-    scripts: str | None = None  # for slide_ready (JavaScript source text)
-    slide_cursor: int | None = None  # for polling, hint at next expected position
+    type: StreamEventType              # NOTE: `type`, not `event_type`
     ...
+    agent: str | None = None           # NEW: attribution ("architect", "builder", ...)
+    position: int | None = None        # NEW: for slide_ready
+    html: str | None = None            # NEW: for slide_ready
+    scripts: str | None = None         # NEW: JavaScript source text (str, not dict)
 ```
 
-- [ ] **Step 2: Add `slide_ready` event emission to streaming callback**
+Mirror the union on the frontend in **`frontend/src/services/api.ts:62`** (that is where
+`StreamEventType` and `StreamEvent` actually live — there is no
+`frontend/src/types/streaming.ts`).
 
-Modify `src/services/streaming_callback.py` (or update in Phase 7):
+- [ ] **Step 2: Emit the event object, not its SSE encoding**
+
 ```python
-def emit_slide_ready(position: int, html: str, scripts: str):
-    event = StreamEvent(
-        event_type="slide_ready",
-        position=position,
-        html=html,
-        scripts=scripts
-    )
-    self.event_queue.put(event.to_sse())
+def emit_slide_ready(self, position: int, html: str, scripts: str) -> None:
+    self.event_queue.put(StreamEvent(          # queue the OBJECT
+        type=StreamEventType.SLIDE_READY,
+        position=position, html=html, scripts=scripts,
+        agent="builder",
+    ))
 ```
 
-- [ ] **Step 3: Update foreman to emit slide_ready events**
+> The consumer in `src/api/routes/chat.py:390-393` dequeues and then calls
+> `event.to_sse()` itself. Queuing `event.to_sse()` (a `str`) makes that
+> `AttributeError` on the very first slide. Every existing emitter in
+> `streaming_callback.py` queues the object — match them.
 
-When a slide lands (build_reviewer writes row or fix_reviewer writes winner), foreman emits a `slide_ready` event via the callback handler.
+- [ ] **Step 3: Give graph nodes a way to emit (the missing mechanism)**
+
+`StreamingCallbackHandler` is a LangChain `BaseCallbackHandler` whose hooks
+(`on_agent_action`, `on_tool_start`, `on_llm_end`) are `AgentExecutor`-era; **under
+LangGraph they will not fire**, and `on_agent_action` has no LangGraph analogue at all.
+So nodes cannot rely on callbacks being invoked for them.
+
+Pass the emitter explicitly instead, via the one channel LangGraph gives every node:
+
+```python
+# Emitter goes in the invoke config, NOT in GraphState (it is not serialisable and
+# must never be checkpointed).
+graph.invoke(
+    state,
+    config={
+        "configurable": {"thread_id": session_id, "emitter": emitter},
+        "max_concurrency": CAP,
+    },
+)
+
+def build_reviewer_node(payload: dict, config: RunnableConfig) -> dict:
+    emitter = config["configurable"].get("emitter")
+    ...
+    if emitter and not objective:
+        emitter.emit_slide_ready(position, html, scripts)
+```
+
+Nodes reached by `Send` still receive `config` as their second parameter, so this works
+on fan-out branches too. Keep the emitter **optional** so the one-shot path (§6.4) and
+tests can run without one.
+
+- [ ] **Step 3b: Emit in release order, not completion order**
+
+Emission is driven by `releasable_positions(state)` (Phase 4), so a slide is emitted only
+once every lower position is committed — the reorder-buffer guarantee. Do **not** emit
+directly from the reviewer that happened to finish first, or ordering is lost.
 
 - [ ] **Step 4: Add slide cursor to polling**
 
-Modify `poll_chat` in `src/api/routes/chat.py`:
+**Extend `poll_chat` (`src/api/routes/chat.py:557`) — do not rewrite it.** The existing body
+carries two shipped fixes that must survive:
+
+1. **The SDR-4437 IDOR fix** (`chat.py:580-588`): a `request_id` must not grant access to
+   another user's chat. It resolves the session via `get_session_id_for_request` and then
+   requires `CAN_VIEW` through `_check_deck_permission_for_session`. **Without this, any
+   authenticated user who guesses a request_id reads someone else's deck.**
+2. **The own-message filter** (`chat.py:606-610`): the user's own message is excluded,
+   because the frontend already shows it optimistically and echoing it back renders the
+   user's text as an instant "AI Assistant" reply.
+
 ```python
 @router.get("/chat/poll/{request_id}")
 async def poll_chat(
     request_id: str,
-    after_message_id: int = 0,
-    slide_cursor: int = 0  # NEW: which slides have been delivered
+    after_message_id: int = Query(default=0),
+    slide_cursor: int = Query(default=-1),   # NEW: highest position already delivered
 ):
-    # Return messages after after_message_id
-    # AND slides (from session_slides table) where position > slide_cursor
-    messages = session_manager.list_messages(session_id, after=after_message_id)
-    slides = session_manager.list_slides(session_id, after_position=slide_cursor)
-    
-    events = []
-    for msg in messages:
-        events.append(session_manager.msg_to_stream_event(msg))
-    for slide in slides:
-        events.append(StreamEvent(
-            event_type="slide_ready",
-            position=slide.position,
-            html=slide.html,
-            scripts=slide.scripts  # scripts is str from DB
-        ))
-    return events
+    # --- unchanged: resolve session + enforce permission (SDR-4437) ---
+    session_id = await asyncio.to_thread(
+        session_manager.get_session_id_for_request, request_id
+    )
+    if session_id is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
+    )
+    chat_request = await asyncio.to_thread(session_manager.get_chat_request, request_id)
+    if not chat_request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    # --- unchanged: message events, still excluding the user's own echo ---
+    messages = await asyncio.to_thread(
+        session_manager.get_messages_for_request, request_id, after_message_id
+    )
+    events = [
+        session_manager.msg_to_stream_event(m) for m in messages if m["role"] != "user"
+    ]
+
+    # --- NEW: released slides after the caller's cursor, from session_slides ---
+    slides = await asyncio.to_thread(
+        session_manager.list_released_slides, session_id, slide_cursor
+    )
+    events.extend(
+        StreamEvent(
+            type=StreamEventType.SLIDE_READY,
+            position=s["position"], html=s["html"], scripts=s["scripts"],
+            agent="reviewer",
+        )
+        for s in slides
+    )
+
+    # --- unchanged response SHAPE, plus one additive field ---
+    return {
+        "status": chat_request["status"],
+        "events": events,
+        "last_message_id": messages[-1]["id"] if messages else after_message_id,
+        "slide_cursor": slides[-1]["position"] if slides else slide_cursor,  # NEW
+        "result": chat_request.get("result") if chat_request["status"] == "completed" else None,
+        "error": chat_request.get("error_message") if chat_request["status"] == "error" else None,
+    }
 ```
+
+> **The return type stays a dict.** An earlier draft returned `list[StreamEvent]`, which
+> breaks all four frontend entrypoints (spec §3.1 lists them as an immovable seam) —
+> `startPolling` reads `status`, `events` and `last_message_id`. `slide_cursor` is added,
+> nothing is removed.
+>
+> Also: `session_manager.list_messages(...)` does **not** exist. The real methods are
+> `get_messages_for_request(request_id, after_message_id)` (`session_manager.py:1962`) and
+> `get_messages(session_id)` (`:810`).
 
 - [ ] **Step 5: Update session_manager**
 
-Add methods:
+Add one method, and extend the existing converter:
 ```python
-def list_slides(session_id: str, after_position: int = -1) -> list[Slide]:
-    """Return slides where position > after_position, in order."""
-    # Query session_slides table (PR1 provides this)
-    
-def msg_to_stream_event(msg: SessionMessage) -> StreamEvent:
-    """Update to handle agent attribution."""
-    if msg.event_type == "slide_ready":
-        return StreamEvent(..., agent="reviewer")  # or msg.data["agent"]
-    ...
+def list_released_slides(self, session_id: str, after_position: int = -1) -> list[dict]:
+    """Committed slides with position > after_position, ascending.
+
+    Reads the session_slides rows PR1 creates, via PR1's SlideWriter /
+    get_slide_deck accessors — do NOT hand-roll a query here. Returns only
+    positions that are RELEASED (every lower position committed), so the polling
+    transport inherits the same ordering guarantee as SSE. Placeheld positions
+    count as committed, else one terminal failure stalls the poll forever.
+    """
+
+def msg_to_stream_event(self, msg: dict) -> dict:
+    """EXTEND (`session_manager.py:2000`), don't replace: it currently hardcodes
+    tool_call / tool_result and defaults everything else to "assistant".
+    Add the `agent` field from msg metadata so attribution survives the polling
+    path as well as SSE."""
 ```
+
+> **`slide_ready` is deliberately NOT persisted as a `SessionMessage`.** Build mechanics
+> must not pollute the chat transcript — the transcript is user-visible and clearable
+> (spec §7.2). The polling path therefore reads slide rows directly, which is also why it
+> needs its own cursor rather than reusing `after_message_id`.
 
 - [ ] **Step 6: Wire agent attribution**
 
@@ -2033,14 +2126,21 @@ class StreamEvent:
 
 ```python
 class StreamingCallbackHandler:
-    def emit_activity(self, agent: str, action: str, details: dict):
-        event = StreamEvent(
-            event_type="assistant",
-            content=f"{agent}: {action} ({details})",
-            agent=agent
-        )
-        self.event_queue.put(event.to_sse())
+    def emit_activity(self, agent: str, action: str, details: dict | None = None) -> None:
+        """Queue the EVENT OBJECT (chat.py:390-393 calls .to_sse() itself), and use
+        the real field name `type`."""
+        self.event_queue.put(StreamEvent(
+            type=StreamEventType.ASSISTANT,
+            content=f"{action}" if not details else f"{action} ({details})",
+            agent=agent,
+            message_type="info",     # excluded from _hydrate_chat_history replay
+        ))
 ```
+
+> **Activity messages are displayed, not conversational state.** `message_type="info"`
+> keeps them out of any replay into the architect's context — matching how
+> `reasoning`/`info`/`tool_*` are already treated as agent-internal noise. They must not
+> become turns the architect re-reads.
 
 - [ ] **Step 2: Update foreman to emit activity**
 
@@ -2569,25 +2669,64 @@ onClick={() => clearContext(sessionId)}
 // Keeps the deck spec
 ```
 
-- [ ] **Step 1: Implement clear-context endpoint**
+- [ ] **Step 1: Implement clear-context endpoint — with a permission check**
 
 `src/api/routes/chat.py`:
 ```python
+class ClearContextRequest(BaseModel):
+    session_id: str
+
 @router.post("/chat/clear-context")
-async def clear_context(session_id: str):
-    """Clear conversation history and agent context; keep spec."""
-    session_manager.clear_transcript(session_id)
-    # Graph checkpointer retains state, but architect's conversation is empty
+async def clear_context(request: ClearContextRequest, db: DBSession = Depends(get_db)):
+    """Clear the conversation (transcript + agent context). Keeps the deck spec."""
+    # MANDATORY: without this, any authenticated user could wipe any session's
+    # transcript. Every other chat route gates this way (e.g. chat.py:587).
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, request.session_id, PermissionLevel.CAN_EDIT
+    )
+    await asyncio.to_thread(session_manager.clear_transcript, request.session_id)
+    await asyncio.to_thread(clear_graph_thread, request.session_id)
     return {"success": True}
 ```
 
-- [ ] **Step 2: Implement session_manager.clear_transcript**
+Two details that matter:
+- **`CAN_EDIT`, not `CAN_VIEW`** — clearing is destructive, so a read-only viewer must not
+  be able to do it.
+- **A body model, not a bare `session_id` parameter.** A bare `str` becomes a query
+  parameter and skips the repo's CSRF/body conventions used by the other POST routes.
+
+- [ ] **Step 2: Clear BOTH the transcript and the graph thread**
+
+Spec §7.2 requires clearing to drop the agent context *and* the transcript, keeping only
+the deck spec. Clearing one is not enough — an earlier draft's comment ("checkpointer
+retains state, but architect's conversation is empty") was self-contradictory: if the
+checkpoint survives, so does the conversation inside it.
 
 ```python
 def clear_transcript(session_id: str) -> None:
-    """Delete all SessionMessage rows for this session."""
-    # SQL: DELETE FROM session_messages WHERE session_id = ?
+    """Delete this session's SessionMessage rows.
+
+    Cascade note: `ChatRequest` rows reference messages by `request_id`, and
+    `get_messages_for_request` reads them. Deleting messages while a request is
+    in flight would make an in-progress poll return nothing. So: reject the clear
+    (409) if `UserSession.is_processing` is set, and delete messages only for
+    completed requests.
+    """
+
+def clear_graph_thread(session_id: str) -> None:
+    """Delete checkpoint rows for thread_id == session_id via the custom saver,
+    so the architect starts with an empty conversation. The deck spec is NOT in
+    the checkpoint (it is a column PR1 adds), so it survives untouched — which is
+    exactly what makes clearing safe."""
 ```
+
+- [ ] **Step 2b: Retire `_hydrate_chat_history`**
+
+`chat_service.py:1636` replays every user/assistant turn into context on every request —
+the unbounded growth that clearing exists to fix (spec §7.2). Delete it as part of this
+task; the architect's conversation now comes from the checkpointed graph state, bounded
+by the deck spec acting as a structured compaction. Leaving it in place would silently
+re-hydrate a conversation the user just cleared.
 
 - [ ] **Step 3: Add clear button to frontend**
 
