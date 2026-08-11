@@ -15,8 +15,27 @@ The LLM agent is mocked (we don't need real generation), but everything
 else runs through real services and a real (in-memory) database.
 
 Run with: pytest tests/integration/test_savepoint_e2e.py -v
+
+Hermeticity note (Part 1 repair)
+---------------------------------
+The original fixture only overrode ``app.dependency_overrides[get_db]``,
+which covers the FastAPI *route* dependency (``src.core.database.get_db``).
+``SessionManager`` does all its DB work through ``get_db_session()``
+(``src.core.database:365``), a separate context manager that bypasses the
+dependency-override system entirely and hits whatever database the
+environment is configured for.  Every route that enforces deck permissions
+also calls ``_check_deck_permission_for_session`` (``src.api.routes._authz``),
+which opens its own ``get_db_session`` independently.
+
+Fix: patch both ``src.api.services.session_manager.get_db_session`` and
+``src.api.routes._authz.get_db_session`` in the ``client`` fixture so that
+*all* DB access goes through the same in-memory SQLite engine.  The
+permission context is also patched to supply ``user_name="test-user"`` so
+that the creator-check in ``PermissionService.get_deck_permission`` grants
+``CAN_MANAGE`` on sessions whose ``created_by`` matches.
 """
 
+import contextlib
 import json
 import time
 import pytest
@@ -28,6 +47,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
 from src.core.database import Base, get_db
+from src.core.permission_context import PermissionContext
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
 
@@ -57,16 +77,50 @@ def test_db_engine():
 
 
 @pytest.fixture(scope="function")
-def test_db(test_db_engine):
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
-    db = SessionLocal()
+def test_db_factory(test_db_engine):
+    """SQLAlchemy session factory bound to the in-memory engine."""
+    return sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+
+
+@pytest.fixture(scope="function")
+def test_db(test_db_factory):
+    db = test_db_factory()
     yield db
     db.close()
 
 
+def _make_fake_get_db_session(factory):
+    """Return a context manager that yields a SQLAlchemy session from *factory*.
+
+    Mirrors the pattern in tests/integration/test_get_slide_deck_row_read.py.
+    Used to patch ``get_db_session`` at fixture scope so SessionManager and the
+    _authz helper both use the in-memory SQLite engine rather than the live DB.
+    """
+
+    @contextlib.contextmanager
+    def fake_get_db_session():
+        db = factory()
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    return fake_get_db_session
+
+
 @pytest.fixture(scope="function")
-def client(test_db):
-    """TestClient backed by in-memory DB, real SessionManager, mocked agent."""
+def client(test_db_engine, test_db_factory, test_db):
+    """TestClient fully backed by in-memory SQLite.
+
+    Patches:
+    - ``app.dependency_overrides[get_db]``                      FastAPI route dep
+    - ``src.api.services.session_manager.get_db_session``       all SessionManager ops
+    - ``src.api.routes._authz.get_db_session``                  deck-permission checks
+    """
     def override_get_db():
         try:
             yield test_db
@@ -75,8 +129,12 @@ def client(test_db):
 
     app.dependency_overrides[get_db] = override_get_db
 
-    with TestClient(app) as c:
-        yield c
+    fake_db_session = _make_fake_get_db_session(test_db_factory)
+
+    with patch("src.api.services.session_manager.get_db_session", fake_db_session):
+        with patch("src.api.routes._authz.get_db_session", fake_db_session):
+            with TestClient(app) as c:
+                yield c
 
     app.dependency_overrides.clear()
 
@@ -97,12 +155,23 @@ def reset_singletons():
 
 @pytest.fixture
 def mock_user():
-    """Patch the user context so API calls don't fail on auth."""
+    """Patch the user context and permission context so API calls pass auth.
+
+    ``get_current_user`` patches ensure ``created_by`` is set to ``"test-user"``
+    on every session we create in tests.
+
+    ``get_permission_context`` is patched in the modules that read it for
+    permission enforcement (``_authz.py``) so the creator-check at
+    ``PermissionService.get_deck_permission`` line 276 resolves
+    ``root.created_by == user_name`` and returns CAN_MANAGE.
+    """
+    perm_ctx = PermissionContext(user_name="test-user")
     with patch("src.api.routes.sessions.get_current_user", return_value="test-user"):
         with patch("src.api.routes.slides.get_current_user", return_value="test-user"):
             with patch("src.api.routes.chat.get_current_user", return_value="test-user"):
                 with patch("src.core.user_context.get_current_user", return_value="test-user"):
-                    yield
+                    with patch("src.api.routes._authz.get_permission_context", return_value=perm_ctx):
+                        yield
 
 
 # ---------------------------------------------------------------------------
@@ -660,4 +729,238 @@ class TestDeleteSlideRegressions:
         # Version numbers should be strictly increasing (newest first in list)
         assert v_numbers == sorted(v_numbers, reverse=True), (
             f"Version numbers should be strictly decreasing in newest-first list: {v_numbers}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Part 2 — spec-snapshot restore (integration-level proof for Task 7)
+# ---------------------------------------------------------------------------
+# These tests exercise the round-trip added in Tasks 1 + 7:
+#   SlideDeckVersion.deck_spec_json  (Task 1 column)
+#   create_version snapshots it      (Task 7 write)
+#   restore_version copies it back   (Task 7 copy-back, C9)
+#
+# Task 7 verified this at unit level with mocks.  Here we run the full
+# API/service stack against in-memory SQLite so that the real ORM,
+# real transactions, and real session_manager methods are exercised.
+# ---------------------------------------------------------------------------
+
+
+def _get_deck_row(factory, session_id_str: str):
+    """Return the SessionSlideDeck ORM row for the given string session_id."""
+    from src.database.models.session import UserSession, SessionSlideDeck
+
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == session_id_str).one()
+        deck = db.query(SessionSlideDeck).filter(SessionSlideDeck.session_id == us.id).one()
+        # Detach from session so values are accessible after close
+        deck_spec_json = deck.deck_spec_json
+        css = deck.css
+        external_scripts_json = deck.external_scripts_json
+        scripts_content = deck.scripts_content
+        return {
+            "deck_spec_json": deck_spec_json,
+            "css": css,
+            "external_scripts_json": external_scripts_json,
+            "scripts_content": scripts_content,
+        }
+    finally:
+        db.close()
+
+
+def _set_deck_spec_json(factory, session_id_str: str, spec_json: str) -> None:
+    """Directly write deck_spec_json on the SessionSlideDeck row."""
+    from src.database.models.session import UserSession, SessionSlideDeck
+
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == session_id_str).one()
+        deck = db.query(SessionSlideDeck).filter(SessionSlideDeck.session_id == us.id).one()
+        deck.deck_spec_json = spec_json
+        db.commit()
+    finally:
+        db.close()
+
+
+def _count_slide_rows(factory, session_id_str: str) -> int:
+    """Count the session_slides rows for the given string session_id."""
+    from src.database.models.session import UserSession, SessionSlide
+
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == session_id_str).one()
+        return db.query(SessionSlide).filter(SessionSlide.session_id == us.id).count()
+    finally:
+        db.close()
+
+
+class TestSpecSnapshotRestoreE2E:
+    """Integration-level proof that deck_spec_json round-trips through save-point restore.
+
+    Task 7 verified create_version/restore_version at unit level with mocks.
+    These tests run the real API+service stack against in-memory SQLite to
+    prove the round-trip end-to-end.
+    """
+
+    def test_spec_snapshot_restore_round_trip(self, client, mock_user, test_db_factory):
+        """Save point captures deck_spec_json; restore brings it back.
+
+        Why this matters: if restore returned an old deck but left today's
+        deck_spec_json intact, PR3's §4.4 rebuild trigger would compare the
+        restored deck's slides against a spec it never came from and
+        "correct" them — silently undoing the restore.  The spec must be
+        restored together with the deck it describes.
+
+        Scenario:
+          1. Seed deck, set spec to SPEC_V1
+          2. Create save point V1 (snapshots SPEC_V1)
+          3. Change spec to SPEC_V2 (simulates architect issuing a new spec
+             while the user edits slides in the meantime)
+          4. Restore to V1
+          5. Assert deck_spec_json == SPEC_V1, not SPEC_V2
+        """
+        SPEC_V1 = json.dumps({"version": 1, "layout": "dark", "accent": "#e66"})
+        SPEC_V2 = json.dumps({"version": 2, "layout": "light", "accent": "#00f"})
+
+        session_id = _create_session(client)
+        _seed_deck(session_id)
+
+        # Set spec to V1 directly (no API for spec writes yet)
+        _set_deck_spec_json(test_db_factory, session_id, SPEC_V1)
+
+        # Create save point — must snapshot SPEC_V1
+        v1 = _create_savepoint(client, session_id, "Initial with SPEC_V1")
+
+        # Architect issues a new spec (or a user edit triggers a spec update)
+        _set_deck_spec_json(test_db_factory, session_id, SPEC_V2)
+        assert _get_deck_row(test_db_factory, session_id)["deck_spec_json"] == SPEC_V2
+
+        # Restore to V1
+        resp = client.post(
+            f"/api/slides/versions/{v1['version_number']}/restore",
+            json={"session_id": session_id},
+        )
+        assert resp.status_code == 200, f"restore failed: {resp.text}"
+
+        # The spec must be back to V1, not V2
+        row = _get_deck_row(test_db_factory, session_id)
+        assert row["deck_spec_json"] == SPEC_V1, (
+            f"restore must bring back SPEC_V1; got {row['deck_spec_json']!r}. "
+            "If SPEC_V2 is returned, PR3's §4.4 trigger would rebuild the "
+            "slides against a spec the restored deck never came from, silently "
+            "undoing the restore."
+        )
+
+    def test_restore_brings_back_css_scripts_and_prunes_phantom_rows(
+        self, client, mock_user, test_db_factory
+    ):
+        """Restore brings back css/external_scripts/scripts_content and prunes extra rows.
+
+        Scenario:
+          1. 3-slide deck with distinctive CSS and an external script — V1
+          2. Replace with 5-slide deck that has different CSS — V2
+          3. Restore to V1
+          4. Assert: 3 slides back, CSS matches V1, external_scripts match V1,
+             scripts_content matches V1, row count == 3 (no phantom rows at
+             positions 3 and 4 from V2)
+        """
+        from src.api.services.chat_service import get_chat_service
+        from src.api.services.session_manager import get_session_manager
+        from src.domain.slide_deck import SlideDeck
+
+        CSS_V1 = "body { background: #001; color: #eee; }"
+        EXT_SCRIPTS_V1 = ["https://cdn.jsdelivr.net/npm/chart.js"]
+
+        CSS_V2 = "body { background: #fff; }"
+
+        session_id = _create_session(client)
+
+        # Build a 3-slide deck with V1 CSS and external_scripts set on both:
+        #   - the SlideDeck domain object (so create_save_point → deck.to_dict()
+        #     captures them into the version snapshot), and
+        #   - the deck_dict passed to save_slide_deck (so the deck columns are
+        #     written correctly before V1 restore target is established).
+        deck3 = SlideDeck.from_html_string(load_3_slide_deck())
+        deck3.css = CSS_V1
+        deck3.external_scripts = EXT_SCRIPTS_V1
+        # SlideDeck.scripts is a computed property (aggregate of slide scripts)
+        # so we can't assign it directly; the version snapshot will carry ""
+        # for the scripts field for decks with no per-slide scripts, which is
+        # fine — scripts_content restoration is tested at unit level in Task 7.
+
+        deck3_dict = deck3.to_dict()
+        # deck3_dict["css"] and deck3_dict["external_scripts"] are now CSS_V1 / EXT_SCRIPTS_V1
+
+        service = get_chat_service()
+        with service._cache_lock:
+            service._deck_cache[session_id] = deck3
+
+        sm = get_session_manager()
+        sm.save_slide_deck(
+            session_id=session_id,
+            title=deck3.title,
+            html_content=deck3.knit(),
+            slide_count=3,
+            deck_dict=deck3_dict,
+        )
+
+        # Create V1 save point — the in-memory deck has CSS_V1 so the snapshot
+        # will carry it.
+        v1 = _create_savepoint(client, session_id, "V1 - 3 slides with CSS_V1")
+
+        # Replace with a 5-slide deck with V2 CSS (no external scripts)
+        deck5 = SlideDeck.from_html_string(load_6_slide_deck())
+        deck5.slides = deck5.slides[:5]
+        deck5.css = CSS_V2
+        deck5.external_scripts = []
+
+        with service._cache_lock:
+            service._deck_cache[session_id] = deck5
+
+        deck5_dict = deck5.to_dict()
+        deck5_dict["css"] = CSS_V2
+        deck5_dict["external_scripts"] = []
+        sm.save_slide_deck(
+            session_id=session_id,
+            title=deck5.title,
+            html_content=deck5.knit(),
+            slide_count=5,
+            deck_dict=deck5_dict,
+        )
+        _create_savepoint(client, session_id, "V2 - 5 slides with CSS_V2")
+
+        # Confirm we have 5 slide rows before restore
+        assert _count_slide_rows(test_db_factory, session_id) == 5, (
+            "Expected 5 rows before restore"
+        )
+
+        # Restore to V1
+        resp = client.post(
+            f"/api/slides/versions/{v1['version_number']}/restore",
+            json={"session_id": session_id},
+        )
+        assert resp.status_code == 200, f"restore failed: {resp.text}"
+
+        # Slide count via API
+        slides_data = _get_slides(client, session_id)
+        assert len(slides_data["slides"]) == 3, (
+            f"Expected 3 slides after restore, got {len(slides_data['slides'])}"
+        )
+
+        # Deck-level presentation columns restored from the V1 snapshot
+        row = _get_deck_row(test_db_factory, session_id)
+        assert row["css"] == CSS_V1, (
+            f"css must be restored to V1; got {row['css']!r}"
+        )
+        assert json.loads(row["external_scripts_json"] or "[]") == EXT_SCRIPTS_V1, (
+            f"external_scripts must be restored to V1; got {row['external_scripts_json']!r}"
+        )
+
+        # No phantom rows — row count must equal the restored slide count
+        row_count = _count_slide_rows(test_db_factory, session_id)
+        assert row_count == 3, (
+            f"Expected exactly 3 session_slides rows after restore; "
+            f"got {row_count}. Phantom rows at positions 3/4 would cause "
+            "the row-read path to serve extra slides that don't exist."
         )
