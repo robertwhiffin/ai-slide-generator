@@ -1300,57 +1300,94 @@ class SessionManager:
                 if slide.get(key) and slide[key] in name_map:
                     slide[key] = name_map[slide[key]]
 
-    def save_verification(
+    def write_slide_verification(
         self,
         session_id: str,
-        content_hash: str,
-        verification: Dict[str, Any],
+        position: int,
+        verification_record: Dict[str, Any],
     ) -> None:
-        """Save verification result for a slide by content hash.
+        """Write (merge) a verification record into the session_slides row at *position*.
 
-        Verification is stored separately from deck_json so it survives
-        deck regeneration when chat modifies slides.
+        The *verification_record* argument MUST be shaped ``{content_hash: verdict}``
+        — the same shape that ``get_slide_deck``'s row branch reads back:
+        ``json.loads(row.verification_record).get(content_hash)``.
+
+        Merge semantics (not assign): existing entries at other content-hash keys
+        survive.  This is load-bearing: if the slide HTML is edited (new hash) and
+        then reverted (old hash), the verdict for the original hash is still present
+        in the row, so the reverted slide's verification is not lost.
+
+        A whole-field assignment would also create a lost-update race when two
+        verification writes arrive concurrently for the same slide (e.g. the user
+        clicks Verify while an auto-verify is running).  The merge limits the damage
+        to writes for the same content-hash key; the last writer for a given hash
+        wins, which is acceptable because the verdicts for that hash are identical
+        (same HTML → same judge result).
 
         Args:
             session_id: Session to save verification for
-            content_hash: Hash of the slide content
-            verification: Verification result dictionary
+            position: 0-based slide position (index)
+            verification_record: Dict shaped ``{content_hash: verdict}``
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            if not deck_owner.slide_deck:
-                logger.warning(f"No slide deck for session {session_id}, cannot save verification")
+            row = (
+                db.query(SessionSlide)
+                .filter(
+                    and_(
+                        SessionSlide.session_id == deck_owner.id,
+                        SessionSlide.position == position,
+                    )
+                )
+                .one_or_none()
+            )
+
+            if row is None:
+                logger.warning(
+                    "write_slide_verification: no row at position %d for session %s",
+                    position,
+                    session_id,
+                )
                 return
 
-            deck = deck_owner.slide_deck
-            
-            # Load existing verification map
-            verification_map = {}
-            if deck.verification_map:
+            # Merge: load existing JSON blob, update with new entries, write back.
+            existing: Dict[str, Any] = {}
+            if row.verification_record:
                 try:
-                    verification_map = json.loads(deck.verification_map)
+                    existing = json.loads(row.verification_record)
                 except json.JSONDecodeError:
-                    logger.warning(f"Invalid verification_map JSON, starting fresh")
-            
-            # Update with new verification
-            verification_map[content_hash] = verification
-            
-            # Save back to database
-            deck.verification_map = json.dumps(verification_map)
-            
+                    logger.warning(
+                        "write_slide_verification: invalid JSON in row, starting fresh"
+                    )
+
+            existing.update(verification_record)
+            row.verification_record = json.dumps(existing)
+
+            content_hash = next(iter(verification_record), None)
+            verdict = verification_record.get(content_hash, {}) if content_hash else {}
             logger.info(
-                "Saved verification",
+                "Wrote slide verification (merged)",
                 extra={
                     "session_id": session_id,
+                    "position": position,
                     "content_hash": content_hash,
-                    "score": verification.get("score"),
+                    "score": verdict.get("score") if isinstance(verdict, dict) else None,
                 },
             )
 
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
-        """Get the verification map for a session.
+        """Get the verification map for a session (legacy blob path).
+
+        Reads from ``SessionSlideDeck.verification_map`` — the blob that was
+        written by the old ``save_verification`` (now deleted).  During the
+        dual-read period, this blob may be stale; the authoritative per-slide
+        verdicts live in ``SessionSlide.verification_record`` (row path).
+
+        Still called by ``create_version`` (to snapshot the map into the version
+        record) and by the version preview / list endpoints.  Do NOT remove it
+        until those callers have been migrated off the blob in a future PR.
 
         Args:
             session_id: Session to get verification map for
@@ -1447,7 +1484,16 @@ class SessionManager:
                     for m in session.messages
                 ]
 
-            # Create new version on the deck owner's session
+            # Create new version on the deck owner's session.
+            # deck_spec_json is snapshotted so that restore_version can copy it
+            # back (C9): a restored deck must be paired with the spec that
+            # described it, or PR3's §4.4 trigger would "correct" the slides to
+            # match a stale spec, silently undoing the restore.
+            deck_spec_json_snapshot = (
+                deck_owner.slide_deck.deck_spec_json
+                if deck_owner.slide_deck
+                else None
+            )
             version = SlideDeckVersion(
                 session_id=deck_owner.id,
                 version_number=next_version,
@@ -1455,6 +1501,7 @@ class SessionManager:
                 deck_json=json.dumps(deck_dict),
                 verification_map_json=json.dumps(verification_map) if verification_map else None,
                 chat_history_json=json.dumps(chat_history) if chat_history else None,
+                deck_spec_json=deck_spec_json_snapshot,
             )
             db.add(version)
             db.flush()
@@ -1712,13 +1759,139 @@ class SessionManager:
                 )
 
             # Update the current slide deck in database (use deck_owner for
-            # contributor sessions whose own slide_deck is None)
+            # contributor sessions whose own slide_deck is None).
+            #
+            # C7: re-materialise session_slides rows from the restored deck.
+            # Task 5's read path prefers rows whenever ANY exist, so writing
+            # only deck_json (the old behaviour) leaves the read path serving
+            # stale rows — the user clicks Restore and the deck does not change.
+            #
+            # C9: copy deck_spec_json back so the restored deck is paired with
+            # the spec that described it.  Without this, PR3's §4.4 trigger
+            # would "correct" the slides to match a stale spec, undoing the
+            # restore silently.
             if deck_owner.slide_deck:
-                deck_owner.slide_deck.deck_json = version.deck_json
-                deck_owner.slide_deck.verification_map = version.verification_map_json
-                deck_owner.slide_deck.title = deck_dict.get("title")
-                deck_owner.slide_deck.slide_count = len(deck_dict.get("slides", []))
-                deck_owner.slide_deck.updated_at = datetime.utcnow()
+                deck = deck_owner.slide_deck
+
+                # --- deck-level columns ---
+                deck.deck_json = version.deck_json
+                deck.verification_map = version.verification_map_json
+                deck.title = deck_dict.get("title")
+                deck.slide_count = len(deck_dict.get("slides", []))
+                deck.updated_at = datetime.utcnow()
+
+                # C9 — spec copy-back.
+                # Use getattr for compatibility with mock objects in existing tests
+                # that predate the deck_spec_json column addition (Task 1).
+                deck.deck_spec_json = getattr(version, "deck_spec_json", None)
+
+                # C7 — deck-level presentation columns (css / external_scripts_json)
+                # These power the row-read path's export chain; restoring deck_json
+                # alone leaves the row path serving the post-edit stylesheet.
+                deck.css = deck_dict.get("css") or ""
+                deck.external_scripts_json = json.dumps(
+                    deck_dict.get("external_scripts") or []
+                )
+
+                # C7 — per-slide row re-materialisation.
+                # Use the same field mapping as Task 4's dual-write so that the
+                # row path (Task 5) reads back the restored deck without divergence.
+                restored_slides = deck_dict.get("slides") or []
+                now_dt = datetime.utcnow()
+
+                for position, slide_dict in enumerate(restored_slides):
+                    html = slide_dict.get("html") or ""
+                    scripts = slide_dict.get("scripts") or ""
+                    slide_id = slide_dict.get("slide_id")
+
+                    # Re-use stored timestamps when present; fall back to now.
+                    created_at_r: Optional[datetime] = None
+                    created_at_str = slide_dict.get("created_at")
+                    if created_at_str:
+                        try:
+                            created_at_r = datetime.fromisoformat(
+                                str(created_at_str).replace("Z", "+00:00")
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    modified_at_r: Optional[datetime] = None
+                    modified_at_str = slide_dict.get("modified_at")
+                    if modified_at_str:
+                        try:
+                            modified_at_r = datetime.fromisoformat(
+                                str(modified_at_str).replace("Z", "+00:00")
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    created_by_val = slide_dict.get("created_by")
+                    modified_by_val = slide_dict.get("modified_by")
+
+                    # Migrate restored verification onto this row.
+                    # verification_map is keyed by content_hash; we need to
+                    # find the entry for this slide's HTML and write it in
+                    # the {content_hash: verdict} shape that the row path expects.
+                    slide_hash = compute_slide_hash(html)
+                    verdict = verification_map.get(slide_hash)
+                    restored_ver_record: Optional[str] = (
+                        json.dumps({slide_hash: verdict}) if verdict is not None else None
+                    )
+
+                    existing = (
+                        db.query(SessionSlide)
+                        .filter(
+                            and_(
+                                SessionSlide.session_id == deck_owner.id,
+                                SessionSlide.position == position,
+                            )
+                        )
+                        .one_or_none()
+                    )
+
+                    if existing is not None:
+                        existing.html = html
+                        existing.scripts = scripts
+                        existing.slide_id = slide_id
+                        if created_by_val:
+                            existing.created_by = created_by_val
+                        if modified_by_val:
+                            existing.modified_by = modified_by_val
+                        existing.modified_at = modified_at_r or now_dt
+                        existing.verification_record = restored_ver_record
+                    else:
+                        row = SessionSlide(
+                            session_id=deck_owner.id,
+                            position=position,
+                            id=str(uuid.uuid4()),
+                            html=html,
+                            slide_id=slide_id,
+                            scripts=scripts,
+                            created_by=created_by_val,
+                            created_at=created_at_r or now_dt,
+                            modified_by=modified_by_val,
+                            modified_at=modified_at_r or now_dt,
+                            verification_record=restored_ver_record,
+                            deck_spec_slide=None,
+                        )
+                        db.add(row)
+
+                # Prune phantom rows for positions beyond the restored slide count.
+                # Use individual db.delete() calls so that the bulk-delete call
+                # count stays stable and existing unit-test mocks (which count
+                # delete() invocations via side_effect) do not break.
+                phantom_rows = (
+                    db.query(SessionSlide)
+                    .filter(
+                        and_(
+                            SessionSlide.session_id == deck_owner.id,
+                            SessionSlide.position >= len(restored_slides),
+                        )
+                    )
+                    .all()
+                )
+                for phantom in phantom_rows:
+                    db.delete(phantom)
 
             logger.info(
                 "Restored to save point",
