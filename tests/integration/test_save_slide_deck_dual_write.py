@@ -386,7 +386,7 @@ class TestRowUpsert:
 
 class TestDeckJsonStillWritten:
     def test_deck_json_column_is_still_populated(self, factory, session_id):
-        """deck_json must be written alongside the session_slides rows."""
+        """deck_json must be written alongside the session_slides rows (INSERT branch)."""
         slides = [_make_slide("<p>Slide 0</p>")]
         deck_dict = _make_deck_dict(slides)
 
@@ -408,6 +408,44 @@ class TestDeckJsonStillWritten:
         parsed = json.loads(deck_row["deck_json"])
         assert "slides" in parsed
         assert len(parsed["slides"]) == 1
+
+    def test_deck_json_updated_on_second_save(self, factory, session_id):
+        """deck_json must be updated to new content on subsequent saves (UPDATE branch).
+
+        This is the guard against a cutover: if the update-branch write of
+        deck_json is accidentally removed, older builds that read deck_json for
+        rollback would silently return stale content after the first re-save.
+        """
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            # First save (INSERT branch)
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="",
+                slide_count=1,
+                deck_dict=_make_deck_dict([_make_slide("<p>First</p>")]),
+            )
+            # Second save (UPDATE branch) with different slide content
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="",
+                slide_count=1,
+                deck_dict=_make_deck_dict([_make_slide("<p>Second</p>")]),
+            )
+
+        owner_id = _user_session_id_int(factory)
+        deck_row = _query_deck(factory, owner_id)
+
+        assert deck_row["deck_json"] is not None
+        parsed = json.loads(deck_row["deck_json"])
+        slides = parsed.get("slides", [])
+        assert len(slides) == 1
+        assert slides[0]["html"] == "<p>Second</p>", (
+            f"deck_json not updated on UPDATE branch: got {slides[0]['html']!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -561,3 +599,149 @@ class TestNoDeckDict:
         rows = _query_slides(factory, owner_id)
         assert rows == []
         assert "version" in result  # return dict still present
+
+
+# ---------------------------------------------------------------------------
+# Test: contributor-session keying — rows land on ROOT session (highest risk)
+# ---------------------------------------------------------------------------
+
+
+def _make_root_and_contributor(factory) -> tuple[str, str, int]:
+    """Create a root session and a contributor session pointing at it.
+
+    Returns:
+        (root_session_id_str, contributor_session_id_str, root_pk_int)
+    """
+    db = factory()
+    root = UserSession(
+        session_id="root-session-001",
+        created_by="owner@example.com",
+    )
+    db.add(root)
+    db.flush()  # get root.id before adding contributor
+    contributor = UserSession(
+        session_id="contributor-session-001",
+        created_by="contrib@example.com",
+        parent_session_id=root.id,  # Integer FK to user_sessions.id
+    )
+    db.add(contributor)
+    db.commit()
+    root_pk = root.id
+    db.close()
+    return "root-session-001", "contributor-session-001", root_pk
+
+
+class TestContributorSessionKeying:
+    """Contributor sessions must write rows under the ROOT session's id.
+
+    This is the sharing-boundary correctness test. 6 call sites in
+    chat_service.py and 1 in tour.py use contributor sessions. If rows
+    were keyed on the caller's session.id instead of deck_owner.id, a
+    contributor's edit would write to the wrong (contributor) session's
+    slot and the owner's deck would not be updated — data corruption
+    across a sharing boundary, invisible without this test.
+    """
+
+    def test_contributor_save_writes_rows_on_root_session(self, factory):
+        """Saving via a contributor session must create rows keyed on the ROOT id."""
+        root_sid, contrib_sid, root_pk = _make_root_and_contributor(factory)
+        deck_dict = _make_deck_dict(
+            [_make_slide("<p>From contributor</p>")],
+            css=".contrib{}",
+            external_scripts=["https://cdn.jsdelivr.net/npm/chart.js"],
+        )
+
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=contrib_sid,  # CALLER is the contributor
+                title="Shared Deck",
+                html_content="",
+                slide_count=1,
+                deck_dict=deck_dict,
+                modified_by="contrib@example.com",
+            )
+
+        # Rows must be on the ROOT session's id
+        rows_on_root = _query_slides(factory, root_pk)
+        assert len(rows_on_root) == 1, (
+            f"Expected 1 row on root session pk={root_pk}, got {len(rows_on_root)}"
+        )
+        assert rows_on_root[0]["html"] == "<p>From contributor</p>"
+
+        # No rows should exist on the contributor's own id
+        db = factory()
+        contrib_pk = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == contrib_sid)
+            .one()
+            .id
+        )
+        db.close()
+        rows_on_contrib = _query_slides(factory, contrib_pk)
+        assert rows_on_contrib == [], (
+            f"Rows landed on contributor session pk={contrib_pk} instead of root"
+        )
+
+    def test_contributor_save_writes_deck_level_columns_on_root_deck(self, factory):
+        """css and external_scripts_json must land on the ROOT deck row."""
+        root_sid, contrib_sid, root_pk = _make_root_and_contributor(factory)
+        css_val = "body { color: blue; }"
+        ext = ["https://cdn.jsdelivr.net/npm/chart.js"]
+        deck_dict = _make_deck_dict(
+            [_make_slide()],
+            css=css_val,
+            external_scripts=ext,
+        )
+
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=contrib_sid,
+                title="Shared Deck",
+                html_content="",
+                slide_count=1,
+                deck_dict=deck_dict,
+            )
+
+        deck_row = _query_deck(factory, root_pk)
+        assert deck_row["css"] == css_val
+        assert deck_row["external_scripts_json"] == json.dumps(ext)
+
+    def test_contributor_save_orphan_prune_targets_root_session(self, factory):
+        """Orphan pruning must delete rows on the ROOT session, not the contributor's."""
+        root_sid, contrib_sid, root_pk = _make_root_and_contributor(factory)
+
+        # Seed 3 rows on root via a root-session save first
+        deck_3 = _make_deck_dict([_make_slide(f"<p>S{i}</p>") for i in range(3)])
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=root_sid,
+                title="Deck",
+                html_content="",
+                slide_count=3,
+                deck_dict=deck_3,
+            )
+
+        rows_before = _query_slides(factory, root_pk)
+        assert len(rows_before) == 3
+
+        # Contributor re-saves with 1 slide — must prune 2 orphans on root
+        deck_1 = _make_deck_dict([_make_slide("<p>Kept</p>")])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr.save_slide_deck(
+                session_id=contrib_sid,  # contributor writes
+                title="Deck",
+                html_content="",
+                slide_count=1,
+                deck_dict=deck_1,
+            )
+
+        rows_after = _query_slides(factory, root_pk)
+        assert len(rows_after) == 1, (
+            f"Orphan prune via contributor session left {len(rows_after)} rows on root"
+        )
