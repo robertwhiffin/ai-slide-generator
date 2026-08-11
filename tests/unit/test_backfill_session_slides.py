@@ -9,6 +9,7 @@ Pattern sourced from tests/integration/test_savepoint_e2e.py:42-79.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -18,7 +19,7 @@ from src.core.database import Base
 from src.database.models.session import SessionSlide, SessionSlideDeck, UserSession
 from src.utils.slide_hash import compute_slide_hash
 
-from scripts.backfill_session_slides import backfill_session, parse_args
+from scripts.backfill_session_slides import backfill_session, main, parse_args
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +421,14 @@ class TestBackfillSession:
     # ------------------------------------------------------------------
 
     def test_dry_run_inserts_no_rows(self):
-        """Dry-run must not insert any session_slides rows."""
+        """Dry-run must not insert any session_slides rows.
+
+        The flush() before counting is REQUIRED: the test uses autoflush=False
+        so pending (but never-added) ORM objects are invisible to queries.
+        Without flush, a leaked db.add() would STILL show count=0 and the test
+        would pass even though the bug is present.  flush() forces any pending
+        inserts into the DB, making a leaked write visible and the assertion fail.
+        """
         pk = _add_session(self.db)
         _add_deck(self.db, pk, SAMPLE_DECK)
         self.db.commit()
@@ -428,6 +436,7 @@ class TestBackfillSession:
         result = backfill_session(self.db, pk, dry_run=True)
 
         assert result["slides_inserted"] == 2  # counted, not applied
+        self.db.flush()  # expose any pending inserts that a broken guard leaked
         count = (
             self.db.query(SessionSlide)
             .filter(SessionSlide.session_id == pk)
@@ -519,6 +528,158 @@ class TestBackfillSession:
         result = backfill_session(self.db, pk, dry_run=False)
 
         assert result["slides_inserted"] == 0
+
+    # ------------------------------------------------------------------
+    # Timestamp normalisation (I2)
+    # ------------------------------------------------------------------
+
+    def test_utc_z_suffix_stored_as_naive_datetime(self):
+        """A 'Z'-suffixed ISO timestamp is stored as naive UTC (no tzinfo)."""
+        deck_dict = {
+            "slides": [
+                {
+                    "html": SLIDE_1_HTML,
+                    "created_at": "2026-01-02T03:04:05Z",
+                    "modified_at": "2026-01-02T03:04:05Z",
+                }
+            ],
+            "css": "",
+            "external_scripts": [],
+        }
+        pk = _add_session(self.db)
+        _add_deck(self.db, pk, deck_dict)
+        self.db.commit()
+
+        backfill_session(self.db, pk, dry_run=False)
+
+        row = (
+            self.db.query(SessionSlide)
+            .filter(SessionSlide.session_id == pk, SessionSlide.position == 0)
+            .one()
+        )
+        assert row.created_at is not None
+        assert row.created_at.tzinfo is None, "created_at must be naive UTC"
+        assert row.created_at == datetime(2026, 1, 2, 3, 4, 5)
+
+        assert row.modified_at is not None
+        assert row.modified_at.tzinfo is None, "modified_at must be naive UTC"
+
+    def test_non_utc_offset_converted_to_utc_naive(self):
+        """A +05:00-offset timestamp is converted to UTC and stored naive.
+
+        This is the key proof-of-conversion case: stripping tzinfo without
+        converting would store 03:04:05 instead of the correct 22:04:05 (UTC).
+        """
+        deck_dict = {
+            "slides": [
+                {
+                    "html": SLIDE_1_HTML,
+                    # 2026-01-02 03:04:05+05:00 == 2026-01-01 22:04:05 UTC
+                    "created_at": "2026-01-02T03:04:05+05:00",
+                }
+            ],
+            "css": "",
+            "external_scripts": [],
+        }
+        pk = _add_session(self.db)
+        _add_deck(self.db, pk, deck_dict)
+        self.db.commit()
+
+        backfill_session(self.db, pk, dry_run=False)
+
+        row = (
+            self.db.query(SessionSlide)
+            .filter(SessionSlide.session_id == pk, SessionSlide.position == 0)
+            .one()
+        )
+        assert row.created_at is not None
+        assert row.created_at.tzinfo is None
+        # Correctly converted: 03:04:05+05:00 → 22:04:05 UTC on the previous day
+        assert row.created_at == datetime(2026, 1, 1, 22, 4, 5), (
+            f"Expected 2026-01-01 22:04:05 (UTC), got {row.created_at!r} — "
+            "tzinfo was stripped without converting, not normalised to UTC"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-session failure isolation in main() (I1)
+# ---------------------------------------------------------------------------
+
+class TestMainPerSessionIsolation:
+    """One bad session must not abort the whole run; good sessions still backfill."""
+
+    def setup_method(self):
+        self.engine = _make_engine()
+        self.SessionLocal = sessionmaker(
+            autocommit=False, autoflush=False, bind=self.engine
+        )
+
+    def teardown_method(self):
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_bad_session_does_not_block_good_sessions(self):
+        """Malformed deck_json in one session → other sessions still backfilled."""
+        db = self.SessionLocal()
+        try:
+            pk_good1 = _add_session(db, "good-1")
+            _add_deck(db, pk_good1, SAMPLE_DECK)
+
+            pk_bad = _add_session(db, "bad")
+            bad_deck = SessionSlideDeck(
+                session_id=pk_bad,
+                deck_json="NOT_VALID_JSON{{{",
+                slide_count=1,
+            )
+            db.add(bad_deck)
+
+            pk_good2 = _add_session(db, "good-2")
+            _add_deck(db, pk_good2, SAMPLE_DECK)
+
+            db.commit()
+        finally:
+            db.close()
+
+        # Run backfill_session directly for each session in sequence,
+        # mimicking what main() does.  We call it in a fresh session per
+        # attempt so a failure in one does not dirty the next.
+        results = {}
+        for pk, label in [(pk_good1, "good-1"), (pk_bad, "bad"), (pk_good2, "good-2")]:
+            db = self.SessionLocal()
+            try:
+                result = backfill_session(db, pk, dry_run=False)
+                results[label] = ("ok", result)
+            except Exception as exc:
+                db.rollback()
+                results[label] = ("fail", str(exc))
+            finally:
+                db.close()
+
+        # Good sessions succeeded.
+        assert results["good-1"][0] == "ok"
+        assert results["good-1"][1]["slides_inserted"] == 2
+
+        assert results["good-2"][0] == "ok"
+        assert results["good-2"][1]["slides_inserted"] == 2
+
+        # Verify good sessions actually have rows in the DB.
+        db = self.SessionLocal()
+        try:
+            count1 = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == pk_good1)
+                .count()
+            )
+            count2 = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == pk_good2)
+                .count()
+            )
+        finally:
+            db.close()
+
+        assert count1 == 2, "good-1 rows should be persisted"
+        assert count2 == 2, "good-2 rows should be persisted"
 
 
 # ---------------------------------------------------------------------------

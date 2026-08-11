@@ -32,7 +32,7 @@ import json
 import logging
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from sqlalchemy import and_
@@ -173,9 +173,17 @@ def backfill_session(
         created_at_str = slide_dict.get("created_at")
         if created_at_str:
             try:
-                created_at = datetime.fromisoformat(
+                dt = datetime.fromisoformat(
                     str(created_at_str).replace("Z", "+00:00")
                 )
+                # Normalise to naive UTC — SessionSlide.created_at is
+                # TIMESTAMP WITHOUT TIME ZONE; all other code uses
+                # datetime.utcnow() (naive UTC).  Mixed naive/aware values
+                # in one column cause Python TypeError on comparison and
+                # lose tz info silently on SQLite.
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                created_at = dt
             except (ValueError, TypeError):
                 pass
 
@@ -183,9 +191,12 @@ def backfill_session(
         modified_at_str = slide_dict.get("modified_at")
         if modified_at_str:
             try:
-                modified_at = datetime.fromisoformat(
+                dt = datetime.fromisoformat(
                     str(modified_at_str).replace("Z", "+00:00")
                 )
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                modified_at = dt
             except (ValueError, TypeError):
                 pass
 
@@ -337,33 +348,52 @@ def main(argv: list | None = None) -> int:
         total_inserted = 0
         total_skipped = 0
         total_verification = 0
+        total_orphans = 0
+        failed_sessions: list[int] = []
 
         for sid in session_ids:
-            result = backfill_session(db, sid, dry_run=args.dry_run)
-            print(
-                f"  session pk={sid}: "
-                f"{result['slides_inserted']} inserted, "
-                f"{result['slides_skipped']} skipped, "
-                f"{result['verification_migrated']} verification migrated, "
-                f"css_backfilled={result['css_backfilled']}, "
-                f"ext_backfilled={result['external_scripts_backfilled']}, "
-                f"orphans_pruned={result['orphans_pruned']}",
-                flush=True,
-            )
-            total_inserted += result["slides_inserted"]
-            total_skipped += result["slides_skipped"]
-            total_verification += result["verification_migrated"]
+            try:
+                result = backfill_session(db, sid, dry_run=args.dry_run)
+                print(
+                    f"  session pk={sid}: "
+                    f"{result['slides_inserted']} inserted, "
+                    f"{result['slides_skipped']} skipped, "
+                    f"{result['verification_migrated']} verification migrated, "
+                    f"css_backfilled={result['css_backfilled']}, "
+                    f"ext_backfilled={result['external_scripts_backfilled']}, "
+                    f"orphans_pruned={result['orphans_pruned']}",
+                    flush=True,
+                )
+                total_inserted += result["slides_inserted"]
+                total_skipped += result["slides_skipped"]
+                total_verification += result["verification_migrated"]
+                total_orphans += result["orphans_pruned"]
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Session pk=%d FAILED: %s", sid, exc, exc_info=True)
+                print(f"  session pk={sid}: FAILED — {exc}", flush=True)
+                failed_sessions.append(sid)
+                # Roll back the dirty transaction so the next session starts clean.
+                db.rollback()
 
         print(
             f"\nSummary: {total_inserted} slides inserted, "
             f"{total_skipped} skipped, "
-            f"{total_verification} verification records migrated."
+            f"{total_verification} verification records migrated, "
+            f"{total_orphans} orphans pruned."
         )
+
+        if failed_sessions:
+            print(
+                f"\nWARNING: {len(failed_sessions)} session(s) failed "
+                f"(pks: {failed_sessions}). "
+                "Check logs above. Successful sessions were committed.",
+                file=sys.stderr,
+            )
 
         if args.dry_run:
             print("\nDry-run complete. Re-run with --yes to apply.")
 
-    return 0
+    return 1 if failed_sessions else 0
 
 
 if __name__ == "__main__":
