@@ -3,6 +3,13 @@
 
 # Core web framework
 fastapi==0.121.2
+# starlette pin: fastapi==0.121.2 requires starlette>=0.40.0,<0.50.0; fastapi
+# 0.137 / starlette 1.3 regressed APIRouter (app.include_router() stopped
+# flattening sub-router routes — caught by tests/unit/test_app_wiring.py).
+# fastapi==0.121.2 already blocks 1.x transitively, but pin explicitly so
+# upgrading fastapi in this file doesn't accidentally open the starlette 1.3
+# regression. Resolver chose 0.49.3 for fastapi==0.121.2.
+starlette==0.49.3
 uvicorn==0.38.0
 python-multipart==0.0.20
 pydantic==2.12.4
