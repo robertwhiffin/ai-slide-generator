@@ -1378,16 +1378,24 @@ class SessionManager:
             )
 
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
-        """Get the verification map for a session (legacy blob path).
+        """Aggregate the verification map from per-row session_slides records.
 
-        Reads from ``SessionSlideDeck.verification_map`` — the blob that was
-        written by the old ``save_verification`` (now deleted).  During the
-        dual-read period, this blob may be stale; the authoritative per-slide
-        verdicts live in ``SessionSlide.verification_record`` (row path).
+        Preferred path (dual-read): if any ``session_slides`` rows exist for
+        the deck owner, walk them in position order, parse each row's
+        ``verification_record`` (shaped ``{content_hash: verdict}``), and merge
+        all entries into one flat ``{content_hash: verdict}`` dict.  A single
+        row may carry multiple hashes (edit → new hash, revert → old hash both
+        survive in the same row), so all keys are merged, not just the
+        current-hash entry.
 
-        Still called by ``create_version`` (to snapshot the map into the version
-        record) and by the version preview / list endpoints.  Do NOT remove it
-        until those callers have been migrated off the blob in a future PR.
+        Legacy fallback: if no rows exist yet (pre-backfill sessions), fall back
+        to reading ``SessionSlideDeck.verification_map`` exactly as before.
+        This mirrors Task 5's get_slide_deck behaviour (prefers rows, falls back
+        to blob) so that mixed-state deployments keep working.
+
+        Callers: ``chat_service.py:2150`` (feeds create_version) and
+        ``slides.py:639`` (feeds update_version_verification).  Both expect the
+        flat ``{content_hash: verdict}`` shape, which this returns.
 
         Args:
             session_id: Session to get verification map for
@@ -1399,9 +1407,35 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            if not deck_owner.slide_deck or not deck_owner.slide_deck.verification_map:
+            if not deck_owner.slide_deck:
                 return {}
 
+            # Preferred: aggregate from per-row records.
+            slides_rows = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            )
+
+            if slides_rows:
+                merged: Dict[str, Any] = {}
+                for row in slides_rows:
+                    if row.verification_record:
+                        try:
+                            row_data = json.loads(row.verification_record)
+                            if isinstance(row_data, dict):
+                                merged.update(row_data)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "get_verification_map: invalid JSON in row at position %d",
+                                row.position,
+                            )
+                return merged
+
+            # Legacy fallback: no rows yet, read the blob.
+            if not deck_owner.slide_deck.verification_map:
+                return {}
             try:
                 return json.loads(deck_owner.slide_deck.verification_map)
             except json.JSONDecodeError:
