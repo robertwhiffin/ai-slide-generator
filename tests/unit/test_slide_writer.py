@@ -28,9 +28,14 @@ from sqlalchemy.orm import sessionmaker
 
 import src.database.models  # noqa: F401 — register all ORM models
 from src.api.services.session_manager import SessionManager, SessionNotFoundError
-from src.api.services.slide_repository import SlideWriter, _PLACEHOLDER_CLASS
+from src.api.services.slide_repository import (
+    SlideWriter,
+    _PLACEHOLDER_CLASS,
+    is_placeholder_record,
+)
 from src.core.database import Base
 from src.database.models.session import SessionSlide, UserSession
+from src.utils.slide_hash import compute_slide_hash
 
 
 # ---------------------------------------------------------------------------
@@ -414,10 +419,24 @@ def test_commit_placeholder_is_distinguishable(factory, session_id):
     assert _PLACEHOLDER_CLASS in slide["html"], (
         f"Placeholder html missing sentinel class '{_PLACEHOLDER_CLASS}': {slide['html']!r}"
     )
-    # verification_record must carry error=True
+    # verification_record must carry error=True.
+    #
+    # Final review F6: the record is now HASH-KEYED — {content_hash: verdict} —
+    # because a flat {"error": ..., "message": ...} was unreadable through
+    # get_slide_deck (which resolves via .get(compute_slide_hash(row.html))) and
+    # polluted get_verification_map's flat aggregate, persisting bare
+    # error/message keys into save-point verification_map_json.  The invariant
+    # this test guards (a placeholder is distinguishable from a real slide) is
+    # unchanged; only where the flag sits has moved, so assert via the supported
+    # helper.  Hash-keying, readability and non-pollution are covered in
+    # tests/unit/test_slide_writer_field_coherence.py.
     vr = slide.get("verification_record") or {}
-    assert vr.get("error") is True, (
-        f"Placeholder verification_record missing error=True: {vr}"
+    assert is_placeholder_record(vr), (
+        f"Placeholder verification_record not detectable as a placeholder: {vr}"
+    )
+    verdict = vr[compute_slide_hash(slide["html"])]
+    assert verdict["error"] is True, (
+        f"Placeholder verdict missing error=True: {verdict}"
     )
 
 

@@ -38,6 +38,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from src.api.services.session_manager import _prune_slide_rows_beyond, _upsert_slide_row
 from src.core.database import get_db_session
 from src.database.models.session import SessionSlide, SessionSlideDeck, UserSession
 from src.utils.slide_hash import compute_slide_hash
@@ -98,6 +99,7 @@ def backfill_session(
             verification_migrated – slides whose verification_record was written
             css_backfilled        – 1 if deck.css was (or would be) set, else 0
             external_scripts_backfilled – 1 if external_scripts_json was (or would be) set
+            head_meta_backfilled  – 1 if head_meta_json was (or would be) set
             orphans_pruned        – rows deleted (or that would be deleted) above slide count
     """
     result: Dict[str, Any] = {
@@ -107,6 +109,7 @@ def backfill_session(
         "verification_migrated": 0,
         "css_backfilled": 0,
         "external_scripts_backfilled": 0,
+        "head_meta_backfilled": 0,
         "orphans_pruned": 0,
     }
 
@@ -164,77 +167,40 @@ def backfill_session(
             continue
 
         html = slide_dict.get("html") or ""
-        slide_id = slide_dict.get("slide_id")
-        scripts = slide_dict.get("scripts") or ""
-        created_by = slide_dict.get("created_by")
-        modified_by = slide_dict.get("modified_by")
 
-        created_at: Optional[datetime] = None
-        created_at_str = slide_dict.get("created_at")
-        if created_at_str:
-            try:
-                dt = datetime.fromisoformat(
-                    str(created_at_str).replace("Z", "+00:00")
-                )
-                # Normalise to naive UTC — SessionSlide.created_at is
-                # TIMESTAMP WITHOUT TIME ZONE; all other code uses
-                # datetime.utcnow() (naive UTC).  Mixed naive/aware values
-                # in one column cause Python TypeError on comparison and
-                # lose tz info silently on SQLite.
-                if dt.tzinfo is not None:
-                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-                created_at = dt
-            except (ValueError, TypeError):
-                pass
-
-        modified_at: Optional[datetime] = None
-        modified_at_str = slide_dict.get("modified_at")
-        if modified_at_str:
-            try:
-                dt = datetime.fromisoformat(
-                    str(modified_at_str).replace("Z", "+00:00")
-                )
-                if dt.tzinfo is not None:
-                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-                modified_at = dt
-            except (ValueError, TypeError):
-                pass
-
-        # Compute content hash and migrate verification record if present.
+        # Migrate this slide's verification verdict from the deck-wide blob.
         content_hash = compute_slide_hash(html)
-        verification_record: Optional[str] = None
+        verification: Optional[Dict[str, Any]] = None
         if content_hash in verification_map:
-            verification_record = json.dumps(
-                {content_hash: verification_map[content_hash]}
-            )
+            verification = {content_hash: verification_map[content_hash]}
             result["verification_migrated"] += 1
 
-        # id decision: generate a fresh UUID per row.
-        # Reason: id is String(64) UNIQUE globally across all sessions.  Two
-        # sessions' deck_jsons may carry the same slide_id (duplicate-slide and
-        # restore flows make this possible), so reusing slide_id would cause a
-        # unique-constraint violation on the second insert and abort the backfill
-        # mid-run.  A fresh UUID guarantees uniqueness with zero schema changes.
-        # slide_id is preserved in the slide_id column for informational use.
-        row_id = str(uuid.uuid4())
-
-        row = SessionSlide(
-            session_id=session_id,
-            position=position,
-            id=row_id,
-            html=html,
-            slide_id=slide_id,
-            scripts=scripts,
-            created_by=created_by,
-            created_at=created_at,
-            modified_by=modified_by,
-            modified_at=modified_at,
-            verification_record=verification_record,
-            deck_spec_slide=None,  # Populated by PR3 (architect agent).
-        )
-
         if not dry_run:
-            db.add(row)
+            # Shared row writer (session_manager._upsert_slide_row) — one helper
+            # owns the full field set for a session_slides row, so the backfill
+            # cannot drift from the dual-write, restore or SlideWriter.  It also
+            # gives this writer the tz normalisation (naive UTC) that used to live
+            # here alone, and the fresh-uuid4 `id` decision:
+            #
+            #   `id` is String(64) UNIQUE globally across all sessions, and two
+            #   sessions' deck_jsons may legitimately carry the same slide_id
+            #   (duplicate-slide and restore flows), so reusing slide_id would
+            #   violate the constraint on the second insert and abort the backfill
+            #   mid-run.  slide_id is preserved in the slide_id column.
+            #
+            # author_fallback is deliberately omitted (None): the backfill has no
+            # writer identity, so created_by/modified_by stay NULL when the slide
+            # dict has none.  The live dual-write DOES pass a fallback.  This
+            # divergence is intentional — do not "harmonise" it.
+            _upsert_slide_row(
+                db,
+                session_id,
+                position,
+                slide_dict,
+                now_dt=None,
+                author_fallback=None,
+                verification=verification,
+            )
 
         result["slides_inserted"] += 1
         logger.info(
@@ -243,7 +209,7 @@ def backfill_session(
             position,
             "would insert" if dry_run else "inserted",
             len(html),
-            bool(verification_record),
+            bool(verification),
         )
 
     # -------------------------------------------------------------------------
@@ -257,6 +223,7 @@ def backfill_session(
     # -------------------------------------------------------------------------
     new_css = deck_dict.get("css") or ""
     new_ext = json.dumps(deck_dict.get("external_scripts") or [])
+    new_head_meta = json.dumps(deck_dict.get("head_meta") or {})
 
     if deck.css is None:
         result["css_backfilled"] += 1
@@ -268,6 +235,15 @@ def backfill_session(
         if not dry_run:
             deck.external_scripts_json = new_ext
 
+    # F5: head_meta is the third deck-level presentation field.  Without this lift
+    # the first row-path read after backfill returns the deck's head_meta from the
+    # deck_json fallback only; once deck_json is eventually retired the custom
+    # viewport would be lost.  Lift it into the column now.
+    if deck.head_meta_json is None:
+        result["head_meta_backfilled"] += 1
+        if not dry_run:
+            deck.head_meta_json = new_head_meta
+
     # -------------------------------------------------------------------------
     # Prune orphan rows (position >= slide count).
     #
@@ -277,17 +253,10 @@ def backfill_session(
     # all-committed predicates would wait forever on phantom positions.
     # -------------------------------------------------------------------------
     if not dry_run:
-        deleted = (
-            db.query(SessionSlide)
-            .filter(
-                and_(
-                    SessionSlide.session_id == session_id,
-                    SessionSlide.position >= len(slides),
-                )
-            )
-            .delete(synchronize_session=False)
+        # Shared prune strategy — see session_manager._prune_slide_rows_beyond.
+        result["orphans_pruned"] = _prune_slide_rows_beyond(
+            db, session_id, len(slides)
         )
-        result["orphans_pruned"] = deleted
     else:
         orphan_count = (
             db.query(SessionSlide)

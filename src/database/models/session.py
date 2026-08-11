@@ -285,6 +285,17 @@ class SessionSlideDeck(Base):
     # render blank — the PRD §3 no-regression gate, failing invisibly.
     external_scripts_json = Column(Text, nullable=True)
 
+    # Deck-level HTML <head> metadata (charset, viewport, other named metas),
+    # JSON object.  The third deck-level presentation field, lifted out of
+    # deck_json for the same reason as css and external_scripts_json: the row
+    # read path reconstructs the deck dict from columns, so a field left only in
+    # deck_json is DROPPED on the first row-path read and then made permanent by
+    # chat_service's round-trip back into deck_json (final review F5).
+    # SlideDeck.knit()/render_slide() fall back to a hardcoded
+    # `width=device-width, initial-scale=1.0` viewport when this is absent, so
+    # decks carrying a custom viewport silently re-render at the wrong scale.
+    head_meta_json = Column(Text, nullable=True)
+
     # Deck-level editing lock for chat-based edits (long-running operations).
     # When an agent is modifying slides, locked_by holds the username and
     # locked_at records when the lock was acquired. Auto-expires after timeout.
