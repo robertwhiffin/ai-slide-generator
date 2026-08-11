@@ -42,7 +42,7 @@ export const PREPROCESS_SOURCE = `
       const fam = (cs.fontFamily || '').toLowerCase();
       const isMono = /\\bmono(space)?\\b|courier|consolas|menlo|monaco/i.test(fam);
       if (!isMono) return;
-      const childDivs = Array.from(panel.children).filter((c) => c.tagName === 'DIV');
+      const childDivs = elementChildrenOf(panel).filter((c) => c.tagName === 'DIV');
       if (childDivs.length < 2) return;
 
       // Collect inline content from each child div + a <br> after, plus
@@ -50,13 +50,13 @@ export const PREPROCESS_SOURCE = `
       // the source).
       const fragment = document.createDocumentFragment();
       let lastWasBr = false;
-      Array.from(panel.childNodes).forEach((child) => {
+      childNodesOf(panel).forEach((child) => {
         if (child.nodeType === 1 && child.tagName === 'DIV') {
           // Replace leading runs of regular spaces in text-node descendants
           // with NBSP so huashu's whitespace-collapse doesn't eat the
           // indent. Only at the start of the line; mid-line spaces stay
           // single (matches monospace rendering of "  prod_catalog").
-          const inlineChildren = Array.from(child.childNodes);
+          const inlineChildren = childNodesOf(child);
           for (let i = 0; i < inlineChildren.length; i++) {
             const n = inlineChildren[i];
             if (n.nodeType === 3 /* TEXT_NODE */) {
@@ -137,7 +137,7 @@ export const PREPROCESS_SOURCE = `
   }
   function wrapInlineRunsIn(parent) {
     let count = 0;
-    const children = Array.from(parent.childNodes);
+    const children = childNodesOf(parent);
     let i = 0;
     // Snapshot parent's computed font props so the new <p> doesn't get
     // subjected to existing <p> CSS rules. Example: a deck CSS
@@ -293,6 +293,14 @@ export const PREPROCESS_SOURCE = `
   // isn't descending a real one.
   const WALK_STEP_LIMIT = 4096;
 
+  // The same guarantee for BREADTH, where the argument above does not reach: a
+  // collection's LENGTH has no browser ceiling to sit eight times above, so this
+  // is not a claim about how wide a slide can be. A slide document holding a
+  // million nodes could not render at 1280x720, so no real deck approaches this
+  // and it cannot truncate one. What it does is stop a realm that lies about a
+  // collection from making the reads below run forever.
+  const COLLECTION_ITEM_LIMIT = 1000000;
+
   // ─── reading the tree, in a realm that may be hostile ──────────────────
   // The descent's termination argument is about the DOM: each step moves to a
   // sole ELEMENT CHILD, and a parent → child chain is finite and acyclic. True of
@@ -335,16 +343,28 @@ export const PREPROCESS_SOURCE = `
       const nextSibling = describe(realm.Element.prototype, 'nextElementSibling');
       const tag = describe(realm.Element.prototype, 'tagName');
       const matches = realm.Element.prototype.matches;
+      // Node-level siblings for the child NODE lists the passes below read (text
+      // and comment nodes included, which the element accessors skip), and
+      // NodeList's own length for the static lists there is no tree to walk.
+      const firstNode = describe(realm.Node.prototype, 'firstChild');
+      const nextNode = describe(realm.Node.prototype, 'nextSibling');
+      const listLength = describe(realm.NodeList.prototype, 'length');
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
-          typeof matches !== 'function') return null;
+          typeof matches !== 'function' ||
+          typeof firstNode.get !== 'function' ||
+          typeof nextNode.get !== 'function' ||
+          typeof listLength.get !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
         nextElementSibling: (el) => nextSibling.get.call(el),
         tagName: (el) => tag.get.call(el),
         matches: (el, selector) => matches.call(el, selector),
+        firstChild: (node) => firstNode.get.call(node),
+        nextSibling: (node) => nextNode.get.call(node),
+        nodeListLength: (list) => listLength.get.call(list),
       };
     } catch (e) {
       return null;
@@ -367,20 +387,91 @@ export const PREPROCESS_SOURCE = `
     nextElementSibling: (el) => el.nextElementSibling,
     tagName: (el) => el.tagName,
     matches: (el, selector) => el.matches(selector),
+    firstChild: (node) => node.firstChild,
+    nextSibling: (node) => node.nextSibling,
+    nodeListLength: (list) => list.length,
   };
+
+  // ─── consuming a live DOM collection ───────────────────────────────────
+  // Array.from(), spread and for...of all read the collection's
+  // [Symbol.iterator], and that property is CONFIGURABLE on both
+  // NodeList.prototype and HTMLCollection.prototype. Page script can replace it
+  // with an iterator that never reports done, on the same route and with the
+  // same reachability as the poisoned child accessors above — and with two
+  // measured outcomes, neither survivable: the consumer spins, or (for a tight
+  // Array.from, which allocates instead of doing per-item work) it grows its
+  // result past the maximum array length and throws RangeError: Invalid array
+  // length out of the whole pass.
+  //
+  // So none of the reads below go through the iterator. They walk the sibling
+  // chain, or index the collection directly — indexed access needs no hardening
+  // of its own, because a live collection's indices are OWN properties of the
+  // platform object and a poisoned prototype cannot shadow them below the real
+  // length. Both are bounded, so a lying realm costs termination nothing.
+  //
+  // One capture per page, made on first use: every deck reaches at least one of
+  // these, and re-entering the iframe per call would put a DOM mutation in the
+  // middle of every pass.
+  let domAccessCache = null;
+  function domAccess() {
+    if (!domAccessCache) {
+      domAccessCache = capturePristineElementAccess() || OWN_ELEMENT_ACCESS;
+    }
+    return domAccessCache;
+  }
+
+  // Every child NODE, in order: the Array.from(node.childNodes) replacement.
+  // Text and comment nodes included, so callers switching on nodeType see exactly
+  // the sequence they saw before.
+  function childNodesOf(node) {
+    const dom = domAccess();
+    const nodes = [];
+    let child = dom.firstChild(node);
+    while (child && nodes.length < COLLECTION_ITEM_LIMIT) {
+      nodes.push(child);
+      child = dom.nextSibling(child);
+    }
+    return nodes;
+  }
+
+  // Element children only: the Array.from(element.children) replacement.
+  function elementChildrenOf(element) {
+    const dom = domAccess();
+    const elements = [];
+    let child = dom.firstElementChild(element);
+    while (child && elements.length < COLLECTION_ITEM_LIMIT) {
+      elements.push(child);
+      child = dom.nextElementSibling(child);
+    }
+    return elements;
+  }
+
+  // A static NodeList (querySelectorAll) — the one case with no sibling chain to
+  // walk, so it is an index loop over the pristine length. A length that is not a
+  // number makes Math.min NaN and the loop empty, which is a lost pass rather
+  // than an endless one.
+  function nodeListToArray(list) {
+    const length = Math.min(domAccess().nodeListLength(list), COLLECTION_ITEM_LIMIT);
+    const nodes = [];
+    for (let index = 0; index < length; index++) nodes.push(list[index]);
+    return nodes;
+  }
 
   function findSlideRoot() {
     const direct = document.querySelector('body > [class*="slide"]');
     if (direct) return direct;
-    const wrappers = document.querySelectorAll('body > section, body > article');
+    const wrappers = nodeListToArray(
+      document.querySelectorAll('body > section, body > article')
+    );
     const walks = [];
-    // Captured only when there is actually a chain to walk, so the wrapperless
-    // shapes (unpinned DS decks, no-DS decks) resolve exactly as before, through
-    // the same two selectors and nothing else.
-    const dom = wrappers.length ? (capturePristineElementAccess() || OWN_ELEMENT_ACCESS) : null;
-    for (const wrapper of wrappers) {
-      const walk = walkToSlideBody(wrapper, dom);
-      if (walk.matched) return wrapper;
+    // Still gated on there being a chain to walk — not to avoid the capture, which
+    // the snapshot above has already made, but because a null dom is how
+    // reportNoSlideRoot is told no wrapper was ever read. A deck with no wrappers
+    // therefore reports exactly the diagnostic it reported before.
+    const dom = wrappers.length ? domAccess() : null;
+    for (let index = 0; index < wrappers.length; index++) {
+      const walk = walkToSlideBody(wrappers[index], dom);
+      if (walk.matched) return wrappers[index];
       walks.push(walk);
     }
     const fallback = document.querySelector('body > div');
@@ -861,7 +952,7 @@ export const PREPROCESS_SOURCE = `
 
   async function rasterizeSvgDataUriImages() {
     let count = 0;
-    const imgs = Array.from(document.querySelectorAll('img')).filter((img) =>
+    const imgs = nodeListToArray(document.querySelectorAll('img')).filter((img) =>
       /^data:image\\/svg\\+xml/i.test(img.src || '')
     );
     for (const img of imgs) {
@@ -918,7 +1009,7 @@ export const PREPROCESS_SOURCE = `
   // instead of vanishing.
   async function rasterizeInlineSvgs() {
     let count = 0;
-    const svgs = Array.from(document.querySelectorAll('svg')).filter(
+    const svgs = nodeListToArray(document.querySelectorAll('svg')).filter(
       (svg) => !(svg.parentElement && svg.parentElement.closest('svg'))
     );
     for (const svg of svgs) {

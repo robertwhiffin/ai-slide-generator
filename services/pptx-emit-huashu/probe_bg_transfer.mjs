@@ -10,7 +10,8 @@
 //
 // usage:  node probe_bg_transfer.mjs <slide.html> [...]
 // stdout: one JSON object per input, in order:
-//         { file, bgTransferred, bodyBackgroundColor, title, timedOut, ms }
+//         { file, bgTransferred, bodyBackgroundColor, title, timedOut, error,
+//           counts, ms }
 //
 // `ms` times the preprocess pass itself (page already loaded), which is how the
 // slide-root walk's cost is shown to scale with wrapper-chain depth rather than
@@ -22,8 +23,10 @@
 // slide-root walk non-terminating (see tests/fixtures/export_slide_root/
 // hostile_*.html) — and "the probe hung" is not a result a test can assert on.
 // Turning non-termination into DATA is what lets the hostile-realm suite state
-// it as an ordinary expectation. `title` carries whatever the page published
-// there, which those fixtures use to report that their poisoning took effect.
+// it as an ordinary expectation. `error` does the same for the pass RAISING,
+// which is the other way those fixtures stop the export. `title` carries
+// whatever the page published there, which those fixtures use to report that
+// their poisoning took effect.
 
 import { chromium } from 'playwright';
 import path from 'node:path';
@@ -43,12 +46,35 @@ const EVALUATE_TIMEOUT_MS = Number(process.env.PROBE_EVALUATE_TIMEOUT_MS || 0);
 // second wait to every hostile case.
 const TIMED_OUT = Symbol('timed-out');
 
+// Hanging is not the only way a hostile realm stops the pass. An endless
+// [Symbol.iterator] makes `Array.from()` grow a result array until it exceeds
+// the maximum array length and RAISES — measured: `RangeError: Invalid array
+// length` out of flattenMonospaceCodeBlocks. That kills the export just as
+// dead, and letting it take the probe process down with it would report the
+// whole run as infrastructure failure rather than as the fixture's outcome. So a
+// throwing pass is DATA too, for the same reason non-termination is.
+class PassFailed {
+  constructor(message) {
+    this.message = message;
+  }
+}
+
+async function evaluatePreprocess(page) {
+  try {
+    return await page.evaluate(PREPROCESS_SOURCE);
+  } catch (error) {
+    // First line only: the stack names this file's own frames, which would make
+    // the reported message move whenever the sidecar is edited.
+    return new PassFailed(String((error && error.message) || error).split('\n')[0]);
+  }
+}
+
 async function runPreprocess(page) {
-  if (EVALUATE_TIMEOUT_MS <= 0) return page.evaluate(PREPROCESS_SOURCE);
+  if (EVALUATE_TIMEOUT_MS <= 0) return evaluatePreprocess(page);
   let timer;
   try {
     return await Promise.race([
-      page.evaluate(PREPROCESS_SOURCE),
+      evaluatePreprocess(page),
       new Promise((resolve) => {
         timer = setTimeout(() => resolve(TIMED_OUT), EVALUATE_TIMEOUT_MS);
       }),
@@ -78,15 +104,24 @@ async function main() {
       const result = await runPreprocess(page);
       const ms = Date.now() - startedAt;
       const timedOut = result === TIMED_OUT;
-      const bodyBackgroundColor = timedOut
-        ? null
-        : await page.evaluate('window.getComputedStyle(document.body).backgroundColor');
+      const failed = result instanceof PassFailed;
+      const returned = !timedOut && !failed;
+      const bodyBackgroundColor = returned
+        ? await page.evaluate('window.getComputedStyle(document.body).backgroundColor')
+        : null;
       console.log(JSON.stringify({
         file: path.basename(file),
-        bgTransferred: timedOut ? null : result.bgTransferred,
+        bgTransferred: returned ? result.bgTransferred : null,
         bodyBackgroundColor,
         title,
         timedOut,
+        // null when the pass returned. Non-null names the other failure mode, so
+        // "did not hang" and "did not raise" are separable expectations.
+        error: failed ? result.message : null,
+        // The pass's whole return value: every count it reports, which is how the
+        // per-pass ELEMENT COUNTS are compared between a benign document and its
+        // hostile twin (same elements, or the counts differ).
+        counts: returned ? result : null,
         ms,
       }));
       await ctx.close();
