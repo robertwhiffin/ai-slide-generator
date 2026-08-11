@@ -9,7 +9,9 @@ Pattern sourced from tests/integration/test_savepoint_e2e.py:42-79.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -602,11 +604,37 @@ class TestBackfillSession:
 
 
 # ---------------------------------------------------------------------------
-# Per-session failure isolation in main() (I1)
+# Per-session failure isolation in main() — calls main() end-to-end (I1)
 # ---------------------------------------------------------------------------
 
-class TestMainPerSessionIsolation:
-    """One bad session must not abort the whole run; good sessions still backfill."""
+def _make_get_db_session_patch(session_local_factory):
+    """Return a contextmanager suitable for patching get_db_session in main().
+
+    main() uses `with get_db_session() as db:` — a context manager that yields
+    a single DB session for the whole run.  We return a factory that, when
+    called, yields a session from our in-memory SQLite factory.
+    """
+    @contextmanager
+    def fake_get_db_session():
+        db = session_local_factory()
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    return fake_get_db_session
+
+
+class TestMainEndToEnd:
+    """main() end-to-end tests: isolation, exit code, and good-session persistence.
+
+    These tests patch scripts.backfill_session_slides.get_db_session to yield
+    an in-memory SQLite session, so main() runs its full per-session loop.
+    """
 
     def setup_method(self):
         self.engine = _make_engine()
@@ -618,51 +646,52 @@ class TestMainPerSessionIsolation:
         Base.metadata.drop_all(bind=self.engine)
         self.engine.dispose()
 
-    def test_bad_session_does_not_block_good_sessions(self):
-        """Malformed deck_json in one session → other sessions still backfilled."""
+    def _seed_sessions(self):
+        """Seed good/bad/good sessions; return (pk_good1, pk_bad, pk_good2)."""
         db = self.SessionLocal()
         try:
-            pk_good1 = _add_session(db, "good-1")
+            pk_good1 = _add_session(db, "main-good-1")
             _add_deck(db, pk_good1, SAMPLE_DECK)
 
-            pk_bad = _add_session(db, "bad")
-            bad_deck = SessionSlideDeck(
-                session_id=pk_bad,
-                deck_json="NOT_VALID_JSON{{{",
-                slide_count=1,
-            )
-            db.add(bad_deck)
+            pk_bad = _add_session(db, "main-bad")
+            _add_deck(db, pk_bad, SAMPLE_DECK)  # valid deck — failure injected via mock below
 
-            pk_good2 = _add_session(db, "good-2")
+            pk_good2 = _add_session(db, "main-good-2")
             _add_deck(db, pk_good2, SAMPLE_DECK)
 
             db.commit()
         finally:
             db.close()
+        return pk_good1, pk_bad, pk_good2
 
-        # Run backfill_session directly for each session in sequence,
-        # mimicking what main() does.  We call it in a fresh session per
-        # attempt so a failure in one does not dirty the next.
-        results = {}
-        for pk, label in [(pk_good1, "good-1"), (pk_bad, "bad"), (pk_good2, "good-2")]:
-            db = self.SessionLocal()
-            try:
-                result = backfill_session(db, pk, dry_run=False)
-                results[label] = ("ok", result)
-            except Exception as exc:
-                db.rollback()
-                results[label] = ("fail", str(exc))
-            finally:
-                db.close()
+    def test_main_good_sessions_backfilled_despite_bad_session(self):
+        """main() must backfill good sessions even when one raises mid-loop.
 
-        # Good sessions succeeded.
-        assert results["good-1"][0] == "ok"
-        assert results["good-1"][1]["slides_inserted"] == 2
+        We patch scripts.backfill_session_slides.backfill_session to raise for
+        exactly one session id.  This directly exercises main()'s try/except
+        handler, rollback, and continue logic — the code under test.
+        """
+        pk_good1, pk_bad, pk_good2 = self._seed_sessions()
 
-        assert results["good-2"][0] == "ok"
-        assert results["good-2"][1]["slides_inserted"] == 2
+        real_backfill = backfill_session
 
-        # Verify good sessions actually have rows in the DB.
+        def backfill_with_one_failure(db, session_id, dry_run=True):
+            if session_id == pk_bad:
+                raise RuntimeError("simulated DB failure for isolation test")
+            return real_backfill(db, session_id, dry_run=dry_run)
+
+        fake_ctx = _make_get_db_session_patch(self.SessionLocal)
+        with patch("scripts.backfill_session_slides.get_db_session", fake_ctx):
+            with patch(
+                "scripts.backfill_session_slides.backfill_session",
+                side_effect=backfill_with_one_failure,
+            ):
+                exit_code = main(["--yes"])
+
+        # Non-zero exit code: at least one session failed.
+        assert exit_code != 0, "main() must return non-zero when any session fails"
+
+        # Good sessions have rows despite the bad session in the middle.
         db = self.SessionLocal()
         try:
             count1 = (
@@ -678,8 +707,24 @@ class TestMainPerSessionIsolation:
         finally:
             db.close()
 
-        assert count1 == 2, "good-1 rows should be persisted"
-        assert count2 == 2, "good-2 rows should be persisted"
+        assert count1 == 2, "good-1 must be backfilled even with a bad session present"
+        assert count2 == 2, "good-2 must be backfilled even with a bad session present"
+
+    def test_main_returns_zero_when_all_sessions_succeed(self):
+        """main() returns 0 when all sessions backfill without error."""
+        db = self.SessionLocal()
+        try:
+            pk = _add_session(db, "main-only-good")
+            _add_deck(db, pk, SAMPLE_DECK)
+            db.commit()
+        finally:
+            db.close()
+
+        fake_ctx = _make_get_db_session_patch(self.SessionLocal)
+        with patch("scripts.backfill_session_slides.get_db_session", fake_ctx):
+            exit_code = main(["--yes"])
+
+        assert exit_code == 0
 
 
 # ---------------------------------------------------------------------------
