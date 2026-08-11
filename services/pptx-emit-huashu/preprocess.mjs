@@ -373,14 +373,63 @@ export const PREPROCESS_SOURCE = `
     const direct = document.querySelector('body > [class*="slide"]');
     if (direct) return direct;
     const wrappers = document.querySelectorAll('body > section, body > article');
+    const walks = [];
     // Captured only when there is actually a chain to walk, so the wrapperless
     // shapes (unpinned DS decks, no-DS decks) resolve exactly as before, through
     // the same two selectors and nothing else.
     const dom = wrappers.length ? (capturePristineElementAccess() || OWN_ELEMENT_ACCESS) : null;
     for (const wrapper of wrappers) {
-      if (walkToSlideBody(wrapper, dom).matched) return wrapper;
+      const walk = walkToSlideBody(wrapper, dom);
+      if (walk.matched) return wrapper;
+      walks.push(walk);
     }
-    return document.querySelector('body > div');
+    const fallback = document.querySelector('body > div');
+    if (!fallback) reportNoSlideRoot(walks, dom);
+    return fallback;
+  }
+
+  // Why the no-root case is REPORTED and not merely returned. It is reachable on
+  // input that is nobody's bug: past 509 wrapper levels Chromium's parser stops
+  // nesting and reparents the overflow, so a 510-level chain arrives as an
+  // innermost wrapper holding the remaining wrappers AND the .slide as SIBLINGS
+  // (measured: 3 element children at 510, 13 at 520). The chain the backend
+  // promoted through — BeautifulSoup has no such limit, so it serialises the
+  // outermost wrapper as the slide's HTML — is simply not present in the DOM that
+  // arrives here, and this locator correctly reports it cannot find a root.
+  //
+  // That is deliberately NOT chased. Matching it would mean promoting a wrapper
+  // with several element children, which is exactly what the backend refuses
+  // (find_all(recursive=False) length 1) and what TestPromotionBlockers pins as
+  // must-block. So the reparsed shape is not resolvable without contradicting the
+  // spec the sidecar exists to conform to; a 510-deep chain of sole-child
+  // semantic wrappers is also a shape no real bundle produces (deepest observed
+  // in a real bundle: two).
+  //
+  // What it must never do is fail SILENTLY, since a rootless deck and a broken
+  // locator both export white. The line below is what tells those apart: it
+  // names the shape the walk actually saw, so "the deck was pathological" is
+  // distinguishable from "our locator regressed". html2pptx.js routes
+  // [preprocess] console lines to stderr, which is the stream
+  // pptx_from_html_huashu.py echoes into the app log.
+  function reportNoSlideRoot(walks, dom) {
+    const access = dom || OWN_ELEMENT_ACCESS;
+    const bodyTags = [];
+    // Bounded: in a hostile realm the sibling accessor is itself a loop risk.
+    let sibling = access.firstElementChild(document.body);
+    while (sibling && bodyTags.length < 8) {
+      bodyTags.push(access.tagName(sibling));
+      sibling = access.nextElementSibling(sibling);
+    }
+    const candidates = walks.map(
+      (walk) => walk.stoppedAt + ' after ' + walk.steps + ' level(s): ' + walk.reason
+    );
+    console.warn(
+      '[preprocess] no slide root: body children [' + bodyTags.join(', ') + ']' +
+      '; wrapper candidates ' + (candidates.length ? candidates.join(' | ') : '(none)') +
+      '; tree reads ' + (access.pristine ? 'pristine' : 'this-realm') +
+      '. A chain over 509 levels deep is reparsed by Chromium into siblings and ' +
+      'is not resolvable here by design.'
+    );
   }
 
   // Whether this wrapper stands for a whole slide: following its sole-element-
@@ -401,8 +450,8 @@ export const PREPROCESS_SOURCE = `
   // times above the depth Chromium can even parse, so no legitimate chain reaches
   // it.
   //
-  // Returns the walk as data rather than a boolean: the reason it stopped is what
-  // the no-root diagnostic reports, without walking anything twice.
+  // Returns the walk as data rather than a boolean so the no-root diagnostic can
+  // report where each candidate stopped without walking anything twice.
   function walkToSlideBody(wrapper, dom) {
     let node = wrapper;
     for (let steps = 0; steps < WALK_STEP_LIMIT; steps++) {
