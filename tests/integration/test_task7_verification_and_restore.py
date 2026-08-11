@@ -673,3 +673,187 @@ class TestRestoreVersionRowRematerialisation:
             "Restored verification was not migrated onto the row"
         )
         assert slides[0]["verification"]["score"] == 85
+
+
+# ---------------------------------------------------------------------------
+# get_verification_map — aggregate from per-row records
+# ---------------------------------------------------------------------------
+
+
+class TestGetVerificationMapAggregation:
+    """get_verification_map must aggregate from session_slides rows.
+
+    Before this fix, the method read the legacy blob which nothing writes any
+    more (save_verification was deleted).  It now walks the rows and merges all
+    {content_hash: verdict} entries.
+    """
+
+    def test_aggregates_verdicts_from_multiple_rows(self, factory, session_id):
+        """A deck with verdicts on 2+ different slides returns all of them."""
+        fake_db = _make_fake_get_db_session(factory)
+
+        html_0 = "<p>Slide zero</p>"
+        html_1 = "<p>Slide one</p>"
+        hash_0 = compute_slide_hash(html_0)
+        hash_1 = compute_slide_hash(html_1)
+        verdict_0 = {"score": 80, "rating": "good"}
+        verdict_1 = {"score": 95, "rating": "excellent"}
+
+        deck_dict = _make_deck_dict([_make_slide(html_0), _make_slide(html_1)])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="<html></html>",
+                slide_count=2,
+                deck_dict=deck_dict,
+                modified_by="author@example.com",
+            )
+            mgr.write_slide_verification(session_id, 0, {hash_0: verdict_0})
+            mgr.write_slide_verification(session_id, 1, {hash_1: verdict_1})
+
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            result = mgr.get_verification_map(session_id)
+
+        assert hash_0 in result, f"hash_0 missing from aggregated map. keys: {list(result)}"
+        assert hash_1 in result, f"hash_1 missing from aggregated map. keys: {list(result)}"
+        assert result[hash_0]["score"] == 80
+        assert result[hash_1]["score"] == 95
+
+    def test_aggregates_multiple_hashes_from_single_row(self, factory, session_id):
+        """A row with two hashes (from edit/revert cycle) contributes both to the map."""
+        fake_db = _make_fake_get_db_session(factory)
+
+        html_a = "<p>Original</p>"
+        html_b = "<p>Edited content different hash</p>"
+        hash_a = compute_slide_hash(html_a)
+        hash_b = compute_slide_hash(html_b)
+        assert hash_a != hash_b
+
+        # Write two verdicts to the same row (position 0)
+        deck_dict = _make_deck_dict([_make_slide(html_a)])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="<html></html>",
+                slide_count=1,
+                deck_dict=deck_dict,
+                modified_by="author@example.com",
+            )
+            mgr.write_slide_verification(session_id, 0, {hash_a: {"score": 80}})
+
+        # Edit: save html_b
+        deck_dict_b = _make_deck_dict([_make_slide(html_b)])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="<html></html>",
+                slide_count=1,
+                deck_dict=deck_dict_b,
+                modified_by="author@example.com",
+            )
+            mgr.write_slide_verification(session_id, 0, {hash_b: {"score": 95}})
+
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            result = mgr.get_verification_map(session_id)
+
+        assert hash_a in result, "hash_a lost from aggregation"
+        assert hash_b in result, "hash_b missing from aggregation"
+        assert result[hash_a]["score"] == 80
+        assert result[hash_b]["score"] == 95
+
+    def test_legacy_fallback_when_no_rows(self, factory, session_id):
+        """When no session_slides rows exist, falls back to the blob."""
+        # Seed a deck row with verification_map blob but NO session_slides rows.
+        db = factory()
+        owner = db.query(UserSession).filter_by(session_id=session_id).one()
+        blob_map = {"legacy_hash": {"score": 70, "rating": "ok"}}
+        deck = SessionSlideDeck(
+            session_id=owner.id,
+            title="Legacy deck",
+            html_content="",
+            slide_count=1,
+            deck_json="{}",
+            version=1,
+            verification_map=json.dumps(blob_map),
+        )
+        db.add(deck)
+        db.commit()
+        db.close()
+
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            result = mgr.get_verification_map(session_id)
+
+        assert "legacy_hash" in result, f"Legacy fallback did not return blob content. keys: {list(result)}"
+        assert result["legacy_hash"]["score"] == 70
+
+    def test_end_to_end_verdict_survives_into_save_point(self, factory, session_id):
+        """Write a verdict → create a save point → SlideDeckVersion.verification_map_json contains it.
+
+        This is the chat_service.py:2150 path: get_verification_map feeds create_version.
+        Before this fix, get_verification_map returned {} (empty blob) so all verdicts
+        were silently dropped from every save point.
+        """
+        fake_db = _make_fake_get_db_session(factory)
+
+        slide_html = "<p>Chart shows Q4 revenue $5M</p>"
+        content_hash = compute_slide_hash(slide_html)
+        verdict = {"score": 92, "rating": "excellent", "explanation": "Accurate"}
+
+        # Save deck
+        deck_dict = _make_deck_dict([_make_slide(slide_html)])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="<html></html>",
+                slide_count=1,
+                deck_dict=deck_dict,
+                modified_by="author@example.com",
+            )
+
+        # Write verdict
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.write_slide_verification(session_id, 0, {content_hash: verdict})
+
+        # Create a save point — must snapshot the verdict
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            verification_map = mgr.get_verification_map(session_id)
+            version_info = mgr.create_version(
+                session_id=session_id,
+                description="After verification",
+                deck_dict=deck_dict,
+                verification_map=verification_map,
+            )
+
+        # Inspect the saved SlideDeckVersion row directly
+        db = factory()
+        owner = db.query(UserSession).filter_by(session_id=session_id).one()
+        version_row = db.query(SlideDeckVersion).filter_by(
+            session_id=owner.id,
+            version_number=version_info["version_number"],
+        ).one()
+        saved_map_raw = version_row.verification_map_json
+        db.close()
+
+        assert saved_map_raw is not None, (
+            "SlideDeckVersion.verification_map_json is None — verdicts were not snapshotted"
+        )
+        saved_map = json.loads(saved_map_raw)
+        assert content_hash in saved_map, (
+            f"content_hash not in saved verification_map_json. "
+            f"keys present: {list(saved_map.keys())}"
+        )
+        assert saved_map[content_hash]["score"] == 92
