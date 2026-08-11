@@ -1042,6 +1042,25 @@ class TestWriteSlideVerificationLegacyFallback:
         assert len(rows) == 1
         assert rows[0]["verification_record"] is None
 
+        # AND nothing leaked into the legacy blob. Without this assertion the test
+        # passes even if the two C2 cases are conflated (i.e. the legacy branch
+        # firing for a missing position inside a deck that DOES have rows), because
+        # the row's record would still be None while the write silently redirected
+        # to the blob.
+        db = factory()
+        try:
+            deck = (
+                db.query(SessionSlideDeck)
+                .filter(SessionSlideDeck.session_id == owner_id)
+                .one()
+            )
+            assert not deck.verification_map, (
+                "out-of-range position must not fall back to the legacy blob — "
+                f"got verification_map={deck.verification_map!r}"
+            )
+        finally:
+            db.close()
+
 
 # ---------------------------------------------------------------------------
 # I1 — restore_version must restore scripts_content
