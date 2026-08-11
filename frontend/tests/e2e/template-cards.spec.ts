@@ -718,6 +718,166 @@ test.describe('Template cards — preview preference and live-render fallback', 
     expect(externalRequests).toEqual([]);
   });
 
+  test('@import is only an at-rule at a RULE position — a declaration value survives', async ({ page }) => {
+    // The scan was CSS-aware about strings and comments but not about CSS
+    // GRAMMAR: it treated the `@import` token as an at-rule wherever it sat,
+    // including inside a declaration VALUE, where CSS does not allow an at-rule
+    // at all. A custom property may legitimately hold that text, and removing it
+    // takes the `;` with it — so the declaration runs on into the NEXT one and
+    // EATS it:
+    //
+    //   in   :root{--lesson:@import url('inert.css');--after:#123456}
+    //   out  :root{--lesson:--after:#123456}
+    //
+    // `--after` is then never declared, `var(--after)` does not resolve, and the
+    // colour falls back to inherited black. Measured: rendered_color=rgb(0,0,0),
+    // after_value="".
+    //
+    // Both entry points are exercised, because they are separate calls: the
+    // layout's <style> elements, and the token stylesheet.
+    const STYLE_CSS =
+      '.slide{position:absolute;inset:0;width:1280px;height:720px;}' +
+      // The declaration value. NOT an at-rule — CSS permits none here.
+      ":root{--lesson:@import url('inert.css');--after:#123456}" +
+      '.ok{color:var(--after)}' +
+      // …while a RULE position inside a conditional group rule still IS one, so
+      // this @import must still go, and the rule after it must survive intact.
+      "@media screen{@import url('https://fonts.example/media.css');" +
+      '.also{color:var(--after)}}';
+    const TOKEN_CSS =
+      // A real webfont import at the top of the sheet: a rule position, still removed.
+      "@import url('https://fonts.example/css2?family=Acme+Display:wght@400;500;600;700');\n" +
+      ":root{--token-lesson:@import url('inert.css');--token-after:#123456}\n" +
+      '.token-ok{color:var(--token-after)}';
+
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            `<!doctype html><html><head><style>${STYLE_CSS}</style></head>` +
+            '<body><section><div class="slide">' +
+            '<h1 class="ok">Acme Declaration Probe</h1>' +
+            '<p class="also">Synthetic nested rule.</p>' +
+            '<p class="token-ok">Synthetic token rule.</p>' +
+            '</div></section></body></html>',
+          token_css: TOKEN_CSS,
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // The declaration that used to be eaten is still declared, in both sheets.
+    expect(srcdoc).toContain('--after:#123456');
+    expect(srcdoc).toContain('--token-after:#123456');
+    // The real, preview-only webfont imports are still gone — whole, with no
+    // orphaned fragment. This is what keeps the fix from being "stop scanning".
+    expect(srcdoc).not.toContain('fonts.example');
+    expect(srcdoc).not.toContain('Acme+Display');
+    expect(srcdoc).not.toContain('media.css');
+
+    // Measured on the RENDERED document, so this cannot pass on a string that
+    // never became CSS: the eaten declaration resolves again…
+    await expect(inner.locator('h1.ok')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    await expect(inner.locator('p.token-ok')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    // …the custom property really is declared rather than merely present as text…
+    const afterValue = await inner
+      .locator('h1.ok')
+      .evaluate((el) => getComputedStyle(el).getPropertyValue('--after').trim());
+    expect(afterValue).toBe('#123456');
+    // …and the rule that followed the removed at-rule inside @media survives.
+    await expect(inner.locator('p.also')).toHaveCSS('color', 'rgb(18, 52, 86)');
+
+    // The sandbox is untouched: policy unchanged, no host admitted, nothing fetched.
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    await expect(frame).toHaveAttribute('sandbox', '');
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('an ESCAPED at-keyword survives the scan — CSP is the control, by design', async ({ page }) => {
+    // `@\69mport url(...)` is a valid spelling of the at-rule: CSS idents admit
+    // escapes, so a browser parses and honours it. The scanner does NOT recognise
+    // it, and this test pins that as a DELIBERATE limit rather than leaving it
+    // undocumented.
+    //
+    // Why accept it: the scanner is not a security control and never was. Egress
+    // is denied by PREVIEW_CSP (`style-src 'unsafe-inline'` and nothing else) and
+    // by `sandbox=""`, both of which apply to every spelling equally. All the
+    // scanner does is remove a rule that is already dead so it stops logging one
+    // console violation per card. An escaped keyword therefore costs exactly one
+    // console line and no egress — while teaching the scanner CSS ident escapes
+    // would widen the very machinery whose over-reach caused the declaration-value
+    // bug above. The narrow scan is the point.
+    //
+    // What this test guarantees is the part that matters: the escaped spelling
+    // fetches NOTHING and navigates nowhere.
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head><style>' +
+            '.slide{position:absolute;inset:0;width:1280px;height:720px;}' +
+            "@\\69mport url('https://fonts.example/escaped.css');" +
+            '.ok{color:#123456}' +
+            '</style></head>' +
+            '<body><section><div class="slide"><h1 class="ok">Acme Escape Probe</h1></div></section></body></html>',
+          token_css: ':root{--brand-core-primary:#123456;}',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    // Documented limit: the escaped spelling is NOT removed…
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc).toContain('escaped.css');
+    // …the rule after it is unharmed either way…
+    await expect(inner.locator('h1.ok')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    // …and the control that actually matters holds: no fetch, policy unchanged.
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    await expect(frame).toHaveAttribute('sandbox', '');
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+  });
+
   test('a template with no @import passes through byte-identically', async ({ page }) => {
     // The removal must be inert when there is nothing to remove: no
     // re-serialization, no entity rewriting, no whitespace normalization.
