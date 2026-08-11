@@ -283,41 +283,143 @@ export const PREPROCESS_SOURCE = `
   // can never both count as roots.
   const SLIDE_WRAPPER_TAGS = new Set(['SECTION', 'ARTICLE']);
 
+  // Hard stop on the descent below. NOT the promotion cap this walk deliberately
+  // does not have: Chromium caps a PARSED document's tree depth at 512 (measured
+  // — a 520-wrapper chain arrives 512 deep), so the longest sole-child chain any
+  // slide document can present is under 512 and the deepest that resolves is 509.
+  // 4096 is eight times the browser's own ceiling: no parsed input can reach it,
+  // so it cannot move where a legitimate chain resolves. It exists only for the
+  // case below where the realm is lying about the tree and the walk therefore
+  // isn't descending a real one.
+  const WALK_STEP_LIMIT = 4096;
+
+  // ─── reading the tree, in a realm that may be hostile ──────────────────
+  // The descent's termination argument is about the DOM: each step moves to a
+  // sole ELEMENT CHILD, and a parent → child chain is finite and acyclic. True of
+  // the DOM — and not true of the JS realm the pass runs in.
+  // Element.prototype.children / firstElementChild are CONFIGURABLE accessors, so
+  // page script can replace them with ones reporting the node itself (or a fresh
+  // node every read) as the sole child, and the descent then never ends.
+  //
+  // That is reachable, not theoretical: SLIDE_CSP (src/utils/html_safety.py)
+  // carries script-src 'unsafe-inline', so inline script in a slide document runs
+  // in the export page, at load, before this pass is evaluated. A malicious or
+  // merely broken uploaded template could hang the export worker.
+  //
+  // The fix reads the tree through primitives taken from a realm no page script
+  // has ever run in: a src-less iframe. Its intrinsics are separate objects from
+  // this realm's, and a native DOM accessor invoked with an explicit receiver
+  // works across realms, so the walk sees the real tree whatever this realm's
+  // prototypes now say. (An about:blank frame is not a fetch, so
+  // default-src 'none' does not block it — measured under the real SLIDE_CSP.)
+  //
+  // This is best-effort by nature and says so: page script runs first, so the
+  // means of reaching a pristine realm are themselves replaceable. What is NOT
+  // best-effort is TERMINATION — that is guaranteed by WALK_STEP_LIMIT, whatever
+  // the realm does. Correct in a hostile realm where it can be; terminating
+  // always.
+  function capturePristineElementAccess() {
+    let frame = null;
+    try {
+      frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      // documentElement, not body: nothing here may perturb body's child list,
+      // which the selectors in findSlideRoot() read.
+      document.documentElement.appendChild(frame);
+      const realm = frame.contentWindow;
+      // A replaced createElement/contentWindow could hand back THIS realm, whose
+      // accessors are the poisoned ones. Distinct intrinsics is the check.
+      if (!realm || realm === window || realm.Element === window.Element) return null;
+      const describe = realm.Object.getOwnPropertyDescriptor;
+      const firstChild = describe(realm.Element.prototype, 'firstElementChild');
+      const nextSibling = describe(realm.Element.prototype, 'nextElementSibling');
+      const tag = describe(realm.Element.prototype, 'tagName');
+      const matches = realm.Element.prototype.matches;
+      if (typeof firstChild.get !== 'function' ||
+          typeof nextSibling.get !== 'function' ||
+          typeof tag.get !== 'function' ||
+          typeof matches !== 'function') return null;
+      return {
+        pristine: true,
+        firstElementChild: (el) => firstChild.get.call(el),
+        nextElementSibling: (el) => nextSibling.get.call(el),
+        tagName: (el) => tag.get.call(el),
+        matches: (el, selector) => matches.call(el, selector),
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      // The captured accessors keep working once the frame is gone (measured), so
+      // the pristine realm never outlives the capture and the export DOM never
+      // contains the iframe.
+      if (frame) {
+        try { frame.remove(); } catch (e) { /* already detached — nothing to undo */ }
+      }
+    }
+  }
+
+  // Fallback when the capture above could not be trusted. Ordinary property
+  // access: correct in a clean realm, subvertible in a hostile one — which is
+  // what WALK_STEP_LIMIT is for.
+  const OWN_ELEMENT_ACCESS = {
+    pristine: false,
+    firstElementChild: (el) => el.firstElementChild,
+    nextElementSibling: (el) => el.nextElementSibling,
+    tagName: (el) => el.tagName,
+    matches: (el, selector) => el.matches(selector),
+  };
+
   function findSlideRoot() {
     const direct = document.querySelector('body > [class*="slide"]');
     if (direct) return direct;
     const wrappers = document.querySelectorAll('body > section, body > article');
+    // Captured only when there is actually a chain to walk, so the wrapperless
+    // shapes (unpinned DS decks, no-DS decks) resolve exactly as before, through
+    // the same two selectors and nothing else.
+    const dom = wrappers.length ? (capturePristineElementAccess() || OWN_ELEMENT_ACCESS) : null;
     for (const wrapper of wrappers) {
-      if (wrapsSlideRoot(wrapper)) return wrapper;
+      if (walkToSlideBody(wrapper, dom).matched) return wrapper;
     }
     return document.querySelector('body > div');
   }
 
   // Whether this wrapper stands for a whole slide: following its sole-element-
   // child chain down through consecutive semantic wrappers lands on the slide
-  // body. The .children collection is element-only, which is what makes
-  // comments, whitespace and text nodes transparent to the walk.
+  // body. Only ELEMENT children are looked at, which is what makes comments,
+  // whitespace and text nodes transparent to the walk — firstElementChild with a
+  // null nextElementSibling is exactly the old children.length === 1 test, read
+  // through accessors that can be taken from a clean realm.
   //
-  // The descent carries NO depth limit, matching the backend's unbounded
-  // _promote_through_slide_wrapper(). Its termination is structural, not
-  // numeric: every step moves from a node to its sole ELEMENT CHILD, so the
-  // walk only ever travels down a parent → child chain. That chain is finite
-  // and acyclic in any DOM, so it must end — at a node with no single element
-  // child, which is precisely the loop condition. A depth number would add no
-  // safety the shape does not already give, and a wrong guess at it is a silent
-  // wrong-output boundary: the backend promotes past the number and serialises
-  // that root as body's direct child, so the deck arrives here unrecognisable
-  // and exports WHITE. That is the same surfaces-disagree defect this locator
-  // exists to prevent, just relocated to the cap.
-  function wrapsSlideRoot(wrapper) {
+  // The descent carries NO PROMOTION cap, matching the backend's unbounded
+  // _promote_through_slide_wrapper(): a number there is a silent wrong-output
+  // boundary, because the backend promotes past it and serialises that root as
+  // body's direct child, so the deck arrives here unrecognisable and exports
+  // WHITE — the same surfaces-disagree defect this locator exists to prevent,
+  // just relocated to the cap. What it does carry is WALK_STEP_LIMIT, which is a
+  // different thing: not a belief about how deep decks go, but a guarantee that a
+  // realm lying about the tree cannot make this loop run forever. It sits eight
+  // times above the depth Chromium can even parse, so no legitimate chain reaches
+  // it.
+  //
+  // Returns the walk as data rather than a boolean: the reason it stopped is what
+  // the no-root diagnostic reports, without walking anything twice.
+  function walkToSlideBody(wrapper, dom) {
     let node = wrapper;
-    while (node.children.length === 1) {
-      const child = node.children[0];
-      if (child.matches('[class*="slide"]')) return true;
-      if (!SLIDE_WRAPPER_TAGS.has(child.tagName)) return false;
+    for (let steps = 0; steps < WALK_STEP_LIMIT; steps++) {
+      const child = dom.firstElementChild(node);
+      if (!child) {
+        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'no element children' };
+      }
+      if (dom.nextElementSibling(child)) {
+        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'several element children' };
+      }
+      if (dom.matches(child, '[class*="slide"]')) return { matched: true, steps: steps + 1 };
+      if (!SLIDE_WRAPPER_TAGS.has(dom.tagName(child))) {
+        return { matched: false, steps: steps + 1, stoppedAt: dom.tagName(child), reason: 'not a promotable wrapper' };
+      }
       node = child;
     }
-    return false;
+    return { matched: false, steps: WALK_STEP_LIMIT, stoppedAt: '(unread)', reason: 'iteration limit reached' };
   }
 
   function transferSlideRootBackground() {
