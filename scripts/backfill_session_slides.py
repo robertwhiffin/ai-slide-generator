@@ -330,6 +330,7 @@ def main(argv: list | None = None) -> int:
                     f"{result['verification_migrated']} verification migrated, "
                     f"css_backfilled={result['css_backfilled']}, "
                     f"ext_backfilled={result['external_scripts_backfilled']}, "
+                    f"head_meta_backfilled={result['head_meta_backfilled']}, "
                     f"orphans_pruned={result['orphans_pruned']}",
                     flush=True,
                 )
