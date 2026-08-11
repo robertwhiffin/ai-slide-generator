@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* A no-design-system deck: body's only child is a bare <div> carrying
+         no slide class at all, so it is resolved by the `body > div`
+         fallback rather than the class lookup. Guards that branch against
+         the wrapper-promotion change. */
+      div { width: 1280px; height: 720px; padding: 72px 88px; background: #123456; }
+      h1 { font-size: 64px; color: #ffffff; }
+      p { font-size: 24px; color: #ffffff; }
+    </style>
+  </head>
+  <body>
+    <div>
+      <h1>Acme No Design System</h1>
+      <p>Synthetic fixture slide.</p>
+    </div>
+  </body>
+</html>

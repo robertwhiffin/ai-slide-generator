@@ -248,9 +248,41 @@ export const PREPROCESS_SOURCE = `
     }
   }
 
+  // ─── locate the slide root ─────────────────────────────────────────
+  // The slide root is the outermost element standing for the whole slide.
+  // Two shapes reach us:
+  //
+  //   * wrapperless (unpinned DS decks, no-DS decks) — body's direct child
+  //     either carries the slide class or is a bare <div>. Both are resolved
+  //     exactly as before, so those decks are untouched.
+  //   * pinned template — the model emits the template's own structure, a
+  //     semantic <section>/<article> around the div.slide body. That wrapper
+  //     carries no class and is not a div, so neither lookup below used to
+  //     match and the transfer silently stopped. The wrapper IS the root: a
+  //     pinned bundle's sole "section { ... }" rule is what paints the slide,
+  //     and the .slide inside it often carries no ground of its own.
+  //
+  // Promotion is deliberately narrow — the wrapper must hold exactly one
+  // meaningful child and that child must be the slide — so a wrapper holding
+  // several slides stays a container. Exactly one element is ever returned,
+  // so a wrapper and its inner .slide can never both count as roots.
+  function findSlideRoot() {
+    const direct = document.querySelector('body > [class*="slide"]');
+    if (direct) return direct;
+    const wrappers = document.querySelectorAll('body > section, body > article');
+    for (const wrapper of wrappers) {
+      const meaningful = Array.from(wrapper.children).filter(
+        (child) => child.tagName !== 'STYLE' && child.tagName !== 'SCRIPT'
+      );
+      if (meaningful.length === 1 && meaningful[0].matches('[class*="slide"]')) {
+        return wrapper;
+      }
+    }
+    return document.querySelector('body > div');
+  }
+
   function transferSlideRootBackground() {
-    const root = document.querySelector('body > [class*="slide"]')
-                 || document.querySelector('body > div');
+    const root = findSlideRoot();
     if (!root) return 'no-root';
     const cs = window.getComputedStyle(root);
     const bgImage = cs.backgroundImage;
