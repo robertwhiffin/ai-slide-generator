@@ -78,14 +78,43 @@ const DS_ASSET_HANDLE_RE = /\{\{ds-asset:\d+\}\}/g;
  * literals and comments are copied through untouched, so an `@import` that is
  * merely being *quoted* or *commented out* survives — only a real at-rule goes.
  *
+ * GRAMMAR is the last part, and being CSS-aware about strings and comments is not
+ * enough on its own. An at-keyword only starts an at-rule at a RULE POSITION. In
+ * a declaration VALUE the same text is just a value, and CSS allows no at-rule
+ * there — so removing it is not "removing an at-rule", it is corrupting a
+ * declaration, and it takes that declaration's `;` with it:
+ *
+ *   in    :root{--lesson:@import url('inert.css');--after:#123456}
+ *   out   :root{--lesson:--after:#123456}
+ *
+ * `--after` is then never declared and every `var(--after)` in the sheet falls
+ * back — a following declaration EATEN by the removal of the one before it.
+ * {@link atRulePosition} is what confines the removal to the positions CSS
+ * actually admits one.
+ *
  * Inline `style="..."` attributes are deliberately NOT scanned: an at-rule is
  * invalid in a declaration list, so `@import` there never loads anything and has
  * no violation to silence.
+ *
+ * KNOWN AND ACCEPTED: an ESCAPED at-keyword (`@\69mport url(...)`) is a valid
+ * spelling that a browser honours, and this scan does not recognise it. That is a
+ * deliberate limit, not an oversight. The scan is not a security control —
+ * PREVIEW_CSP (`style-src 'unsafe-inline'` and nothing else) plus `sandbox=""`
+ * deny the fetch for every spelling equally, escaped or not. All the scan does is
+ * drop a rule that is ALREADY dead so it stops logging one console violation per
+ * card, so an escaped keyword costs exactly one console line and no egress.
+ * Teaching the scan CSS ident escapes would widen the very machinery whose
+ * over-reach caused the declaration-value bug above, for no security gain; the
+ * narrow scan is the point. Pinned by an e2e test so the limit stays documented
+ * and the no-egress claim stays measured.
  */
 const IMPORT_AT_KEYWORD = '@import';
 
 /** CSS ident characters, used to keep `@import` from matching `@imports`. */
 const IDENT_CHAR_RE = /[A-Za-z0-9_-]/;
+
+/** CSS white space, which never ends a rule position. */
+const WHITESPACE_RE = /\s/;
 
 /**
  * Index just past the string literal starting at `start`.
@@ -206,29 +235,58 @@ function skipBlock(css: string, start: number): number {
  * Remove every `@import` at-rule from ONE stylesheet's text.
  *
  * Everything that is not an at-rule is copied through byte-for-byte, including
- * string literals and comments that merely happen to contain the word `@import`.
- * A sheet with no `@import` therefore comes back identical to what went in.
+ * string literals and comments that merely happen to contain the word `@import`,
+ * and declaration values that contain it. A sheet with no `@import` at-rule
+ * therefore comes back identical to what went in.
+ *
+ * `atStatementStart` tracks the one piece of grammar this needs. A rule — or an
+ * at-rule — can only begin where the previous construct ended: at the start of the
+ * sheet, or after a `;`, `{` or `}`. Anywhere else the scanner is partway through a
+ * selector or a declaration, and an at-keyword there does not start an at-rule at
+ * all. Whitespace and comments are transparent, exactly as they are to a CSS
+ * parser; any other token ends the rule position.
+ *
+ * That makes an `@import` at the top of a sheet, after a rule, or inside an
+ * `@media`/`@supports` block an at-rule (all removed), while one inside a
+ * declaration value is left exactly where it is.
+ *
+ * The flag only ever gates a REMOVAL, so it is deliberately conservative: too few
+ * removals leaves a dead rule in place and costs one console violation, while too
+ * many destroy author CSS.
  */
 export function stripCssImports(css: string): string {
   let out = '';
   let index = 0;
+  let atStatementStart = true;
   while (index < css.length) {
     const char = css[index];
     if (char === '"' || char === "'") {
       const end = skipString(css, index);
       out += css.slice(index, end);
       index = end;
+      // A string literal is a token like any other: it can only appear partway
+      // through a construct, so it ends the rule position.
+      atStatementStart = false;
       continue;
     }
     if (char === '/' && css[index + 1] === '*') {
       const end = skipComment(css, index);
       out += css.slice(index, end);
       index = end;
+      // Comments are transparent — a rule may still start after one.
       continue;
     }
-    if (char === '@' && startsImportAtRule(css, index)) {
+    if (char === '@' && atStatementStart && startsImportAtRule(css, index)) {
       index = skipImportAtRule(css, index);
+      // The at-rule (and its terminating `;`) is gone, so the next construct
+      // starts here — which is what lets consecutive `@import`s all be removed.
+      atStatementStart = true;
       continue;
+    }
+    if (char === ';' || char === '{' || char === '}') {
+      atStatementStart = true;
+    } else if (!WHITESPACE_RE.test(char)) {
+      atStatementStart = false;
     }
     out += char;
     index += 1;
