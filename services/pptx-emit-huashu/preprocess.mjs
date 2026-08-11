@@ -255,30 +255,64 @@ export const PREPROCESS_SOURCE = `
   //   * wrapperless (unpinned DS decks, no-DS decks) — body's direct child
   //     either carries the slide class or is a bare <div>. Both are resolved
   //     exactly as before, so those decks are untouched.
-  //   * pinned template — the model emits the template's own structure, a
-  //     semantic <section>/<article> around the div.slide body. That wrapper
-  //     carries no class and is not a div, so neither lookup below used to
-  //     match and the transfer silently stopped. The wrapper IS the root: a
-  //     pinned bundle's sole "section { ... }" rule is what paints the slide,
-  //     and the .slide inside it often carries no ground of its own.
+  //   * pinned template — the model emits the template's own structure, one
+  //     or more semantic <section>/<article> levels around the div.slide
+  //     body. Those wrappers carry no class and are not divs, so neither
+  //     lookup below used to match and the transfer silently stopped. The
+  //     OUTERMOST wrapper is the root: a pinned bundle's sole
+  //     "section { ... }" rule is what paints the slide, and the .slide
+  //     inside it often carries no ground of its own.
   //
-  // Promotion is deliberately narrow — the wrapper must hold exactly one
-  // meaningful child and that child must be the slide — so a wrapper holding
-  // several slides stays a container. Exactly one element is ever returned,
-  // so a wrapper and its inner .slide can never both count as roots.
+  // Promotion has to agree with the backend's _promote_through_slide_wrapper()
+  // (src/utils/html_utils.py), which walks outward through EVERY consecutive
+  // sole-child semantic wrapper. The backend serialises the root it chose as
+  // the slide's HTML, so whatever it promoted to is exactly what arrives here
+  // as body's direct child. Stopping after a single level therefore left a
+  // section > article > div.slide deck rootless here — exported white — while
+  // the app rendered it correctly: the two surfaces disagreeing about one
+  // deck, which is the whole class of bug this locator exists to prevent.
+  //
+  // The walk stays deliberately narrow, matching the count the backend takes
+  // from find_all(recursive=False): each level must hold exactly one ELEMENT
+  // child. So a wrapper holding several slides stays a container, and an
+  // <h2>/<style>/<script>/SVG sibling stops the walk, while comments,
+  // whitespace and text never block it. A <div> is never promoted at any
+  // depth — it is neither a candidate wrapper nor a link in the chain — since
+  // it would risk swallowing a deck-level container holding one slide.
+  // Exactly one element is ever returned, so a wrapper and its inner .slide
+  // can never both count as roots.
+  const SLIDE_WRAPPER_TAGS = new Set(['SECTION', 'ARTICLE']);
+  // The walk descends a strictly finite parent → child chain and so cannot
+  // cycle; this cap only bounds the work done on pathological input. The
+  // deepest chain a real bundle emits is two levels
+  // (section > article > div.slide), so 16 leaves ample headroom while
+  // keeping the loop's termination independent of the document.
+  const MAX_WRAPPER_DEPTH = 16;
+
   function findSlideRoot() {
     const direct = document.querySelector('body > [class*="slide"]');
     if (direct) return direct;
     const wrappers = document.querySelectorAll('body > section, body > article');
     for (const wrapper of wrappers) {
-      const meaningful = Array.from(wrapper.children).filter(
-        (child) => child.tagName !== 'STYLE' && child.tagName !== 'SCRIPT'
-      );
-      if (meaningful.length === 1 && meaningful[0].matches('[class*="slide"]')) {
-        return wrapper;
-      }
+      if (wrapsSlideRoot(wrapper)) return wrapper;
     }
     return document.querySelector('body > div');
+  }
+
+  // Whether this wrapper stands for a whole slide: following its sole-element-
+  // child chain down through consecutive semantic wrappers lands on the slide
+  // body. The .children collection is element-only, which is what makes
+  // comments, whitespace and text nodes transparent to the walk.
+  function wrapsSlideRoot(wrapper) {
+    let node = wrapper;
+    for (let depth = 0; depth < MAX_WRAPPER_DEPTH; depth += 1) {
+      if (node.children.length !== 1) return false;
+      const child = node.children[0];
+      if (child.matches('[class*="slide"]')) return true;
+      if (!SLIDE_WRAPPER_TAGS.has(child.tagName)) return false;
+      node = child;
+    }
+    return false;
   }
 
   function transferSlideRootBackground() {
