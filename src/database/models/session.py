@@ -263,10 +263,27 @@ class SessionSlideDeck(Base):
     # Full SlideDeck structure as JSON (for restoration)
     # Note: Verification is NOT stored here - it's in verification_map
     deck_json = Column(Text)  # JSON with slides array, css, external_scripts, scripts
-    
+
     # Verification results keyed by content hash (survives deck regeneration)
     # JSON format: {"content_hash": {"score": 95, "rating": "excellent", ...}}
     verification_map = Column(Text, nullable=True)
+
+    # Deck spec (full architecture spec, architect-authored)
+    # Persisted per-session; inferred from existing HTML once, then persisted (spec §4.3).
+    # Snapshot also stored in SlideDeckVersion (spec §4.4).
+    deck_spec_json = Column(Text, nullable=True)
+
+    # Deck-level CSS (written by the foreman — single writer for the deck)
+    # Builders write only body HTML to their slides; deck CSS is centralized here.
+    css = Column(Text, nullable=True)
+
+    # Deck-level external script URLs (Chart.js CDN etc.), JSON array.
+    # REQUIRED, not optional: the export chain reads `external_scripts` off the deck
+    # dict (`src/api/routes/export.py:52`), and `SlideDeck._ensure_default_external_scripts`
+    # (`src/domain/slide_deck.py:74-77`) injects the Chart.js CDN into every deck. If the
+    # row path returns [] instead, EVERY export silently loses Chart.js and all charts
+    # render blank — the PRD §3 no-regression gate, failing invisibly.
+    external_scripts_json = Column(Text, nullable=True)
 
     # Deck-level editing lock for chat-based edits (long-running operations).
     # When an agent is modifying slides, locked_by holds the username and
@@ -324,6 +341,9 @@ class SlideDeckVersion(Base):
     # Chat history snapshot (JSON array of messages up to this point)
     chat_history_json = Column(Text, nullable=True)
 
+    # Deck spec snapshot at save-point time (must stay in sync with deck_json for restore)
+    deck_spec_json = Column(Text, nullable=True)
+
     # Relationship
     session = relationship("UserSession", back_populates="versions")
 
@@ -335,4 +355,59 @@ class SlideDeckVersion(Base):
 
     def __repr__(self):
         return f"<SlideDeckVersion(session_id={self.session_id}, version={self.version_number}, desc='{self.description}')>"
+
+
+class SessionSlide(Base):
+    """One row per slide in a session's deck.
+
+    Keyed by (session_id, position). Carries the Slide domain model fields
+    plus verification_record (per-row, keyed by content_hash) and deck_spec_slide
+    (the slide's fragment of the architecture spec).
+
+    Verification moved here from SessionSlideDeck.verification_map to allow
+    parallel per-slide writes without lost-update races (spec §5.2.4).
+    """
+
+    __tablename__ = "session_slides"
+
+    # Composite primary key: (session_id, position)
+    session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+        index=True,
+    )
+    position = Column(Integer, primary_key=True, nullable=False)
+
+    # Unique row ID (for external references if needed)
+    id = Column(String(64), unique=True, nullable=True)
+
+    # Slide content (from Slide domain model)
+    html = Column(Text, nullable=False)  # Body HTML only, not full document
+    slide_id = Column(String(255), nullable=True)  # Optional UUID
+    scripts = Column(Text, nullable=True)  # Chart.js, etc. per-slide code
+
+    # Authorship and timestamps
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    modified_by = Column(String(255), nullable=True)
+    modified_at = Column(DateTime, nullable=True)
+
+    # Per-slide verification record (keyed by content_hash if present)
+    # JSON format: {"content_hash": {findings from reviewer}}
+    verification_record = Column(Text, nullable=True)
+
+    # This slide's portion of the deck spec (architect-authored, foreman-distributed)
+    # JSON format: {position, purpose, content brief, assumes, hands_off, data_references}
+    deck_spec_slide = Column(Text, nullable=True)
+
+    # Indexes for efficient queries
+    __table_args__ = (
+        Index("ix_session_slides_session_position", "session_id", "position"),
+        Index("ix_session_slides_id", "id"),
+    )
+
+    def __repr__(self):
+        return f"<SessionSlide(session_id={self.session_id}, position={self.position})>"
 
