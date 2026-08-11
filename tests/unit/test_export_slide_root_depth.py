@@ -51,6 +51,7 @@ from src.domain.slide_deck import SlideDeck
 from src.services import pptx_from_html_huashu
 from src.utils.html_utils import find_slide_roots
 from tests.unit.test_export_slide_root_background import (
+    FIXTURE_DIR,
     GROUND,
     LOST,
     PROBE_SCRIPT,
@@ -62,10 +63,17 @@ from tests.unit.test_export_slide_root_background import (
 # case that must go from RED to green. 400 stands for "arbitrarily deep" —
 # imported template HTML is arbitrary and a pinned-template generation retains
 # whatever structure it was given. 508 and 509 sit just under Chromium's own parser
-# ceiling: it caps a parsed document's tree depth at 512 (measured), so 509 wrapper
-# levels is the deepest chain that exists in the DOM at all, and therefore the real
-# end of the range this walk is responsible for.
+# ceiling (see TestChromiumParserNestingLimit): 509 is the deepest chain that exists
+# in the DOM at all, and therefore the real end of the range this walk is
+# responsible for.
 DEPTHS = (1, 2, 3, 16, 17, 32, 400, 508, 509)
+
+# Chromium caps a PARSED document's tree depth at 512 (measured: a 520-wrapper
+# chain arrives 512 deep). With html > body above them, 509 wrapper levels is the
+# deepest chain that survives parsing intact; at 510 the parser stops nesting and
+# reparents the overflow. Both numbers are measured, not derived.
+LAST_NESTED_DEPTH = 509
+REPARSED_DEPTH = 510
 
 # Ceiling for the preprocess pass on ONE slide, per depth. Generous on purpose:
 # this is a "does the walk blow up" tripwire (a quadratic or re-entrant walk
@@ -346,6 +354,108 @@ class TestPromotionBlockers:
             extra_css=".slide { height: 360px; padding: 36px 88px; }",
         )
         assert _slide_background(_build_html(monkeypatch, html)) == LOST
+
+
+@requires_huashu_sidecar
+class TestChromiumParserNestingLimit:
+    """Where the walk stops being able to help, and why that is not a bug here.
+
+    Past 509 wrapper levels the two surfaces stop being handed the same tree.
+    BeautifulSoup has no nesting limit, so the backend promotes a 510-level chain
+    to its outermost wrapper and serialises THAT as the slide's HTML — but
+    Chromium's parser caps tree depth at 512, so when the sidecar loads that HTML
+    the overflow is REPARENTED: the innermost wrapper ends up holding the
+    remaining wrappers AND the ``.slide`` as siblings. The sole-child chain the
+    backend walked simply is not in the DOM any more.
+
+    This is deliberately not chased. Resolving the reparsed shape would mean
+    promoting a wrapper with several element children, which is exactly what the
+    backend refuses and what ``TestPromotionBlockers`` pins as must-block — so
+    "fixing" it would contradict the spec the sidecar exists to conform to. A
+    510-deep chain of sole-child semantic wrappers is also a shape no real bundle
+    produces; the deepest observed in a real bundle is two.
+
+    What these tests DO require is that the limit is measured, pinned, and
+    ATTRIBUTABLE — a rootless deck and a broken locator both export white, so the
+    log has to be able to tell them apart.
+    """
+
+    def test_the_deepest_chain_chromium_nests_still_resolves(
+        self, tmp_path: Path
+    ) -> None:
+        """509 is not a cliff we chose — it is the last depth that reaches us."""
+        results = _probe(
+            tmp_path, {f"depth_{LAST_NESTED_DEPTH}": _chain_document(LAST_NESTED_DEPTH)}
+        )
+        assert results[f"depth_{LAST_NESTED_DEPTH}"]["bgTransferred"] == "solid"
+
+    def test_one_level_deeper_resolves_to_no_root(self, tmp_path: Path) -> None:
+        """The honest outcome for a tree that no longer holds the chain."""
+        results = _probe(
+            tmp_path, {f"depth_{REPARSED_DEPTH}": _chain_document(REPARSED_DEPTH)}
+        )
+        assert results[f"depth_{REPARSED_DEPTH}"]["bgTransferred"] == "no-root"
+
+    def test_the_backend_still_promotes_at_that_depth(self) -> None:
+        """Pins that the divergence is the BROWSER's, not a sidecar regression.
+
+        The spec side is unaffected — which is precisely why the sidecar cannot
+        follow it here, and why the log has to say so.
+        """
+        roots = find_slide_roots(
+            BeautifulSoup(_chain_document(REPARSED_DEPTH), "html.parser")
+        )
+
+        assert len(roots) == 1
+        assert roots[0].name == "section"
+        assert roots[0].parent is not None and roots[0].parent.name == "body"
+
+    def test_the_reparsed_shape_is_reported_and_names_what_it_saw(
+        self, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """The diagnostic must distinguish "pathological deck" from "we regressed".
+
+        ``several element children`` is the reparse signature: the walk found a
+        wrapper level holding more than one element child, which is the shape
+        Chromium reparenting produces and the shape the backend refuses to
+        promote. Reading it back out of the emitter's own stderr is what makes it
+        attributable — that is the stream ``pptx_from_html_huashu`` echoes into the
+        app log.
+
+        huashu's layout validation rejects this fixture (the reparented wrappers
+        overflow the body), so the export is allowed to fail here; the diagnostic
+        is emitted by the preprocess pass, which runs first either way.
+        """
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        pptx_from_html_huashu.build_pptx_huashu(
+            "slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}]
+        )
+        stderr = capfd.readouterr().err
+
+        assert "[preprocess] no slide root:" in stderr, (
+            f"no attributable diagnostic in the emitter output:\n{stderr[-2000:]}"
+        )
+        assert "several element children" in stderr
+        # …and the node-side line that says what it COST, in the same stream.
+        assert "resolved NO root" in stderr
+
+    def test_a_genuinely_rootless_deck_is_reported_the_same_way(
+        self, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """Attribution is not special-cased to deep chains.
+
+        ``rootless.html`` has no wrapper candidates at all, so this pins the other
+        end of the diagnostic: it still names body's children and still says the
+        slide will export white, with no candidate list to show.
+        """
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        html = (FIXTURE_DIR / "rootless.html").read_text(encoding="utf-8")
+        pptx_from_html_huashu.build_pptx_huashu("slide root depth", [{"html": html}])
+        stderr = capfd.readouterr().err
+
+        assert "[preprocess] no slide root:" in stderr
+        assert "wrapper candidates (none)" in stderr
+        assert "resolved NO root" in stderr
 
 
 @requires_huashu_sidecar

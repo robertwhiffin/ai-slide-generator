@@ -985,8 +985,18 @@ async function html2pptx(htmlFile, pres, options = {}) {
     try {
       const page = await browser.newPage();
       page.on('console', (msg) => {
+        const text = msg.text();
+        // Tellr addition: our own [preprocess] diagnostics go to STDERR. The
+        // Python wrapper (pptx_from_html_huashu.py) echoes only stderr into the
+        // app log, so a stdout-only diagnostic is invisible to whoever has to
+        // explain an unexpectedly white slide. Page chatter stays on stdout,
+        // exactly as before.
+        if (text.startsWith('[preprocess]')) {
+          console.error(`Browser console: ${text}`);
+          return;
+        }
         // Log the message text to your test runner's console
-        console.log(`Browser console: ${msg.text()}`);
+        console.log(`Browser console: ${text}`);
       });
 
       await page.goto(`file://${filePath}`);
@@ -1033,6 +1043,16 @@ async function html2pptx(htmlFile, pres, options = {}) {
             console.log(`[preprocess] wrapped ${result.wrapped || 0} text nodes, ` +
                         `replaced ${result.replacedImgs || 0} bg-image divs, ` +
                         `peeled ${result.peeledTextTags || 0} text tags`);
+            // Tellr addition: attribute the one outcome the artifact cannot
+            // explain. No slide root means no slide-root → body background
+            // transfer, so this slide exports on the untouched body default
+            // (white) — indistinguishable in the .pptx from a locator
+            // regression. The page-side '[preprocess] no slide root' line above
+            // carries the shape that was actually seen.
+            if (result.bgTransferred === 'no-root') {
+              console.error('[preprocess] slide-root locator resolved NO root: this slide ' +
+                            'exports with the untouched body background (white).');
+            }
           }
         } catch (e) {
           console.error(`[preprocess] failed: ${e.message} — continuing without`);
