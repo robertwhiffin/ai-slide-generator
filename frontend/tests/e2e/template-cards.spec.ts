@@ -10,6 +10,7 @@ import {
   mockDesignSystemDetail,
   mockDesignSystemTemplatesWithLive,
   mockDesignSystemTemplateSource,
+  mockDesignSystemTemplateSourceCustomElementHarness,
   mockDesignSystemFiles,
   mockDesignSystemFileContents,
   TINY_PNG_BASE64,
@@ -351,6 +352,206 @@ test.describe('Template cards — preview preference and live-render fallback', 
     // …and the detail page produced ZERO failed-resource console errors.
     await page.waitForTimeout(500);
     expect(resourceErrors).toEqual([]);
+  });
+
+  test('custom-element deck harness renders instead of collapsing behind its own :not(:defined) guard', async ({ page }) => {
+    // Real Claude Design exports wrap their slide sections in a custom element
+    // (<deck-stage>) and guard the pre-upgrade flash with
+    // `deck-stage:not(:defined){visibility:hidden}`. A preview frame runs NO
+    // scripts, so the element is never registered: without the shim the guard
+    // is permanent, every slide inherits visibility:hidden, and the card is
+    // just the body background — the reported "dark rectangle".
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockDesignSystemTemplateSourceCustomElementHarness),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    await expect(contentCard.locator('[data-testid="template-live-preview"]')).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+
+    // The slide is genuinely PAINTED: toBeVisible() fails on both failure modes
+    // (inherited visibility:hidden AND a zero-size box).
+    await expect(inner.locator('h1')).toHaveText('Acme Harness Slide One');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    // The harness element is un-hidden and given a real stage box, so the
+    // absolutely-positioned slide has something to fill.
+    const stage = await inner.locator('deck-stage').evaluate((el) => ({
+      visibility: getComputedStyle(el).visibility,
+      display: getComputedStyle(el).display,
+      width: (el as HTMLElement).getBoundingClientRect().width,
+      height: (el as HTMLElement).getBoundingClientRect().height,
+    }));
+    expect(stage.visibility).toBe('visible');
+    expect(stage.display).toBe('block');
+    expect(stage.width).toBe(1280);
+    expect(stage.height).toBe(720);
+
+    // The slide box itself is the full 16:9 stage, not a collapsed sliver.
+    const slideBox = await inner.locator('.slide').evaluate(
+      (el) => (el as HTMLElement).getBoundingClientRect().height,
+    );
+    expect(slideBox).toBe(720);
+
+    // A card shows the FIRST slide. Sections are position:absolute; inset:0, so
+    // without per-slide isolation they stack and the LAST one would win.
+    await expect(inner.locator('h1')).toHaveCount(1);
+    await expect(inner.getByText('Acme Harness Slide Two')).toHaveCount(0);
+  });
+
+  test('custom-element harness does not weaken the sandbox: ZERO egress, no navigation', async ({ page }) => {
+    // The shim adds CSS only. The hardening must be byte-identical: sandbox=""
+    // exactly, the no-egress CSP still the FIRST fetch-capable byte, and no
+    // passive fetch or navigation out of an exfil-shaped harness template.
+    const externalRequests: string[] = [];
+    await page.route('https://external.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TINY_PNG_BASE64, 'base64') });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head>' +
+            // Navigation attempt + passive-fetch attempts, inside the harness.
+            '<meta http-equiv="refresh" content="0;url=https://external.example/go">' +
+            '<link rel="stylesheet" href="https://external.example/style.css">' +
+            '<style>html,body{margin:0;background:#123456;}' +
+            'deck-stage:not(:defined){visibility:hidden}' +
+            '.slide{position:absolute;inset:0;' +
+            'background-image:url("https://external.example/bg.png");}' +
+            '</style></head>' +
+            '<body><deck-stage width="1280" height="720">' +
+            '<section><div class="slide"><h1>Acme Harness Exfil Probe</h1>' +
+            '<img src="https://external.example/pixel.png" alt="">' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="">` +
+            '</div></section></deck-stage></body></html>',
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // It rendered (so the assertion below is not vacuously true)…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    // …the sandbox and CSP are unchanged, CSP still structurally first…
+    await expect(frame).toHaveAttribute('sandbox', '');
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc.startsWith('<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy"')).toBe(true);
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    expect(srcdoc.indexOf('Content-Security-Policy')).toBeLessThan(srcdoc.indexOf('external.example'));
+
+    // …and nothing left the frame, by fetch OR navigation.
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+    // Still showing our document: the meta refresh did not take it anywhere.
+    await expect(inner.locator('h1')).toHaveText('Acme Harness Exfil Probe');
+  });
+
+  test('an off-screen card pays nothing for its megabyte source until scrolled in', async ({ page }) => {
+    // Cards previously prefetched 200px beyond the viewport, so every template
+    // on the detail page downloaded its FULL source (megabytes each, brand
+    // assets and webfonts inlined as data: URIs) during page load. A card is
+    // worth that only when it is actually visible.
+    const sourceRequests: string[] = [];
+    page.on('request', (req) => {
+      const match = /\/templates\/(\d+)\/source$/.exec(req.url());
+      if (match) sourceRequests.push(match[1]);
+    });
+
+    // Four screenshot-less templates, so the grid runs past a short viewport.
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          templates: [2, 3, 4, 5].map((id) => ({
+            id,
+            name: `Acme Live ${id}`,
+            description: 'Screenshot-less template.',
+            entry_path: `templates/live-${id}/index.html`,
+            thumbnail_url: null,
+          })),
+          total: 4,
+        }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/\d+\/source$/, (route, request) => {
+      const id = /\/templates\/(\d+)\/source$/.exec(request.url())?.[1] ?? '0';
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: Number(id),
+          name: `Acme Live ${id}`,
+          layout_html:
+            '<!doctype html><html><head><style>.slide{position:absolute;inset:0;}</style></head>' +
+            `<body><deck-stage><section><div class="slide"><h1>Acme Live ${id}</h1></div></section></deck-stage></body></html>`,
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    // A viewport short enough that the template grid starts below the fold.
+    await page.setViewportSize({ width: 900, height: 400 });
+    await openAcmeDetail(page);
+    await expect(page.getByTestId('template-cards')).toHaveCount(1);
+    await page.waitForTimeout(700);
+
+    // Nothing off-screen has been paid for: zero source bytes on load.
+    expect(sourceRequests).toEqual([]);
+
+    // Scrolling the grid in is what triggers the fetches — the deferral is
+    // real, not a permanent drop.
+    await page.locator('[data-testid="template-card"]').first().scrollIntoViewIfNeeded();
+    await expect(page.locator('[data-testid="template-live-preview"]').first()).toBeVisible();
+    await expect.poll(() => new Set(sourceRequests).size).toBeGreaterThan(0);
+  });
+
+  test('expanding a card reuses the fetched source instead of downloading it again', async ({ page }) => {
+    const sourceRequests: string[] = [];
+    page.on('request', (req) => {
+      if (/\/templates\/\d+\/source$/.test(req.url())) sourceRequests.push(req.url());
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockDesignSystemTemplateSourceCustomElementHarness),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    await expect(contentCard.locator('[data-testid="template-live-preview"]')).toBeVisible();
+    await expect.poll(() => sourceRequests.length).toBe(1);
+
+    await contentCard.getByTestId('expand-template-button').click();
+    await expect(page.getByTestId('template-viewer-frame')).toBeVisible();
+    // The viewer renders from the card's payload — still exactly one download.
+    const viewer = page.frameLocator('[data-testid="template-viewer-frame"]');
+    await expect(viewer.locator('h1').first()).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(sourceRequests.length).toBe(1);
   });
 
   test('source fetch fires only for screenshot-less templates', async ({ page }) => {
