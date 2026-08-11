@@ -628,6 +628,131 @@ test.describe('Template cards — preview preference and live-render fallback', 
     expect(cspViolations).toEqual([]);
   });
 
+  test('@import removal stays inside CSS — HTML text and CSS strings survive', async ({ page }) => {
+    // The rule to drop is an @import AT-RULE in a stylesheet. A text-level match
+    // over the whole document instead removes anything SHAPED like one, wherever
+    // it sits. All three shapes below are legitimate content a template may
+    // contain, and all three were destroyed:
+    //
+    //   valid_following_css   the rule after a commented-out @import was erased
+    //   legitimate_css_string content:"@import ..." collapsed to content:""
+    //   legitimate_html_text  VISIBLE PAGE TEXT showing CSS to the reader vanished
+    //
+    // The genuinely preview-only webfont @import must STILL go — that is the
+    // whole point of the removal — and the CSP must not be widened to admit it.
+    const STYLE_CSS =
+      '.slide{position:absolute;inset:0;width:1280px;height:720px;}' +
+      // A commented-out @import: the old matcher ran out of the comment and ate
+      // the rule that follows it. A DIFFERENT host from the token sheet's, so
+      // "no live font import survived" below can name a host unambiguously.
+      "/* @import url('https://inert.example/old.css') is disabled */\n" +
+      '.after{color:#123456;}\n' +
+      // An @import inside a CSS STRING LITERAL — this is DATA, not an at-rule.
+      'pre::before{content:"@import url(\'inert.css\');";}';
+    const HTML_TEXT = "@import url('theme.css'); keep this lesson text";
+
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            `<!doctype html><html><head><style>${STYLE_CSS}</style></head>` +
+            '<body><section><div class="slide">' +
+            '<h1 class="after">Acme Scope Probe</h1>' +
+            `<pre>${HTML_TEXT}</pre>` +
+            '</div></section></body></html>',
+          // Semicolons inside the url() — the rule has to be followed through its
+          // bracketing, not cut at the first `;`.
+          token_css:
+            "@import url('https://fonts.example/css2?family=Acme+Display:wght@400;500;600;700');\n" +
+            ':root{--brand-core-primary:#123456;}',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // The stylesheet came through untouched — every byte of it.
+    expect(srcdoc).toContain(STYLE_CSS);
+    // …and so did the visible page text.
+    expect(srcdoc).toContain(HTML_TEXT);
+    // The real, preview-only webfont @import is gone whole.
+    expect(srcdoc).not.toContain('fonts.example');
+    expect(srcdoc).not.toContain('Acme+Display');
+    expect(srcdoc).not.toContain('display=swap');
+
+    // Now the same three claims measured on the RENDERED document rather than on
+    // the markup, so this cannot pass on a string that never became CSS.
+    // 1. the rule after the commented-out @import still applies…
+    await expect(inner.locator('h1.after')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    // 2. …the CSS string literal still carries its content…
+    const pseudo = await inner
+      .locator('pre')
+      .evaluate((el) => getComputedStyle(el, '::before').content);
+    expect(pseudo).toContain("@import url('inert.css');");
+    // 3. …and the page text the reader is meant to see is intact.
+    await expect(inner.locator('pre')).toHaveText(HTML_TEXT);
+
+    // The sandbox is untouched: policy unchanged, no host admitted, nothing fetched.
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    await expect(frame).toHaveAttribute('sandbox', '');
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('a template with no @import passes through byte-identically', async ({ page }) => {
+    // The removal must be inert when there is nothing to remove: no
+    // re-serialization, no entity rewriting, no whitespace normalization.
+    const STYLE_CSS =
+      '.slide{position:absolute;inset:0;width:1280px;height:720px;}\n' +
+      '/* Acme note: a > b && c < d */\n' +
+      'h1{color:#123456;content:"a;b"}\n' +
+      '@media screen{.after{color:#123456}}';
+    const TOKEN_CSS = ':root{--brand-core-primary:#123456;}\n/* no imports here */';
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            `<!doctype html><html><head><style>${STYLE_CSS}</style></head>` +
+            '<body><section><div class="slide"><h1>Acme Passthrough</h1></div></section></body></html>',
+          token_css: TOKEN_CSS,
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc).toContain(STYLE_CSS);
+    expect(srcdoc).toContain(TOKEN_CSS);
+  });
+
   test('source fetch fires only for screenshot-less templates', async ({ page }) => {
     const sourceRequests: string[] = [];
     page.on('request', (req) => {

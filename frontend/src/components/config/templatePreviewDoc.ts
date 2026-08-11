@@ -58,10 +58,200 @@ const DS_ASSET_HANDLE_RE = /\{\{ds-asset:\d+\}\}/g;
  * frame; @import never works here at all.
  *
  * The URL can itself contain semicolons (`...wght@400;500;600;700`), so the rule
- * is matched through its closing paren rather than to the first `;`.
+ * cannot be matched to the first `;` — it has to be followed through its
+ * bracketing. {@link skipImportAtRule} tracks paren depth for exactly that.
+ *
+ * SCOPE is the other half of getting this right. A text-level pattern over the
+ * whole document does not remove an at-rule, it removes anything SHAPED like
+ * one, wherever it appears:
+ *
+ *   - `pre::before{content:"@import url('x');";color:red}` — the declaration is
+ *     CSS *data*, not an at-rule; erasing it silently empties the pseudo-element.
+ *   - `<pre>@import url('theme.css'); keep this text</pre>` — VISIBLE PAGE TEXT.
+ *     Documentation-style templates legitimately show CSS to the reader.
+ *   - an `@import` COMMENTED OUT in the sheet, followed by a real rule — the
+ *     match runs out of the comment and eats the rule after it.
+ *
+ * So the removal is CSS-aware and applied ONLY to stylesheet text: `<style>`
+ * element content (see {@link stripImportsFromStyleElements}) and the token CSS,
+ * which is a stylesheet in its own right. Inside that text, quoted string
+ * literals and comments are copied through untouched, so an `@import` that is
+ * merely being *quoted* or *commented out* survives — only a real at-rule goes.
+ *
+ * Inline `style="..."` attributes are deliberately NOT scanned: an at-rule is
+ * invalid in a declaration list, so `@import` there never loads anything and has
+ * no violation to silence.
  */
-const CSS_IMPORT_RE =
-  /@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|[^)"']*)\s*\)|"[^"]*"|'[^']*')[^;]*;?/gi;
+const IMPORT_AT_KEYWORD = '@import';
+
+/** CSS ident characters, used to keep `@import` from matching `@imports`. */
+const IDENT_CHAR_RE = /[A-Za-z0-9_-]/;
+
+/**
+ * Index just past the string literal starting at `start`.
+ *
+ * Backslash escapes are skipped as a unit so an escaped quote does not end the
+ * string early. An unterminated string ends at the newline, as CSS says it does,
+ * rather than swallowing the remainder of the sheet.
+ */
+function skipString(css: string, start: number): number {
+  const quote = css[start];
+  let index = start + 1;
+  while (index < css.length) {
+    const char = css[index];
+    if (char === '\\') {
+      index += 2;
+      continue;
+    }
+    if (char === quote) return index + 1;
+    if (char === '\n') return index;
+    index += 1;
+  }
+  return css.length;
+}
+
+/** Index just past the CSS block comment starting at `start`. */
+function skipComment(css: string, start: number): number {
+  const close = css.indexOf('*/', start + 2);
+  return close < 0 ? css.length : close + 2;
+}
+
+/** Whether a real `@import` at-keyword (not `@imports`, `@import-x`) starts here. */
+function startsImportAtRule(css: string, start: number): boolean {
+  const candidate = css.slice(start, start + IMPORT_AT_KEYWORD.length);
+  if (candidate.toLowerCase() !== IMPORT_AT_KEYWORD) return false;
+  const next = css[start + IMPORT_AT_KEYWORD.length];
+  return next === undefined || !IDENT_CHAR_RE.test(next);
+}
+
+/**
+ * Index just past the `@import` at-rule starting at `start`.
+ *
+ * The prelude is followed through its own bracketing rather than to the first
+ * `;`, so a `;` inside `url(...)` or inside a quoted string does not end it
+ * early — that is what keeps a webfont URL such as `...wght@400;500;600;700`
+ * from being cut in half and leaving an orphaned fragment behind.
+ *
+ * An at-rule with no block ends at its `;`, which is consumed.
+ *
+ * The two ways that can fail to happen are handled the way a CSS parser handles
+ * them, so what is removed matches what a browser would refuse to apply:
+ *
+ *  - a `{` arrives first: per CSS Syntax, consuming an at-rule takes the block
+ *    that follows, and `@import` does not accept one, so the whole at-rule
+ *    INCLUDING that block is invalid and dropped. The block is consumed
+ *    (brace-balanced) rather than left behind as a dangling `{...}` fragment.
+ *  - a `}` arrives first: that brace closes an ENCLOSING block, so the at-rule
+ *    ended without a terminator. The scan stops without consuming it, leaving
+ *    the enclosing structure intact.
+ */
+function skipImportAtRule(css: string, start: number): number {
+  let index = start + IMPORT_AT_KEYWORD.length;
+  let parenDepth = 0;
+  while (index < css.length) {
+    const char = css[index];
+    if (char === '"' || char === "'") {
+      index = skipString(css, index);
+      continue;
+    }
+    if (char === '/' && css[index + 1] === '*') {
+      index = skipComment(css, index);
+      continue;
+    }
+    if (char === '(') {
+      parenDepth += 1;
+    } else if (char === ')') {
+      parenDepth = Math.max(0, parenDepth - 1);
+    } else if (parenDepth === 0) {
+      if (char === ';') return index + 1;
+      if (char === '{') return skipBlock(css, index);
+      if (char === '}') return index;
+    }
+    index += 1;
+  }
+  return css.length;
+}
+
+/**
+ * Index just past the brace-balanced `{ ... }` block starting at `start`.
+ *
+ * Strings and comments are skipped so a brace inside either does not throw the
+ * balance off.
+ */
+function skipBlock(css: string, start: number): number {
+  let index = start;
+  let depth = 0;
+  while (index < css.length) {
+    const char = css[index];
+    if (char === '"' || char === "'") {
+      index = skipString(css, index);
+      continue;
+    }
+    if (char === '/' && css[index + 1] === '*') {
+      index = skipComment(css, index);
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+    index += 1;
+  }
+  return css.length;
+}
+
+/**
+ * Remove every `@import` at-rule from ONE stylesheet's text.
+ *
+ * Everything that is not an at-rule is copied through byte-for-byte, including
+ * string literals and comments that merely happen to contain the word `@import`.
+ * A sheet with no `@import` therefore comes back identical to what went in.
+ */
+export function stripCssImports(css: string): string {
+  let out = '';
+  let index = 0;
+  while (index < css.length) {
+    const char = css[index];
+    if (char === '"' || char === "'") {
+      const end = skipString(css, index);
+      out += css.slice(index, end);
+      index = end;
+      continue;
+    }
+    if (char === '/' && css[index + 1] === '*') {
+      const end = skipComment(css, index);
+      out += css.slice(index, end);
+      index = end;
+      continue;
+    }
+    if (char === '@' && startsImportAtRule(css, index)) {
+      index = skipImportAtRule(css, index);
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
+/**
+ * Strip `@import` from every `<style>` in the parsed layout, in place.
+ *
+ * Rewriting the parsed DOM instead of the HTML source is what confines the
+ * removal to CSS: an `@import` sitting in a text node is not in a stylesheet and
+ * is never touched. `<style>` is a raw-text element, so its content round-trips
+ * through serialization unescaped. Each element is written back only when it
+ * actually changed, so a layout with no `@import` serializes byte-identically.
+ */
+function stripImportsFromStyleElements(doc: Document): void {
+  doc.querySelectorAll('style').forEach((style) => {
+    const css = style.textContent ?? '';
+    const stripped = stripCssImports(css);
+    if (stripped !== css) style.textContent = stripped;
+  });
+}
 
 /**
  * Slide roots inside a template layout. Templates mark each slide section with
@@ -153,16 +343,18 @@ export function buildTemplatePreviewDoc(
   tokenCss: string | null,
   slideIndex?: number,
 ): string {
-  const inlineLayout = layoutHtml
-    .replace(DS_ASSET_HANDLE_RE, 'data:,')
-    .replace(CSS_IMPORT_RE, '');
+  const inlineLayout = layoutHtml.replace(DS_ASSET_HANDLE_RE, 'data:,');
+  // Token CSS is a stylesheet in its own right, so it is stripped directly; the
+  // layout's @import rules are stripped from its parsed <style> elements below,
+  // which is what keeps the removal out of HTML text.
   const inlineTokenCss = tokenCss
-    ? tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,').replace(CSS_IMPORT_RE, '')
+    ? stripCssImports(tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,'))
     : tokenCss;
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
   const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
   const guard = cspMeta + (inlineTokenCss ? `<style>${inlineTokenCss}</style>` : '') + previewReset;
   const parsed = parseLayout(inlineLayout);
+  stripImportsFromStyleElements(parsed);
   if (slideIndex !== undefined) {
     const slides = Array.from(parsed.querySelectorAll(SLIDE_ROOT_SELECTOR));
     if (slides.length > 1 && slideIndex >= 0 && slideIndex < slides.length) {
