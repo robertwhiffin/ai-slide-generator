@@ -139,6 +139,29 @@ class TestPinnedWrapperBackground:
         pptx = _build(monkeypatch, "wrapped_bare_slide.html")
         assert _slide_background(pptx) == GROUND
 
+    def test_ground_survives_a_chain_of_wrappers_not_just_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Promotion follows the WHOLE chain, as the backend's does.
+
+        ``find_slide_roots`` promotes outward through every consecutive
+        sole-child semantic wrapper, so for ``section > article > div.slide``
+        it stores the outer ``<section>``. A locator that promotes a single
+        level stops at the ``<article>``, does not recognise it as a root and
+        falls through, so the slide exports white while the app renders it
+        correctly — the two surfaces disagreeing about the same deck.
+
+        The fixture shares wrapped_bare_slide.html's rules exactly and differs
+        only by the interposed ``<article>``, so comparing the two artifacts
+        from one run attributes any difference to that level alone.
+        """
+        nested = _build(monkeypatch, "wrapped_nested_bare_slide.html")
+        single = _build(monkeypatch, "wrapped_bare_slide.html")
+
+        assert _slide_background(nested) == GROUND
+        assert _slide_background(nested) == _slide_background(single)
+        assert structural_manifest(nested) == structural_manifest(single)
+
     def test_wrapperless_no_design_deck_keeps_its_background(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
