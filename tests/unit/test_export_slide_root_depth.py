@@ -61,8 +61,11 @@ from tests.unit.test_export_slide_root_background import (
 # last depth that worked and 17 was the first that exported white, so 17 is the
 # case that must go from RED to green. 400 stands for "arbitrarily deep" —
 # imported template HTML is arbitrary and a pinned-template generation retains
-# whatever structure it was given.
-DEPTHS = (1, 2, 3, 16, 17, 32, 400)
+# whatever structure it was given. 508 and 509 sit just under Chromium's own parser
+# ceiling: it caps a parsed document's tree depth at 512 (measured), so 509 wrapper
+# levels is the deepest chain that exists in the DOM at all, and therefore the real
+# end of the range this walk is responsible for.
+DEPTHS = (1, 2, 3, 16, 17, 32, 400, 508, 509)
 
 # Ceiling for the preprocess pass on ONE slide, per depth. Generous on purpose:
 # this is a "does the walk blow up" tripwire (a quadratic or re-entrant walk

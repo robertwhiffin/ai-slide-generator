@@ -10,11 +10,20 @@
 //
 // usage:  node probe_bg_transfer.mjs <slide.html> [...]
 // stdout: one JSON object per input, in order:
-//         { file, bgTransferred, bodyBackgroundColor, ms }
+//         { file, bgTransferred, bodyBackgroundColor, title, timedOut, ms }
 //
 // `ms` times the preprocess pass itself (page already loaded), which is how the
 // slide-root walk's cost is shown to scale with wrapper-chain depth rather than
 // with browser startup.
+//
+// PROBE_EVALUATE_TIMEOUT_MS (opt-in, off by default) bounds that pass and
+// reports `timedOut: true` instead of waiting for it. A preprocess pass that
+// never returns is a real failure mode — a hostile page script can make the
+// slide-root walk non-terminating (see tests/fixtures/export_slide_root/
+// hostile_*.html) — and "the probe hung" is not a result a test can assert on.
+// Turning non-termination into DATA is what lets the hostile-realm suite state
+// it as an ordinary expectation. `title` carries whatever the page published
+// there, which those fixtures use to report that their poisoning took effect.
 
 import { chromium } from 'playwright';
 import path from 'node:path';
@@ -26,6 +35,28 @@ const launchOptions = {
   channel: 'chromium',
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
 };
+
+const EVALUATE_TIMEOUT_MS = Number(process.env.PROBE_EVALUATE_TIMEOUT_MS || 0);
+
+// A page whose JS never yields cannot be asked anything more, so the timeout
+// path reports what it knows and skips the follow-up reads rather than adding a
+// second wait to every hostile case.
+const TIMED_OUT = Symbol('timed-out');
+
+async function runPreprocess(page) {
+  if (EVALUATE_TIMEOUT_MS <= 0) return page.evaluate(PREPROCESS_SOURCE);
+  let timer;
+  try {
+    return await Promise.race([
+      page.evaluate(PREPROCESS_SOURCE),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), EVALUATE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function main() {
   const files = process.argv.slice(2);
@@ -40,16 +71,22 @@ async function main() {
       const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
       const page = await ctx.newPage();
       await page.goto(pathToFileURL(path.resolve(file)).href);
+      // Read before the pass: a page that hangs cannot answer afterwards, and
+      // the fixtures publish their self-report here at load time.
+      const title = await page.title();
       const startedAt = Date.now();
-      const result = await page.evaluate(PREPROCESS_SOURCE);
+      const result = await runPreprocess(page);
       const ms = Date.now() - startedAt;
-      const bodyBackgroundColor = await page.evaluate(
-        'window.getComputedStyle(document.body).backgroundColor'
-      );
+      const timedOut = result === TIMED_OUT;
+      const bodyBackgroundColor = timedOut
+        ? null
+        : await page.evaluate('window.getComputedStyle(document.body).backgroundColor');
       console.log(JSON.stringify({
         file: path.basename(file),
-        bgTransferred: result.bgTransferred,
+        bgTransferred: timedOut ? null : result.bgTransferred,
         bodyBackgroundColor,
+        title,
+        timedOut,
         ms,
       }));
       await ctx.close();

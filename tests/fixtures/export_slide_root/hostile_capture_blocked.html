@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* Same shape and same single ground as the other hostile fixtures. Here the
+         ground is expected to be LOST — see the script. */
+      section { background: #123456; color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+    <script>
+      // The WORST case, and the one that says what the guarantee really is.
+      //
+      // Reading the tree through a pristine realm defeats the other two hostile
+      // fixtures — but page script runs FIRST, so the means of reaching that realm
+      // are replaceable too. This fixture replaces them: `contentWindow` hands back
+      // THIS window, so the "pristine" reference is the poisoned realm itself and
+      // the capture must refuse it.
+      //
+      // With no trustworthy way to read the tree left, correctness is gone: this
+      // deck exports white. What must NOT be gone is TERMINATION. The walk falls
+      // back to ordinary property access, hits its iteration bound, and returns —
+      // and the no-root path then reports the shape it saw, so a human reading the
+      // log can tell this apart from a locator regression.
+      //
+      // So the bound is not decoration: this is the case that exercises it, and
+      // the reason it is not a promotion cap in disguise — it sits eight times
+      // above any depth Chromium can parse, so it can only ever be reached by a
+      // realm that is lying.
+      var report = { configurable: {}, redefineResult: 'ok' };
+      function poison(name, get) {
+        var descriptor = Object.getOwnPropertyDescriptor(Element.prototype, name);
+        report.configurable[name] = !!(descriptor && descriptor.configurable);
+        try {
+          Object.defineProperty(Element.prototype, name, { configurable: true, get: get });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poison('children', function () { return { length: 1, 0: this }; });
+      poison('firstElementChild', function () { return this; });
+      poison('nextElementSibling', function () { return null; });
+      var frameDescriptor = Object.getOwnPropertyDescriptor(
+        HTMLIFrameElement.prototype, 'contentWindow'
+      );
+      report.configurable.contentWindow = !!(frameDescriptor && frameDescriptor.configurable);
+      try {
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+          configurable: true,
+          get: function () { return window; },
+        });
+      } catch (error) {
+        report.redefineResult = 'refused contentWindow: ' + error.message;
+      }
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <section data-label="Acme Ground">
+      <article>
+        <div class="slide">
+          <h1>Acme Wrapper Ground</h1>
+          <p>Synthetic fixture slide.</p>
+        </div>
+      </article>
+    </section>
+  </body>
+</html>
