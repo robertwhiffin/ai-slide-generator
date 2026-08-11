@@ -1333,6 +1333,39 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
+            if not deck_owner.slide_deck:
+                logger.warning(
+                    "write_slide_verification: no slide deck for session %s", session_id
+                )
+                return
+
+            # C2 fix: detect legacy/pre-backfill sessions (deck exists but no rows).
+            # The read path falls back to the blob for row-less sessions; the write
+            # path must mirror that so verdicts are not silently discarded.
+            any_row_exists = (
+                db.query(SessionSlide.position)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .first()
+            ) is not None
+
+            if not any_row_exists:
+                # Legacy fallback: write to the blob (SessionSlideDeck.verification_map)
+                # so get_verification_map's legacy branch can read it back.
+                deck = deck_owner.slide_deck
+                blob: Dict[str, Any] = {}
+                if deck.verification_map:
+                    try:
+                        blob = json.loads(deck.verification_map)
+                    except json.JSONDecodeError:
+                        pass
+                blob.update(verification_record)
+                deck.verification_map = json.dumps(blob)
+                logger.info(
+                    "write_slide_verification: legacy session — wrote to blob",
+                    extra={"session_id": session_id, "position": position},
+                )
+                return
+
             row = (
                 db.query(SessionSlide)
                 .filter(
@@ -1345,10 +1378,15 @@ class SessionManager:
             )
 
             if row is None:
+                # Deck has rows but not at this position — genuine caller error.
                 logger.warning(
-                    "write_slide_verification: no row at position %d for session %s",
+                    "write_slide_verification: no row at position %d for session %s "
+                    "(deck has %d rows; position out of range)",
                     position,
                     session_id,
+                    db.query(SessionSlide)
+                    .filter(SessionSlide.session_id == deck_owner.id)
+                    .count(),
                 )
                 return
 
@@ -1813,19 +1851,22 @@ class SessionManager:
                 deck.title = deck_dict.get("title")
                 deck.slide_count = len(deck_dict.get("slides", []))
                 deck.updated_at = datetime.utcnow()
+                deck.version = (getattr(deck, "version", None) or 0) + 1
 
                 # C9 — spec copy-back.
                 # Use getattr for compatibility with mock objects in existing tests
                 # that predate the deck_spec_json column addition (Task 1).
                 deck.deck_spec_json = getattr(version, "deck_spec_json", None)
 
-                # C7 — deck-level presentation columns (css / external_scripts_json)
+                # C7 / I1 — deck-level presentation columns.
                 # These power the row-read path's export chain; restoring deck_json
-                # alone leaves the row path serving the post-edit stylesheet.
+                # alone leaves the row path serving the post-edit stylesheet,
+                # external scripts list, and chart bootstrap JS.
                 deck.css = deck_dict.get("css") or ""
                 deck.external_scripts_json = json.dumps(
                     deck_dict.get("external_scripts") or []
                 )
+                deck.scripts_content = deck_dict.get("scripts") or ""
 
                 # C7 — per-slide row re-materialisation.
                 # Use the same field mapping as Task 4's dual-write so that the
@@ -1862,17 +1903,17 @@ class SessionManager:
                     created_by_val = slide_dict.get("created_by")
                     modified_by_val = slide_dict.get("modified_by")
 
-                    # Migrate restored verification onto this row.
-                    # verification_map is keyed by content_hash; we need to
-                    # find the entry for this slide's HTML and write it in
-                    # the {content_hash: verdict} shape that the row path expects.
+                    # Migrate restored verification onto this row using MERGE
+                    # semantics (not assign).  The save-point's map entry for this
+                    # slide's hash, if present, is merged in.  If the map has no
+                    # entry (normal ordering: user verifies AFTER creating the save
+                    # point), the existing row's record is left untouched — never
+                    # write None over it, which would destroy verdicts that were
+                    # earned after the save point was taken.
                     slide_hash = compute_slide_hash(html)
-                    verdict = verification_map.get(slide_hash)
-                    restored_ver_record: Optional[str] = (
-                        json.dumps({slide_hash: verdict}) if verdict is not None else None
-                    )
+                    restored_verdict = verification_map.get(slide_hash)
 
-                    existing = (
+                    existing_row = (
                         db.query(SessionSlide)
                         .filter(
                             and_(
@@ -1883,17 +1924,37 @@ class SessionManager:
                         .one_or_none()
                     )
 
-                    if existing is not None:
-                        existing.html = html
-                        existing.scripts = scripts
-                        existing.slide_id = slide_id
+                    if existing_row is not None:
+                        existing_row.html = html
+                        existing_row.scripts = scripts
+                        existing_row.slide_id = slide_id
                         if created_by_val:
-                            existing.created_by = created_by_val
+                            existing_row.created_by = created_by_val
                         if modified_by_val:
-                            existing.modified_by = modified_by_val
-                        existing.modified_at = modified_at_r or now_dt
-                        existing.verification_record = restored_ver_record
+                            existing_row.modified_by = modified_by_val
+                        existing_row.modified_at = modified_at_r or now_dt
+                        # C1 fix: merge, not assign.  Only update when the save-point
+                        # map actually has an entry; when it does not, leave the
+                        # existing record intact so post-save-point verdicts survive.
+                        if restored_verdict is not None:
+                            existing_vr: Dict[str, Any] = {}
+                            raw_vr = existing_row.verification_record
+                            if raw_vr and isinstance(raw_vr, str):
+                                try:
+                                    existing_vr = json.loads(raw_vr)
+                                except json.JSONDecodeError:
+                                    pass
+                            existing_vr[slide_hash] = restored_verdict
+                            existing_row.verification_record = json.dumps(existing_vr)
+                        # else: leave existing_row.verification_record untouched
                     else:
+                        # Insert: only set verification_record when the save-point
+                        # map has an entry for this hash.
+                        initial_ver_record: Optional[str] = (
+                            json.dumps({slide_hash: restored_verdict})
+                            if restored_verdict is not None
+                            else None
+                        )
                         row = SessionSlide(
                             session_id=deck_owner.id,
                             position=position,
@@ -1905,7 +1966,7 @@ class SessionManager:
                             created_at=created_at_r or now_dt,
                             modified_by=modified_by_val,
                             modified_at=modified_at_r or now_dt,
-                            verification_record=restored_ver_record,
+                            verification_record=initial_ver_record,
                             deck_spec_slide=None,
                         )
                         db.add(row)

@@ -857,3 +857,256 @@ class TestGetVerificationMapAggregation:
             f"keys present: {list(saved_map.keys())}"
         )
         assert saved_map[content_hash]["score"] == 92
+
+
+# ---------------------------------------------------------------------------
+# C1 — restore_version must MERGE verification, not assign
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreVerificationMerge:
+    """C1 — restoring a save point must not wipe verdicts the row already holds.
+
+    Normal ordering: user verifies slides AFTER creating the save point, so the
+    save point's verification_map is empty.  Restoring to it must not assign None
+    over the row's verification_record — doing so destroys every verdict even
+    when the HTML is byte-identical.
+    """
+
+    def _save_deck_simple(self, factory, session_id, slides, css="", ext=None):
+        fake_db = _make_fake_get_db_session(factory)
+        deck_dict = _make_deck_dict(slides, css=css, external_scripts=ext or [])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="<html></html>",
+                slide_count=len(slides),
+                deck_dict=deck_dict,
+                modified_by="author@example.com",
+            )
+        return fake_db
+
+    def test_restore_preserves_verdict_written_after_save_point(self, factory, session_id):
+        """Save point → verify slide (verdict written post-save) → restore → verdict survives.
+
+        If restore assigns verification_record = None (because the save point's map
+        has no entry for that hash), the verdict is destroyed even though the HTML
+        is identical and the content hash matches.
+        """
+        fake_db = _make_fake_get_db_session(factory)
+
+        slide_html = "<p>Revenue $5M Q4</p>"
+        content_hash = compute_slide_hash(slide_html)
+        verdict = {"score": 92, "rating": "excellent"}
+
+        slides = [_make_slide(slide_html)]
+
+        # 1. Save deck
+        self._save_deck_simple(factory, session_id, slides)
+
+        # 2. Create save point (BEFORE verifying — map is empty)
+        deck_dict = _make_deck_dict(slides)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            version_info = mgr.create_version(
+                session_id=session_id,
+                description="Pre-verification save",
+                deck_dict=deck_dict,
+                verification_map={},  # empty — normal ordering
+            )
+        version_number = version_info["version_number"]
+
+        # 3. Write verdict (post-save-point)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.write_slide_verification(session_id, 0, {content_hash: verdict})
+
+        # Confirm it's readable now
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            pre_restore = mgr.get_slide_deck(session_id)
+        assert pre_restore["slides"][0]["verification"] is not None, "setup: verdict not written"
+
+        # 4. Restore to the save point (whose map is empty)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            with patch("src.api.services.session_manager.SessionManager.require_editing_lock"):
+                mgr = SessionManager()
+                mgr.restore_version(session_id, version_number)
+
+        # 5. Verdict must survive — HTML is byte-identical, content hash matches
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            after_restore = mgr.get_slide_deck(session_id)
+
+        assert after_restore["slides"][0]["verification"] is not None, (
+            "Verdict was destroyed by restore even though HTML is byte-identical. "
+            "restore_version is assigning None over the existing verification_record."
+        )
+        assert after_restore["slides"][0]["verification"]["score"] == 92
+
+        # get_verification_map must also return it
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            vmap = mgr.get_verification_map(session_id)
+        assert content_hash in vmap, (
+            f"get_verification_map lost the verdict after restore. keys: {list(vmap)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# C2 — write_slide_verification falls back to blob on legacy (no-row) sessions
+# ---------------------------------------------------------------------------
+
+
+class TestWriteSlideVerificationLegacyFallback:
+    """C2 — on a pre-backfill session that has a deck but no rows, write to the blob.
+
+    The read path already falls back to the blob for row-less sessions.
+    The write path must mirror that so verdicts are not silently discarded.
+    """
+
+    def _seed_blob_only_deck(self, factory, session_id):
+        """Seed a SessionSlideDeck with no session_slides rows (pre-backfill state)."""
+        db = factory()
+        owner = db.query(UserSession).filter_by(session_id=session_id).one()
+        slide_html = "<p>Legacy slide</p>"
+        deck_json_dict = {
+            "title": "Legacy Deck",
+            "css": "",
+            "external_scripts": [],
+            "slides": [{"html": slide_html, "scripts": ""}],
+        }
+        deck = SessionSlideDeck(
+            session_id=owner.id,
+            title="Legacy Deck",
+            html_content="",
+            slide_count=1,
+            deck_json=json.dumps(deck_json_dict),
+            version=1,
+        )
+        db.add(deck)
+        db.commit()
+        db.close()
+        return slide_html
+
+    def test_verdict_written_to_blob_when_no_rows_exist(self, factory, session_id):
+        """On a deck with no session_slides rows, verdict is written to the blob."""
+        slide_html = self._seed_blob_only_deck(factory, session_id)
+        content_hash = compute_slide_hash(slide_html)
+        verdict = {"score": 75, "rating": "good"}
+
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            # position=0 exists in deck_json but there is no session_slides row
+            mgr.write_slide_verification(session_id, 0, {content_hash: verdict})
+
+        # get_verification_map legacy fallback must return it
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            vmap = mgr.get_verification_map(session_id)
+
+        assert content_hash in vmap, (
+            f"Verdict was silently discarded on a legacy (no-row) session. "
+            f"write_slide_verification must fall back to the blob when no rows exist. "
+            f"vmap keys: {list(vmap)}"
+        )
+        assert vmap[content_hash]["score"] == 75
+
+    def test_row_missing_within_a_rows_deck_still_warns_and_returns(self, factory, session_id):
+        """When a deck HAS rows but position N doesn't exist, warn and return (no change).
+
+        This is a genuine caller error (wrong index), not a legacy session.
+        Behaviour is unchanged from the original warning-and-return.
+        """
+        fake_db = _make_fake_get_db_session(factory)
+        deck_dict = _make_deck_dict([_make_slide("<p>One slide</p>")])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Deck",
+                html_content="<html></html>",
+                slide_count=1,
+                deck_dict=deck_dict,
+                modified_by="author@example.com",
+            )
+            # position 99 is out of range — must not raise, must not write anything
+            mgr.write_slide_verification(session_id, 99, {"some_hash": {"score": 0}})
+
+        # Verify nothing was written at position 0's verification_record
+        owner_id = _user_session_id_int(factory)
+        rows = _query_slides(factory, owner_id)
+        assert len(rows) == 1
+        assert rows[0]["verification_record"] is None
+
+
+# ---------------------------------------------------------------------------
+# I1 — restore_version must restore scripts_content
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreScriptsContent:
+    """I1 — scripts_content (chart bootstrap JS) must be restored alongside css."""
+
+    def test_restore_brings_back_scripts_content(self, factory, session_id):
+        """scripts_content from the save point is restored to deck.scripts_content."""
+        fake_db = _make_fake_get_db_session(factory)
+
+        scripts_v1 = "Chart.defaults.font.size = 14;"
+
+        slides_v1 = [_make_slide("<p>V1 slide</p>")]
+        deck_dict_v1 = {
+            "title": "Test Deck",
+            "css": "body{color:red}",
+            "external_scripts": [],
+            "scripts": scripts_v1,
+            "slides": slides_v1,
+        }
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Test Deck",
+                html_content="<html></html>",
+                slide_count=1,
+                deck_dict=deck_dict_v1,
+                modified_by="author@example.com",
+            )
+            version_info = mgr.create_version(
+                session_id=session_id,
+                description="V1 with scripts",
+                deck_dict=deck_dict_v1,
+            )
+        version_number = version_info["version_number"]
+
+        # Edit: different scripts
+        scripts_v2 = "Chart.defaults.font.size = 20;"
+        deck_dict_v2 = dict(deck_dict_v1, scripts=scripts_v2, slides=[_make_slide("<p>V2</p>")])
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Test Deck",
+                html_content="<html></html>",
+                slide_count=1,
+                deck_dict=deck_dict_v2,
+                modified_by="author@example.com",
+            )
+
+        # Restore to v1
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            with patch("src.api.services.session_manager.SessionManager.require_editing_lock"):
+                mgr = SessionManager()
+                mgr.restore_version(session_id, version_number)
+
+        # get_slide_deck must return v1's scripts
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            result = mgr.get_slide_deck(session_id)
+
+        assert result.get("scripts") == scripts_v1, (
+            f"Expected scripts={scripts_v1!r} after restore, got {result.get('scripts')!r}"
+        )
