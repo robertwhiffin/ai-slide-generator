@@ -72,6 +72,7 @@ are applied automatically during FastAPI startup. The sequence in `src/api/main.
      - `session_slide_decks.deck_spec_json` — future architect spec snapshot
      - `session_slide_decks.css` — extracted stylesheet (needed by row read path)
      - `session_slide_decks.external_scripts_json` — CDN scripts list (needed by row read path)
+     - `session_slide_decks.head_meta_json` — `<head>` metas (needed by row read path)
      - `slide_deck_versions.deck_spec_json` — spec snapshot at save-point time
    - `init_db()` is idempotent: re-running it (or restarting the app) is safe.
 
@@ -82,18 +83,19 @@ the same transaction.
 **Confirming the migration ran.** Connect to the database and run:
 
 ```sql
--- All four new columns must be present; query returns 4 rows if migration is complete.
+-- All five new columns must be present; query returns 5 rows if migration is complete.
 SELECT table_name, column_name
 FROM information_schema.columns
 WHERE table_schema = 'app_data'   -- replace with your LAKEBASE_SCHEMA value
   AND ((table_name = 'session_slide_decks'
-        AND column_name IN ('deck_spec_json', 'css', 'external_scripts_json'))
+        AND column_name IN ('deck_spec_json', 'css', 'external_scripts_json',
+                            'head_meta_json'))
     OR (table_name = 'slide_deck_versions'
         AND column_name = 'deck_spec_json'))
 ORDER BY table_name, column_name;
 ```
 
-Expected: 4 rows. If fewer, the migration did not complete — check app startup logs
+Expected: 5 rows. If fewer, the migration did not complete — check app startup logs
 for errors from `_migrate_row_per_slide_schema`.
 
 Also confirm `session_slides` exists:
@@ -107,7 +109,7 @@ dev fork and confirm the above queries return the expected results. On a Lakebas
 fork, `init_db()` runs on first startup; check the app logs for lines containing
 `Migration: adding ... column to session_slide_decks` or
 `Migration: row-per-slide schema migration complete`. If the app boots and the column
-check returns 4 rows, the Postgres path is working for your Lakebase version.
+check returns 5 rows, the Postgres path is working for your Lakebase version.
 
 ---
 
@@ -124,8 +126,8 @@ line per session and a totals line at the end. Review the output:
 
 ```
 Backfilling N session(s) [dry-run]
-  session pk=123: 5 inserted, 0 skipped, 2 verification migrated, css_backfilled=1, ext_backfilled=1, orphans_pruned=0
-  session pk=124: 12 inserted, 0 skipped, 0 verification migrated, css_backfilled=1, ext_backfilled=1, orphans_pruned=0
+  session pk=123: 5 inserted, 0 skipped, 2 verification migrated, css_backfilled=1, ext_backfilled=1, head_meta_backfilled=1, orphans_pruned=0
+  session pk=124: 12 inserted, 0 skipped, 0 verification migrated, css_backfilled=1, ext_backfilled=1, head_meta_backfilled=1, orphans_pruned=0
   ...
 Summary: 1024 slides inserted, 0 skipped, 87 verification records migrated, 0 orphans pruned.
 
@@ -141,6 +143,7 @@ What each counter means:
 | `verification_migrated` | Slides whose verification verdict was migrated from the blob |
 | `css_backfilled` | 1 if `deck.css` was NULL and would be set from `deck_json` |
 | `ext_backfilled` | 1 if `deck.external_scripts_json` was NULL and would be set |
+| `head_meta_backfilled` | 1 if `deck.head_meta_json` was NULL and would be set from `deck_json` |
 | `orphans_pruned` | Rows at `position >= slide_count` that would be deleted |
 
 **Why orphan pruning matters.** The row read path returns ALL rows in position order.
@@ -270,16 +273,73 @@ it before the DDL has run.
 
 ## Rollback
 
-### Pre-cutover (safe)
+### Pre-cutover (mostly safe — read the limits)
 
-Before the legacy columns are dropped, rolling back is trivial:
+Before the legacy columns are dropped, rolling back is a redeploy:
 
 1. Redeploy the previous (pre-PR1) build.
 2. The older build reads `deck_json` and ignores `session_slides` rows entirely.
-3. No data is lost: `deck_json` was written throughout the dual-write period.
 
 The new `session_slides` table and the new columns on `session_slide_decks` /
 `slide_deck_versions` are inert — they cause no harm and can be left in place.
+
+**What the guarantee actually is.** It is *not* "no data is lost". It is
+narrower, and worth stating precisely:
+
+> **Slide content, CSS and external scripts survive a rollback, because
+> `save_slide_deck` and `restore_version` both keep `deck_json` current on every
+> write. Verification verdicts earned after PR1 deploys do NOT survive.**
+
+Verified by probe against this build, path by path:
+
+| Write path | keeps `deck_json` current? |
+|---|---|
+| `save_slide_deck` (dual-write, INSERT and UPDATE) | YES |
+| `restore_version` | YES |
+| `write_slide_verification` (row branch) | **NO** — writes only the row |
+| `SlideWriter.write_slide` / `commit_placeholder` | **NO** — writes only rows |
+
+So there are two real limits:
+
+1. **Post-deploy verification verdicts are lost on rollback.** Once a deck has
+   `session_slides` rows, `write_slide_verification` writes the verdict to the
+   row's `verification_record` and never touches `verification_map`
+   (`save_verification` was deleted in PR1). An older build reads the blob, so
+   those slides come back showing as unverified. Recoverable by re-verifying,
+   but it *is* data loss — plan for it rather than being surprised. (Verdicts on
+   decks that have no rows yet still go to the blob, and those do survive.)
+
+2. **`SlideWriter` breaks the guarantee outright, and PR3 is when that starts to
+   matter.** `write_slide` updates the row and leaves `deck_json` showing the
+   *old* HTML — confirmed by probe: after a `write_slide` at position 0 the row
+   read `<p>AGENT</p>` while `deck_json` still read `<p>A</p>`. `SlideWriter` has
+   **no production callers in PR1**, so this is latent today. State the rule
+   explicitly:
+
+   > The rollback guarantee for slide *content* holds only while `SlideWriter`
+   > has no production callers. The moment PR3's graph starts writing slides
+   > through it, a rollback silently reverts every agent-authored slide.
+
+   Before PR3 ships, either give `SlideWriter` a `deck_json` write-through or
+   accept that rollback is snapshot-only from that point on.
+
+### Exposure: decks edited between deploy and backfill
+
+Deploy and backfill are not atomic, and there is a window between them. If a user
+edits a deck in that window, the dual-write creates `session_slides` rows for it
+with `verification_record = NULL`; the read path then prefers rows, so any
+verdicts that deck had already earned in `verification_map` become unreachable.
+`get_verification_map` returns `{}` for it, and the next save point snapshots an
+empty map.
+
+The backfill **cannot repair this**: its idempotency guard skips any position
+that already has a row (`slides_skipped`), so it will not fill in the missing
+verdicts.
+
+This is accepted deliberately — there is no verdict-repair process and none is
+wanted. The window is minutes, and it costs the affected user a re-verify, not
+any slide content. **Mitigation: run Phase 3 promptly after Phase 1.** The longer
+the gap, the more decks can fall into it.
 
 ### Post-cutover (destructive)
 
@@ -415,6 +475,7 @@ Added by `_migrate_row_per_slide_schema` via `ALTER TABLE`:
 | `deck_spec_json` | Future architect spec snapshot (nullable, reserved for PR3) |
 | `css` | Extracted stylesheet; populated by dual-write and backfill |
 | `external_scripts_json` | JSON array of CDN URLs; populated by dual-write and backfill |
+| `head_meta_json` | JSON object of `<head>` metas (charset, viewport, …); populated by dual-write, restore and backfill. Falls back to the `head_meta` inside `deck_json` when NULL, so pre-existing decks keep their viewport on the first row-path read |
 
 ### New column on `slide_deck_versions`
 
@@ -436,14 +497,28 @@ Added by `_migrate_row_per_slide_schema` via `ALTER TABLE`:
 Understanding these makes the rollback story clear.
 
 **`save_slide_deck`** writes BOTH `deck_json` and `session_slides` rows (plus
-`css`/`external_scripts_json`) in the same transaction. Both representations are
-always in sync for decks written after PR1 deploys.
+`css`/`external_scripts_json`/`head_meta_json`) in the same transaction. Both
+representations are in sync for slide *content* after PR1 deploys — but see the
+Rollback section for the two paths (`write_slide_verification`'s row branch and
+`SlideWriter`) that write rows only.
 
 **`get_slide_deck`** prefers rows: if ANY `session_slides` rows exist for the deck,
 it reconstructs the deck dict from rows + deck-level columns and ignores `deck_json`.
 If no rows exist (legacy session, not yet backfilled), it falls back to `deck_json`
-exactly as before. This is why rolling back to a pre-PR1 build is safe before cutover:
-the old build reads only `deck_json`.
+exactly as before. Both branches emit the same key set, including `head_meta` and
+per-slide `index`, so a deck's shape does not depend on which path served it. This
+is why rolling back to a pre-PR1 build restores the right slides before cutover:
+the old build reads only `deck_json`, which `save_slide_deck` kept current.
+
+**Row writes go through one helper.** `_upsert_slide_row` in `session_manager.py`
+is the single writer of a `session_slides` row, used by the dual-write,
+`restore_version`, the backfill and `SlideWriter`. On UPDATE it rewrites the full
+identity field set (`slide_id`, `created_by`, `created_at`), because reorder,
+insert and delete move slides *between* positions — a row must describe the slide
+currently at that position, not the one that used to be there. Verification
+records are re-attributed to the slide they belong to (by `slide_id`, then content
+hash, then unclaimed position) so a verdict follows its slide across a reorder
+instead of being inherited by the new occupant.
 
 **`get_verification_map`** aggregates `verification_record` from all rows if any rows
 exist; falls back to the `verification_map` blob for row-less sessions.

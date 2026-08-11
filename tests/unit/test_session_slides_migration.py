@@ -122,6 +122,22 @@ def test_migration_adds_external_scripts_json_to_session_slide_decks(sqlite_engi
     assert "external_scripts_json" in _get_columns(sqlite_engine, "session_slide_decks")
 
 
+def test_migration_adds_head_meta_json_to_session_slide_decks(sqlite_engine):
+    """_run_migrations adds head_meta_json to session_slide_decks when missing.
+
+    Final review F5: head_meta is a real deck field (charset/viewport) that the row
+    read path dropped.  It now has a dedicated column like css and
+    external_scripts_json, so the ALTER path must cover it for live databases.
+    """
+    Base.metadata.create_all(bind=sqlite_engine)
+    _drop_column_if_exists(sqlite_engine, "session_slide_decks", "head_meta_json")
+    assert "head_meta_json" not in _get_columns(sqlite_engine, "session_slide_decks")
+
+    _run_migrations(sqlite_engine, schema=None)
+
+    assert "head_meta_json" in _get_columns(sqlite_engine, "session_slide_decks")
+
+
 def test_migration_adds_deck_spec_json_to_slide_deck_versions(sqlite_engine):
     """_run_migrations adds deck_spec_json to slide_deck_versions when missing."""
     Base.metadata.create_all(bind=sqlite_engine)
@@ -151,6 +167,7 @@ def test_migration_is_idempotent(sqlite_engine):
     _drop_column_if_exists(sqlite_engine, "session_slide_decks", "deck_spec_json")
     _drop_column_if_exists(sqlite_engine, "session_slide_decks", "css")
     _drop_column_if_exists(sqlite_engine, "session_slide_decks", "external_scripts_json")
+    _drop_column_if_exists(sqlite_engine, "session_slide_decks", "head_meta_json")
     _drop_column_if_exists(sqlite_engine, "slide_deck_versions", "deck_spec_json")
 
     # First call — adds the columns
@@ -161,6 +178,7 @@ def test_migration_is_idempotent(sqlite_engine):
     assert "deck_spec_json" in _get_columns(sqlite_engine, "session_slide_decks")
     assert "css" in _get_columns(sqlite_engine, "session_slide_decks")
     assert "external_scripts_json" in _get_columns(sqlite_engine, "session_slide_decks")
+    assert "head_meta_json" in _get_columns(sqlite_engine, "session_slide_decks")
     assert "deck_spec_json" in _get_columns(sqlite_engine, "slide_deck_versions")
 
 
