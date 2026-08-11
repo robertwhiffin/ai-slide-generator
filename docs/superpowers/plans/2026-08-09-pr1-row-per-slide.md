@@ -57,7 +57,13 @@ class SlideWriter:
         
         Raises:
             SessionNotFoundError if session_id does not exist.
-            VersionConflictError if a concurrent write conflicts (409 on stale position/parent version).
+
+        Does NOT raise VersionConflictError. There is deliberately **no optimistic lock
+        on the slide row** — that is the whole point of row-per-slide: one reviewer owns
+        one position, so there is nothing to contend with. An earlier draft of this
+        docstring promised the exception, which would have had PR3 writing handlers for a
+        condition that cannot occur. The deck-level `version` counter still guards
+        deck-level writes (`save_slide_deck`); it does not apply here.
         """
         
     def get_slide(
@@ -171,6 +177,19 @@ def write_deck_spec(self, session_id: str, spec: Dict[str, Any]) -> None:
     architect authors a new spec or updates an existing one.
     """
 ```
+
+> **Ownership: these two methods are the ONLY deck-spec persistence path**, and they live
+> on **`SessionManager`** (not `SlideWriter` — the surrounding block is `SlideWriter`'s, so
+> state it explicitly). PR3 must call them rather than defining its own
+> `persist_deck_spec`/`load_deck_spec` in `src/domain/deck_spec.py`: two writers to one
+> column is a collision, `src/domain/` currently has no DB imports at all (a layering
+> break), and the two APIs disagree on the boundary type.
+>
+> **Boundary type is `Dict[str, Any]`, not the Pydantic `DeckSpec`.** PR3 owns the
+> `DeckSpec` model and serialises at the call site (`spec.model_dump()` / 
+> `DeckSpec.model_validate(loaded)`), keeping the persistence layer free of a dependency
+> on PR3's domain model — which matters because PR1 lands first and must not import from
+> code that does not exist yet.
 
 ---
 
@@ -379,6 +398,14 @@ In the `SessionSlideDeck` class definition, add these columns (right after `veri
     # Deck-level CSS (written by the foreman — single writer for the deck)
     # Builders write only body HTML to their slides; deck CSS is centralized here.
     css = Column(Text, nullable=True)
+
+    # Deck-level external script URLs (Chart.js CDN etc.), JSON array.
+    # REQUIRED, not optional: the export chain reads `external_scripts` off the deck
+    # dict (`src/api/routes/export.py:52`), and `SlideDeck._ensure_default_external_scripts`
+    # (`src/domain/slide_deck.py:74-77`) injects the Chart.js CDN into every deck. If the
+    # row path returns [] instead, EVERY export silently loses Chart.js and all charts
+    # render blank — the PRD §3 no-regression gate, failing invisibly.
+    external_scripts_json = Column(Text, nullable=True)
 ```
 
 - [ ] **Step 5: Add column to SlideDeckVersion**
@@ -509,6 +536,12 @@ def _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite):
         logger.info(f"Migration: adding css column to {decks_table}")
         conn.execute(text(
             f"ALTER TABLE {q_decks} ADD COLUMN css TEXT NULL"
+        ))
+
+    if decks_cols and "external_scripts_json" not in decks_cols:
+        logger.info(f"Migration: adding external_scripts_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN external_scripts_json TEXT NULL"
         ))
 
     # --- slide_deck_versions: add deck_spec_json ---
@@ -815,6 +848,33 @@ def backfill_session(
             f"slide (html_len={len(html)}, verification={bool(verification_record)})"
         )
 
+    # --- REQUIRED: lift deck-level presentation fields out of deck_json into columns ---
+    # Existing decks carry css / external_scripts INSIDE deck_json. The row read path
+    # (Task 5) reads them from columns instead, so without this the first read after
+    # backfill returns css="" and external_scripts=[] and every export of every existing
+    # deck loses its stylesheet and the Chart.js CDN. This is the same gap as the
+    # dual-write fix, on the historical-data side.
+    if deck.css is None:
+        deck.css = deck_dict.get("css") or ""
+        result["css_backfilled"] += 1
+    if deck.external_scripts_json is None:
+        deck.external_scripts_json = json.dumps(deck_dict.get("external_scripts") or [])
+        result["external_scripts_backfilled"] += 1
+
+    # --- REQUIRED: prune orphan rows above the deck's slide count ---
+    # A re-run after a deck shrank (slide deleted, or restore to a shorter version) would
+    # otherwise leave stale higher-position rows. The read path prefers rows whenever ANY
+    # exist, so get_slide_deck() would return MORE slides than the deck has — and PR3's
+    # releasable_positions / all-committed trigger would inherit the phantom positions.
+    if not dry_run:
+        deleted = db.query(SessionSlide).filter(
+            and_(
+                SessionSlide.session_id == session_id,
+                SessionSlide.position >= len(slides),
+            )
+        ).delete(synchronize_session=False)
+        result["orphans_pruned"] += deleted
+
     if not dry_run:
         db.commit()
 
@@ -967,6 +1027,16 @@ def save_slide_deck(
         deck.slide_count = slide_count
         deck.title = deck_dict.get("title")
         deck.modified_by = get_current_username()
+
+        # --- REQUIRED: persist deck-level presentation fields to their own columns ---
+        # The row read path (Task 5) reconstructs the deck dict from columns, NOT from
+        # deck_json. If these are not written here, the row path returns css="" and
+        # external_scripts=[], and every export loses the stylesheet and the Chart.js CDN
+        # (export.py:52-53 reads both off the dict). Write them on the SAME call that
+        # writes the rows, so the two representations can never disagree.
+        deck.css = deck_dict.get("css") or ""
+        deck.external_scripts_json = json.dumps(deck_dict.get("external_scripts") or [])
+
         deck.version += 1
 
         # --- NEW: Dual-write to session_slides rows ---
@@ -1004,6 +1074,19 @@ def save_slide_deck(
                     deck_spec_slide=None,
                 )
                 db.add(row)
+
+        # --- REQUIRED: prune rows above the new slide count, in the SAME transaction ---
+        # Without this, deleting a slide or restoring a shorter version leaves stale
+        # higher-position rows. Because the read path prefers rows whenever ANY exist,
+        # get_slide_deck() would then return MORE slides than the deck has, and PR3's
+        # releasable_positions / all-committed predicates would wait forever on phantom
+        # positions that no builder will ever fill.
+        db.query(SessionSlide).filter(
+            and_(
+                SessionSlide.session_id == deck_owner.id,
+                SessionSlide.position >= len(slides),
+            )
+        ).delete(synchronize_session=False)
 
         # Commit both old and new
         db.commit()
@@ -1109,7 +1192,7 @@ def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
                 "slide_count": len(slides_from_rows),
                 "version": deck.version,
                 "css": deck.css or "",
-                "external_scripts": [],  # TODO: store deck-level external_scripts?
+                "external_scripts": json.loads(deck.external_scripts_json or "[]"),
                 "scripts": deck.scripts_content or "",
                 "slides": [],
                 "created_by": deck_owner.created_by,
@@ -1265,8 +1348,16 @@ class SlideWriter:
     list_slides_in_position_order() to release them in order (reorder buffer, §6.2).
     """
 
-    def __init__(self, session_manager: SessionManager):
-        self.session_manager = session_manager
+    def __init__(self, session_manager: SessionManager | None = None):
+        """`session_manager` is optional and defaults to the process-wide instance.
+
+        This default is REQUIRED, not a convenience. PR3's graph calls `SlideWriter()`
+        with no arguments from inside builder/reviewer nodes, and those nodes are pure
+        functions of `GraphState` (or of a `Send` payload) — neither carries a
+        `SessionManager`, and threading one through graph state would mean putting a
+        non-serialisable object into the checkpointer. So the no-arg form must work.
+        """
+        self.session_manager = session_manager or get_session_manager()
 
     def write_slide(
         self,
@@ -1543,9 +1634,19 @@ def write_slide_verification(
     position: int,
     verification_record: Dict[str, Any],
 ) -> None:
-    """Write verification record to a specific slide row (keyed by content_hash).
-    
-    Replaces the old blob-level save_verification which had lost-update races.
+    """MERGE a verification record into a slide row, keyed by content_hash.
+
+    Replaces the old blob-level save_verification, which had a lost-update race
+    across the whole deck. The row scope removes the race; the MERGE preserves the
+    property the race-fix must not cost us.
+
+    `verification_record` is `{content_hash: {...}}`. It is merged into whatever the
+    row already holds — NOT assigned over it. Spec §3.2/§5.2.4 keep content-hash
+    keying specifically so a verdict survives regeneration: edit a slide, and its new
+    hash gets a new entry while the old entry remains, so restoring or reverting to
+    the earlier content still finds its verdict. A whole-field assignment silently
+    discards that history — the lost-update race would be gone and the
+    survives-regeneration property gone with it.
     """
     from src.core.database import get_db_session
     from src.database.models.session import SessionSlide
@@ -1563,9 +1664,15 @@ def write_slide_verification(
         ).one_or_none()
 
         if row:
-            row.verification_record = json.dumps(verification_record)
+            existing = json.loads(row.verification_record) if row.verification_record else {}
+            existing.update(verification_record)      # merge by content_hash
+            row.verification_record = json.dumps(existing)
             db.commit()
 ```
+
+Add a test for exactly this: write a verdict for hash A, edit the slide, write a verdict
+for hash B, then assert **both** A and B are still present and readable. That test fails
+against the assignment form and passes against the merge.
 
 - [ ] **Step 4: Update callers (slides.py, verification.py)**
 
@@ -1584,6 +1691,37 @@ slide_writer.write_slide(
     verification_record={content_hash: findings},
 )
 ```
+
+- [ ] **Step 4b: Write and read the save-point spec snapshot (the column is useless without this)**
+
+Task 1 adds `SlideDeckVersion.deck_spec_json` and Task 9 asserts restore preserves it —
+but **nothing writes it**, so that test cannot pass. The writer is
+`session_manager.py:1258-1264`, which currently constructs the version with no spec
+argument:
+
+```python
+            version = SlideDeckVersion(
+                session_id=deck_owner.id,
+                version_number=next_version,
+                description=description,
+                deck_json=json.dumps(deck_dict),
+                verification_map_json=json.dumps(verification_map) if verification_map else None,
+                chat_history_json=json.dumps(chat_history) if chat_history else None,
+                # NEW — snapshot the spec alongside the deck (spec §4.4):
+                deck_spec_json=deck.deck_spec_json,
+            )
+```
+
+And the restore reader (`session_manager.py:1408-1430`) must copy it back:
+
+```python
+            deck_owner.slide_deck.deck_spec_json = version.deck_spec_json
+```
+
+**Why both halves matter.** If restore puts back an old deck but leaves today's spec in
+place, the two describe different decks — and PR3's §4.4 trigger then "corrects" the
+restored deck to match a spec it never came from, silently undoing the restore. Writing
+without reading, or reading without writing, both produce that.
 
 - [ ] **Step 5: Run existing verification tests to check for regressions**
 
@@ -1623,27 +1761,85 @@ from src.services.html_to_pptx import build_pptx
 from src.services.html_to_google_slides import build_google_slides
 
 
+DECK_CSS = ".slide { background: #123456; }"
+
+
+def _seed_deck_legacy(db, session_id: str) -> dict:
+    """Write a deck the OLD way (deck_json only) and return the dict written."""
+    deck_dict = {
+        "title": "Parity deck",
+        "css": DECK_CSS,
+        "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js"],
+        "scripts": "console.log('x');",
+        "slides": [
+            {"html": '<div class="slide"><canvas id="c1"></canvas></div>',
+             "slide_id": "s1", "scripts": "new Chart(...)"},
+            {"html": '<div class="slide"><h1>Two</h1></div>',
+             "slide_id": "s2", "scripts": ""},
+        ],
+    }
+    # ... save via save_slide_deck(...) ...
+    return deck_dict
+
+
+def test_row_path_preserves_deck_level_fields():
+    """THE regression guard: css and external_scripts survive the row round-trip.
+
+    This is the test whose absence would let the PRD §3 gate fail silently. The row
+    read path reconstructs the deck dict from COLUMNS, so if dual-write/backfill do
+    not populate `css` / `external_scripts_json`, this returns "" and [] — and every
+    export loses the stylesheet and the Chart.js CDN while all other assertions pass.
+    """
+    written = _seed_deck_legacy(db, session_id)          # legacy: deck_json only
+    run_backfill(session_id)                             # Task 3
+    got = SessionManager().get_slide_deck(session_id)    # now reads from rows
+
+    assert got["css"] == DECK_CSS, "deck CSS lost on the row path"
+    assert got["external_scripts"] == written["external_scripts"], \
+        "external_scripts lost — Chart.js CDN would be dropped from every export"
+    assert got["scripts"] == written["scripts"]
+    assert [s["html"] for s in got["slides"]] == [s["html"] for s in written["slides"]]
+    assert [s["scripts"] for s in got["slides"]] == [s["scripts"] for s in written["slides"]]
+
+
 def test_export_pptx_parity_with_rows():
-    """PPTX export from row-based deck matches current export."""
-    # Create a session with a deck (via rows or legacy).
-    # Call get_slide_deck (now reads from rows).
-    # Build PPTX using the dict.
-    # Compare to expected output (or at least verify no errors).
-    pass
+    """PPTX built from the row path is byte-identical to the legacy path."""
+    written = _seed_deck_legacy(db, session_id)
+    legacy_dict = SessionManager().get_slide_deck(session_id)   # pre-backfill
+    legacy_pptx = build_pptx(legacy_dict)
+
+    run_backfill(session_id)
+    row_dict = SessionManager().get_slide_deck(session_id)      # post-backfill
+    row_pptx = build_pptx(row_dict)
+
+    assert row_pptx == legacy_pptx, "PPTX export diverged after row migration"
 
 
 def test_export_google_slides_parity_with_rows():
-    """Google Slides export from row-based deck matches current export."""
-    pass
+    """Google Slides request payload from the row path matches the legacy path."""
+    # Same shape: capture the payload build_google_slides() would send (do not call
+    # the API), pre- and post-backfill, and assert equality.
+
+
+def test_orphan_rows_pruned_when_deck_shrinks():
+    """Deleting a slide must not leave a phantom higher-position row."""
+    _seed_deck_legacy(db, session_id)      # 2 slides
+    run_backfill(session_id)
+    save_deck_with_slides(session_id, count=1)             # deck shrinks to 1
+    got = SessionManager().get_slide_deck(session_id)
+    assert len(got["slides"]) == 1, "orphan row above the new slide count survived"
 ```
 
-- [ ] **Step 2: Run tests to check export works**
+- [ ] **Step 2: Run the tests — and confirm they FAIL without the fix**
 
 ```bash
 pytest tests/integration/test_export_parity.py -v
 ```
 
-Expected: PASS (export chain works unchanged with new dict contract)
+Expected: PASS. **Then verify the guard is real**: temporarily revert the
+`deck.css` / `deck.external_scripts_json` writes in Task 4 and re-run —
+`test_row_path_preserves_deck_level_fields` and the PPTX parity test must FAIL. A
+regression test that cannot fail is the stub problem wearing assertions.
 
 - [ ] **Step 3: Commit**
 
