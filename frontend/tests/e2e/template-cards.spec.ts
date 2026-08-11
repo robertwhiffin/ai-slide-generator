@@ -554,6 +554,80 @@ test.describe('Template cards — preview preference and live-render fallback', 
     expect(sourceRequests.length).toBe(1);
   });
 
+  test('an external webfont @import is dropped, not left to raise a CSP violation per card', async ({ page }) => {
+    // Bundles @import a webfont family their own fonts/ directory does not ship.
+    // PREVIEW_CSP refuses it (style-src is 'unsafe-inline' and nothing else, so
+    // uploaded CSS gets no egress channel) — correct, but it logged a violation
+    // on every card. The rule is dropped instead, and the self-hosted fallback
+    // family in the same stack still renders.
+    const cspViolations: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error' && /Refused to (load|apply)|Content Security Policy/i.test(msg.text())) {
+        cspViolations.push(msg.text());
+      }
+    });
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head><style>.slide{position:absolute;inset:0;}' +
+            'h1{font-family:var(--acme-font-display);}</style></head>' +
+            '<body><section><div class="slide"><h1>Acme Font Probe</h1></div></section></body></html>',
+          token_css:
+            // Semicolons INSIDE the url() — a naive `;`-terminated match mangles
+            // this and leaves half a rule behind.
+            "@import url('https://fonts.example/css2?family=Acme+Display:wght@400;500;700&display=swap');\n" +
+            // `style-src 'unsafe-inline'` refuses a data: stylesheet too, so this
+            // one is equally dead weight and must also go.
+            "@import url('data:text/css,.acme-inert{color:#123456}');\n" +
+            "@font-face { font-family: 'Acme Fallback Sans'; " +
+            "src: url(data:font/woff2;base64,d29mZjItYnl0ZXM=) format('woff2'); }\n" +
+            ":root { --acme-font-display: 'Acme Display', 'Acme Fallback Sans', system-ui; " +
+            '--brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // The external import is gone whole — no orphaned fragment of it survives.
+    expect(srcdoc).not.toContain('fonts.example');
+    expect(srcdoc).not.toContain('display=swap');
+    expect(srcdoc).not.toContain('Acme+Display');
+    // NO @import survives — a data: one is refused by this CSP just the same…
+    expect(srcdoc).not.toContain('@import');
+    // …while the self-hosted @font-face (which font-src data: DOES allow) stays…
+    expect(srcdoc).toContain('data:font/woff2;base64,');
+    // …the fallback family still resolves for the heading…
+    const family = await inner.locator('h1').evaluate((el) => getComputedStyle(el).fontFamily);
+    expect(family).toContain('Acme Fallback Sans');
+    // …the CSP is unchanged (no host was allowed in)…
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    // …and the frame is quiet: no fetch attempt, no violation to log.
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+    expect(cspViolations).toEqual([]);
+  });
+
   test('source fetch fires only for screenshot-less templates', async ({ page }) => {
     const sourceRequests: string[] = [];
     page.on('request', (req) => {

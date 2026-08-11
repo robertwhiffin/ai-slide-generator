@@ -32,6 +32,38 @@ export const PREVIEW_CSP =
 const DS_ASSET_HANDLE_RE = /\{\{ds-asset:\d+\}\}/g;
 
 /**
+ * An `@import` pulling an EXTERNAL stylesheet — Claude Design bundles reach for
+ * a Google Fonts family (`@import url('https://fonts.googleapis.com/css2?...')`
+ * in their colors_and_type.css) whose files their own fonts/ directory does not
+ * ship.
+ *
+ * PREVIEW_CSP refuses it: `style-src` allows 'unsafe-inline' and nothing else,
+ * deliberately. That is not a gap to widen — an @import URL is attacker-chosen
+ * text, so allowing a stylesheet host would hand uploaded USER CONTENT exactly
+ * the egress channel this frame exists to deny. The slide/export path is a
+ * different trust context and already allows the font hosts (SLIDE_CSP), so the
+ * family still loads where decks are actually rendered.
+ *
+ * The refusal is correct but NOISY: one CSP violation per card, every load.
+ * Dropping the rule keeps the frame quiet and costs nothing real — the bundle's
+ * font stacks name a self-hosted family after the remote one (e.g.
+ * `--font-display: <remote>, <self-hosted>, system-ui`) and those @font-face
+ * rules arrive as base64 `data:` URIs that `font-src data:` already permits.
+ *
+ * EVERY `@import` goes, not just external ones: `style-src 'unsafe-inline'` does
+ * not admit `data:` either (measured — "Loading the stylesheet 'data:text/css,…'
+ * violates … style-src 'unsafe-inline'"), so a data: import is equally dead and
+ * equally noisy, and rewriting an external one to `data:,` would just trade one
+ * violation for another. Inline `<style>` is how CSS legitimately reaches this
+ * frame; @import never works here at all.
+ *
+ * The URL can itself contain semicolons (`...wght@400;500;600;700`), so the rule
+ * is matched through its closing paren rather than to the first `;`.
+ */
+const CSS_IMPORT_RE =
+  /@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|[^)"']*)\s*\)|"[^"]*"|'[^']*')[^;]*;?/gi;
+
+/**
  * Slide roots inside a template layout. Templates mark each slide section with
  * the `slide` class (on `<section>` or `<div>` — see the backend's
  * `_detect_slide_root_tags`), which is what makes a multi-slide template
@@ -121,8 +153,12 @@ export function buildTemplatePreviewDoc(
   tokenCss: string | null,
   slideIndex?: number,
 ): string {
-  const inlineLayout = layoutHtml.replace(DS_ASSET_HANDLE_RE, 'data:,');
-  const inlineTokenCss = tokenCss ? tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,') : tokenCss;
+  const inlineLayout = layoutHtml
+    .replace(DS_ASSET_HANDLE_RE, 'data:,')
+    .replace(CSS_IMPORT_RE, '');
+  const inlineTokenCss = tokenCss
+    ? tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,').replace(CSS_IMPORT_RE, '')
+    : tokenCss;
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
   const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
   const guard = cspMeta + (inlineTokenCss ? `<style>${inlineTokenCss}</style>` : '') + previewReset;
