@@ -1098,6 +1098,14 @@ class SessionManager:
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get slide deck for a session with verification merged by content hash.
 
+        Read path (dual-read period):
+          1. If session_slides rows exist for the deck owner, reconstruct the
+             deck dict from those rows + deck-level columns. This is the
+             authoritative path once the dual-write has populated the rows.
+          2. Otherwise fall back to the legacy deck_json blob. This covers
+             sessions written before the dual-write landed and any edge cases
+             where the dual-write was skipped (e.g. deck_dict=None saves).
+
         For contributor sessions, follows parent_session_id to read the
         shared slide deck from the owner's session.
 
@@ -1108,7 +1116,7 @@ class SessionManager:
             Full SlideDeck dictionary (with slides array and verification) or None
         """
         from src.utils.slide_hash import compute_slide_hash
-        
+
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
@@ -1117,7 +1125,86 @@ class SessionManager:
                 return None
 
             deck = deck_owner.slide_deck
-            
+
+            # ------------------------------------------------------------------
+            # NEW: Try to read from session_slides rows first.
+            # Any rows at all means the dual-write has run; use rows as truth.
+            # ------------------------------------------------------------------
+            slides_from_rows = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            )
+
+            if slides_from_rows:
+                slides_list = []
+                for slide_row in slides_from_rows:
+                    content_hash = compute_slide_hash(slide_row.html or "")
+                    slide_dict: Dict[str, Any] = {
+                        "html": slide_row.html or "",
+                        "slide_id": slide_row.slide_id,
+                        "scripts": slide_row.scripts or "",
+                        "created_by": slide_row.created_by,
+                        "created_at": (
+                            slide_row.created_at.isoformat() + "Z"
+                            if slide_row.created_at
+                            else None
+                        ),
+                        "modified_by": slide_row.modified_by,
+                        "modified_at": (
+                            slide_row.modified_at.isoformat() + "Z"
+                            if slide_row.modified_at
+                            else None
+                        ),
+                        "content_hash": content_hash,
+                        "verification": None,
+                    }
+
+                    # Per-slide verification: keyed by content_hash inside the
+                    # row's JSON blob. verification_record is Task 7's domain;
+                    # we read it read-only here.
+                    if slide_row.verification_record:
+                        try:
+                            verification_data = json.loads(slide_row.verification_record)
+                            slide_dict["verification"] = verification_data.get(content_hash)
+                        except json.JSONDecodeError:
+                            pass  # leave verification=None
+
+                    slides_list.append(slide_dict)
+
+                deck_dict: Dict[str, Any] = {
+                    "title": deck.title,
+                    "slide_count": len(slides_list),
+                    "css": deck.css or "",
+                    "external_scripts": json.loads(deck.external_scripts_json or "[]"),
+                    "scripts": deck.scripts_content or "",
+                    "slides": slides_list,
+                    "created_by": deck_owner.created_by,
+                    "created_at": (
+                        deck.created_at.isoformat() + "Z"
+                        if deck.created_at
+                        else None
+                    ),
+                    "modified_by": deck.modified_by or deck_owner.created_by,
+                    "modified_at": (
+                        deck.updated_at.isoformat() + "Z"
+                        if deck.updated_at
+                        else None
+                    ),
+                    "version": deck.version,
+                }
+                if deck.html_content:
+                    deck_dict["html_content"] = deck.html_content
+
+                self._resolve_deck_display_names(deck_dict)
+                return deck_dict
+
+            # ------------------------------------------------------------------
+            # LEGACY: No rows yet — fall back to deck_json blob path.
+            # Behaviour unchanged from pre-Task-5 code.
+            # ------------------------------------------------------------------
+
             # Load verification map (separate from deck_json)
             verification_map = {}
             if deck.verification_map:
@@ -1125,7 +1212,7 @@ class SessionManager:
                     verification_map = json.loads(deck.verification_map)
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid verification_map JSON for session {session_id}")
-            
+
             # Return full deck structure if available
             if deck.deck_json:
                 deck_dict = json.loads(deck.deck_json)
@@ -1135,7 +1222,7 @@ class SessionManager:
                 # Include html_content for raw HTML debug view
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
-                
+
                 # Backfill missing per-slide authorship from the deck owner
                 fallback_user = deck_owner.created_by
                 needs_persist = False
@@ -1168,10 +1255,10 @@ class SessionManager:
                 deck_dict["modified_by"] = deck.modified_by or deck_owner.created_by
                 deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
                 deck_dict["version"] = deck.version
-                
+
                 self._resolve_deck_display_names(deck_dict)
                 return deck_dict
-            
+
             # Legacy: return basic info without slides array
             result = {
                 "title": deck.title,
