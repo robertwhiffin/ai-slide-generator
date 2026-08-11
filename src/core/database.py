@@ -1045,8 +1045,8 @@ def _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite):
     """Add columns for row-per-slide schema migration.
 
     Steps (each idempotent via column-existence check):
-    1. session_slide_decks: add deck_spec_json, css, external_scripts_json
-       (all nullable during dual-write period; deck_json stays)
+    1. session_slide_decks: add deck_spec_json, css, external_scripts_json,
+       head_meta_json (all nullable during dual-write period; deck_json stays)
     2. slide_deck_versions: add deck_spec_json (snapshot of spec at save-point time)
 
     Note: session_slides table itself is created by Base.metadata.create_all() from
@@ -1080,6 +1080,12 @@ def _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite):
         logger.info(f"Migration: adding external_scripts_json column to {decks_table}")
         conn.execute(text(
             f"ALTER TABLE {q_decks} ADD COLUMN external_scripts_json TEXT NULL"
+        ))
+
+    if decks_cols and "head_meta_json" not in decks_cols:
+        logger.info(f"Migration: adding head_meta_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN head_meta_json TEXT NULL"
         ))
 
     # --- slide_deck_versions: add deck_spec_json ---
