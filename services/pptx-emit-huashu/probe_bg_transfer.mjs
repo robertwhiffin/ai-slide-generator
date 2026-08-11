@@ -10,7 +10,11 @@
 //
 // usage:  node probe_bg_transfer.mjs <slide.html> [...]
 // stdout: one JSON object per input, in order:
-//         { file, bgTransferred, bodyBackgroundColor }
+//         { file, bgTransferred, bodyBackgroundColor, ms }
+//
+// `ms` times the preprocess pass itself (page already loaded), which is how the
+// slide-root walk's cost is shown to scale with wrapper-chain depth rather than
+// with browser startup.
 
 import { chromium } from 'playwright';
 import path from 'node:path';
@@ -36,7 +40,9 @@ async function main() {
       const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
       const page = await ctx.newPage();
       await page.goto(pathToFileURL(path.resolve(file)).href);
+      const startedAt = Date.now();
       const result = await page.evaluate(PREPROCESS_SOURCE);
+      const ms = Date.now() - startedAt;
       const bodyBackgroundColor = await page.evaluate(
         'window.getComputedStyle(document.body).backgroundColor'
       );
@@ -44,6 +50,7 @@ async function main() {
         file: path.basename(file),
         bgTransferred: result.bgTransferred,
         bodyBackgroundColor,
+        ms,
       }));
       await ctx.close();
     }
