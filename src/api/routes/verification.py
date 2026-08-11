@@ -485,7 +485,7 @@ async def get_genie_link(
             if not settings.genie:
                 return {
                     "has_genie_conversation": False,
-                    "message": "Profile is in prompt-only mode (no Genie space configured)",
+                    "message": "Profile is in prompt-only mode (no Genie agent configured)",
                 }
 
             resolved_space_id = settings.genie.space_id

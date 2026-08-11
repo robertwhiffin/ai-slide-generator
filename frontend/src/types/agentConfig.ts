@@ -137,7 +137,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
 };
 
 export const TOOL_TYPE_LABELS: Record<ToolType, string> = {
-  genie: 'Genie Space',
+  genie: 'Genie Agent',
   mcp: 'MCP Server',
   vector_index: 'Vector Index',
   model_endpoint: 'Model Endpoint',

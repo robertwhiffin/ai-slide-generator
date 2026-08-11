@@ -14,7 +14,7 @@ AI slide generators exist — but they can't touch your governed data without br
 
 **tellr** is an agentic application that generates data-driven presentations from your Databricks environment:
 
-- **Connected to your data** — Queries your Genie spaces for live, governed data
+- **Connected to your data** — Queries your Genie agents for live, governed data
 - **Respects permissions** — Uses Unity Catalog security out of the box
 - **Conversational editing** — Refine slides through natural language ("add a comparison to Q3", "make the EMEA section more prominent")
 - **Prompt-only mode** — Works without Genie for general-purpose slide generation
@@ -30,7 +30,7 @@ tellr is the third pillar in Databricks' AI/BI suite, completing the story along
 
 - Databricks workspace with Apps enabled
 - Permission to create a Lakebase (or create a schema in an existing one)
-- Genie space with your data (optional — tellr works in prompt-only mode without Genie)
+- Genie agent with your data (optional — tellr works in prompt-only mode without Genie)
 
 ### Install
 
@@ -92,7 +92,7 @@ Step-by-step instructions with screenshots:
 | [Advanced Configuration](docs/user-guide/03-advanced-configuration.md) | Customize deck prompts and slide styles |
 
 **Quick start:**
-1. Select or create a profile (bundles your Genie space, slide style, and deck prompt)
+1. Select or create a profile (bundles your Genie agent, slide style, and deck prompt)
 2. Go to Generator
 3. Describe the presentation you want
 4. Send — watch slides stream in
