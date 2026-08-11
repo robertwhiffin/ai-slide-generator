@@ -282,12 +282,6 @@ export const PREPROCESS_SOURCE = `
   // Exactly one element is ever returned, so a wrapper and its inner .slide
   // can never both count as roots.
   const SLIDE_WRAPPER_TAGS = new Set(['SECTION', 'ARTICLE']);
-  // The walk descends a strictly finite parent → child chain and so cannot
-  // cycle; this cap only bounds the work done on pathological input. The
-  // deepest chain a real bundle emits is two levels
-  // (section > article > div.slide), so 16 leaves ample headroom while
-  // keeping the loop's termination independent of the document.
-  const MAX_WRAPPER_DEPTH = 16;
 
   function findSlideRoot() {
     const direct = document.querySelector('body > [class*="slide"]');
@@ -303,10 +297,21 @@ export const PREPROCESS_SOURCE = `
   // child chain down through consecutive semantic wrappers lands on the slide
   // body. The .children collection is element-only, which is what makes
   // comments, whitespace and text nodes transparent to the walk.
+  //
+  // The descent carries NO depth limit, matching the backend's unbounded
+  // _promote_through_slide_wrapper(). Its termination is structural, not
+  // numeric: every step moves from a node to its sole ELEMENT CHILD, so the
+  // walk only ever travels down a parent → child chain. That chain is finite
+  // and acyclic in any DOM, so it must end — at a node with no single element
+  // child, which is precisely the loop condition. A depth number would add no
+  // safety the shape does not already give, and a wrong guess at it is a silent
+  // wrong-output boundary: the backend promotes past the number and serialises
+  // that root as body's direct child, so the deck arrives here unrecognisable
+  // and exports WHITE. That is the same surfaces-disagree defect this locator
+  // exists to prevent, just relocated to the cap.
   function wrapsSlideRoot(wrapper) {
     let node = wrapper;
-    for (let depth = 0; depth < MAX_WRAPPER_DEPTH; depth += 1) {
-      if (node.children.length !== 1) return false;
+    while (node.children.length === 1) {
       const child = node.children[0];
       if (child.matches('[class*="slide"]')) return true;
       if (!SLIDE_WRAPPER_TAGS.has(child.tagName)) return false;
