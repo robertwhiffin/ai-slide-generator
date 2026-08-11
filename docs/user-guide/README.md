@@ -18,7 +18,7 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 ## Quick Start
 
 1. **Open the app** — you land directly on the generator
-2. **Add tools** (optional) — click "Add Tool" in the config bar to connect Genie spaces or other data sources
+2. **Add tools** (optional) — click "Add Tool" in the config bar to connect Genie agents or other data sources
 3. **Enter a prompt** — describe the presentation you want to create
 4. **Click Send** — a session is created automatically and slides begin generating
 5. **Refine** — send follow-up messages to edit, add, or restyle slides

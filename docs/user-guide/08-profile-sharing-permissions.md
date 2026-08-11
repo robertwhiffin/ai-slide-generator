@@ -121,7 +121,7 @@ Individual contributor entries override the global level if they grant higher ac
 
 **What you CAN do:**
 - See the profile in your profile list
-- View profile configuration (Genie spaces, prompts, styles)
+- View profile configuration (Genie agents, prompts, styles)
 - Load the profile into your own sessions
 - Set the profile as your personal default
 
@@ -134,7 +134,7 @@ Individual contributor entries override the global level if they grant higher ac
 #### CAN EDIT
 
 **Includes everything in CAN USE, plus:**
-- Edit agent configuration (Genie spaces, prompts, styles)
+- Edit agent configuration (Genie agents, prompts, styles)
 - Rename the profile and update its description
 
 **What you CANNOT do:**
