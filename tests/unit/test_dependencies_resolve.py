@@ -8,11 +8,20 @@ resolvable BEFORE pyproject.toml is edited (Phase B, after Task 2 writes the
 pins, runs the same confirm via `-e .`).
 
 Evidence: The controller's Phase A dry-run (phaseA-proxy-dryrun.log) already
-confirmed exit-0 on 2026-08-09 with these exact specs. This test re-verifies
-the same claim and will fail loudly if the proxy's availability shifts.
+confirmed exit-0 on 2026-08-09 with these exact 11 specs, landing
+databricks-sdk-0.94.0 as a transitive dependency. databricks-sdk is not in
+this spec list because the plan deliberately leaves it transitive; the resolver
+backtracks to 0.94.0 under the databricks-connect<17.1 transitive bound
+regardless of whatever the proxy's maximum databricks-sdk version is. This test
+re-verifies the same claim and will fail loudly if the proxy's availability
+shifts.
 
-Both tests are marked @live (excluded in CI with -m 'not live'). If the
-proxy is unreachable the tests skip rather than fail.
+Both tests are marked @live. The unit CI job (test.yml:102) runs
+`pytest tests/unit -v --tb=short -n auto` with NO -m filter, so these tests
+ARE collected in CI. They are currently saved only incidentally because the
+Databricks proxy host is unreachable from GitHub Actions runners -- the skip
+guard fires before the network call reaches the proxy. If a runner ever gains
+proxy access these tests will run (and the slow resolve will take ~8 minutes).
 """
 import re
 import subprocess
@@ -23,15 +32,12 @@ import pytest
 
 PROXY_URL = "https://pypi-proxy.dev.databricks.com/simple/"
 
-# Explicit version specs — the 11 candidates from the PR2 spec (brief §Phase A),
-# plus one extra constraint added after controller's run: databricks-sdk<0.126.
+# Explicit version specs — exactly the 11 candidates from the PR2 spec (brief §Phase A).
 #
-# Why the extra constraint: the controller's run (2026-08-09) resolved
-# databricks-sdk-0.125.0 successfully. On 2026-08-11, version 0.126.0 appeared on
-# the proxy index but its metadata endpoint returns HTTP 403. Without the constraint
-# the resolver picks 0.126.0 (newest satisfying databricks-langchain>=0.65.0) and
-# fails. Constraining to <0.126 matches exactly what was confirmed to work.
-# This should be surfaced to Task 2 as a known-good upper bound for pinning.
+# databricks-sdk is NOT in this list: the plan deliberately leaves it transitive,
+# arriving via databricks-langchain==0.9.0 (>=0.65.0). The resolver backtracks to
+# databricks-sdk 0.94.0 under the databricks-connect<17.1 transitive bound.
+# No explicit upper bound on databricks-sdk is needed or correct here.
 #
 # Do NOT replace with `-e .`: resolving the current pyproject.toml proves nothing
 # because langgraph is not pinned there at all.
@@ -47,8 +53,6 @@ PHASE_A_SPECS = [
     "psycopg2-binary==2.9.10",
     "fastapi<0.137",
     "starlette<1.3",
-    # Extra: pin to below the 403-ing 0.126.0 (confirmed 0.125.0 works)
-    "databricks-sdk<0.126",
 ]
 
 # Critical packages that must be present on the proxy at their pinned versions.
@@ -108,11 +112,22 @@ def test_critical_packages_available_on_proxy():
             text=True,
             timeout=30,
         )
-        # Treat as available only when pip exited 0 AND the version string
-        # appears in stdout (the "Available versions:" line) without an ERROR.
+        # Parse ONLY the "Available versions:" line (or the leading "pkg (X.Y.Z)"
+        # header line).  Do NOT search the whole stdout — pip also prints
+        # "INSTALLED: X.Y.Z" and "LATEST: X.Y.Z" lines which would cause a false
+        # pass when the locally installed version happens to equal the pinned version
+        # (observed with databricks-langchain==0.9.0 and psycopg2-binary==2.9.10).
+        available_line = ""
+        for line in result.stdout.splitlines():
+            # pip emits the Available versions line as "  Available versions: A, B, C"
+            # and the header as "pkg-name (X.Y.Z)" — both are safe; INSTALLED/LATEST are not.
+            if line.lstrip().startswith("Available versions:") or (
+                line.startswith(pkg) and "(" in line and "INSTALLED" not in line and "LATEST" not in line
+            ):
+                available_line += " " + line
         # Use a boundary pattern so "1.3" doesn't spuriously match "1.3.14".
         version_present = bool(
-            re.search(r"(?<![.\d])" + re.escape(version) + r"(?![.\d])", result.stdout)
+            re.search(r"(?<![.\d])" + re.escape(version) + r"(?![.\d])", available_line)
         )
         available = (
             result.returncode == 0
@@ -122,7 +137,7 @@ def test_critical_packages_available_on_proxy():
         if not available:
             failures.append(
                 f"{pkg}=={version}: rc={result.returncode} "
-                f"stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r}"
+                f"available_line={available_line!r} stderr={result.stderr[:200]!r}"
             )
 
     assert not failures, (
