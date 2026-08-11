@@ -121,6 +121,20 @@ connection pool, `sslmode=require` and schema qualification for free.
 - Subclass `langgraph.checkpoint.base.BaseCheckpointSaver`; implement the sync methods
   the compiled graph uses (`get_tuple`, `list`, `put`, `put_writes`) over the existing
   engine/session, reusing `JsonPlusSerializer` for payloads.
+
+> **Sync-only is deliberate — drive the graph with `invoke`/`stream`, never `astream`.**
+> `BaseCheckpointSaver`'s async methods raise `NotImplementedError` by default, so an
+> `astream` call against a sync-only saver fails. That is acceptable because the existing
+> generation path is already synchronous end to end: `send_message_streaming` is a **sync
+> generator** (`chat_service.py:745`), the job-queue worker iterates it synchronously
+> (`job_queue.py:202`), and the routes push the whole thing into a thread via
+> `run_in_thread_with_context` / `asyncio.to_thread` (`chat.py:31,227`). Matching that
+> keeps the SQLAlchemy session usage single-threaded per turn, which is what makes the
+> engine-backed saver safe in the first place.
+>
+> **If any future caller needs `astream`, add `aget_tuple`/`alist`/`aput`/`aput_writes`
+> first** — do not assume the sync methods will be bridged. Anywhere this plan mentions
+> `astream`, read it as "not supported by this saver".
 - Provide a **`setup()`-equivalent** that creates its tables idempotently. Follow this
   repo's migration convention — a `_migrate_*(conn, inspector, schema, _qual, is_sqlite)`
   helper wired into `_run_migrations()` (`src/core/database.py:417`), *not* Alembic
@@ -492,13 +506,52 @@ from src.domain.deck_spec import DeckSpec
 
 def merge_dict(a: dict, b: dict) -> dict:
     """Last-writer-wins per key. Each branch owns its own position key, so
-    concurrent builders never contend on the same key."""
+    concurrent builders never contend on the same key.
+
+    NOTE: cannot delete keys — a "removed" entry must be tombstoned as None, which is
+    why `has_pending_fix()` exists (`bool({0: None})` is True).
+    """
     out = dict(a or {})
     out.update(b or {})
     return out
 
 
+# --- Turn scoping: REQUIRED, not a nicety -----------------------------------------
+# `thread_id` is per SESSION, so checkpointed reducer state accumulates across turns.
+# Measured on the installed langgraph, with InMemorySaver and one thread_id:
+#     turn 1 -> landed=[0,1,2]
+#     turn 2, passing landed=set()          -> STILL sees [0,1,2]
+#     turn 2, with a fresh checkpoint_ns    -> STILL sees [0,1,2]
+# Neither passing fresh values nor changing checkpoint_ns resets it, because reducers
+# MERGE the incoming value with the checkpointed one. Left unhandled, an edit turn
+# starts with every position already "landed": next_dispatch_batch returns [],
+# all_positions_committed is true, and the graph goes straight to deck review having
+# built NOTHING. `findings` would also grow unboundedly for the session's lifetime.
+#
+# Fix: make the turn id part of the value and reset on change. Verified working —
+# turn 1 -> [0,1,2]; turn 2 -> []; then adding within turn 2 -> [5].
+def turn_scoped_union(a: dict, b: dict) -> dict:
+    """Union within a turn; discard everything when the turn id changes."""
+    a = a or {"turn": None, "vals": set()}
+    b = b or {"turn": None, "vals": set()}
+    if b["turn"] != a["turn"]:
+        return {"turn": b["turn"], "vals": set(b["vals"])}
+    return {"turn": a["turn"], "vals": set(a["vals"]) | set(b["vals"])}
+
+
+def turn_scoped_merge(a: dict, b: dict) -> dict:
+    """Same discipline for the position-keyed dicts (slides, fix_map, …)."""
+    a = a or {"turn": None, "vals": {}}
+    b = b or {"turn": None, "vals": {}}
+    if b["turn"] != a["turn"]:
+        return {"turn": b["turn"], "vals": dict(b["vals"])}
+    merged = dict(a["vals"]); merged.update(b["vals"])
+    return {"turn": a["turn"], "vals": merged}
+
+
 def union_set(a: set, b: set) -> set:
+    """Only for keys that are genuinely session-lifetime. Prefer the turn-scoped
+    variants for anything the foreman reads to decide what to build."""
     return set(a or set()) | set(b or set())
 
 
@@ -562,11 +615,15 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         super().__init__(serde=JsonPlusSerializer())
         self._session_maker = get_session_maker()
 
-    # Implement the sync surface the compiled graph uses:
+    # Sync surface only — see "Sync-only is deliberate" below.
     def get_tuple(self, config) -> CheckpointTuple | None: ...
     def list(self, config, *, filter=None, before=None, limit=None): ...
     def put(self, config, checkpoint: Checkpoint, metadata, new_versions): ...
     def put_writes(self, config, writes, task_id, task_path="") -> None: ...
+
+    # `delete_thread` already exists on BaseCheckpointSaver — implement it here and use
+    # it for context clearing (Task 10.2) rather than inventing a separate function.
+    def delete_thread(self, thread_id: str) -> None: ...
 
 
 _saver: SqlAlchemyCheckpointSaver | None = None
@@ -1518,7 +1575,7 @@ def reviewer_router(state: GraphState) -> str:
     positional params raise "TypeError: route() missing 2 required positional
     arguments". Per-branch facts must be read out of state, not passed in.
     """
-    return "fix" if state.get("fix_map") else "land"
+    return "fix" if has_pending_fix(state) else "land"
 
 
 def foreman_router(state: GraphState):
@@ -1529,7 +1586,7 @@ def foreman_router(state: GraphState):
     `builder_queue`, which nothing wrote, so it always fell through to END and the
     graph never built a deck.
     """
-    if state.get("fix_map"):
+    if has_pending_fix(state):   # NOT `if state.get("fix_map")` — see below
         return "fixer"
 
     batch = next_dispatch_batch(state)                    # Phase 4, ascending
@@ -1542,6 +1599,33 @@ def foreman_router(state: GraphState):
     if all_positions_committed(state):   # landed | placeheld covers every spec position
         return "deck_reviewer"
     return END
+
+
+def has_pending_fix(state: GraphState) -> bool:
+    """True only if some fix_map entry is still un-tombstoned.
+
+    **Never write `if state.get("fix_map")`.** `merge_dict` cannot delete keys, so a
+    completed fix is tombstoned as `{position: None}` — and `bool({0: None})` is
+    `True`. Testing the dict's truthiness therefore routes to the fixer forever;
+    `fixer_node`'s `min(...)` then raises `ValueError` on an empty candidate set, and
+    the graph loops to `GraphRecursionError`. Verified: `bool({0: None}) is True`.
+    """
+    return any(entry is not None for entry in (state.get("fix_map") or {}).values())
+
+
+def fan_reviewers(state: GraphState):
+    """Re-fan one Send per built slide, so each gets its own reviewer invocation.
+
+    VERIFIED against installed langgraph: 6 builders -> 6 reviewer invocations, each
+    payload carrying its own position/brief/html, with max_concurrency honoured
+    (peak concurrent builders == the cap). Builders carry their payload forward in
+    `slides[position]` precisely so this router can rebuild each branch's input.
+    """
+    return [
+        Send("build_reviewer", payload)
+        for _, payload in sorted(state["slides"].items())
+        if payload.get("position") not in state.get("reviewed_positions", set())
+    ]
 
 
 def build_branch_payload(state: GraphState, position: int) -> dict:
@@ -1572,7 +1656,18 @@ def fixer_node(state: GraphState) -> dict:
     Takes (state) only. Picks the lowest outstanding fix so behaviour is
     deterministic when several positions need fixing in the same turn.
     """
-    position = min(p for p, e in state["fix_map"].items() if e is not None)
+    # Lowest entry that is neither tombstoned nor already dispatched. The
+    # `in_flight` guard is what keeps "one fix round" true: the fixer runs once per
+    # turn per position, and fix_reviewer_node clears only `fix_target`, so without it
+    # every position ABOVE the minimum gets re-fixed on the next foreman pass
+    # (measured: each position entering the fixer twice, deck review firing twice).
+    candidates = [
+        p for p, e in (state.get("fix_map") or {}).items()
+        if e is not None and not e.get("in_flight")
+    ]
+    if not candidates:
+        return {}                      # nothing to do; router will move the turn on
+    position = min(candidates)
     entry = state["fix_map"][position]
 
     output = call_skill_with_llm(
@@ -1588,6 +1683,8 @@ def fixer_node(state: GraphState) -> dict:
     return {
         "fix_target": position,
         "fixed": {position: {"html": output["html"], "scripts": output["scripts"]}},
+        # Mark in-flight so this position cannot be selected again on a later pass.
+        "fix_map": {position: {**entry, "in_flight": True}},
     }
 ```
 
@@ -1597,6 +1694,19 @@ Add the two keys this introduces to `GraphState` (Phase 1 Step 1):
     fix_target: int | None                                # position currently in the fixer
     fixed: Annotated[dict[int, dict], merge_dict]         # position -> {html, scripts}
 ```
+
+**Fix-round bookkeeping, all in one place** (this is what makes "exactly one fix round"
+true rather than aspirational):
+
+| Stage | `fix_map[pos]` becomes | Effect |
+|---|---|---|
+| build reviewer finds an objective defect | `{original_html, original_scripts, finding}` | `has_pending_fix` → True, so the router sends to the fixer |
+| fixer dispatches it | `{..., "in_flight": True}` | excluded from the fixer's candidates, so it cannot be picked twice |
+| fix reviewer decides | `None` (tombstone) | `has_pending_fix` → False once every entry is tombstoned |
+
+Add a test asserting per-position fixer invocation counts are **exactly 1** across a turn
+where two positions need fixes — and that the deck reviewer fires **once**, not once per
+fix.
 
 > **Fixer and builder are separate skills** over shared fragments (spec §5.6): the
 > builder authors, the fixer makes the minimal change. Handing broken HTML to an
@@ -1722,9 +1832,11 @@ def build_graph(config):
         ["builder", "fixer", "deck_reviewer", END],
     )
 
-    # Every builder branch is reviewed, then returns to the foreman, which is the
-    # single place deck-wide state is updated.
-    graph.add_edge("builder", "build_reviewer")
+    # Builder -> reviewer must RE-FAN per position. A static edge here would collapse
+    # all N branches into ONE reviewer invocation receiving plain GraphState with no
+    # payload (measured: 3 builders -> 1 reviewer call seeing only state keys), which
+    # KeyErrors on payload["position"] and breaks one-reviewer-per-slide.
+    graph.add_conditional_edges("builder", fan_reviewers, ["build_reviewer"])
     graph.add_conditional_edges(
         "build_reviewer",
         reviewer_router,                   # "land" | "fix"
@@ -1734,10 +1846,32 @@ def build_graph(config):
     graph.add_edge("fix_reviewer", "foreman")
     graph.add_edge("deck_reviewer", END)
 
-    # Shared saver; session isolation comes from thread_id at invoke time:
-    #   graph.invoke(state, config={"configurable": {"thread_id": session_id},
-    #                               "max_concurrency": CAP})
+    # Shared saver; session isolation comes from thread_id at invoke time. EVERY invoke
+    # site must pass all FOUR of these:
+    #   graph.invoke(state, config={
+    #       "configurable": {"thread_id": session_id, "emitter": emitter},
+    #       "max_concurrency": CAP,
+    #       "recursion_limit": recursion_limit_for(len(spec.slides)),
+    #   })
     return graph.compile(checkpointer=get_checkpointer())
+
+
+def recursion_limit_for(slide_count: int) -> int:
+    """LangGraph's default `recursion_limit` is 25 — too low for a real deck, and the
+    plan never set it.
+
+    Each superstep costs one unit. This topology spends roughly one per dispatch batch
+    plus one per fix round plus the architect/analyst/deck-review hops, so the
+    requirement grows with slide count. A deck big enough to need a second batch, with
+    fixes, exceeds 25 and dies with `GraphRecursionError` — **in production, on large
+    decks, while every small-fixture test passes green.** Spec §8 contemplates 40-slide
+    decks.
+
+    The limit is a runaway guard, not a budget, so size it generously.
+    """
+    import math
+    batches = max(1, math.ceil(slide_count / CAP))
+    return max(50, batches * 8 + 20)
 
 
 def foreman_router(state: GraphState):
@@ -1746,7 +1880,7 @@ def foreman_router(state: GraphState):
     Returns Send objects (fan-out) or a single next-node name. Send objects MUST be
     returned from here — writing them into state does nothing.
     """
-    if state.get("fix_map"):
+    if has_pending_fix(state):   # NOT `if state.get("fix_map")` — see below
         return "fixer"
     batch = next_dispatch_batch(state)                 # Phase 4 pure function
     if batch:
