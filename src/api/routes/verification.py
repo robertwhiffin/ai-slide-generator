@@ -174,10 +174,10 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
 
             # Save this result by content hash (so it's remembered)
             await asyncio.to_thread(
-                session_manager.save_verification,
+                session_manager.write_slide_verification,
                 request.session_id,
-                content_hash,
-                unknown_result,
+                slide_index,
+                {content_hash: unknown_result},
             )
 
             return VerifySlideResponse(**unknown_result)
@@ -202,10 +202,10 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
                 "error": False,
             }
             await asyncio.to_thread(
-                session_manager.save_verification,
+                session_manager.write_slide_verification,
                 request.session_id,
-                content_hash,
-                unknown_result,
+                slide_index,
+                {content_hash: unknown_result},
             )
             return VerifySlideResponse(**unknown_result)
 
@@ -240,10 +240,10 @@ async def verify_slide(slide_index: int, request: VerifySlideRequest):
 
         # Save verification by content hash (survives deck regeneration)
         await asyncio.to_thread(
-            session_manager.save_verification,
+            session_manager.write_slide_verification,
             request.session_id,
-            content_hash,
-            verification_result,
+            slide_index,
+            {content_hash: verification_result},
         )
 
         logger.info(
