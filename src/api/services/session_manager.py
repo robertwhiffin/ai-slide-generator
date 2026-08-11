@@ -7,10 +7,11 @@ import json
 import logging
 import os
 import secrets
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import sanitize_agent_config_for_persist
@@ -20,6 +21,7 @@ from src.database.models.session import (
     ChatRequest,
     SessionMessage,
     SessionSlideDeck,
+    SessionSlide,
     SlideDeckVersion,
     UserSession,
 )
@@ -938,6 +940,106 @@ class SessionManager:
                     )
                 except Exception:
                     logger.debug("Failed to record deck_created event", exc_info=True)
+
+            # ------------------------------------------------------------------
+            # Dual-write: session_slides rows + deck-level presentation columns
+            #
+            # Runs in the SAME transaction as the deck_json write above so both
+            # representations stay consistent.  Task 5 reads from session_slides
+            # when any rows exist; Task 3 backfill uses identical field mapping.
+            # ------------------------------------------------------------------
+            if deck_dict:
+                slides = deck_dict.get("slides") or []
+                now_dt = datetime.utcnow()
+
+                # 1. Deck-level presentation columns (css, external_scripts_json).
+                #    The Task 5 read path reconstructs the deck dict from columns,
+                #    not from deck_json, so these MUST stay in sync.  Missing them
+                #    causes every export to lose the stylesheet and Chart.js CDN.
+                deck.css = deck_dict.get("css") or ""
+                deck.external_scripts_json = json.dumps(
+                    deck_dict.get("external_scripts") or []
+                )
+
+                # 2. Per-slide upsert: one row per (deck_owner.id, position).
+                #    Prefer the slide dict's own created_by/created_at (they may
+                #    have just been author-stamped above) and fall back to the
+                #    current user / deck creation timestamp.
+                for position, slide_dict in enumerate(slides):
+                    html = slide_dict.get("html") or ""
+                    scripts = slide_dict.get("scripts") or ""
+                    slide_id = slide_dict.get("slide_id")
+
+                    # Parse created_at / modified_at from the slide dict.
+                    created_at: Optional[datetime] = None
+                    created_at_str = slide_dict.get("created_at")
+                    if created_at_str:
+                        try:
+                            created_at = datetime.fromisoformat(
+                                str(created_at_str).replace("Z", "+00:00")
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    modified_at: Optional[datetime] = None
+                    modified_at_str = slide_dict.get("modified_at")
+                    if modified_at_str:
+                        try:
+                            modified_at = datetime.fromisoformat(
+                                str(modified_at_str).replace("Z", "+00:00")
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    created_by_val = slide_dict.get("created_by") or modified_by
+                    modified_by_val = slide_dict.get("modified_by") or modified_by
+
+                    existing = (
+                        db.query(SessionSlide)
+                        .filter(
+                            and_(
+                                SessionSlide.session_id == deck_owner.id,
+                                SessionSlide.position == position,
+                            )
+                        )
+                        .one_or_none()
+                    )
+                    if existing is not None:
+                        # Update mutable fields; leave created_by/created_at and
+                        # verification_record untouched (verification is Task 7).
+                        existing.html = html
+                        existing.scripts = scripts
+                        if modified_by_val:
+                            existing.modified_by = modified_by_val
+                        existing.modified_at = modified_at or now_dt
+                    else:
+                        row = SessionSlide(
+                            session_id=deck_owner.id,
+                            position=position,
+                            id=str(uuid.uuid4()),
+                            html=html,
+                            slide_id=slide_id,
+                            scripts=scripts,
+                            created_by=created_by_val,
+                            created_at=created_at or now_dt,
+                            modified_by=modified_by_val,
+                            modified_at=modified_at or now_dt,
+                            verification_record=None,  # Task 7 owns this
+                            deck_spec_slide=None,       # Task 6 / PR3 owns this
+                        )
+                        db.add(row)
+
+                # 3. Orphan pruning: delete rows with position >= len(slides).
+                #    Must be in the same transaction as the writes.  Without it a
+                #    shorter deck leaves phantom rows that the read path will serve
+                #    as extra slides, and PR3's releasable_positions predicate
+                #    waits forever on positions no builder will fill.
+                db.query(SessionSlide).filter(
+                    and_(
+                        SessionSlide.session_id == deck_owner.id,
+                        SessionSlide.position >= len(slides),
+                    )
+                ).delete(synchronize_session=False)
 
             # Update activity on both the requesting session and the deck owner
             session.last_activity = datetime.utcnow()
