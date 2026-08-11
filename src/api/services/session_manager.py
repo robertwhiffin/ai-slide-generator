@@ -991,6 +991,10 @@ class SessionManager:
                         except (ValueError, TypeError):
                             pass
 
+                    # Deliberate divergence from backfill_session_slides.py:
+                    # the backfill leaves created_by=None when absent (it has no
+                    # writer identity); a live save always knows who is writing, so
+                    # we fall back to modified_by.  Do NOT "harmonise" these to None.
                     created_by_val = slide_dict.get("created_by") or modified_by
                     modified_by_val = slide_dict.get("modified_by") or modified_by
 
