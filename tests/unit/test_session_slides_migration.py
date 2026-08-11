@@ -139,12 +139,23 @@ def test_migration_adds_deck_spec_json_to_slide_deck_versions(sqlite_engine):
 
 
 def test_migration_is_idempotent(sqlite_engine):
-    """Running _run_migrations twice does not raise and leaves columns in place."""
-    Base.metadata.create_all(bind=sqlite_engine)
+    """Running _run_migrations twice does not raise and leaves columns in place.
 
-    # First call
+    Drop the target columns BEFORE the first run so the first call must add them
+    and the second call is a true no-op against already-present columns.
+    This proves: (a) the migration adds columns when absent, and (b) it does not
+    error when they already exist — the real production idempotency property.
+    """
+    Base.metadata.create_all(bind=sqlite_engine)
+    # Simulate pre-migration live DB: drop the columns Task 2 is responsible for
+    _drop_column_if_exists(sqlite_engine, "session_slide_decks", "deck_spec_json")
+    _drop_column_if_exists(sqlite_engine, "session_slide_decks", "css")
+    _drop_column_if_exists(sqlite_engine, "session_slide_decks", "external_scripts_json")
+    _drop_column_if_exists(sqlite_engine, "slide_deck_versions", "deck_spec_json")
+
+    # First call — adds the columns
     _run_migrations(sqlite_engine, schema=None)
-    # Second call — must not raise
+    # Second call — must not raise (idempotency)
     _run_migrations(sqlite_engine, schema=None)
 
     assert "deck_spec_json" in _get_columns(sqlite_engine, "session_slide_decks")
