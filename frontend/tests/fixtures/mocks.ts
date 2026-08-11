@@ -597,6 +597,32 @@ export const mockDesignSystemTemplateSourceMultiSlide = {
   token_css: ":root { --brand-core-primary: #123456; }",
 };
 
+// A template whose slide sections are wrapped in a CUSTOM ELEMENT harness, the
+// shape real Claude Design exports ship: `<deck-stage>` plus the author's own
+// pre-upgrade guard `deck-stage:not(:defined){visibility:hidden}`.
+//
+// A preview frame runs NO scripts (sandbox="" and a CSP with no script-src), so
+// that element can never be registered: it stays permanently :not(:defined),
+// the guard hides every slide for good, and all that is left to see is the body
+// background. Slides are `position:absolute; inset:0` exactly as the real
+// templates are, so this also pins the "cards must show the FIRST slide, not
+// the last one stacked on top" behavior. Synthetic Acme only.
+export const mockDesignSystemTemplateSourceCustomElementHarness = {
+  id: 2,
+  name: "Acme Content",
+  layout_html:
+    "<!doctype html><html><head><style>" +
+    "html,body{margin:0;background:#123456;}" +
+    "deck-stage:not(:defined){visibility:hidden}" +
+    ".slide{position:absolute;inset:0;display:flex;flex-direction:column;}" +
+    "</style></head>" +
+    '<body><deck-stage width="1280" height="720">' +
+    '<section data-label="One"><div class="slide"><h1>Acme Harness Slide One</h1></div></section>' +
+    '<section data-label="Two"><div class="slide"><h1>Acme Harness Slide Two</h1></div></section>' +
+    "</deck-stage></body></html>",
+  token_css: ":root { --brand-core-primary: #123456; }",
+};
+
 // GET /api/settings/design-systems/{id}/files -> retained source-file tree (Phase 6)
 export const mockDesignSystemFiles = {
   files: [
