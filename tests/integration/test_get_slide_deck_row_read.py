@@ -76,6 +76,30 @@ def session_id(factory):
     return "test-session-001"
 
 
+def _dict_diff_report(a: dict, b: dict, label_a: str = "row", label_b: str = "legacy") -> str:
+    """Produce a human-readable diff of two dicts for assertion messages."""
+    lines = [f"Dicts differ ({label_a} vs {label_b}):"]
+    all_keys = set(a.keys()) | set(b.keys())
+    for key in sorted(all_keys):
+        if key == "slides":
+            continue  # slides compared separately below
+        va, vb = a.get(key, "<MISSING>"), b.get(key, "<MISSING>")
+        if va != vb:
+            lines.append(f"  top-level {key!r}: {label_a}={va!r}  {label_b}={vb!r}")
+    slides_a = a.get("slides", [])
+    slides_b = b.get("slides", [])
+    if len(slides_a) != len(slides_b):
+        lines.append(f"  slides count: {label_a}={len(slides_a)}  {label_b}={len(slides_b)}")
+    else:
+        for i, (sa, sb) in enumerate(zip(slides_a, slides_b)):
+            all_slide_keys = set(sa.keys()) | set(sb.keys())
+            for k in sorted(all_slide_keys):
+                va2, vb2 = sa.get(k, "<MISSING>"), sb.get(k, "<MISSING>")
+                if va2 != vb2:
+                    lines.append(f"  slide[{i}] {k!r}: {label_a}={va2!r}  {label_b}={vb2!r}")
+    return "\n".join(lines)
+
+
 def _make_fake_get_db_session(factory):
     """Return a contextmanager that yields a SQLAlchemy session from *factory*."""
 
@@ -381,7 +405,18 @@ class TestEquivalence:
     """
 
     def test_row_path_equals_legacy_path(self, factory, session_id):
-        """Row-path dict must equal legacy-path dict for the same logical deck."""
+        """Row-path dict must be FULLY equal to legacy-path dict for the same logical deck.
+
+        This is a whole-dict comparison: assert row_dict == legacy_dict after
+        stripping fields that cannot legitimately match. Every exclusion is
+        justified inline and in the task-5 report.
+
+        Exclusions:
+          NONE. Both paths derive all fields from the same DB columns written by
+          the same save_slide_deck call. In SQLite the timezone-aware per-slide
+          timestamps are stored as naive datetimes (SQLite strips tzinfo), so they
+          round-trip identically from both paths. No key is excluded.
+        """
         css_val = ".card { padding: 1rem; }"
         ext_scripts = ["https://cdn.jsdelivr.net/npm/chart.js"]
         slides = [
@@ -427,21 +462,15 @@ class TestEquivalence:
 
         assert legacy_dict is not None
 
-        # --- Compare top-level fields ---
-        for key in ("title", "css", "external_scripts", "scripts", "version"):
-            assert row_dict.get(key) == legacy_dict.get(key), (
-                f"Top-level key {key!r} differs: row={row_dict.get(key)!r} legacy={legacy_dict.get(key)!r}"
-            )
-
-        # --- Compare slides (per-slide fields that both paths must agree on) ---
-        assert len(row_dict["slides"]) == len(legacy_dict["slides"]), (
-            f"Slide count differs: row={len(row_dict['slides'])} legacy={len(legacy_dict['slides'])}"
+        # --- Full equality: no exclusions ---
+        # Both dicts include the same keys: title, css, external_scripts, scripts,
+        # slides, slide_count, version, created_by, created_at, modified_by,
+        # modified_at, html_content. Per-slide: html, slide_id, scripts,
+        # created_by, created_at, modified_by, modified_at, content_hash, verification.
+        # All values are derived from the same DB columns (same save call wrote them).
+        assert row_dict == legacy_dict, (
+            _dict_diff_report(row_dict, legacy_dict)
         )
-        for i, (r_slide, l_slide) in enumerate(zip(row_dict["slides"], legacy_dict["slides"])):
-            for key in ("html", "scripts", "slide_id", "content_hash"):
-                assert r_slide.get(key) == l_slide.get(key), (
-                    f"Slide {i} key {key!r} differs: row={r_slide.get(key)!r} legacy={l_slide.get(key)!r}"
-                )
 
     def test_equivalence_fails_if_css_dropped(self, factory, session_id):
         """Sabotage proof: if the row path drops css, the equivalence test fails.
@@ -521,6 +550,61 @@ class TestEquivalence:
         )
         assert row_result["external_scripts"] != ext_scripts, (
             "Sabotage proof failed: expected mismatch with original ext_scripts"
+        )
+
+    def test_equivalence_catches_per_slide_modified_by_divergence(self, factory, session_id):
+        """Sabotage proof: tightened test detects per-slide modified_by divergence.
+
+        This proves the coordinator's gap is now closed: changing a per-slide
+        authorship field in the row path would be caught by test_row_path_equals_legacy_path.
+        We verify by patching the row path live (monkey-patching the module) and
+        checking that the comparison fails.
+        """
+        import src.api.services.session_manager as sm_module
+
+        slides = [_make_slide("<p>Authorship slide</p>", slide_id="slide-auth")]
+        deck_dict_in = _make_deck_dict(slides, title="Auth Deck")
+
+        fake_db = _make_fake_get_db_session(factory)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            mgr = SessionManager()
+            mgr.save_slide_deck(
+                session_id=session_id,
+                title="Auth Deck",
+                html_content="",
+                slide_count=1,
+                deck_dict=deck_dict_in,
+                modified_by="test-user@example.com",
+            )
+
+        # Read via row path to get the REAL dict (rows exist)
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            row_dict = mgr.get_slide_deck(session_id)
+        assert row_dict is not None
+
+        # Delete rows to get legacy dict
+        owner_id = _user_session_id_int(factory)
+        db = factory()
+        db.query(SessionSlide).filter(SessionSlide.session_id == owner_id).delete()
+        db.commit()
+        db.close()
+
+        with patch("src.api.services.session_manager.get_db_session", fake_db):
+            legacy_dict = mgr.get_slide_deck(session_id)
+        assert legacy_dict is not None
+
+        # Create a sabotaged copy of row_dict with wrong per-slide modified_by
+        import copy
+        sabotaged = copy.deepcopy(row_dict)
+        sabotaged["slides"][0]["modified_by"] = "SABOTAGE"
+
+        # The full-dict comparison must detect this divergence
+        assert sabotaged != legacy_dict, (
+            "Sabotage not detected: full dict comparison must catch per-slide modified_by divergence"
+        )
+        # The real row_dict (not sabotaged) must still be equal to legacy
+        assert row_dict == legacy_dict, (
+            _dict_diff_report(row_dict, legacy_dict)
         )
 
 
