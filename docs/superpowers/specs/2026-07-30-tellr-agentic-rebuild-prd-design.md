@@ -58,13 +58,26 @@ through one engine with two front doors (§9), but their success looks different
 An FE preparing a customer deck. They arrive with a goal and partial material, not a
 finished outline.
 
-| Job | Today | Target |
-|---|---|---|
-| "Help me work out what this deck should say" | Not supported — the agent only emits HTML | Brainstorm with the supervisor before any slide exists |
-| "Build it from our data" | Supported (Genie/tools) | Unchanged, but reviewed on the way out |
-| "Change slides 5, 6 and 10 — differently" | Impossible: contiguous checkbox selection, one instruction | One conversational turn, three targeted edits |
-| "Is this deck any good?" | Manual per-slide "Verify" for numbers only | Automatic content/design/narrative review, defects pre-fixed |
-| "Fix this text myself" | HTML editor is broken | Inline WYSIWYG on the stage |
+| Job | Today | Target | Enabled by |
+|---|---|---|---|
+| "Help me work out what this deck should say" | Not supported — the agent only emits HTML | Brainstorm with the supervisor before any slide exists | ws4 |
+| "Build it from our data" | Supported (Genie/tools) | Unchanged, but reviewed on the way out | ws4, ws5 |
+| "Change slides 5, 6 and 10 — differently" | Impossible: contiguous checkbox selection, one instruction | One conversational turn, three targeted edits | ws7 (needs per-slide addressing — ✅ ws0a) |
+| "Is this deck any good?" | Manual per-slide "Verify" for numbers only | Automatic content/design/narrative review, defects pre-fixed | ws5 (needs per-slide verdicts — ✅ ws0a) |
+| "Fix this text myself" | HTML editor is broken | Inline WYSIWYG on the stage | ws8 |
+| "Don't lose my verified slides when I reorder or restore" | Verdicts live in one shared blob; reorder and restore lose or mis-attribute them | A verdict follows its slide through reorder, edit-and-revert, and save-point restore | ✅ ws0a |
+
+**Status against these jobs: none of them are delivered yet.** Workstreams 0a and 0b
+(§10) changed no user-visible behaviour by design — they are the data model and dependency
+groundwork the remaining workstreams stand on. The one row above marked ✅ is the exception,
+and it is a *fidelity* guarantee rather than a new capability: per-slide verdicts now
+survive the operations that previously dropped them.
+
+Two jobs were **blocked by the old data model**, not merely unbuilt, which is why the
+prerequisites came first: addressing slides 5, 6 and 10 independently and holding a
+verdict per slide both require a slide to be a row you can name and write in parallel. With
+one `deck_json` blob behind an optimistic lock, concurrent per-slide work 409s itself and
+per-slide verdicts share one field. That is now fixed.
 
 ### Segment 2 — Programmatic callers (skills & MCP)
 
@@ -76,6 +89,13 @@ composed prompt into a finished deck and **never see the UI**. They need:
 - review + remediation applied *internally* before the deck is returned — these
   callers benefit most from automatic quality, since no human is in the loop to
   catch a bad slide.
+
+**Unchanged by workstreams 0a/0b, deliberately.** The prerequisites preserved the
+`get_slide_deck()` dict contract exactly, so the export chain and every `html_content`
+consumer needed no edits — verified by a parity test that builds each slide's HTML through
+the real export funnel on both the legacy and row paths and asserts they are identical. The
+programmatic contract these callers depend on is therefore untouched, and that parity test
+is the regression gate protecting it (§3's no-regression criterion).
 
 **Design consequence:** conversation is a front door, not the engine. Anything that
 only works in dialogue (clarifying questions, interrupts) must have a defined
@@ -119,6 +139,17 @@ checkpoints; each workstream spec derives its own acceptance tests.
   produce decks of at least current quality.
 - Export (PPTX + Google Slides), permissions, save points and sharing behave as
   before.
+
+*Status after workstreams 0a/0b (2026-08-12):* the data-model half of this gate is
+covered by automated tests and verified against a production-forked Lakebase branch —
+existing decks open (dual-read falls back to `deck_json`, and the startup backfill
+migrates them), the `get_slide_deck()` dict contract is byte-identical across the legacy
+and row paths, and save-point restore round-trips slides, CSS, external scripts, the deck
+spec and verdicts. **Not yet covered:** Google Slides export parity could not be tested
+hermetically (`HtmlToGoogleSlidesConverter` requires live Databricks and Google
+credentials), so it is asserted only via the shared `build_slide_html` funnel — a manual
+export check belongs in the release gate. Permissions and sharing are unchanged by these
+workstreams but remain to be re-verified for 4/5.
 
 ---
 
@@ -473,6 +504,8 @@ defines the end state and the seams.
 
 | # | Workstream | Depends on | Size | Notes |
 |---|---|---|---|---|
+| 0a | ✅ **DONE** — **Row-per-slide schema** — `session_slides` (one row per slide), per-row verification, deck-spec column | — | M | Merged 2026-08-12 (PR #235). Prerequisite for 4; see §10.2 |
+| 0b | ✅ **DONE** — **Dependency stack upgrade** — langgraph 1.2.10 pinned and proven on the Apps build proxy | — | S | Merged 2026-08-12 (PR #236). Prerequisite for 4; see §10.2 |
 | 1 | **UC-in-setup** — required UC catalog/schema in app config + provisioning; handles upgrade path for existing deployments | — | S | Unblocks MLflow; can land early |
 | 2 | **Gateway endpoint abstraction** — de-hardcode the model, route via Gateway, usage tracking & rate limits | — | S | Independent |
 | 3 | **MLflow rebuild** — always-on nested tracing + scorer framework; delete fallback/auto-skip hacks | 1 | M | |
@@ -484,11 +517,62 @@ defines the end state and the seams.
 
 ### 10.1 Sequencing notes
 
+- **0a and 0b** ✅ **are done.** They were not in the original decomposition — the
+  workstream-4 design spec identified them as prerequisites that had to land and be
+  verified against live data *before* the core rewrite, so a bad deck could be
+  attributed to one change or the other rather than both at once.
 - **1 and 2** are small, independent, and safe to land first.
 - **3** depends on UC being available (1).
-- **4** is the keystone; **5 and 7** build on it.
+- **4** is the keystone; **5 and 7** build on it. Its data-model and dependency
+  prerequisites are now satisfied.
 - **6** ✅ **is done** — it was built against a stub deck and merged independently,
   as planned. **8** builds on **6** and is now unblocked.
+
+### 10.2 What the prerequisites delivered (and what they oblige workstream 4 to do)
+
+Both merged into `feat/langgraph-core` on 2026-08-12 and verified on a Lakebase branch
+forked from production, not just locally.
+
+**0a — row-per-slide schema (PR #235).** The deck's source of truth is now one row per
+slide, keyed `(session_id, position)`:
+
+- Parallel per-slide writes no longer contend on a single optimistic-locked row — the
+  precondition for the fan-out in §4.
+- Verification moved off the shared `verification_map` blob onto the row, keyed by
+  content hash and **merged, never overwritten**, so a verdict still survives
+  regeneration. This is the mechanism §12.1's "finding persistence" constraint asked for;
+  drawer findings can now key off the same field.
+- `SlideDeckVersion` deliberately stays a JSON blob — the right shape for an immutable
+  save-point snapshot, and it keeps §13's restore promise cheap.
+- `SlideWriter` (`src/api/services/slide_repository.py`) is the published write API for
+  the graph. Constructible with no arguments, and deliberately **no optimistic lock on
+  the slide row** — one reviewer owns one position, so there is nothing to contend with.
+- A dual-write / dual-read period keeps `deck_json` current, so an older build still
+  reads decks and pre-cutover rollback works.
+- The data backfill runs **automatically at app startup**, not as a manual script.
+
+**0b — dependency stack (PR #236).** langgraph 1.2.10 / langchain 1.3.14 /
+langchain-core 1.5.3 / langgraph-checkpoint 4.1.1, with mlflow reconciled to 3.14.0 —
+which closes §12.1's "dependency resolution risk" and the live mlflow pin conflict named
+there. Resolution was proven against the Databricks Apps build proxy, and the pins were
+applied to `packages/databricks-tellr-app/pyproject.toml` — the file the BUILD phase
+actually resolves.
+
+**Obligations this creates for workstream 4:**
+
+- The checkpointer must be a **custom `BaseCheckpointSaver` over the existing SQLAlchemy
+  engine**, not `langgraph-checkpoint-postgres`. That package takes a raw psycopg
+  connection, which never traverses the `provide_token` listener that delivers Lakebase's
+  OAuth token — its writes would begin failing about an hour into every deployment. This
+  is the concrete resolution of §12.1's multi-worker/checkpointer correctness point.
+- A failed slide position is marked by a **hash-keyed** `verification_record` carrying
+  `error: true`; detect it via `is_placeholder_record`, **not** an HTML class.
+- `SlideWriter` updates rows but not `deck_json`. The rollback guarantee for slide
+  *content* therefore holds only while it has no production callers — workstream 4 is
+  when that stops being true, so it must either write through to `deck_json` or accept
+  and document the loss.
+- Orphan rows above the slide count are pruned by every write path; the graph's
+  "all positions committed" predicate can rely on that.
 
 ---
 
@@ -530,10 +614,23 @@ rediscover. Recorded here so they are not lost between documents.
   been a repeated source of shipped bugs; see the `tellr-code-review` skill. Affects
   workstream 4 (LangGraph core) directly — the checkpointer choice is a correctness
   issue, not a preference.
-- **Dependency resolution risk.** Production Apps builds have previously failed on
-  pip backtracking, and there is a live `mlflow` pin conflict between
-  `requirements.txt` and `pyproject.toml`. Adding an orchestration dependency needs
-  verifying against the Apps build before the core work depends on it.
+  **Narrowed by workstream 0a/0b:** the row-per-slide schema removes the write-contention
+  half of this (parallel writers now touch distinct rows, not one optimistic-locked row),
+  and §10.2 fixes the checkpointer decision — a custom saver over the existing SQLAlchemy
+  engine, because the official Postgres saver bypasses the OAuth token listener. What
+  remains is genuinely in-process cached state, which is a web-app concern rather than a
+  database one.
+- ✅ **RESOLVED (workstream 0b, PR #236) — Dependency resolution risk.** The `mlflow`
+  pin conflict between `requirements.txt` and `pyproject.toml` is reconciled (3.14.0),
+  and the langgraph 1.2.10 stack is pinned and proven to resolve on the Apps build
+  proxy. **One correction worth carrying:** the repo-root `requirements.txt` and
+  `pyproject.toml` are **not** on the Apps BUILD path — `deploy_local.py` emits a
+  requirements file containing only `databricks-tellr-app==<version>`, so the closure
+  that actually gets resolved is the one in
+  `packages/databricks-tellr-app/pyproject.toml`. A dependency change that misses that
+  file passes every local test and ships the old stack. That file also deliberately
+  leaves leaf transitives ranged so the Apps base image can satisfy them — do not
+  "tidy" it into a fully-pinned closure.
 - **Security surface of review agents.** Review agents read untrusted deck content
   and tool output, and their findings feed instructions back to the builder. The
   existing `<untrusted-data>` wrapping/injection scanning and the output safety gate
@@ -545,9 +642,18 @@ rediscover. Recorded here so they are not lost between documents.
   (RC10–RC15 and related) each encode a previously-shipped bug fix. They are a test
   checklist for the supervisor's intent handling, not merely dead code to delete.
   Affects workstream 7.
-- **Finding persistence.** Current verification results are keyed by slide content
-  hash so they survive regeneration. Drawer findings need equivalent behaviour, plus
-  a defined lifecycle across edits and save-point restores.
+- ✅ **MECHANISM DELIVERED (workstream 0a, PR #235) — Finding persistence.** Verification
+  now lives on `session_slides.verification_record`, keyed by content hash and merged
+  rather than overwritten, so a verdict survives regeneration *and* an edit-then-revert
+  finds the earlier verdict again. `restore_version` re-materialises rows and merges
+  verdicts back, so the save-point lifecycle is defined. Drawer findings should reuse this
+  field rather than inventing a parallel store. **Still open:** whether drawer findings and
+  reviewer verdicts share one record or sit side by side, and how a finding is retired once
+  fixed.
+  *Non-obvious property to preserve:* a record belongs to a **slide, not a position** — on
+  reorder the whole record travels with its slide. Writing per-position instead silently
+  attaches one slide's verdict to another (this shipped as a defect during 0a and was
+  caught only by a whole-branch review).
 - **Testing non-determinism.** A multi-agent core needs a stated approach to testing
   non-deterministic flows, distinct from the eval harness (which measures quality,
   not correctness).
