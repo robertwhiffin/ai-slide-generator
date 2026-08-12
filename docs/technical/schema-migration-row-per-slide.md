@@ -45,10 +45,33 @@ Before starting:
 
 | Phase | Day | What happens |
 |-------|-----|--------------|
-| Deploy code | 0 | `init_db()` adds new schema; app starts dual-writing rows |
-| Backfill | 0 | Script migrates existing decks that have no rows yet |
+| Deploy code | 0 | `init_db()` adds new schema; **startup migrates existing decks**; app dual-writes rows |
 | Verification window | 0–14 | Monitor exports, restore, and slide operations |
 | Cutover | 14+ | Operator drops `deck_json` / `verification_map`; removes dual-write code |
+
+**The data backfill is automatic.** `backfill_unmigrated_decks()` runs in the
+FastAPI lifespan right after `init_db()`, alongside the existing
+`migrate_profiles()` call, so deploying the code migrates historical decks by
+itself. Phases 2 and 3 below are **no longer required steps** — they are kept as
+tools for targeted re-runs and for verifying what the startup pass did.
+
+Why it is automatic rather than a manual step: a hand-run backfill left every
+deployment in a split state until someone remembered the command. Reads still
+worked (`get_slide_deck` falls back to `deck_json`), but a deck *edited* in that
+window acquired rows without its verdicts, and the idempotency guard then skipped
+it permanently. Running on boot closes that window.
+
+The startup pass is guarded by a per-deck `NOT EXISTS` anti-join over
+`session_slides`, which is index-only against that table's composite primary key.
+Once every deck has rows the query returns nothing, so later boots cost one cheap
+scan of a small table — well below the OAuth token fetch and connection-pool
+setup already happening at startup. A deck whose `deck_json` cannot be parsed is
+logged and skipped rather than raised, so one bad deck cannot abort startup; it
+stays readable through the `deck_json` fallback.
+
+**Scope limit:** the startup pass finds decks with *no rows at all*. A
+*partially* backfilled deck is left to the CLI below — see "Exposure: decks
+edited between deploy and backfill".
 
 ---
 
@@ -113,7 +136,13 @@ check returns 5 rows, the Postgres path is working for your Lakebase version.
 
 ---
 
-## Phase 2 — Dry-run backfill
+## Phase 2 — Dry-run backfill (optional; startup already did this)
+
+> Not a required step. The deploy in Phase 1 already backfilled every deck that
+> had no rows. Use this to inspect what remains — expect "0 inserted" across the
+> board on a healthy deploy. A non-zero count here means some decks were skipped
+> by the startup pass (most likely partially-backfilled decks), which is worth
+> understanding before you apply anything.
 
 From the repo root with the production database reachable:
 
@@ -163,7 +192,12 @@ If the key is not found it exits with code 1 and prints to stderr.
 
 ---
 
-## Phase 3 — Apply backfill
+## Phase 3 — Apply backfill (optional; only if Phase 2 found work)
+
+> Not a required step on a normal deploy. Run it only when the dry-run above
+> reports decks still needing migration — e.g. a partially-backfilled deck, or a
+> deck whose `deck_json` failed to parse during the startup pass (those are
+> logged with their session pk at boot).
 
 ```bash
 python -m scripts.backfill_session_slides --yes
@@ -325,21 +359,29 @@ So there are two real limits:
 
 ### Exposure: decks edited between deploy and backfill
 
-Deploy and backfill are not atomic, and there is a window between them. If a user
-edits a deck in that window, the dual-write creates `session_slides` rows for it
-with `verification_record = NULL`; the read path then prefers rows, so any
-verdicts that deck had already earned in `verification_map` become unreachable.
-`get_verification_map` returns `{}` for it, and the next save point snapshots an
-empty map.
+**Largely closed by the automatic startup backfill**, but not eliminated. Read
+this before assuming it cannot happen.
 
-The backfill **cannot repair this**: its idempotency guard skips any position
-that already has a row (`slides_skipped`), so it will not fill in the missing
-verdicts.
+The mechanism: if a deck acquires `session_slides` rows *before* its verdicts are
+migrated, the dual-write creates those rows with `verification_record = NULL`. The
+read path prefers rows, so verdicts the deck had already earned in
+`verification_map` become unreachable — `get_verification_map` returns `{}` for it
+and the next save point snapshots an empty map. The backfill **cannot repair
+this**: its idempotency guard skips any position that already has a row
+(`slides_skipped`).
 
-This is accepted deliberately — there is no verdict-repair process and none is
-wanted. The window is minutes, and it costs the affected user a re-verify, not
-any slide content. **Mitigation: run Phase 3 promptly after Phase 1.** The longer
-the gap, the more decks can fall into it.
+Since `backfill_unmigrated_decks()` now runs during startup — before the app
+serves any traffic — a deck can no longer be edited "between deploy and backfill"
+on a normal boot. The remaining ways in are narrow:
+
+- A deck whose `deck_json` failed to parse during the startup pass (logged with
+  its session pk) is skipped, then acquires rows on its next edit.
+- A deck already left partially backfilled by an earlier hand-run of the CLI.
+
+Accepted deliberately: there is no verdict-repair process and none is wanted. The
+cost is a re-verify for the affected deck, never slide content. **If you see
+parse failures in the startup log, investigate those decks before users edit
+them.**
 
 ### Post-cutover (destructive)
 
