@@ -40,6 +40,7 @@ from src.core.database import (
     stop_token_refresh,
 )
 from src.core.migrate_profiles_to_agent_config import migrate_profiles, backfill_sessions
+from src.core.backfill_session_slides_startup import backfill_unmigrated_decks
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,16 @@ async def lifespan(app: FastAPI):
             backfilled = backfill_sessions(get_session_local())
             if backfilled:
                 logger.info(f"Backfilled {backfilled} sessions with agent_config")
+
+            # Row-per-slide: migrate historical deck_json blobs into session_slides
+            # rows. Guarded by a NOT EXISTS anti-join, so this is a no-op scan once
+            # every deck has rows. Runs here rather than as a manual script so an
+            # upgrade cannot leave decks half-migrated (a deck edited before a
+            # hand-run backfill acquires rows without its verdicts, and the
+            # idempotency guard then skips it permanently).
+            slide_decks = backfill_unmigrated_decks(get_session_local())
+            if slide_decks:
+                logger.info(f"Backfilled {slide_decks} deck(s) into session_slides rows")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise

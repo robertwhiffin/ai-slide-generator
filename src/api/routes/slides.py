@@ -436,12 +436,12 @@ async def update_slide_verification(index: int, request: UpdateVerificationReque
         content_hash = compute_slide_hash(slide_html)
 
         if request.verification is not None:
-            # Save verification by content hash
+            # Save verification by content hash (row-level merge)
             await asyncio.to_thread(
-                session_manager.save_verification,
+                session_manager.write_slide_verification,
                 request.session_id,
-                content_hash,
-                request.verification,
+                index,
+                {content_hash: request.verification},
             )
             
             logger.info(
