@@ -15,10 +15,10 @@ dependencies = [
     "pydantic==2.12.4",
     "pydantic-settings==2.12.0",
     "databricks-langchain==0.9.0",
-    "langchain==1.0.5",
-    "langchain-core==1.0.4",
-    "langchain-community==0.4.1",
-    "langchain-text-splitters==1.0.0",
+    "langchain==1.3.14",
+    "langchain-core==1.5.3",
+    "langchain-community==0.4.2",
+    "langchain-text-splitters==1.1.2",
     "litellm==1.80.11",
     "mcp==1.27.0",
     "opentelemetry-api==1.38.0",
@@ -60,6 +60,13 @@ dependencies = [
     # `pip install databricks-tellr-app` is safe.
     # SDR-4437 MEDIUM-7 (July 2026): the 7 formerly-ranged direct deps above
     # this block are now exact-pinned too; same refresh discipline.
+    # PR2 LangGraph stack bump (August 2026): updated langchain 1.0.5→1.3.14,
+    # langchain-core 1.0.4→1.5.3, langchain-community 0.4.1→0.4.2,
+    # langchain-text-splitters 1.0.0→1.1.2, langchain-classic 1.0.0→1.0.8,
+    # langgraph 1.0.10→1.2.10, added langgraph-checkpoint==4.1.1,
+    # langgraph-prebuilt 1.0.10→1.1.0, added langgraph-sdk==0.4.2. These match
+    # the repo-root requirements.txt and pyproject.toml. MUST be re-verified via
+    # a devloop deploy on db-tellr-dev-pinfix or equivalent before PR3 ships.
     "databricks-sdk==0.120.0",
     "mlflow[databricks]==3.14.0",
     "mlflow-skinny==3.14.0",
@@ -68,9 +75,11 @@ dependencies = [
     "databricks-ai-search==0.76",
     "databricks-connect==16.1.7",
     "databricks-vectorsearch==0.75",
-    "langchain-classic==1.0.0",
-    "langgraph==1.0.10",
-    "langgraph-prebuilt==1.0.10",
+    "langchain-classic==1.0.8",
+    "langgraph==1.2.10",
+    "langgraph-checkpoint==4.1.1",
+    "langgraph-prebuilt==1.1.0",
+    "langgraph-sdk==0.4.2",
     "langsmith==0.9.5",
     "unitycatalog-ai==0.3.2",
     "unitycatalog-langchain==0.3.0",
