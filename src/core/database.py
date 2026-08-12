@@ -524,6 +524,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
+        # --- row-per-slide schema: session_slides table + deck_spec columns ---
+        _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -1036,3 +1039,68 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
     logger.info("Migration: granted CAN_MANAGE to existing deck creators")
 
     logger.info("Migration: deck permissions model migration complete")
+
+
+def _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite):
+    """Add columns for row-per-slide schema migration.
+
+    Steps (each idempotent via column-existence check):
+    1. session_slide_decks: add deck_spec_json, css, external_scripts_json,
+       head_meta_json (all nullable during dual-write period; deck_json stays)
+    2. slide_deck_versions: add deck_spec_json (snapshot of spec at save-point time)
+
+    Note: session_slides table itself is created by Base.metadata.create_all() from
+    the Task 1 ORM model (SessionSlide). This helper only handles the ALTER path for
+    columns that create_all() will never add to already-existing tables in a live DB.
+    """
+    from sqlalchemy import text
+
+    # --- session_slide_decks: add deck_spec_json, css, external_scripts_json ---
+    decks_table = "session_slide_decks"
+    try:
+        decks_cols = {c["name"] for c in inspector.get_columns(decks_table, schema=schema)}
+    except Exception:
+        decks_cols = set()
+
+    q_decks = _qual(decks_table)
+
+    if decks_cols and "deck_spec_json" not in decks_cols:
+        logger.info(f"Migration: adding deck_spec_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN deck_spec_json TEXT NULL"
+        ))
+
+    if decks_cols and "css" not in decks_cols:
+        logger.info(f"Migration: adding css column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN css TEXT NULL"
+        ))
+
+    if decks_cols and "external_scripts_json" not in decks_cols:
+        logger.info(f"Migration: adding external_scripts_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN external_scripts_json TEXT NULL"
+        ))
+
+    if decks_cols and "head_meta_json" not in decks_cols:
+        logger.info(f"Migration: adding head_meta_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN head_meta_json TEXT NULL"
+        ))
+
+    # --- slide_deck_versions: add deck_spec_json ---
+    versions_table = "slide_deck_versions"
+    try:
+        versions_cols = {c["name"] for c in inspector.get_columns(versions_table, schema=schema)}
+    except Exception:
+        versions_cols = set()
+
+    q_versions = _qual(versions_table)
+
+    if versions_cols and "deck_spec_json" not in versions_cols:
+        logger.info(f"Migration: adding deck_spec_json column to {versions_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_versions} ADD COLUMN deck_spec_json TEXT NULL"
+        ))
+
+    logger.info("Migration: row-per-slide schema migration complete")

@@ -595,7 +595,7 @@ class TestSlideEndpoints:
             "slides": [{"html": "<div>Slide</div>"}],
             "slide_count": 1
         }
-        mock_session_manager.save_verification.return_value = None
+        mock_session_manager.write_slide_verification.return_value = None
 
         # Mock compute_slide_hash
         with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash123"):
@@ -1045,7 +1045,7 @@ class TestVerificationEndpoints:
             }
         ]
         mock_session_manager.get_experiment_id.return_value = "exp-123"
-        mock_session_manager.save_verification.return_value = None
+        mock_session_manager.write_slide_verification.return_value = None
 
         mock_settings = MagicMock()
         mock_settings.llm_judge_backend = "mlflow"
@@ -1121,7 +1121,7 @@ class TestVerificationEndpoints:
             "slide_count": 1
         }
         mock_session_manager.get_messages.return_value = []  # No tool results
-        mock_session_manager.save_verification.return_value = None
+        mock_session_manager.write_slide_verification.return_value = None
 
         with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash123"):
             response = client.post("/api/verification/0", json={
@@ -1150,7 +1150,7 @@ class TestVerificationEndpoints:
                 "content": "No images found matching your criteria.",
             }
         ]
-        mock_session_manager.save_verification.return_value = None
+        mock_session_manager.write_slide_verification.return_value = None
 
         with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash456"):
             with patch("src.api.routes.verification.evaluate_with_judge") as mock_eval:
