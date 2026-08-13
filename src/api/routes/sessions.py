@@ -101,7 +101,7 @@ async def create_session(request: CreateSessionRequest = None):
         logger.error(f"Failed to create session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to create session: {str(e)}",
+            detail="Failed to create session",
         ) from e
 
 
@@ -149,7 +149,7 @@ async def list_sessions(
         logger.error(f"Failed to list sessions: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list sessions: {str(e)}",
+            detail="Failed to list sessions",
         ) from e
 
 
@@ -235,7 +235,7 @@ async def list_shared_presentations(
         logger.error(f"Failed to list shared presentations: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list shared presentations: {str(e)}",
+            detail="Failed to list shared presentations",
         ) from e
 
 
@@ -356,7 +356,7 @@ async def get_or_create_contributor_session(
         logger.error(f"Failed to create contributor session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to create contributor session: {str(e)}",
+            detail="Failed to create contributor session",
         ) from e
 
 
@@ -421,7 +421,7 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
         logger.error(f"Failed to get session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get session: {str(e)}",
+            detail="Failed to get session",
         ) from e
 
 
@@ -478,7 +478,7 @@ async def update_session(
         logger.error(f"Failed to update session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to update session: {str(e)}",
+            detail="Failed to update session",
         ) from e
 
 
@@ -543,7 +543,7 @@ async def duplicate_session(
         logger.error(f"Failed to duplicate session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to duplicate session: {str(e)}",
+            detail="Failed to duplicate session",
         ) from e
 
 
@@ -583,7 +583,7 @@ async def delete_session(session_id: str, db: Session = Depends(get_db)):
         logger.error(f"Failed to delete session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to delete session: {str(e)}",
+            detail="Failed to delete session",
         ) from e
 
 
@@ -637,7 +637,7 @@ async def get_session_messages(
         logger.error(f"Failed to get session messages: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get messages: {str(e)}",
+            detail="Failed to get messages",
         ) from e
 
 
@@ -693,7 +693,7 @@ async def add_message(session_id: str, request: AddMessageRequest):
         logger.error(f"Failed to add message: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to add message: {str(e)}",
+            detail="Failed to add message",
         ) from e
 
 
@@ -732,7 +732,7 @@ async def get_session_slides(session_id: str):
         logger.error(f"Failed to get session slides: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get slides: {str(e)}",
+            detail="Failed to get slides",
         ) from e
 
 
@@ -755,7 +755,7 @@ async def cleanup_expired_sessions():
         logger.error(f"Failed to cleanup sessions: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Cleanup failed: {str(e)}",
+            detail="Cleanup failed",
         ) from e
 
 
@@ -837,7 +837,7 @@ async def export_session(session_id: str):
         logger.error(f"Failed to export session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Export failed: {str(e)}",
+            detail="Export failed",
         ) from e
 
 
@@ -870,7 +870,7 @@ async def acquire_editing_lock(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
         logger.error(f"Failed to acquire editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/{session_id}/lock")
@@ -895,7 +895,7 @@ async def release_editing_lock(session_id: str):
         return {"status": "released"}
     except Exception as e:
         logger.error(f"Failed to release editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/{session_id}/lock")
@@ -914,7 +914,7 @@ async def get_editing_lock_status(session_id: str):
         )
     except Exception as e:
         logger.error(f"Failed to check editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.put("/{session_id}/lock/heartbeat")
@@ -939,5 +939,5 @@ async def heartbeat_editing_lock(session_id: str):
         return {"renewed": ok}
     except Exception as e:
         logger.error(f"Failed to heartbeat editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
