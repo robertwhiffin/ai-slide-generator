@@ -863,7 +863,7 @@ export const PREPROCESS_SOURCE = `
   function emitInlineBackgrounds() {
     let count = 0;
     const SELECTOR = 'span, mark, kbd';
-    document.querySelectorAll(SELECTOR).forEach((el) => {
+    queryAll(SELECTOR).forEach((el) => {
       const cs = window.getComputedStyle(el);
       const bg = cs.backgroundColor;
       if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') return;

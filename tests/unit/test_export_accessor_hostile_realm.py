@@ -49,7 +49,7 @@ by exactly one collection read, so reverting one site drops exactly one count.
     canvasImgs             <canvas>                                     890
     svgImgsRasterized      <img> with an svg data URI                   955
     inlineSvgsRasterized   inline <svg>                                 1012
-    inlineBgs              inline element with a background             866  FENCED
+    inlineBgs              inline element with a background             866
 
 Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.
@@ -75,9 +75,10 @@ from tests.unit.test_export_svg_raster import structural_manifest
 # The benign document every fixture below is a copy of, plus one <script>.
 BENIGN = "every_collection_pass"
 
-# The one sub-pass still driven by a raw accessor, because it lives inside
-# emitInlineBackgrounds, which this change is instructed to leave byte-identical.
-FENCED_SUB_PASS = "inlineBgs"
+# The sub-pass inside emitInlineBackgrounds. It was the last site reading through
+# the realm's own prototype, so it is stated on its own below as well as in the
+# aggregate parity claim, rather than only in the aggregate.
+INLINE_BG_SUB_PASS = "inlineBgs"
 
 # Fixtures whose vector is CLOSED: the pass returns and reads the real document.
 CLOSED_FIXTURES = ("hostile_foreach_silent", "hostile_selector_decoy")
@@ -92,25 +93,6 @@ POISONED_INTERFACES = {
     "hostile_selector_decoy": ("Document",),
     "hostile_selector_all_decoy": ("Document", "Element"),
 }
-
-# The residual is NOT a smaller version of the same defect, which is why these
-# carry the whole failure mode rather than a weakened one. A poisoned forEach
-# ignores its receiver, so the raw site at preprocess.mjs:866 spins on ANY
-# document — an empty 'span, mark, kbd' NodeList still calls it. The hang and the
-# raise are therefore open for EVERY deck while that line stands.
-#
-# strict, so that closing it fails this suite instead of quietly leaving a stale
-# marker behind: the marker is removed by the change that hardens line 866.
-fenced_by_emit_inline_backgrounds = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "preprocess.mjs:866 consumes document.querySelectorAll(SELECTOR) with the "
-        "realm's NodeList.prototype.forEach. That line is inside "
-        "emitInlineBackgrounds, which this change is instructed to leave "
-        "byte-identical, so the site is disclosed rather than closed. Remove this "
-        "marker with that fix."
-    ),
-)
 
 
 @requires_huashu_sidecar
@@ -183,17 +165,14 @@ class TestTheClosedSitesReadTheRealDocument:
     def test_every_closed_sub_pass_matches_the_benign_twin(self, fixture: str) -> None:
         """Same elements, per sub-pass, measured as the counts the pass returns.
 
-        Probed in ONE run so both documents share a browser. The fenced sub-pass
-        is excluded here and asserted on its own below, so that this expectation
-        states exactly what the change closed and nothing it did not.
+        Probed in ONE run so both documents share a browser. EVERY sub-pass is
+        compared, ``inlineBgs`` included: the exclusion that used to sit here
+        existed only because ``emitInlineBackgrounds`` was fenced, and closing
+        that site is what removed the reason for it.
         """
         probed = _probe_bounded(fixture, BENIGN)
-        hostile = dict(probed[fixture]["counts"])
-        benign = dict(probed[BENIGN]["counts"])
-        hostile.pop(FENCED_SUB_PASS)
-        benign.pop(FENCED_SUB_PASS)
 
-        assert hostile == benign
+        assert probed[fixture]["counts"] == probed[BENIGN]["counts"]
 
     def test_the_ground_is_the_documents_own_and_not_the_decoy(self) -> None:
         """The positive half of the locator claim.
@@ -220,10 +199,12 @@ class TestTheClosedSitesReadTheRealDocument:
         ``NodeList.prototype.length`` getter refuses with *Illegal invocation*
         when handed a foreign receiver.
 
-        Asserted as the ABSENCE of that specific failure rather than as a clean
-        pass, because the fenced site still raises further down the same run: the
-        claim here is that the locator's collection read is no longer what breaks,
-        which is exactly what reverting that one site would undo.
+        The absence of that SPECIFIC failure is asserted first, because it is the
+        attributable half: it is exactly what reverting the locator's collection
+        read would bring back. The clean pass is then asserted as well — while
+        ``emitInlineBackgrounds`` was fenced this fixture still raised further down
+        the same run, so a clean pass could not be claimed; closing that site is
+        what makes the stronger statement true.
         """
         result = _probe_bounded("hostile_wrapper_selector_all")[
             "hostile_wrapper_selector_all"
@@ -232,6 +213,9 @@ class TestTheClosedSitesReadTheRealDocument:
         assert "Illegal invocation" not in (result["error"] or ""), (
             "the wrapper collection is still read through the realm's own "
             f"querySelectorAll: {result['error']!r}"
+        )
+        assert result["error"] is None, (
+            f"the pass raised {result['error']!r} on the wrapper-shaped document"
         )
 
     def test_the_decoy_deck_exports_as_the_benign_deck(
@@ -249,15 +233,21 @@ class TestTheClosedSitesReadTheRealDocument:
 
 
 @requires_huashu_sidecar
-class TestTheFencedSiteIsTheOnlyResidual:
-    """What the fence costs, stated as expectations rather than prose.
+class TestTheLastSiteIsClosed:
+    """``emitInlineBackgrounds``, which was the one site left reading raw.
+
+    It was fenced when the sibling sites were hardened, and these three
+    expectations were the disclosure of what that cost: a poisoned ``forEach``
+    ignores its receiver, so the raw site spun on ANY document — an empty
+    ``'span, mark, kbd'`` NodeList still called it — leaving the hang and the
+    raise open for EVERY deck. The site now reads through ``queryAll``, so they
+    are ordinary passing expectations.
 
     Asserted through the bounded probe rather than a real export: a hang costs
-    the probe its 5s bound instead of the sidecar's 180s timeout, so disclosing
-    the residual does not make the suite expensive.
+    the probe its 5s bound instead of the sidecar's 180s timeout, so a
+    regression here stays cheap to catch.
     """
 
-    @fenced_by_emit_inline_backgrounds
     def test_an_endless_foreach_does_not_hang_the_pass(self) -> None:
         result = _probe_bounded("hostile_foreach_endless")["hostile_foreach_endless"]
 
@@ -267,7 +257,6 @@ class TestTheFencedSiteIsTheOnlyResidual:
             "forEach is still consumed somewhere in the pass"
         )
 
-    @fenced_by_emit_inline_backgrounds
     def test_a_decoy_query_selector_all_does_not_raise(self) -> None:
         result = _probe_bounded("hostile_selector_all_decoy")[
             "hostile_selector_all_decoy"
@@ -279,16 +268,16 @@ class TestTheFencedSiteIsTheOnlyResidual:
             "through the realm's own prototype somewhere in the pass"
         )
 
-    @fenced_by_emit_inline_backgrounds
     def test_a_silent_foreach_costs_the_deck_no_content_at_all(self) -> None:
-        """The fenced sub-pass, excluded from the parity claim above.
+        """This sub-pass on its own, named rather than only inside the aggregate.
 
-        Separate from that claim so neither is weakened: that one states what the
-        change closed, this one states what the fence left open.
+        The parity claim above now covers ``inlineBgs`` too, so this overlaps it
+        deliberately: a no-op ``forEach`` is the failure mode that reports SUCCESS,
+        and the count it silently zeroes is worth naming in a test of its own.
         """
         probed = _probe_bounded("hostile_foreach_silent", BENIGN)
 
         assert (
-            probed["hostile_foreach_silent"]["counts"][FENCED_SUB_PASS]
-            == probed[BENIGN]["counts"][FENCED_SUB_PASS]
+            probed["hostile_foreach_silent"]["counts"][INLINE_BG_SUB_PASS]
+            == probed[BENIGN]["counts"][INLINE_BG_SUB_PASS]
         )
