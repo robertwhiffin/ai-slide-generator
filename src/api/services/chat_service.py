@@ -272,7 +272,7 @@ class ChatService:
         session_id: str,
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
-        image_ids: Optional[List[int]] = None,
+        image_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Send a message to the agent and get response.
 
@@ -748,7 +748,7 @@ class ChatService:
         message: str,
         slide_context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
-        image_ids: Optional[List[int]] = None,
+        image_ids: Optional[List[str]] = None,
         is_first_message_override: Optional[bool] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
@@ -1900,27 +1900,30 @@ class ChatService:
         
         return ([], None)
 
-    def _inject_image_context(self, message: str, image_ids: List[int]) -> str:
-        """Append image metadata to user message so the agent knows about attached images."""
+    def _inject_image_context(self, message: str, image_ids: List[str]) -> str:
+        """Append image metadata to user message so the agent knows about attached images.
+
+        ``image_ids`` are opaque image tokens (SDR-4437 F-TM-7), not int PKs.
+        """
         from src.core.database import get_db_session
         from src.services import image_service
 
         image_descriptions = []
         with get_db_session() as db:
-            for img_id in image_ids:
+            for img_token in image_ids:
                 try:
                     img = db.query(image_service.ImageAsset).filter(
-                        image_service.ImageAsset.id == img_id,
+                        image_service.ImageAsset.token == img_token,
                         image_service.ImageAsset.is_active == True,
                     ).first()
                     if img:
                         image_descriptions.append(
-                            f'- Image ID {img.id}: "{img.original_filename}" '
+                            f'- Image ID {img.token}: "{img.original_filename}" '
                             f'({img.description or "no description"}). '
-                            f'Use: <img src="{{{{image:{img.id}}}}}" alt="{img.description or img.original_filename}" />'
+                            f'Use: <img src="{{{{image:{img.token}}}}}" alt="{img.description or img.original_filename}" />'
                         )
                 except Exception as e:
-                    logger.warning(f"Failed to load image {img_id} for context injection: {e}")
+                    logger.warning(f"Failed to load image {img_token} for context injection: {e}")
 
         if not image_descriptions:
             return message

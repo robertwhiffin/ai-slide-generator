@@ -1,4 +1,5 @@
 """Image upload and management API endpoints."""
+import base64
 import logging
 import os
 from typing import List, Optional
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api/images", tags=["images"])
 
 class ImageResponse(BaseModel):
     """Response schema for image metadata."""
-    id: int
+    id: str  # Opaque token (SDR-4437 F-TM-7) — the internal int PK is never exposed.
     filename: str
     original_filename: str
     mime_type: str
@@ -46,7 +47,7 @@ class ImageListResponse(BaseModel):
 
 class ImageDataResponse(BaseModel):
     """Response containing image base64 data."""
-    id: int
+    id: str  # Opaque token (SDR-4437 F-TM-7).
     mime_type: str
     base64_data: str
     data_uri: str  # Ready-to-use: "data:image/png;base64,..."
@@ -80,7 +81,7 @@ def _get_current_user() -> str:
 
 def _image_to_response(img: ImageAsset) -> ImageResponse:
     return ImageResponse(
-        id=img.id,
+        id=img.token,  # Expose the opaque token, never the enumerable int PK.
         filename=img.filename,
         original_filename=img.original_filename,
         mime_type=img.mime_type,
@@ -167,58 +168,75 @@ def list_images(
         )
 
 
-@router.get("/{image_id}", response_model=ImageResponse)
-def get_image(image_id: int, db: Session = Depends(get_db)):
-    """Get image metadata by ID."""
+def _deny_ephemeral_cross_user(image: ImageAsset) -> None:
+    """Defense-in-depth (SDR-4437 F-TM-7): chat-pasted ("ephemeral") images are
+    private to their uploader. Library images stay open-read. Raise 404 (not 403)
+    so a wrong caller cannot even confirm the image exists.
+    """
+    if image.category == "ephemeral" and image.uploaded_by != _get_current_user():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+
+
+@router.get("/{token}", response_model=ImageResponse)
+def get_image(token: str, db: Session = Depends(get_db)):
+    """Get image metadata by opaque token."""
     try:
         image = db.query(ImageAsset).filter(
-            ImageAsset.id == image_id,
+            ImageAsset.token == token,
             ImageAsset.is_active == True,
         ).first()
         if not image:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+        _deny_ephemeral_cross_user(image)
         return _image_to_response(image)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting image {image_id}: {e}", exc_info=True)
+        logger.error(f"Error getting image: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get image",
         )
 
 
-@router.get("/{image_id}/data", response_model=ImageDataResponse)
-def get_image_data(image_id: int, db: Session = Depends(get_db)):
-    """Get full image as base64 data (for embedding in slides)."""
+@router.get("/{token}/data", response_model=ImageDataResponse)
+def get_image_data(token: str, db: Session = Depends(get_db)):
+    """Get full image as base64 data (for embedding in slides), keyed by token."""
     try:
-        b64_data, mime_type = image_service.get_image_base64(db, image_id)
+        image = db.query(ImageAsset).filter(
+            ImageAsset.token == token,
+            ImageAsset.is_active == True,
+        ).first()
+        if not image:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+        _deny_ephemeral_cross_user(image)
+        b64_data = base64.b64encode(image.image_data).decode("utf-8")
         return ImageDataResponse(
-            id=image_id,
-            mime_type=mime_type,
+            id=image.token,
+            mime_type=image.mime_type,
             base64_data=b64_data,
-            data_uri=f"data:{mime_type};base64,{b64_data}",
+            data_uri=f"data:{image.mime_type};base64,{b64_data}",
         )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error getting image data {image_id}: {e}", exc_info=True)
+        logger.error(f"Error getting image data: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get image data",
         )
 
 
-@router.put("/{image_id}", response_model=ImageResponse)
+@router.put("/{token}", response_model=ImageResponse)
 def update_image(
-    image_id: int,
+    token: str,
     request: ImageUpdateRequest,
     db: Session = Depends(get_db),
 ):
     """Update image metadata (tags, description, category)."""
     try:
         image = db.query(ImageAsset).filter(
-            ImageAsset.id == image_id,
+            ImageAsset.token == token,
             ImageAsset.is_active == True,
         ).first()
         if not image:
@@ -246,20 +264,20 @@ def update_image(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"Error updating image {image_id}: {e}", exc_info=True)
+        logger.error(f"Error updating image: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update image",
         )
 
 
-@router.delete("/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_image(image_id: int, db: Session = Depends(get_db)):
+@router.delete("/{token}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_image(token: str, db: Session = Depends(get_db)):
     """Soft-delete an image."""
     try:
         user = _get_current_user()
         image = db.query(ImageAsset).filter(
-            ImageAsset.id == image_id,
+            ImageAsset.token == token,
             ImageAsset.is_active == True,  # noqa: E712
         ).first()
         if not image:
@@ -270,14 +288,14 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have permission to modify this image",
             )
-        image_service.delete_image(db, image_id, user)
+        image_service.delete_image(db, token, user)
     except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         db.rollback()
-        logger.error(f"Error deleting image {image_id}: {e}", exc_info=True)
+        logger.error(f"Error deleting image: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete image",

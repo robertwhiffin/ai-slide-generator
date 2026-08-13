@@ -108,7 +108,7 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
     }
   };
 
-  const handleDelete = async (imageId: number) => {
+  const handleDelete = async (imageId: string) => {
     try {
       await api.deleteImage(imageId);
       setImages(prev => prev.filter(img => img.id !== imageId));

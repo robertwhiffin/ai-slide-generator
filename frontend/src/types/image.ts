@@ -1,5 +1,5 @@
 export interface ImageAsset {
-  id: number;
+  id: string; // Opaque token (SDR-4437 F-TM-7) — never the internal int PK.
   filename: string;
   original_filename: string;
   mime_type: string;
@@ -20,7 +20,7 @@ export interface ImageListResponse {
 }
 
 export interface ImageDataResponse {
-  id: number;
+  id: string; // Opaque token (SDR-4437 F-TM-7).
   mime_type: string;
   base64_data: string;
   data_uri: string;

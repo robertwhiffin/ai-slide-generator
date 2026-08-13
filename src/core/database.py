@@ -524,6 +524,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
+        # --- image_assets.token: unguessable external id + backfill (SDR-4437 F-TM-7) ---
+        _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
@@ -600,6 +603,46 @@ def _ensure_llm_judge_backend_default(
         logger.debug(
             "Migration: skip llm_judge_backend server default alter: %s", ex
         )
+
+
+def _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add the unguessable ``token`` column to image_assets and backfill (SDR-4437 F-TM-7).
+
+    The int PK is enumerable, so image reads now key on an opaque token. Fresh
+    installs get the column via create_all(); existing tables need this ALTER +
+    per-row backfill. Idempotent: gated on the column's absence.
+    """
+    import secrets
+
+    from sqlalchemy import text
+
+    table = "image_assets"
+    try:
+        cols = {c["name"] for c in inspector.get_columns(table, schema=schema)}
+    except Exception:
+        return
+    if not cols or "token" in cols:
+        return
+
+    q = _qual(table)
+    logger.info(f"Migration: adding token column to {table} (SDR-4437 F-TM-7)")
+    # Add nullable first so the ALTER succeeds on a populated table.
+    conn.execute(text(f"ALTER TABLE {q} ADD COLUMN token VARCHAR(64)"))
+
+    # Backfill every existing row with a distinct unguessable token.
+    row_ids = [r[0] for r in conn.execute(text(f"SELECT id FROM {q} WHERE token IS NULL")).fetchall()]
+    for row_id in row_ids:
+        conn.execute(
+            text(f"UPDATE {q} SET token = :tok WHERE id = :id"),
+            {"tok": secrets.token_urlsafe(32), "id": row_id},
+        )
+
+    # Enforce uniqueness (and non-null on PostgreSQL, now that every row has a token).
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS ix_image_assets_token ON {q} (token)"
+    ))
+    if not is_sqlite:
+        conn.execute(text(f"ALTER TABLE {q} ALTER COLUMN token SET NOT NULL"))
 
 
 def _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite) -> None:
