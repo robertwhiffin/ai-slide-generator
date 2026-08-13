@@ -212,50 +212,8 @@ class TestGetSessionSlidesPermission:
             assert "session_id" in result
 
 
-# ===========================================================================
-# 2. export_session — requires CAN_VIEW
-# ===========================================================================
-
-
-class TestExportSessionPermission:
-    """export_session must enforce require_view_deck."""
-
-    def test_stranger_blocked(self, db, owner_session):
-        from src.api.routes.sessions import export_session
-        from fastapi import HTTPException
-
-        mock_mgr = MagicMock()
-        mock_mgr.get_session.return_value = _make_session_info(owner_session)
-
-        with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
-             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
-             patch("src.api.routes.sessions.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes._authz.get_permission_context", return_value=_stranger_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
-             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)):
-            with pytest.raises(HTTPException) as exc_info:
-                _run(export_session(owner_session.session_id))
-            assert exc_info.value.status_code == 403
-
-    def test_viewer_allowed(self, db, owner_session, deck_contributor_view):
-        from src.api.routes.sessions import export_session
-
-        mock_mgr = MagicMock()
-        mock_mgr.get_session.return_value = _make_session_info(owner_session)
-        mock_mgr.get_messages.return_value = []
-        mock_mgr.get_slide_deck.return_value = None
-
-        with patch("src.api.routes.sessions.get_session_manager", return_value=mock_mgr), \
-             patch("src.api.routes._authz.get_session_manager", return_value=mock_mgr), \
-             patch("src.api.routes.sessions.get_permission_context", return_value=_viewer_ctx()), \
-             patch("src.api.routes._authz.get_permission_context", return_value=_viewer_ctx()), \
-             patch("src.api.routes.sessions.get_db_session", _fake_db_session(db)), \
-             patch("src.api.routes._authz.get_db_session", _fake_db_session(db)), \
-             patch("src.api.routes.sessions.Path"):
-            import builtins
-            with patch.object(builtins, "open", MagicMock()):
-                result = _run(export_session(owner_session.session_id))
-            assert result["status"] == "exported"
+# (export_session permission tests removed — the endpoint was deleted in
+#  SDR-4437 F-CR-10 as unused dead code.)
 
 
 # ===========================================================================
