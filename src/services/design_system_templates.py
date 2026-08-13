@@ -606,9 +606,27 @@ def _entry_path_candidates(entry: dict) -> list[str]:
     return out
 
 
+#: Basenames a template folder's screenshot ships under, with or without a leading
+#: dot and with or without an extension: the documented ``preview.png`` and the
+#: ``.thumbnail`` a real export actually writes. Matching only ``preview*`` left
+#: every real bundle's ``thumbnail_url`` NULL even once the importer stored the
+#: bytes — the importer and this lookup are two separate gates on the same file.
+_THUMBNAIL_BASENAME_PREFIXES = ("preview", "thumbnail")
+
+
+def _is_thumbnail_basename(basename: str) -> bool:
+    return basename.lstrip(".").startswith(_THUMBNAIL_BASENAME_PREFIXES)
+
+
 def _find_thumbnail_asset_id(files: list[Any], template_dir: str) -> Optional[int]:
-    """The template folder's ``preview*`` screenshot: the smallest-path image
-    reference row under ``template_dir`` whose basename starts with ``preview``."""
+    """The template folder's screenshot: the smallest-path image reference row
+    under ``template_dir`` whose basename names a preview or a thumbnail.
+
+    Smallest path is the tie-break when a folder ships more than one, so the choice
+    is deterministic. The ``image/*`` requirement is what keeps a non-image file
+    named ``thumbnail`` out: the importer only records a verified, sniffed media
+    type on these rows.
+    """
     previews: list[tuple[str, int]] = []
     for ds_file in files:
         asset_id = getattr(ds_file, "asset_id", None)
@@ -619,7 +637,7 @@ def _find_thumbnail_asset_id(files: list[Any], template_dir: str) -> Optional[in
             continue
         basename = path.rsplit("/", 1)[-1].lower()
         mime = (getattr(ds_file, "mime", "") or "").lower()
-        if basename.startswith("preview") and mime.startswith("image/"):
+        if _is_thumbnail_basename(basename) and mime.startswith("image/"):
             previews.append((path, asset_id))
     return min(previews)[1] if previews else None
 

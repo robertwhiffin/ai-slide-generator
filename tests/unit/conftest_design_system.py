@@ -20,6 +20,31 @@ def png_bytes(width: int = 8, height: int = 8, color=(18, 52, 86)) -> bytes:
     return buf.getvalue()
 
 
+def webp_bytes(width: int = 8, height: int = 8, color=(18, 52, 86)) -> bytes:
+    """A tiny valid WebP — the format a real export's ``.thumbnail`` files carry.
+
+    Those files ship with NO extension, so their type is only knowable from the
+    ``RIFF....WEBP`` magic bytes these carry.
+    """
+    buf = io.BytesIO()
+    PILImage.new("RGB", (width, height), color=color).save(buf, format="WEBP")
+    return buf.getvalue()
+
+
+def gif_bytes(width: int = 8, height: int = 8, color=(18, 52, 86)) -> bytes:
+    """A tiny valid GIF (``GIF89a`` magic)."""
+    buf = io.BytesIO()
+    PILImage.new("RGB", (width, height), color=color).save(buf, format="GIF")
+    return buf.getvalue()
+
+
+def jpeg_bytes(width: int = 8, height: int = 8, color=(18, 52, 86)) -> bytes:
+    """A tiny valid JPEG (``\\xff\\xd8\\xff`` magic)."""
+    buf = io.BytesIO()
+    PILImage.new("RGB", (width, height), color=color).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 # A minimal, syntactically valid SVG logo — placeholder art, not a real brand.
 SVG_LOGO = (
     b'<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">'
@@ -195,6 +220,59 @@ def templated_bundle_files() -> dict:
         "templates/corporate/preview.png": template_preview_png(),
         "templates/corporate/ds-base.js": b"// synthetic - not retained",
     }
+
+
+# ---------------------------------------------------------------------------
+# Real-export shape: one DOT-PREFIXED, EXTENSION-LESS `.thumbnail` per template
+# ---------------------------------------------------------------------------
+
+#: The template folders a real Claude-Design export ships, each carrying a
+#: ``templates/<slug>/.thumbnail`` screenshot: dot-prefixed, named ``thumbnail``
+#: (not ``preview``), and with NO file extension. Names are generic layout
+#: archetypes, not brand content.
+DOT_THUMBNAIL_SLUGS = (
+    "corporate",
+    "executive-events",
+    "reference-architecture",
+    "strategy-consulting",
+)
+
+
+def dot_thumbnail_manifest() -> dict:
+    """A manifest declaring one template per :data:`DOT_THUMBNAIL_SLUGS` folder."""
+    manifest = default_manifest()
+    manifest["name"] = "Acme Dot Thumbnail DS"
+    manifest["templates"] = [
+        {
+            "name": f"Acme {slug}",
+            "description": f"Synthetic {slug} layout.",
+            "folder": f"templates/{slug}",
+            "entryPath": f"templates/{slug}/index.html",
+        }
+        for slug in DOT_THUMBNAIL_SLUGS
+    ]
+    return manifest
+
+
+def dot_thumbnail_bundle_files() -> dict:
+    """Bundle files matching the real export: every template folder carries an
+    ``index.html`` plus an extension-less, dot-prefixed WebP ``.thumbnail``.
+
+    Each thumbnail gets distinct dimensions so a test can prove the rows are not
+    all the same asset.
+    """
+    files = {
+        "fonts/acme-sans.woff2": b"OTTO synthetic-font-bytes",
+        "assets/logo.svg": SVG_LOGO,
+        "assets/backgrounds/hero-bg.png": png_bytes(16, 16),
+        "README.md": SYNTHETIC_README,
+        "SKILL.md": SYNTHETIC_SKILL,
+    }
+    for index, slug in enumerate(DOT_THUMBNAIL_SLUGS):
+        files[f"templates/{slug}/index.html"] = TEMPLATED_TEMPLATE_HTML
+        files[f"templates/{slug}/.thumbnail"] = webp_bytes(10 + index, 6 + index)
+        files[f"templates/{slug}/ds-base.js"] = b"// synthetic - not retained"
+    return files
 
 
 def make_declared_size_bundle_zip(

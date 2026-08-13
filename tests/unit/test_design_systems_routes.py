@@ -379,6 +379,79 @@ class TestTemplateEndpoints:
         assert resp.status_code == 404
 
 
+class TestDotPrefixedThumbnailEndToEnd:
+    """A real export ships ``templates/<slug>/.thumbnail`` — dot-prefixed, named
+    ``thumbnail``, no extension. The picker must get a URL per template and that
+    URL must serve the stored bytes."""
+
+    def _import_dot_thumbnail(self, client):
+        from tests.unit.conftest_design_system import (
+            dot_thumbnail_bundle_files,
+            dot_thumbnail_manifest,
+        )
+
+        resp = _import(
+            client,
+            bundle_kwargs={
+                "manifest": dot_thumbnail_manifest(),
+                "files": dot_thumbnail_bundle_files(),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()
+
+    def test_every_template_lists_a_thumbnail_url(self, client):
+        from tests.unit.conftest_design_system import DOT_THUMBNAIL_SLUGS
+
+        body = self._import_dot_thumbnail(client)
+        data = client.get(f"{BASE}/{body['id']}/templates").json()
+        assert data["total"] == len(DOT_THUMBNAIL_SLUGS)
+        missing = [t["entry_path"] for t in data["templates"] if not t["thumbnail_url"]]
+        assert missing == [], f"templates with no thumbnail_url: {missing}"
+
+    def test_each_thumbnail_url_serves_the_stored_webp_bytes(self, client):
+        from tests.unit.conftest_design_system import DOT_THUMBNAIL_SLUGS
+
+        body = self._import_dot_thumbnail(client)
+        templates = client.get(f"{BASE}/{body['id']}/templates").json()["templates"]
+        served = []
+        for template in templates:
+            resp = client.get(template["thumbnail_url"])
+            assert resp.status_code == 200, template["entry_path"]
+            # Sniffed type, served inline (webp is raster-safe), nosniff header.
+            assert resp.headers["content-type"].startswith("image/webp")
+            assert resp.headers.get("x-content-type-options") == "nosniff"
+            assert "content-disposition" not in resp.headers
+            assert resp.content.startswith(b"RIFF")
+            assert resp.content[8:12] == b"WEBP"
+            served.append(resp.content)
+        assert len(served) == len(DOT_THUMBNAIL_SLUGS)
+        # One distinct screenshot per template folder, not the same blob reused.
+        assert len(set(served)) == len(DOT_THUMBNAIL_SLUGS)
+
+    def test_thumbnail_404_across_design_systems(self, client):
+        from tests.unit.conftest_design_system import (
+            dot_thumbnail_bundle_files,
+            dot_thumbnail_manifest,
+        )
+
+        body_a = self._import_dot_thumbnail(client)
+        manifest_b = dot_thumbnail_manifest()
+        manifest_b["name"] = "Acme Dot Thumbnail DS B"
+        body_b = _import(
+            client,
+            bundle_kwargs={
+                "manifest": manifest_b,
+                "files": dot_thumbnail_bundle_files(),
+            },
+        ).json()
+        template_b = client.get(f"{BASE}/{body_b['id']}/templates").json()["templates"][0]
+        resp = client.get(
+            f"{BASE}/{body_a['id']}/templates/{template_b['id']}/thumbnail"
+        )
+        assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Reference integrity (design_system_id in agent-config validator)
 # ---------------------------------------------------------------------------

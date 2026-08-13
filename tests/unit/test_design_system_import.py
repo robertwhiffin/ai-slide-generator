@@ -17,8 +17,11 @@ import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
 from tests.unit.conftest_design_system import (
     MANIFEST_FILENAME,
+    SVG_LOGO,
+    SYNTHETIC_README,
     make_bundle_zip,
     make_declared_size_bundle_zip,
+    webp_bytes,
 )
 
 
@@ -290,6 +293,143 @@ class TestImportValidation:
         import_bundle(session, zip_bytes=make_bundle_zip(), user="u")
         with pytest.raises(DesignSystemNameConflictError):
             import_bundle(session, zip_bytes=make_bundle_zip(), user="u")
+
+
+# ---------------------------------------------------------------------------
+# Dotfile handling: a NARROW allowlist, not a relaxed skip
+#
+# A template folder's ``.thumbnail`` screenshot is the ONE dot-prefixed shape the
+# importer stores. The allowlist is keyed on the whole normalized path
+# (``templates/<one-segment>/`` + a thumbnail basename), so every other dotfile —
+# anywhere in the bundle — stays skipped exactly as before.
+# ---------------------------------------------------------------------------
+
+
+class TestDotfileAllowlistIsNarrow:
+    def _stored(self, session, files):
+        from src.services.design_system_service import import_bundle
+
+        ds = import_bundle(
+            session, zip_bytes=make_bundle_zip(files=files), user="u"
+        )
+        return {a.filename for a in ds.assets}, {f.path for f in ds.files}
+
+    @pytest.mark.parametrize(
+        "arcname",
+        [
+            ".env",
+            ".npmrc",
+            ".DS_Store",
+            ".git/config",
+            ".git/HEAD",
+            "assets/.env",
+            "assets/.DS_Store",
+            "assets/.hidden-logo.png",
+            "fonts/.env",
+            "__MACOSX/._logo.svg",
+            "__MACOSX/assets/._logo.svg",
+            "templates/corporate/.env",
+            "templates/corporate/.DS_Store",
+            "templates/corporate/.git/config",
+        ],
+        ids=lambda name: name.replace("/", "_"),
+    )
+    def test_non_thumbnail_dotfiles_and_os_junk_are_never_stored(
+        self, session, arcname
+    ):
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            arcname: b"SECRET=should-never-be-stored",
+        }
+        filenames, paths = self._stored(session, files)
+        assert arcname not in paths
+        assert arcname.rsplit("/", 1)[-1] not in filenames
+        # The legitimate asset still imported, so this is not a vacuous pass.
+        assert "assets/logo.svg" in paths
+
+    @pytest.mark.parametrize(
+        "arcname",
+        [
+            ".thumbnail",  # bundle root, not a template folder
+            "assets/.thumbnail",  # inside the brand-asset tree
+            "fonts/.thumbnail",
+            "templates/.thumbnail",  # no template folder segment
+            "templates/corporate/nested/.thumbnail",  # two segments deep
+            "templates/corporate/.thumbnail.bak",  # not a bare thumbnail basename
+            "templates/corporate/.thumbnails",
+        ],
+        ids=lambda name: name.replace("/", "_"),
+    )
+    def test_thumbnail_outside_the_allowed_shape_is_not_stored(self, session, arcname):
+        """Real WebP bytes at the wrong path are still refused — the allowlist is
+        keyed on the PATH shape, so valid image content cannot smuggle a dotfile
+        past it."""
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            arcname: webp_bytes(),
+        }
+        filenames, paths = self._stored(session, files)
+        assert arcname not in paths
+        assert "assets/logo.svg" in paths
+
+
+class TestThumbnailPathsAreStillZipSlipChecked:
+    @pytest.mark.parametrize(
+        "arcname",
+        [
+            "../.thumbnail",
+            "templates/../../.thumbnail",
+            "templates/corporate/../../../.thumbnail",
+            "/etc/templates/corporate/.thumbnail",
+        ],
+        ids=lambda name: name.replace("/", "_"),
+    )
+    def test_traversal_thumbnail_rejects_the_whole_bundle(self, session, arcname):
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        files = {"assets/logo.svg": SVG_LOGO, arcname: webp_bytes()}
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        message = str(exc.value).lower()
+        assert "unsafe" in message or "traversal" in message
+
+    def test_iterator_itself_refuses_a_traversal_thumbnail(self):
+        """The entry iterator raises on its own, not only via the up-front global
+        path scan — a dot-prefixed thumbnail must not be able to skip the check by
+        being allowlisted."""
+        import io
+        import zipfile
+
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _iter_safe_entries,
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("templates/corporate/../../../.thumbnail", webp_bytes())
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            with pytest.raises(DesignSystemImportError):
+                list(_iter_safe_entries(zf, ""))
+
+    def test_iterator_still_yields_a_legitimate_dot_thumbnail(self):
+        """Positive control for the test above: the same iterator DOES surface a
+        well-formed template thumbnail, so the rejection above is about the path,
+        not about dot-prefixed names in general."""
+        import io
+        import zipfile
+
+        from src.services.design_system_service import _iter_safe_entries
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("templates/corporate/.thumbnail", webp_bytes())
+            zf.writestr("templates/corporate/.env", b"SECRET=x")
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            yielded = [rel for _, rel in _iter_safe_entries(zf, "")]
+        assert yielded == ["templates/corporate/.thumbnail"]
 
 
 # ---------------------------------------------------------------------------
