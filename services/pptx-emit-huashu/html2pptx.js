@@ -1164,13 +1164,122 @@ async function html2pptx(htmlFile, pres, options = {}) {
       // before rasterizing. Without this, we either capture a blank
       // canvas (init not done) or a partial/mid-animation snapshot.
       // Slides without <canvas> skip this and proceed instantly.
-      const canvasCount = await page.evaluate(() =>
-        document.querySelectorAll('canvas').length
-      );
+      //
+      // Tellr addition: these two are the export's FIRST DOM reads, and they were
+      // its last RAW ones. SLIDE_CSP (src/utils/html_safety.py) carries
+      // script-src 'unsafe-inline', so inline script in an uploaded slide has
+      // already run in this page by the time either fires, and it can replace
+      // Document.prototype.querySelectorAll, NodeList.prototype's length getter
+      // and NodeList.prototype[Symbol.iterator] — all CONFIGURABLE.
+      //
+      // Neither read could be covered by the accessors extractSlideData() and
+      // preprocess.mjs share: a page.evaluate callback is serialised and closes
+      // over nothing on the Node side, and both of these run BEFORE the
+      // preprocess source is evaluated into the page. So the capture is repeated
+      // here, for the same reason it is repeated there (see the note above the
+      // helpers in extractSlideData) — same MECHANISM, no second technique.
+      //
+      // Measured, not theoretical. A throwing querySelectorAll rejected the slide
+      // outright — "page.evaluate: Error: raw querySelectorAll reached" — because
+      // the count read carries no .catch() and page.evaluate has no timeout of
+      // its own. A non-returning one, and an Array.from() over a non-returning
+      // [Symbol.iterator], each held the renderer's main thread until the Python
+      // wrapper's subprocess timeout killed the whole sidecar: every later
+      // page.evaluate on a wedged renderer waits forever, so the 5s bound on the
+      // readiness wait below does not help.
+      //
+      // Both reads are DOCUMENT-scoped and stay document-scoped: Document's and
+      // Element's copies of querySelectorAll are distinct function objects, and
+      // reading 'canvas' off an element instead would find a different set.
+      const canvasCount = await page.evaluate(() => {
+        // Pristine Document.prototype.querySelectorAll and NodeList.prototype
+        // length getter, captured from a throwaway realm. When the capture cannot
+        // be made this stays on THIS realm's accessors, exactly as
+        // OWN_DOM_ACCESS does in extractSlideData().
+        const readCanvases = () => {
+          let queryAll = (selector) => document.querySelectorAll(selector);
+          let lengthOf = (list) => list.length;
+          let frame = null;
+          try {
+            frame = document.createElement('iframe');
+            frame.style.display = 'none';
+            document.documentElement.appendChild(frame);
+            const realm = frame.contentWindow;
+            // A replaced createElement/contentWindow could hand back THIS realm,
+            // whose accessors are the poisoned ones. Distinct intrinsics is the
+            // check.
+            if (realm && realm !== window && realm.Element !== window.Element) {
+              const docQueryAll = realm.Document.prototype.querySelectorAll;
+              const listLength = realm.Object.getOwnPropertyDescriptor(
+                realm.NodeList.prototype, 'length'
+              );
+              if (typeof docQueryAll === 'function' && listLength &&
+                  typeof listLength.get === 'function') {
+                queryAll = (selector) => docQueryAll.call(document, selector);
+                lengthOf = (list) => listLength.get.call(list);
+              }
+            }
+          } catch (e) {
+            /* keep this realm's own accessors */
+          } finally {
+            // The captured accessors keep working once the frame is gone, so the
+            // pristine realm never outlives the capture and the document this
+            // preflight measures never contains the iframe.
+            if (frame) {
+              try { frame.remove(); } catch (e) { /* already detached */ }
+            }
+          }
+          const list = queryAll('canvas');
+          return { list, count: lengthOf(list) };
+        };
+        return readCanvases().count;
+      });
       if (canvasCount > 0) {
         await page.waitForFunction(() => {
-          const canvases = Array.from(document.querySelectorAll('canvas'));
-          return canvases.every((c) => c.width > 0 && c.height > 0);
+          // The same capture, for the same reason, in the other callback that
+          // cannot share scope with this one.
+          const readCanvases = () => {
+            let queryAll = (selector) => document.querySelectorAll(selector);
+            let lengthOf = (list) => list.length;
+            let frame = null;
+            try {
+              frame = document.createElement('iframe');
+              frame.style.display = 'none';
+              document.documentElement.appendChild(frame);
+              const realm = frame.contentWindow;
+              if (realm && realm !== window && realm.Element !== window.Element) {
+                const docQueryAll = realm.Document.prototype.querySelectorAll;
+                const listLength = realm.Object.getOwnPropertyDescriptor(
+                  realm.NodeList.prototype, 'length'
+                );
+                if (typeof docQueryAll === 'function' && listLength &&
+                    typeof listLength.get === 'function') {
+                  queryAll = (selector) => docQueryAll.call(document, selector);
+                  lengthOf = (list) => listLength.get.call(list);
+                }
+              }
+            } catch (e) {
+              /* keep this realm's own accessors */
+            } finally {
+              if (frame) {
+                try { frame.remove(); } catch (e) { /* already detached */ }
+              }
+            }
+            const list = queryAll('canvas');
+            return { list, count: lengthOf(list) };
+          };
+          // An index loop over the pristine length, never the realm's iterator:
+          // Array.from() and for...of both read [Symbol.iterator], which page
+          // script can make endless. Indexed access needs no hardening of its
+          // own — a live collection's indices are OWN properties of the platform
+          // object, so a poisoned prototype cannot shadow them below the real
+          // length. Same short-circuit as the .every() this replaces.
+          const { list, count } = readCanvases();
+          for (let index = 0; index < count; index++) {
+            const canvas = list[index];
+            if (!(canvas.width > 0 && canvas.height > 0)) return false;
+          }
+          return true;
         }, { timeout: 5000 }).catch(() => {});
         // Chart.js default animation = 1000ms; wait 2000ms post-init to
         // be safe (covers the chart-init IIFE's own setTimeout chain
