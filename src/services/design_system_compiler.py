@@ -217,7 +217,24 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # a sentinel), ``_MARKER_LIKE_RE`` still removes marker-shaped text from this slot, and
 # currency is decided at OFFSET ZERO of the artifact — ahead of the header line
 # entirely — by :data:`_CURRENCY_SENTINEL`.
-COMPILER_VERSION = 17
+# v18: the two remaining OUR-CODE gaps in what the artifact CONTAINS, so persisted v17
+# rows lack both and the bump is what makes them recompile.
+#
+# * CONTRAST guidance existed NOWHERE in the artifact. A grep for
+#   ``contrast|wcag|accessib`` over a full 31k-char compiled artifact returned ZERO
+#   hits, and the cost was measured on the UNPINNED path (where the model writes its
+#   own CSS): two sub-AA text/background pairs at 2.73:1 and 2.81:1 against AA's
+#   4.5:1. The model picks a background from the palette, then picks an ink from the
+#   SAME palette, and nothing asked it to check the pair. :func:`_contrast_section`
+#   now COMPUTES WCAG relative luminance over the design system's own color tokens
+#   and states which of them can carry text — generic prose would have restated the
+#   requirement without telling the model which of ITS colors satisfy it.
+# * The BRAND TYPE SCALE defined FOUR tiers (cover / section / body / floor) while a
+#   real bundle authors FIVE text roles. The missing one is the eyebrow/kicker — the
+#   small label above a title — so the model guessed its size on every slide and
+#   those labels rendered inconsistently slide-to-slide. The band is derived from the
+#   bundle's own ramp (:func:`_eyebrow_px`), never from a constant.
+COMPILER_VERSION = 18
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -910,6 +927,49 @@ _TYPE_SCALE_ANTI_SHRINK_LINE = (
     "across more slides — NEVER shrink type below the brand type scale."
 )
 
+# The EYEBROW / KICKER band — the fifth text role.
+#
+# The scale defined four tiers (cover / section / body / floor) while a real bundle
+# authors five: it also has a small label ABOVE the title (``.eyebrow`` /
+# ``.action-kicker``). One title per slide with a small kicker over it is correct BY
+# DESIGN; what was missing is a BAND for it, so the model guessed the size on every
+# slide and the labels rendered inconsistently slide-to-slide.
+#
+# WHAT IS DERIVABLE, AND WHAT IS NOT — the two halves are treated differently on
+# purpose:
+#
+# * THE SIZE IS DERIVED (:func:`_eyebrow_px`), from a rung the brand actually
+#   shipped. Nothing is hardcoded, exactly as for the other four bands.
+# * THE TREATMENT IS NOT DERIVABLE. A token is ``(group, name, value)``
+#   (``src/database/models/design_system.py``) — there is no case, weight or
+#   tracking token to read, and the compiler does not parse the bundle's CSS, which
+#   is the only place those live. So this line states NO number for them and defers
+#   to the BRAND MANUAL, which is injected above and is already the authority on
+#   style. Prescribing a case or a weight here would invent a claim the brand never
+#   made and could contradict the manual the artifact declares authoritative.
+#
+# What the line DOES require is CONSISTENCY, because that is the defect that was
+# measured: whatever treatment is chosen must be the same on every slide.
+_EYEBROW_TREATMENT_CLAUSE = (
+    "Follow the brand manual for its case, weight and letter-spacing; if the "
+    "manual is silent, choose one treatment and keep it identical on every slide."
+)
+
+# The neutral branch states the eyebrow RELATIONALLY and invents no number.
+#
+# There is nothing to derive a neutral size FROM: ``src/core/defaults.py``'s
+# ``DEFAULT_SLIDE_STYLE`` — the documented source of every other neutral band —
+# names H1 40-52px, H2 28-36px and body 16-18px, and NO small-label or caption
+# size. Writing a number here would mean importing one from a specific brand's
+# stylesheet, which is precisely the hardcoding the derived path exists to avoid.
+# Positioning it against the body band above is the strongest statement the
+# compiler can make honestly.
+_EYEBROW_NEUTRAL_LINE = (
+    "- Eyebrow/kicker labels (the small label above a title): smaller than the "
+    "body band above, and the SAME size on every slide that carries one. "
+    f"{_EYEBROW_TREATMENT_CLAUSE}"
+)
+
 # Neutral fallback bands = the app default style's anchors, restated. Kept in
 # prose form (no CSS) like the rest of the compiled guidance.
 _TYPE_SCALE_NEUTRAL_BLOCK = "\n".join(
@@ -919,6 +979,7 @@ _TYPE_SCALE_NEUTRAL_BLOCK = "\n".join(
         "- Cover/hero and slide titles (H1): 40-52px, bold.",
         "- Section headers (H2): 28-36px.",
         "- Body text: 16-18px.",
+        _EYEBROW_NEUTRAL_LINE,
         _TYPE_SCALE_ANTI_SHRINK_LINE,
     ]
 )
@@ -1062,13 +1123,36 @@ def _font_size_token_pairs(
     )
 
 
+def _eyebrow_px(sizes: list[float], body_bottom: float) -> float:
+    """The ramp rung an eyebrow/kicker label sits on.
+
+    THE LARGEST RUNG STRICTLY BELOW THE BODY BAND, falling back to the body band's
+    own bottom rung when the ramp has nothing below it. Always a size the brand
+    shipped — the same property the other four bands have.
+
+    The definition follows from what an eyebrow IS: a label that is read, so it is
+    real text rather than fine print, but subordinate to the body it sits above. On
+    a ramp that ships a rung between the floor and body, that rung is the brand's
+    own answer; a ramp with no such rung has no dedicated label size, and the
+    smallest body rung is then the honest one rather than a number invented to fill
+    the gap.
+
+    Measured against the real bundle shape (12, 14, 16, 18, 20, 24, 32, 40, 48, 64):
+    body is 16-20, so this returns 14 — which is the size that bundle's own
+    ``.eyebrow`` CSS uses, reached without the compiler knowing anything about it.
+    """
+    below_body = [px for px in sizes if px < body_bottom]
+    return max(below_body) if below_body else body_bottom
+
+
 def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     """Build the BRAND TYPE SCALE block (always emitted; see comment above).
 
     Role mapping over the sorted distinct ramp sizes: cover/hero = top,
     floor = bottom, body = the 16-22px band (closest-to-18 when the ramp
     skips that range), section headers = the upper-middle entry between the
-    body band and the top. Fewer than 3 distinct sizes is not a usable ramp
+    body band and the top, eyebrow = the largest rung below the body band
+    (:func:`_eyebrow_px`). Fewer than 3 distinct sizes is not a usable ramp
     -> neutral default bands.
     """
     ramp = _font_size_px_ramp(grouped)
@@ -1104,6 +1188,13 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
             f"- Cover/hero titles: {_fmt_px(hero_px)} — the top of the brand ramp.",
             f"- Section/slide titles: {_fmt_px(section_px)} or larger.",
             f"- Body text: {body_label}.",
+            # The bands read in descending size order, so the eyebrow follows body
+            # and precedes the floor. Like every other number in this region it is
+            # formatted from a float the compiler parsed out of a px token value, so
+            # the region stays numbers-only and no user text enters it.
+            f"- Eyebrow/kicker labels (the small label above a title): "
+            f"{_fmt_px(_eyebrow_px(sizes, body_sizes[0]))}, the SAME size on every "
+            f"slide that carries one. {_EYEBROW_TREATMENT_CLAUSE}",
             f"- Floor: never render ANY text below {_fmt_px(floor_px)}, the "
             "bottom of the brand ramp.",
             _TYPE_SCALE_ANTI_SHRINK_LINE,
@@ -1363,6 +1454,268 @@ def _color_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
         ]
     )
     return [spec, css]
+
+
+# --- Text contrast (WCAG AA), computed from the brand's OWN colors -----------
+#
+# The artifact used to carry NO contrast guidance at all, and the model was left to
+# pick a background from the palette and then an ink from the same palette with
+# nothing checking the pair. Two shipped pairs measured 2.73:1 and 2.81:1.
+#
+# Generic prose ("meet 4.5:1") was the cheaper fix and it is strictly worse: it
+# restates the requirement without telling the model which of THIS system's colors
+# satisfy it, which is the only question it actually has to answer. So the compiler
+# computes the answer.
+#
+# IT EMITS PARSED COLORS ONLY — never a token NAME. This is the same structural
+# argument the numbers-only type-scale region rests on, and here it is even
+# stronger: a string reaching this section has matched a fully-anchored color
+# grammar, so it cannot carry marker text, instruction-shaped prose, a line break
+# or a region sentinel — not because it was sanitized, but because a valid CSS
+# color cannot contain any of them. The value is re-serialized from the three
+# integers the compiler parsed, so what is emitted is the compiler's own text.
+#
+# That also keeps the section clear of the one live hazard here: a color token
+# NAMED ``brand [ds-type-scale]`` is a fixture in this repo's own suite. Naming
+# colors would have put user text next to a compiler contract for the sixth time
+# in this module's history. ``BRAND COLOR TOKENS:`` sits directly above and maps
+# every value back to its authored name, so nothing is lost by naming nothing —
+# and the model writes CSS with the value anyway.
+_CONTRAST_AA_NORMAL = 4.5
+_CONTRAST_AA_LARGE = 3.0
+
+# The requirement itself, shared by both branches so the numbers are stated once.
+_CONTRAST_AA_REQUIREMENT_LINE = (
+    "- Every text/background pair must meet WCAG AA: at least "
+    f"{_CONTRAST_AA_NORMAL:g}:1 for normal text, and at least "
+    f"{_CONTRAST_AA_LARGE:g}:1 for large text (24px and above, or bold from 19px). "
+    "Choose the background first, then the text color, then check that pair."
+)
+
+_CONTRAST_DERIVED_HEADING = (
+    "BRAND TEXT CONTRAST (REQUIRED — computed from this design system's own "
+    "color tokens):"
+)
+
+# Closes the derived block. The pair rule is what covers everything the two
+# extremes do not: the measured failures were mid-tone ON mid-tone, which is
+# exactly the pair a palette makes easy to reach for and a luminance table cannot
+# enumerate without listing every combination.
+_CONTRAST_PAIR_RULE_LINE = (
+    "- For any other pair of these colors, work out the ratio before you use it: "
+    f"two mid-tone brand colors together almost never reach {_CONTRAST_AA_NORMAL:g}:1. "
+    "If a pair falls short, change the background or the text color — never lower "
+    "the requirement."
+)
+
+# Fallback when fewer than two colors can be resolved (a token-less system, or one
+# whose colors are all in forms with no computable value). The requirement is still
+# stated — the vacuum this whole block exists to close must not be able to reopen
+# for a bundle the compiler happens not to be able to read — but nothing is claimed
+# to be "computed from" colors that were not.
+_CONTRAST_GENERIC_BLOCK = "\n".join(
+    [
+        "BRAND TEXT CONTRAST (REQUIRED):",
+        _CONTRAST_AA_REQUIREMENT_LINE,
+        "- Work out the ratio for every pair you use: two mid-tone colors together "
+        f"almost never reach {_CONTRAST_AA_NORMAL:g}:1. If a pair falls short, change "
+        "the background or the text color — never lower the requirement.",
+    ]
+)
+
+# ``#rgb`` / ``#rgba`` / ``#rrggbb`` / ``#rrggbbaa``. Lengths 5 and 7 are not valid
+# CSS hex colors and are rejected by the length check in :func:`_rgb_from_hex`.
+_HEX_COLOR_RE = re.compile(r"^#([0-9a-f]{3,8})$", re.IGNORECASE)
+
+# ``rgb()`` / ``rgba()`` in both the legacy comma form and the modern space form
+# (``rgb(0 0 0 / 50%)``). Anchored at both ends: a value that merely CONTAINS a
+# color (a shadow, a gradient) must not be read as one, because the color that
+# ends up behind the text in those cases is not this value.
+_RGB_FUNC_RE = re.compile(
+    r"""^rgba?\(\s*
+        ([0-9.]+%?)\s*(?:,\s*|\s+)
+        ([0-9.]+%?)\s*(?:,\s*|\s+)
+        ([0-9.]+%?)
+        (?:\s*[,/]\s*([0-9.]+%?))?
+        \s*\)$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _rgb_from_hex(digits: str) -> Optional[tuple[int, int, int]]:
+    """Parse the digits of a hex color, rejecting anything not fully opaque."""
+    if len(digits) in (3, 4):
+        channels = [int(digit * 2, 16) for digit in digits]
+    elif len(digits) in (6, 8):
+        channels = [int(digits[at : at + 2], 16) for at in range(0, len(digits), 2)]
+    else:
+        return None
+    if len(channels) == 4 and channels[3] != 255:
+        return None
+    return (channels[0], channels[1], channels[2])
+
+
+def _color_channel(raw: str) -> int:
+    """One ``rgb()`` channel as 0-255, accepting the number or percentage form."""
+    number = float(raw[:-1]) * 255.0 / 100.0 if raw.endswith("%") else float(raw)
+    return max(0, min(255, int(round(number))))
+
+
+def _parse_opaque_color(value: Any) -> Optional[tuple[int, int, int]]:
+    """The ``(r, g, b)`` of *value*, or ``None`` when it is not an opaque color.
+
+    ``None`` covers three DIFFERENT situations, and all three must be excluded
+    rather than guessed at:
+
+    * NOT A COLOR — a spacing length, a font stack, a shadow. The grammars are
+      anchored at both ends, so ``0 1px 2px rgba(0,0,0,0.1)`` does not read as
+      ``rgba(0,0,0,0.1)``: the color behind text on a shadowed element is not the
+      shadow's color, and treating it as one would put a value in the table that
+      no text ever sits on.
+    * A COLOR THIS FUNCTION CANNOT RESOLVE — ``hsl()``, ``lab()``, ``color-mix()``,
+      a named color, ``currentColor``, ``var(--x)``. Omitting them understates the
+      palette, which is the safe direction: the pair rule still covers them, while
+      inventing a luminance would state a ratio the brand never authored.
+    * TRANSLUCENT — any alpha below 1. A translucent color's effective luminance
+      depends on what is composited BEHIND it, which the compiler does not know, so
+      its contrast is genuinely not computable. Assuming white (the usual shortcut)
+      would report a ratio that is wrong on every dark surface.
+    """
+    text = _safe(value).strip()
+    hex_match = _HEX_COLOR_RE.match(text)
+    if hex_match:
+        return _rgb_from_hex(hex_match.group(1))
+    func_match = _RGB_FUNC_RE.match(text)
+    if not func_match:
+        return None
+    try:
+        alpha = func_match.group(4)
+        if alpha is not None and (
+            float(alpha[:-1]) / 100.0 if alpha.endswith("%") else float(alpha)
+        ) < 1.0:
+            return None
+        return (
+            _color_channel(func_match.group(1)),
+            _color_channel(func_match.group(2)),
+            _color_channel(func_match.group(3)),
+        )
+    except ValueError:
+        # The character class admits malformed numbers ("1.2.3"); a value that is
+        # not a number is not a color.
+        return None
+
+
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+    """WCAG 2.x relative luminance of an opaque sRGB color."""
+
+    def _linear(channel: int) -> float:
+        ratio = channel / 255.0
+        return ratio / 12.92 if ratio <= 0.03928 else ((ratio + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * _linear(rgb[0]) + 0.7152 * _linear(rgb[1]) + 0.0722 * _linear(rgb[2])
+    )
+
+
+def _contrast_ratio(one: float, other: float) -> float:
+    """WCAG contrast ratio between two relative luminances."""
+    lighter, darker = max(one, other), min(one, other)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _fmt_hex(rgb: tuple[int, int, int]) -> str:
+    """Canonical ``#RRGGBB`` — the compiler's own rendering of a parsed color."""
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+def _palette_luminances(
+    grouped: dict[str, list[tuple[str, str]]]
+) -> list[tuple[float, str]]:
+    """``[(luminance, "#RRGGBB"), ...]`` for every resolvable color, ascending.
+
+    Read from EVERY token group by VALUE, not from the color groups by membership —
+    the same reasoning that makes ramp detection a name+value question. Group
+    aliasing already routes ``color``/``palette`` to a color group, but a color
+    filed under an author-invented group (``brand-semantic``) reaches no color
+    emitter at all, and it is still a color the model may put text on.
+
+    De-duplicated by canonical value: two tokens naming one color are one color
+    here. Sorted by ``(luminance, value)`` so the output is a pure function of the
+    palette and not of load order.
+    """
+    by_value: dict[str, float] = {}
+    for entries in grouped.values():
+        for _name, value in entries:
+            rgb = _parse_opaque_color(value)
+            if rgb is None:
+                continue
+            by_value.setdefault(_fmt_hex(rgb), _relative_luminance(rgb))
+    return sorted((luminance, value) for value, luminance in by_value.items())
+
+
+def _contrast_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
+    """Build the BRAND TEXT CONTRAST block (always emitted).
+
+    The palette's own extremes are the two inks the block can speak about
+    RIGOROUSLY: for any single ink, "which of these colors reach AA behind it" is
+    answerable in one pass, whereas the full pairing is quadratic in the palette
+    and a real bundle ships hundreds of tokens. So the block states what it has
+    actually computed — the AA-safe backgrounds for the lightest ink, for the
+    darkest ink, and the colors that reach AA with NEITHER — and hands the model a
+    rule for every other pair.
+
+    That third list is the one that addresses the measured defect. A mid-tone that
+    fails against both extremes fails against everything between them too, so
+    naming it as "never put normal text here" is a complete answer for that color,
+    not a heuristic.
+    """
+    colors = _palette_luminances(grouped)
+    if len(colors) < 2:
+        return _CONTRAST_GENERIC_BLOCK
+
+    darkest_luminance, darkest = colors[0]
+    lightest_luminance, lightest = colors[-1]
+
+    def _reaching_aa(ink_luminance: float) -> list[str]:
+        return [
+            value
+            for luminance, value in colors
+            if _contrast_ratio(luminance, ink_luminance) >= _CONTRAST_AA_NORMAL
+        ]
+
+    on_lightest = _reaching_aa(lightest_luminance)
+    on_darkest = _reaching_aa(darkest_luminance)
+    unusable = [
+        value
+        for luminance, value in colors
+        if _contrast_ratio(luminance, lightest_luminance) < _CONTRAST_AA_NORMAL
+        and _contrast_ratio(luminance, darkest_luminance) < _CONTRAST_AA_NORMAL
+    ]
+
+    lines = [
+        _CONTRAST_DERIVED_HEADING,
+        _CONTRAST_AA_REQUIREMENT_LINE,
+        f"- The two safest text colors in this system are its extremes: {lightest} "
+        f"(the lightest) and {darkest} (the darkest).",
+    ]
+    if on_lightest:
+        lines.append(
+            f"- Use {lightest} as the text color on these backgrounds: "
+            f"{', '.join(on_lightest)}"
+        )
+    if on_darkest:
+        lines.append(
+            f"- Use {darkest} as the text color on these backgrounds: "
+            f"{', '.join(on_darkest)}"
+        )
+    if unusable:
+        lines.append(
+            "- Never set normal text on these colors — they reach "
+            f"{_CONTRAST_AA_NORMAL:g}:1 with NEITHER extreme, so use them for "
+            f"fills, rules, icons and imagery only: {', '.join(unusable)}"
+        )
+    lines.append(_CONTRAST_PAIR_RULE_LINE)
+    return "\n".join(lines)
 
 
 def _shadow_sections(grouped: dict[str, list[tuple[str, str]]]) -> list[str]:
@@ -1825,14 +2178,16 @@ def compile_design_system(
     Emitted order: header (stamped with the compiler-version marker) ->
     description -> BRAND MANUAL (README + SKILL, full) -> scope firewall
     (always present: the design system governs STYLE only, never content) ->
-    tokens (color, type, spacing, shadow, then any group with no canonical
-    emitter under ADDITIONAL BRAND TOKENS; all uncapped) -> BRAND TYPE SCALE
-    (always present: ramp-derived role anchors, or the neutral default bands
-    when no ramp is recognizable) -> fonts (@font-face refs + family listing;
-    uncapped) -> templates (closed by the soft-pick enabler) -> SLIDE FRAME
-    CONSTRAINTS (frame guardrails, always present) -> the brand IMAGE ASSET
-    CONTRACT (fetch via ``search_brand_assets``). Brand images are NOT
-    enumerated.
+    color tokens -> BRAND TEXT CONTRAST (always present: WCAG AA pairings
+    computed from those colors, or the requirement alone when fewer than two
+    resolve) -> the remaining tokens (type, spacing, shadow, then any group
+    with no canonical emitter under ADDITIONAL BRAND TOKENS; all uncapped) ->
+    BRAND TYPE SCALE (always present: ramp-derived role anchors including the
+    eyebrow band, or the neutral default bands when no ramp is recognizable) ->
+    fonts (@font-face refs + family listing; uncapped) -> templates (closed by
+    the soft-pick enabler) -> SLIDE FRAME CONSTRAINTS (frame guardrails, always
+    present) -> the brand IMAGE ASSET CONTRACT (fetch via
+    ``search_brand_assets``). Brand images are NOT enumerated.
     """
     parts: list[str] = []
 
@@ -1923,6 +2278,15 @@ def compile_design_system(
     # is what left non-px sizes and same-px siblings labeled as spacing.
     font_size_pairs = _font_size_token_pairs(grouped)
     parts.extend(_color_sections(grouped))
+
+    # Text contrast — ALWAYS present, immediately after the colors it reasons about
+    # so the model reads the pairing rules next to the palette they apply to. The
+    # block emits PARSED colors only (never a token name), so it carries no
+    # user-controlled text; it is therefore emitted outside the compiler-owned
+    # type-scale region purely because it is a different contract, not because it
+    # would be unsafe inside one.
+    parts.append(_contrast_section(grouped))
+
     typography = _scale_section(
         grouped, "type", "TYPOGRAPHY TOKENS:", exclude=font_size_pairs
     )
