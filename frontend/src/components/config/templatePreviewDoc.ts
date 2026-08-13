@@ -9,6 +9,12 @@
  * CSP that blocks the passive-fetch channel sandbox does not cover.
  */
 
+import {
+  slideHostFrameStyle,
+  SLIDE_FRAME_H,
+  SLIDE_FRAME_W,
+} from '../../services/slideDocument';
+
 /**
  * CSP for the preview document: uploaded template HTML/CSS must not be able
  * to trigger ANY external network fetch from the frame (img/link tags, css
@@ -319,9 +325,13 @@ function stripImportsFromStyleElements(doc: Document): void {
  */
 const SLIDE_ROOT_SELECTOR = '.slide';
 
-/** The fixed 16:9 stage a preview renders into (the deck canvas the cards scale). */
-export const PREVIEW_STAGE_W = 1280;
-export const PREVIEW_STAGE_H = 720;
+/**
+ * The fixed 16:9 stage a preview renders into (the deck canvas the cards scale).
+ * Aliases the shared slide frame so the pop-out and the in-app slide surfaces
+ * cannot drift to different dimensions.
+ */
+export const PREVIEW_STAGE_W = SLIDE_FRAME_W;
+export const PREVIEW_STAGE_H = SLIDE_FRAME_H;
 
 /**
  * Shim for custom elements this frame can never upgrade.
@@ -347,12 +357,20 @@ export const PREVIEW_STAGE_H = 720;
  * `:not(:defined)` matches only valid-named custom elements that were never
  * registered; built-ins (and non-hyphenated unknown tags) count as defined, so
  * this cannot reach ordinary template markup.
+ *
+ * Sizing the stage is necessary but NOT sufficient. Inside it the template nests
+ * a wrapper (`<section>`) that carries the deck background, and inside that a
+ * `position: absolute` slide root — so the wrapper holds no in-flow content and
+ * collapses to height 0, and the background it carries never paints (readable
+ * dark-on-dark, since colour and font still inherit). {@link slideHostFrameStyle}
+ * stretches the stage's child to the frame, which is what gives that wrapper
+ * area; it is the same shared contract every in-app slide surface uses.
  */
 const UNDEFINED_ELEMENT_SHIM =
   '<style>' +
   ':not(:defined){visibility:visible!important}' +
-  'body>:not(:defined){display:block!important;position:relative!important;' +
-  `width:${PREVIEW_STAGE_W}px!important;height:${PREVIEW_STAGE_H}px!important}` +
+  'body>:not(:defined){display:block!important}' +
+  slideHostFrameStyle('body>:not(:defined)') +
   '</style>';
 
 /** Parse layout HTML inertly (no fetch, no script execution). */
@@ -416,8 +434,24 @@ export function buildTemplatePreviewDoc(
   if (slideIndex !== undefined) {
     const slides = Array.from(parsed.querySelectorAll(SLIDE_ROOT_SELECTOR));
     if (slides.length > 1 && slideIndex >= 0 && slideIndex < slides.length) {
+      // Nothing on the path to the surviving slide may be removed.
+      const keep = new Set<Element>();
+      for (let n: Element | null = slides[slideIndex]; n; n = n.parentElement) keep.add(n);
       slides.forEach((slide, idx) => {
-        if (idx !== slideIndex) slide.remove();
+        if (idx === slideIndex) return;
+        // Drop the slide, then any wrapper it leaves EMPTY. An emptied wrapper
+        // is not inert: templates put the deck background on the wrapper
+        // (`section`), so under the frame contract it would stretch to the full
+        // stage and — being a later sibling — paint over the slide that
+        // survives, blanking the preview. Walk up only while the parent has no
+        // element children left, so a wrapper holding anything else stays.
+        let node: Element | null = slide;
+        while (node && !keep.has(node)) {
+          const parent: Element | null = node.parentElement;
+          node.remove();
+          if (!parent || keep.has(parent) || parent.children.length > 0) break;
+          node = parent;
+        }
       });
     }
   }

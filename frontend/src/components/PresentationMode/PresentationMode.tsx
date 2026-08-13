@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SlideDeck } from '../../types/slide';
-import { buildSlideDocument, SLIDE_ROOT_RESET_STYLE } from '../../services/slideDocument';
+import {
+  buildSlideDocument,
+  slideHostFrameStyle,
+  SLIDE_ROOT_RESET_STYLE,
+} from '../../services/slideDocument';
 
 interface PresentationModeProps {
   slideDeck: SlideDeck;
@@ -72,22 +76,19 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       margin: 0 !important;
     }
     .slide-container {
-      width: 1280px;
-      height: 720px;
       flex-shrink: 0;
       flex-grow: 0;
-      position: relative;
       /* Transparent on purpose: the deck's own body/html background (or the
          :where(html) white default above) is the canvas. Painting white here
          killed deck-level backgrounds behind transparent slide roots. */
-      overflow: hidden;
       margin: 0;
     }
-    .slide-container > * {
-      width: 100%;
-      height: 100%;
-    }
-    ${SLIDE_ROOT_RESET_STYLE}`;
+    ${SLIDE_ROOT_RESET_STYLE}
+    /* The frame and the child-stretch rule this surface used to declare on its
+       own. It was the ONLY surface that stretched the slide's wrapper to the
+       frame, and therefore the only one that escaped the dark-on-dark defect;
+       the rule now lives in one shared place so every surface gets it. */
+    ${slideHostFrameStyle('.slide-container')}`;
 
     const bootstrapScripts = `
     // Wait for Chart.js to be available before running scripts
