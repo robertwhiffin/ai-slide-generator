@@ -31,6 +31,28 @@ Content-Security-Policy differentiated by response type:
   'none', no eval) plus the html_safety.py scanner, and any header at
   all is a strict improvement over the previous no-CSP state.
 
+  SDR-4437 M-CSP — ACCEPTED RESIDUAL (pending SE sign-off). M-CSP asks
+  to move ``script-src`` off ``'unsafe-inline'`` to hashes/nonces. That
+  is infeasible here and was verified:
+    * The SPA's own document has NO inline <script> — index.html loads a
+      single external module (``/src/main.tsx``), already covered by
+      ``'self'``. So the SPA itself does not need 'unsafe-inline'.
+    * The 'unsafe-inline' exists ONLY for the srcdoc slide iframes, whose
+      generated HTML contains arbitrary inline <script> (Chart.js init,
+      etc.) and which inherit THIS document policy in addition to their
+      own SLIDE_CSP meta (both enforce; most restrictive wins).
+    * Per CSP2+, adding any nonce or hash to ``script-src`` makes the
+      browser IGNORE 'unsafe-inline'. A nonce on the parent would
+      therefore disable inline execution for the inherited srcdoc slide
+      scripts and break slide rendering app-wide — you cannot have
+      "nonce + unsafe-inline" both take effect.
+  Removing it would require re-architecting slides away from srcdoc
+  (backend-served ``src`` iframes), which the frame-ancestors / no-src
+  design above deliberately avoids. The residual is bounded: slides stay
+  confined by SLIDE_CSP (an egress boundary) + the html_safety scanner,
+  and the DOCUMENT_CSP ⊇ SLIDE_CSP superset invariant is locked by
+  tests/unit/test_export_csp.py::test_document_csp_header_is_superset_of_slide_csp.
+
 - Everything else (JSON APIs, assets, SSE) gets the deny-all
   ``API_CSP`` — nothing executes in a JSON response.
 
