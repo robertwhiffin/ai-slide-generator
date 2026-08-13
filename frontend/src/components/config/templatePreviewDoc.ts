@@ -334,7 +334,8 @@ export const PREVIEW_STAGE_W = SLIDE_FRAME_W;
 export const PREVIEW_STAGE_H = SLIDE_FRAME_H;
 
 /**
- * Shim for custom elements this frame can never upgrade.
+ * Preview stage shim: neutralise custom elements this frame can never upgrade,
+ * and give the template's slide wrapper the fixed frame.
  *
  * Scripts NEVER run in a preview frame (`sandbox=""` plus a CSP with no
  * script-src), so a custom element used as the deck harness — Claude Design
@@ -365,12 +366,45 @@ export const PREVIEW_STAGE_H = SLIDE_FRAME_H;
  * dark-on-dark, since colour and font still inherit). {@link slideHostFrameStyle}
  * stretches the stage's child to the frame, which is what gives that wrapper
  * area; it is the same shared contract every in-app slide surface uses.
+ *
+ * TWO HOST SHAPES, ONE SELECTOR. The frame host is whichever body child sits on
+ * the path to the slide, and uploaded templates come both ways:
+ *
+ *   <body><deck-stage><section><div class="slide">   custom-element harness
+ *   <body><section><div class="slide">               wrapper straight under body
+ *
+ * `:not(:defined)` reaches only the first: it matches valid-named custom
+ * elements that were never registered, and every built-in counts as defined, so
+ * it can never match a `<section>`. The second shape is a supported upload (see
+ * `template-cards.spec.ts`) and collapsed identically — measured 1280x0, with
+ * the out-of-flow slide escaping to the viewport at 1280x800. `:has()` covers it
+ * structurally: the body child that CONTAINS a slide root is the wrapper needing
+ * the frame, whatever its tag.
+ *
+ * The union is written as ONE `:is()` rather than a comma-separated list of two,
+ * for three reasons:
+ *  1. A `<deck-stage>` that contains a slide satisfies BOTH arms. A selector
+ *     either matches or it does not, so `:is()` applies the frame exactly once;
+ *     two comma arms would apply the whole block twice to that element.
+ *  2. {@link slideHostFrameStyle} appends ` > …` to build its child rule. A
+ *     descendant combinator binds only to the LAST arm of a selector list, so a
+ *     comma-separated host would silently leave the first arm's children
+ *     unstretched — the original defect, reintroduced.
+ *  3. `:is()` takes a FORGIVING selector list. In a browser without `:has()`
+ *     support the unknown arm is dropped and the custom-element arm keeps
+ *     working; an invalid selector inside a plain comma list would instead
+ *     invalidate the entire style rule and un-frame both shapes.
+ *
+ * Specificity is unchanged by the widening: `:is()` and `:has()` each take the
+ * specificity of their most specific argument, so the host still scores (0,1,1)
+ * — and the geometry is settled by `!important` regardless, exactly as the
+ * visibility neutralisation above it is.
  */
-const UNDEFINED_ELEMENT_SHIM =
+const PREVIEW_STAGE_SHIM =
   '<style>' +
   ':not(:defined){visibility:visible!important}' +
   'body>:not(:defined){display:block!important}' +
-  slideHostFrameStyle('body>:not(:defined)') +
+  slideHostFrameStyle(`body>:is(:not(:defined),:has(${SLIDE_ROOT_SELECTOR}))`) +
   '</style>';
 
 /** Parse layout HTML inertly (no fetch, no script execution). */
@@ -403,7 +437,7 @@ export function countTemplateSlides(layoutHtml: string): number {
  * anything; the parsed head content is re-emitted AFTER the guard block and
  * the parsed body (attributes included, via its own serialization) follows.
  *
- * {@link UNDEFINED_ELEMENT_SHIM} trails the template head so a deck harness
+ * {@link PREVIEW_STAGE_SHIM} trails the template head so a deck harness
  * built from an unregisterable custom element still lays out and is not left
  * hidden by its own pre-upgrade guard.
  *
@@ -459,5 +493,5 @@ export function buildTemplatePreviewDoc(
   const templateBody = parsed.body?.outerHTML ?? '<body></body>';
   // The shim trails the template's own head so it wins on cascade ORDER as well
   // as importance; the CSP meta stays the first fetch-capable byte regardless.
-  return `<!DOCTYPE html><html><head>${guard}${templateHead}${UNDEFINED_ELEMENT_SHIM}</head>${templateBody}</html>`;
+  return `<!DOCTYPE html><html><head>${guard}${templateHead}${PREVIEW_STAGE_SHIM}</head>${templateBody}</html>`;
 }

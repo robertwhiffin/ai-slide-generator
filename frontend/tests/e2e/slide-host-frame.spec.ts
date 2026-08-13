@@ -60,17 +60,36 @@ const TEMPLATE_CSS = `
   section { background: ${STAGE_BG}; color: ${INK}; overflow: hidden; }
   .slide { position: absolute; inset: 0; padding: 72px 88px; display: flex; flex-direction: column; }
   .slide.own-bg { background: #ffffff; }
+  .slide.compact { width: 640px !important; height: 360px !important; }
 `;
 
 const bareSlide = (label: string) =>
   `<section data-label="${label}"><div class="slide"><p class="probe">Body copy ${label}</p></div></section>`;
 const immuneSlide = (label: string) =>
   `<section data-label="${label}"><div class="slide own-bg"><p class="probe">Body copy ${label}</p></div></section>`;
+// A slide root with NO wrapper — the legacy no-design-system shape, where the
+// slide root itself is the host's direct child — that declares a size SMALLER
+// than the frame, with `!important`. The opt-out probe.
+const compactRoot = (label: string) =>
+  `<div class="slide compact" data-label="${label}"><p class="probe">Body copy ${label}</p></div>`;
 
 /** A multi-slide template document, the shape an uploaded template really has. */
 const templateLayout = (slides: string[]) =>
   `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style></head>` +
   `<body><deck-stage width="1280" height="720">${slides.join('')}</deck-stage></body></html>`;
+
+/**
+ * The same template one level shallower: the background-carrying wrapper sits
+ * DIRECTLY under <body>, with no custom-element harness around it. This is a
+ * supported upload shape — `template-cards.spec.ts` serves exactly
+ * `<body><section><div class="slide">…</div></section></body>` — and a
+ * `:not(:defined)` host selector cannot reach it, because `:not(:defined)`
+ * matches only unregistered CUSTOM elements while every built-in counts as
+ * defined. The pop-out must therefore recognise the wrapper structurally.
+ */
+const plainLayout = (slides: string[]) =>
+  `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style></head>` +
+  `<body>${slides.join('')}</body></html>`;
 
 // --------------------------------------------------------------- measurement
 /**
@@ -135,6 +154,66 @@ async function measure(page: Page, doc: string) {
   await page.setContent(doc, { waitUntil: 'load' });
   const result = await page.evaluate(MEASURE);
   expect(result, 'fixture should render a .slide').not.toBeNull();
+  return result!;
+}
+
+/**
+ * How many frame-contract rules in the live document match a given element,
+ * split by ROLE: a `host` rule pins the fixed 1280x720 frame, a `child` rule
+ * stretches a host's direct child to fill it.
+ *
+ * The frame must be declared ONCE per element and the two roles must never land
+ * on the SAME element. A host selector written as a comma list whose arms both
+ * match would apply one role twice; a host selector that reaches a nested
+ * wrapper would apply BOTH roles to it, stacking `position: relative` against
+ * `position: absolute` with equal importance and letting specificity decide the
+ * geometry. Counting matched rules catches both, where computed style cannot:
+ * duplicate identical declarations compute the same as one.
+ */
+const COUNT_FRAME_RULES = (selector: string) => {
+  const el = document.querySelector(selector);
+  if (!el) return null;
+  let host = 0;
+  let child = 0;
+  for (const sheet of Array.from(document.styleSheets)) {
+    let rules: CSSRuleList;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue; // cross-origin sheet; none in these fixtures
+    }
+    for (const rule of Array.from(rules)) {
+      const styleRule = rule as CSSStyleRule;
+      if (!styleRule.selectorText) continue;
+      let hit = false;
+      try {
+        hit = el.matches(styleRule.selectorText);
+      } catch {
+        continue; // a selector this browser cannot parse cannot be applying
+      }
+      if (!hit) continue;
+      const style = styleRule.style;
+      if (
+        style.getPropertyValue('width') === '1280px' &&
+        style.getPropertyValue('height') === '720px'
+      ) {
+        host++;
+      } else if (
+        style.getPropertyValue('position') === 'absolute' &&
+        style.getPropertyValue('height') === '100%'
+      ) {
+        child++;
+      }
+    }
+  }
+  return { host, child, position: getComputedStyle(el).position };
+};
+
+async function frameRoles(page: Page, doc: string, selector: string) {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setContent(doc, { waitUntil: 'load' });
+  const result = await page.evaluate(COUNT_FRAME_RULES, selector);
+  expect(result, `fixture should contain ${selector}`).not.toBeNull();
   return result!;
 }
 
@@ -273,6 +352,91 @@ test.describe('slide-host frame contract', () => {
     expect(visible.emptySections, 'no background-carrying wrapper may be left empty').toBe(0);
     expect(visible.sections, 'only the isolated slide’s wrapper survives').toBe(1);
     expect(visible.labelAtCentre, 'the isolated slide is what the frame shows').toBe('target');
+  });
+
+  // ------------------------------- pop-out: a plain wrapper under <body>
+  // The gap the `:not(:defined)` host selector cannot cover. Everything about
+  // the defect is identical — a background-carrying wrapper collapsed by an
+  // out-of-flow slide — only the un-upgradable custom element is missing.
+  test('template pop-out: a wrapper directly under body, with no deck-stage, paints the deck background at full frame height', async ({ page }) => {
+    const layout = plainLayout([
+      immuneSlide('cover'), bareSlide('target'), immuneSlide('closing'),
+    ]);
+    const m = await measure(page, await buildPopoutDoc(page, layout, 1));
+
+    expect(m.section, 'plain wrapper: section must fill the frame, not collapse')
+      .toEqual({ w: 1280, h: 720 });
+    expect(m.slide, 'plain wrapper: slide must be the 720px frame, not the viewport')
+      .toEqual({ w: 1280, h: 720 });
+    expect(m.contrast, `plain wrapper: painted contrast (backdrop ${m.backdrop})`)
+      .toBeGreaterThanOrEqual(4.5);
+  });
+
+  test('template pop-out: isolating a slide in a plain wrapper leaves no emptied background wrapper', async ({ page }) => {
+    // Same hazard as the deck-stage shape: an emptied `section` still matches
+    // the bare `section` background rule, and under the frame contract a later
+    // empty sibling would paint over the slide that survives.
+    const doc = await buildPopoutDoc(
+      page,
+      plainLayout([bareSlide('first'), bareSlide('target'), bareSlide('trailing')]),
+      1,
+    );
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setContent(doc, { waitUntil: 'load' });
+
+    const visible = await page.evaluate(() => {
+      const el = document.elementFromPoint(640, 360);
+      const slide = el?.closest('.slide') ?? null;
+      return {
+        sections: document.querySelectorAll('section').length,
+        emptySections: [...document.querySelectorAll('section')]
+          .filter((s) => !s.querySelector('.slide')).length,
+        labelAtCentre: slide?.closest('section')?.getAttribute('data-label') ?? null,
+      };
+    });
+
+    expect(visible.emptySections, 'no background-carrying wrapper may be left empty').toBe(0);
+    expect(visible.sections, 'only the isolated slide’s wrapper survives').toBe(1);
+    expect(visible.labelAtCentre, 'the isolated slide is what the frame shows').toBe('target');
+  });
+
+  test('template pop-out: the frame is declared once, on the wrapper, in BOTH template shapes', async ({ page }) => {
+    // One host, one child, never both roles on one element — see
+    // COUNT_FRAME_RULES. This is what keeps a selector that covers both shapes
+    // from double-applying to the shape that already worked.
+    const withStage = await buildPopoutDoc(page, templateLayout([bareSlide('only')]));
+    const stageHost = await frameRoles(page, withStage, 'deck-stage');
+    expect(stageHost.host, 'deck-stage is framed exactly once').toBe(1);
+    expect(stageHost.child, 'deck-stage is a host, never also a stretched child').toBe(0);
+
+    const stageWrapper = await frameRoles(page, withStage, 'section');
+    expect(stageWrapper.child, 'the section inside deck-stage is stretched exactly once').toBe(1);
+    expect(stageWrapper.host, 'the nested section must NOT become a second frame').toBe(0);
+
+    const plain = await buildPopoutDoc(page, plainLayout([bareSlide('only')]));
+    const plainWrapper = await frameRoles(page, plain, 'section');
+    expect(plainWrapper.host, 'a wrapper directly under body is framed exactly once').toBe(1);
+    expect(plainWrapper.child, 'that wrapper is the host, so it is not also stretched').toBe(0);
+
+    const plainSlide = await frameRoles(page, plain, '.slide');
+    expect(plainSlide.child, 'the slide inside it is stretched exactly once').toBe(1);
+  });
+
+  // ------------------------------------------- deliberate: no size opt-out
+  test('an authored slide root smaller than the frame is still stretched to it', async ({ page }) => {
+    // DELIBERATE, not incidental. The product canvas is a FIXED 1280x720 16:9
+    // frame, so honouring a smaller authored root would leave the page
+    // background painting around it — the very defect this contract fixes.
+    // It is also what the platform itself does: every shipped `deck-stage.js`
+    // stretches its slotted child with a byte-identical
+    // `position/inset/width/height/box-sizing` `!important` block from inside
+    // its shadow root, where important declarations in the inner tree beat
+    // author important declarations in the outer one — so a bundle cannot opt
+    // out of the stretch in a real deck-stage either. Honouring an opt-out here
+    // would make the preview disagree with the shipped renderer.
+    const m = await measure(page, surfaces.SlideTile(compactRoot('compact')));
+    expect(m.slide, 'a 640x360 !important authored root is still framed at 1280x720')
+      .toEqual({ w: 1280, h: 720 });
   });
 
   // ------------------------------------------------------------ drift guard
