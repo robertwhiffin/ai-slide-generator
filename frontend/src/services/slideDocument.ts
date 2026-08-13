@@ -61,15 +61,79 @@ export const SLIDE_ROOT_RESET_STYLE = `
   }
 `;
 
+/** The fixed 16:9 frame every preview surface renders a single slide into. */
+export const SLIDE_FRAME_W = 1280;
+export const SLIDE_FRAME_H = 720;
+
+/**
+ * The slide-host frame contract: give `hostSelector` the fixed frame and STRETCH
+ * ITS CHILD to fill it.
+ *
+ * Why the child, and not just the host. Design-system templates nest the slide
+ * two levels deep — a wrapper element (`<section>`) carries the deck background
+ * via a bare TYPE selector, and inside it `.slide` is `position: absolute;
+ * inset: 0`. Because the slide is out of flow, the wrapper has no in-flow
+ * content and collapses to `height: 0`. The collapsed element is the one
+ * carrying the background, so the deck background never paints and whatever is
+ * behind it (typically the deck's own dark `html,body` background) shows
+ * through. `color` and `font-family` still apply — they inherit — which is why
+ * the result is READABLE DARK-ON-DARK rather than an obviously blank slide.
+ * The absolute slide also escapes its static wrapper and resolves against the
+ * viewport, so the same surfaces lay content out against the wrong height.
+ *
+ * Sizing the ROOT does not fix this: the wrapper stays a static-flow child and
+ * still collapses. Only stretching the host's CHILD gives the
+ * background-carrying element area. Presentation mode was the one surface that
+ * already declared such a rule, which is the only reason it escaped the defect;
+ * this is that rule, promoted so every surface shares one mechanism.
+ *
+ * Every declaration is load-bearing (each was measured by removing it):
+ *  - host `position: relative` — else the absolute slide escapes to the viewport
+ *  - host width/height — else the frame collapses and nothing has area
+ *  - child `height: 100%` — the actual fix; a sized, positioned host is not enough
+ *  - child `box-sizing: border-box` — slide roots are content-box with a safe-area
+ *    padding, so a bare `width/height: 100%` overshoots the frame
+ *  - `overflow: hidden` — else a preview grows where an export clips
+ *  - `!important`, at id-level specificity via the `:not(#…)` clause (which never
+ *    matches — no such id is ever minted) — templates author their own
+ *    `position` on the slide root and would otherwise reintroduce the collapse
+ *
+ * `.slide-wrapper` is excluded deliberately: that is the per-slide block of the
+ * standalone MULTI-slide HTML export, where every block is meant to stay in flow
+ * and scroll. Stretching those to one frame would stack the whole deck into a
+ * single pile, so the contract is written to be incapable of it wherever it is
+ * injected.
+ */
+export function slideHostFrameStyle(hostSelector: string): string {
+  return `
+  ${hostSelector} {
+    position: relative !important;
+    width: ${SLIDE_FRAME_W}px !important;
+    height: ${SLIDE_FRAME_H}px !important;
+    overflow: hidden;
+  }
+  ${hostSelector} > :not(#tellr-host-frame-boost):not(.slide-wrapper) {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    box-sizing: border-box !important;
+    overflow: hidden;
+  }
+`;
+}
+
 // Layout reset for fixed-frame preview surfaces (slide tiles, visual editor).
 // The UA's default 8px body margin alone pushes 1280x720 content past the
 // frame and draws scrollbars inside the preview; these surfaces clip instead
 // (the filmstrip and presentation mode carry their own frame sizing). The
 // shared root reset pins the slide root to the frame origin instead of
-// truncating its bottom edge.
+// truncating its bottom edge, and the frame contract gives a
+// background-carrying slide wrapper the area it needs to paint at all.
 export const SLIDE_PREVIEW_RESET_STYLE = `
   html, body { margin: 0; padding: 0; overflow: hidden; }
   ${SLIDE_ROOT_RESET_STYLE}
+  ${slideHostFrameStyle('body')}
 `;
 
 export interface SlideDocumentOptions {

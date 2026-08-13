@@ -1,7 +1,11 @@
 import React, { useMemo } from 'react';
 import type { Slide, SlideDeck } from '../../types/slide';
 import { isContiguous } from '../../utils/slideReplacements';
-import { buildSlideDocument, SLIDE_ROOT_RESET_STYLE } from '../../services/slideDocument';
+import {
+  buildSlideDocument,
+  slideHostFrameStyle,
+  SLIDE_ROOT_RESET_STYLE,
+} from '../../services/slideDocument';
 import './SlideSelection.css';
 
 interface SlideSelectionProps {
@@ -50,17 +54,19 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
     // background/font-family — those lines repainted deck-level brand
     // backgrounds white and forced Inter on every filmstrip preview. The
     // shared root reset flattens the slide root exactly like every other
-    // surface (see SLIDE_ROOT_RESET_STYLE).
+    // surface (see SLIDE_ROOT_RESET_STYLE); the shared frame contract supplies
+    // the 1280x720 frame AND stretches the slide's background-carrying wrapper
+    // to fill it, without which that wrapper collapses to height 0 and the
+    // deck background never paints (see slideHostFrameStyle).
     const resetStyle = `
       * {
         box-sizing: border-box;
       }
       body {
         margin: 0;
-        width: 1280px;
-        height: 720px;
       }
-      ${SLIDE_ROOT_RESET_STYLE}`;
+      ${SLIDE_ROOT_RESET_STYLE}
+      ${slideHostFrameStyle('body')}`;
 
     return (slideHtml: string) =>
       buildSlideDocument(slideHtml, {
