@@ -5,9 +5,15 @@ behavior (full JSON-RPC round trip, FastMCP routing) lives in
 tests/integration/test_mcp_endpoint.py (added in Task 11).
 """
 
+import base64
+import json
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.api.mcp_auth import MCPIdentity
@@ -29,6 +35,66 @@ def fake_request():
     req = MagicMock()
     req.headers = {"x-forwarded-access-token": "tok"}
     return req
+
+
+@pytest.fixture
+def mcp_asset_session():
+    """Real in-memory persistence for synthetic MCP design-system assets."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
+def _make_synthetic_design_system(session, name, assets):
+    from src.database.models.design_system import DesignSystem, DesignSystemAsset
+
+    design_system = DesignSystem(name=name)
+    for filename, mime, data, kind in assets:
+        design_system.assets.append(
+            DesignSystemAsset(
+                kind=kind,
+                filename=filename,
+                mime=mime,
+                data=data,
+                size_bytes=len(data),
+            )
+        )
+    session.add(design_system)
+    session.commit()
+    session.refresh(design_system)
+    return design_system
+
+
+def _render_mcp_deck_with_scope(session, deck, design_system_id):
+    from src.api.mcp_server import _render_deck_response
+
+    @contextmanager
+    def fake_db_session():
+        yield session
+
+    session_manager = MagicMock()
+    agent_config = (
+        {"design_system_id": design_system_id}
+        if design_system_id is not None
+        else {}
+    )
+    session_manager.get_session.return_value = {"agent_config": agent_config}
+
+    with patch("src.api.mcp_server.get_db_session", fake_db_session), patch(
+        "src.api.services.session_manager.get_session_manager",
+        return_value=session_manager,
+    ):
+        return _render_deck_response(
+            deck,
+            {"session_id": "synthetic-session", "title": "Synthetic Deck"},
+            "",
+        )
 
 
 # ---- create_deck --------------------------------------------------------
@@ -1101,6 +1167,120 @@ async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
 
 
 # ---- get_deck -----------------------------------------------------------
+
+
+def test_mcp_deck_response_substitutes_all_design_system_assets(mcp_asset_session):
+    """MCP structured data, deck CSS, and standalone HTML embed owned assets."""
+    design_system = _make_synthetic_design_system(
+        mcp_asset_session,
+        "Synthetic Aurora System",
+        [
+            ("synthetic-typeface.ttf", "font/ttf", b"tiny-font", "font"),
+            ("synthetic-mark.png", "image/png", b"tiny-image", "logo"),
+        ],
+    )
+    font_asset, image_asset = design_system.assets
+    font_placeholder = f"{{{{ds-asset:{font_asset.id}}}}}"
+    image_placeholder = f"{{{{ds-asset:{image_asset.id}}}}}"
+    deck = {
+        "title": "Synthetic Deck",
+        "slides": [
+            {
+                "html": f'<div class="slide"><img src="{image_placeholder}"></div>',
+                "scripts": "",
+            }
+        ],
+        "css": (
+            "@font-face { font-family: 'Synthetic Sans'; "
+            f"src: url('{font_placeholder}') format('truetype'); }}"
+        ),
+        "external_scripts": [],
+        "head_meta": {},
+    }
+
+    result = _render_mcp_deck_with_scope(
+        mcp_asset_session, deck, design_system.id
+    )
+
+    assert "{{ds-asset:" not in json.dumps(result["deck"]["slides"])
+    assert "{{ds-asset:" not in result["deck"]["css"]
+    assert "{{ds-asset:" not in result["html_document"]
+    assert base64.b64encode(b"tiny-font").decode() in result["deck"]["css"]
+    assert base64.b64encode(b"tiny-image").decode() in result["deck"]["slides"][0]["html"]
+
+
+def test_mcp_deck_response_does_not_substitute_foreign_design_system_asset(
+    mcp_asset_session,
+):
+    """A system A asset stays inert when the session is scoped to system B."""
+    from src.services import design_system_service
+
+    system_a = _make_synthetic_design_system(
+        mcp_asset_session,
+        "Synthetic Meridian System A",
+        [("private-a.png", "image/png", b"system-a-bytes", "logo")],
+    )
+    system_b = _make_synthetic_design_system(
+        mcp_asset_session,
+        "Synthetic Meridian System B",
+        [("public-b.png", "image/png", b"system-b-bytes", "logo")],
+    )
+    foreign_asset = system_a.assets[0]
+    placeholder = f"{{{{ds-asset:{foreign_asset.id}}}}}"
+    deck = {
+        "slides": [{"html": f'<div class="slide"><img src="{placeholder}"></div>'}],
+        "css": "",
+    }
+
+    with patch(
+        "src.services.design_system_service.get_asset_base64",
+        wraps=design_system_service.get_asset_base64,
+    ) as get_asset_base64:
+        result = _render_mcp_deck_with_scope(
+            mcp_asset_session, deck, system_b.id
+        )
+
+    get_asset_base64.assert_called_once_with(
+        mcp_asset_session,
+        foreign_asset.id,
+        design_system_id=system_b.id,
+    )
+    assert placeholder in result["deck"]["slides"][0]["html"]
+    assert placeholder in result["html_document"]
+    assert base64.b64encode(b"system-a-bytes").decode() not in result["html_document"]
+
+
+def test_mcp_deck_response_without_design_system_fails_closed(mcp_asset_session):
+    """A session with no design system resolves nothing and still renders."""
+    from src.services import design_system_service
+
+    design_system = _make_synthetic_design_system(
+        mcp_asset_session,
+        "Synthetic No-Scope System",
+        [("unscoped.png", "image/png", b"unscoped-bytes", "logo")],
+    )
+    asset = design_system.assets[0]
+    placeholder = f"{{{{ds-asset:{asset.id}}}}}"
+    deck = {
+        "slides": [{"html": f'<div class="slide"><img src="{placeholder}"></div>'}],
+        "css": f".slide {{ background-image: url('{placeholder}'); }}",
+    }
+
+    with patch(
+        "src.services.design_system_service.get_asset_base64",
+        wraps=design_system_service.get_asset_base64,
+    ) as get_asset_base64:
+        result = _render_mcp_deck_with_scope(mcp_asset_session, deck, None)
+
+    assert get_asset_base64.call_count == 2
+    assert all(
+        call.kwargs == {"design_system_id": None}
+        for call in get_asset_base64.call_args_list
+    )
+    assert placeholder in result["deck"]["slides"][0]["html"]
+    assert placeholder in result["deck"]["css"]
+    assert placeholder in result["html_document"]
+    assert base64.b64encode(b"unscoped-bytes").decode() not in result["html_document"]
 
 
 @pytest.mark.asyncio

@@ -586,10 +586,30 @@ def _render_deck_response(
         base_url: Public app URL prefix for building deck URLs. Empty
             string yields relative URLs.
 
-    ``SlideDeck.from_dict`` rebuilds the deck from the stored snapshot,
+    Image and design-system asset placeholders are substituted at this shared
+    response boundary so both MCP deck-returning tools emit standalone data
+    without expanding the persisted snapshot. Design-system assets are scoped
+    to the session's active design system and fail closed when it has none.
+
+    ``SlideDeck.from_dict`` rebuilds the deck from the substituted snapshot,
     including per-slide scripts/metadata and head metadata.
     """
     deck_dict = deck_dict or {}
+    session_id = session["session_id"]
+
+    from src.api.services.chat_service import resolve_active_design_system_id
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
+    from src.utils.image_utils import substitute_deck_dict_images
+
+    design_system_id = resolve_active_design_system_id(session_id)
+    with get_db_session() as db:
+        substitute_deck_dict_images(deck_dict, db)
+        substitute_deck_dict_ds_assets(
+            deck_dict,
+            db,
+            design_system_id=design_system_id,
+        )
+
     if deck_dict:
         deck = SlideDeck.from_dict(
             deck_dict,
@@ -598,7 +618,6 @@ def _render_deck_response(
     else:
         deck = SlideDeck(title=session.get("title"))
 
-    session_id = session["session_id"]
     deck_url = (
         f"{base_url}/sessions/{session_id}/edit"
         if base_url
