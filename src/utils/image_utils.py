@@ -8,7 +8,8 @@ from src.services import image_service
 
 logger = logging.getLogger(__name__)
 
-IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\{\{image:(\d+)\}\}")
+# Tokens are secrets.token_urlsafe(...) → [A-Za-z0-9_-] (SDR-4437 F-TM-7).
+IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\{\{image:([A-Za-z0-9_-]+)\}\}")
 
 
 def substitute_image_placeholders(html: str, db: Session) -> str:
@@ -22,12 +23,12 @@ def substitute_image_placeholders(html: str, db: Session) -> str:
         return html
 
     def replace_match(match):
-        image_id = int(match.group(1))
+        image_token = match.group(1)
         try:
-            b64_data, mime_type = image_service.get_image_base64(db, image_id)
+            b64_data, mime_type = image_service.get_image_base64(db, image_token)
             return f"data:{mime_type};base64,{b64_data}"
         except Exception as e:
-            logger.warning(f"Failed to resolve image placeholder {{{{image:{image_id}}}}}: {e}")
+            logger.warning(f"Failed to resolve image placeholder {{{{image:{image_token}}}}}: {e}")
             return match.group(0)  # Leave placeholder if image not found
 
     return IMAGE_PLACEHOLDER_PATTERN.sub(replace_match, html)

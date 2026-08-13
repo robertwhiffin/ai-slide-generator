@@ -51,7 +51,7 @@ def upload_image(
         ).first()
         if existing:
             raise ValueError(
-                f"An image named '{original_filename}' already exists (id={existing.id}). "
+                f"An image named '{original_filename}' already exists. "
                 "Please rename the file or delete the existing image first."
             )
 
@@ -86,19 +86,19 @@ def upload_image(
     return image
 
 
-def get_image_base64(db: Session, image_id: int) -> tuple[str, str]:
+def get_image_base64(db: Session, token: str) -> tuple[str, str]:
     """
-    Get full image as base64 string.
+    Get full image as base64 string, keyed by the opaque token (SDR-4437 F-TM-7).
 
     Returns:
         Tuple of (base64_data, mime_type)
     """
     image = db.query(ImageAsset).filter(
-        ImageAsset.id == image_id,
+        ImageAsset.token == token,
         ImageAsset.is_active == True,
     ).first()
     if not image:
-        raise ValueError(f"Image {image_id} not found")
+        raise ValueError(f"Image {token} not found")
 
     b64 = base64.b64encode(image.image_data).decode("utf-8")
     return b64, image.mime_type
@@ -175,11 +175,11 @@ def search_images(
     ).all()
 
 
-def delete_image(db: Session, image_id: int, user: str) -> None:
-    """Soft-delete an image."""
-    image = db.query(ImageAsset).filter(ImageAsset.id == image_id).first()
+def delete_image(db: Session, token: str, user: str) -> None:
+    """Soft-delete an image, keyed by the opaque token (SDR-4437 F-TM-7)."""
+    image = db.query(ImageAsset).filter(ImageAsset.token == token).first()
     if not image:
-        raise ValueError(f"Image {image_id} not found")
+        raise ValueError(f"Image {token} not found")
 
     image.is_active = False
     image.updated_by = user

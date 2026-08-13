@@ -163,7 +163,7 @@ class TestGetImageEndpoint:
     def test_returns_image_metadata(self, client, db_session):
         image = create_test_image(db_session, original_filename="logo.png")
 
-        response = client.get(f"/api/images/{image.id}")
+        response = client.get(f"/api/images/{image.token}")
         assert response.status_code == 200
         assert response.json()["original_filename"] == "logo.png"
 
@@ -173,7 +173,7 @@ class TestGetImageEndpoint:
 
     def test_returns_404_for_inactive(self, client, db_session):
         image = create_test_image(db_session, is_active=False)
-        response = client.get(f"/api/images/{image.id}")
+        response = client.get(f"/api/images/{image.token}")
         assert response.status_code == 404
 
 
@@ -185,7 +185,7 @@ class TestGetImageDataEndpoint:
     def test_returns_base64_data(self, client, db_session, png_bytes):
         image = create_test_image(db_session, image_data=png_bytes)
 
-        response = client.get(f"/api/images/{image.id}/data")
+        response = client.get(f"/api/images/{image.token}/data")
         assert response.status_code == 200
         data = response.json()
         assert data["mime_type"] == "image/png"
@@ -206,7 +206,7 @@ class TestUpdateEndpoint:
         image = create_test_image(db_session, tags=["old"])
 
         response = client.put(
-            f"/api/images/{image.id}",
+            f"/api/images/{image.token}",
             json={"tags": ["new", "tags"]},
         )
         assert response.status_code == 200
@@ -216,7 +216,7 @@ class TestUpdateEndpoint:
         image = create_test_image(db_session, description="old")
 
         response = client.put(
-            f"/api/images/{image.id}",
+            f"/api/images/{image.token}",
             json={"description": "new description"},
         )
         assert response.status_code == 200
@@ -235,12 +235,12 @@ class TestDeleteEndpoint:
     def test_delete_returns_204(self, client, db_session):
         image = create_test_image(db_session)
 
-        response = client.delete(f"/api/images/{image.id}")
+        response = client.delete(f"/api/images/{image.token}")
         assert response.status_code == 204
 
     def test_deleted_image_no_longer_listed(self, client, db_session):
         image = create_test_image(db_session)
-        client.delete(f"/api/images/{image.id}")
+        client.delete(f"/api/images/{image.token}")
 
         response = client.get("/api/images")
         assert response.json()["total"] == 0

@@ -138,7 +138,7 @@ interface SendMessageParams {
   message: string;
   sessionId: string;
   slideContext?: SlideContext;
-  imageIds?: number[];
+  imageIds?: string[];
   profileId?: number;
   profileName?: string;
 }
@@ -785,7 +785,7 @@ export const api = {
     slideContext: SlideContext | undefined,
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
-    imageIds?: number[],
+    imageIds?: string[],
     agentConfig?: AgentConfig,
   ): () => void {
     const controller = new AbortController();
@@ -877,7 +877,7 @@ export const api = {
     sessionId: string,
     message: string,
     slideContext?: SlideContext,
-    imageIds?: number[],
+    imageIds?: string[],
     agentConfig?: AgentConfig,
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
@@ -936,7 +936,7 @@ export const api = {
     slideContext: SlideContext | undefined,
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
-    imageIds?: number[],
+    imageIds?: string[],
     agentConfig?: AgentConfig,
   ): () => void {
     let cancelled = false;
@@ -1026,7 +1026,7 @@ export const api = {
     slideContext: SlideContext | undefined,
     onEvent: (event: StreamEvent) => void,
     onError: (error: Error) => void,
-    imageIds?: number[],
+    imageIds?: string[],
     agentConfig?: AgentConfig,
   ): () => void {
     if (isPollingMode()) {
@@ -1071,14 +1071,14 @@ export const api = {
     return response.json();
   },
 
-  async getImageData(imageId: number): Promise<ImageDataResponse> {
+  async getImageData(imageId: string): Promise<ImageDataResponse> {
     const response = await fetch(`${API_BASE_URL}/api/images/${imageId}/data`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to get image data');
     return response.json();
   },
 
   async updateImage(
-    imageId: number,
+    imageId: string,
     updates: { tags?: string[]; description?: string; category?: string }
   ): Promise<ImageAsset> {
     const response = await fetch(`${API_BASE_URL}/api/images/${imageId}`, {
@@ -1090,7 +1090,7 @@ export const api = {
     return response.json();
   },
 
-  async deleteImage(imageId: number): Promise<void> {
+  async deleteImage(imageId: string): Promise<void> {
     const response = await fetch(`${API_BASE_URL}/api/images/${imageId}`, {
       method: 'DELETE',
     });
