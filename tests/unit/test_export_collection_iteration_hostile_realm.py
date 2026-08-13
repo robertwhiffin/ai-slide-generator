@@ -54,24 +54,38 @@ first: its twin's export depends on all four of its collection reads — the
 monospace panel, the prose div, the ``<svg>`` and the ``<img>`` — so the artifact
 matches only when every one of them yields the same elements in the same order.
 
-WHAT THIS FIX DOES NOT REACH, measured rather than assumed. Hardening
-``preprocess.mjs`` makes the PASS return — proven above at the pass's own
-boundary, in single-digit milliseconds and with the same counts as the benign
-twin — but it does not make the EXPORT complete, because the vendored huashu
-walker has the same defect one file over:
+THE VENDORED WALKER IS NOW HARDENED TOO, which is why the artifact claims below
+are ordinary expectations. Hardening ``preprocess.mjs`` alone made the PASS
+return but not the EXPORT complete, because the vendored huashu walker had the
+same defect one file over — and line 652 runs for every element the text walker
+visits, so both fixtures hung there regardless of the preprocess fix:
 
-    html2pptx.js  652  for (const node of el.childNodes)     NodeList
-                  791  Array.from(el.querySelectorAll('li')) NodeList
-                  1025 Array.from(querySelectorAll('canvas')) NodeList
+    html2pptx.js  447  element.childNodes.forEach(...)        NodeList
+                  576  document.querySelectorAll('*').forEach HTMLCollection
+                  652  for (const node of el.childNodes)      NodeList
+                  791  Array.from(el.querySelectorAll('li'))  NodeList
+                  896  el.querySelector('b, i, u, ...')       Element lookup
 
-Line 652 runs for every element the text walker visits, so both fixtures still
-hang the export there. Measured, not inferred: changing that ONE line to an index
-loop takes this module's artifact tests from four 180s sidecar timeouts to seven
-passes in 13s. It is left alone here because it is a different file and this
-change is confined to the collection reads in ``preprocess.mjs``; the artifact
-claims below are therefore ``xfail(strict=True)``, which documents the residual
-and turns into a failure the moment the walker is fixed and the markers are owed
-removal.
+All five now read through the same mechanism ``preprocess.mjs`` uses: accessors
+captured from a src-less iframe's pristine realm, consumed by walking the sibling
+chain or indexing under a bound. The measured effect on this module is four
+sidecar timeouts becoming four passes, and the suite going from 109s to under
+20s. These two claims carried ``xfail(strict=True)`` while the walker was open;
+the strictness is what turned the fix into a failing test and made the markers'
+removal owed rather than optional.
+
+WHAT IS STILL NOT REACHED, measured rather than assumed. One raw site remains in
+``preprocess.mjs``, inside ``emitInlineBackgrounds``:
+
+    preprocess.mjs 866  document.querySelectorAll(SELECTOR).forEach(...)
+
+That function is fenced off from this change by explicit instruction, so the site
+is disclosed rather than closed. It is not a partial residual: a poisoned
+``forEach`` ignores its receiver, so that line spins on ANY document — an empty
+``span, mark, kbd`` NodeList still calls it — which leaves the hang and the raise
+open for every deck, not only for decks carrying an inline background. The
+sibling module ``test_export_accessor_hostile_realm.py`` states that residual as
+its own strict expectations, so it fails the moment the fence is lifted.
 
 Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.
@@ -83,6 +97,7 @@ import json
 
 import pytest
 
+from src.services import pptx_from_html_huashu
 from tests.unit.test_export_slide_root_background import (
     GROUND,
     GROUND_RGB,
@@ -96,25 +111,11 @@ from tests.unit.test_export_slide_root_hostile_realm import (
 )
 from tests.unit.test_export_svg_raster import structural_manifest
 
-from src.services import pptx_from_html_huashu
-
-# The export cannot complete while html2pptx.js:652 consumes el.childNodes with
-# for...of — see the module docstring. strict, so that fixing the walker fails
-# this suite instead of quietly leaving a stale marker behind.
-blocked_on_the_vendored_walker = pytest.mark.xfail(
-    strict=True,
-    raises=pptx_from_html_huashu.HuashuExportError,
-    reason=(
-        "html2pptx.js:652 walks el.childNodes with for...of, so the hostile "
-        "iterator still hangs the export downstream of the preprocess pass. "
-        "Out of scope here: a different file. Remove this marker with that fix."
-    ),
-)
-
-# Long enough to be a real export of a two-element slide (the benign twins finish
-# in a couple of seconds), short enough that four blocked cases cost the suite
-# 100s instead of the 180s-per-case the production timeout would.
-BLOCKED_EXPORT_TIMEOUT_SECONDS = 25
+# Long enough to be a real export of a two-element slide (the hostile twins finish
+# in a couple of seconds now that the walker terminates), short enough that a
+# regression costs the suite seconds instead of the 180s-per-case the production
+# timeout would.
+HOSTILE_EXPORT_TIMEOUT_SECONDS = 25
 
 # Each hostile fixture and the benign twin it must export identically to.
 TWINS = {
@@ -222,7 +223,6 @@ class TestTheHostileScriptCostsTheDeckNothing:
 
         assert probed[fixture]["counts"] == probed[twin]["counts"]
 
-    @blocked_on_the_vendored_walker
     @pytest.mark.parametrize("fixture", HOSTILE_FIXTURES)
     def test_the_ground_reaches_the_artifact(
         self, monkeypatch: pytest.MonkeyPatch, fixture: str
@@ -231,12 +231,11 @@ class TestTheHostileScriptCostsTheDeckNothing:
         monkeypatch.setattr(
             pptx_from_html_huashu,
             "SIDECAR_TIMEOUT_SECONDS",
-            BLOCKED_EXPORT_TIMEOUT_SECONDS,
+            HOSTILE_EXPORT_TIMEOUT_SECONDS,
         )
 
         assert _slide_background(_build(monkeypatch, f"{fixture}.html")) == GROUND
 
-    @blocked_on_the_vendored_walker
     @pytest.mark.parametrize("fixture", HOSTILE_FIXTURES)
     def test_the_hostile_deck_exports_as_the_benign_deck(
         self, monkeypatch: pytest.MonkeyPatch, fixture: str
@@ -250,7 +249,7 @@ class TestTheHostileScriptCostsTheDeckNothing:
         monkeypatch.setattr(
             pptx_from_html_huashu,
             "SIDECAR_TIMEOUT_SECONDS",
-            BLOCKED_EXPORT_TIMEOUT_SECONDS,
+            HOSTILE_EXPORT_TIMEOUT_SECONDS,
         )
         hostile = _build(monkeypatch, f"{fixture}.html")
         benign = _build(monkeypatch, f"{TWINS[fixture]}.html")
