@@ -94,9 +94,46 @@ export const SLIDE_FRAME_H = 720;
  *  - child `box-sizing: border-box` — slide roots are content-box with a safe-area
  *    padding, so a bare `width/height: 100%` overshoots the frame
  *  - `overflow: hidden` — else a preview grows where an export clips
- *  - `!important`, at id-level specificity via the `:not(#…)` clause (which never
- *    matches — no such id is ever minted) — templates author their own
- *    `position` on the slide root and would otherwise reintroduce the collapse
+ *
+ * WHAT THE `!important`s AND THE ID BOOST ACTUALLY BEAT — measured per
+ * declaration, because the honest answer is narrower than it looks.
+ *
+ * Against the real uploaded bundle they are INERT. Its CSS declares no position
+ * and no size on the wrapper (`section{background;color;overflow:hidden}`), so
+ * the nine affected archetypes still measure 1280x720 with every `!important`
+ * AND the `:not(#…)` clause removed. An authored `position: static` on the
+ * wrapper is beaten by SPECIFICITY alone — child (0,1,1) vs (0,0,1) — so it
+ * needs no importance either.
+ *
+ * Exactly ONE declaration class defeats the frame without them: an author
+ * `!important` SIZE on the host's direct child. With the contract's importance
+ * removed, `.slide.compact{width:640px!important;height:360px!important}`
+ * measures 640x360 and the page background paints around it — the very defect
+ * this contract exists to fix. The `:not(#tellr-host-frame-boost)` clause (which
+ * never matches; no such id is ever minted) lifts the arm to id-level so an
+ * id-scoped author rule — `#deck.slide{…!important}`, (1,1,0) — cannot outrank it
+ * either. That is the whole job of the importance and the boost.
+ *
+ * Model-authored `!important` on a slide root is a REAL input class, not a
+ * hypothetical: `src/utils/html_safety.py` records `.slide{margin:40px auto
+ * !important}` from real generator output, which is why the sibling root reset
+ * carries the same boost for the same reason.
+ *
+ * The set cannot be trimmed piecemeal. Keeping importance on `height` alone
+ * measures 640x720 — right height, wrong width — so these declarations hold the
+ * frame as a SET, or the authored size wins outright.
+ *
+ * NO SIZE OPT-OUT, DELIBERATELY. The canvas is a fixed 1280x720 16:9 frame
+ * product-wide, and the generator is instructed "Fixed slide size: 1280x720px
+ * per slide" (src/core/defaults.py), so a root smaller than the frame is not a
+ * supported configuration — it reopens the page-background-shows-through defect
+ * rather than expressing a layout. The platform agrees: every shipped
+ * `deck-stage.js` applies a byte-identical
+ * `position/inset/width/height/box-sizing` `!important` block to `::slotted(*)`
+ * from inside its shadow root, where inner-tree important declarations beat
+ * outer-tree important ones at ANY specificity — so a bundle cannot opt out of
+ * the stretch in a real deck-stage either. Honouring an opt-out here would make
+ * the preview disagree with the renderer these templates were authored against.
  *
  * `.slide-wrapper` is excluded deliberately: that is the per-slide block of the
  * standalone MULTI-slide HTML export, where every block is meant to stay in flow
