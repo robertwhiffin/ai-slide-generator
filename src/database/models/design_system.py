@@ -69,6 +69,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -124,14 +125,19 @@ class DesignSystem(Base):
     # here silently TRUNCATED an imported name to 255 characters, storing the brand
     # under a name it never chose.
     #
-    # ``unique`` is RETAINED on the now-unbounded column. On PostgreSQL/Lakebase a
-    # UNIQUE constraint on ``text`` is a normal btree index; the only limit is the
-    # ~2704-byte per-entry index-tuple maximum, which a design-system NAME does not
-    # approach in practice. If a name ever did, the insert would fail loudly with an
-    # index-row-size error rather than corrupt or truncate anything — so no prefix /
-    # expression index is needed, and none is used. Uniqueness is a real product
-    # rule (the picker addresses systems by name), so it is not dropped.
-    name = Column(Text, nullable=False, unique=True)
+    # Uniqueness is enforced, but only over LIVE rows, by the partial unique index
+    # ``uq_design_system_name_active`` declared below — NOT by a column-level
+    # ``unique=True``. A whole-table UNIQUE constraint made a soft delete leak the
+    # name permanently: DELETE tombstones the row (``is_active = False``), the list
+    # endpoint hides it, and the tombstone then held its name against every later
+    # import — a name the user could no longer see, delete, or reuse. Scoping the
+    # index to ``WHERE is_active`` is what makes the tombstone stop owning the name,
+    # and it is the DATABASE half of the fix: the application pre-checks in
+    # ``design_system_service.import_bundle`` and the create/rename routes filter
+    # ``is_active`` to fail fast with a 409, but this index is what actually decides.
+    # Both halves must move together — filtering the pre-checks alone converts the
+    # clean 409 into an IntegrityError 500 at commit.
+    name = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
 
     # Authorship + org-default flags (org-shared visibility; no per-user isolation)
@@ -193,6 +199,38 @@ class DesignSystem(Base):
         back_populates="design_system",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+
+    # Name uniqueness scoped to LIVE rows. See the ``name`` column note for why a
+    # whole-table UNIQUE constraint was wrong.
+    #
+    # Deliberately a partial unique INDEX rather than a UNIQUE constraint: Postgres
+    # has no partial unique constraints, only partial unique indexes, and a
+    # column-level ``unique=True`` would emit exactly the whole-table constraint this
+    # replaces. Declared here so ``create_all`` builds it on fresh installs;
+    # ``_migrate_design_system_partial_name_index`` converts already-provisioned
+    # databases.
+    #
+    # ``WHERE is_active`` means MANY tombstones may share one name — intended, so a
+    # delete/re-import cycle can repeat indefinitely rather than working exactly once.
+    #
+    # Emitted identically on both dialects (verified): SQLite has supported partial
+    # indexes since 3.8, so the SQLite used in tests enforces the SAME rule as
+    # PostgreSQL/Lakebase and the behaviour is actually covered by the unit suite —
+    # it would not be under a ``postgresql_where``-only declaration. On
+    # PostgreSQL/Lakebase this is a unique btree index over ``text``, bounded only by
+    # the ~2704-byte index-tuple maximum a design-system name does not approach; an
+    # over-long name still fails loudly and is still translated by
+    # ``translate_name_index_limit_error``, so the uncapped-brand-text guarantee is
+    # unchanged.
+    __table_args__ = (
+        Index(
+            "uq_design_system_name_active",
+            "name",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active"),
+        ),
     )
 
     def __repr__(self):

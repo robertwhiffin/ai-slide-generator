@@ -8,10 +8,16 @@ the drop-in equivalent of ``slide_style_library.style_content`` — so it flows
 through the existing generation seam (see ``agent_factory._get_prompt_content``).
 
 Name uniqueness: creation/import return **409 Conflict** on a duplicate name
-(``design_system.name`` is unique, spec §6), matching the slide-styles
-convention. This is deliberately non-destructive — an org-shared asset is never
-silently overwritten; the caller supplies a different name (import accepts a
-``name`` form field) to import a copy.
+(spec §6), matching the slide-styles convention. This is deliberately
+non-destructive — an org-shared asset is never silently overwritten; the caller
+supplies a different name (import accepts a ``name`` form field) to import a copy.
+
+Uniqueness is scoped to **LIVE** rows, at both layers: the pre-checks here filter
+``is_active``, and the database enforces the partial unique index
+``uq_design_system_name_active`` (``WHERE is_active``). A whole-table rule made the
+soft DELETE below reserve the name FOREVER — the tombstone is hidden from the list
+endpoint, so a user who deleted a design system could never re-import under the same
+name and had nothing left to delete. A name held only by a tombstone is free.
 """
 import logging
 import os
@@ -548,7 +554,14 @@ def create_design_system(
 ):
     """Create a design system from structured input (assets arrive via /import)."""
     try:
-        existing = db.query(DesignSystem).filter(DesignSystem.name == request.name).first()
+        # LIVE rows only, matching the partial unique index
+        # ``uq_design_system_name_active``. A soft-deleted system's name is free to
+        # reuse — see the DesignSystem model's note on the name column.
+        existing = (
+            db.query(DesignSystem)
+            .filter(DesignSystem.name == request.name, DesignSystem.is_active == True)  # noqa: E712
+            .first()
+        )
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -638,9 +651,16 @@ def update_design_system(
         _require_creator_or_admin(ds)
 
         if request.name and request.name != ds.name:
+            # LIVE rows only, matching the partial unique index
+            # ``uq_design_system_name_active`` — the same reason as create/import: a
+            # tombstone must not reserve a name the picker no longer shows.
             clash = (
                 db.query(DesignSystem)
-                .filter(DesignSystem.name == request.name, DesignSystem.id != ds_id)
+                .filter(
+                    DesignSystem.name == request.name,
+                    DesignSystem.id != ds_id,
+                    DesignSystem.is_active == True,  # noqa: E712
+                )
                 .first()
             )
             if clash:

@@ -169,10 +169,22 @@ def _assert_all_text(engine, *, run: int) -> None:
 
 
 def _insert_design_system(conn, *, name: str) -> int:
-    """Insert a parent design system and return its id.
+    """Insert a LIVE parent design system and return its id.
 
     Boolean NOT NULL flags are discovered from the live table rather than listed,
     so the helper does not have to be re-edited every time the model gains one.
+
+    ``is_active`` is the ONE exception to the blanket FALSE, and it is load-bearing
+    here rather than cosmetic. Name uniqueness is a PARTIAL unique index over
+    ``WHERE is_active``, so an INACTIVE row has no index entry at all — and
+    therefore no btree index-tuple size limit to overflow. Inserting a tombstone
+    would have silently stopped exercising the very index whose 2704-byte limit
+    these tests are about: the unindexable name would just store, and the
+    translator assertion would never see the database's error.
+
+    Every production writer creates ACTIVE rows (import/create set
+    ``is_active=True``; the soft DELETE only flips an already-indexed row), so TRUE
+    is also the faithful shape.
     """
     inspector = inspect(conn)
     required: list[tuple[str, str]] = []
@@ -183,6 +195,9 @@ def _insert_design_system(conn, *, name: str) -> int:
             "created_at",
             "updated_at",
         ):
+            continue
+        if column["name"] == "is_active":
+            required.append(("is_active", "TRUE"))
             continue
         # Literal typed to the column so the INSERT is valid whatever NOT NULL
         # bookkeeping columns the model carries (booleans, the integer version).
