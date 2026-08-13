@@ -17,6 +17,9 @@ export function useGoogleOAuthPopup() {
       const popup = window.open(url, 'google-slides-auth', 'width=600,height=700,popup=yes');
 
       const handleMessage = (event: MessageEvent) => {
+        // F-CR-3 (SDR-4437): only trust the callback popup, which is same-origin.
+        // Reject spoofed messages posted from any other origin.
+        if (event.origin !== window.location.origin) return;
         if (event.data?.type === 'google-slides-auth') {
           cleanup();
           resolve(event.data.success === true);
