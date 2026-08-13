@@ -589,7 +589,7 @@ class TestUncapMigration:
         TABLE DDL against the PostgreSQL dialect, which is what a fresh Lakebase
         install runs, and by compiling the ALTER the migration issues."""
         from sqlalchemy.dialects import postgresql
-        from sqlalchemy.schema import CreateTable
+        from sqlalchemy.schema import CreateIndex, CreateTable
 
         import src.database.models.design_system as models
 
@@ -630,8 +630,29 @@ class TestUncapMigration:
                 assert f"{column} VARCHAR" not in ddl
                 assert f'"{column}" VARCHAR' not in ddl
 
-        # The UNIQUE constraint on the now-TEXT name column is still emitted.
-        assert "UNIQUE" in rendered["design_system"]
+        # Uniqueness on the now-TEXT name column is still enforced — the point of
+        # this assertion is that widening the column to TEXT never silently drops
+        # the product's name-uniqueness rule.
+        #
+        # It is no longer emitted INSIDE the CREATE TABLE. A whole-table UNIQUE
+        # constraint made a soft delete reserve the name forever (the tombstone kept
+        # holding it against every later import), so the rule is now a PARTIAL unique
+        # index scoped to live rows, which Postgres can only express as a separate
+        # CREATE UNIQUE INDEX. Assert on that statement instead — same guarantee for
+        # the rows that matter, narrower predicate.
+        assert "UNIQUE" not in rendered["design_system"], (
+            "expected no whole-table UNIQUE constraint on design_system; a "
+            "tombstoned name must not stay reserved"
+        )
+        index_ddl = str(
+            CreateIndex(models.DesignSystem.__table__.indexes and next(
+                ix for ix in models.DesignSystem.__table__.indexes
+                if ix.name == "uq_design_system_name_active"
+            )).compile(dialect=postgresql.dialect())
+        )
+        assert "CREATE UNIQUE INDEX" in index_ddl
+        assert "(name)" in index_ddl
+        assert "WHERE is_active" in index_ddl
 
     def test_system_controlled_columns_stay_varchar_in_postgres_ddl(self):
         """Scope check at the DDL level too."""

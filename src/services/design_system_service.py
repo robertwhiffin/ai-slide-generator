@@ -125,7 +125,9 @@ class DesignSystemNameConflictError(ValueError):
     """A design system with the requested name already exists.
 
     Routes map this to HTTP 409. Name uniqueness is enforced (spec §6:
-    ``name (unique)``); the caller may supply a different name to import a copy.
+    ``name (unique)``) over LIVE rows only — a name held solely by a soft-deleted
+    tombstone is free, which is what makes delete-then-re-import work. The caller
+    may supply a different name to import a copy of a system that is still live.
     """
 
 
@@ -188,7 +190,7 @@ def translate_name_index_limit_error(exc: BaseException, *, name: Optional[str])
     """Re-raise *exc* as :class:`DesignSystemNameTooLongError` if that is what it is.
 
     THE DATABASE IS THE AUTHORITY. ``design_system.name`` is unbounded ``TEXT``
-    (brand text is never capped or truncated) carrying a UNIQUE constraint, so it is
+    (brand text is never capped or truncated) covered by a unique index, so it is
     backed by a btree whose per-entry tuple cannot exceed
     :data:`_BTREE_MAX_INDEX_ROW_BYTES`. Whether a given name fits is Postgres's
     determination, made when the row is written; this function's only job is to
@@ -538,7 +540,20 @@ def import_bundle(
         # translate_name_index_limit_error).
         #
         # Fail fast on a name clash before doing any expensive work.
-        existing = db.query(DesignSystem).filter(DesignSystem.name == name).first()
+        #
+        # Scoped to LIVE rows to MATCH the partial unique index
+        # ``uq_design_system_name_active`` (see the DesignSystem model). Unscoped, this
+        # pre-check saw the tombstone a soft DELETE leaves behind — a row the list
+        # endpoint hides — and refused every re-import of a name the user had just
+        # deleted, permanently. The filter and the index are one change: filtering here
+        # WITHOUT the partial index turns this clean 409 into an IntegrityError 500 at
+        # the commit below, and the index without this filter would raise that 500
+        # instead of a 409 for a genuine live clash.
+        existing = (
+            db.query(DesignSystem)
+            .filter(DesignSystem.name == name, DesignSystem.is_active == True)  # noqa: E712
+            .first()
+        )
         if existing:
             raise DesignSystemNameConflictError(
                 f"A design system named '{name}' already exists (id={existing.id}). "

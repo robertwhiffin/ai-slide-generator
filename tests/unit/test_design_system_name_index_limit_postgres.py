@@ -1,7 +1,8 @@
 """An unindexable design-system NAME must be a clear 4xx on EVERY write path.
 
 ``design_system.name`` is unbounded ``TEXT`` (brand text is never capped or
-truncated) carrying a UNIQUE constraint, so it is backed by a btree index whose
+truncated) covered by a unique index — the partial ``uq_design_system_name_active``,
+which covers every LIVE row — so it is backed by a btree index whose
 per-entry tuple cannot exceed 2704 bytes. A name that overflows it raises
 ``ProgramLimitExceeded`` from inside the INSERT/UPDATE — the right direction (it
 fails loudly and never truncates), but it landed in each route's generic

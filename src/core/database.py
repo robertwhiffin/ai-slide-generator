@@ -549,7 +549,15 @@ def _run_migrations(engine, schema: str | None = None):
         # deleted, so a reader of this list can see what happened to them.
         _migrate_uncap_brand_text_columns(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system: name uniqueness scoped to LIVE rows, so a soft delete
+        # --- stops reserving the name forever (partial unique index) ---
+        _migrate_design_system_partial_name_index(
+            conn, inspector, schema, _qual, is_sqlite
+        )
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
+        # Runs LAST so every object created above — including the partial name index
+        # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
 
 
@@ -763,7 +771,9 @@ def _migrate_uncap_brand_text_columns(
       ``VARCHAR(n)`` is a no-rewrite change — ``text`` and ``varchar`` share a
       storage representation, so Postgres only updates the catalog. Existing values
       are preserved exactly; ``text`` has no length limit to violate.
-      ``design_system.name`` carries a UNIQUE constraint, which is unaffected: a
+      ``design_system.name`` is covered by a unique index — the PARTIAL
+      ``uq_design_system_name_active``, see
+      :func:`_migrate_design_system_partial_name_index` — which is unaffected: a
       unique btree index over ``text`` is normal, bounded only by the ~2704-byte
       index-tuple maximum that a design-system name does not approach. If one ever
       did, the INSERT would fail loudly rather than truncate — so no prefix or
@@ -828,6 +838,148 @@ def _migrate_uncap_brand_text_columns(
                 "width and the remaining columns are still converted",
                 table_name,
                 column_name,
+                exc_info=True,
+            )
+
+
+#: Name of the partial unique index that scopes design-system name uniqueness to
+#: LIVE rows. Must match the ``Index(...)`` declared in
+#: ``src/database/models/design_system.py`` — ``create_all`` builds it under this
+#: name on fresh installs and this migration builds it under the same name on
+#: already-provisioned ones, so the two paths converge on one schema.
+_DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
+
+
+def _migrate_design_system_partial_name_index(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Scope ``design_system.name`` uniqueness to LIVE rows (idempotent).
+
+    ``design_system.name`` originally carried a whole-table UNIQUE constraint. That
+    made the soft delete leak the name PERMANENTLY: ``DELETE`` tombstones the row
+    (``is_active = False``), the list endpoint hides it, and the tombstone then held
+    its name against every subsequent import — a name the user could no longer see,
+    delete, or reuse. The reported symptom was an unfixable
+    "A design system named 'X' already exists (id=N)" on re-importing a corrected
+    bundle under the name the user had just deleted.
+
+    Filtering only the application-side name pre-checks would NOT have fixed it: it
+    converts the clean 409 into an ``IntegrityError`` at commit, i.e. an HTTP 500 on
+    a legitimate upload. The uniqueness RULE itself is what was wrong, so this
+    replaces the whole-table constraint with a PARTIAL unique index over
+    ``WHERE is_active``. Tombstones are then unconstrained — many may share one name,
+    which is what lets a delete/re-import cycle repeat indefinitely instead of
+    working exactly once — while two LIVE rows still cannot.
+
+    Ordering is deliberate: the replacement index is CREATED FIRST and the old
+    constraint is dropped ONLY IF that succeeded. The database is therefore never
+    left with no uniqueness enforcement at all — including on a database where the
+    constraint was already dropped but duplicate live names somehow exist, in which
+    case the CREATE fails, the DROP is skipped, and the existing constraint stays.
+
+    Idempotent: returns early once the partial index is present, so repeat startups
+    and a fresh ``create_all`` database (where the ORM already declares the index)
+    are both no-ops. Each statement runs in its OWN SAVEPOINT so a failure — e.g.
+    insufficient privileges on a locked-down deploy, or an inherited foreign-owned
+    table on a copy-on-write branch fork — cannot poison the outer migration
+    transaction.
+
+    Discovery, not assumption: the old constraint's name is REFLECTED rather than
+    hardcoded to Postgres's ``design_system_name_key`` default, and both shapes are
+    handled — a UNIQUE *constraint* (what a column-level ``unique=True`` emits, and
+    what needs ``DROP CONSTRAINT``) and a bare unique *index* (which needs
+    ``DROP INDEX``).
+
+    No-op on SQLite. It is not a deployment target (``_get_database_url`` only ever
+    returns PostgreSQL unless ``DATABASE_URL`` is set explicitly), and the tests
+    build their schema with ``create_all``, which emits the partial index directly —
+    SQLite has supported partial indexes since 3.8, so the unit suite exercises the
+    SAME rule as Lakebase. An explicitly-configured pre-existing SQLite file would
+    keep its inline table-level UNIQUE, which SQLite cannot drop without rebuilding
+    the table; rebuilding a table of brand blobs is not worth doing for a
+    configuration nothing deploys, so it is left alone rather than silently rewritten.
+    """
+    from sqlalchemy import inspect, text
+
+    if is_sqlite:
+        return
+
+    # Reflect LIVE, with a fresh inspector: the shared one caches its reflection
+    # from before the design_system table may have been created earlier in this same
+    # migration transaction.
+    try:
+        insp = inspect(conn)
+        indexes = insp.get_indexes("design_system", schema=schema)
+        unique_constraints = insp.get_unique_constraints("design_system", schema=schema)
+    except Exception:
+        return  # table absent on this deploy
+
+    if any(ix.get("name") == _DS_NAME_ACTIVE_INDEX for ix in indexes):
+        return  # already scoped
+
+    logger.info(
+        "Migration: scoping design_system.name uniqueness to active rows (%s)",
+        _DS_NAME_ACTIVE_INDEX,
+    )
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"CREATE UNIQUE INDEX {_DS_NAME_ACTIVE_INDEX} "
+                f'ON {_qual("design_system")} (name) WHERE is_active'
+            ))
+    except Exception:
+        logger.warning(
+            "Migration: could not create %s; design_system.name keeps its existing "
+            "whole-table uniqueness and a soft-deleted name stays reserved",
+            _DS_NAME_ACTIVE_INDEX,
+            exc_info=True,
+        )
+        return
+
+    # Only now is it safe to remove the whole-table rule the new index replaces.
+    # A column-level ``unique=True`` emits a UNIQUE CONSTRAINT; some databases may
+    # instead carry a bare unique index. Drop whichever is actually there, and only
+    # when it covers exactly ``(name)`` — a composite unique over more columns is a
+    # different rule this migration has no business removing.
+    for constraint in unique_constraints:
+        if list(constraint.get("column_names") or []) != ["name"]:
+            continue
+        name = constraint.get("name")
+        if not name:
+            continue
+        try:
+            with conn.begin_nested():
+                conn.execute(text(
+                    f'ALTER TABLE {_qual("design_system")} DROP CONSTRAINT "{name}"'
+                ))
+            logger.info("Migration: dropped whole-table unique constraint %s", name)
+        except Exception:
+            logger.warning(
+                "Migration: could not drop unique constraint %s; a soft-deleted "
+                "design-system name stays reserved until it is removed",
+                name,
+                exc_info=True,
+            )
+
+    constraint_names = {c.get("name") for c in unique_constraints}
+    for index in indexes:
+        if not index.get("unique") or list(index.get("column_names") or []) != ["name"]:
+            continue
+        name = index.get("name")
+        # A constraint-backing index is dropped with its constraint above; issuing
+        # DROP INDEX for it would fail.
+        if not name or name in constraint_names:
+            continue
+        try:
+            with conn.begin_nested():
+                qualified = f'"{schema}"."{name}"' if schema else f'"{name}"'
+                conn.execute(text(f"DROP INDEX {qualified}"))
+            logger.info("Migration: dropped whole-table unique index %s", name)
+        except Exception:
+            logger.warning(
+                "Migration: could not drop unique index %s; a soft-deleted "
+                "design-system name stays reserved until it is removed",
+                name,
                 exc_info=True,
             )
 
