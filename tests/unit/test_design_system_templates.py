@@ -16,12 +16,19 @@ import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
 from tests.unit.conftest_design_system import (
     COLORS_AND_TYPE_CSS,
+    DOT_THUMBNAIL_SLUGS,
     SVG_LOGO,
     TEMPLATED_TEMPLATE_HTML,
+    dot_thumbnail_bundle_files,
+    dot_thumbnail_manifest,
+    gif_bytes,
+    jpeg_bytes,
     make_bundle_zip,
+    png_bytes,
     template_preview_png,
     templated_bundle_files,
     templated_manifest,
+    webp_bytes,
 )
 
 
@@ -811,6 +818,215 @@ class TestImportPopulatesTemplates:
     def test_compiled_style_content_stays_template_agnostic(self, session):
         ds = _import_templated_ds(session)
         assert "SELECTED SLIDE TEMPLATE" not in ds.compiled_style_content
+
+
+# ---------------------------------------------------------------------------
+# Real-export thumbnail shape: templates/<slug>/.thumbnail
+#
+# A real Claude-Design export ships ONE screenshot per template folder that is
+# dot-prefixed, named ``thumbnail`` (not ``preview``), and carries NO extension —
+# so its type is knowable only from its magic bytes. Every one of them used to be
+# discarded (the dotfile skip in ``_iter_safe_entries`` dropped the entry before
+# the preview recognizer ran, the recognizer would have rejected it anyway, and
+# the thumbnail lookup only matched ``preview*``), leaving the picker with no
+# thumbnail and ``thumbnail_url`` NULL.
+# ---------------------------------------------------------------------------
+
+
+def _import_dot_thumbnail_ds(session, *, files=None, manifest=None):
+    """Import the real-export-shaped bundle (a ``.thumbnail`` per template)."""
+    from src.services.design_system_service import import_bundle
+
+    zip_bytes = make_bundle_zip(
+        manifest=manifest if manifest is not None else dot_thumbnail_manifest(),
+        files=files if files is not None else dot_thumbnail_bundle_files(),
+    )
+    return import_bundle(session, zip_bytes=zip_bytes, user="tester")
+
+
+class TestImportDotPrefixedTemplateThumbnails:
+    def test_every_dot_thumbnail_is_stored_as_a_template_shot(self, session):
+        ds = _import_dot_thumbnail_ds(session)
+        shots = [a for a in ds.assets if a.kind == "template_shot"]
+        assert len(shots) == len(DOT_THUMBNAIL_SLUGS), (
+            f"expected {len(DOT_THUMBNAIL_SLUGS)} stored thumbnails, "
+            f"got {len(shots)}: {[a.filename for a in shots]}"
+        )
+        assert {a.filename for a in shots} == {".thumbnail"}
+
+    def test_extension_less_thumbnail_content_type_is_sniffed_from_magic_bytes(
+        self, session
+    ):
+        ds = _import_dot_thumbnail_ds(session)
+        shots = [a for a in ds.assets if a.kind == "template_shot"]
+        # No extension to guess from: the type comes from RIFF....WEBP, NOT from
+        # a fallback like application/octet-stream.
+        assert {a.mime for a in shots} == {"image/webp"}
+
+    def test_thumbnail_reference_rows_do_not_double_store_bytes(self, session):
+        ds = _import_dot_thumbnail_ds(session)
+        shot_ids = {a.id for a in ds.assets if a.kind == "template_shot"}
+        rows = [f for f in ds.files if f.path.endswith("/.thumbnail")]
+        assert len(rows) == len(DOT_THUMBNAIL_SLUGS)
+        assert {f.asset_id for f in rows} == shot_ids
+        assert all(f.data is None for f in rows)
+
+    def test_every_template_gets_a_non_null_thumbnail_asset(self, session):
+        ds = _import_dot_thumbnail_ds(session)
+        assert len(ds.templates) == len(DOT_THUMBNAIL_SLUGS)
+        unlinked = [t.entry_path for t in ds.templates if t.thumbnail_asset_id is None]
+        assert unlinked == [], f"templates with a NULL thumbnail: {unlinked}"
+
+    def test_each_template_links_the_thumbnail_from_its_own_folder(self, session):
+        """Per-folder, not first-wins: template N must not borrow template 1's shot."""
+        ds = _import_dot_thumbnail_ds(session)
+        asset_path_by_id = {
+            f.asset_id: f.path for f in ds.files if f.asset_id is not None
+        }
+        for template in ds.templates:
+            folder = template.entry_path.rsplit("/", 1)[0]
+            assert asset_path_by_id[template.thumbnail_asset_id] == f"{folder}/.thumbnail"
+
+    def test_intrinsic_dimensions_are_recorded_from_the_sniffed_image(self, session):
+        ds = _import_dot_thumbnail_ds(session)
+        shots = [a for a in ds.assets if a.kind == "template_shot"]
+        # Fixture widths/heights are distinct per folder, so this also proves the
+        # four rows carry four different images rather than one repeated blob.
+        assert sorted((a.width, a.height) for a in shots) == [
+            (10, 6), (11, 7), (12, 8), (13, 9)
+        ]
+
+    def test_dot_thumbnails_stay_hidden_from_brand_asset_search(self, session):
+        """A thumbnail must never be placeable brand content in a slide."""
+        from src.services.design_system_service import search_assets
+
+        ds = _import_dot_thumbnail_ds(session)
+        found = search_assets(session, ds.id)
+        assert ".thumbnail" not in [a.filename for a in found]
+        assert "template_shot" not in [a.kind for a in found]
+
+    def test_re_import_does_not_duplicate_thumbnail_rows(self, session):
+        """Two imports of the same bundle are two design systems, each with its
+        own four thumbnails — never eight rows on one, never a second row per
+        template folder."""
+        first = _import_dot_thumbnail_ds(session)
+        second_manifest = dot_thumbnail_manifest()
+        second_manifest["name"] = "Acme Dot Thumbnail DS Copy"
+        second = _import_dot_thumbnail_ds(session, manifest=second_manifest)
+
+        for ds in (first, second):
+            shots = [a for a in ds.assets if a.kind == "template_shot"]
+            assert len(shots) == len(DOT_THUMBNAIL_SLUGS)
+            assert len({t.thumbnail_asset_id for t in ds.templates}) == len(
+                DOT_THUMBNAIL_SLUGS
+            )
+        assert first.id != second.id
+
+    def test_repeated_materialize_keeps_one_thumbnail_per_template(self, session):
+        """The lazy materializer is idempotent: re-running it over an already
+        imported system neither adds template rows nor re-points thumbnails."""
+        from src.services.design_system_templates import materialize_templates
+
+        ds = _import_dot_thumbnail_ds(session)
+        before = {t.id: t.thumbnail_asset_id for t in ds.templates}
+        assert materialize_templates(ds) == list(ds.templates)
+        session.commit()
+        assert {t.id: t.thumbnail_asset_id for t in ds.templates} == before
+
+    def test_preview_png_bundles_are_unaffected(self, session):
+        """The documented ``templates/<slug>/preview.png`` shape keeps working."""
+        ds = _import_templated_ds(session)
+        shots = [a for a in ds.assets if a.kind == "template_shot"]
+        assert [(a.filename, a.mime) for a in shots] == [("preview.png", "image/png")]
+        assert ds.templates[0].thumbnail_asset_id == shots[0].id
+
+
+class TestTemplateThumbnailFormatSniffing:
+    """Only real PNG/JPEG/GIF/WebP bytes are stored; anything else is refused
+    rather than persisted under a guessed content type."""
+
+    def _shots(self, session, thumbnail_bytes, *, name="Acme Sniff DS"):
+        files = dot_thumbnail_bundle_files()
+        for slug in DOT_THUMBNAIL_SLUGS:
+            files[f"templates/{slug}/.thumbnail"] = thumbnail_bytes
+        manifest = dot_thumbnail_manifest()
+        manifest["name"] = name
+        ds = _import_dot_thumbnail_ds(session, files=files, manifest=manifest)
+        return ds, [a for a in ds.assets if a.kind == "template_shot"]
+
+    @pytest.mark.parametrize(
+        "make_bytes,expected_mime",
+        [
+            (png_bytes, "image/png"),
+            (jpeg_bytes, "image/jpeg"),
+            (gif_bytes, "image/gif"),
+            (webp_bytes, "image/webp"),
+        ],
+    )
+    def test_each_supported_raster_format_is_sniffed(
+        self, session, make_bytes, expected_mime
+    ):
+        _, shots = self._shots(session, make_bytes())
+        assert len(shots) == len(DOT_THUMBNAIL_SLUGS)
+        assert {a.mime for a in shots} == {expected_mime}
+
+    def test_non_image_bytes_are_refused_not_stored_as_octet_stream(self, session):
+        ds, shots = self._shots(session, b"#!/bin/sh\necho not an image\n")
+        assert shots == []
+        # The rest of the bundle still imports — one junk thumbnail must not
+        # cost the whole upload — the templates simply carry no thumbnail.
+        assert len(ds.templates) == len(DOT_THUMBNAIL_SLUGS)
+        assert all(t.thumbnail_asset_id is None for t in ds.templates)
+
+    def test_svg_thumbnail_is_refused(self, session):
+        """SVG can carry inline script and is not a sniffable raster format."""
+        _, shots = self._shots(session, SVG_LOGO)
+        assert shots == []
+
+    def test_riff_container_that_is_not_webp_is_refused(self, session):
+        """``RIFF`` alone is not enough — bytes 8:12 must spell ``WEBP``
+        (a RIFF/WAVE file must not be stored as image/webp)."""
+        wav = b"RIFF" + (36).to_bytes(4, "little") + b"WAVEfmt " + b"\0" * 24
+        _, shots = self._shots(session, wav)
+        assert shots == []
+
+    def test_truncated_magic_bytes_are_refused(self, session):
+        _, shots = self._shots(session, b"RIF")
+        assert shots == []
+
+
+class TestExtensionLessScreenshotBasenames:
+    """The allowlisted shape is ``templates/<folder>/`` + an optional single dot +
+    ``thumbnail``/``preview`` + nothing else. Each accepted spelling is covered so
+    no branch of it is untested."""
+
+    def _import_with_basename(self, session, basename):
+        files = dot_thumbnail_bundle_files()
+        for slug in DOT_THUMBNAIL_SLUGS:
+            del files[f"templates/{slug}/.thumbnail"]
+            files[f"templates/{slug}/{basename}"] = webp_bytes()
+        manifest = dot_thumbnail_manifest()
+        manifest["name"] = f"Acme {basename} DS"
+        return _import_dot_thumbnail_ds(session, files=files, manifest=manifest)
+
+    @pytest.mark.parametrize(
+        "basename", [".thumbnail", "thumbnail", ".preview", "preview"]
+    )
+    def test_accepted_spelling_is_stored_and_linked(self, session, basename):
+        ds = self._import_with_basename(session, basename)
+        shots = [a for a in ds.assets if a.kind == "template_shot"]
+        assert len(shots) == len(DOT_THUMBNAIL_SLUGS)
+        assert {a.filename for a in shots} == {basename}
+        assert {a.mime for a in shots} == {"image/webp"}
+        assert all(t.thumbnail_asset_id is not None for t in ds.templates)
+
+    @pytest.mark.parametrize(
+        "basename", ["thumbnail.bak", "thumb", "screenshot", "previews", "thumbnails"]
+    )
+    def test_other_basenames_are_not_treated_as_screenshots(self, session, basename):
+        ds = self._import_with_basename(session, basename)
+        assert [a for a in ds.assets if a.kind == "template_shot"] == []
+        assert all(t.thumbnail_asset_id is None for t in ds.templates)
 
 
 # ---------------------------------------------------------------------------

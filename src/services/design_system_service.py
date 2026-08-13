@@ -11,9 +11,13 @@ Lakebase rows:
   custom properties are parsed as an ADDITIONAL token source.
 - ``fonts/**`` and ``assets/**`` — binary files stored as ``design_system_asset``
   rows (bytes in-DB, following the ``image_assets`` pattern). ``preview*`` files
-  under ``assets/`` are reference-only and skipped; a template folder's
-  ``templates/<folder>/preview.*`` screenshot IS stored (kind ``template_shot``,
-  v1 Phase 4) so the template picker can serve thumbnails.
+  under ``assets/`` are reference-only and skipped; a template folder's screenshot
+  IS stored (kind ``template_shot``, v1 Phase 4) so the template picker can serve
+  thumbnails. Both shipped shapes count: ``templates/<folder>/preview.<ext>`` and
+  the DOT-PREFIXED, EXTENSION-LESS ``templates/<folder>/.thumbnail`` a real export
+  writes — the latter is allowlisted past the general dotfile skip and has its
+  media type SNIFFED from its magic bytes (unknown content is refused, never
+  stored under a guessed type).
 
 v1 Phase 1 ("import foundation") extends the importer WITHOUT changing the
 generation seam:
@@ -280,17 +284,76 @@ _TEMPLATE_PREVIEW_RE = re.compile(
     r"^templates/[^/]+/preview[^/]*\.(png|jpe?g|gif|webp)$", re.IGNORECASE
 )
 
+# The SAME screenshot as it actually ships in a real export: DOT-PREFIXED, named
+# ``thumbnail`` rather than ``preview``, and carrying NO file extension —
+# ``templates/<folder>/.thumbnail``. Every one of those was discarded, so a real
+# bundle imported with no thumbnail at all and a NULL ``thumbnail_url``.
+#
+# Deliberately the NARROWEST path shape that describes them: exactly one folder
+# segment under ``templates/``, an optional single leading dot, one of the two
+# known basenames, and NOTHING else — no extension, no suffix. It is this
+# tightness that makes it safe for :func:`_iter_safe_entries` to exempt a match
+# from the general dotfile skip; a dotfile anywhere else stays skipped. Because
+# a match carries no extension, its media type is NOT guessable from the name and
+# is sniffed from the content instead (:func:`_sniff_raster_mime`).
+_TEMPLATE_THUMBNAIL_RE = re.compile(
+    r"^templates/[^/]+/\.?(thumbnail|preview)$", re.IGNORECASE
+)
+
+# Magic-byte signatures for the raster formats a template thumbnail may be. An
+# extension-less file is stored ONLY if its bytes match one of these; unknown
+# content is refused rather than persisted under a guessed content type. SVG is
+# absent on purpose (it can carry inline script and has no magic number).
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_GIF_MAGICS = (b"GIF87a", b"GIF89a")
+
+
+def _sniff_raster_mime(data: bytes) -> Optional[str]:
+    """MIME type from an image's MAGIC BYTES, or ``None`` if not a known raster.
+
+    Content-based detection for files whose name carries no extension. WebP is a
+    RIFF container, so ``RIFF`` alone is not enough — the form type at bytes 8:12
+    must spell ``WEBP``, otherwise a RIFF/WAVE file would be stored as an image.
+    """
+    if data.startswith(_PNG_MAGIC):
+        return "image/png"
+    if data.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if data.startswith(_GIF_MAGICS):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _is_template_thumbnail(rel_path: str) -> bool:
+    """True for an EXTENSION-LESS template screenshot (``templates/x/.thumbnail``).
+
+    Distinguished from :func:`_is_template_preview` because the absence of an
+    extension is what forces content sniffing.
+    """
+    return bool(_TEMPLATE_THUMBNAIL_RE.match(rel_path.lower()))
+
 
 def _is_template_preview(rel_path: str) -> bool:
-    return bool(_TEMPLATE_PREVIEW_RE.match(rel_path.lower()))
+    """True for a template folder's screenshot in EITHER shipped shape."""
+    low = rel_path.lower()
+    return bool(_TEMPLATE_PREVIEW_RE.match(low)) or bool(
+        _TEMPLATE_THUMBNAIL_RE.match(low)
+    )
 
 
 def _should_skip(rel_path: str) -> bool:
     """Only ``assets/**`` and ``fonts/**`` files are stored; skip everything else.
 
     Directories, OS junk, dotfiles, template screenshots and ``preview*`` files
-    (reference-only material) are excluded. Template-folder preview thumbnails
-    are the exception — the caller checks :func:`_is_template_preview` first.
+    (reference-only material) are excluded. Template-folder screenshots are the
+    exception — the caller checks :func:`_is_template_preview` first.
+
+    NOTE: this is not the FIRST gate an entry passes. ``_iter_safe_entries`` runs
+    upstream and applies its own dotfile skip, so a dot-prefixed screenshot has to
+    be allowlisted THERE as well or it never reaches this function at all.
     """
     low = rel_path.lower()
     base = _basename(low)
@@ -990,6 +1053,17 @@ def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
     Skips directories, OS junk (``__MACOSX``, ``.DS_Store``) and dotfiles. Raises
     :class:`DesignSystemImportError` on a zip-slip path (absolute or ``..``) so a
     malicious bundle is rejected rather than silently stored.
+
+    This is the ACTUAL first gate every entry passes, so the ONE dot-prefixed shape
+    the importer stores — a template folder's ``.thumbnail`` screenshot
+    (:func:`_is_template_preview`) — is allowlisted HERE too. Without that a fix to
+    the recognizer alone reads as working in a unit test and still drops every real
+    thumbnail, because the entry never reaches the recognizer.
+
+    The zip-slip check runs BEFORE the dotfile decision, so normalization and
+    rejection are never skippable by a dot-prefixed name, and the allowlist is
+    tested against the NORMALIZED path — the same string the recognizer sees
+    downstream, so the gate and the recognizer cannot disagree.
     """
     for info in zf.infolist():
         name = info.filename
@@ -1001,15 +1075,17 @@ def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
         low = rel_raw.lower()
         if low.startswith("__macosx/") or "/__macosx/" in low:
             continue
-        base = _basename(low)
-        if base == ".ds_store" or base.startswith("."):
-            continue
         safe = _safe_relpath(rel_raw)
         if safe is None:
             raise DesignSystemImportError(
                 f"Bundle contains an unsafe path '{rel_raw}' (absolute path or "
                 "parent-directory traversal); refusing to import."
             )
+        base = _basename(safe.lower())
+        if (base == ".ds_store" or base.startswith(".")) and not _is_template_preview(
+            safe
+        ):
+            continue
         yield info, safe
 
 
@@ -1176,8 +1252,26 @@ def _collect_assets_and_files(
             # Size-checked read: the declared size is validated BEFORE
             # materialisation (bomb guard).
             data = budget.read_info(zf, info)
-            mime = _guess_mime(rel)
             kind = "template_shot" if _is_template_preview(rel) else _infer_asset_kind(rel)
+            if _is_template_thumbnail(rel):
+                # No extension to guess from, so the type comes from the CONTENT.
+                # Unrecognized bytes are REFUSED rather than stored as
+                # application/octet-stream: a thumbnail is served back to the
+                # browser, so its declared type has to be one we actually verified.
+                # Only THIS entry is dropped — a bundle import is one request, and
+                # one junk screenshot must not cost the whole upload.
+                sniffed = _sniff_raster_mime(data)
+                if sniffed is None:
+                    logger.warning(
+                        "Bundle entry '%s' is not a PNG/JPEG/GIF/WebP image "
+                        "(%d bytes); not stored as a template thumbnail",
+                        rel,
+                        len(data),
+                    )
+                    continue
+                mime = sniffed
+            else:
+                mime = _guess_mime(rel)
             width, height = _image_dimensions(data, mime)
             asset = DesignSystemAsset(
                 kind=kind,
