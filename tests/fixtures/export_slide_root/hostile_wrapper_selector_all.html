@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* Byte-for-byte the same rules as wrapped_bare_slide.html: this fixture
+         differs from it by the interposed <article> and nothing else, so any
+         difference between the two exports is attributable to the extra
+         wrapper level alone.
+
+         The backend promotes a slide root outward through EVERY consecutive
+         sole-child semantic wrapper, so for this shape it stores the outer
+         <section>. A locator that promotes only one level stops at the
+         <article>, fails to recognise it as a root, and falls through — the
+         slide then exports white while the app renders it correctly.
+
+         Only the outermost <section> paints a ground here, exactly as in
+         wrapped_bare_slide.html: the <article> and the .slide are both
+         transparent, so resolving to either of them reads no background and
+         emits white. That is what makes this fixture discriminating rather
+         than merely colour-blind. */
+      section { background: #123456; color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+    <script>
+      // Poisoned querySelectorAll on BOTH Document.prototype and
+      // Element.prototype -> a plain array-like holding one detached decoy.
+      //
+      // Document's and Element's copies of querySelectorAll are DISTINCT
+      // function objects (a Document one invoked on an Element throws Illegal
+      // invocation), so a fix that captures only one of them leaves the other
+      // open — this fixture is what makes that measurable.
+      //
+      // The returned object is deliberately not a NodeList. Every consumer in
+      // the pass then breaks in a different way: `.forEach` is absent
+      // (TypeError), and the two sites that hand a raw result to
+      // nodeListToArray make the pristine NodeList length getter throw on a
+      // foreign receiver. Both take down the whole pass.
+      // Reported on document.title so the suite can prove the poisoning TOOK
+      // before asserting anything else — a poisoning the browser refused would
+      // make every expectation vacuous.
+      var decoy = document.createElement('div');
+      decoy.className = 'slide';
+      decoy.style.background = '#654321';
+      var report = { configurable: {}, direct: {}, redefineResult: 'ok' };
+      function poisonQuerySelectorAll(name, proto) {
+        var descriptor = Object.getOwnPropertyDescriptor(proto, 'querySelectorAll');
+        report.direct[name] = !!descriptor;
+        report.configurable[name] = descriptor ? !!descriptor.configurable : true;
+        try {
+          Object.defineProperty(proto, 'querySelectorAll', {
+            configurable: true,
+            value: function () { return { length: 1, 0: decoy }; },
+          });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poisonQuerySelectorAll('Document', Document.prototype);
+      poisonQuerySelectorAll('Element', Element.prototype);
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <section data-label="Acme Ground">
+      <article>
+        <div class="slide">
+          <h1>Acme Wrapper Ground</h1>
+          <p>Synthetic fixture slide.</p>
+        </div>
+      </article>
+    </section>
+  </body>
+</html>

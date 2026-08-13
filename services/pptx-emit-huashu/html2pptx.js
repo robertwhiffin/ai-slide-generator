@@ -271,6 +271,147 @@ async function extractSlideData(page) {
     const PT_PER_PX = 0.75;
     const PX_PER_IN = 96;
 
+    // Tellr addition: the same pristine-realm DOM reads preprocess.mjs uses, for
+    // the same reason and against the same threat. SLIDE_CSP
+    // (src/utils/html_safety.py) carries script-src 'unsafe-inline', so inline
+    // script in an uploaded slide runs in this page at load, BEFORE this walk. It
+    // can replace NodeList.prototype[Symbol.iterator], NodeList.prototype.forEach,
+    // and Document/Element querySelector(All) — all CONFIGURABLE — and the walk
+    // below then either spins forever or reads a document that does not exist.
+    // Measured, not theoretical: an endless iterator on el.childNodes took this
+    // walker from a 13s export to a sidecar timeout.
+    //
+    // Why the helpers are repeated here rather than shared with preprocess.mjs:
+    // page.evaluate() receives a FUNCTION, which cannot close over anything on the
+    // Node side, and this file is vendored CJS that cannot import that ESM module's
+    // bindings into the page. So the MECHANISM is the same one — pristine realm
+    // plus bounded iteration, no second technique — expressed where it has to live.
+    const COLLECTION_ITEM_LIMIT = 1000000;
+
+    function capturePristineDomAccess() {
+      let frame = null;
+      try {
+        frame = document.createElement('iframe');
+        frame.style.display = 'none';
+        document.documentElement.appendChild(frame);
+        const realm = frame.contentWindow;
+        // A replaced createElement/contentWindow could hand back THIS realm, whose
+        // accessors are the poisoned ones. Distinct intrinsics is the check.
+        if (!realm || realm === window || realm.Element === window.Element) return null;
+        const describe = realm.Object.getOwnPropertyDescriptor;
+        const firstNode = describe(realm.Node.prototype, 'firstChild');
+        const nextNode = describe(realm.Node.prototype, 'nextSibling');
+        const listLength = describe(realm.NodeList.prototype, 'length');
+        // Document's and Element's copies are DISTINCT function objects, so both
+        // are captured and each call site says which receiver it means.
+        const docQueryAll = realm.Document.prototype.querySelectorAll;
+        const elQuery = realm.Element.prototype.querySelector;
+        const elQueryAll = realm.Element.prototype.querySelectorAll;
+        if (typeof firstNode.get !== 'function' ||
+            typeof nextNode.get !== 'function' ||
+            typeof listLength.get !== 'function' ||
+            typeof docQueryAll !== 'function' ||
+            typeof elQuery !== 'function' ||
+            typeof elQueryAll !== 'function') return null;
+        return {
+          firstChild: (node) => firstNode.get.call(node),
+          nextSibling: (node) => nextNode.get.call(node),
+          nodeListLength: (list) => listLength.get.call(list),
+          documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
+          elementQuerySelector: (el, selector) => elQuery.call(el, selector),
+          elementQuerySelectorAll: (el, selector) => elQueryAll.call(el, selector),
+        };
+      } catch (e) {
+        return null;
+      } finally {
+        // The captured accessors keep working once the frame is gone, so the
+        // pristine realm never outlives the capture and the walked DOM never
+        // contains the iframe.
+        if (frame) {
+          try { frame.remove(); } catch (e) { /* already detached */ }
+        }
+      }
+    }
+
+    // Ordinary property access: correct in a clean realm, subvertible in a hostile
+    // one — which is what the bounds below are for.
+    const OWN_DOM_ACCESS = {
+      firstChild: (node) => node.firstChild,
+      nextSibling: (node) => node.nextSibling,
+      nodeListLength: (list) => list.length,
+      documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
+      elementQuerySelector: (el, selector) => el.querySelector(selector),
+      elementQuerySelectorAll: (el, selector) => el.querySelectorAll(selector),
+    };
+
+    let domAccessCache = null;
+    function domAccess() {
+      if (!domAccessCache) {
+        domAccessCache = capturePristineDomAccess() || OWN_DOM_ACCESS;
+      }
+      return domAccessCache;
+    }
+
+    // A bound that is reached is a bug, so it says so. The same reasoning as the
+    // preprocess pass: a slide holding a million nodes could not render at
+    // 1280x720, so no real deck approaches this and it cannot truncate one. The
+    // [preprocess] and [html2pptx] prefixes are both routed to STDERR by the
+    // console handler in html2pptx() — the only stream pptx_from_html_huashu.py
+    // echoes — so this cannot drop content in silence.
+    let collectionLossReported = false;
+    function reportCollectionLoss(where) {
+      if (collectionLossReported) return;
+      collectionLossReported = true;
+      console.warn(
+        `[html2pptx] collection truncated at ${COLLECTION_ITEM_LIMIT} items in ` +
+        `${where}: content past that point is NOT in the exported slide. This bound ` +
+        'is unreachable for real slide content, so meeting it means the document ' +
+        'presented an implausible collection or the realm is lying about one.'
+      );
+    }
+
+    // Every child NODE in order, walked over the sibling chain instead of through
+    // the collection's iterator. Returns a plain Array, so callers iterate a
+    // snapshot with Array.prototype rather than NodeList.prototype.forEach.
+    function childNodesOf(node) {
+      const dom = domAccess();
+      const nodes = [];
+      let child = dom.firstChild(node);
+      while (child && nodes.length < COLLECTION_ITEM_LIMIT) {
+        nodes.push(child);
+        child = dom.nextSibling(child);
+      }
+      // A surviving child is exactly the bound being met: the loop's other exit is
+      // a falsy one.
+      if (child) reportCollectionLoss('childNodesOf');
+      return nodes;
+    }
+
+    // A static NodeList has no sibling chain to walk, so it is an index loop over
+    // the pristine length. Indexed access needs no hardening of its own: a live
+    // collection's indices are OWN properties of the platform object and a poisoned
+    // prototype cannot shadow them below the real length.
+    function nodeListToArray(list) {
+      const reported = domAccess().nodeListLength(list);
+      const length = Math.min(reported, COLLECTION_ITEM_LIMIT);
+      const nodes = [];
+      for (let index = 0; index < length; index++) nodes.push(list[index]);
+      if (reported > COLLECTION_ITEM_LIMIT) reportCollectionLoss('nodeListToArray');
+      return nodes;
+    }
+
+    function queryAll(selector) {
+      return nodeListToArray(domAccess().documentQuerySelectorAll(selector));
+    }
+
+    function queryAllWithin(element, selector) {
+      return nodeListToArray(domAccess().elementQuerySelectorAll(element, selector));
+    }
+
+    function queryOneWithin(element, selector) {
+      return domAccess().elementQuerySelector(element, selector);
+    }
+
     // Fonts that are single-weight and should not have bold applied
     // (applying bold causes PowerPoint to use faux bold which makes text wider)
     const SINGLE_WEIGHT_FONTS = ['impact'];
@@ -444,7 +585,7 @@ async function extractSlideData(page) {
     const parseInlineFormatting = (element, baseOptions = {}, runs = [], baseTextTransform = (x) => x) => {
       let prevNodeIsText = false;
 
-      element.childNodes.forEach((node) => {
+      childNodesOf(element).forEach((node) => {
         let textTransform = baseTextTransform;
 
         const isText = node.nodeType === Node.TEXT_NODE || node.tagName === 'BR';
@@ -573,7 +714,7 @@ async function extractSlideData(page) {
     const textTags = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI'];
     const processed = new Set();
 
-    document.querySelectorAll('*').forEach((el) => {
+    queryAll('*').forEach((el) => {
       if (processed.has(el)) return;
 
       // Validate text elements don't have backgrounds, borders, or shadows
@@ -649,7 +790,7 @@ async function extractSlideData(page) {
         // Tellr-soften: pre-processor wraps bare div text in <p>; anything
         // it missed (e.g. dynamically-injected nodes) is silently dropped
         // from the export with a console warning instead of throwing.
-        for (const node of el.childNodes) {
+        for (const node of childNodesOf(el)) {
           if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent.trim();
             if (text) {
@@ -788,7 +929,7 @@ async function extractSlideData(page) {
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
 
-        const liElements = Array.from(el.querySelectorAll('li'));
+        const liElements = queryAllWithin(el, 'li');
         const items = [];
         const ulComputed = window.getComputedStyle(el);
         const ulPaddingLeftPt = pxToPoints(ulComputed.paddingLeft);
@@ -893,7 +1034,7 @@ async function extractSlideData(page) {
 
       if (rotation !== null) baseStyle.rotate = rotation;
 
-      const hasFormatting = el.querySelector('b, i, u, strong, em, span, br');
+      const hasFormatting = queryOneWithin(el, 'b, i, u, strong, em, span, br');
 
       if (hasFormatting) {
         // Text with inline formatting
@@ -986,12 +1127,18 @@ async function html2pptx(htmlFile, pres, options = {}) {
       const page = await browser.newPage();
       page.on('console', (msg) => {
         const text = msg.text();
-        // Tellr addition: our own [preprocess] diagnostics go to STDERR. The
-        // Python wrapper (pptx_from_html_huashu.py) echoes only stderr into the
-        // app log, so a stdout-only diagnostic is invisible to whoever has to
-        // explain an unexpectedly white slide. Page chatter stays on stdout,
+        // Tellr addition: our own [preprocess] and [html2pptx] diagnostics go to
+        // STDERR. The Python wrapper (pptx_from_html_huashu.py) echoes only stderr
+        // into the app log, so a stdout-only diagnostic is invisible to whoever has
+        // to explain an unexpectedly white slide. Page chatter stays on stdout,
         // exactly as before.
-        if (text.startsWith('[preprocess]')) {
+        //
+        // [html2pptx] is routed for the same reason [preprocess] is: every line
+        // carrying that prefix reports CONTENT LEAVING THE DECK — an unwrapped div
+        // text node dropped, a gradient backdrop dropped, a collection truncated at
+        // the bound. On stdout those were discarded, which is indistinguishable
+        // from never having reported them.
+        if (text.startsWith('[preprocess]') || text.startsWith('[html2pptx]')) {
           console.error(`Browser console: ${text}`);
           return;
         }

@@ -37,7 +37,7 @@ export const PREPROCESS_SOURCE = `
   // and the breakLine fix in parseInlineFormatting).
   function flattenMonospaceCodeBlocks() {
     let count = 0;
-    document.querySelectorAll('div').forEach((panel) => {
+    queryAll('div').forEach((panel) => {
       const cs = window.getComputedStyle(panel);
       const fam = (cs.fontFamily || '').toLowerCase();
       const isMono = /\\bmono(space)?\\b|courier|consolas|menlo|monaco/i.test(fam);
@@ -177,7 +177,7 @@ export const PREPROCESS_SOURCE = `
     let wrapped = 0;
     // Also walk <pre> and <code> so SQL/code blocks survive (they're
     // BLOCK_TAGS, but we want to wrap their inline children too).
-    document.querySelectorAll('div, pre, code').forEach((parent) => {
+    queryAll('div, pre, code').forEach((parent) => {
       wrapped += wrapInlineRunsIn(parent);
     });
     return wrapped;
@@ -349,13 +349,27 @@ export const PREPROCESS_SOURCE = `
       const firstNode = describe(realm.Node.prototype, 'firstChild');
       const nextNode = describe(realm.Node.prototype, 'nextSibling');
       const listLength = describe(realm.NodeList.prototype, 'length');
+      // The lookups themselves, which every pass below starts from. These are
+      // plain methods rather than accessors, and Document's copies are DISTINCT
+      // function objects from Element's — a Document querySelectorAll invoked on
+      // an element throws Illegal invocation — so both are captured and each call
+      // site says which receiver it means. Capturing only one would leave the
+      // other exactly as replaceable as it is now.
+      const docQuery = realm.Document.prototype.querySelector;
+      const docQueryAll = realm.Document.prototype.querySelectorAll;
+      const elQuery = realm.Element.prototype.querySelector;
+      const elQueryAll = realm.Element.prototype.querySelectorAll;
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
           typeof matches !== 'function' ||
           typeof firstNode.get !== 'function' ||
           typeof nextNode.get !== 'function' ||
-          typeof listLength.get !== 'function') return null;
+          typeof listLength.get !== 'function' ||
+          typeof docQuery !== 'function' ||
+          typeof docQueryAll !== 'function' ||
+          typeof elQuery !== 'function' ||
+          typeof elQueryAll !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
@@ -365,6 +379,15 @@ export const PREPROCESS_SOURCE = `
         firstChild: (node) => firstNode.get.call(node),
         nextSibling: (node) => nextNode.get.call(node),
         nodeListLength: (list) => listLength.get.call(list),
+        // The receiver stays this realm's document, which is the same trust this
+        // function already places in the global (it reaches the pristine realm
+        // through document.createElement). A native lookup invoked with an
+        // explicit receiver works across realms, so the result is this document's
+        // real elements, read through a function no page script has touched.
+        documentQuerySelector: (selector) => docQuery.call(document, selector),
+        documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
+        elementQuerySelector: (el, selector) => elQuery.call(el, selector),
+        elementQuerySelectorAll: (el, selector) => elQueryAll.call(el, selector),
       };
     } catch (e) {
       return null;
@@ -390,6 +413,10 @@ export const PREPROCESS_SOURCE = `
     firstChild: (node) => node.firstChild,
     nextSibling: (node) => node.nextSibling,
     nodeListLength: (list) => list.length,
+    documentQuerySelector: (selector) => document.querySelector(selector),
+    documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
+    elementQuerySelector: (el, selector) => el.querySelector(selector),
+    elementQuerySelectorAll: (el, selector) => el.querySelectorAll(selector),
   };
 
   // ─── consuming a live DOM collection ───────────────────────────────────
@@ -420,6 +447,35 @@ export const PREPROCESS_SOURCE = `
     return domAccessCache;
   }
 
+  // ─── a bound that is reached is a bug, so say so ───────────────────────
+  // COLLECTION_ITEM_LIMIT was measured unreachable: the widest real deck presents
+  // about 33 items against a bound of a million, some 30,000x of headroom. That is
+  // the reason it must not truncate in SILENCE. Reaching it means either a realm
+  // lying about a collection or an input nobody has ever seen, and in both cases
+  // the items past the bound are missing from the exported deck — the same
+  // surfaces-disagree failure as a lost background, and just as unexplainable from
+  // the artifact. So the bound stays where it is (lowering it would invent a real
+  // truncation risk) and announces itself if it is ever met.
+  //
+  // The line carries the [preprocess] prefix deliberately: html2pptx.js routes
+  // exactly that prefix to console.error, and stderr is the only stream
+  // pptx_from_html_huashu.py echoes into the app log. A stdout line would be
+  // discarded, which is indistinguishable from staying silent.
+  //
+  // Once per pass, not once per item: the bound is met INSIDE loops, so a line per
+  // occurrence would bury the log under a million copies of itself.
+  let collectionLossReported = false;
+  function reportCollectionLoss(what, where) {
+    if (collectionLossReported) return;
+    collectionLossReported = true;
+    console.warn(
+      '[preprocess] collection ' + what + ' in ' + where + ': content past that ' +
+      'point is NOT in the exported deck. This bound is unreachable for real slide ' +
+      'content, so meeting it means the document presented an implausible ' +
+      'collection or the realm is lying about one.'
+    );
+  }
+
   // Every child NODE, in order: the Array.from(node.childNodes) replacement.
   // Text and comment nodes included, so callers switching on nodeType see exactly
   // the sequence they saw before.
@@ -431,6 +487,9 @@ export const PREPROCESS_SOURCE = `
       nodes.push(child);
       child = dom.nextSibling(child);
     }
+    // A surviving child is exactly the bound being met: the loop's other exit is a
+    // falsy one. No extra read, so this cannot itself run long.
+    if (child) reportCollectionLoss('truncated at ' + COLLECTION_ITEM_LIMIT + ' items', 'childNodesOf');
     return nodes;
   }
 
@@ -443,6 +502,7 @@ export const PREPROCESS_SOURCE = `
       elements.push(child);
       child = dom.nextElementSibling(child);
     }
+    if (child) reportCollectionLoss('truncated at ' + COLLECTION_ITEM_LIMIT + ' items', 'elementChildrenOf');
     return elements;
   }
 
@@ -451,18 +511,54 @@ export const PREPROCESS_SOURCE = `
   // number makes Math.min NaN and the loop empty, which is a lost pass rather
   // than an endless one.
   function nodeListToArray(list) {
-    const length = Math.min(domAccess().nodeListLength(list), COLLECTION_ITEM_LIMIT);
+    const reported = domAccess().nodeListLength(list);
+    const length = Math.min(reported, COLLECTION_ITEM_LIMIT);
     const nodes = [];
     for (let index = 0; index < length; index++) nodes.push(list[index]);
+    if (reported > COLLECTION_ITEM_LIMIT) {
+      reportCollectionLoss('truncated at ' + COLLECTION_ITEM_LIMIT + ' of ' + reported + ' items', 'nodeListToArray');
+    } else if (!(reported >= 0)) {
+      // The lost-pass case the bound cannot describe: a length that is not a
+      // number makes Math.min NaN and the loop empty. Terminating, but an empty
+      // result is content loss too, and it must not be quieter than truncation.
+      reportCollectionLoss('dropped entirely, length read as ' + String(reported), 'nodeListToArray');
+    }
     return nodes;
   }
 
+  // ─── the lookups every pass starts from ────────────────────────────────
+  // document.querySelector / querySelectorAll are CONFIGURABLE own properties of
+  // Document.prototype, on the same route and with the same reachability as the
+  // poisoned child accessors above: page script can point them at a decoy, or
+  // return something that is not a NodeList at all. Neither shows up as a hang —
+  // the pass returns, having read a document that does not exist.
+  //
+  // Going through the pristine copy also settles the OTHER half of the read.
+  // querySelectorAll's result was being consumed with NodeList.prototype.forEach,
+  // which is its OWN configurable property, separate from [Symbol.iterator] and
+  // untouched by the work that closed that: an endless forEach hangs the pass, and
+  // a no-op one makes every sub-pass silently do nothing. Returning a plain Array
+  // from the index loop above is what takes the realm out of that path — callers
+  // then iterate a snapshot with Array.prototype, exactly as the childNodesOf and
+  // elementChildrenOf callers already do.
+  function queryAll(selector) {
+    return nodeListToArray(domAccess().documentQuerySelectorAll(selector));
+  }
+
+  // The same, scoped to an element: a DISTINCT function object from the document's,
+  // so it needs its own capture and its own call.
+  function queryAllWithin(element, selector) {
+    return nodeListToArray(domAccess().elementQuerySelectorAll(element, selector));
+  }
+
+  function queryOne(selector) {
+    return domAccess().documentQuerySelector(selector);
+  }
+
   function findSlideRoot() {
-    const direct = document.querySelector('body > [class*="slide"]');
+    const direct = queryOne('body > [class*="slide"]');
     if (direct) return direct;
-    const wrappers = nodeListToArray(
-      document.querySelectorAll('body > section, body > article')
-    );
+    const wrappers = queryAll('body > section, body > article');
     const walks = [];
     // Still gated on there being a chain to walk — not to avoid the capture, which
     // the snapshot above has already made, but because a null dom is how
@@ -474,7 +570,7 @@ export const PREPROCESS_SOURCE = `
       if (walk.matched) return wrappers[index];
       walks.push(walk);
     }
-    const fallback = document.querySelector('body > div');
+    const fallback = queryOne('body > div');
     if (!fallback) reportNoSlideRoot(walks, dom);
     return fallback;
   }
@@ -600,7 +696,7 @@ export const PREPROCESS_SOURCE = `
   // absolutely-positioned <img> at full container size, prepend it as
   // the div's first child so existing content paints on top.
   function replaceBackgroundImageWithImg() {
-    const divs = document.querySelectorAll('div');
+    const divs = queryAll('div');
     let replaced = 0;
     divs.forEach((div) => {
       const cs = window.getComputedStyle(div);
@@ -637,7 +733,7 @@ export const PREPROCESS_SOURCE = `
     const textTags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
     let peeled = 0;
     textTags.forEach((tag) => {
-      document.querySelectorAll(tag).forEach((el) => {
+      queryAll(tag).forEach((el) => {
         const cs = window.getComputedStyle(el);
         const hasBg = cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
         const hasBorder = parseFloat(cs.borderTopWidth) > 0 ||
@@ -678,8 +774,8 @@ export const PREPROCESS_SOURCE = `
   // hide the original <table> so the walker ignores it.
   function flattenTables() {
     let cellCount = 0;
-    document.querySelectorAll('table').forEach((table) => {
-      const cells = table.querySelectorAll('th, td');
+    queryAll('table').forEach((table) => {
+      const cells = queryAllWithin(table, 'th, td');
       if (!cells.length) return;
       const bodyRect = document.body.getBoundingClientRect();
       cells.forEach((cell) => {
@@ -887,7 +983,7 @@ export const PREPROCESS_SOURCE = `
   // upstream images) throw on toDataURL — skip those silently.
   function rasterizeCanvases() {
     let count = 0;
-    document.querySelectorAll('canvas').forEach((canvas) => {
+    queryAll('canvas').forEach((canvas) => {
       try {
         // Skip canvases that are still 0×0 (chart never initialized).
         if (!canvas.width || !canvas.height) return;
@@ -952,7 +1048,7 @@ export const PREPROCESS_SOURCE = `
 
   async function rasterizeSvgDataUriImages() {
     let count = 0;
-    const imgs = nodeListToArray(document.querySelectorAll('img')).filter((img) =>
+    const imgs = queryAll('img').filter((img) =>
       /^data:image\\/svg\\+xml/i.test(img.src || '')
     );
     for (const img of imgs) {
@@ -1009,7 +1105,7 @@ export const PREPROCESS_SOURCE = `
   // instead of vanishing.
   async function rasterizeInlineSvgs() {
     let count = 0;
-    const svgs = nodeListToArray(document.querySelectorAll('svg')).filter(
+    const svgs = queryAll('svg').filter(
       (svg) => !(svg.parentElement && svg.parentElement.closest('svg'))
     );
     for (const svg of svgs) {
