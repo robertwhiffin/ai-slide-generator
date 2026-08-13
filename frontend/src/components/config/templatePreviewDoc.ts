@@ -381,24 +381,54 @@ export const PREVIEW_STAGE_H = SLIDE_FRAME_H;
  * structurally: the body child that CONTAINS a slide root is the wrapper needing
  * the frame, whatever its tag.
  *
- * The union is written as ONE `:is()` rather than a comma-separated list of two,
- * for three reasons:
- *  1. A `<deck-stage>` that contains a slide satisfies BOTH arms. A selector
- *     either matches or it does not, so `:is()` applies the frame exactly once;
- *     two comma arms would apply the whole block twice to that element.
- *  2. {@link slideHostFrameStyle} appends ` > …` to build its child rule. A
- *     descendant combinator binds only to the LAST arm of a selector list, so a
- *     comma-separated host would silently leave the first arm's children
- *     unstretched — the original defect, reintroduced.
- *  3. `:is()` takes a FORGIVING selector list. In a browser without `:has()`
- *     support the unknown arm is dropped and the custom-element arm keeps
- *     working; an invalid selector inside a plain comma list would instead
- *     invalidate the entire style rule and un-frame both shapes.
+ * ONE `:is()`, NOT A COMMA LIST. The reason is the CHILD rule, not the host
+ * rule. {@link slideHostFrameStyle} appends ` > :not(…)` to whatever it is
+ * given, and a child combinator binds only to the LAST arm of a selector list.
+ * Written with a comma, the first arm therefore degenerates into a SECOND rule
+ * matching the HOST itself, stamping it with the child declarations
+ * (`position:absolute; inset:0; width:100%; height:100%`). The host stops
+ * holding the fixed frame and resolves against the initial containing block
+ * instead. Measured on the deck-stage shape at a 1280x800 viewport, the comma
+ * form gives deck-stage, `<section>` and `.slide` all 1280x800 with the host
+ * computed `position: absolute` — the wrong HEIGHT, not a collapse. (1280x0 is
+ * what NO frame produces; and the wrapper is still stretched, because
+ * `:has(.slide)` — the last arm — also matches deck-stage, so the child rule
+ * does reach its children.) `slide-host-frame.spec.ts` renders both forms and
+ * measures them, so this is checked rather than asserted.
+ *
+ * NOT a reason: "two arms would apply the block twice". A selector list is ONE
+ * rule; its declarations apply to an element once however many arms match, and
+ * no page API reports an arm count. A `<deck-stage>` containing a slide
+ * satisfies BOTH arms of the `:is()` today and is framed exactly once.
+ *
+ * `:is()` is also a FORGIVING selector list: in a browser without `:has()` the
+ * unknown arm is dropped and the custom-element arm keeps working, where an
+ * invalid selector in a plain comma list would invalidate the whole rule and
+ * un-frame both shapes.
+ *
+ * DELIBERATELY BROAD. `:has()` matches a body child containing a slide root at
+ * ANY depth, not only as a direct child. Narrowing it to `:has(> .slide)` was
+ * measured and REJECTED: the two shapes above measure 1280x720 either way, but
+ * the direct-child form regresses two reachable shapes to the 1280x800 defect —
+ * a template with an intermediate wrapper (`main > article > .slide`), and a
+ * standalone multi-slide export uploaded as a template. The cost of the breadth
+ * is that several matching body children each become their own 720px stage;
+ * they stay `position: relative` and IN FLOW (measured at 0 and 720), so a
+ * multi-slide layout preview stacks and scrolls rather than piling every slide
+ * at the origin as it did before this contract. All pinned by the spec.
+ *
+ * Two limits, both pre-existing and unchanged by the widening:
+ *  - `<body><div class="slide">`, where the slide IS the body child, matches
+ *    NEITHER arm — every built-in counts as defined, and a slide root does not
+ *    contain one — so it is not framed and measures 1280x800.
+ *  - the HOST arm can match a `.slide-wrapper`, which the CHILD arm excludes.
+ *    That needs a document carrying `.slide-wrapper` AND this selector, and
+ *    `buildStandaloneDeckDocument` never injects the frame, so it means an
+ *    export-shaped document uploaded as a template. Measured benign: the
+ *    wrappers stay in flow, 720 apart, not piled into one stack.
  *
  * Specificity is unchanged by the widening: `:is()` and `:has()` each take the
- * specificity of their most specific argument, so the host still scores (0,1,1)
- * — and the geometry is settled by `!important` regardless, exactly as the
- * visibility neutralisation above it is.
+ * specificity of their most specific argument, so the host still scores (0,1,1).
  */
 const PREVIEW_STAGE_SHIM =
   '<style>' +

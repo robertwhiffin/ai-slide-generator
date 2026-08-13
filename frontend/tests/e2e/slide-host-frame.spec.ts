@@ -158,17 +158,22 @@ async function measure(page: Page, doc: string) {
 }
 
 /**
- * How many frame-contract rules in the live document match a given element,
+ * How many frame-contract RULES in the live document match a given element,
  * split by ROLE: a `host` rule pins the fixed 1280x720 frame, a `child` rule
  * stretches a host's direct child to fill it.
  *
- * The frame must be declared ONCE per element and the two roles must never land
- * on the SAME element. A host selector written as a comma list whose arms both
- * match would apply one role twice; a host selector that reaches a nested
- * wrapper would apply BOTH roles to it, stacking `position: relative` against
- * `position: absolute` with equal importance and letting specificity decide the
- * geometry. Counting matched rules catches both, where computed style cannot:
- * duplicate identical declarations compute the same as one.
+ * WHAT THIS CAN SEE: both roles landing on the SAME element — the real failure
+ * mode of a mis-written host union, and invisible to computed style alone,
+ * because `position: relative` and `position: absolute` both compute to
+ * something plausible and only the resulting box gives it away.
+ *
+ * WHAT THIS CANNOT SEE: how many ARMS of one selector matched. `el.matches()`
+ * is boolean per rule, and there is no API that reports which arms of a
+ * selector list matched. That is not a gap in the probe but in the premise: a
+ * selector list is ONE rule, so its declarations apply to an element exactly
+ * once however many arms match, and nothing in the page can distinguish one
+ * matching arm from two. Tests that care assert the observable consequence —
+ * the resulting geometry — not an arm count.
  */
 const COUNT_FRAME_RULES = (selector: string) => {
   const el = document.querySelector(selector);
@@ -216,6 +221,73 @@ async function frameRoles(page: Page, doc: string, selector: string) {
   expect(result, `fixture should contain ${selector}`).not.toBeNull();
   return result!;
 }
+
+// ------------------------------------------------- alternative host selectors
+/**
+ * Geometry + frame-contract ROLE of every interesting element, so a claim about
+ * a host selector can be MEASURED instead of asserted.
+ */
+const PROBE = (selectors: string[]) => {
+  const out: Record<string, { w: number; h: number; top: number; position: string;
+    host: number; child: number }[]> = {};
+  for (const sel of selectors) {
+    out[sel] = [...document.querySelectorAll(sel)].map((el) => {
+      const r = el.getBoundingClientRect();
+      let host = 0;
+      let child = 0;
+      for (const sheet of [...document.styleSheets]) {
+        let rules: CSSRuleList;
+        try {
+          rules = sheet.cssRules;
+        } catch {
+          continue;
+        }
+        for (const rule of [...rules]) {
+          const sr = rule as CSSStyleRule;
+          if (!sr.selectorText) continue;
+          let hit = false;
+          try {
+            hit = el.matches(sr.selectorText);
+          } catch {
+            continue;
+          }
+          if (!hit) continue;
+          if (sr.style.getPropertyValue('width') === '1280px'
+            && sr.style.getPropertyValue('height') === '720px') host++;
+          else if (sr.style.getPropertyValue('position') === 'absolute'
+            && sr.style.getPropertyValue('height') === '100%') child++;
+        }
+      }
+      return {
+        w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top),
+        position: getComputedStyle(el).position, host, child,
+      };
+    });
+  }
+  return out;
+};
+
+/**
+ * The pop-out's preview shim, with the host selector as the VARIABLE. Mirrors
+ * `PREVIEW_STAGE_SHIM` in templatePreviewDoc.ts; the shipped host selector is
+ * imported rather than retyped, and a test below pins that the real pop-out
+ * document still contains it, so this mirror cannot drift from the real one.
+ */
+const shimmedDoc = (hostSelector: string, bodyHtml: string) =>
+  `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style><style>`
+  + ':not(:defined){visibility:visible!important}'
+  + 'body>:not(:defined){display:block!important}'
+  + `${slideHostFrameStyle(hostSelector)}</style></head><body>${bodyHtml}</body></html>`;
+
+async function probeHost(page: Page, hostSelector: string, bodyHtml: string,
+  selectors: string[]) {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setContent(shimmedDoc(hostSelector, bodyHtml), { waitUntil: 'load' });
+  return page.evaluate(PROBE, selectors);
+}
+
+// The custom-element host shape, as a bare body fragment for the probes above.
+const STAGE_BODY = `<deck-stage width="1280" height="720">${bareSlide('a')}</deck-stage>`;
 
 // ------------------------------------------------------- surface documents
 // Each mirrors the real call site, so the spec fails if a surface stops using
@@ -420,6 +492,204 @@ test.describe('slide-host frame contract', () => {
 
     const plainSlide = await frameRoles(page, plain, '.slide');
     expect(plainSlide.child, 'the slide inside it is stretched exactly once').toBe(1);
+  });
+
+  // --------------------------------- why ONE :is() and not a comma-list union
+  // The rationale in templatePreviewDoc.ts is asserted here against a real
+  // browser rather than left as prose, because the mechanism is easy to get
+  // wrong: the damage is done by the CHILD rule, not the host rule.
+  test('a comma-separated host union stamps the HOST with the child rule', async ({ page }) => {
+    // slideHostFrameStyle appends ` > :not(…)`, and a child combinator binds
+    // only to the LAST arm of a selector list. So the FIRST arm degenerates
+    // into a second rule matching the HOST, which stamps it with
+    // position:absolute/inset:0/100% — the host abandons the fixed 720 frame
+    // and resolves against the initial containing block (the viewport).
+    const comma = await probeHost(page, 'body>:not(:defined),body>:has(.slide)',
+      STAGE_BODY, ['deck-stage', 'section', '.slide']);
+
+    expect(comma['deck-stage'][0].child,
+      'the child rule lands on the HOST — this is what breaks').toBe(1);
+    expect(comma['deck-stage'][0].position,
+      'so the host is absolutely positioned, not the frame’s relative').toBe('absolute');
+    // The wrong HEIGHT, at the viewport's 800 — NOT a collapse to 1280x0, which
+    // is what no frame at all produces.
+    expect(comma['deck-stage'][0], 'host takes the viewport box')
+      .toMatchObject({ w: 1280, h: 800 });
+    expect(comma['section'][0], 'the wrapper is stretched to that wrong box')
+      .toMatchObject({ w: 1280, h: 800 });
+    expect(comma['.slide'][0], 'and so is the slide').toMatchObject({ w: 1280, h: 800 });
+    // The wrapper IS still stretched: `:has(.slide)` — the last arm — also
+    // matches deck-stage, so the child rule does reach its children.
+    expect(comma['section'][0].child, 'the wrapper is not left unstretched').toBe(1);
+
+    // The shipped `:is()` form, same fixture, for contrast.
+    const is = await probeHost(page, 'body>:is(:not(:defined),:has(.slide))',
+      STAGE_BODY, ['deck-stage', 'section', '.slide']);
+    expect(is['deck-stage'][0], 'the :is() host holds the fixed frame')
+      .toMatchObject({ w: 1280, h: 720, position: 'relative', host: 1, child: 0 });
+    expect(is['section'][0], ':is(): wrapper stretched to the frame')
+      .toMatchObject({ w: 1280, h: 720 });
+    expect(is['.slide'][0], ':is(): slide at the frame').toMatchObject({ w: 1280, h: 720 });
+  });
+
+  test('an unsupported arm degrades gracefully in :is(), fatally in a comma list', async ({ page }) => {
+    // The other reason for `:is()`: it takes a FORGIVING selector list, so a
+    // browser that does not know one arm drops just that arm. The same union
+    // spelled with a comma is invalid as a whole and frames NOTHING.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setContent('<!DOCTYPE html><html><head><style>'
+      + 'body>:is(:not(:defined),:totally-unknown(x)) { height: 720px }'
+      + 'body>:not(:defined),body>:totally-unknown(x) { width: 640px }'
+      + `</style></head><body>${STAGE_BODY}</body></html>`, { waitUntil: 'load' });
+
+    const cs = await page.evaluate(() => {
+      const s = getComputedStyle(document.querySelector('deck-stage')!);
+      return { height: s.height, width: s.width };
+    });
+    expect(cs.height, ':is() keeps the arm it understands').toBe('720px');
+    expect(cs.width, 'the comma list is invalidated entirely').toBe('auto');
+  });
+
+  test('a host matched by BOTH arms is still framed exactly once', async ({ page }) => {
+    // The precondition is real: a <deck-stage> containing a slide satisfies the
+    // custom-element arm AND the :has() arm. What does NOT follow is that the
+    // block therefore applies twice — a selector list is one rule, so its
+    // declarations apply once however many arms match, and no page API reports
+    // an arm count (see COUNT_FRAME_RULES). This asserts the precondition, then
+    // the observable consequence: the geometry is exactly the single frame.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setContent(shimmedDoc('body>:is(:not(:defined),:has(.slide))', STAGE_BODY),
+      { waitUntil: 'load' });
+
+    const arms = await page.evaluate(() => {
+      const el = document.querySelector('deck-stage')!;
+      return {
+        customElementArm: el.matches('body>:not(:defined)'),
+        hasSlideArm: el.matches('body>:has(.slide)'),
+      };
+    });
+    expect(arms, 'the host really is matched by both arms')
+      .toEqual({ customElementArm: true, hasSlideArm: true });
+
+    const m = await page.evaluate(PROBE, ['deck-stage', 'section', '.slide']);
+    expect(m['deck-stage'][0], 'matched twice, framed once')
+      .toMatchObject({ w: 1280, h: 720, position: 'relative', host: 1, child: 0 });
+    expect(m['section'][0], 'and its wrapper stretched once')
+      .toMatchObject({ w: 1280, h: 720, host: 0, child: 1 });
+  });
+
+  // ------------------------------------- deliberate breadth of the :has() arm
+  test('the frame reaches a slide nested BELOW a direct child', async ({ page }) => {
+    // `:has(.slide)` matches a body child containing a slide root at ANY depth.
+    // That breadth is load-bearing: narrowing it to `:has(> .slide)` regresses
+    // this shape to the 1280x800 defect (the direct-child form matches nothing
+    // here, since `main`'s child is `article`).
+    const deep = `<main><article>${bareSlide('deep')}</article></main>`;
+    const sels = ['main', 'article', '.slide'];
+
+    const broad = await probeHost(page, 'body>:is(:not(:defined),:has(.slide))', deep, sels);
+    expect(broad['main'][0], 'the body child is framed').toMatchObject({ w: 1280, h: 720, host: 1 });
+    expect(broad['article'][0], 'its direct child is stretched').toMatchObject({ w: 1280, h: 720, child: 1 });
+    expect(broad['.slide'][0], 'so the slide resolves against a 720 box')
+      .toMatchObject({ w: 1280, h: 720 });
+
+    const tight = await probeHost(page, 'body>:is(:not(:defined),:has(>.slide))', deep, sels);
+    expect(tight['main'][0], 'the direct-child form frames nothing here')
+      .toMatchObject({ h: 0, host: 0 });
+    expect(tight['.slide'][0], 'and the slide escapes to the viewport — the defect')
+      .toMatchObject({ w: 1280, h: 800 });
+
+    // Pin it against the SHIPPED selector too, not just the two written above,
+    // so narrowing the real one fails here and not only in the comparison.
+    const layout = `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style></head>`
+      + `<body><main><article>${bareSlide('deep')}</article></main></body></html>`;
+    const doc = await buildPopoutDoc(page, layout);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setContent(doc, { waitUntil: 'load' });
+    const real = await page.evaluate(PROBE, ['.slide']);
+    expect(real['.slide'][0], 'the shipped selector frames a nested slide')
+      .toMatchObject({ w: 1280, h: 720 });
+  });
+
+  test('several matching body children each get their own frame, IN FLOW', async ({ page }) => {
+    // The cost of the breadth, pinned so it cannot silently worsen: with more
+    // than one matching body child, each becomes its own 720px stage. They stay
+    // `position: relative` and in normal flow, so a multi-slide layout preview
+    // STACKS and scrolls (720 apart) instead of piling every slide at the
+    // origin, which is what happened before the contract existed.
+    const two = bareSlide('one') + bareSlide('two');
+    const framed = await probeHost(page, 'body>:is(:not(:defined),:has(.slide))', two,
+      ['section', '.slide']);
+
+    expect(framed['section']).toHaveLength(2);
+    expect(framed['section'][0]).toMatchObject({ w: 1280, h: 720, top: 0, position: 'relative' });
+    expect(framed['section'][1], 'the second stage sits BELOW the first, not on top of it')
+      .toMatchObject({ w: 1280, h: 720, top: 720, position: 'relative' });
+    expect(framed['.slide'][0]).toMatchObject({ w: 1280, h: 720, top: 0 });
+    expect(framed['.slide'][1]).toMatchObject({ w: 1280, h: 720, top: 720 });
+
+    // Without the frame both wrappers collapse and both slides paint at the
+    // SAME origin — the behaviour the stacking replaced.
+    await page.setContent(
+      `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style></head><body>${two}</body></html>`,
+      { waitUntil: 'load' });
+    const bare = await page.evaluate(PROBE, ['section', '.slide']);
+    expect(bare['section'][0]).toMatchObject({ h: 0 });
+    expect(bare['.slide'][0].top, 'unframed: both slides at the same origin').toBe(0);
+    expect(bare['.slide'][1].top, 'unframed: both slides at the same origin').toBe(0);
+  });
+
+  test('the pop-out really injects the host selector measured by these tests', async ({ page }) => {
+    // The probes above compose the shim themselves, so pin that the shipped
+    // pop-out document carries the exact same host selector text. Without this
+    // the mirror could drift and the measurements would describe nothing.
+    const doc = await buildPopoutDoc(page, templateLayout([bareSlide('only')]));
+    expect(doc, 'pop-out host selector').toContain('body>:is(:not(:defined),:has(.slide))');
+  });
+
+  // ------------------------------------------- known limits, recorded as-is
+  // Both measured through the REAL pop-out builder. These pin CURRENT
+  // behaviour, not desired behaviour: if either changes, the comment in
+  // templatePreviewDoc.ts describing it must change with it.
+  test('a slide root that IS the body child is not framed (pre-existing gap)', async ({ page }) => {
+    // Matches neither arm: every built-in element counts as `:defined`, and a
+    // slide root does not CONTAIN a slide root. The absolute slide therefore
+    // resolves against the viewport. Unchanged by the host-union work.
+    const layout = `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style></head>`
+      + '<body><div class="slide"><p class="probe">x</p></div></body></html>';
+    const doc = await buildPopoutDoc(page, layout);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setContent(doc, { waitUntil: 'load' });
+    const m = await page.evaluate(PROBE, ['.slide']);
+    expect(m['.slide'][0], 'not framed: takes the viewport height, not the 720 frame')
+      .toMatchObject({ w: 1280, h: 800, host: 0, child: 0 });
+  });
+
+  test('an export-shaped upload frames its .slide-wrapper but keeps it in flow', async ({ page }) => {
+    // The CHILD arm excludes `.slide-wrapper`; the HOST arm can still match one
+    // via `:has(.slide)`. Reaching that needs a document that contains
+    // `.slide-wrapper` AND injects this selector — and
+    // `buildStandaloneDeckDocument` never injects the frame at all, so the real
+    // export is untouched (pinned by the standalone-export test below). It
+    // means an export-shaped document uploaded as a TEMPLATE. Measured benign:
+    // the wrappers keep `position: relative` and stay 720 apart, so the deck
+    // does not pile into a single stack.
+    const wrapped = (label: string) =>
+      `<div class="slide-wrapper"><div class="slide-container">${bareSlide(label)}</div></div>`;
+    const layout = `<!DOCTYPE html><html><head><style>${TEMPLATE_CSS}</style></head>`
+      + `<body>${wrapped('one')}${wrapped('two')}</body></html>`;
+    const doc = await buildPopoutDoc(page, layout);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setContent(doc, { waitUntil: 'load' });
+    const m = await page.evaluate(PROBE, ['.slide-wrapper', '.slide']);
+
+    expect(m['.slide-wrapper']).toHaveLength(2);
+    expect(m['.slide-wrapper'][0], 'the wrapper becomes a host')
+      .toMatchObject({ w: 1280, h: 720, top: 0, position: 'relative', host: 1 });
+    expect(m['.slide-wrapper'][1], 'and the second stays BELOW it, not stacked on it')
+      .toMatchObject({ w: 1280, h: 720, top: 720, position: 'relative', host: 1 });
+    expect(m['.slide'][0], 'each slide still measures the frame')
+      .toMatchObject({ w: 1280, h: 720 });
   });
 
   // ------------------------------------------- deliberate: no size opt-out
