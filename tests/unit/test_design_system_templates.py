@@ -941,6 +941,110 @@ class TestImportDotPrefixedTemplateThumbnails:
         assert ds.templates[0].thumbnail_asset_id == shots[0].id
 
 
+# ---------------------------------------------------------------------------
+# BYTE-IDENTICAL thumbnails in DIFFERENT template folders
+# ---------------------------------------------------------------------------
+#
+# The real export ships four template thumbnails and two of them are GENUINELY
+# byte-identical: ``templates/reference-architecture/.thumbnail`` and
+# ``templates/strategy-consulting/.thumbnail`` are both 10,040 bytes with the same
+# sha256, while ``corporate`` (11,526 B) and ``executive-events`` (7,870 B) differ.
+#
+# Identical content is precisely the case a content-keyed or first-wins lookup gets
+# wrong: it binds one folder's thumbnail to another folder's template, or collapses
+# two folders onto one asset row — and every template still LOOKS like it has a
+# thumbnail, so the failure is invisible in a count.
+#
+# Neither existing test could see it.
+# ``test_each_template_links_the_thumbnail_from_its_own_folder`` checks binding but
+# with DISTINCT bytes per folder, and
+# ``TestTemplateThumbnailFormatSniffing._shots`` uses identical bytes but only
+# counts rows and checks their MIME. This closes the gap: own-folder binding, with
+# identical bytes.
+# ---------------------------------------------------------------------------
+
+#: The two slugs whose thumbnails are byte-identical in the real export.
+IDENTICAL_THUMBNAIL_SLUGS = ("reference-architecture", "strategy-consulting")
+
+#: The shapes worth pinning: the real export's two-of-four, and the degenerate
+#: all-four case where content carries no distinguishing information at all.
+IDENTICAL_THUMBNAIL_CASES = [
+    pytest.param(IDENTICAL_THUMBNAIL_SLUGS, id="two-identical-as-shipped"),
+    pytest.param(DOT_THUMBNAIL_SLUGS, id="all-four-identical"),
+]
+
+
+class TestByteIdenticalThumbnailsStayBoundToTheirOwnFolder:
+    IDENTICAL_BYTES = webp_bytes(10, 10)
+
+    def _files(self, slugs):
+        """Real-export-shaped bundle files with ``slugs`` sharing ONE payload."""
+        files = dot_thumbnail_bundle_files()
+        for slug in slugs:
+            files[f"templates/{slug}/.thumbnail"] = self.IDENTICAL_BYTES
+        return files
+
+    def _import(self, session, slugs):
+        return _import_dot_thumbnail_ds(session, files=self._files(slugs))
+
+    def test_the_fixture_really_does_ship_identical_bytes(self):
+        """Guard the guard: if the shared payload ever stops being shared, every
+        test below keeps passing while testing nothing it exists to test."""
+        files = self._files(IDENTICAL_THUMBNAIL_SLUGS)
+        shared = {
+            files[f"templates/{slug}/.thumbnail"]
+            for slug in IDENTICAL_THUMBNAIL_SLUGS
+        }
+        assert len(shared) == 1, "the two 'identical' thumbnails are not identical"
+        others = [
+            files[f"templates/{slug}/.thumbnail"]
+            for slug in DOT_THUMBNAIL_SLUGS
+            if slug not in IDENTICAL_THUMBNAIL_SLUGS
+        ]
+        # ...and the other two still differ, from each other and from the pair, so
+        # the fixture mirrors the export rather than flattening to one payload.
+        assert len(set(others)) == len(others)
+        assert not any(payload in shared for payload in others)
+
+    @pytest.mark.parametrize("slugs", IDENTICAL_THUMBNAIL_CASES)
+    def test_all_four_templates_resolve_their_own_folders_thumbnail(
+        self, session, slugs
+    ):
+        ds = self._import(session, slugs)
+        asset_path_by_id = {
+            f.asset_id: f.path for f in ds.files if f.asset_id is not None
+        }
+        assert len(ds.templates) == len(DOT_THUMBNAIL_SLUGS)
+
+        resolved = {}
+        for template in ds.templates:
+            folder = template.entry_path.rsplit("/", 1)[0]
+            assert template.thumbnail_asset_id is not None, (
+                f"{folder} resolved no thumbnail at all"
+            )
+            resolved[folder] = asset_path_by_id[template.thumbnail_asset_id]
+
+        assert resolved == {
+            f"templates/{slug}": f"templates/{slug}/.thumbnail"
+            for slug in DOT_THUMBNAIL_SLUGS
+        }, "a template is serving a thumbnail from another template's folder"
+
+    @pytest.mark.parametrize("slugs", IDENTICAL_THUMBNAIL_CASES)
+    def test_each_folder_keeps_its_own_asset_row(self, session, slugs):
+        """Rows are per ENTRY, not per CONTENT. Two folders sharing bytes must not
+        share an asset row — sharing is how one template comes to serve another's
+        thumbnail URL, and how deleting one would blank the other."""
+        ds = self._import(session, slugs)
+        shots = [a for a in ds.assets if a.kind == "template_shot"]
+        assert len(shots) == len(DOT_THUMBNAIL_SLUGS), (
+            f"expected one thumbnail row per folder, got {len(shots)}"
+        )
+        linked = [t.thumbnail_asset_id for t in ds.templates]
+        assert len(set(linked)) == len(DOT_THUMBNAIL_SLUGS), (
+            f"templates share thumbnail asset rows: {linked}"
+        )
+
+
 class TestTemplateThumbnailFormatSniffing:
     """Only real PNG/JPEG/GIF/WebP bytes are stored; anything else is refused
     rather than persisted under a guessed content type."""

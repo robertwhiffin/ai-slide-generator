@@ -289,19 +289,28 @@ class TestPathSafety:
         from src.services.design_system_service import _safe_relpath
 
         assert _safe_relpath("assets/logo.svg") == "assets/logo.svg"
-        assert _safe_relpath("a\\b\\c.png") == "a/b/c.png"  # backslashes normalized
-        # INVERTED deliberately. This used to assert
-        #     _safe_relpath("./assets/./logo.svg") == "assets/logo.svg"
-        # i.e. that a ``.`` segment was COLLAPSED. That collapsing was the defect:
-        # erasing a segment on the way to the junk/dotfile decision let
-        # ``assets/innocent/.`` arrive as ``assets/innocent`` — basename no longer
-        # dot-prefixed — and be stored under a path that was not the entry's name,
-        # and it let two entries collapse onto one identity. The helper now VALIDATES
-        # rather than rewrites: a non-canonical path is refused, not repaired.
+        # The ONE tolerance: a Windows zip's ``\`` separator is folded. A fold can
+        # neither erase a segment nor change a basename, so nothing is laundered
+        # past a later rule.
+        assert _safe_relpath("a\\b\\c.png") == "a/b/c.png"
+        # Everything else is VALIDATED, never rewritten. A spelling that is not the
+        # plain relative form of the file it names is refused, because normalizing it
+        # changes the very string the rules downstream judge — and collapses two
+        # distinct entries onto one stored path, leaving the bytes to zip order.
+        assert _safe_relpath("./assets/logo.svg") is None
         assert _safe_relpath("./assets/./logo.svg") is None
+        assert _safe_relpath("assets//logo.svg") is None
+        # A trailing ``.`` names the DIRECTORY ``assets/innocent``, so it is not a
+        # file path — and specifically NOT the file ``assets/innocent``. This is the
+        # laundering that let an entry be stored under a name that was not its own.
+        assert _safe_relpath("assets/innocent/.") is None
+        assert _safe_relpath("assets/") is None
+        # Shapes that change WHICH file is named are refused outright too.
         assert _safe_relpath("assets/../../evil") is None
         assert _safe_relpath("/etc/passwd") is None
         assert _safe_relpath("C:/Windows/x") is None
+        assert _safe_relpath("templates/x/.thumbnail\n") is None
+        assert _safe_relpath("") is None
 
 
 # ---------------------------------------------------------------------------

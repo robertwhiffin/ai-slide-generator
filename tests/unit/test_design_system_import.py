@@ -8,6 +8,14 @@ All fixtures are SYNTHETIC (fake "Acme" brand, dummy hex, placeholder bytes) —
 no real brand content, per the public-repo hygiene rule.
 """
 
+import contextlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import zipfile
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -15,10 +23,14 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
+from src.services.design_system_service import _basename
 from tests.unit.conftest_design_system import (
+    COLORS_AND_TYPE_CSS,
     MANIFEST_FILENAME,
     SVG_LOGO,
     SYNTHETIC_README,
+    SYNTHETIC_TEMPLATE_HTML,
+    default_manifest,
     make_bundle_zip,
     make_declared_size_bundle_zip,
     webp_bytes,
@@ -399,9 +411,6 @@ class TestThumbnailPathsAreStillZipSlipChecked:
         """The entry iterator raises on its own, not only via the up-front global
         path scan — a dot-prefixed thumbnail must not be able to skip the check by
         being allowlisted."""
-        import io
-        import zipfile
-
         from src.services.design_system_service import (
             DesignSystemImportError,
             _iter_safe_entries,
@@ -418,9 +427,6 @@ class TestThumbnailPathsAreStillZipSlipChecked:
         """Positive control for the test above: the same iterator DOES surface a
         well-formed template thumbnail, so the rejection above is about the path,
         not about dot-prefixed names in general."""
-        import io
-        import zipfile
-
         from src.services.design_system_service import _iter_safe_entries
 
         buf = io.BytesIO()
@@ -433,35 +439,93 @@ class TestThumbnailPathsAreStillZipSlipChecked:
 
 
 # ---------------------------------------------------------------------------
-# A bundle path is CANONICAL or it is refused — never laundered into one
+# A bundle path is VALIDATED, never rewritten — and a duplicate claim on ONE
+# stored path is refused instead of resolved by zip order
 # ---------------------------------------------------------------------------
 #
-# Normalization used to run BEFORE the junk/dotfile decision, so a segment that
-# made an entry junk could be erased on the way to that decision:
-# ``assets/innocent/.`` normalized to ``assets/innocent``, whose basename is no
-# longer dot-prefixed, and the entry was STORED under a path that was not its own
-# name. Two entries could also collapse onto one identity (``assets/./x`` and
-# ``assets/x``), leaving which bytes win to zip ordering.
+# The rule is the one f83fc2e shipped: an entry is already spelled as the plain
+# relative path of the file it names, or the bundle is REFUSED. Nothing is
+# normalized into an acceptable form, for two measured reasons.
 #
-# The fix is to refuse a non-canonical path outright instead of rewriting it into
-# an acceptable one, and to make BOTH gates that look at bundle paths reach that
-# verdict through the SAME classifier, so they cannot disagree by construction.
+# (i) Rewriting changes the very string the rules downstream are about to judge.
+# ``assets/innocent/.`` normalized to ``assets/innocent``, losing the ``.``
+# basename that made it a directory reference, and the entry was stored under a
+# name that was not its own.
+#
+# (ii) Rewriting collapses DISTINCT entries onto ONE identity — ``assets/./x``,
+# ``assets//x`` and ``assets/x`` all become ``assets/x`` — leaving which bytes
+# get stored to zip member ordering.
+#
+# The ONE tolerance, kept exactly as f83fc2e kept it, is folding ``\`` to ``/``:
+# zips written on Windows use it as the separator, and a fold can neither erase a
+# segment nor change a basename's junk-ness the way the collapses above do.
+# Because it IS still a way for two entries to claim one stored path
+# (``assets\x`` and ``assets/x``), that collision is DETECTED and refused rather
+# than resolved by order.
+#
+# A ``./``-prefixed archive — what ``bsdtar -a -cf bundle.zip -C <dir> .`` writes
+# for every member, plus a bare ``./`` for the root — is therefore refused, and
+# that is deliberate rather than a cost being absorbed. Measured over the real
+# exports on hand (777, 777, 868 and 872 entries): ZERO non-canonical entries — no
+# leading ``./``, no ``//``, no backslash, no ``.`` segment — every entry of all
+# four classified as a storable file. The ``./`` prefix is an artifact of
+# re-archiving an unpacked bundle with a tar-family tool, not of the product's
+# export, so the refusal costs no real bundle; and it names the re-archive as the
+# likely cause so a user who hit it can fix it.
 # ---------------------------------------------------------------------------
 
-#: Path shapes that are not canonical and must therefore be REFUSED outright.
-#: Every one of these was previously either stored under a laundered name or
-#: silently collapsed onto another entry's identity.
+#: Spellings that are NOT the plain relative form of the file they name. Each
+#: refuses the whole bundle: this importer validates, it does not launder. The
+#: ``.``-suffixed entries are the laundering route itself — ``assets/innocent/.``
+#: must never arrive as the FILE ``assets/innocent``.
 NON_CANONICAL_ARCNAMES = [
+    "./assets/logo2.svg",
+    "assets/./logo2.svg",
+    "assets//logo2.svg",
+    "./assets/./sub//logo2.svg",
+    "./templates/corporate/.thumbnail",
+    ".",
+    "./",
+    "assets/.",
+    "assets/./",
+    "assets//",
     "assets/innocent/.",
     "fonts/x/.",
-    "assets/./x",
-    "assets/x/.",
     "templates/x/.",
-    ".",
+]
+
+#: ``(raw arcname, stored path)`` for the ONE tolerated fold. Folding cannot
+#: erase a segment or change a basename, so it launders nothing past a later
+#: rule — which is what separates it from the collapses refused above.
+BACKSLASH_ARCNAMES = [
+    ("assets\\logo2.svg", "assets/logo2.svg"),
+    ("assets\\sub\\logo2.svg", "assets/sub/logo2.svg"),
+    ("templates\\corporate\\.thumbnail", "templates/corporate/.thumbnail"),
+]
+
+#: Directory markers naming a legitimate path. Never stored, and never refused —
+#: a real archive carries them, and the path a marker names is canonical.
+DIRECTORY_ARCNAMES = ["assets/", "assets/sub/", "assets\\sub\\"]
+
+#: Shapes that change WHICH FILE the path names. Refused outright — and the whole
+#: bundle with them, because an archive containing one is not a bundle we can
+#: interpret. A directory marker gets no exemption: ``../evil/`` names a
+#: directory outside the bundle.
+UNSAFE_ARCNAMES = [
     "..",
+    "../evil.png",
+    "../evil/",
     "assets/..",
-    "assets//x",
-    "./assets/logo2.svg",
+    "assets/../evil.png",
+    "assets/../../evil.png",
+    "templates/x/../../../.thumbnail",
+    "/etc/passwd",
+    "/etc/templates/corporate/.thumbnail",
+    "/abs/dir/",
+    "C:/Windows/x",
+    "C:\\Windows\\x",
+    "//server/share/x",
+    "..\\evil.png",
 ]
 
 #: Trailing junk on the ALLOWLISTED thumbnail shape. ``$`` matches before a single
@@ -477,43 +541,528 @@ CONTROL_CHAR_ARCNAMES = [
     "templates/x/preview.png\n",
 ]
 
+#: Pairs of DISTINCT arcnames that are each individually ACCEPTABLE yet claim ONE
+#: stored path, by way of the tolerated ``\`` fold. Whichever of the two the
+#: archive happens to list first would otherwise decide the stored bytes. These
+#: are the collisions strict validation cannot reach — refusing non-canonical
+#: shapes does nothing about them, which is why the collision check is separate.
+FOLD_COLLIDING_ARCNAME_PAIRS = [
+    ("assets/mixed.svg", "assets\\mixed.svg"),
+    ("assets/sub/mixed.svg", "assets\\sub\\mixed.svg"),
+    ("templates/x/.thumbnail", "templates\\x\\.thumbnail"),
+]
 
-class TestNonCanonicalPathsAreRefused:
-    def test_all_shapes_refuse_the_whole_bundle(self, session):
-        """Every non-canonical shape refuses the import rather than storing
-        SOMETHING under a name that is not the entry's own."""
+#: Bytes that differ between the two members of a colliding pair, so "which entry
+#: won" is directly readable from what got stored.
+COLLIDING_FIRST_BYTES = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">'
+    b"<!--FIRST-MEMBER--></svg>"
+)
+COLLIDING_SECOND_BYTES = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">'
+    b"<!--SECOND-MEMBER--></svg>"
+)
+
+
+@contextlib.contextmanager
+def _isolated_session():
+    """A private, empty database per import.
+
+    The order-independence tests below import the SAME bundle name twice and must
+    not have the second import see the first one's rows — a 409 name conflict
+    would look exactly like the refusal they are trying to measure.
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    with Session(engine) as isolated:
+        yield isolated
+    engine.dispose()
+
+
+def _import_outcome(files):
+    """``("refused", message)`` or ``("stored", [(stored_path, bytes), ...])``.
+
+    Keyed on the STORED PATH — which is what a collision is about — and carrying the
+    BYTES, so a test that compares two member orderings fails with the differing
+    content in its message rather than with an opaque boolean.
+    """
+    from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+    with _isolated_session() as isolated:
+        try:
+            ds = import_bundle(
+                isolated, zip_bytes=make_bundle_zip(files=files), user="u"
+            )
+        except DesignSystemImportError as exc:
+            return "refused", str(exc)
+        stored = [
+            (f.path, bytes(f.data if f.data is not None else f.asset.data))
+            for f in ds.files
+        ]
+        return "stored", sorted(stored)
+
+
+class TestNonCanonicalShapesRefuseTheWholeBundle:
+    """A non-canonical spelling refuses the bundle; it is never rewritten into an
+    acceptable one. Normalizing first is what let an entry reach storage under a
+    name that was not its own, so the fix is to validate and stop."""
+
+    @pytest.mark.parametrize("arcname", NON_CANONICAL_ARCNAMES, ids=repr)
+    def test_refused(self, session, arcname):
         from src.services.design_system_service import DesignSystemImportError, import_bundle
-        from tests.unit.conftest_design_system import default_manifest
 
-        survived = []
-        for index, arcname in enumerate(NON_CANONICAL_ARCNAMES + CONTROL_CHAR_ARCNAMES):
-            # A distinct name per iteration: the unique index on a LIVE name would
-            # otherwise 409 on the second import and mask the real outcome.
-            manifest = default_manifest()
-            manifest["name"] = f"Acme Shape {index}"
-            files = {"assets/logo.svg": SVG_LOGO, arcname: webp_bytes()}
-            try:
-                ds = import_bundle(
-                    session,
-                    zip_bytes=make_bundle_zip(manifest=manifest, files=files),
-                    user="u",
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            arcname: webp_bytes(),
+        }
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        assert "unsafe" in str(exc.value).lower()
+
+    @pytest.mark.parametrize("arcname", NON_CANONICAL_ARCNAMES, ids=repr)
+    def test_nothing_at_all_reaches_storage(self, arcname):
+        """Refusal is what makes "not stored under a rewritten name" structural
+        rather than a property of whichever rule happens to run first: the import
+        aborts before a single row is created."""
+        verdict, detail = _import_outcome(
+            {
+                "assets/logo.svg": SVG_LOGO,
+                "README.md": SYNTHETIC_README,
+                arcname: webp_bytes(),
+            }
+        )
+        assert verdict == "refused", (
+            f"{arcname!r} is not a canonical path but the import succeeded and "
+            f"stored {detail!r}"
+        )
+
+
+class TestTrailingDotIsNeverStoredAsItsParentName:
+    """``assets/innocent/.`` must NEVER end up stored as ``assets/innocent``.
+
+    This is the exact laundering the strict rule exists to prevent: normalizing
+    before the junk/dotfile decision dropped the ``.`` basename, and the entry was
+    stored under its parent's name. Pinned on the import path AND on the database,
+    because "the returned object has no such row" would still pass if the row were
+    written and then not attached.
+    """
+
+    ARCNAME = "assets/innocent/."
+    SECRET = b"SECRET=should-never-be-stored"
+
+    def _files(self):
+        return {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            self.ARCNAME: self.SECRET,
+        }
+
+    def test_the_bundle_is_refused_and_names_the_entry(self, session):
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(
+                session, zip_bytes=make_bundle_zip(files=self._files()), user="u"
+            )
+        assert repr(self.ARCNAME) in str(exc.value)
+
+    def test_no_row_exists_at_the_parent_path_afterwards(self):
+        from src.database.models.design_system import DesignSystemFile
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(
+                    isolated, zip_bytes=make_bundle_zip(files=self._files()), user="u"
                 )
-            except DesignSystemImportError:
-                continue
-            survived.append((arcname, sorted(f.path for f in ds.files)))
-        assert survived == [], f"non-canonical paths reached storage: {survived}"
+            isolated.rollback()
+            stored = [
+                f.path
+                for f in isolated.query(DesignSystemFile).all()
+            ]
+            assert stored == [], f"a refused bundle still stored {stored!r}"
+
+
+class TestBackslashSeparatorsAreFolded:
+    """The ONE tolerance f83fc2e kept, kept unchanged: a Windows zip writes ``\\``
+    as its separator, and folding it can neither erase a segment nor change a
+    basename — so it cannot launder anything past a later rule."""
+
+    @pytest.mark.parametrize("raw,stored", BACKSLASH_ARCNAMES, ids=lambda v: repr(v))
+    def test_stored_under_the_forward_slash_spelling(self, session, raw, stored):
+        from src.services.design_system_service import import_bundle
+
+        payload = webp_bytes() if stored.endswith(".thumbnail") else SVG_LOGO
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            raw: payload,
+        }
+        ds = import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        paths = {f.path for f in ds.files}
+        assert stored in paths, f"{raw!r} did not reach storage as {stored!r}"
+        assert raw not in paths
+
+    def test_a_dotfile_reached_through_a_backslash_path_is_still_a_dotfile(
+        self, session
+    ):
+        """The fold happens before the junk/dotfile decision, so that decision must
+        still see the dot: ``assets\\.npmrc`` is a dotfile, not brand content."""
+        from src.services.design_system_service import import_bundle
+
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            "assets\\.npmrc": b"//registry/:_authToken=nope",
+            "assets\\.DS_Store": b"junk",
+        }
+        ds = import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        paths = {f.path for f in ds.files}
+        assert "assets/logo.svg" in paths  # not a vacuous pass
+        assert not any(_basename(p).startswith(".") for p in paths)
+
+
+class TestDirectoryMarkersAreSkippedNotRefused:
+    """A directory marker is not a file and is never stored — but a real archive
+    carries them, so a marker naming a canonical path must not refuse the bundle."""
+
+    @pytest.mark.parametrize("arcname", DIRECTORY_ARCNAMES, ids=repr)
+    def test_skipped_while_the_bundle_still_imports(self, session, arcname):
+        from src.services.design_system_service import import_bundle
+
+        files = {
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            arcname: b"",
+        }
+        ds = import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        paths = {f.path for f in ds.files}
+        assert "assets/logo.svg" in paths  # the bundle was NOT refused
+        assert arcname not in paths
+        named = arcname.replace("\\", "/").rstrip("/")
+        assert named not in paths, (
+            f"{arcname!r} names a directory but was stored as the FILE {named!r}"
+        )
+
+
+class TestUnsafeShapesRefuseTheWholeBundle:
+    @pytest.mark.parametrize(
+        "arcname", UNSAFE_ARCNAMES + CONTROL_CHAR_ARCNAMES, ids=repr
+    )
+    def test_refused(self, session, arcname):
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        files = {"assets/logo.svg": SVG_LOGO, arcname: webp_bytes()}
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        assert "unsafe" in str(exc.value).lower()
 
     @pytest.mark.parametrize(
-        "arcname", NON_CANONICAL_ARCNAMES + CONTROL_CHAR_ARCNAMES, ids=repr
+        "arcname",
+        UNSAFE_ARCNAMES + CONTROL_CHAR_ARCNAMES + NON_CANONICAL_ARCNAMES,
+        ids=repr,
     )
-    def test_both_gates_agree_by_construction(self, arcname):
-        """The up-front whole-bundle scan and the per-entry iterator must reach the
-        SAME verdict on the same shape. The regression was exactly a disagreement:
-        the scan refused ``assets/innocent/.`` on its RAW basename while the
-        iterator accepted the same entry on its NORMALIZED one."""
-        import io
-        import zipfile
+    def test_the_refusal_is_actionable_without_reading_the_source(
+        self, session, arcname
+    ):
+        """A refusal has to name the entry, say what is wrong with it, and say what
+        to do about it. "non-canonical" alone names a category a user who has never
+        seen this code cannot map to anything they can change."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
 
+        files = {"assets/logo.svg": SVG_LOGO, arcname: webp_bytes()}
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        message = str(exc.value)
+        # WHICH entry. ``!r`` so a control character is visible rather than acted on
+        # by whatever renders the message.
+        assert repr(arcname) in message
+        # WHAT to do about it: upload the export as-is, or re-zip with `zip -r`
+        # rather than with a tar-family tool.
+        lowered = message.lower()
+        assert "re-create the archive" in lowered
+        assert "zip -r" in lowered
+        assert "export" in lowered
+
+
+class TestOnePathClaimedTwiceIsRefusedNotDecidedByZipOrder:
+    """Strict validation does not close identity collapse on its own.
+
+    The tolerated ``\\`` fold is still a route to two DISTINCT entries claiming one
+    stored path, and a zip may legally carry the same arcname twice. Both are
+    caught by detecting the duplicate CLAIM, which covers every route rather than
+    the shapes someone thought of.
+    """
+
+    @staticmethod
+    def _pair_files(first, second, *, reverse=False):
+        """The same two entries, carrying the SAME bytes, in either archive order.
+
+        The payload stays bound to the arcname — swapping the bytes along with the
+        order would make an order-dependent importer look order-independent, since
+        whichever entry came first would always carry the same content.
+        """
+        payload = {first: COLLIDING_FIRST_BYTES, second: COLLIDING_SECOND_BYTES}
+        files = {"assets/logo.svg": SVG_LOGO, "README.md": SYNTHETIC_README}
+        for arcname in ([second, first] if reverse else [first, second]):
+            files[arcname] = payload[arcname]
+        return files
+
+    @pytest.mark.parametrize(
+        "first,second", FOLD_COLLIDING_ARCNAME_PAIRS, ids=lambda v: repr(v)
+    )
+    def test_zip_member_order_does_not_change_the_outcome(self, first, second):
+        forward = _import_outcome(self._pair_files(first, second))
+        reverse = _import_outcome(self._pair_files(first, second, reverse=True))
+        assert forward == reverse, (
+            f"reversing the zip member order of {first!r} / {second!r} changed the "
+            f"outcome: forward={forward!r} reverse={reverse!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "first,second", FOLD_COLLIDING_ARCNAME_PAIRS, ids=lambda v: repr(v)
+    )
+    def test_the_pair_is_refused_rather_than_silently_deduplicated(self, first, second):
+        verdict, detail = _import_outcome(self._pair_files(first, second))
+        assert verdict == "refused", (
+            f"{first!r} and {second!r} name one stored path, but the import "
+            f"succeeded and kept {detail!r}"
+        )
+        assert repr(first) in detail and repr(second) in detail
+        assert "re-create the archive" in detail.lower()
+
+    def test_the_same_arcname_twice_is_refused(self):
+        """A zip may legally list one name twice, and then nothing but member order
+        decides which bytes a reader gets. No path rule can see this — both spellings
+        are identical and canonical — so only the duplicate-claim check catches it."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        buf = io.BytesIO()
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(MANIFEST_FILENAME, json.dumps(default_manifest()).encode())
+                zf.writestr("colors_and_type.css", COLORS_AND_TYPE_CSS)
+                zf.writestr("README.md", SYNTHETIC_README)
+                zf.writestr("assets/mixed.svg", COLLIDING_FIRST_BYTES)
+                zf.writestr("assets/mixed.svg", COLLIDING_SECOND_BYTES)
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=buf.getvalue(), user="u")
+        assert "assets/mixed.svg" in str(exc.value)
+
+    def test_a_bundle_without_a_collision_still_imports(self):
+        """Positive control: two entries sharing a BASENAME but canonicalizing to
+        different paths are not a collision, and both are stored with their own
+        bytes."""
+        verdict, detail = _import_outcome(
+            {
+                "assets/logo.svg": SVG_LOGO,
+                "README.md": SYNTHETIC_README,
+                "assets/mixed.svg": COLLIDING_FIRST_BYTES,
+                "assets/sub/mixed.svg": COLLIDING_SECOND_BYTES,
+            }
+        )
+        assert verdict == "stored", detail
+        stored = dict(detail)
+        assert stored["assets/mixed.svg"] == COLLIDING_FIRST_BYTES
+        assert stored["assets/sub/mixed.svg"] == COLLIDING_SECOND_BYTES
+
+
+def _dot_rooted_members():
+    """The member list ``bsdtar`` writes for an archive rooted at ``.``.
+
+    ``bsdtar -a -cf b.zip -C <dir> .`` prefixes EVERY member with ``./`` and leads
+    with a bare ``./`` for the root directory itself. That is the shape of a
+    RE-ARCHIVE of an unpacked bundle, not of the product's export: measured over the
+    real exports on hand (777, 777, 868 and 872 entries) not one entry is
+    ``./``-prefixed, doubled-slashed, backslashed or ``.``-segmented.
+    """
+    return {
+        "./": b"",
+        "./" + MANIFEST_FILENAME: json.dumps(default_manifest()).encode(),
+        "./colors_and_type.css": COLORS_AND_TYPE_CSS.encode(),
+        "./README.md": SYNTHETIC_README,
+        "./assets/": b"",
+        "./assets/logo.svg": SVG_LOGO,
+        "./fonts/": b"",
+        "./fonts/acme-sans.woff2": b"OTTO synthetic-font-bytes",
+        "./templates/": b"",
+        "./templates/corporate/": b"",
+        "./templates/corporate/index.html": SYNTHETIC_TEMPLATE_HTML,
+        "./templates/corporate/.thumbnail": webp_bytes(),
+    }
+
+
+class TestDotRootedArchiveIsRefused:
+    """A ``./``-rooted archive is refused, and the refusal explains itself.
+
+    Accepting it would mean rewriting every entry before judging it — the
+    laundering ``assets/innocent/.`` exploited — so the shape is turned away
+    instead. The cost is bounded and was measured: no real export carries the
+    shape, it only appears when someone re-archives an unpacked bundle with a
+    tar-family tool, and the message says exactly that.
+    """
+
+    def _dot_rooted_zip(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for arcname, payload in _dot_rooted_members().items():
+                zf.writestr(arcname, payload)
+        return buf.getvalue()
+
+    def test_a_dot_rooted_bundle_is_refused(self, session):
+        """The member SHAPE, built with ``zipfile`` so the property is pinned even
+        where ``bsdtar`` is not installed."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=self._dot_rooted_zip(), user="u")
+        assert "unsafe" in str(exc.value).lower()
+
+    def test_the_refusal_points_at_the_re_archive_that_caused_it(self, session):
+        """A user who re-zipped with ``bsdtar`` has to be able to tell, from the
+        message alone, that the archiver is the problem and what to do instead."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=self._dot_rooted_zip(), user="u")
+        message = str(exc.value).lower()
+        assert "zip -r" in message
+        assert "export" in message
+        assert "bsdtar" in message
+
+    def test_a_real_bsdtar_archive_is_refused(self, session, tmp_path):
+        """The same shape from the actual tool, so the fixture above cannot drift
+        away from what ``bsdtar`` really writes."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        bsdtar = shutil.which("bsdtar") or (
+            "/usr/bin/bsdtar" if os.path.exists("/usr/bin/bsdtar") else None
+        )
+        if bsdtar is None:
+            pytest.skip("bsdtar (libarchive) is not installed on this machine")
+
+        tree = tmp_path / "bundle"
+        for arcname, payload in _dot_rooted_members().items():
+            if arcname.endswith("/"):
+                continue
+            target = tree / arcname[2:]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+
+        archive = tmp_path / "bundle.zip"
+        subprocess.run(
+            [bsdtar, "-a", "-cf", str(archive), "-C", str(tree), "."], check=True
+        )
+        members = zipfile.ZipFile(archive).namelist()
+        # Guard the guard: if a future bsdtar stops emitting './' this test would
+        # otherwise silently stop testing the thing it exists for.
+        assert all(m.startswith("./") for m in members), members
+        assert "./" in members
+
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=archive.read_bytes(), user="u")
+        assert "unsafe" in str(exc.value).lower()
+
+    def test_the_same_tree_re_zipped_with_zip_r_imports(self, session, tmp_path):
+        """The positive control that makes the refusal above a statement about the
+        ARCHIVER rather than about the bundle: the identical file tree, zipped the
+        way the refusal message tells the user to, imports with its thumbnail."""
+        from src.services.design_system_service import import_bundle
+
+        zip_cmd = shutil.which("zip")
+        if zip_cmd is None:
+            pytest.skip("the 'zip' CLI is not installed on this machine")
+
+        tree = tmp_path / "bundle"
+        for arcname, payload in _dot_rooted_members().items():
+            if arcname.endswith("/"):
+                continue
+            target = tree / arcname[2:]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+
+        archive = tmp_path / "bundle.zip"
+        subprocess.run(
+            [zip_cmd, "-r", "-q", str(archive), "."], cwd=str(tree), check=True
+        )
+        members = zipfile.ZipFile(archive).namelist()
+        assert not any(m.startswith("./") for m in members), members
+
+        ds = import_bundle(session, zip_bytes=archive.read_bytes(), user="u")
+        paths = {f.path for f in ds.files}
+        assert "assets/logo.svg" in paths
+        assert "fonts/acme-sans.woff2" in paths
+        assert "templates/corporate/.thumbnail" in paths
+        assert ds.tokens, "the re-zipped bundle must still yield its tokens"
+
+
+# ---------------------------------------------------------------------------
+# The two gates must reach the SAME verdict — measured as DIVERGENCE
+# ---------------------------------------------------------------------------
+#
+# The regression this suite exists for was a DISAGREEMENT between the up-front
+# whole-bundle scan and the per-entry iterator: the scan refused
+# ``assets/innocent/.`` on its raw basename while the iterator accepted the same
+# entry on its normalized one, and the permissive gate was the one that reached
+# storage.
+#
+# A test that feeds both gates only shapes both REFUSE cannot see that class of
+# defect — it passes whatever the gates do on everything else. So the corpus below
+# is generated to straddle every rule, and a companion test asserts the corpus
+# really does land on all three verdicts, which is what keeps the agreement test
+# from going vacuous.
+#
+# NOTE ON WHAT THIS DOES AND DOES NOT PIN: it pins AGREEMENT across a broad
+# corpus, which is the property the regression violated. It does not pin that the
+# two gates SHARE one classifier function — two independent implementations that
+# happen to agree on every shape here would pass. Sharing one classifier is a
+# maintainability property (a new rule cannot be added to one gate and forgotten
+# in the other), not a behaviourally-pinned one, and it is not honest to claim a
+# test enforces it.
+# ---------------------------------------------------------------------------
+
+
+def _gate_corpus():
+    """Path shapes straddling every rule the classifier applies.
+
+    Generated rather than listed so the corpus cannot quietly shrink to only the
+    shapes that were on someone's mind.
+    """
+    heads = ["", "./", ".//", "/", "C:/", "../", ".\\"]
+    middles = [
+        "assets/",
+        "assets/./",
+        "assets//",
+        "assets/../",
+        "assets\\",
+        "fonts/",
+        "templates/x/",
+        "",
+    ]
+    tails = ["logo.svg", ".thumbnail", ".env", "preview.png", "", ".", ".."]
+    shapes = {
+        head + middle + tail
+        for head in heads
+        for middle in middles
+        for tail in tails
+    }
+    return sorted(shapes - {""})
+
+
+class TestBothGatesReachTheSameVerdict:
+    @staticmethod
+    def _verdicts(arcname):
+        """``(scan_refused, iterator_verdict)`` for one arcname, from the real gates."""
         from src.services.design_system_service import (
             DesignSystemImportError,
             _assert_bundle_paths_safe,
@@ -524,89 +1073,49 @@ class TestNonCanonicalPathsAreRefused:
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr(arcname, webp_bytes())
         raw = buf.getvalue()
+        # zipfile truncates an arcname at a NUL and rejects nothing else, so read
+        # back what the archive ACTUALLY contains rather than what we asked for.
+        stored_name = zipfile.ZipFile(io.BytesIO(raw)).namelist()[0]
 
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            with pytest.raises(DesignSystemImportError):
+            try:
                 _assert_bundle_paths_safe(zf)
+                scan_refused = False
+            except DesignSystemImportError:
+                scan_refused = True
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            with pytest.raises(DesignSystemImportError):
-                list(_iter_safe_entries(zf, ""))
+            try:
+                yielded = [rel for _, rel in _iter_safe_entries(zf, "")]
+                iterator = ("stored", yielded[0]) if yielded else ("skipped", None)
+            except DesignSystemImportError:
+                iterator = ("refused", None)
+        return stored_name, scan_refused, iterator
 
-    @pytest.mark.parametrize(
-        "rel_path",
-        NON_CANONICAL_ARCNAMES
-        + CONTROL_CHAR_ARCNAMES
-        + [
-            # A NUL cannot survive ``zipfile`` (it truncates the arcname on write),
-            # so it is unreachable end-to-end — the predicate still refuses it
-            # rather than relying on a stdlib detail for that property.
-            "templates/x/.thumbnail\x00",
-            "assets/lo\x00go.svg",
-            "",
-            "/etc/passwd",
-            "C:/Windows/x",
-        ],
-        ids=repr,
-    )
-    def test_safe_relpath_refuses_rather_than_rewrites(self, rel_path):
-        from src.services.design_system_service import _safe_relpath
-
-        assert _safe_relpath(rel_path) is None
-
-    @pytest.mark.parametrize(
-        "rel_path", ["assets/logo.svg", "templates/x/.thumbnail", "a/b/c.png"]
-    )
-    def test_canonical_paths_pass_through_unchanged(self, rel_path):
-        """Positive control: a canonical path is returned as-is, so the refusals
-        above are about non-canonical shapes, not about rejecting everything."""
-        from src.services.design_system_service import _safe_relpath
-
-        assert _safe_relpath(rel_path) == rel_path
-
-    def test_directory_entries_are_skipped_not_refused(self, session):
-        """A trailing-slash directory entry is never STORED, but it must not refuse
-        the bundle either — every real zip carries directory entries."""
-        import io
-        import zipfile
-
-        from src.services.design_system_service import _iter_safe_entries, import_bundle
-
-        files = {
-            "assets/": b"",
-            "assets/sub/": b"",
-            "fonts/": b"",
-            "assets/logo.svg": SVG_LOGO,
-        }
-        ds = import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
-        paths = {f.path for f in ds.files}
-        assert "assets/logo.svg" in paths
-        assert not any(p.rstrip("/") in ("assets", "assets/sub", "fonts") for p in paths)
-
-        # And the iterator yields nothing for a bare directory entry.
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("assets/dir/", b"")
-        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
-            assert [rel for _, rel in _iter_safe_entries(zf, "")] == []
-
-    def test_traversal_directory_entry_is_still_refused(self):
-        """Skipping directory entries must not become a way to smuggle a traversal
-        path past the scan."""
-        import io
-        import zipfile
-
-        from src.services.design_system_service import (
-            DesignSystemImportError,
-            _assert_bundle_paths_safe,
+    def test_no_shape_in_the_corpus_makes_the_gates_disagree(self):
+        divergences = []
+        for arcname in _gate_corpus():
+            stored_name, scan_refused, iterator = self._verdicts(arcname)
+            if scan_refused != (iterator[0] == "refused"):
+                divergences.append(
+                    {
+                        "arcname": stored_name,
+                        "scan_refused": scan_refused,
+                        "iterator": iterator[0],
+                    }
+                )
+        assert divergences == [], (
+            f"the two gates disagree on {len(divergences)} shapes: {divergences}"
         )
 
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("../evil/", b"")
-        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
-            with pytest.raises(DesignSystemImportError):
-                _assert_bundle_paths_safe(zf)
-
+    def test_the_corpus_lands_on_all_three_verdicts(self):
+        """Keeps the agreement test above from passing vacuously. If every shape in
+        the corpus were refused, agreement would be trivial and the test would not
+        detect the divergence it exists to detect."""
+        seen = {"refused": 0, "skipped": 0, "stored": 0}
+        for arcname in _gate_corpus():
+            _, _, iterator = self._verdicts(arcname)
+            seen[iterator[0]] += 1
+        assert all(count > 0 for count in seen.values()), seen
 
 class TestThumbnailAllowlistAnchoring:
     """``$`` accepts a terminal newline in Python, so a ``$``-anchored allowlist on
