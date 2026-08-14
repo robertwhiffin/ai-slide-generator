@@ -606,3 +606,83 @@ class TestTruncatedDocumentIsWellFormed:
 
         assert len(out) <= self.MAX
         assert out.endswith("</html>")
+
+
+class TestSlideOutcomeReportMustBeComplete:
+    """A non-empty but SHORT report must not be accepted as success.
+
+    The gate read `if result.slide_results and not any(result.slide_results)`, so a
+    worker that reported success for slide 0, said nothing about slides 1..N-1 and
+    exited 0 would pass: `(True,)` is non-empty and contains a True. Not reachable
+    in today's runner — it emits exactly once per manifest entry, and its early
+    exits surface as a nonzero return code — but that is a property of the current
+    loop, not an invariant, and the report is what certifies the deck has content.
+
+    The length is therefore checked against the manifest the runner was ASKED to
+    report on, read back from the job dir rather than recomputed, so the two cannot
+    drift. Same reasoning that justified closing WH-H05 while it was inert.
+
+    Both existing semantics are preserved exactly: an EMPTY report still means
+    "unknown" (an older worker cannot manufacture a failure), and a FULL report with
+    at least one True still exports (partial success, Guardrail 1C).
+    """
+
+    _VALID = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    slide = prs.slides.add_slide(prs.slide_layouts[6])\n"
+    )
+
+    def _convert(self, tmp_path, slide_count, slide_results):
+        from src.services.converter_jail.jail import JailResult
+
+        converter = _make_converter()
+        assets = tmp_path / "assets"
+        assets.mkdir(exist_ok=True)
+        slide_inputs = [("<p>x</p>", [], [], str(assets)) for _ in range(slide_count)]
+        codes = [self._VALID for _ in range(slide_count)]
+        fake = JailResult(
+            returncode=0, timed_out=False, slide_results=slide_results
+        )
+        with patch("src.services.converter_jail.run_pptx_jail", return_value=fake):
+            converter._run_pptx_conversion(
+                codes, slide_inputs, str(tmp_path / "out.pptx")
+            )
+
+    def test_a_short_report_is_not_accepted_as_success(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        with pytest.raises(PPTXConversionError) as excinfo:
+            self._convert(tmp_path, 3, (True,))
+
+        message = str(excinfo.value)
+        assert "1 of 3" in message, message
+        # Distinguishable from the all-failed verdict, for log triage.
+        assert "incomplete" in message.lower()
+
+    def test_a_report_longer_than_the_manifest_is_not_accepted(self, tmp_path):
+        """The other direction of the same disagreement: extra reports must not be
+        able to dilute an all-failed verdict into a pass."""
+        from src.services.html_to_pptx import PPTXConversionError
+
+        with pytest.raises(PPTXConversionError) as excinfo:
+            self._convert(tmp_path, 2, (False, False, True))
+
+        assert "3 of 2" in str(excinfo.value)
+
+    def test_an_empty_report_is_still_unknown(self, tmp_path):
+        """UNCHANGED semantics: a worker with no result channel must not be read as
+        "all slides failed"."""
+        self._convert(tmp_path, 3, ())  # must not raise
+
+    def test_a_full_report_with_mixed_outcomes_still_exports(self, tmp_path):
+        """UNCHANGED semantics (Guardrail 1C): partial success is not failure."""
+        self._convert(tmp_path, 3, (True, False, False))  # must not raise
+
+    def test_a_full_report_of_only_placeholders_still_raises(self, tmp_path):
+        """Regression guard on the verdict this gate exists for."""
+        from src.services.html_to_pptx import PPTXConversionError
+
+        with pytest.raises(PPTXConversionError) as excinfo:
+            self._convert(tmp_path, 3, (False, False, False))
+
+        assert "no slide rendered" in str(excinfo.value).lower()

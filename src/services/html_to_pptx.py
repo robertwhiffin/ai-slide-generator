@@ -416,6 +416,32 @@ class HtmlToPptxConverterV3:
         )
         return job_dir
 
+    @staticmethod
+    def _manifest_slide_count(job_dir: str, codes, slide_inputs) -> int:
+        """How many slides the jail runner is expected to report on.
+
+        Read from the manifest :meth:`_build_pptx_job_dir` just wrote, because that
+        file IS the request — deriving the number a second way (say, from
+        ``len(codes)``) would let the two disagree silently if the job-dir builder
+        ever filtered an entry.
+
+        Falls back to the count the manifest was built from if it cannot be read
+        back: an unreadable manifest we just wrote should not turn an otherwise-good
+        export into a failure.
+        """
+        import json
+
+        from src.services.converter_jail import protocol
+
+        try:
+            manifest = json.loads(
+                (Path(job_dir) / protocol.MANIFEST_NAME).read_text(encoding="utf-8")
+            )
+            return len(manifest.get("slides") or [])
+        except Exception:
+            logger.warning("Could not read the jail manifest back", exc_info=True)
+            return min(len(codes), len(slide_inputs))
+
     def _run_pptx_conversion(self, codes, slide_inputs, output_path, progress_cb=None) -> None:
         """Build the job dir and run the jailed PPTX runner. Raises
         PPTXConversionError on jail failure/timeout."""
@@ -425,6 +451,11 @@ class HtmlToPptxConverterV3:
 
         job_dir = self._build_pptx_job_dir(codes, slide_inputs)
         try:
+            # How many slides the runner was ASKED to report on. Read back from the
+            # manifest that was just written rather than recomputed from the inputs,
+            # so this number cannot drift from what _build_pptx_job_dir actually
+            # produced.
+            expected_slides = self._manifest_slide_count(job_dir, codes, slide_inputs)
             result = run_pptx_jail(job_dir, output_path, progress_cb=progress_cb)
         finally:
             _shutil.rmtree(job_dir, ignore_errors=True)
@@ -452,16 +483,38 @@ class HtmlToPptxConverterV3:
         # An EMPTY report means the runner said nothing about slides, which is
         # "unknown", not "all failed" — a runner that died before reporting is
         # already caught by the returncode check above.
-        if result.slide_results and not any(result.slide_results):
-            logger.error(
-                "PPTX conversion produced no real slides",
-                extra={"slide_count": len(result.slide_results)},
-            )
-            raise PPTXConversionError(
-                f"No slide rendered: all {len(result.slide_results)} slide(s) fell back "
-                "to empty placeholders, so the deck carries no content. Check the "
-                "converter logs for the per-slide failures."
-            )
+        if result.slide_results:
+            # A report that does not cover every slide certifies nothing. Today's
+            # runner emits exactly once per manifest entry and its early exits
+            # surface as a nonzero return code, so a short report is unreachable —
+            # but that is a property of the current loop, not an invariant, and
+            # `(True,)` for a 3-slide deck would otherwise pass this gate. Checked
+            # in BOTH directions, so extra reports cannot dilute an all-failed
+            # verdict either.
+            if len(result.slide_results) != expected_slides:
+                logger.error(
+                    "PPTX slide outcome report is incomplete",
+                    extra={
+                        "reported": len(result.slide_results),
+                        "expected": expected_slides,
+                    },
+                )
+                raise PPTXConversionError(
+                    f"Slide outcome report is incomplete: the converter reported "
+                    f"{len(result.slide_results)} of {expected_slides} slide(s), so "
+                    "the deck cannot be certified as carrying real content. Check "
+                    "the converter logs."
+                )
+            if not any(result.slide_results):
+                logger.error(
+                    "PPTX conversion produced no real slides",
+                    extra={"slide_count": len(result.slide_results)},
+                )
+                raise PPTXConversionError(
+                    f"No slide rendered: all {len(result.slide_results)} slide(s) fell "
+                    "back to empty placeholders, so the deck carries no content. Check "
+                    "the converter logs for the per-slide failures."
+                )
 
     def _call_llm_sync(self, system_prompt: str, user_prompt: str) -> Optional[str]:
         """Synchronous LLM call — core implementation used by both async and threaded paths."""
