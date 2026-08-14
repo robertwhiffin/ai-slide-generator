@@ -13,6 +13,7 @@ import io
 import json
 import os
 import shutil
+import struct
 import subprocess
 import zipfile
 
@@ -522,6 +523,8 @@ FORBIDDEN_CHARACTER_ARCNAMES = [
     "assets/logo\x9f.svg",       # last C1 code point
     "assets/logo\u202egnp.svg",  # RTL OVERRIDE - renders as though it ended ".svg"
     "assets/logo\u200f.svg",     # RIGHT-TO-LEFT MARK
+    "assets/logo\u061c.svg",     # ARABIC LETTER MARK - the omission that shipped
+    "assets/logo\u2066.svg",     # LEFT-TO-RIGHT ISOLATE
     "templates/x/.thumbnail\x85",
 ]
 
@@ -1065,6 +1068,33 @@ class TestTheStatedReasonIsTrue:
         reason = str(exc.value).split(". ")[0]
         assert "would place the file outside the bundle" not in reason
 
+    def test_a_name_mismatch_with_no_nul_is_not_blamed_on_nul_truncation(self):
+        """The reason for ``orig_filename != filename`` used to attribute EVERY such
+        case to NUL truncation, which a Unicode Path extra field falsifies: central
+        ``assets/cafe.svg`` plus a record declaring ``assets/caf\\u00e9.svg`` makes the
+        two names differ with no NUL anywhere. Refusal is the right identity policy;
+        the reason has to describe the identity conflict generically rather than name a
+        cause this entry does not have.
+        """
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        central = "assets/cafe.svg"
+        zip_bytes = _bundle_with_extra_field(
+            central,
+            _unicode_path_extra(central, "assets/café.svg"),
+            SVG_LOGO,
+        )
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=zip_bytes, user="u")
+        message = str(exc.value)
+        # The stdlib DID rewrite the name here, with no NUL involved — which is exactly
+        # why the reason may not present NUL truncation as the explanation.
+        assert "does not match the name the zip reader resolves" in message
+        assert "TWO identities" in message
+        # Still actionable, like every other path refusal.
+        assert "re-create the archive" in message.lower()
+
 
 class TestForbiddenCharactersAreRefused:
     """Character classes that must never appear in a stored path.
@@ -1102,6 +1132,48 @@ class TestForbiddenCharactersAreRefused:
 
         assert _safe_relpath("assets/logo\ud800.svg") is None
 
+    def test_the_refused_set_is_exactly_unicodes_bidi_control_property(self):
+        """The whole point of deriving the set instead of hand-listing it.
+
+        ``U+061C`` ARABIC LETTER MARK is a Unicode Bidi_Control and was MISSING from the
+        hand-written list, so it was accepted while the policy said otherwise. This
+        asserts, over the entire code space, that the predicate matches precisely the
+        twelve characters carrying the Bidi_Control property (PropList.txt) — no
+        omission and no over-capture. Nine are derived from their bidi class; if a
+        future Unicode release adds another embedding-style control it is picked up
+        automatically, and if it adds another implicit mark this test fails instead of
+        the omission shipping.
+        """
+        import unicodedata
+
+        from src.services.design_system_service import _is_bidi_control
+
+        bidi_control = {
+            0x061C, 0x200E, 0x200F,                          # implicit marks
+            0x202A, 0x202B, 0x202C, 0x202D, 0x202E,          # embeddings + overrides
+            0x2066, 0x2067, 0x2068, 0x2069,                  # isolates
+        }
+        refused = {cp for cp in range(0x110000) if _is_bidi_control(chr(cp))}
+        assert refused == bidi_control, {
+            "missing": sorted(hex(c) for c in bidi_control - refused),
+            "over-captured": sorted(hex(c) for c in refused - bidi_control),
+            "unidata_version": unicodedata.unidata_version,
+        }
+
+    @pytest.mark.parametrize(
+        "code_point",
+        [0x070F, 0x110BD, 0x13430],
+        ids=["syriac-abbreviation-mark", "kaithi-number-sign", "egyptian-hieroglyph"],
+    )
+    def test_near_miss_format_characters_are_not_over_captured(self, code_point):
+        """Precision, not just coverage. These are category Cf with a bidi class of L
+        or AL — the same classes the implicit marks carry — so a looser derivation
+        ("Cf and bidi in {L,R,AL}") would refuse all of them. They are not
+        Bidi_Control and carry no spoofing power, so they must not be refused."""
+        from src.services.design_system_service import _is_bidi_control
+
+        assert _is_bidi_control(chr(code_point)) is False
+
     @pytest.mark.parametrize(
         "arcname", PERMITTED_FORMAT_CHARACTER_ARCNAMES, ids=repr
     )
@@ -1119,6 +1191,259 @@ class TestForbiddenCharactersAreRefused:
         }
         ds = import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
         assert arcname in {f.path for f in ds.files}
+
+
+def _unicode_path_extra(central_name, declared_name, *, version=1, name_crc=None):
+    """A real Info-ZIP Unicode Path extra field (tag ``0x7075``).
+
+    Layout: ``tag`` u16, ``size`` u16, ``version`` u8, ``crc32`` of the CENTRAL name
+    u32, then the declared name as UTF-8. The CRC has to match the central name or
+    CPython ignores the record, so it is computed here rather than faked — the point of
+    these tests is a record the stdlib really acts on.
+    """
+    from binascii import crc32
+
+    if name_crc is None:
+        name_crc = crc32(central_name.encode("utf-8"))
+    body = struct.pack("<BL", version, name_crc) + declared_name.encode("utf-8")
+    return struct.pack("<HH", 0x7075, len(body)) + body
+
+
+def _bundle_with_extra_field(central_name, extra, payload):
+    """A complete, otherwise-valid bundle whose one extra entry carries ``extra``.
+
+    ``ZipInfo.extra`` is written into BOTH the local header and the central directory,
+    so the record is present exactly as a real archiver would emit it.
+    """
+    manifest = default_manifest()
+    manifest["templates"] = [
+        {
+            "name": "X",
+            "description": "Synthetic layout.",
+            "folder": "templates/x",
+            "entryPath": "templates/x/index.html",
+        }
+    ]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(MANIFEST_FILENAME, json.dumps(manifest).encode())
+        zf.writestr("colors_and_type.css", COLORS_AND_TYPE_CSS)
+        zf.writestr("README.md", SYNTHETIC_README)
+        zf.writestr("assets/logo.svg", SVG_LOGO)
+        zf.writestr("templates/x/index.html", SYNTHETIC_TEMPLATE_HTML)
+        info = zipfile.ZipInfo(central_name)
+        info.extra = extra
+        zf.writestr(info, payload)
+    return buf.getvalue()
+
+
+class TestUnicodePathExtraFieldCannotRewriteAName:
+    """A ``0x7075`` extra field declares a name for an entry OTHER than the central
+    directory's — and CPython acts on it.
+
+    ``ZipInfo._decodeExtra`` runs ``self.filename = _sanitize_filename(declared)`` for
+    this record and never touches ``orig_filename``. So the NUL bypass comes straight
+    back in a form the "recorded name == read name" invariant cannot see: put the CLEAN
+    name ``templates/x/.thumbnail`` in the central directory and the NUL-bearing
+    ``templates/x/.thumbnail\\x00.exe`` in the extra field, and the sanitizer strips the
+    NUL back out, leaving ``orig_filename == filename`` and the invariant satisfied.
+
+    The guard therefore parses the RAW extra bytes rather than trusting any
+    stdlib-processed attribute — which is the whole premise of this commit series
+    applied one layer further down.
+    """
+
+    CENTRAL = "templates/x/.thumbnail"
+    DECLARED_NUL = "templates/x/.thumbnail\x00.exe"
+
+    def _zip(self, declared=None, *, extra=None, central=None, payload=None):
+        central = self.CENTRAL if central is None else central
+        if extra is None:
+            extra = _unicode_path_extra(
+                central, self.DECLARED_NUL if declared is None else declared
+            )
+        return _bundle_with_extra_field(
+            central, extra, webp_bytes() if payload is None else payload
+        )
+
+    def test_the_stdlib_really_does_act_on_the_record_and_hide_it(self):
+        """Guard the guard. If CPython stopped honouring ``0x7075``, or stopped
+        sanitizing the declared name, every test below would keep passing while the
+        bypass they exist for had ceased to exist — or worse, changed shape.
+
+        Asserted on what the SINK consumes: the two attributes the old invariant
+        compared come back EQUAL, so the entry looks perfectly ordinary.
+        """
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.CENTRAL)
+        assert info.orig_filename == self.CENTRAL
+        assert info.filename == self.CENTRAL
+        assert info.orig_filename == info.filename, (
+            "the 0x7075 route is only interesting because these are EQUAL"
+        )
+        # The record really is present in the parsed extra bytes...
+        assert struct.pack("<H", 0x7075) in info.extra
+        # ...and the name the stdlib resolved is the allowlisted thumbnail shape, which
+        # is what made this storable rather than merely untidy.
+        from src.services.design_system_service import _is_template_preview
+
+        assert _is_template_preview(info.filename) is True
+
+    def test_the_bundle_is_refused(self):
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=self._zip(), user="u")
+        assert "0x7075" in str(exc.value) or "extra field" in str(exc.value).lower()
+
+    def test_nothing_is_stored_as_a_thumbnail(self):
+        from src.database.models.design_system import (
+            DesignSystemAsset,
+            DesignSystemFile,
+        )
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(isolated, zip_bytes=self._zip(), user="u")
+            isolated.rollback()
+            assert isolated.query(DesignSystemFile).all() == []
+            assert isolated.query(DesignSystemAsset).all() == []
+
+    def test_the_iterator_refuses_it_too_not_only_the_up_front_scan(self):
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _iter_safe_entries,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            with pytest.raises(DesignSystemImportError):
+                list(_iter_safe_entries(zf, ""))
+
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "templates/x/.thumbnail\x00.exe",
+            "templates/x/.thumbnail\x85",
+            "templates\\x\\.thumbnail",
+            "../../../etc/passwd",
+            "/etc/passwd",
+            "templates/x/./.thumbnail",
+            "assets/other.svg",
+            "",
+        ],
+        ids=repr,
+    )
+    def test_any_disagreeing_declared_name_is_refused(self, declared):
+        """Not only the NUL spelling. Whatever the second name is — a traversal, an
+        absolute path, a backslash path, or simply a DIFFERENT valid name — the entry
+        has two identities and one of them would reach storage unvalidated."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(isolated, zip_bytes=self._zip(declared), user="u")
+
+    @pytest.mark.parametrize(
+        "extra_kwargs",
+        [{"version": 2}, {"name_crc": 0xDEADBEEF}],
+        ids=["ignored-version", "non-matching-crc"],
+    )
+    def test_a_record_the_stdlib_ignores_is_still_refused(self, extra_kwargs):
+        """CPython only applies the record when the version is 1 AND the name CRC
+        matches, so these two are inert TODAY. They are refused anyway: matching the
+        stdlib's acceptance condition would make this guard depend on the internals it
+        exists to distrust, and an entry declaring two names is ambiguous regardless of
+        which one a given reader picks."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        extra = _unicode_path_extra(
+            self.CENTRAL, self.DECLARED_NUL, **extra_kwargs
+        )
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
+
+    def test_a_truncated_record_never_imports(self):
+        """A malformed record must not import. It happens to be caught one layer lower
+        — CPython validates extra-field framing while building the ZipFile and raises
+        ``BadZipFile``, which surfaces as "not a valid .zip bundle" — so this asserts
+        the OUTCOME rather than a message this code owns.
+        """
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+
+        # Declares 40 bytes of payload but supplies 2.
+        extra = struct.pack("<HH", 0x7075, 40) + b"\x01\x02"
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            struct.pack("<HH", 0x7075, 40) + b"\x01\x02",       # size overruns the field
+            struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03",    # body shorter than 5
+            struct.pack("<HH", 0x7075, 7) + b"\x01\x00\x00\x00\x00\xff\xfe",  # bad UTF-8
+        ],
+        ids=["overrun", "short-body", "invalid-utf8"],
+    )
+    def test_the_parser_reports_malformed_records_rather_than_raising(self, extra):
+        """Unit-level, deliberately: every malformed shape above is rejected by the
+        stdlib before this function is reached through a real archive, so an
+        archive-level test could not distinguish "handled" from "never called".
+
+        Tested directly anyway, because the parser reads attacker-controlled bytes and
+        must not depend on another layer having screened them first — the premise of
+        this whole series is not trusting what a lower layer did with a name.
+        """
+        from src.services.design_system_service import (
+            _REASON_CORRUPT_EXTRA,
+            _extra_field_name_refusal,
+        )
+
+        info = zipfile.ZipInfo("assets/logo.svg")
+        info.extra = extra
+        assert _extra_field_name_refusal(info) == _REASON_CORRUPT_EXTRA
+
+    def test_the_parser_walks_past_other_records_to_find_a_later_one(self):
+        """Extra fields are a SEQUENCE. A name-rewriting record placed after an
+        unrelated one must still be found, or the guard is bypassed by prepending any
+        unknown tag."""
+        from src.services.design_system_service import (
+            _REASON_NAME_MISMATCH,
+            _extra_field_name_refusal,
+        )
+
+        timestamp = struct.pack("<HH", 0x5455, 5) + b"\x03\x00\x00\x00\x00"
+        unicode_path = _unicode_path_extra("assets/logo.svg", "assets/evil.svg")
+        info = zipfile.ZipInfo("assets/logo.svg")
+        info.extra = timestamp + unicode_path
+        assert _extra_field_name_refusal(info) == _REASON_NAME_MISMATCH
+
+    def test_a_record_that_agrees_with_the_central_name_is_accepted(self):
+        """The limit of the rule, and the reason the real exports are unaffected: a
+        0x7075 record is only a problem when it DISAGREES. One that declares exactly
+        the central name adds no second identity, so the entry imports normally and the
+        guard is not a blanket refusal of extra fields."""
+        from src.services.design_system_service import import_bundle
+
+        extra = _unicode_path_extra(self.CENTRAL, self.CENTRAL)
+        with _isolated_session() as isolated:
+            ds = import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
+            assert self.CENTRAL in {f.path for f in ds.files}
+            shots = [a for a in ds.assets if a.kind == "template_shot"]
+            assert len(shots) == 1
+
+    def test_an_unrelated_extra_field_is_left_alone(self):
+        """Only name-rewriting records are this module's business. An unknown tag —
+        here a plausible-looking timestamp record — must not refuse the bundle."""
+        from src.services.design_system_service import import_bundle
+
+        extra = struct.pack("<HH", 0x5455, 5) + b"\x03\x00\x00\x00\x00"
+        with _isolated_session() as isolated:
+            ds = import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
+            assert self.CENTRAL in {f.path for f in ds.files}
 
 
 class TestStdlibRewrittenNamesAreRefused:
