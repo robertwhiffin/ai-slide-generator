@@ -88,6 +88,48 @@ def test_build_slide_html_flattens_the_slide_root_after_deck_css():
     assert "box-shadow: none !important" in html
 
 
+def test_build_slide_html_neutralises_deck_authored_body_padding():
+    """WM-01: a deck-authored `body { padding }` must not translate the slide.
+
+    The html/body reset is emitted BEFORE the deck, so `body { padding: 48px 0 }`
+    — real generator output — won on order and pushed `.slide` to y=48. The .pptx
+    then carried that offset on every positioned component (dy 46-48 px) including
+    the background rectangle, whose bottom landed at 768 inside a 720 frame: a 48 px
+    unpainted band at the top and content pushed past the clip. Measured with the
+    shipped builder: `.slide` @ 0,48 on 4 of 4 slides before, 0,0 after.
+
+    The reset is restated AFTER the deck, which is exactly what the frontend
+    preview surfaces already do (SLIDE_PREVIEW_RESET_STYLE is appended after deck
+    CSS), so the export agrees with what the user saw on screen.
+    """
+    slide = {"slide_id": "s1", "html": '<div class="slide">hi</div>'}
+    deck = {
+        "title": "T",
+        "css": "body { padding: 48px 0; gap: 48px; } .slide { height: 720px; }",
+        "scripts": "",
+        "external_scripts": [],
+    }
+    html = build_slide_html(slide, deck)
+
+    body_reset = "html, body {\n      margin: 0;\n      padding: 0;\n    }"
+    assert body_reset in html, "post-deck body reset missing"
+    # Order is the whole mechanism: at equal specificity the LATER rule wins.
+    assert html.index(body_reset) > html.index(deck["css"])
+
+
+def test_build_slide_html_body_reset_is_not_in_the_shared_root_reset():
+    """The body reset must stay LOCAL to the single-slide export document.
+
+    SLIDE_ROOT_RESET_STYLE is also injected into the standalone MULTI-slide
+    export, whose scrolling layout depends on `body { padding: 40px 20px }`.
+    Folding a body-padding reset into the shared constant would flatten that
+    deck into one pile — and would also break the byte-identity this module
+    asserts against the frontend constant.
+    """
+    assert "body {" not in SLIDE_ROOT_RESET_STYLE
+    assert "padding" not in SLIDE_ROOT_RESET_STYLE
+
+
 def test_csp_meta_precedes_slide_content():
     # CSP must be parsed before any inline script/handler in the slide body.
     slide = {"slide_id": "s1", "html": '<div onclick="x()">hi</div>'}

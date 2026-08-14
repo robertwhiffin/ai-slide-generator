@@ -148,6 +148,27 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
     {deck_css}
+    /* After deck CSS: the fixed-frame document owns its OWN box (WM-01).
+       The html/body rule above is emitted BEFORE the deck, so a deck-authored
+       `body {{ padding: 48px 0; gap: 48px }}` — real generator output — used to win
+       on order and translate the WHOLE slide down: `.slide` measured at y=48, and
+       the .pptx carried that offset on every positioned component (dy 46-48 px)
+       including the background rectangle, whose bottom then sat at 768 inside a
+       720 frame. So: a 48 px unpainted band at the top of every exported slide and
+       48 px of content pushed past the clip.
+       Restated HERE, after the deck, exactly as the frontend preview surfaces
+       already do it (SLIDE_PREVIEW_RESET_STYLE is appended after the deck CSS in
+       buildSlideDocument), so the export agrees with what the user saw on screen.
+       Deliberately NOT added to the shared SLIDE_ROOT_RESET_STYLE: that constant is
+       also injected into the standalone MULTI-slide export, whose scrolling layout
+       depends on `body {{ padding: 40px 20px }}`.
+       No `!important`, matching the frontend rule: it wins by ORDER at equal
+       specificity, so both surfaces treat a deck's `!important` body padding the
+       same way and cannot drift apart. */
+    html, body {{
+      margin: 0;
+      padding: 0;
+    }}
     /* After deck CSS: flatten the slide root (outer margin / radius / shadow) —
        inside this fixed 1280x720 overflow:hidden document a root margin
        shifts content past the clip and truncates the export's bottom edge
