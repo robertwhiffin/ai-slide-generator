@@ -18,7 +18,10 @@ from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
 from src.core.database import Base, get_db
-from tests.unit.conftest_design_system import make_bundle_zip
+from tests.unit.conftest_design_system import (
+    make_bundle_zip,
+    make_zip64_header_offset_archive,
+)
 
 
 @pytest.fixture(scope="function")
@@ -126,6 +129,38 @@ class TestImportEndpoint:
 
     def test_import_without_file_returns_422(self, client):
         assert client.post(f"{BASE}/import").status_code == 422
+
+    def test_import_hostile_zip64_header_offset_returns_400_not_500(self, client):
+        """A 146-byte upload must not be able to choose the status code.
+
+        The archive's central directory carries the ZIP64 offset sentinel plus an extra
+        field replacing the local header offset with ``2**64 - 1``. Seeking there raises
+        ``OverflowError`` — outside the importer's ``(OSError, ValueError)`` guard, so it
+        escaped ``import_bundle`` entirely, missed this route's
+        ``DesignSystemImportError`` handler and landed in the catch-all below it as a
+        **500**.
+
+        A malformed upload is the caller's to fix, so it has to arrive as a 400 with an
+        explanation. Asserted as ``== 400`` rather than ``< 500``: the 500 is the whole
+        finding, and a range check would pass on any of the codes that are not the bug.
+        """
+        resp = client.post(
+            f"{BASE}/import",
+            files={
+                "file": (
+                    "hostile.zip",
+                    make_zip64_header_offset_archive(),
+                    "application/zip",
+                )
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.status_code != 500
+        # The generic handler's opaque text is what a 500 would have said; the refusal
+        # has to name the entry and the defect instead.
+        detail = resp.json()["detail"]
+        assert detail != "Failed to import design system"
+        assert "local file header" in detail
 
 
 # ---------------------------------------------------------------------------

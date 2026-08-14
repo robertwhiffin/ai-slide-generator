@@ -5,7 +5,9 @@ bytes — per the public-repo hygiene rule (no real brand content ever).
 """
 import io
 import json
+import struct
 import zipfile
+import zlib
 from typing import Optional
 
 from PIL import Image as PILImage
@@ -311,6 +313,66 @@ def make_declared_size_bundle_zip(
                     handle.write(chunk[: min(remaining, len(chunk))])
                     remaining -= min(remaining, len(chunk))
     return buf.getvalue()
+
+
+#: The legacy 32-bit "relative offset of local header" value that means "the real
+#: offset is 64 bits wide, in the ZIP64 extra field". CPython honours the pair.
+_ZIP64_OFFSET_SENTINEL = 0xFFFFFFFF
+#: ZIP64 Extended Information Extra Field.
+_ZIP64_EXTRA_TAG = 0x0001
+
+
+def make_zip64_header_offset_archive(offset: bytes = b"\xff" * 8) -> bytes:
+    """A tiny, CPython-readable .zip whose entry's LOCAL HEADER OFFSET is hostile.
+
+    Built by hand rather than through ``zipfile``, because the point is a central
+    directory record no writer would ever emit: the legacy 32-bit offset field holds
+    the ZIP64 sentinel ``0xffffffff`` and the ZIP64 extra field supplies a 64-bit
+    replacement of the caller's choosing. ``ZipInfo._decodeExtra`` substitutes it
+    verbatim, so the default of eight ``0xff`` bytes yields
+    ``header_offset == 2**64 - 1`` — an offset no seek can accept, on an archive
+    CPython opens and lists without complaint.
+
+    Only ``_ds_manifest.json`` is present, and its content is not valid bundle JSON.
+    That is deliberate and sufficient: the whole-bundle path scan runs BEFORE the
+    manifest is read, so this archive exercises the offset and nothing else.
+
+    Every length and offset is computed here, so the archive stays internally
+    consistent — in particular the end-of-central-directory record's size and
+    location leave CPython's prepended-data adjustment (``concat``) at zero, which
+    keeps ``header_offset`` exactly the crafted value rather than a shifted one.
+    """
+    name = MANIFEST_FILENAME.encode()
+    data = b"{}"
+    crc = zlib.crc32(data)
+    # Stored, not deflated: the sizes below are then the same number twice, and the
+    # local header's variable part is just the name.
+    local_header = (
+        b"PK\x03\x04"
+        + struct.pack("<HHHHH", 20, 0, 0, 0, 0x21)  # version, flags, method, time, date
+        + struct.pack("<LLL", crc, len(data), len(data))
+        + struct.pack("<HH", len(name), 0)  # name length, extra length
+        + name
+    )
+    extra = struct.pack("<HH", _ZIP64_EXTRA_TAG, len(offset)) + offset
+    central = (
+        b"PK\x01\x02"
+        + struct.pack("<HHHHHH", 20, 20, 0, 0, 0, 0x21)
+        + struct.pack("<LLL", crc, len(data), len(data))
+        + struct.pack("<HHH", len(name), len(extra), 0)
+        + struct.pack("<HHL", 0, 0, 0)  # disk, internal attrs, external attrs
+        + struct.pack("<L", _ZIP64_OFFSET_SENTINEL)
+        + name
+        + extra
+    )
+    body = local_header + data
+    end_record = (
+        b"PK\x05\x06"
+        + struct.pack("<HHHH", 0, 0, 1, 1)
+        + struct.pack("<LL", len(central), len(body))
+        + struct.pack("<H", 0)
+    )
+    return body + central + end_record
 
 
 def make_bundle_zip(

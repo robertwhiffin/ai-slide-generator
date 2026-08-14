@@ -34,6 +34,7 @@ from tests.unit.conftest_design_system import (
     default_manifest,
     make_bundle_zip,
     make_declared_size_bundle_zip,
+    make_zip64_header_offset_archive,
     webp_bytes,
 )
 
@@ -1884,6 +1885,301 @@ class TestTheLocalFileHeaderIsInspectedToo:
             ds = import_bundle(isolated, zip_bytes=self._zip(local_extra=b""), user="u")
             assert self.CENTRAL in {f.path for f in ds.files}
             assert len([a for a in ds.assets if a.kind == "template_shot"]) == 1
+
+
+class TestAHostileZip64OffsetIsRefusedRatherThanCrashing:
+    """The local-header read is driven by an offset the ARCHIVE supplies, and the
+    archive is the attacker's.
+
+    ``info.header_offset`` looks like a number the zip reader vouched for, and it is
+    not: a central directory record may carry the legacy sentinel ``0xffffffff`` plus a
+    ZIP64 extra field holding a 64-bit replacement, and ``ZipInfo._decodeExtra``
+    substitutes it verbatim without ever comparing it to the size of the file. So an
+    archive of 146 bytes can present an entry whose local header begins at
+    ``2**64 - 1``.
+
+    Seeking there does not raise ``OSError`` or ``ValueError`` — the two the guard
+    caught. ``BytesIO.seek`` cannot convert the value to a C ``ssize_t`` at all and
+    raises ``OverflowError``, which walked straight out of the helper, out of
+    ``import_bundle``, past the route's ``DesignSystemImportError`` handler and into
+    the generic 500. A hostile upload must not be able to choose the status code, and
+    "the local header could not be read" is exactly the condition
+    :data:`_REASON_LOCAL_HEADER` already exists to refuse.
+
+    So the offset is bound-checked against the real size of the archive BEFORE the
+    seek, and the guard is widened to ``OverflowError`` so no later arithmetic
+    surprise can escape either. Both, not one: the bound check is the fix, and the
+    widened guard is the backstop for the next value nobody predicted.
+    """
+
+    #: 2**64 - 1, the offset CPython reports for the crafted pair.
+    HOSTILE_OFFSET = 18446744073709551615
+
+    def test_cpython_really_exposes_the_out_of_range_offset(self):
+        """NON-VACUITY. If CPython stopped honouring the ZIP64 offset substitution, or
+        started sanity-checking it, every test below would keep passing while the crash
+        they exist for had ceased to exist.
+
+        Pinned on the three facts that make the crash reachable: the archive OPENS, the
+        offset is astronomically past the end of it, and the entry is otherwise
+        completely ordinary.
+        """
+        raw = make_zip64_header_offset_archive()
+        assert len(raw) == 146, "a 146-byte archive is the whole attack"
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            (info,) = zf.infolist()
+        assert info.header_offset == self.HOSTILE_OFFSET
+        assert info.header_offset > len(raw), "the offset must be past EOF to matter"
+        assert info.filename == info.orig_filename == MANIFEST_FILENAME
+
+    def test_the_unpatched_guard_would_not_have_caught_it(self):
+        """WHY the guard had to be widened rather than only bound-checked: the
+        exception a raw seek to this offset raises is not in the caught set.
+
+        Asserted against ``BytesIO`` directly — the exact object ``import_bundle``
+        wraps the upload in — so this pins the stdlib behaviour the fix is a response
+        to, independently of the helper.
+        """
+        with pytest.raises(OverflowError):
+            io.BytesIO(b"small").seek(self.HOSTILE_OFFSET)
+        assert not issubclass(OverflowError, (OSError, ValueError))
+
+    def test_the_helper_reports_an_unreadable_header_instead_of_raising(self):
+        from src.services.design_system_service import _local_header_identity
+
+        with zipfile.ZipFile(io.BytesIO(make_zip64_header_offset_archive())) as zf:
+            (info,) = zf.infolist()
+            assert _local_header_identity(zf, info) is None
+
+    def test_the_bundle_is_refused_with_the_unreadable_header_reason(self):
+        """Fail CLOSED, on the path that already exists for a header that cannot be
+        read — not with a new error shape and not with a 500."""
+        from src.services.design_system_service import (
+            _REASON_LOCAL_HEADER,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(
+                    isolated, zip_bytes=make_zip64_header_offset_archive(), user="u"
+                )
+        assert _REASON_LOCAL_HEADER in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "offset",
+        [
+            b"\xff" * 8,  # 2**64 - 1: unconvertible to a C ssize_t
+            struct.pack("<Q", 2**63),  # the first value above the ssize_t ceiling
+            struct.pack("<Q", 2**63 - 1),  # the ceiling itself: converts, seeks past EOF
+            struct.pack("<Q", 146),  # exactly EOF
+            struct.pack("<Q", 147),  # one byte past EOF
+        ],
+        ids=["2**64-1", "2**63", "2**63-1", "at-EOF", "past-EOF"],
+    )
+    def test_every_offset_at_or_beyond_the_end_of_the_archive_is_refused(self, offset):
+        """The bound check is what makes this uniform. An offset that OVERFLOWS the
+        seek and one that merely lands past the last byte are the same defect — the
+        local header is not there — and only a size comparison treats them alike.
+        Without it, the three largest values raise and the two smallest fall through to
+        a short read, which happened to return ``None`` by luck rather than by rule.
+        """
+        from src.services.design_system_service import (
+            _REASON_LOCAL_HEADER,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(
+                    isolated,
+                    zip_bytes=make_zip64_header_offset_archive(offset),
+                    user="u",
+                )
+        assert _REASON_LOCAL_HEADER in str(exc.value)
+
+    def test_reading_a_local_header_leaves_the_file_position_where_it_found_it(self):
+        """Defensive hygiene, pinned so it stays. The helper seeks a file pointer it
+        does not own; every reader that shares it re-seeks before reading, which is why
+        this was never a bug, but restoring the position costs one call and removes the
+        need to know that."""
+        from src.services.design_system_service import _local_header_identity
+
+        with zipfile.ZipFile(io.BytesIO(make_bundle_zip())) as zf:
+            info = next(i for i in zf.infolist() if i.filename == "assets/logo.svg")
+            zf.fp.seek(7)
+            assert _local_header_identity(zf, info) is not None
+            assert zf.fp.tell() == 7
+
+
+class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
+    """``orig_filename or filename`` replaces an EMPTY recorded name with the REWRITTEN
+    one — the one laundering left in a module whose whole premise is not to launder.
+
+    An empty central-directory name is attacker-controlled data with meaning, and
+    truthiness cannot tell it apart from the attribute being ABSENT. The consequence is
+    not cosmetic: a ``0x7075`` record whose CRC matches the empty central name (CRC-32
+    of ``b""``, which is 0) makes CPython assign ``filename = "slides/benign.bin"``
+    while ``orig_filename`` stays ``""``. The ``or`` then hands every gate the rewritten
+    name, so route 1 of :func:`_entry_identity_refusal` (``orig_filename !=
+    filename``) compares the rewritten name against itself and the local-name
+    comparison compares the local header against the rewritten name too. Both agree,
+    and an entry carrying two raw header identities imports.
+
+    Measured before the fix: the scan raised nothing and the iterator yielded
+    ``slides/benign.bin`` as a file to store.
+
+    Two changes, because either alone leaves a hole. ``None`` is distinguished from
+    ``""`` so the raw name is the raw name; and an empty raw name is REFUSED, because
+    no legitimate archive member has one and an entry with no recorded name has no
+    identity for the gate to establish.
+    """
+
+    TARGET = "slides/benign.bin"
+
+    def _zip(self, *, central_name="", declared=None, local_name=None):
+        """A valid bundle plus one entry whose two headers record DIFFERENT names.
+
+        No byte patching. ``ZipFile`` writes the local header during ``writestr`` and
+        the central directory at ``close``, both reading ``zinfo.filename`` and
+        ``zinfo.extra`` when they run, so mutating the object in between gives each
+        header its own name and its own extra field with every length computed by
+        ``zipfile`` itself.
+        """
+        declared = self.TARGET if declared is None else declared
+        local_name = self.TARGET if local_name is None else local_name
+        manifest = default_manifest()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(MANIFEST_FILENAME, json.dumps(manifest).encode())
+            zf.writestr("colors_and_type.css", COLORS_AND_TYPE_CSS)
+            zf.writestr("README.md", SYNTHETIC_README)
+            zf.writestr("assets/logo.svg", SVG_LOGO)
+            info = zipfile.ZipInfo(local_name)
+            info.extra = _unicode_path_extra(local_name, declared)
+            zf.writestr(info, b"synthetic-payload")
+            # Re-read from this same object by ``_write_end_record`` at close, so the
+            # CENTRAL record gets the empty name and its own matching-CRC record.
+            info.filename = central_name
+            info.extra = _unicode_path_extra(central_name, declared)
+        return buf.getvalue()
+
+    def test_cpython_really_launders_the_empty_name_into_a_usable_one(self):
+        """NON-VACUITY, and the reason an empty name is worth attacking with. The
+        central directory records NO name; CPython resolves a perfectly ordinary
+        storable one and leaves the two attributes DIFFERENT — which is precisely the
+        divergence route 1 exists to catch and which the ``or`` hid from it."""
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.TARGET)
+        assert info.orig_filename == "", "the central name must really be EMPTY"
+        assert info.filename == self.TARGET
+        assert info.orig_filename != info.filename
+
+    def test_the_raw_name_is_the_empty_one_the_archive_records(self):
+        """The laundering itself, at the one line that does it. Everything else in this
+        class is a consequence of this function's answer."""
+        from src.services.design_system_service import _raw_entry_name
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.TARGET)
+        assert _raw_entry_name(info) == ""
+
+    def test_an_absent_attribute_still_falls_back_to_the_filename(self):
+        """The distinction the fix turns on, and the case the ``or`` got right: ABSENT
+        is not EMPTY. A ``ZipInfo`` without the attribute at all must still report a
+        name, so the fallback stays — it is only truthiness that goes."""
+        from src.services.design_system_service import _raw_entry_name
+
+        info = zipfile.ZipInfo("assets/logo.svg")
+        del info.orig_filename
+        assert not hasattr(info, "orig_filename")
+        assert _raw_entry_name(info) == "assets/logo.svg"
+
+    def test_the_shared_judgement_refuses_the_entry(self):
+        """The judgement BOTH gates read, so neither can be left behind."""
+        from src.services.design_system_service import (
+            _ENTRY_REFUSE,
+            _REASON_EMPTY_RECORDED_NAME,
+            _entry_verdict_for_info,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.TARGET)
+            verdict = _entry_verdict_for_info(zf, info)
+        assert verdict.kind == _ENTRY_REFUSE
+        assert verdict.reason == _REASON_EMPTY_RECORDED_NAME
+
+    def test_the_bundle_is_refused(self):
+        from src.services.design_system_service import (
+            _REASON_EMPTY_RECORDED_NAME,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=self._zip(), user="u")
+        assert _REASON_EMPTY_RECORDED_NAME in str(exc.value)
+
+    def test_the_iterator_does_not_yield_it_either(self):
+        """The gate that decides what gets STORED. Before the fix it yielded
+        ``slides/benign.bin`` — an entry with two raw header identities, on its way to
+        a row."""
+        from src.services.design_system_service import _iter_safe_entries
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            yielded = [path for _, path in _iter_safe_entries(zf, "")]
+        assert self.TARGET not in yielded
+        assert "assets/logo.svg" in yielded, "the rest of the bundle must still enumerate"
+
+    def test_nothing_is_stored(self):
+        from src.database.models.design_system import (
+            DesignSystemAsset,
+            DesignSystemFile,
+        )
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(isolated, zip_bytes=self._zip(), user="u")
+            isolated.rollback()
+            assert isolated.query(DesignSystemFile).all() == []
+            assert isolated.query(DesignSystemAsset).all() == []
+
+    def test_a_directory_entry_is_still_accepted_as_an_identity_and_skipped(self):
+        """THE LIMIT OF THE RULE, and the thing an over-broad emptiness check breaks. A
+        trailing-slash directory entry records a real, non-empty name; it is judged as
+        having one identity and then skipped as a directory, exactly as before. Pinned
+        with a bundle that imports, so a regression here fails loudly rather than
+        dropping a folder."""
+        from src.services.design_system_service import import_bundle
+
+        files = {
+            "assets/": b"",
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+        }
+        with _isolated_session() as isolated:
+            ds = import_bundle(
+                isolated, zip_bytes=make_bundle_zip(files=files), user="u"
+            )
+            stored = {f.path for f in ds.files}
+            assert "assets/logo.svg" in stored
+            assert "assets/" not in stored
+
+    def test_an_ordinary_bundle_still_imports(self):
+        """The plain path, pinned: the new refusal must cost nothing to a real upload
+        whose every entry records its own name."""
+        from src.services.design_system_service import import_bundle
+
+        with _isolated_session() as isolated:
+            ds = import_bundle(isolated, zip_bytes=make_bundle_zip(), user="u")
+            assert "assets/logo.svg" in {f.path for f in ds.files}
 
 
 class TestStdlibRewrittenNamesAreRefused:
