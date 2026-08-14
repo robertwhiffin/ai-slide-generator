@@ -30,8 +30,20 @@ export const PREVIEW_CSP =
 /**
  * The preview frame's own reset, injected ahead of the template's head so the
  * template can still override it.
+ *
+ * `* { box-sizing: border-box }` is part of the reset because the CORRECT
+ * rendering already is border-box: SlideSelection and PresentationMode both
+ * supply it, so uploaded templates were authored under it, and the surfaces that
+ * omitted it (this pop-out, plus SlideTile/VisualEditorPanel via
+ * SLIDE_PREVIEW_RESET_STYLE) were the ones rendering differently. Measured on
+ * reference-architecture #2, the tile-vs-selection difference was 91,146 px in
+ * BOTH the dsv5 and dsv6 builds — pre-existing and identical — and adding this one
+ * declaration makes them byte-identical. Generated decks are unaffected: their own
+ * CSS sets it, which is why every generated deck already measured 0.00 px across
+ * all four surfaces. The gap bit only TEMPLATE slides, which rely on the host.
  */
-export const PREVIEW_RESET_STYLE = '<style>html,body{margin:0;overflow:hidden}</style>';
+export const PREVIEW_RESET_STYLE =
+  '<style>*{box-sizing:border-box}html,body{margin:0;overflow:hidden}</style>';
 
 /**
  * A {{ds-asset:ID}} handle that still reaches the builder (a backend that
