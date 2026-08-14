@@ -435,6 +435,34 @@ class HtmlToPptxConverterV3:
             logger.error("PPTX jail failed rc=%s: %s", result.returncode, result.stderr_tail)
             raise PPTXConversionError("PPTX conversion failed in sandbox")
 
+        # THE FINAL-OUTCOME GATE. Whether a slide produced real content is only
+        # known HERE, after validation and execution: a non-empty snippet can still
+        # be rejected by the import allowlist while the job dir is built, or raise
+        # when it runs, and each of those falls back to a placeholder slide that is
+        # invisible in the saved file. If EVERY slide fell back, the .pptx is
+        # content-free and must not be presented as a successful export — that is
+        # the same silent loss the codegen-side check catches, reached by a
+        # different route (measured: an `import socket` snippet, and a snippet that
+        # raises, each producing a full deck of placeholders and a 200).
+        #
+        # A PARTIAL failure deliberately still exports: per-slide fallback is the
+        # AST guard's defence-in-depth path, where one rejected snippet must not
+        # cost the whole deck. Only an ALL-slides-failed outcome raises.
+        #
+        # An EMPTY report means the runner said nothing about slides, which is
+        # "unknown", not "all failed" — a runner that died before reporting is
+        # already caught by the returncode check above.
+        if result.slide_results and not any(result.slide_results):
+            logger.error(
+                "PPTX conversion produced no real slides",
+                extra={"slide_count": len(result.slide_results)},
+            )
+            raise PPTXConversionError(
+                f"No slide rendered: all {len(result.slide_results)} slide(s) fell back "
+                "to empty placeholders, so the deck carries no content. Check the "
+                "converter logs for the per-slide failures."
+            )
+
     def _call_llm_sync(self, system_prompt: str, user_prompt: str) -> Optional[str]:
         """Synchronous LLM call — core implementation used by both async and threaded paths."""
         start = time.time()
@@ -753,7 +781,11 @@ class HtmlToPptxConverterV3:
         )
         css = self._clip_css(css, int(usable * self._STARVED_STYLE_SHARE))
         style_content = f"<style>{css}</style>"
-        body_budget = max(0, usable - len(css))
+        # RESERVE the body marker's own length. Without it the reconstruction came
+        # to exactly max_length + len(marker), and the backstop slice then cut into
+        # the closing tag — handing the model a document ending in `</ht`. The
+        # arithmetic must fit on its own; the clamp is only a backstop.
+        body_budget = max(0, usable - len(css) - len(self._BODY_TRUNCATION_MARKER))
         if len(body_content) > body_budget:
             body_content = body_content[:body_budget] + self._BODY_TRUNCATION_MARKER
         logger.warning(
