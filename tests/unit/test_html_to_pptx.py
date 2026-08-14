@@ -474,3 +474,135 @@ class TestWholesaleCodegenFailureIsLoud:
 
         assert result == str(out_path)
         mock_run.assert_called_once()
+
+
+class TestAllSlidesFailingDownstreamIsAlsoLoud:
+    """The loud check must read the FINAL outcome, not just codegen.
+
+    Refusing to export when the LLM returned NOTHING was only half the defect. A
+    non-empty snippet can still fail LATER — rejected by the AST import allowlist
+    when the job dir is built, or raising when it executes inside the jail — and
+    each of those falls back to a placeholder slide. When that happens for EVERY
+    slide the runner still saves a valid, content-free .pptx and the route answers
+    200: the same silent loss WF-01 exists to kill, reached by a different route.
+
+    These go through the REAL jail (a subprocess), because the whole point is that
+    the verdict now comes from the post-validation, post-execution result rather
+    than from inspecting the generated text.
+    """
+
+    _VALID_DEF = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    slide = prs.slides.add_slide(prs.slide_layouts[6])\n"
+    )
+    #: Case (a): a VALID definition, so codegen "succeeded", plus a disallowed
+    #: import — the AST allowlist rejects it and the manifest records has_code=False.
+    _AST_REJECTED = "import socket\n" + _VALID_DEF
+    #: Case (b): passes the allowlist, then raises when executed in the jail.
+    _RAISES_AT_RUNTIME = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    raise RuntimeError('conversion failed')\n"
+    )
+    _GOOD = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    from pptx.util import Inches\n"
+        "    slide = prs.slides.add_slide(prs.slide_layouts[6])\n"
+        "    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))\n"
+        "    box.text_frame.text = 'real content'\n"
+    )
+
+    @staticmethod
+    def _slides(n):
+        return [f"<html><body><div class='slide'>{i}</div></body></html>" for i in range(n)]
+
+    @pytest.mark.asyncio
+    async def test_every_snippet_rejected_by_the_ast_allowlist_raises(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._AST_REJECTED, self._AST_REJECTED]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            with pytest.raises(PPTXConversionError) as excinfo:
+                await converter.convert_slide_deck(self._slides(2), str(out_path))
+
+        assert "no slide" in str(excinfo.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_every_snippet_failing_execution_raises(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._RAISES_AT_RUNTIME, self._RAISES_AT_RUNTIME]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            with pytest.raises(PPTXConversionError) as excinfo:
+                await converter.convert_slide_deck(self._slides(2), str(out_path))
+
+        assert "no slide" in str(excinfo.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_outcome_still_exports(self, tmp_path):
+        """GUARDRAIL 1C — the boundary, pinned in both directions.
+
+        Some slides real, some fallen back is the AST guard's documented
+        defence-in-depth path: one rejected snippet must not cost the whole export.
+        ONLY an all-slides-failed outcome raises.
+        """
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._GOOD, self._RAISES_AT_RUNTIME, self._AST_REJECTED]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            result = await converter.convert_slide_deck(self._slides(3), str(out_path))
+
+        assert result == str(out_path)
+        assert out_path.exists()
+        from pptx import Presentation
+
+        # Every slide is present — the two failures degraded individually.
+        assert len(Presentation(str(out_path)).slides) == 3
+
+    @pytest.mark.asyncio
+    async def test_one_surviving_slide_is_enough_to_export(self, tmp_path):
+        """The narrowest mixed case: exactly one slide renders."""
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._RAISES_AT_RUNTIME, self._GOOD]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            result = await converter.convert_slide_deck(self._slides(2), str(out_path))
+
+        assert result == str(out_path)
+
+
+class TestTruncatedDocumentIsWellFormed:
+    """The starved-budget arithmetic overshot by exactly the body marker's 3
+    characters, so the final hard slice cut into the closing tag and the model was
+    handed a document ending in a malformed `</ht`."""
+
+    MAX = 15000
+
+    def test_the_starved_path_ends_in_a_well_formed_closing_tag(self):
+        converter = _make_converter()
+        css = "".join(".r%d{color:#abcdef}" % i for i in range(20000))
+        doc = f"<html><head><style>{css}</style></head><body>{'<p>x</p>' * 4000}</body></html>"
+
+        out = converter._truncate_html(doc)
+
+        assert len(out) <= self.MAX
+        assert out.endswith("</html>"), out[-40:]
+
+    def test_the_budget_is_met_without_the_backstop_slice_biting(self):
+        """The clamp is a backstop, not part of the arithmetic: the reconstruction
+        must already fit, so nothing is ever cut mid-tag."""
+        converter = _make_converter()
+        css = "@font-face{src:url(data:font/woff2;base64,%s)}" % ("A" * 200000)
+        doc = f"<html><head><style>{css}</style></head><body>{'<p>y</p>' * 3000}</body></html>"
+
+        out = converter._truncate_html(doc)
+
+        assert len(out) <= self.MAX
+        assert out.endswith("</html>")
