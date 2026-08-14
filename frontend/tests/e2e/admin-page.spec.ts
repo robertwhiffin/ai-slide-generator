@@ -235,22 +235,64 @@ test.describe('Admin Page', () => {
     await expect(page.getByTestId('design-system-default-badge-2')).toHaveCount(0);
   });
 
-  test('Set as org default shows only on non-default active design systems', async ({ page }) => {
+  test('the org-default control is a TOGGLE, per row state', async ({ page }) => {
     await setupDesignSystemMocks(page);
     await page.goto('/admin');
     await page.getByRole('tab', { name: 'Design System' }).click();
-    // The current default offers no action...
+    // The current default offers the WITHDRAWAL. It used to offer nothing at all,
+    // which is what made the org default one-way: an admin could promote a design
+    // system and switch between systems, but never return the org to "no default",
+    // so the legacy slide-style fallback was unreachable (WD-01).
+    await expect(
+      page.getByTestId('design-system-row-1').getByRole('button', { name: 'Clear org default' }),
+    ).toBeVisible();
     await expect(
       page.getByTestId('design-system-row-1').getByRole('button', { name: 'Set as org default' }),
     ).toHaveCount(0);
-    // ...an active non-default one does...
+    // ...an active non-default one offers the promotion...
     await expect(
       page.getByTestId('design-system-row-2').getByRole('button', { name: 'Set as org default' }),
     ).toBeVisible();
-    // ...and an INACTIVE one does not (the backend rejects it with a 400).
+    // ...and an INACTIVE, non-default one offers neither: the backend rejects
+    // PROMOTING a tombstone with a 400, and there is nothing to withdraw.
     await expect(
-      page.getByTestId('design-system-row-3').getByRole('button', { name: 'Set as org default' }),
+      page.getByTestId('design-system-row-3').getByRole('button'),
     ).toHaveCount(0);
+  });
+
+  test('Clicking Clear org default calls the endpoint and drops the badge', async ({ page }) => {
+    let clearUrl: string | null = null;
+    let clearFired = false;
+    await page.route('**/api/settings/design-systems/*/clear-default', (route, req) => {
+      clearUrl = req.url();
+      clearFired = true;
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...mockDesignSystems.design_systems[0], is_default: false }),
+      });
+    });
+    await page.route('**/api/settings/design-systems', (route) => {
+      const design_systems = clearFired
+        ? designSystemRows.map(ds => ({ ...ds, is_default: false }))
+        : designSystemRows;
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ design_systems, total: design_systems.length }),
+      });
+    });
+
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Design System' }).click();
+    await page
+      .getByTestId('design-system-row-1')
+      .getByRole('button', { name: 'Clear org default' })
+      .click();
+
+    await expect.poll(() => clearUrl).toContain('/design-systems/1/clear-default');
+    // No row is the org default any more — the state D4's legacy fallback needs.
+    await expect(page.getByTestId('design-system-default-badge-1')).toHaveCount(0);
   });
 
   test('Clicking Set as org default calls the endpoint and moves the badge', async ({ page }) => {

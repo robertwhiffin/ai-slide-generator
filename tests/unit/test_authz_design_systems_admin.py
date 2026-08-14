@@ -117,11 +117,13 @@ def admin(production, monkeypatch):
 
 
 def _mutations(ds_id: int):
-    """(method, path, body) for the three org-wide design-system mutations."""
+    """(method, path, body) for the org-wide design-system mutations."""
     return [
         ("POST", f"{BASE}/{ds_id}/set-default", None),
         ("PUT", f"{BASE}/{ds_id}", {"description": "renamed by caller"}),
         ("DELETE", f"{BASE}/{ds_id}", None),
+        # Removing org-wide state has the same blast radius as setting it.
+        ("POST", f"{BASE}/{ds_id}/clear-default", None),
     ]
 
 
@@ -144,7 +146,9 @@ def test_seeded_ds_is_authored_by_someone_other_than_the_caller():
         )
 
 
-@pytest.mark.parametrize("index", [0, 1, 2], ids=["set-default", "update", "delete"])
+@pytest.mark.parametrize(
+    "index", [0, 1, 2, 3], ids=["set-default", "update", "delete", "clear-default"]
+)
 def test_design_system_mutations_403_for_non_admin(client, seeded_ds, non_admin, index):
     """403 for a non-admin who is ALSO not the author (see the module docstring)."""
     method, path, body = _mutations(int(seeded_ds.id))[index]
@@ -152,7 +156,9 @@ def test_design_system_mutations_403_for_non_admin(client, seeded_ds, non_admin,
     assert resp.status_code == 403, f"{method} {path} -> {resp.status_code} {resp.text}"
 
 
-@pytest.mark.parametrize("index", [0, 1, 2], ids=["set-default", "update", "delete"])
+@pytest.mark.parametrize(
+    "index", [0, 1, 2, 3], ids=["set-default", "update", "delete", "clear-default"]
+)
 def test_design_system_mutations_succeed_for_admin(client, seeded_ds, admin, index):
     """Behavior preserved: the gate must not break the admin path."""
     method, path, body = _mutations(int(seeded_ds.id))[index]

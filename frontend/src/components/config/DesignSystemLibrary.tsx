@@ -87,14 +87,25 @@ export const DesignSystemLibrary: React.FC = () => {
     setDetail(imported);
   }, [loadSystems]);
 
-  const handleSetDefault = useCallback(async (system: DesignSystemSummary) => {
+  /**
+   * TOGGLE the org default. Setting it was always available; REMOVING it had no
+   * route and no control at all, so the lifecycle was one-way — withdrawing a
+   * default meant deleting the design system or promoting a different one, and the
+   * legacy slide-style fallback was unreachable. Both directions are admin-only.
+   */
+  const handleToggleDefault = useCallback(async (system: DesignSystemSummary) => {
     setActionId(system.id);
     try {
-      await configApi.setDesignSystemDefault(system.id);
+      if (system.is_default) {
+        await configApi.clearDesignSystemDefault(system.id);
+      } else {
+        await configApi.setDesignSystemDefault(system.id);
+      }
       await loadSystems();
       if (selectedId === system.id) await selectSystem(system.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to set default');
+      const action = system.is_default ? 'clear' : 'set';
+      setError(err instanceof Error ? err.message : `Failed to ${action} default`);
     } finally {
       setActionId(null);
     }
@@ -248,18 +259,23 @@ export const DesignSystemLibrary: React.FC = () => {
 
                         {/* Actions */}
                         <div className="flex shrink-0 items-center gap-1">
-                          {!system.is_default && system.is_active && (
+                          {(system.is_default || system.is_active) && (
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-8 px-2 text-xs text-muted-foreground"
                               disabled={actionId === system.id}
+                              title={
+                                system.is_default
+                                  ? 'Remove the org default — generation falls back to the slide-style default'
+                                  : undefined
+                              }
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleSetDefault(system);
+                                handleToggleDefault(system);
                               }}
                             >
-                              Set as org default
+                              {system.is_default ? 'Clear org default' : 'Set as org default'}
                             </Button>
                           )}
                           <Button
