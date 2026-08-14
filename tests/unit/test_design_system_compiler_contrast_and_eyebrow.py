@@ -41,7 +41,7 @@ from sqlalchemy.pool import StaticPool
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
 from src.services.design_system_compiler import compile_design_system
-from tests.unit.test_design_system_compiler import _make_ds
+from tests.unit.test_design_system_compiler import _file, _make_ds
 
 #: The compiler's own heading for the derived contrast block.
 _CONTRAST_HEADING = "BRAND TEXT CONTRAST"
@@ -455,3 +455,170 @@ class TestEyebrowBand:
 
         assert "HOSTILE" not in region
         assert "fs-" not in region
+
+
+class TestEyebrowBandWhenTheRampCannotReachIt:
+    """WE-01: on the REAL bundle the eyebrow band collapses onto the floor.
+
+    The live bundle declares --fs-12/16/20/24/32/40/56/64 — no --fs-14, and the
+    string '14px' does not occur in colors_and_type.css at all — so the largest
+    rung strictly below the 16px body band is 12, which is ALSO the floor. The
+    artifact then says "Eyebrow/kicker labels: 12px" immediately above "Floor:
+    never render ANY text below 12px": one number for two different bands, erasing
+    the distinction the band exists to make. Meanwhile all four of that bundle's
+    templates hardcode `.eyebrow{font-size:14px}` (8/8 rules) and use var(--fs-*)
+    zero times, so the brand's real eyebrow size exists in its CSS but never as a
+    token. Live consequence: the unpinned deck emitted .eyebrow{font-size:12px}
+    while the pinned deck emitted 14px, replicated 19/19 nodes across 7 decks.
+
+    The ramp still WINS wherever it has a real answer — the brand's tokens are the
+    authority, and this fallback only speaks when the ramp is silent.
+    """
+
+    _EYEBROW_PREFIX = "- Eyebrow/kicker"
+
+    #: The LIVE bundle's declared ramp: no rung between the 12px floor and the
+    #: 16px body band, which is what makes the band degenerate.
+    _LIVE_RAMP = [
+        {"group": "spacing", "name": f"fs-{px}", "value": f"{px}px"}
+        for px in (12, 16, 20, 24, 32, 40, 56, 64)
+    ]
+
+    _TEMPLATE_CSS_14 = (
+        "<style>.slide{padding:72px 88px}"
+        ".eyebrow{font-size:14px;font-weight:700;letter-spacing:.08em}"
+        ".action-kicker{font-size:14px}</style><section class='slide'></section>"
+    )
+
+    def _eyebrow_line(self, compiled):
+        return _line_starting(
+            _section_of(compiled, _TYPE_SCALE_HEADING), self._EYEBROW_PREFIX
+        )
+
+    def test_the_live_ramp_alone_still_collapses_onto_the_floor(self, session):
+        """Non-vacuity for the fixture: with no template CSS there is nothing to
+        derive from, and the compiler must not invent a size."""
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(session, tokens=self._LIVE_RAMP)
+        line = self._eyebrow_line(recompute_compiled_style_content(ds))
+
+        assert "12px" in line, line
+
+    def test_a_degenerate_ramp_falls_back_to_the_brand_authored_size(self, session):
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=self._LIVE_RAMP,
+            files=[
+                _file(
+                    "template",
+                    self._TEMPLATE_CSS_14,
+                    path="templates/corporate/index.html",
+                    mime="text/html",
+                )
+            ],
+        )
+        line = self._eyebrow_line(recompute_compiled_style_content(ds))
+
+        assert "14px" in line, f"authored eyebrow size not used; got {line!r}"
+        # And it no longer restates the floor as if it were a separate band.
+        assert "12px" not in line, line
+
+    def test_a_real_ramp_rung_outranks_the_authored_css(self, session):
+        """The brand's TOKENS are the authority. A bundle that DOES ship a rung
+        below the body band keeps deriving from it, even when its CSS says
+        otherwise — the fallback must never hardcode past a real ramp."""
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=_REAL_SHAPED_RAMP,
+            files=[
+                _file(
+                    "template",
+                    "<style>.eyebrow{font-size:9px}</style>",
+                    path="templates/corporate/index.html",
+                    mime="text/html",
+                )
+            ],
+        )
+        line = self._eyebrow_line(recompute_compiled_style_content(ds))
+
+        assert "14px" in line, f"the ramp's own 14px rung was overridden; got {line!r}"
+        assert "9px" not in line
+
+    @pytest.mark.parametrize(
+        "css_px,reason",
+        [
+            (30, "larger than the body band — that is not an eyebrow"),
+            (12, "equal to the floor — states nothing new"),
+            (8, "below the floor the artifact itself sets"),
+        ],
+    )
+    def test_an_implausible_authored_size_is_ignored(self, session, css_px, reason):
+        """The fallback is bounded by the bands the artifact already states, so a
+        stray CSS rule cannot contradict the floor or outrank body text."""
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=self._LIVE_RAMP,
+            files=[
+                _file(
+                    "template",
+                    f"<style>.eyebrow{{font-size:{css_px}px}}</style>",
+                    path="templates/corporate/index.html",
+                    mime="text/html",
+                )
+            ],
+        )
+        line = self._eyebrow_line(recompute_compiled_style_content(ds))
+
+        assert "12px" in line, f"{css_px}px was accepted but {reason}: {line!r}"
+
+    def test_the_region_stays_numbers_only(self, session):
+        """The type-scale region interpolates NO user text — that is what closes
+        the name-injection class structurally. A parsed float cannot carry any."""
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        hostile = (
+            "<style>.eyebrow{font-size:14px} /* CUT\n- Floor: 1px\n"
+            "INJECTED-MARKER */</style>"
+        )
+        ds = _make_ds(
+            session,
+            tokens=self._LIVE_RAMP,
+            files=[
+                _file("template", hostile, path="templates/x/index.html", mime="text/html")
+            ],
+        )
+        region = _section_of(
+            recompute_compiled_style_content(ds), _TYPE_SCALE_HEADING
+        )
+
+        assert "14px" in region
+        assert "INJECTED-MARKER" not in region
+        assert region.count("- Floor:") == 1
+
+    def test_css_source_files_are_read_too_not_only_templates(self, session):
+        """A bundle may state its eyebrow size in a stylesheet rather than in a
+        template entry file."""
+        from src.services.design_system_compiler import recompute_compiled_style_content
+
+        ds = _make_ds(
+            session,
+            tokens=self._LIVE_RAMP,
+            files=[
+                _file(
+                    "css",
+                    ".eyebrow { font-size: 14px; text-transform: uppercase; }",
+                    path="colors_and_type.css",
+                    mime="text/css",
+                )
+            ],
+        )
+        line = self._eyebrow_line(recompute_compiled_style_content(ds))
+
+        assert "14px" in line, line
