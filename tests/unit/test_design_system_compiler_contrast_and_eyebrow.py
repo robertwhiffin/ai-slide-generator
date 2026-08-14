@@ -128,13 +128,15 @@ def _section_of(compiled, heading):
 
 
 def _ink_line(section, ink):
-    """The pairing line naming *ink* as the required text colour.
+    """The pairing line naming *ink* as the text colour for a set of backgrounds.
 
-    The pairing is stated as a REQUIREMENT for the text role (WE-02): the model was
-    measured choosing brand accents over the enumerated colour, so the line reads
-    "the text color MUST be <ink>" rather than "Use <ink>".
+    WE-02's imperative rewording of this line ("the text color MUST be <ink>") was
+    MEASUREMENT-GATED and the gate FAILED, so the line is back to its declarative
+    form — see :class:`TestPairingWordingWasRevertedAfterFailingItsGate`. What the
+    line has to CONTAIN is unchanged either way, which is why the tests below read
+    it through this helper instead of matching a prefix inline.
     """
-    return _line_starting(section, f"- On these backgrounds the text color MUST be {ink}")
+    return _line_starting(section, f"- Use {ink} as the text color on these backgrounds:")
 
 
 def _line_starting(section, prefix):
@@ -636,45 +638,124 @@ class TestEyebrowBandWhenTheRampCannotReachIt:
         assert "14px" in line, line
 
 
-class TestPairingIsImperativeForTheTextRole:
-    """MEASUREMENT-GATED (WE-02). The pairings were AVAILABLE AND IGNORED.
+class TestPairingWordingWasRevertedAfterFailingItsGate:
+    """MEASUREMENT-GATED (WE-02) — and the gate FAILED, so the edit is REVERTED.
 
-    On the measured deck all three offending backgrounds were enumerated WITH a
-    prescribed AA-passing text colour and the model chose otherwise every time:
-    coral #FF5F46 on oat #F9F7F4 at 2.8146:1 where #000000 (19.64:1) was named,
-    lava #FF3621 on white where #000000 (21:1) was named, and for the CTA it picked
-    the EXACT INVERSE of what the artifact stated for that background. 24 of 108
-    rated node-cells fell below 4.5:1 — 0 of them primary text, every offender a
-    brand ACCENT used as text, all in the model-authored CSS tail. Nothing was
-    invented: the palette was misused, not exceeded.
+    The edit was sound in PRINCIPLE and is not being called wrong: the pairings
+    genuinely were AVAILABLE AND IGNORED, so stating them as requirements for the
+    TEXT role was a reasonable lever to try. It was shipped explicitly conditional on
+    measurement, and the measurement came back INERT.
 
-    The colours are NOT rewritten — silently correcting a brand's palette would
-    defeat the purpose of a design system — so the only lever is to state the
-    pairing as a requirement for the TEXT role.
+    Re-run at n=4 (13 slides, 660 rated node-cells, painted-pixel backdrops, Python
+    recompute matching 660/660), the failures reproduce EXACTLY on the byte-identical
+    dev13 prompt: 12 sub-threshold node-cells on BOTH builds, the same 3 nodes, the
+    same two pairs, the same ratios — coral #FF5F46 eyebrow on oat #F9F7F4 = 2.8146
+    (x2) and CTA #FFFFFF on lava #FF3621 = 3.6197. Across n=4: 208/660 below 4.5,
+    156/660 below their own threshold, the eyebrow pair failing on 4/4 decks, the CTA
+    exact inverse recurring on 2/2 decks that produced a button, and the prescribed
+    ink ignored on 552/624 enumerated-background cells.
+
+    So the edit bought ~500 B of prompt and changed NO behaviour. Inert, not harmful
+    — which is precisely why it goes: prompt text that does not move a measured
+    number is cost without benefit, and the gate existed to catch that.
+
+    WHAT THIS CLASS PINS NOW. Two things, so the revert cannot silently regress in
+    either direction: the declarative pairing is still EMITTED (the guidance itself
+    was never in doubt — it predates WE-02 and closed the v18 contrast vacuum), and
+    the imperative rewording is GONE. This class is deliberately NOT deleted: a
+    deleted test is how a reverted-for-measurement edit quietly comes back.
+
+    KNOWN-OPEN, deliberately not addressed here. Two candidates remain, in the order
+    the re-run ranks them: WE-03, the untested reverse-direction NEGATIVE list ("do
+    not use <colour> as text"), which is structurally the cheaper next step because
+    every offending colour is one the artifact never names as unsafe AS TEXT — the
+    ``unusable`` line is legitimately EMPTY for this brand, so the one line that would
+    have warned never fires; and POST-GENERATION VALIDATION of rendered pairs, the
+    only remedy independent of the model complying with prose. The re-run also found
+    12 unique PRIMARY-text nodes below 4.5 on prompts dev13 never ran (subtitle
+    #618794 on navy = 3.4961, body grey #8A8580 on white = 3.6538) — new coverage
+    rather than proven degradation, but it shows the model can still choose
+    sub-threshold PRIMARY text, which is what eventually forces the second option.
     """
 
-    def test_the_pairing_lines_are_requirements_not_suggestions(self, session):
+    def test_the_pairing_still_names_the_required_ink_declaratively(self, session):
+        """The guidance itself is NOT what was reverted — only its wording. Both
+        pairing lines must still enumerate their backgrounds against an ink."""
         compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
         section = _section_of(compiled, _CONTRAST_HEADING)
 
-        pairing_lines = [
-            line
-            for line in section.splitlines()
-            if line.startswith("- On these backgrounds the text color MUST be")
-        ]
-        assert pairing_lines, f"no imperative pairing line; got:\n{section}"
+        assert _ink_line(section, _LIGHTEST), f"no pairing line for the lightest ink:\n{section}"
+        assert _ink_line(section, _DARKEST), f"no pairing line for the darkest ink:\n{section}"
 
-    def test_using_an_accent_as_text_on_a_listed_background_is_forbidden(self, session):
-        """The measured behaviour, named explicitly: an on-brand accent is not a
-        licence to override the pairing."""
+    def test_the_imperative_rewording_is_gone(self, session):
+        """The reverted edit, pinned by its ABSENCE: both the "MUST be" pairing
+        prefix and the accent/text-role line it added."""
         compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
         section = _section_of(compiled, _CONTRAST_HEADING)
 
-        assert "REQUIREMENTS for TEXT" in section
-        assert "accent" in section
-        # Small label text is where the measured failures landed (eyebrows at
-        # 2.8146:1), so the rule must reach them by name and not read as body-only.
-        assert "eyebrow" in section.lower()
+        assert "On these backgrounds the text color MUST be" not in section
+        assert "REQUIREMENTS for TEXT" not in section
+        assert "accents belong in fills" not in section
+
+    def test_the_aa_requirement_survives_the_revert(self, session):
+        """What the revert must NOT take with it. The ratio requirement and the
+        mid-tone pair rule are v18 content that closed the contrast vacuum; only
+        WE-02's ~500 B of extra imperative prose was gated."""
+        compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
+        section = _section_of(compiled, _CONTRAST_HEADING)
+
+        assert "4.5:1" in section
+        # The heading still declares the block REQUIRED (asserted against the
+        # ARTIFACT, not against this file's search prefix).
+        assert "BRAND TEXT CONTRAST (REQUIRED" in compiled
+        assert "work out the ratio" in section.lower()
+
+    def test_the_revert_carries_its_own_version_bump(self):
+        """The bump is LOAD-BEARING for this revert, unlike for the edit it undoes.
+
+        WE-02 rode the v19 bump on the reasoning that v19 was unreleased, so v18 rows
+        were invalidated once rather than twice — true at the time. v19 has since been
+        RELEASED, so rows compiled by it exist carrying the imperative wording, and
+        currency is an exact version-stamped sentinel match. Changing what a released
+        version emits without moving the stamp would leave every existing row serving
+        the reverted text forever."""
+        from src.services.design_system_compiler import COMPILER_VERSION
+
+        assert COMPILER_VERSION >= 20, (
+            "reverting the WE-02 wording changes what the compiler emits, and v19 was "
+            "released — persisted v19 rows can only pick this up via a bump"
+        )
+
+    def test_a_v19_stamped_artifact_is_not_current(self, session):
+        """The mechanism behind the test above, exercised rather than asserted: a row
+        stamped with the RELEASED version that carried the reverted wording must read
+        stale, so the lazy backfill-on-read recompiles it."""
+        from src.services.design_system_compiler import (
+            COMPILER_VERSION,
+            compiled_style_content_is_current,
+            ensure_compiled_style_content_current,
+        )
+
+        fresh = compile_design_system(_make_ds(session, name="Currency DS", tokens=_PALETTE))
+        assert compiled_style_content_is_current(fresh), "a fresh artifact must read current"
+
+        # A genuine prior-version artifact: the same bytes, prior-stamped.
+        stale = fresh.replace(
+            f"\x1f<ds-compiler v{COMPILER_VERSION}>\x1f",
+            f"\x1f<ds-compiler v{COMPILER_VERSION - 1}>\x1f",
+            1,
+        )
+        assert f"<ds-compiler v{COMPILER_VERSION - 1}>" in stale, "fixture must be prior-stamped"
+        assert not compiled_style_content_is_current(stale)
+
+        ds = _make_ds(session, name="Stale Row DS", tokens=_PALETTE)
+        ds.compiled_style_content = stale
+        refreshed = ensure_compiled_style_content_current(ds)
+
+        assert compiled_style_content_is_current(refreshed)
+        # Refreshed IN PLACE on the record, which is what makes the backfill lazy.
+        assert ds.compiled_style_content == refreshed
+        assert "REQUIREMENTS for TEXT" not in refreshed
 
     def test_no_colour_is_rewritten(self, session):
         """The fix is prompt-side only: every colour the artifact names is still one

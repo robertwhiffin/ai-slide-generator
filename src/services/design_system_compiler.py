@@ -258,7 +258,27 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 # BLAST RADIUS, measured: only systems whose largest sub-body rung equals the floor
 # compile differently. Every other ramp shape — including the one the docstring above
 # describes — is byte-identical apart from this version marker.
-COMPILER_VERSION = 19
+# v20: WE-02's imperative contrast-pairing wording is REVERTED for failing its
+# measurement gate, so persisted v19 rows hold ~500 B of prose this compiler no
+# longer emits and the bump is what makes them recompile.
+#
+# THE BUMP IS LOAD-BEARING HERE, unlike the edit it undoes. When WE-02 shipped it
+# rode the v19 bump on the reasoning that "v19 is unreleased, so v18 rows are
+# invalidated once, not twice" — and that was true AT THE TIME. It is not true now:
+# v19 HAS been released and deployed, and rows compiled by it exist carrying the
+# imperative wording. Currency is an exact, version-stamped sentinel match at the
+# front of the artifact (:data:`_CURRENCY_SENTINEL`,
+# :func:`compiled_style_content_is_current`), so a stored v19 artifact would keep
+# reading CURRENT under a v19 compiler and would NEVER be recompiled — the revert
+# would ship while every existing row went on serving the reverted text. Changing
+# what a RELEASED version emits without moving the stamp is precisely the failure
+# mode the sentinel exists to prevent.
+#
+# BLAST RADIUS: every design system recompiles once, and the only difference is the
+# removal of the imperative pairing prose (plus the version marker itself). WL-02's
+# safe-area wording, which PASSED its gate in the same commit, is deliberately
+# untouched and stays exactly as v19 emitted it.
+COMPILER_VERSION = 20
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -1599,29 +1619,54 @@ _CONTRAST_DERIVED_HEADING = (
 # extremes do not: the measured failures were mid-tone ON mid-tone, which is
 # exactly the pair a palette makes easy to reach for and a luminance table cannot
 # enumerate without listing every combination.
-# MEASUREMENT-GATED (WE-02). The pairings above were AVAILABLE AND IGNORED, not
-# missing: on the measured deck all three offending backgrounds were enumerated WITH
-# a prescribed AA-passing text color, and the model chose otherwise every time —
-# coral #FF5F46 on oat #F9F7F4 at 2.8146:1 where #000000 (19.64:1) was named, lava
-# #FF3621 on white where #000000 (21:1) was named, and for the CTA it picked the
-# EXACT INVERSE of what the artifact stated for that background. 24 of 108 rated
-# node-cells fell below 4.5:1; 0 were primary text, and every offender was a brand
-# ACCENT used as text, all of them in the model-authored CSS tail. No color was
-# invented — the palette was misused, not exceeded.
+# WE-02 ONCE ADDED MORE HERE, AND IT WAS REVERTED FOR FAILING ITS MEASUREMENT GATE.
+# Recorded so the same lever is not reached for again without new evidence.
 #
-# So the pairing is stated as a REQUIREMENT for the TEXT role specifically. The
-# colors themselves are NOT rewritten: silently correcting a brand's palette would
-# defeat the purpose of a design system.
-_CONTRAST_TEXT_ROLE_IMPERATIVE_LINE = (
-    "- Those pairings are REQUIREMENTS for TEXT, not suggestions: whenever you use a "
-    "background listed above, its text color is the one named for it. Do NOT use a "
-    "brand accent (or any other palette color) as the text color on a listed "
-    "background because it looks on-brand — accents belong in fills, rules, icons "
-    "and imagery unless that exact pair meets the ratio above. This applies to small "
-    "label text (eyebrows, kickers, captions, tags) and to link and button labels "
-    "just as much as to body copy."
-)
-
+# The diagnosis was and remains correct: the pairings are AVAILABLE AND IGNORED, not
+# missing. On the deck that prompted it, all three offending backgrounds were
+# enumerated WITH a prescribed AA-passing text color and the model chose otherwise
+# every time — coral #FF5F46 on oat #F9F7F4 at 2.8146:1 where #000000 (19.64:1) was
+# named, and for the CTA the EXACT INVERSE of what the artifact stated. No color was
+# invented; the palette was misused.
+#
+# The attempted fix restated the pairing as a REQUIREMENT for the TEXT role, plus a
+# line forbidding a brand accent as text on a listed background and naming small
+# label text and button labels explicitly. It was shipped conditional on measurement.
+#
+# THE MEASUREMENT (re-run at n=4: 13 slides, 660 rated node-cells, painted-pixel
+# backdrops, Python recompute agreeing 660/660) found it INERT. Against the
+# byte-identical dev13 prompt the failures reproduce EXACTLY — 12 sub-threshold
+# node-cells on BOTH builds, the same 3 nodes, the same two pairs, the same ratios
+# (coral eyebrow 2.8146 twice, CTA #FFFFFF on lava #FF3621 3.6197). Across n=4:
+# 208/660 below 4.5, 156/660 below their own threshold, the eyebrow pair failing on
+# 4/4 decks, the CTA inverse on 2/2 decks that produced a button, and the prescribed
+# ink ignored on 552/624 enumerated-background cells. ~500 B of prompt, no behaviour
+# change. Inert, not harmful — and inert prose is still cost, so it goes.
+#
+# WHAT THIS MEANS FOR THE NEXT ATTEMPT: restating the POSITIVE pairing more forcefully
+# is not the lever. Two candidates remain, in the order the re-run ranks them, and
+# NEITHER is implemented here:
+#
+#  1. WE-03, the reverse-direction NEGATIVE list — "do not use <color> as text" —
+#     which is still untested. The reason it is the cheaper next step is structural:
+#     every offending color is one the artifact never names as unsafe AS TEXT. The
+#     `unusable` line below is legitimately EMPTY for this brand (its extremes are
+#     pure #FFFFFF/#000000, so every resolvable color token reaches AA with one of
+#     them), so the one line that would have warned never fires. A negative list
+#     keyed on the TEXT role, not on unusability against both extremes, is a
+#     different statement from anything the artifact makes today.
+#  2. POST-GENERATION VALIDATION of rendered text/background pairs, which is the only
+#     remedy that does not depend on the model complying with prose at all.
+#
+# The re-run also found 12 unique PRIMARY-text nodes below 4.5 on prompts never
+# previously exercised (subtitle #618794 on navy 3.4961, body grey #8A8580 on white
+# 3.6538) — new coverage rather than proven degradation, but it shows the model can
+# still choose sub-threshold PRIMARY text, which is what makes (2) eventually
+# necessary. Both recorded as known-open.
+#
+# The declarative pairing itself is v18 content that closed the contrast vacuum and
+# is untouched by the revert. Colors are never rewritten either way: silently
+# correcting a brand's palette would defeat the purpose of a design system.
 _CONTRAST_PAIR_RULE_LINE = (
     "- For any other pair of these colors, work out the ratio before you use it: "
     f"two mid-tone brand colors together almost never reach {_CONTRAST_AA_NORMAL:g}:1. "
@@ -1821,16 +1866,14 @@ def _contrast_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     ]
     if on_lightest:
         lines.append(
-            f"- On these backgrounds the text color MUST be {lightest}: "
+            f"- Use {lightest} as the text color on these backgrounds: "
             f"{', '.join(on_lightest)}"
         )
     if on_darkest:
         lines.append(
-            f"- On these backgrounds the text color MUST be {darkest}: "
+            f"- Use {darkest} as the text color on these backgrounds: "
             f"{', '.join(on_darkest)}"
         )
-    if on_lightest or on_darkest:
-        lines.append(_CONTRAST_TEXT_ROLE_IMPERATIVE_LINE)
     if unusable:
         lines.append(
             "- Never set normal text on these colors — they reach "
