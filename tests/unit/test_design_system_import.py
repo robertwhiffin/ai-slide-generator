@@ -1214,6 +1214,31 @@ def _bundle_with_extra_field(central_name, extra, payload):
 
     ``ZipInfo.extra`` is written into BOTH the local header and the central directory,
     so the record is present exactly as a real archiver would emit it.
+
+    SYMMETRY IS THE LIMIT OF THIS HELPER, and it is why the central-directory-only
+    inspection went unnoticed for a round: every archive it builds carries the same
+    record in both headers, so a check reading either one passes. Use
+    :func:`_bundle_with_asymmetric_extra_fields` for the shapes that tell them apart.
+    """
+    return _bundle_with_asymmetric_extra_fields(
+        central_name, local_extra=extra, central_extra=extra, payload=payload
+    )
+
+
+def _bundle_with_asymmetric_extra_fields(
+    central_name, *, local_extra, central_extra, payload
+):
+    """A bundle whose entry carries DIFFERENT extra fields in its two headers.
+
+    A .zip records every entry twice — once in the local file header that precedes its
+    bytes, once in the central directory at the end — and nothing makes the two agree.
+    CPython parses only the central copy, so an archive can show a clean central record
+    to Python and a name-rewriting one to any reader that trusts the local header.
+
+    Built without patching bytes: ``ZipFile`` emits the local header during
+    ``writestr`` and the central directory at ``close``, both reading ``zinfo.extra``
+    when they run. Mutating the attribute between the two therefore hands each header
+    its own record, with all lengths and offsets computed by ``zipfile`` itself.
     """
     manifest = default_manifest()
     manifest["templates"] = [
@@ -1232,9 +1257,28 @@ def _bundle_with_extra_field(central_name, extra, payload):
         zf.writestr("assets/logo.svg", SVG_LOGO)
         zf.writestr("templates/x/index.html", SYNTHETIC_TEMPLATE_HTML)
         info = zipfile.ZipInfo(central_name)
-        info.extra = extra
+        info.extra = local_extra
         zf.writestr(info, payload)
+        # Written by ``_write_end_record`` at close, from this same object.
+        info.extra = central_extra
     return buf.getvalue()
+
+
+def _local_header_of(raw, central_name):
+    """``(offset, name_bytes, extra_bytes)`` of ``central_name``'s LOCAL file header.
+
+    Parsed from the archive bytes the way a non-CPython unzip would, so the tests
+    assert on what the local header REALLY says rather than on what was intended.
+    """
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        info = next(i for i in zf.infolist() if i.filename == central_name)
+    offset = info.header_offset
+    header = raw[offset : offset + 30]
+    assert header[:4] == b"PK\x03\x04", "not a local file header"
+    name_len, extra_len = struct.unpack_from("<HH", header, 26)
+    name_at = offset + 30
+    extra_at = name_at + name_len
+    return offset, raw[name_at:extra_at], raw[extra_at : extra_at + extra_len]
 
 
 class TestUnicodePathExtraFieldCannotRewriteAName:
@@ -1453,9 +1497,10 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
             _extra_field_name_refusal,
         )
 
-        info = zipfile.ZipInfo("assets/logo.svg")
-        info.extra = extra
-        assert _extra_field_name_refusal(info) == _REASON_CORRUPT_EXTRA
+        assert (
+            _extra_field_name_refusal(extra, "assets/logo.svg")
+            == _REASON_CORRUPT_EXTRA
+        )
 
     @pytest.mark.parametrize(
         "extra,opens",
@@ -1505,9 +1550,10 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
 
         timestamp = struct.pack("<HH", 0x5455, 5) + b"\x03\x00\x00\x00\x00"
         unicode_path = _unicode_path_extra("assets/logo.svg", "assets/evil.svg")
-        info = zipfile.ZipInfo("assets/logo.svg")
-        info.extra = timestamp + unicode_path
-        assert _extra_field_name_refusal(info) == _REASON_NAME_MISMATCH
+        assert (
+            _extra_field_name_refusal(timestamp + unicode_path, "assets/logo.svg")
+            == _REASON_NAME_MISMATCH
+        )
 
     def test_a_record_that_agrees_with_the_central_name_is_accepted(self):
         """The limit of the rule, and the reason the real exports are unaffected: a
@@ -1532,6 +1578,312 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
         with _isolated_session() as isolated:
             ds = import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
             assert self.CENTRAL in {f.path for f in ds.files}
+
+    #: The 0x7075 TAG and nothing else: two bytes, with no ``size`` field and no body.
+    #: Too short to be a header, so a walk that only steps while four or more bytes
+    #: remain never looks at it — and reports the entry as clean.
+    HEADERLESS_FRAGMENT = b"\x75\x70"
+
+    def test_a_fragment_too_short_to_be_a_header_is_refused(self):
+        """An extra field of exactly ``b"\\x75\\x70"`` must be REFUSED, not ignored.
+
+        The walk steps record by record and used to stop as soon as fewer than four
+        bytes remained, treating the leftover as padding. That is the wrong reading of
+        a trailing fragment: the extra field is a sequence of records with no padding
+        in it, so bytes that cannot be a complete header mean the field is malformed —
+        and here they are the first half of the very record this guard exists to read.
+        Whatever name that record meant to declare is unreadable, which is exactly the
+        condition the overrun and short-body cases already refuse.
+
+        CPython opens such an archive without complaint (its own walk has the same
+        four-byte floor), so refusing it is this module's job alone.
+        """
+        from src.services.design_system_service import (
+            _REASON_CORRUPT_EXTRA,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = self._zip(extra=self.HEADERLESS_FRAGMENT)
+        # Guard the guard: the refusal below is ours, not a BadZipFile from the stdlib.
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.CENTRAL)
+            assert info.extra == self.HEADERLESS_FRAGMENT
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=zip_bytes, user="u")
+        assert _REASON_CORRUPT_EXTRA in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            b"\x75\x70",
+            b"\x75",
+            b"\x75\x70\x20",
+            struct.pack("<HH", 0x5455, 5) + b"\x03\x00\x00\x00\x00" + b"\x75\x70",
+        ],
+        ids=["tag-only", "one-byte", "three-bytes", "after-a-valid-record"],
+    )
+    def test_the_parser_refuses_every_trailing_fragment(self, extra):
+        """Any leftover, wherever it falls. A fragment following a well-formed record
+        is the shape that matters most: the walk reaches it having already parsed
+        something successfully, which is precisely when "stop, we are done" looks
+        reasonable and is wrong."""
+        from src.services.design_system_service import (
+            _REASON_CORRUPT_EXTRA,
+            _extra_field_name_refusal,
+        )
+
+        assert (
+            _extra_field_name_refusal(extra, "assets/logo.svg")
+            == _REASON_CORRUPT_EXTRA
+        )
+
+    def test_an_extra_field_that_ends_exactly_on_a_record_is_still_accepted(self):
+        """The limit of the rule. A field whose records tile it exactly has no
+        fragment, and must not be refused — otherwise every ordinary archive with a
+        timestamp record fails."""
+        from src.services.design_system_service import _extra_field_name_refusal
+
+        extra = struct.pack("<HH", 0x5455, 5) + b"\x03\x00\x00\x00\x00"
+        assert _extra_field_name_refusal(extra, "assets/logo.svg") is None
+        assert _extra_field_name_refusal(b"", "assets/logo.svg") is None
+
+
+class TestTheLocalFileHeaderIsInspectedToo:
+    """A .zip states every entry's identity TWICE, and CPython reads only one copy.
+
+    Each entry is described by a local file header immediately before its bytes and
+    again by a central directory record at the end of the archive. Nothing in the
+    format makes the two agree, and CPython's reader builds ``ZipInfo`` purely from
+    the central copy: ``ZipInfo.extra`` is the CENTRAL extra, and the local extra is
+    never parsed at all.
+
+    So a guard reading ``info.extra`` alone can be walked straight past. Give the
+    central directory a clean name and an EMPTY extra, and put the name-rewriting
+    ``0x7075`` record — version 1, matching CRC, declaring
+    ``templates/x/.thumbnail\\x00.exe`` — in the local header only. CPython reports an
+    ordinary entry, the guard finds nothing to object to, and the archive is stored
+    under the clean thumbnail identity while presenting the other name to any unzip
+    that reads local headers. That is the same one-archive-two-identities problem the
+    central-extra refusal exists to prevent, expressed in the copy that was not being
+    read.
+
+    Both copies are therefore inspected, and a DISAGREEMENT between them is itself a
+    refusal: there is no single name such an entry can be said to have.
+    """
+
+    CENTRAL = "templates/x/.thumbnail"
+    DECLARED_NUL = "templates/x/.thumbnail\x00.exe"
+
+    def _zip(self, *, local_extra=None, central_extra=b"", declared=None):
+        if local_extra is None:
+            local_extra = _unicode_path_extra(
+                self.CENTRAL, self.DECLARED_NUL if declared is None else declared
+            )
+        return _bundle_with_asymmetric_extra_fields(
+            self.CENTRAL,
+            local_extra=local_extra,
+            central_extra=central_extra,
+            payload=webp_bytes(),
+        )
+
+    def test_the_two_headers_really_do_disagree_in_the_crafted_archive(self):
+        """NON-VACUITY, and the whole reason this class exists. If the record leaked
+        into the central directory, every refusal below would pass through the
+        central-extra path and prove nothing about the local one.
+
+        Pinned on both sides: the central extra is EMPTY, the local extra carries the
+        0x7075 record, and CPython opens the archive and resolves the clean,
+        allowlisted thumbnail name — the state in which the bypass was measured.
+        """
+        from src.services.design_system_service import _is_template_preview
+
+        raw = self._zip()
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.CENTRAL)
+        assert info.extra == b"", "the central directory must carry NO extra field"
+        assert info.orig_filename == info.filename == self.CENTRAL
+        assert _is_template_preview(info.filename) is True
+
+        _, local_name, local_extra = _local_header_of(raw, self.CENTRAL)
+        assert local_name == self.CENTRAL.encode()
+        assert struct.pack("<H", 0x7075) in local_extra
+        assert self.DECLARED_NUL.encode() in local_extra
+
+    def test_the_central_extra_walk_alone_reports_nothing(self):
+        """The second half of the non-vacuity proof: the parser reading the CENTRAL
+        extra is silent on this archive. Any refusal therefore comes from the local
+        header, which is the code path under test."""
+        from src.services.design_system_service import _extra_field_name_refusal
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.CENTRAL)
+        assert _extra_field_name_refusal(info.extra, self.CENTRAL) is None
+
+    def test_the_bundle_is_refused_for_the_two_identities(self):
+        from src.services.design_system_service import (
+            _REASON_NAME_MISMATCH,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=self._zip(), user="u")
+        assert _REASON_NAME_MISMATCH in str(exc.value)
+
+    def test_nothing_is_stored_as_a_thumbnail(self):
+        """The consequence that made this blocking rather than untidy: the entry was
+        reaching the template-thumbnail allowlist and being stored under the clean
+        name, which is the identity the guard was supposed to make impossible."""
+        from src.database.models.design_system import (
+            DesignSystemAsset,
+            DesignSystemFile,
+        )
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError):
+                import_bundle(isolated, zip_bytes=self._zip(), user="u")
+            isolated.rollback()
+            assert isolated.query(DesignSystemFile).all() == []
+            assert isolated.query(DesignSystemAsset).all() == []
+
+    def test_the_iterator_refuses_it_too_not_only_the_up_front_scan(self):
+        """Both gates share one judgement, so neither can be left behind."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _iter_safe_entries,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            with pytest.raises(DesignSystemImportError):
+                list(_iter_safe_entries(zf, ""))
+
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "templates/x/.thumbnail\x00.exe",
+            "templates\\x\\.thumbnail",
+            "../../../etc/passwd",
+            "assets/other.svg",
+        ],
+        ids=repr,
+    )
+    def test_any_disagreeing_local_declaration_is_refused(self, declared):
+        """Not only the NUL spelling: whatever second name the local header declares,
+        the entry has two identities."""
+        from src.services.design_system_service import (
+            _REASON_NAME_MISMATCH,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=self._zip(declared=declared), user="u")
+        assert _REASON_NAME_MISMATCH in str(exc.value)
+
+    def test_a_malformed_record_in_the_local_extra_alone_is_refused(self):
+        """The two findings compose: a fragment too short to be a header, in the copy
+        that was not being read. Neither guard alone catches this."""
+        from src.services.design_system_service import (
+            _REASON_CORRUPT_EXTRA,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = self._zip(local_extra=b"\x75\x70")
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.CENTRAL)
+            assert info.extra == b"", "central must stay clean or this proves nothing"
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=zip_bytes, user="u")
+        assert _REASON_CORRUPT_EXTRA in str(exc.value)
+
+    def test_a_local_extra_that_agrees_with_the_central_name_is_accepted(self):
+        """The limit of the rule, and what keeps the real exports importable: reading
+        the local header is not a refusal of archives that HAVE one. A record
+        declaring exactly the central name adds no second identity, so the thumbnail
+        imports and is bound to its template as usual."""
+        from src.services.design_system_service import import_bundle
+
+        zip_bytes = self._zip(local_extra=_unicode_path_extra(self.CENTRAL, self.CENTRAL))
+        with _isolated_session() as isolated:
+            ds = import_bundle(isolated, zip_bytes=zip_bytes, user="u")
+            assert self.CENTRAL in {f.path for f in ds.files}
+            assert len([a for a in ds.assets if a.kind == "template_shot"]) == 1
+
+    def test_a_local_filename_that_disagrees_is_refused_before_any_read(self):
+        """The other way the two copies can differ: not the extra field but the NAME
+        recorded beside it.
+
+        Patched to an equal-length name so every length and offset in the archive
+        stays valid — CPython opens it and lists the central name happily. Its own
+        local/central comparison exists but runs inside ``ZipFile.open``, i.e. only
+        when an entry's bytes are actually read, and it raises ``BadZipFile`` — a
+        corrupt-archive error, not an explanation. Refusing at the path gate covers
+        every entry whether or not the importer ever reads it, and tells the user what
+        is wrong with their upload.
+        """
+        from src.services.design_system_service import (
+            _REASON_NAME_MISMATCH,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        raw = bytearray(self._zip(local_extra=b""))
+        offset, local_name, _ = _local_header_of(bytes(raw), self.CENTRAL)
+        other = b"templates/y/.thumbnail"
+        assert len(other) == len(local_name), "equal length keeps the archive framed"
+        raw[offset + 30 : offset + 30 + len(local_name)] = other
+
+        with zipfile.ZipFile(io.BytesIO(bytes(raw))) as zf:
+            assert self.CENTRAL in zf.namelist()
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=bytes(raw), user="u")
+        assert _REASON_NAME_MISMATCH in str(exc.value)
+
+    def test_an_unreadable_local_header_is_refused(self):
+        """Fail closed. If the local header is not there to be read, the entry's
+        second identity is unknown rather than absent, and an importer that cannot
+        check must not accept."""
+        from src.services.design_system_service import (
+            _REASON_LOCAL_HEADER,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        raw = bytearray(self._zip(local_extra=b""))
+        offset, _, _ = _local_header_of(bytes(raw), self.CENTRAL)
+        raw[offset : offset + 4] = b"PK\xff\xff"
+
+        with zipfile.ZipFile(io.BytesIO(bytes(raw))) as zf:
+            assert self.CENTRAL in zf.namelist()
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=bytes(raw), user="u")
+        assert _REASON_LOCAL_HEADER in str(exc.value)
+
+    def test_an_ordinary_bundle_with_no_extra_fields_still_imports(self):
+        """The regression this whole check must not cause: reading local headers is
+        added work on EVERY entry of every upload, so the plain path is pinned here."""
+        from src.services.design_system_service import import_bundle
+
+        with _isolated_session() as isolated:
+            ds = import_bundle(isolated, zip_bytes=self._zip(local_extra=b""), user="u")
+            assert self.CENTRAL in {f.path for f in ds.files}
+            assert len([a for a in ds.assets if a.kind == "template_shot"]) == 1
 
 
 class TestStdlibRewrittenNamesAreRefused:

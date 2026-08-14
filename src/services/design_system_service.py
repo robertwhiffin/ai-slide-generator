@@ -1083,6 +1083,11 @@ _REASON_CORRUPT_EXTRA = (
     "its Info-ZIP Unicode Path extra field (0x7075) is malformed, so the name the "
     "archive means to declare for this entry cannot be read at all"
 )
+_REASON_LOCAL_HEADER = (
+    "its local file header — the second place a .zip records an entry's name — cannot "
+    "be read, so whether the archive states one name for this entry or two cannot be "
+    "established"
+)
 _REASON_ABSOLUTE = (
     "it is an absolute path, so it names a location outside the bundle rather than "
     "a file inside it"
@@ -1411,11 +1416,20 @@ _UNICODE_PATH_EXTRA_TAG = 0x7075
 # CRC-32 of the central-directory name.
 _UNICODE_PATH_HEADER_LEN = 5
 
+# Every extra-field record is a 2-byte tag followed by a 2-byte body size. Anything
+# shorter than that cannot be a record at all.
+_EXTRA_RECORD_HEADER_LEN = 4
 
-def _extra_field_name_refusal(info: zipfile.ZipInfo) -> Optional[str]:
+
+def _extra_field_name_refusal(extra: bytes, central: str) -> Optional[str]:
     """Refuse an entry whose EXTRA FIELD declares a different name, else ``None``.
 
-    Parsed from the raw ``info.extra`` bytes on purpose. No stdlib-processed attribute
+    Takes the extra-field BYTES rather than a ``ZipInfo`` because an entry has TWO
+    extra fields — one in the central directory, one in its local file header — and
+    both are walked, by :func:`_entry_identity_refusal`. ``ZipInfo.extra`` is only the
+    central copy.
+
+    Parsed from raw bytes on purpose. No stdlib-processed attribute
     can be trusted as an entry's identity, and this record is the proof: in CPython's
     ``ZipInfo._decodeExtra`` a ``0x7075`` record assigns
     ``self.filename = _sanitize_filename(declared_name)`` and never touches
@@ -1443,12 +1457,21 @@ def _extra_field_name_refusal(info: zipfile.ZipInfo) -> Optional[str]:
     and never the filename. The Unicode COMMENT field (``0x6375``) carries a comment,
     not a path. Unknown tags are skipped by both the stdlib and the loop below.
     """
-    central = _raw_entry_name(info)
-    extra = info.extra or b""
     offset = 0
-    while len(extra) - offset >= 4:
+    while offset < len(extra):
+        # A LEFTOVER too short to be a record header is malformed, not padding. The
+        # extra field is a sequence of records that tile it exactly; the format
+        # defines no filler between or after them. Stopping quietly on a trailing
+        # fragment skipped the shortest possible spelling of the very record this
+        # function exists to read: an extra of exactly b"\x75\x70" is the 0x7075 tag
+        # with its size field and body cut off, and CPython — whose own walk has the
+        # same four-byte floor — opens such an archive without complaint. Whatever
+        # name that record meant to declare cannot be read, which is the condition
+        # the overrun and short-body branches below already refuse.
+        if len(extra) - offset < _EXTRA_RECORD_HEADER_LEN:
+            return _REASON_CORRUPT_EXTRA
         tag, size = struct.unpack_from("<HH", extra, offset)
-        body_start = offset + 4
+        body_start = offset + _EXTRA_RECORD_HEADER_LEN
         body_end = body_start + size
         if body_end > len(extra):
             return _REASON_CORRUPT_EXTRA
@@ -1466,8 +1489,120 @@ def _extra_field_name_refusal(info: zipfile.ZipInfo) -> Optional[str]:
     return None
 
 
+# Local file header layout (APPNOTE 4.3.7), the fixed part of which is 30 bytes:
+# signature, version needed, general-purpose bit flag, ... then the two lengths that
+# say how much variable-length data follows, then the name and the extra field.
+_LOCAL_HEADER_SIGNATURE = b"PK\x03\x04"
+_LOCAL_HEADER_LEN = 30
+_LOCAL_HEADER_FLAGS_OFFSET = 6
+_LOCAL_HEADER_LENGTHS_OFFSET = 26  # file name length u16, then extra field length u16
+# General-purpose bit 11: the name and comment are UTF-8 rather than the historical
+# CP437. Read from the LOCAL header's own flags, because that is the byte a reader
+# consulting this header would use to decode the name beside it.
+_UTF8_NAME_FLAG = 0x800
+
+
+def _local_header_identity(
+    zf: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> "Optional[tuple[str, bytes]]":
+    """The ``(name, extra)`` the entry's LOCAL FILE HEADER records, or ``None``.
+
+    A .zip states every entry's identity TWICE — once in the local file header that
+    precedes its bytes, once in the central directory at the end — and NOTHING in the
+    format makes the two agree. CPython builds ``ZipInfo`` purely from the central
+    copy: ``ZipInfo.extra`` is the central extra and the local one is never parsed at
+    all. So a guard that reads ``info.extra`` alone inspects one of the two names an
+    archive can present, and an attacker simply puts the rewrite in the other:
+    measured, an entry with a clean central name, an EMPTY central extra and a local
+    ``0x7075`` record declaring ``templates/x/.thumbnail\\x00.exe`` (version 1,
+    matching CRC — the form CPython would honour had it looked) was accepted and
+    stored as a live template thumbnail, which is precisely the outcome the central
+    check exists to prevent.
+
+    Read straight from the archive rather than through any ``ZipInfo`` attribute, for
+    the same reason the extra field is: the point is what the bytes say. The header is
+    located by ``info.header_offset`` — an absolute file offset, adjusted by CPython
+    for any prepended data — and parsed at the documented offsets rather than guessed
+    at. Seeking ``zf.fp`` is safe alongside the reader's own use of it: an open entry
+    stream re-seeks to its own position before every read.
+
+    ``None`` means the header could not be read as a local file header at all, which
+    callers treat as a refusal (:data:`_REASON_LOCAL_HEADER`) rather than as
+    permission: an entry whose second name is unknown is not an entry with one name.
+    """
+    fp = getattr(zf, "fp", None)
+    if fp is None:
+        return None
+    try:
+        fp.seek(info.header_offset)
+        header = fp.read(_LOCAL_HEADER_LEN)
+        if (
+            len(header) != _LOCAL_HEADER_LEN
+            or header[:4] != _LOCAL_HEADER_SIGNATURE
+        ):
+            return None
+        name_len, extra_len = struct.unpack_from(
+            "<HH", header, _LOCAL_HEADER_LENGTHS_OFFSET
+        )
+        name_bytes = fp.read(name_len)
+        extra = fp.read(extra_len)
+    except (OSError, ValueError):
+        # A hostile header_offset can point past the end of the file, and a seek on a
+        # detached/closed stream raises. Unreadable, like any other unparseable header.
+        return None
+    if len(name_bytes) != name_len or len(extra) != extra_len:
+        return None
+    (flags,) = struct.unpack_from("<H", header, _LOCAL_HEADER_FLAGS_OFFSET)
+    encoding = "utf-8" if flags & _UTF8_NAME_FLAG else "cp437"
+    try:
+        return name_bytes.decode(encoding), extra
+    except UnicodeDecodeError:
+        return None
+
+
+def _entry_identity_refusal(
+    zf: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> Optional[str]:
+    """Refuse an entry that the archive gives more than ONE name, else ``None``.
+
+    THE place every name-rewriting route is collected, so closing one cannot leave
+    another open. There are four, and each is invisible to the others:
+
+      1. ``orig_filename != filename`` — the reader rewrote the central name. A NUL
+         byte does this: ``templates/x/.thumbnail\\x00.exe`` is truncated to
+         ``templates/x/.thumbnail``, which matches the thumbnail allowlist.
+      2. A ``0x7075`` record in the CENTRAL extra declaring another name. This defeats
+         route 1 entirely, because the stdlib sanitizes the declared name before
+         assigning it, leaving the two attributes equal.
+      3. The LOCAL file header's name disagreeing with the central directory's.
+         CPython does compare these, but only inside ``ZipFile.open`` — i.e. only for
+         entries whose bytes are actually read, and only as a ``BadZipFile`` rather
+         than as something the user can act on. Refusing here covers every entry and
+         says what is wrong.
+      4. A ``0x7075`` record in the LOCAL extra. This defeats routes 1-3 together: the
+         central directory is entirely clean, so nothing CPython parses is out of
+         place, while a reader that trusts local headers sees the other name.
+
+    Checked in that order, so the reported reason names the shallowest defect the
+    entry has rather than the deepest.
+    """
+    central = _raw_entry_name(info)
+    if central != info.filename:
+        return _REASON_NAME_MISMATCH
+    reason = _extra_field_name_refusal(info.extra or b"", central)
+    if reason is not None:
+        return reason
+    local = _local_header_identity(zf, info)
+    if local is None:
+        return _REASON_LOCAL_HEADER
+    local_name, local_extra = local
+    if local_name != central:
+        return _REASON_NAME_MISMATCH
+    return _extra_field_name_refusal(local_extra, central)
+
+
 def _entry_verdict_for_info(
-    info: zipfile.ZipInfo, rel_path: Optional[str] = None
+    zf: zipfile.ZipFile, info: zipfile.ZipInfo, rel_path: Optional[str] = None
 ) -> _EntryVerdict:
     """The verdict for one ZipInfo, judged on the name the archive really records.
 
@@ -1475,32 +1610,25 @@ def _entry_verdict_for_info(
     root-prefix-stripped path, for the in-scope iterator. It has to be a separate
     argument because the template-thumbnail allowlist is anchored at ``templates/``:
     a wrapped bundle's ``safe/templates/x/.thumbnail`` only matches once ``safe/`` is
-    off. The identity checks below always apply to the FULL recorded name, which is
-    the string a rewrite would have altered.
+    off. The identity check always applies to the FULL recorded name, which is the
+    string a rewrite would have altered.
 
-    TWO identity checks, because there are two independent ways an entry can end up
-    with more than one name, and each is invisible to the other:
-
-      1. ``orig_filename != filename`` — the reader rewrote the central name. A NUL
-         byte does this: ``templates/x/.thumbnail\\x00.exe`` is truncated to
-         ``templates/x/.thumbnail``, which matches the thumbnail allowlist.
-      2. :func:`_extra_field_name_refusal` — an extra field declares a different name.
-         This one DEFEATS check 1 entirely, because the stdlib sanitizes the declared
-         name before assigning it, leaving the two attributes equal.
-
-    Validating the raw name alone would refuse case 1's entry but leave the deeper
-    problem: ``zf.read``/``namelist`` and the rest of the importer key off
-    ``filename``, so raw-name validation and by-name retrieval would be talking about
-    different files. Refusing any divergence keeps one name per entry everywhere,
-    which is the same property the backslash refusal buys (see
+    IDENTITY FIRST, then the path rules. :func:`_entry_identity_refusal` establishes
+    that the entry has exactly ONE name — across both of the archive's copies of it —
+    and only then is that name classified. The order is the point: validating a path
+    that the archive states twice validates whichever copy this reader happened to
+    resolve, while ``zf.read``/``namelist`` and the rest of the importer key off
+    ``filename``. Refusing any divergence keeps one name per entry everywhere, which
+    is the same property the backslash refusal buys (see
     :func:`_entry_path_verdict`).
+
+    ``zf`` is needed because half of what an archive says about an entry lives in the
+    local file header, which no ``ZipInfo`` attribute exposes.
     """
+    identity_reason = _entry_identity_refusal(zf, info)
+    if identity_reason is not None:
+        return _EntryVerdict(_ENTRY_REFUSE, reason=identity_reason)
     raw = _raw_entry_name(info)
-    if raw != info.filename:
-        return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_NAME_MISMATCH)
-    extra_reason = _extra_field_name_refusal(info)
-    if extra_reason is not None:
-        return _EntryVerdict(_ENTRY_REFUSE, reason=extra_reason)
     return _classify_bundle_entry(raw if rel_path is None else rel_path)
 
 
@@ -1558,12 +1686,15 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
 
     THIS GATE ESTABLISHES THE INVARIANT THE REST OF THE IMPORTER RELIES ON. It runs
     before root discovery and before any read (see :func:`import_bundle`), and it
-    refuses any entry whose recorded name differs from the name Python reports or
-    which contains a ``\\``. Everything downstream — :func:`_locate_root_prefix`,
-    the ``startswith(root_prefix)`` scoping and slicing in
-    :func:`_iter_safe_entries`, and ``zf.read``-by-name — therefore works on names
-    that are exactly what validation judged. Weakening either refusal reintroduces
-    two path identities in one importer.
+    refuses any entry the archive gives more than one name — whether the divergence is
+    between ``orig_filename`` and ``filename``, between the two headers that record
+    the entry, or in a name-rewriting extra field in either of them
+    (:func:`_entry_identity_refusal`) — as well as any name containing a ``\\``.
+    Everything downstream — :func:`_locate_root_prefix`, the
+    ``startswith(root_prefix)`` scoping and slicing in :func:`_iter_safe_entries`, and
+    ``zf.read``-by-name — therefore works on names that are exactly what validation
+    judged. Weakening any of those refusals reintroduces two path identities in one
+    importer.
 
     The verdict comes from :func:`_entry_verdict_for_info`, the SAME judgement
     :func:`_iter_safe_entries` uses, so the two gates cannot disagree about an entry.
@@ -1579,7 +1710,7 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
                 f"Bundle entry {name!r} is a symlink; refusing to import."
             )
         # No ``if name`` guard: an empty name is refused, not skipped.
-        verdict = _entry_verdict_for_info(info)
+        verdict = _entry_verdict_for_info(zf, info)
         if verdict.kind == _ENTRY_REFUSE:
             raise DesignSystemImportError(_path_refusal_message(name, verdict.reason))
         if verdict.kind == _ENTRY_FILE:
@@ -1630,7 +1761,7 @@ def _iter_safe_entries(
         rel_raw = name[len(root_prefix):]
         if not rel_raw:
             continue  # the root-prefix directory entry itself
-        verdict = _entry_verdict_for_info(info, rel_raw)
+        verdict = _entry_verdict_for_info(zf, info, rel_raw)
         if verdict.kind == _ENTRY_REFUSE:
             raise DesignSystemImportError(
                 _path_refusal_message(rel_raw, verdict.reason)
