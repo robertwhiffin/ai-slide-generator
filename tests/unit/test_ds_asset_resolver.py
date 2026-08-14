@@ -404,3 +404,80 @@ class TestSessionsRouteDeckSubstitutionScoping:
         assert victim_b64 not in html
         assert f"{{{{ds-asset:{victim.id}}}}}" in html
         assert f"data:image/svg+xml;base64,{attacker_b64}" in html
+
+
+class TestTombstonedDesignSystemStillResolvesStoredDeckAssets:
+    """A finished deck pinned to a SOFT-DELETED design system keeps its bytes.
+
+    This is the D7 ruling at the RENDER seam, and it is the guardrail on the
+    WD-03 fix: gating the generation-side ``search_brand_assets`` tool on
+    ``is_active`` must NOT leak into asset resolution. Every call site of
+    ``resolve_active_design_system_id`` (render, legacy PPTX export, huashu
+    export, Google Slides export, session/version read, MCP get_deck) feeds this
+    substitution, so filtering tombstones HERE would strip fonts and images from
+    every historic deck — including the ``@font-face src: url('{{ds-asset:N}}')``
+    handles stored decks carry.
+    """
+
+    def _tombstone_with_assets(self, session):
+        from src.database.models.design_system import DesignSystem, DesignSystemAsset
+
+        ds = DesignSystem(name="Retired Brand")
+        ds.assets.append(
+            DesignSystemAsset(
+                kind="font", filename="brand.woff2", mime="font/woff2",
+                data=b"OTTO-font-bytes", size_bytes=15,
+            )
+        )
+        ds.assets.append(
+            DesignSystemAsset(
+                kind="logo", filename="logo.svg", mime="image/svg+xml",
+                data=b"<svg>retired</svg>", size_bytes=18,
+            )
+        )
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+        ds.is_active = False  # the soft delete
+        session.commit()
+        return ds.id, ds.assets[0].id, ds.assets[1].id
+
+    def test_font_face_handle_still_resolves_after_a_soft_delete(self, session):
+        from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
+
+        ds_id, font_id, _ = self._tombstone_with_assets(session)
+        css = (
+            "@font-face { font-family: 'Brand'; "
+            f"src: url('{{{{ds-asset:{font_id}}}}}') format('woff2'); }}"
+        )
+        out = substitute_ds_asset_placeholders(css, session, design_system_id=ds_id)
+
+        expected = base64.b64encode(b"OTTO-font-bytes").decode()
+        assert f"data:font/woff2;base64,{expected}" in out
+        assert "{{ds-asset:" not in out
+
+    def test_whole_stored_deck_still_resolves_after_a_soft_delete(self, session):
+        from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
+
+        ds_id, font_id, logo_id = self._tombstone_with_assets(session)
+        deck = {
+            "css": f"@font-face {{ src: url('{{{{ds-asset:{font_id}}}}}'); }}",
+            "slides": [{"html": f'<img src="{{{{ds-asset:{logo_id}}}}}"/>'}],
+        }
+        substitute_deck_dict_ds_assets(deck, session, design_system_id=ds_id)
+
+        assert "{{ds-asset:" not in deck["css"]
+        assert "{{ds-asset:" not in deck["slides"][0]["html"]
+        assert base64.b64encode(b"OTTO-font-bytes").decode() in deck["css"]
+        assert base64.b64encode(b"<svg>retired</svg>").decode() in deck["slides"][0]["html"]
+
+    def test_cross_design_system_handles_still_fail_closed_on_a_tombstone(self, session):
+        """Retention is not a relaxation: a FOREIGN handle stays inert."""
+        from src.utils.ds_asset_utils import substitute_ds_asset_placeholders
+
+        ds_id, _, _ = self._tombstone_with_assets(session)
+        other = _make_asset(session, data=b"<svg>other</svg>", name="Other Brand")
+
+        html = f'<img src="{{{{ds-asset:{other.id}}}}}"/>'
+        out = substitute_ds_asset_placeholders(html, session, design_system_id=ds_id)
+        assert out == html  # left as a literal, no bytes disclosed

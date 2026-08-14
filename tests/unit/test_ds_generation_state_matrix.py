@@ -9,7 +9,8 @@ The states, None/empty-safe (no exotic edge cases):
 3. design_system_id + template_id (Phase 4) -> a valid pin appends the
    SELECTED-TEMPLATE block at prompt-assembly time; an absent/invalid pin is
    byte-identical to the no-template path (ignored + logged, never a 500); tool
-   registration stays gated on design_system_id ALONE.
+   registration is gated on the ACTIVE design system and a template_id NEVER
+   changes it.
 4. design_system_id set, but the PERSISTED ``compiled_style_content`` predates the
    current compiler (stale/missing version marker) or was never compiled -> the
    factory recompiles it lazily from the row's persisted tokens/files/assets at
@@ -112,6 +113,22 @@ def _prompts_with_db(config, db):
         return _get_prompt_content(config)
 
 
+def _patched_db(session):
+    """Yield the test session from the call-time ``get_db_session`` import.
+
+    Tool registration reads the design system's ``is_active`` (a tombstone must not
+    get a brand tool), so ``_build_tools`` needs the same database the fixture
+    populated.
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        yield session
+
+    return patch("src.core.database.get_db_session", _cm)
+
+
 class TestStateNoDesignSystem:
     def test_legacy_path_unchanged_and_no_brand_asset_tool(self):
         from src.api.schemas.agent_config import AgentConfig
@@ -155,7 +172,8 @@ class TestStateDesignSystemSelected:
         assert "BRAND IMAGE ASSETS" in sp                 # asset contract
         assert "search_brand_assets" in sp               # contract names the tool
 
-        names = [t.name for t in _build_tools(config, {})]
+        with _patched_db(session):
+            names = [t.name for t in _build_tools(config, {})]
         assert "search_brand_assets" in names
         assert "search_images" in names
 
@@ -177,13 +195,14 @@ class TestStateDesignSystemSelected:
 
         sp = _prompts_with_db(config, _dispatching_db(design_system=ds))["system_prompt"]
         assert "BRAND IMAGE ASSETS" in sp  # contract always present
-        assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
+        with _patched_db(session):
+            assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
 
 
 class TestStateTemplateHook:
-    def test_registration_gated_on_design_system_id_alone(self):
+    def test_registration_never_keys_on_the_template_pin(self):
         """The tool builder takes ONLY a design_system_id (no template arg), and
-        registration keys on design_system_id ALONE — a pinned template_id
+        registration keys on the ACTIVE design system — a pinned template_id
         (Phase 4) shapes prompt assembly, never tool registration."""
         from src.api.schemas.agent_config import AgentConfig
         from src.services.agent_factory import _build_tools
@@ -192,7 +211,10 @@ class TestStateTemplateHook:
         assert list(inspect.signature(build_ds_asset_tool).parameters) == ["design_system_id"]
 
         config = AgentConfig(design_system_id=5)
-        assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
+        with patch(
+            "src.services.agent_factory._design_system_is_active", return_value=True
+        ):
+            assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
 
 
 class TestStateTemplatePinned:
@@ -342,10 +364,13 @@ class TestStateTemplatePinned:
         ds = self._templated_ds(session)
         with_template = AgentConfig(design_system_id=ds.id, template_id=ds.templates[0].id)
         without = AgentConfig(design_system_id=ds.id)
-        assert (
-            [t.name for t in _build_tools(with_template, {})]
-            == [t.name for t in _build_tools(without, {})]
-        )
+        with _patched_db(session):
+            pinned_names = [t.name for t in _build_tools(with_template, {})]
+            unpinned_names = [t.name for t in _build_tools(without, {})]
+        assert pinned_names == unpinned_names
+        # Non-vacuity: both lists really carry the brand tool, so this is not two
+        # identically EMPTY registrations agreeing with each other.
+        assert "search_brand_assets" in pinned_names
 
 
 class TestStateStaleCompiledContent:

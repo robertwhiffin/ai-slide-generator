@@ -312,6 +312,44 @@ def _get_prompt_content(
     }
 
 
+def _design_system_is_active(design_system_id: int) -> bool:
+    """True when that design system exists and is ACTIVE.
+
+    The tool gate below needs the same verdict the prompt branch reaches at
+    :func:`_get_prompt_content` (``.filter_by(id=…, is_active=True)``, else
+    *"Design system not found, using default"*), so both halves of a generation
+    request agree about whether a design system is in play.
+
+    NOT the same question as ``chat_service.resolve_active_design_system_id``,
+    despite the name: that resolves the ``{{ds-asset:ID}}`` scope for a deck
+    RESPONSE and deliberately still resolves a soft-deleted system's bytes, so
+    already-generated decks keep their fonts and images (the D7 retention
+    contract). This is the AUTHORING question — may new content be made against
+    this brand — and a tombstone answers no.
+
+    Fails CLOSED. A lookup error degrades exactly the way the prompt branch does
+    (no brand material) rather than advertising a tool whose own lookup would fail
+    in the same breath.
+    """
+    try:
+        from src.core.database import get_db_session
+        from src.database.models import DesignSystem
+
+        with get_db_session() as db:
+            return (
+                db.query(DesignSystem.id)
+                .filter_by(id=design_system_id, is_active=True)
+                .first()
+                is not None
+            )
+    except Exception as e:
+        logger.error(
+            f"Failed to resolve design_system_id for tool registration: {e}",
+            extra={"design_system_id": design_system_id},
+        )
+        return False
+
+
 def _build_tools(
     config: AgentConfig,
     session_data: dict[str, Any],
@@ -351,12 +389,21 @@ def _build_tools(
     )
     tools.append(image_search_tool)
 
-    # Brand-asset search tool — ONLY when a design system is selected (state
-    # guard). Bound to the design_system_id via closure so it surfaces only that
-    # system's assets; the compiled style's ASSET CONTRACT tells the model to call
-    # it. Gated on design_system_id alone — a pinned template_id (Phase 4) shapes
-    # prompt assembly only and never changes tool registration.
-    if config.design_system_id is not None:
+    # Brand-asset search tool — ONLY when a selected design system is ACTIVE.
+    # Bound to the design_system_id via closure so it surfaces only that system's
+    # assets; the compiled style's ASSET CONTRACT tells the model to call it. A
+    # pinned template_id (Phase 4) shapes prompt assembly only and never changes
+    # tool registration.
+    #
+    # The is_active half matters because a session keeps its pin after the design
+    # system is soft-deleted: on the id alone, generation got a fully working brand
+    # tool for a TOMBSTONE (measured: "Found 2 brand asset(s)" with embeddable
+    # handles) while the prompt branch, which does filter is_active, supplied no
+    # brand at all — so new content was authored against a deleted brand with none
+    # of its instructions. Both halves now answer the same question.
+    if config.design_system_id is not None and _design_system_is_active(
+        config.design_system_id
+    ):
         tools.append(build_ds_asset_tool(config.design_system_id))
 
     genie_index = 0
