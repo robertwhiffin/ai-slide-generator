@@ -130,6 +130,45 @@ def test_build_slide_html_body_reset_is_not_in_the_shared_root_reset():
     assert "padding" not in SLIDE_ROOT_RESET_STYLE
 
 
+def test_external_scripts_carry_no_crossorigin_attribute():
+    """WM-02: `crossorigin` blocked Tailwind in the export document.
+
+    It makes these CORS requests; cdn.tailwindcss.com answers 302 with no CORS
+    headers, so the request failed net::ERR_FAILED and Preflight never landed —
+    DS-OFF headings rendered at a different size and weight in the file than on
+    screen (measured: 3 font-size differences and up to 22.50 px of drift, both
+    gone once the attribute is dropped). The frontend emits the same tag without
+    it and it loads (302 -> 200 /3.4.17, verified).
+
+    Dropping it is only safe while there is NO `integrity` attribute: with SRI
+    present, removing `crossorigin` blocks the script outright, which would turn a
+    typography drift into no styling at all. This test pins BOTH halves.
+    """
+    slide = {"slide_id": "s1", "html": "<canvas id='c'></canvas>"}
+    deck = {
+        "title": "T",
+        "css": "",
+        "scripts": "",
+        "external_scripts": [
+            "https://cdn.tailwindcss.com",
+            "https://cdn.jsdelivr.net/npm/chart.js",
+        ],
+    }
+    html = build_slide_html(slide, deck)
+
+    script_tags = [
+        line for line in html.splitlines() if "<script src=" in line
+    ]
+    assert script_tags, "external scripts were not emitted at all"
+    for tag in script_tags:
+        assert "crossorigin" not in tag, tag
+        # If SRI is ever added, `crossorigin` becomes REQUIRED again — fail here
+        # rather than silently shipping a script the browser will refuse.
+        assert "integrity" not in tag, (
+            "integrity added without crossorigin — the CDN script will be blocked"
+        )
+
+
 def test_csp_meta_precedes_slide_content():
     # CSP must be parsed before any inline script/handler in the slide body.
     slide = {"slide_id": "s1", "html": '<div onclick="x()">hi</div>'}
