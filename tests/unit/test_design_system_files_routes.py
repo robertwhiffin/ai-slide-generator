@@ -414,3 +414,51 @@ class TestValidatedFilePath:
         from src.api.routes.settings.design_systems import _validated_file_path
 
         assert _validated_file_path(path) is None
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # DOUBLE-encoded: the framework's one decode pass leaves `%252e`,
+            # whose own '%25' hides the traversal from a single-pass check.
+            "%252e%252e/README.md",
+            "%252e%252e%252fREADME.md",
+            "%252e%252e/%252e%252e/etc/passwd",
+            "assets%252f%252e%252e%252fREADME.md",
+            # TRIPLE-encoded: one more wrapper, same smuggle.
+            "%25252e%25252e/README.md",
+            # backslash and absolute-path forms, smuggled the same way
+            "assets%255clogo.svg",
+            "%252fetc%252fpasswd",
+        ],
+    )
+    def test_rejects_multiply_encoded_traversal(self, path):
+        """A value that keeps decoding into a traversal is refused at EVERY depth.
+
+        Inert today (the validated value is only ever an exact-match DB filter
+        scoped to one design system — no second decode, no filesystem sink), so
+        this is completeness rather than a hole. It is pinned because the next
+        consumer of this function may not be so lucky.
+        """
+        from src.api.routes.settings.design_systems import _validated_file_path
+
+        assert _validated_file_path(path) is None
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # A literal '%' is legitimate in a brand's own filename, so the
+            # refusal above must key on TRAVERSAL, never on the '%' character.
+            "assets/100%-scale.png",
+            "assets/50%off-badge.svg",
+            "brand%.css",
+            "a/b%/c.css",
+            # '%41' IS a valid escape and decodes to 'A' — harmless, so decoding
+            # it must not be treated as an attack either.
+            "assets/100%41.png",
+            "%41%42.css",
+        ],
+    )
+    def test_accepts_legitimate_percent_in_filenames(self, path):
+        from src.api.routes.settings.design_systems import _validated_file_path
+
+        assert _validated_file_path(path) == path
