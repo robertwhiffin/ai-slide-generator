@@ -1022,13 +1022,31 @@ class TestSlideFrameConstraints:
         # per-slide, so it does not contradict the deck's vertically-stacked page
         assert "no in-slide scrolling" in out
 
-    def test_frame_block_has_soft_safe_area_guidance(self, session):
+    def test_frame_block_states_the_safe_area_imperatively(self, session):
+        """MEASUREMENT-GATED (WL-02). The wording was "(soft guidance) … roughly
+        72px", with zero occurrences of MUST/REQUIRED in the whole block, and the
+        model obeyed it as written: the horizontal 88px held on 18/18 slides and
+        313/314 ink boxes, while padding-top was 72px on only 3 of 18 slides
+        (observed 64/56/88px, minimum top clearance 54px).
+
+        So the horizontal number is a MUST, the vertical gets an imperative FLOOR
+        rather than an exact demand (requiring exactly 72px would over-constrain
+        composition), and 72px stays the stated target."""
         from src.services.design_system_compiler import compile_design_system
 
         out = compile_design_system(_make_ds(session, tokens=_TOKENS))
-        assert "72px" in out and "88px" in out
-        assert "safe area" in out.lower()
+        block = out[out.index("SLIDE FRAME CONSTRAINTS"):out.index("BRAND IMAGE ASSETS")]
+        safe_area = next(
+            line for line in block.splitlines() if line.startswith("- Safe area")
+        )
+
+        assert "88px" in safe_area and "MUST" in safe_area
+        assert "72px" in safe_area and "TARGET" in safe_area
+        assert "56px" in safe_area and "NEVER" in safe_area
         assert "full-bleed" in out.lower()
+        # The hedges the model was measured taking literally are gone.
+        assert "soft guidance" not in safe_area
+        assert "roughly" not in safe_area
 
     def test_safe_area_is_soft_prose_not_injected_css(self, session):
         """Deliverable #2 is SOFT prose ONLY — the compiler must NOT force-inject a

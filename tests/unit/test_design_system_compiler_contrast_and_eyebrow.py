@@ -33,6 +33,8 @@ which is the defect that was measured.
 All fixtures SYNTHETIC (invented greys/blues/tans, no real brand values).
 """
 
+import re
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -125,6 +127,16 @@ def _section_of(compiled, heading):
     return after.split("\n\n", 1)[0]
 
 
+def _ink_line(section, ink):
+    """The pairing line naming *ink* as the required text colour.
+
+    The pairing is stated as a REQUIREMENT for the text role (WE-02): the model was
+    measured choosing brand accents over the enumerated colour, so the line reads
+    "the text color MUST be <ink>" rather than "Use <ink>".
+    """
+    return _line_starting(section, f"- On these backgrounds the text color MUST be {ink}")
+
+
 def _line_starting(section, prefix):
     """The single line of *section* starting with *prefix* (``""`` if absent)."""
     for line in section.splitlines():
@@ -180,8 +192,8 @@ class TestContrastPairingIsDerivedFromTheSystemsOwnColours:
         compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
         section = _section_of(compiled, _CONTRAST_HEADING)
 
-        light_ink_line = _line_starting(section, f"- Use {_LIGHTEST}")
-        dark_ink_line = _line_starting(section, f"- Use {_DARKEST}")
+        light_ink_line = _ink_line(section, _LIGHTEST)
+        dark_ink_line = _ink_line(section, _DARKEST)
 
         assert _DARK_SURFACE in light_ink_line, (
             f"{_DARK_SURFACE} (7.70:1 vs the lightest ink) is not listed as a "
@@ -196,7 +208,7 @@ class TestContrastPairingIsDerivedFromTheSystemsOwnColours:
         compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
         section = _section_of(compiled, _CONTRAST_HEADING)
 
-        assert _LIGHT_SURFACE in _line_starting(section, f"- Use {_DARKEST}"), (
+        assert _LIGHT_SURFACE in _ink_line(section, _DARKEST), (
             f"{_LIGHT_SURFACE} (13.70:1 vs the darkest ink) is not listed as a "
             "background for it"
         )
@@ -217,8 +229,8 @@ class TestContrastPairingIsDerivedFromTheSystemsOwnColours:
             f"got {unsafe_line!r}"
         )
         # ...and it must not be offered as a safe background for either ink.
-        assert _MID_TONE not in _line_starting(section, f"- Use {_LIGHTEST}")
-        assert _MID_TONE not in _line_starting(section, f"- Use {_DARKEST}")
+        assert _MID_TONE not in _ink_line(section, _LIGHTEST)
+        assert _MID_TONE not in _ink_line(section, _DARKEST)
 
     def test_pairing_is_derived_not_constant(self, session):
         """DIFFERENTIAL: a second palette yields DIFFERENT emitted colours, and
@@ -622,3 +634,57 @@ class TestEyebrowBandWhenTheRampCannotReachIt:
         line = self._eyebrow_line(recompute_compiled_style_content(ds))
 
         assert "14px" in line, line
+
+
+class TestPairingIsImperativeForTheTextRole:
+    """MEASUREMENT-GATED (WE-02). The pairings were AVAILABLE AND IGNORED.
+
+    On the measured deck all three offending backgrounds were enumerated WITH a
+    prescribed AA-passing text colour and the model chose otherwise every time:
+    coral #FF5F46 on oat #F9F7F4 at 2.8146:1 where #000000 (19.64:1) was named,
+    lava #FF3621 on white where #000000 (21:1) was named, and for the CTA it picked
+    the EXACT INVERSE of what the artifact stated for that background. 24 of 108
+    rated node-cells fell below 4.5:1 — 0 of them primary text, every offender a
+    brand ACCENT used as text, all in the model-authored CSS tail. Nothing was
+    invented: the palette was misused, not exceeded.
+
+    The colours are NOT rewritten — silently correcting a brand's palette would
+    defeat the purpose of a design system — so the only lever is to state the
+    pairing as a requirement for the TEXT role.
+    """
+
+    def test_the_pairing_lines_are_requirements_not_suggestions(self, session):
+        compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
+        section = _section_of(compiled, _CONTRAST_HEADING)
+
+        pairing_lines = [
+            line
+            for line in section.splitlines()
+            if line.startswith("- On these backgrounds the text color MUST be")
+        ]
+        assert pairing_lines, f"no imperative pairing line; got:\n{section}"
+
+    def test_using_an_accent_as_text_on_a_listed_background_is_forbidden(self, session):
+        """The measured behaviour, named explicitly: an on-brand accent is not a
+        licence to override the pairing."""
+        compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
+        section = _section_of(compiled, _CONTRAST_HEADING)
+
+        assert "REQUIREMENTS for TEXT" in section
+        assert "accent" in section
+        # Small label text is where the measured failures landed (eyebrows at
+        # 2.8146:1), so the rule must reach them by name and not read as body-only.
+        assert "eyebrow" in section.lower()
+
+    def test_no_colour_is_rewritten(self, session):
+        """The fix is prompt-side only: every colour the artifact names is still one
+        of the system's own tokens."""
+        compiled = compile_design_system(_make_ds(session, tokens=_PALETTE))
+        section = _section_of(compiled, _CONTRAST_HEADING)
+
+        declared = {token["value"].upper() for token in _PALETTE}
+        emitted = set(re.findall(r"#[0-9A-Fa-f]{6}", section))
+        assert emitted <= {value.upper() for value in declared}, (
+            f"the artifact names a colour the system never declared: "
+            f"{emitted - declared}"
+        )
