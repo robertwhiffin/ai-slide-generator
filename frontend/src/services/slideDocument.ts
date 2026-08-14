@@ -168,6 +168,7 @@ export function slideHostFrameStyle(hostSelector: string): string {
 // truncating its bottom edge, and the frame contract gives a
 // background-carrying slide wrapper the area it needs to paint at all.
 export const SLIDE_PREVIEW_RESET_STYLE = `
+  * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; overflow: hidden; }
   ${SLIDE_ROOT_RESET_STYLE}
   ${slideHostFrameStyle('body')}
