@@ -452,6 +452,63 @@ class TestDotPrefixedThumbnailEndToEnd:
         assert resp.status_code == 404
 
 
+class TestImportReportsDroppedEntries:
+    """A thumbnail whose bytes are not a recognizable raster is DROPPED so one junk
+    screenshot cannot cost the whole upload — but the caller used to be told the
+    import succeeded with no indication anything was ignored. The import response
+    carries a non-fatal warning list naming each dropped entry and why."""
+
+    def _bundle_with_unsniffable_thumbnail(self):
+        from tests.unit.conftest_design_system import (
+            dot_thumbnail_bundle_files,
+            dot_thumbnail_manifest,
+        )
+
+        files = dot_thumbnail_bundle_files()
+        files["templates/corporate/.thumbnail"] = b"this is not an image at all"
+        return {"manifest": dot_thumbnail_manifest(), "files": files}
+
+    def test_import_still_succeeds(self, client):
+        resp = _import(client, bundle_kwargs=self._bundle_with_unsniffable_thumbnail())
+        assert resp.status_code == 201, resp.text
+
+    def test_response_names_the_dropped_entry_and_the_reason(self, client):
+        resp = _import(client, bundle_kwargs=self._bundle_with_unsniffable_thumbnail())
+        warnings = resp.json()["warnings"]
+        paths = [w["path"] for w in warnings]
+        assert "templates/corporate/.thumbnail" in paths, warnings
+        reason = next(w["reason"] for w in warnings if w["path"].endswith(".thumbnail"))
+        assert "image" in reason.lower()
+
+    def test_only_the_unreadable_entry_is_reported(self, client):
+        """The other three thumbnails imported fine, so the warning list is not a
+        blanket complaint about the bundle."""
+        resp = _import(client, bundle_kwargs=self._bundle_with_unsniffable_thumbnail())
+        body = resp.json()
+        assert len(body["warnings"]) == 1, body["warnings"]
+        templates = client.get(f"{BASE}/{body['id']}/templates").json()["templates"]
+        with_thumb = [t for t in templates if t["thumbnail_url"]]
+        assert len(with_thumb) == 3
+
+    def test_clean_bundle_reports_no_warnings(self, client):
+        """Positive control: the field is present and EMPTY for a good bundle, so a
+        passing assertion above is not just reading a missing key."""
+        from tests.unit.conftest_design_system import (
+            dot_thumbnail_bundle_files,
+            dot_thumbnail_manifest,
+        )
+
+        resp = _import(
+            client,
+            bundle_kwargs={
+                "manifest": dot_thumbnail_manifest(),
+                "files": dot_thumbnail_bundle_files(),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["warnings"] == []
+
+
 # ---------------------------------------------------------------------------
 # Reference integrity (design_system_id in agent-config validator)
 # ---------------------------------------------------------------------------

@@ -615,6 +615,16 @@ _THUMBNAIL_BASENAME_PREFIXES = ("preview", "thumbnail")
 
 
 def _is_thumbnail_basename(basename: str) -> bool:
+    """True for a screenshot basename, with or without a leading dot.
+
+    A PREFIX match on purpose, matching the breadth of the importer's
+    ``preview[^/]*\\.<ext>`` shape. A C0/DEL control character is refused outright:
+    the prefix test alone says nothing about what TRAILS the basename, and this is
+    the third gate on the same file — the importer now refuses such a path, so this
+    is defence in depth that no longer depends on the importer for the property.
+    """
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in basename):
+        return False
     return basename.lstrip(".").startswith(_THUMBNAIL_BASENAME_PREFIXES)
 
 

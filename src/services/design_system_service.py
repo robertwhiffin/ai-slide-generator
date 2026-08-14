@@ -59,7 +59,7 @@ import logging
 import mimetypes
 import re
 import zipfile
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from sqlalchemy.orm import Session, defer
 
@@ -77,6 +77,22 @@ logger = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "_ds_manifest.json"
 DEFAULT_CSS_TOKEN_SOURCE = "colors_and_type.css"
+
+
+class BundleImportWarning(NamedTuple):
+    """A bundle entry the import DROPPED without failing the upload.
+
+    Some entries are individually unusable without making the bundle unusable — an
+    unsniffable template screenshot, a CSS token source that is not UTF-8. Dropping
+    just that entry is right (one junk file must not cost the whole upload), but the
+    caller was then told the import succeeded with nothing to say a file had been
+    ignored, so the only record was a server-side log the user cannot see. These ride
+    back on the import response instead.
+    """
+
+    path: str
+    reason: str
+
 
 # Color sub-groups the compiler renders as :root vars. A token name whose first
 # segment is one of these carries its group in the name (e.g. --brand-accents-lava).
@@ -280,8 +296,14 @@ def _infer_asset_kind(rel_path: str) -> str:
 # raster-image extension) — stored as a ``template_shot`` asset so the Phase 4
 # template picker can serve thumbnails. Checked BEFORE ``_should_skip`` (which
 # excludes ``templates/**`` from generic asset storage).
+#
+# Anchored with ``\Z``, NOT ``$``: in Python ``$`` matches at the end of the string
+# OR immediately before a single trailing newline, so a ``$``-anchored allowlist on
+# a PATH accepts ``<allowed shape>\n`` — ``templates/x/preview.png\n`` was matched,
+# stored, and served. ``\Z`` is the true end of string. Applies to every allowlist
+# regex in this module that judges a path or a filename.
 _TEMPLATE_PREVIEW_RE = re.compile(
-    r"^templates/[^/]+/preview[^/]*\.(png|jpe?g|gif|webp)$", re.IGNORECASE
+    r"^templates/[^/]+/preview[^/]*\.(png|jpe?g|gif|webp)\Z", re.IGNORECASE
 )
 
 # The SAME screenshot as it actually ships in a real export: DOT-PREFIXED, named
@@ -296,8 +318,11 @@ _TEMPLATE_PREVIEW_RE = re.compile(
 # from the general dotfile skip; a dotfile anywhere else stays skipped. Because
 # a match carries no extension, its media type is NOT guessable from the name and
 # is sniffed from the content instead (:func:`_sniff_raster_mime`).
+# ``\Z`` for the same reason as _TEMPLATE_PREVIEW_RE: with ``$`` this accepted
+# ``templates/x/.thumbnail\n``, which was then stored AND linked as a template's
+# thumbnail_url.
 _TEMPLATE_THUMBNAIL_RE = re.compile(
-    r"^templates/[^/]+/\.?(thumbnail|preview)$", re.IGNORECASE
+    r"^templates/[^/]+/\.?(thumbnail|preview)\Z", re.IGNORECASE
 )
 
 # Magic-byte signatures for the raster formats a template thumbnail may be. An
@@ -563,11 +588,19 @@ def import_bundle(
     user: Optional[str],
     name_override: Optional[str] = None,
     source_filename: Optional[str] = None,
+    warnings: Optional[list[BundleImportWarning]] = None,
 ) -> DesignSystem:
     """Import a ``.zip`` design-system bundle into Lakebase and compile it.
 
     Returns the persisted :class:`DesignSystem` (committed, with tokens + assets +
     ``compiled_style_content``).
+
+    Args:
+        warnings: optional collector. Pass a list to receive an
+            :class:`BundleImportWarning` for every entry the import DROPPED without
+            failing — the caller can then tell the user which files were ignored and
+            why. Omitting it keeps the previous signature working for the many
+            callers that only want the design system.
 
     Raises:
         DesignSystemImportError: bundle is not a zip, missing/invalid manifest, or
@@ -626,8 +659,10 @@ def import_bundle(
         # Read the DECLARED CSS token sources ONCE (budgeted); the same bytes are
         # reused for both token parsing and source-file retention (no double-charge).
         css_sources = _read_css_sources(zf, root_prefix, manifest, budget)
-        tokens = _collect_tokens(manifest, _decode_css_texts(css_sources))
-        assets, files = _collect_assets_and_files(zf, root_prefix, budget, css_sources)
+        tokens = _collect_tokens(manifest, _decode_css_texts(css_sources, warnings))
+        assets, files = _collect_assets_and_files(
+            zf, root_prefix, budget, css_sources, warnings
+        )
 
     # Stored VERBATIM; the strip decides only whether the brand wrote a description
     # at all (a whitespace-only one describes nothing, so it stays NULL). Same split
@@ -976,7 +1011,10 @@ def _read_css_sources(
     return result
 
 
-def _decode_css_texts(css_sources: "dict[str, bytes]") -> list[str]:
+def _decode_css_texts(
+    css_sources: "dict[str, bytes]",
+    warnings: "Optional[list[BundleImportWarning]]" = None,
+) -> list[str]:
     """Decode the pre-read CSS source bytes to UTF-8 text (skip undecodable)."""
     texts: list[str] = []
     for path, raw in css_sources.items():
@@ -984,31 +1022,98 @@ def _decode_css_texts(css_sources: "dict[str, bytes]") -> list[str]:
             texts.append(raw.decode("utf-8"))
         except UnicodeDecodeError:
             logger.warning("Skipping non-UTF-8 CSS token source: %s", path)
+            if warnings is not None:
+                warnings.append(
+                    BundleImportWarning(
+                        path,
+                        "not valid UTF-8; its design tokens were not read.",
+                    )
+                )
     return texts
 
 
 def _safe_relpath(rel_path: str) -> Optional[str]:
-    """Normalize a bundle-relative path; return ``None`` if it is unsafe (zip-slip).
+    """The CANONICAL form of a bundle-relative FILE path, or ``None`` to REFUSE it.
 
-    Rejects absolute paths (POSIX ``/`` or a Windows drive) and any path that
-    escapes the bundle root via a ``..`` segment. Backslashes are normalized to
-    ``/`` and ``.``/empty segments are collapsed. Assets are stored as DB bytes
-    (never written to disk), so this is defence-in-depth — and it keeps the
-    persisted ``design_system_file.path`` values safe for the later file browser.
+    VALIDATION, not laundering: a path is already canonical or it is refused. It is
+    never rewritten into an acceptable form, because rewriting changes the very
+    thing later rules are about to judge. ``assets/innocent/.`` used to normalize to
+    ``assets/innocent`` — losing the ``.`` basename that made it junk — and the
+    entry was stored under a path that was not its own name. Two entries could also
+    collapse onto ONE identity (``assets/./x``, ``assets//x`` and ``assets/x`` all
+    became ``assets/x``), leaving which bytes win to zip ordering.
+
+    Refused: an empty name, a C0/DEL control character (``\\n`` and NUL among them,
+    so no rule downstream has to cope with one), an absolute path (POSIX ``/`` or a
+    Windows drive), and any ``.``, ``..`` or EMPTY segment. Backslashes are still
+    folded to ``/`` first, which is the one tolerance kept deliberately: zips written
+    on Windows use them as separators, and folding cannot erase a segment or change a
+    basename's junk-ness the way the collapses above did.
+
+    A trailing-slash DIRECTORY marker is not a file path and is refused here; callers
+    reach the directory case through :func:`_classify_bundle_entry`, which strips the
+    marker and validates the path it names.
+
+    This is the contract the file browser already relies on: stored
+    ``design_system_file.path`` values are canonical by construction, so
+    ``_validated_file_path`` can reject a non-canonical REQUEST instead of
+    normalizing it into an accepted one.
     """
     if not rel_path:
         return None
     normalized = rel_path.replace("\\", "/")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in normalized):
+        return None
     if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
         return None
-    parts: list[str] = []
-    for segment in normalized.split("/"):
-        if segment in ("", "."):
-            continue
-        if segment == "..":
-            return None
-        parts.append(segment)
-    return "/".join(parts) if parts else None
+    if any(segment in ("", ".", "..") for segment in normalized.split("/")):
+        return None
+    return normalized
+
+
+# The verdict :func:`_classify_bundle_entry` reaches for one zip entry.
+_ENTRY_REFUSE = "refuse"  # unsafe — reject the whole bundle
+_ENTRY_SKIP = "skip"      # legitimate but never stored (directory, OS junk, dotfile)
+_ENTRY_FILE = "file"      # store it, under the canonical path returned alongside
+
+
+def _classify_bundle_entry(rel_path: str) -> tuple[str, Optional[str]]:
+    """THE decision for one bundle entry: refuse it, skip it, or store it.
+
+    ONE place that canonicalizes and then applies EVERY rule. Both gates that judge
+    bundle paths call this — the up-front whole-bundle scan
+    (:func:`_assert_bundle_paths_safe`) and the per-entry iterator
+    (:func:`_iter_safe_entries`) — so they cannot disagree about a path shape, and a
+    new rule cannot be added to one and forgotten in the other. They used to decide
+    separately and DID disagree: the scan refused ``assets/innocent/.`` on its raw
+    basename while the iterator accepted the same entry on its normalized one, and
+    the permissive gate was the one that reached storage.
+
+    Returns ``(verdict, canonical_path)``; the path is set only for ``_ENTRY_FILE``.
+    """
+    if rel_path.endswith("/"):
+        # A directory marker. It is never stored, but the path it NAMES still has to
+        # be canonical, so '../evil/' is refused rather than skipped.
+        return (
+            (_ENTRY_SKIP, None)
+            if _safe_relpath(rel_path[:-1]) is not None
+            else (_ENTRY_REFUSE, None)
+        )
+    canonical = _safe_relpath(rel_path)
+    if canonical is None:
+        return _ENTRY_REFUSE, None
+    low = canonical.lower()
+    if low.startswith("__macosx/") or "/__macosx/" in low:
+        return _ENTRY_SKIP, None
+    base = _basename(low)
+    # The ONE dot-prefixed shape the importer stores is a template folder's
+    # screenshot; every other dotfile stays skipped. Tested against the CANONICAL
+    # path — the same string the recognizer sees downstream.
+    if (base == ".ds_store" or base.startswith(".")) and not _is_template_preview(
+        canonical
+    ):
+        return _ENTRY_SKIP, None
+    return _ENTRY_FILE, canonical
 
 
 def _is_symlink(info: zipfile.ZipInfo) -> bool:
@@ -1029,8 +1134,11 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
     root-prefix scoping — so a malicious entry that falls OUTSIDE the bundle root
     (e.g. ``../evil.png`` when the manifest sits under ``safe/``) is REJECTED, not
     silently skipped. EVERY entry is checked (no exemption for empty or ``.``-only
-    names): absolute paths, ``..`` traversal, and empty/invalid names are refused,
-    and symlink entries are refused before any bytes are read.
+    names): absolute paths, ``..`` traversal, control characters, and empty/invalid
+    names are refused, and symlink entries are refused before any bytes are read.
+
+    The path verdict comes from :func:`_classify_bundle_entry`, the SAME classifier
+    :func:`_iter_safe_entries` uses, so the two gates cannot disagree about a shape.
     """
     for info in zf.infolist():
         name = info.filename
@@ -1038,12 +1146,12 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
             raise DesignSystemImportError(
                 f"Bundle entry '{name}' is a symlink; refusing to import."
             )
-        # No ``if name`` guard: an empty (or ``.``-only) name also fails
-        # ``_safe_relpath`` and must be rejected, not skipped.
-        if _safe_relpath(name) is None:
+        # No ``if name`` guard: an empty (or ``.``-only) name is also refused, not
+        # skipped.
+        if _classify_bundle_entry(name)[0] == _ENTRY_REFUSE:
             raise DesignSystemImportError(
-                f"Bundle contains an unsafe path '{name}' (empty, absolute, or "
-                "parent-directory traversal); refusing to import."
+                f"Bundle contains an unsafe path '{name}' (empty, absolute, "
+                "non-canonical, or parent-directory traversal); refusing to import."
             )
 
 
@@ -1060,31 +1168,26 @@ def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
     the recognizer alone reads as working in a unit test and still drops every real
     thumbnail, because the entry never reaches the recognizer.
 
-    The zip-slip check runs BEFORE the dotfile decision, so normalization and
-    rejection are never skippable by a dot-prefixed name, and the allowlist is
-    tested against the NORMALIZED path — the same string the recognizer sees
-    downstream, so the gate and the recognizer cannot disagree.
+    Every path rule lives in :func:`_classify_bundle_entry` — the same classifier the
+    up-front scan uses — so an entry is judged on its CANONICAL path and neither gate
+    can be patched into disagreeing with the other. Stripping ``root_prefix`` is the
+    only work done here, and it is bookkeeping rather than a path rule.
     """
     for info in zf.infolist():
         name = info.filename
         if not name.startswith(root_prefix):
             continue
         rel_raw = name[len(root_prefix):]
-        if not rel_raw or rel_raw.endswith("/"):
-            continue  # directory entry
-        low = rel_raw.lower()
-        if low.startswith("__macosx/") or "/__macosx/" in low:
-            continue
-        safe = _safe_relpath(rel_raw)
-        if safe is None:
+        if not rel_raw:
+            continue  # the root-prefix directory entry itself
+        verdict, safe = _classify_bundle_entry(rel_raw)
+        if verdict == _ENTRY_REFUSE:
             raise DesignSystemImportError(
-                f"Bundle contains an unsafe path '{rel_raw}' (absolute path or "
-                "parent-directory traversal); refusing to import."
+                f"Bundle contains an unsafe path '{rel_raw}' (absolute path, "
+                "non-canonical path, or parent-directory traversal); refusing to "
+                "import."
             )
-        base = _basename(safe.lower())
-        if (base == ".ds_store" or base.startswith(".")) and not _is_template_preview(
-            safe
-        ):
+        if safe is None:  # _ENTRY_SKIP
             continue
         yield info, safe
 
@@ -1204,6 +1307,7 @@ def _collect_assets_and_files(
     root_prefix: str,
     budget: "_SizeBudget",
     css_sources: "dict[str, bytes]",
+    warnings: "Optional[list[BundleImportWarning]]" = None,
 ) -> tuple[list[DesignSystemAsset], list[DesignSystemFile]]:
     """Read a bundle into asset rows + file rows in one safety-checked pass.
 
@@ -1268,6 +1372,17 @@ def _collect_assets_and_files(
                         rel,
                         len(data),
                     )
+                    # A server-side log alone left the user believing the import was
+                    # complete; the same fact rides back on the response.
+                    if warnings is not None:
+                        warnings.append(
+                            BundleImportWarning(
+                                rel,
+                                "not a PNG, JPEG, GIF or WebP image "
+                                f"({len(data)} bytes); this template's thumbnail "
+                                "was not stored.",
+                            )
+                        )
                     continue
                 mime = sniffed
             else:
