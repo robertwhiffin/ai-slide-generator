@@ -58,10 +58,15 @@ export const SlideSelection: React.FC<SlideSelectionProps> = ({
     // the 1280x720 frame AND stretches the slide's background-carrying wrapper
     // to fill it, without which that wrapper collapses to height 0 and the
     // deck background never paints (see slideHostFrameStyle).
+    //
+    // Deliberately no universal `* { box-sizing: border-box }` either. This
+    // surface DID declare one for a long time, and it was measured ~91,034 px
+    // away from the Claude Design ground truth for exactly that reason — it was
+    // never the reference rendering it was once assumed to be. The only
+    // box-sizing a preview may impose is the SCOPED one in slideHostFrameStyle,
+    // which mirrors deck-stage.js's `::slotted(*)`. Full reasoning and numbers
+    // live on SLIDE_PREVIEW_RESET_STYLE in services/slideDocument.ts.
     const resetStyle = `
-      * {
-        box-sizing: border-box;
-      }
       body {
         margin: 0;
       }

@@ -42,10 +42,15 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
 
     // Layout/reset CSS that wraps the deck CSS. Passed as extraHeadStyle so it
     // is appended after deck.css inside the builder's <style> block.
+    //
+    // Deliberately no universal `* { box-sizing: border-box }`. This surface DID
+    // declare one for a long time, and it was measured ~91,034 px away from the
+    // Claude Design ground truth for exactly that reason — it was never the
+    // reference rendering it was once assumed to be. The only box-sizing a
+    // preview may impose is the SCOPED one in slideHostFrameStyle, which mirrors
+    // deck-stage.js's `::slotted(*)`. Full reasoning and numbers live on
+    // SLIDE_PREVIEW_RESET_STYLE in services/slideDocument.ts.
     const extraHeadStyle = `
-    * {
-      box-sizing: border-box;
-    }
     html, body {
       width: 100%;
       height: 100%;

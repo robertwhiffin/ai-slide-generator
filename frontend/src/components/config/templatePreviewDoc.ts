@@ -31,19 +31,21 @@ export const PREVIEW_CSP =
  * The preview frame's own reset, injected ahead of the template's head so the
  * template can still override it.
  *
- * `* { box-sizing: border-box }` is part of the reset because the CORRECT
- * rendering already is border-box: SlideSelection and PresentationMode both
- * supply it, so uploaded templates were authored under it, and the surfaces that
- * omitted it (this pop-out, plus SlideTile/VisualEditorPanel via
- * SLIDE_PREVIEW_RESET_STYLE) were the ones rendering differently. Measured on
- * reference-architecture #2, the tile-vs-selection difference was 91,146 px in
- * BOTH the dsv5 and dsv6 builds — pre-existing and identical — and adding this one
- * declaration makes them byte-identical. Generated decks are unaffected: their own
- * CSS sets it, which is why every generated deck already measured 0.00 px across
- * all four surfaces. The gap bit only TEMPLATE slides, which rely on the host.
+ * NO UNIVERSAL `* { box-sizing: border-box }` — see SLIDE_PREVIEW_RESET_STYLE in
+ * services/slideDocument.ts for the full reasoning and the measurements. In
+ * short: slide content is CONTENT-box in Claude Design (the templates declare no
+ * `box-sizing` at all; their deck-stage.js scopes it to `::slotted(*)`, which
+ * {@link slideHostFrameStyle} mirrors), so a universal reset here renders the
+ * template in a box model it was never authored against.
+ *
+ * This surface is the one C6 measures, which makes it the most direct witness:
+ * with the universal declaration it read 283,317 / 29,491,200 differing pixels
+ * against the template rendered by its own authentic deck-stage.js; without it,
+ * 0. Generated decks are unaffected either way — their own CSS sets box-sizing.
+ * The declaration only ever bit TEMPLATE slides, which rely on this reset.
  */
 export const PREVIEW_RESET_STYLE =
-  '<style>*{box-sizing:border-box}html,body{margin:0;overflow:hidden}</style>';
+  '<style>html,body{margin:0;overflow:hidden}</style>';
 
 /**
  * A {{ds-asset:ID}} handle that still reaches the builder (a backend that
