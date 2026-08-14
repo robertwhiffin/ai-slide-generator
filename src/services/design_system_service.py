@@ -1088,6 +1088,17 @@ _REASON_LOCAL_HEADER = (
     "be read, so whether the archive states one name for this entry or two cannot be "
     "established"
 )
+# Distinct from :data:`_REASON_EMPTY`, which is about a name that IS empty everywhere.
+# This one is about a name the ARCHIVE leaves empty while the reader resolves a usable
+# one from an extra field — so the message has to name both halves, or it reads as a
+# complaint about a name the user can see is not empty.
+_REASON_EMPTY_RECORDED_NAME = (
+    "the archive records NO name for this entry at all. An empty central-directory "
+    "name is not a legitimate archive member, and it is not harmless either: an "
+    "Info-ZIP Unicode Path extra field can supply a replacement (its checksum matches "
+    "an empty name trivially), so the entry ends up with a name that was never "
+    "recorded for it"
+)
 _REASON_ABSOLUTE = (
     "it is an absolute path, so it names a location outside the bundle rather than "
     "a file inside it"
@@ -1403,8 +1414,26 @@ def _raw_entry_name(info: zipfile.ZipInfo) -> str:
     ``ZipInfo.__init__`` truncates ``filename`` at the first NUL byte and keeps the
     real central-directory name in ``orig_filename``. Every gate here reads the name
     through this function so validation judges what the archive actually says.
+
+    ABSENT and EMPTY are different answers, and only an explicit ``None`` test tells
+    them apart. ``or`` did not: it fell back to ``filename`` for an ``orig_filename``
+    of ``""`` as readily as for a missing attribute — which is this module's own
+    laundering, performed at the one function whose entire job is to report the raw
+    name. An empty central name is attacker-controlled data with meaning, and CPython
+    will happily REPLACE it: a ``0x7075`` record needs its checksum to match the
+    central name, and the CRC-32 of ``b""`` is 0, so the record is honoured and
+    ``filename`` becomes whatever it declares. The fallback then handed every gate
+    that name, so ``orig_filename != filename`` compared the replacement against
+    itself and the local-header comparison compared against it too. Measured: an entry
+    with an empty central name, a local name of ``slides/benign.bin`` and a record
+    declaring the same passed both and was yielded for storage.
+
+    The empty name is now REPORTED rather than replaced; refusing it is
+    :func:`_entry_identity_refusal`'s call, on :data:`_REASON_EMPTY_RECORDED_NAME`.
+    The ``getattr`` default stays for a ``ZipInfo`` that genuinely lacks the attribute.
     """
-    return getattr(info, "orig_filename", None) or info.filename
+    raw = getattr(info, "orig_filename", None)
+    return info.filename if raw is None else raw
 
 
 # Info-ZIP Unicode Path Extra Field. Its whole purpose is to declare a name for an
@@ -1523,8 +1552,30 @@ def _local_header_identity(
     the same reason the extra field is: the point is what the bytes say. The header is
     located by ``info.header_offset`` — an absolute file offset, adjusted by CPython
     for any prepended data — and parsed at the documented offsets rather than guessed
-    at. Seeking ``zf.fp`` is safe alongside the reader's own use of it: an open entry
-    stream re-seeks to its own position before every read.
+    at.
+
+    THE OFFSET IS THE ARCHIVE'S, NOT THE READER'S. ``header_offset`` looks like a value
+    the zip reader vouched for and is nothing of the kind: a central directory record
+    may carry the legacy sentinel ``0xffffffff`` in its 32-bit offset field plus a ZIP64
+    extra field holding a 64-bit replacement, and ``ZipInfo._decodeExtra`` substitutes
+    that verbatim without ever comparing it to the size of the file. A 146-byte archive
+    can therefore claim its entry's local header begins at ``2**64 - 1``. So the offset
+    is bound-checked against the archive's real size BEFORE the seek, and an offset that
+    cannot hold a header is unreadable like any other — which also makes "past the end
+    of the file" and "too large to seek to at all" one case instead of two.
+
+    PRECONDITION on sharing ``zf.fp``, stated rather than assumed. This seeks a file
+    pointer it does not own, and it does so WITHOUT taking ``ZipFile._lock``, so it is
+    not safe in general — a truly concurrent read, or a file object shared with anything
+    outside this ``ZipFile``, could be moved out from under mid-read. It is safe for
+    THIS importer's usage, and only because of four properties that hold together:
+    :func:`import_bundle` wraps the upload in a private :class:`io.BytesIO` that nothing
+    else holds a reference to; the whole-bundle scan runs to completion before any entry
+    is read; ``ZipFile.open``'s reader re-seeks to its own position before every read, so
+    a moved pointer cannot corrupt an open stream; and the asset reads are synchronous
+    ``zf.read`` calls with no interleaving. The position is restored afterwards anyway —
+    it costs one seek and removes the need for a reader of this function to know any of
+    the above.
 
     ``None`` means the header could not be read as a local file header at all, which
     callers treat as a refusal (:data:`_REASON_LOCAL_HEADER`) rather than as
@@ -1534,21 +1585,39 @@ def _local_header_identity(
     if fp is None:
         return None
     try:
-        fp.seek(info.header_offset)
-        header = fp.read(_LOCAL_HEADER_LEN)
-        if (
-            len(header) != _LOCAL_HEADER_LEN
-            or header[:4] != _LOCAL_HEADER_SIGNATURE
-        ):
-            return None
-        name_len, extra_len = struct.unpack_from(
-            "<HH", header, _LOCAL_HEADER_LENGTHS_OFFSET
-        )
-        name_bytes = fp.read(name_len)
-        extra = fp.read(extra_len)
-    except (OSError, ValueError):
-        # A hostile header_offset can point past the end of the file, and a seek on a
-        # detached/closed stream raises. Unreadable, like any other unparseable header.
+        resume_at = fp.tell()
+        try:
+            fp.seek(0, io.SEEK_END)
+            archive_size = fp.tell()
+            offset = info.header_offset
+            # Negative is nonsense and at/after EOF means the header is not there. Both
+            # are checked BEFORE the seek, because a large enough offset does not fail
+            # the seek gracefully — it cannot be converted to a C ssize_t and raises
+            # OverflowError, which is not an OSError and is not a ValueError.
+            if offset < 0 or offset + _LOCAL_HEADER_LEN > archive_size:
+                return None
+            fp.seek(offset)
+            header = fp.read(_LOCAL_HEADER_LEN)
+            if (
+                len(header) != _LOCAL_HEADER_LEN
+                or header[:4] != _LOCAL_HEADER_SIGNATURE
+            ):
+                return None
+            name_len, extra_len = struct.unpack_from(
+                "<HH", header, _LOCAL_HEADER_LENGTHS_OFFSET
+            )
+            name_bytes = fp.read(name_len)
+            extra = fp.read(extra_len)
+        finally:
+            fp.seek(resume_at)
+    except (OSError, ValueError, OverflowError):
+        # A seek on a detached/closed stream raises, and the bound check above cannot
+        # cover an arithmetic surprise nobody has thought of yet — OverflowError is
+        # here as the backstop for the next one, since the whole point of this helper
+        # is that its input is hostile. Unreadable, like any other unparseable header.
+        #
+        # NOT bare ``Exception``: a genuine bug in the parsing this guards must still
+        # crash loudly rather than be laundered into a path refusal.
         return None
     if len(name_bytes) != name_len or len(extra) != extra_len:
         return None
@@ -1585,8 +1654,16 @@ def _entry_identity_refusal(
 
     Checked in that order, so the reported reason names the shallowest defect the
     entry has rather than the deepest.
+
+    All four presuppose that the archive records a name at all, which is why the EMPTY
+    recorded name is refused ahead of them: an entry with no central-directory name has
+    no identity for this function to establish, and every comparison below would be
+    against ``""``. It is reported as the empty name it is rather than as a mismatch
+    with whatever CPython resolved, because that is the fact the user can act on.
     """
     central = _raw_entry_name(info)
+    if not central:
+        return _REASON_EMPTY_RECORDED_NAME
     if central != info.filename:
         return _REASON_NAME_MISMATCH
     reason = _extra_field_name_refusal(info.extra or b"", central)
