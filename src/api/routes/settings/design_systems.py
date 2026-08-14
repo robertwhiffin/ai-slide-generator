@@ -25,6 +25,7 @@ import re
 import unicodedata
 from collections import OrderedDict
 from typing import Any, List, Optional, cast
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
@@ -1180,6 +1181,35 @@ _TEXT_SOURCE_MIMES = frozenset(
 # pass — only ever seen in double-encoding smuggling attempts, so reject outright.
 _ENCODED_TRAVERSAL_RE = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
 
+# How many decode passes a value may need before it stops changing. A value still
+# mutating after this many is pathological, never a real bundle path, and is
+# refused rather than normalized (see :func:`_validated_file_path`).
+_MAX_DECODE_PASSES = 4
+
+
+def _has_canonical_shape(value: str) -> bool:
+    """True when ``value`` has the shape of a canonical bundle-relative path.
+
+    The SHAPE half of :func:`_validated_file_path`, factored out so the exact same
+    rules can be re-applied to each decoded form of a request path — one source of
+    truth, rather than a second, weaker copy of the checks.
+    """
+    if not value or "\\" in value:
+        return False
+    # NUL / C0 control characters never appear in a legitimate stored path, and
+    # NUL in particular must be rejected BEFORE the DB lookup: psycopg2 refuses
+    # NUL in a bound parameter (ValueError), which would surface as a 500
+    # instead of the uniform opaque 404 (SQLite masks this as a no-match 404).
+    if any(ord(ch) < 0x20 for ch in value):
+        return False
+    if _ENCODED_TRAVERSAL_RE.search(value):
+        return False
+    if value.startswith("/") or re.match(r"^[A-Za-z]:", value):
+        return False
+    if any(segment in ("", ".", "..") for segment in value.split("/")):
+        return False
+    return True
+
 
 def _validated_file_path(raw: str) -> Optional[str]:
     """Return ``raw`` when it is a canonical bundle-relative path, else ``None``.
@@ -1190,22 +1220,32 @@ def _validated_file_path(raw: str) -> Optional[str]:
     backslashes, absolute/drive paths, empty/``.``/``..`` segments, and lingering
     percent-encoded traversal bytes all fail. Lookups are DB-exact within one
     design system (no filesystem involved), so this is defence-in-depth.
+
+    MULTIPLY-ENCODED forms are refused too. ``_ENCODED_TRAVERSAL_RE`` matches a
+    lingering ``%2e``/``%2f``/``%5c``, but in ``%252e`` the traversal is hidden
+    behind its own encoded ``%``, so ONE pass of that check cannot see it. The
+    value is therefore decoded repeatedly and every intermediate form must satisfy
+    the same shape rules; a value that keeps decoding into a traversal is refused
+    at any depth.
+
+    The refusal keys on TRAVERSAL, never on the ``%`` character: a literal ``%``
+    is legitimate in a brand's own filename, and an escape that decodes to
+    something harmless (``%41`` -> ``A``) stays accepted. Rejecting ``%`` outright
+    would turn a brand's real file into a 404 — the same class of brand-hostile
+    limit the uncapped-text columns exist to avoid.
     """
-    if not raw or "\\" in raw:
+    if not _has_canonical_shape(raw):
         return None
-    # NUL / C0 control characters never appear in a legitimate stored path, and
-    # NUL in particular must be rejected BEFORE the DB lookup: psycopg2 refuses
-    # NUL in a bound parameter (ValueError), which would surface as a 500
-    # instead of the uniform opaque 404 (SQLite masks this as a no-match 404).
-    if any(ord(ch) < 0x20 for ch in raw):
-        return None
-    if _ENCODED_TRAVERSAL_RE.search(raw):
-        return None
-    if raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
-        return None
-    if any(segment in ("", ".", "..") for segment in raw.split("/")):
-        return None
-    return raw
+    candidate = raw
+    for _ in range(_MAX_DECODE_PASSES):
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return raw
+        if not _has_canonical_shape(decoded):
+            return None
+        candidate = decoded
+    # Still changing after _MAX_DECODE_PASSES: refuse rather than keep unwrapping.
+    return None
 
 
 def _is_text_source(path: str, mime: str) -> bool:
