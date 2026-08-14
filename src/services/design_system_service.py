@@ -1679,16 +1679,18 @@ def _entry_identity_refusal(
 
 
 def _entry_verdict_for_info(
-    zf: zipfile.ZipFile, info: zipfile.ZipInfo, rel_path: Optional[str] = None
+    zf: zipfile.ZipFile, info: zipfile.ZipInfo
 ) -> _EntryVerdict:
     """The verdict for one ZipInfo, judged on the name the archive really records.
 
-    ``rel_path`` is the name to CLASSIFY when it differs from the archive's — the
-    root-prefix-stripped path, for the in-scope iterator. It has to be a separate
-    argument because the template-thumbnail allowlist is anchored at ``templates/``:
-    a wrapped bundle's ``safe/templates/x/.thumbnail`` only matches once ``safe/`` is
-    off. The identity check always applies to the FULL recorded name, which is the
-    string a rewrite would have altered.
+    The whole-bundle scan's composition of the two shared steps, over the FULL recorded
+    name. :func:`_iter_safe_entries` applies the very same two steps in the very same
+    order but cannot call this, because it has to interleave its root-prefix scoping
+    between them: identity is judged for every member, scoping then decides which
+    entries this import stores, and only those are classified — on the STRIPPED path,
+    because the template-thumbnail allowlist is anchored at ``templates/``. Identity is
+    judged on the full recorded name in both gates, that being the string a rewrite
+    would have altered.
 
     IDENTITY FIRST, then the path rules. :func:`_entry_identity_refusal` establishes
     that the entry has exactly ONE name — across both of the archive's copies of it —
@@ -1705,8 +1707,7 @@ def _entry_verdict_for_info(
     identity_reason = _entry_identity_refusal(zf, info)
     if identity_reason is not None:
         return _EntryVerdict(_ENTRY_REFUSE, reason=identity_reason)
-    raw = _raw_entry_name(info)
-    return _classify_bundle_entry(raw if rel_path is None else rel_path)
+    return _classify_bundle_entry(_raw_entry_name(info))
 
 
 def _is_symlink(info: zipfile.ZipInfo) -> bool:
@@ -1773,8 +1774,12 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
     judged. Weakening any of those refusals reintroduces two path identities in one
     importer.
 
-    The verdict comes from :func:`_entry_verdict_for_info`, the SAME judgement
-    :func:`_iter_safe_entries` uses, so the two gates cannot disagree about an entry.
+    The verdict comes from :func:`_entry_verdict_for_info`, which composes the SAME two
+    shared steps :func:`_iter_safe_entries` applies —
+    :func:`_entry_identity_refusal` then :func:`_classify_bundle_entry` — so the two
+    gates cannot disagree about an entry. The iterator runs them either side of its own
+    root-prefix scoping, which is why it composes them itself rather than calling this
+    gate's helper; the classifiers are shared, so there is still exactly one of each.
     """
     claimed: dict[str, str] = {}
     for info in zf.infolist():
@@ -1802,7 +1807,8 @@ def _iter_safe_entries(
     """Yield ``(ZipInfo, safe_rel_path)`` for every in-scope bundle FILE entry.
 
     Skips directories, OS junk (``__MACOSX``, ``.DS_Store``) and dotfiles. Raises
-    :class:`DesignSystemImportError` on a zip-slip path (absolute or ``..``) so a
+    :class:`DesignSystemImportError` on an in-scope zip-slip path (absolute or ``..``),
+    and on ANY entry the archive gives more than one name wherever it sits, so a
     malicious bundle is rejected rather than silently stored.
 
     This is the ACTUAL first gate every entry passes, so the ONE dot-prefixed shape
@@ -1811,12 +1817,19 @@ def _iter_safe_entries(
     the recognizer alone reads as working in a unit test and still drops every real
     thumbnail, because the entry never reaches the recognizer.
 
-    Every path rule lives in :func:`_classify_bundle_entry`, reached through
-    :func:`_entry_verdict_for_info` — the same judgement the up-front scan uses — so
-    neither gate can be patched into disagreeing with the other. Stripping
-    ``root_prefix`` is the only work done here, and it is bookkeeping rather than a
-    path rule: it is a raw slice, which is sound precisely because no validated name
-    is ever a rewritten one (no ``\\`` fold, no stdlib truncation).
+    Judged in TWO STEPS, in the same order :func:`_entry_verdict_for_info` applies them
+    for the up-front scan, with the scoping filter interleaved between the two:
+    :func:`_entry_identity_refusal` for every member, then
+    :func:`_classify_bundle_entry` for the ones this import is scoped to. Both halves
+    are the SHARED helpers, so neither gate can be patched into disagreeing with the
+    other. Interleaving is what keeps the two halves' different natures straight: an
+    entry outside the root is legitimately none of this import's business, while an
+    entry the archive names twice is hostile wherever it sits — see the comments at the
+    two steps.
+
+    Stripping ``root_prefix`` is the only work done here, and it is bookkeeping rather
+    than a path rule: it is a raw slice, which is sound precisely because no validated
+    name is ever a rewritten one (no ``\\`` fold, no stdlib truncation).
 
     Two in-scope entries claiming ONE path are refused here as well as by the up-front
     scan, so every path this yields is DISTINCT and callers do not need a first-wins
@@ -1833,12 +1846,45 @@ def _iter_safe_entries(
     claimed: dict[str, str] = {}
     for info in zf.infolist():
         name = _raw_entry_name(info)
+        # IDENTITY BEFORE SCOPE, for EVERY member. Whether the archive gives this entry
+        # ONE name is a fact about the entry, true wherever it sits, so it is settled
+        # before the scoping below decides whether this import has any interest in it.
+        # Ordering these the other way round left the iterator judging only what the
+        # scope filter let through, and an entry it dropped was never judged at all: an
+        # EMPTY recorded name is "in scope" of every prefix and strips to nothing, so
+        # ``not rel_raw`` SKIPPED it — the one shape that is hostile precisely because
+        # the archive records no name for it.
+        #
+        # Nothing was exploitable: :func:`_assert_bundle_paths_safe` runs first on every
+        # production path and refuses such an entry before root discovery or any read.
+        # What was lost is that this gate no longer refused INDEPENDENTLY, which is the
+        # entire value of having two.
+        identity_reason = _entry_identity_refusal(zf, info)
+        if identity_reason is not None:
+            raise DesignSystemImportError(
+                _path_refusal_message(name, identity_reason)
+            )
+        # SCOPE, unchanged and still SILENT. An entry outside the discovered root is
+        # not one of the entries this import stores, so it is passed over rather than
+        # refused — including one whose PATH is unsafe, which the whole-bundle scan
+        # already refuses GLOBALLY (see :func:`_assert_bundle_paths_safe`). Raising here
+        # on an out-of-scope path would widen this generator from "the entries this
+        # import stores" to "every entry in the archive", which is a different contract
+        # from the one its caller has. Identity is not that: it is judged above because
+        # no root prefix makes a second name acceptable.
         if not name.startswith(root_prefix):
             continue
         rel_raw = name[len(root_prefix):]
         if not rel_raw:
             continue  # the root-prefix directory entry itself
-        verdict = _entry_verdict_for_info(zf, info, rel_raw)
+        # The STRIPPED path is what gets classified — the reason this is
+        # :func:`_classify_bundle_entry` directly rather than
+        # :func:`_entry_verdict_for_info`, whose identity half has already run above.
+        # The template-thumbnail allowlist is anchored at ``templates/``, so a wrapped
+        # bundle's ``safe/templates/x/.thumbnail`` only matches once ``safe/`` is off;
+        # the identity check above deliberately used the FULL recorded name instead,
+        # which is the string a rewrite would have altered.
+        verdict = _classify_bundle_entry(rel_raw)
         if verdict.kind == _ENTRY_REFUSE:
             raise DesignSystemImportError(
                 _path_refusal_message(rel_raw, verdict.reason)
