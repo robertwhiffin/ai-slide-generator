@@ -593,8 +593,19 @@ class TestBuildToolsNewTypes:
 
 
 class TestBrandAssetToolRegistration:
-    """Phase 2 reset: search_brand_assets is registered ONLY when a design system
-    is selected, bound to config.design_system_id; search_images is unaffected."""
+    """Phase 2 reset: search_brand_assets is registered ONLY when an ACTIVE design
+    system is selected, bound to config.design_system_id; search_images is
+    unaffected.
+
+    These are WIRING tests, so the active-system lookup is stubbed. Its real
+    behaviour against real rows — active, tombstoned, unknown, and a lookup
+    failure — is covered by
+    ``TestBrandAssetToolRequiresAnActiveDesignSystem`` below.
+    """
+
+    @staticmethod
+    def _active():
+        return patch("src.services.agent_factory._design_system_is_active", return_value=True)
 
     def test_no_design_system_no_brand_asset_tool(self):
         from src.api.schemas.agent_config import AgentConfig
@@ -608,7 +619,8 @@ class TestBrandAssetToolRegistration:
         from src.api.schemas.agent_config import AgentConfig
         from src.services.agent_factory import _build_tools
 
-        names = [t.name for t in _build_tools(AgentConfig(design_system_id=7), {})]
+        with self._active():
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=7), {})]
         assert "search_images" in names
         assert "search_brand_assets" in names
 
@@ -616,7 +628,9 @@ class TestBrandAssetToolRegistration:
         from src.api.schemas.agent_config import AgentConfig
         from src.services import agent_factory
 
-        with patch("src.services.agent_factory.build_ds_asset_tool") as mock_build:
+        with self._active(), patch(
+            "src.services.agent_factory.build_ds_asset_tool"
+        ) as mock_build:
             marker = MagicMock()
             marker.name = "search_brand_assets"
             mock_build.return_value = marker
@@ -660,3 +674,133 @@ class TestBrandAssetToolRegistration:
         tools = _build_tools(config, {})
         # 1 image search + 5 tool types = 6
         assert len(tools) == 6
+
+
+class TestBrandAssetToolRequiresAnActiveDesignSystem:
+    """``search_brand_assets`` must be gated on the same resolved-ACTIVE design
+    system the PROMPT branch resolves.
+
+    The prompt branch filters ``is_active=True`` and, for a tombstone, degrades to
+    exactly the no-design-system prompt. Registration keyed on
+    ``design_system_id is not None`` alone, so a session pinned to a SOFT-DELETED
+    system got the tool anyway: measured live, an unfiltered call returned
+    "Found 2 brand asset(s)" for the dead system with ready-to-use handles, and the
+    model embedded one. That let NEW content be authored against a DELETED brand
+    while the prompt carried no brand instructions at all — the worst of both
+    states, and provably not the intent, since the prompt branch's own filter is
+    the statement of intent.
+
+    This is the GENERATION path only. The asset-serving and deck-render paths
+    deliberately keep resolving a tombstone's bytes (see the D7 ruling and
+    ``TestTombstonedDesignSystemStillResolvesStoredDeckAssets``) so historic decks
+    keep their fonts and images.
+    """
+
+    @staticmethod
+    def _db(session):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            yield session
+
+        return patch("src.core.database.get_db_session", _cm)
+
+    @staticmethod
+    def _make_ds(session, *, name, is_active):
+        from src.database.models.design_system import DesignSystem, DesignSystemAsset
+
+        ds = DesignSystem(name=name, is_active=is_active)
+        ds.assets.append(
+            DesignSystemAsset(
+                kind="illustration",
+                filename="probe-dot.png",
+                mime="image/png",
+                data=b"\x89PNG",
+                size_bytes=4,
+            )
+        )
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+        return ds
+
+    @pytest.fixture
+    def session(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+        from sqlalchemy.pool import StaticPool
+
+        import src.database.models  # noqa: F401 - register models with Base.metadata
+        from src.core.database import Base
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        with Session(engine) as s:
+            yield s
+        engine.dispose()
+
+    def test_active_design_system_registers_the_tool(self, session):
+        """Guards against over-fixing: the working path must stay working."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._make_ds(session, name="Live DS", is_active=True)
+        with self._db(session):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=ds.id), {})]
+        assert "search_brand_assets" in names
+        assert "search_images" in names
+
+    def test_tombstoned_design_system_does_not_register_the_tool(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._make_ds(session, name="Dead DS", is_active=False)
+        with self._db(session):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=ds.id), {})]
+        assert "search_brand_assets" not in names
+        # The legacy image tool is untouched — generation still has a way to
+        # find pictures, exactly as on the no-design-system path.
+        assert "search_images" in names
+
+    def test_soft_deleting_a_live_system_withdraws_the_tool(self, session):
+        """The transition itself, in one test: same id, same config, tool gone."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._make_ds(session, name="Doomed DS", is_active=True)
+        config = AgentConfig(design_system_id=ds.id)
+        with self._db(session):
+            before = [t.name for t in _build_tools(config, {})]
+            ds.is_active = False
+            session.commit()
+            after = [t.name for t in _build_tools(config, {})]
+        assert "search_brand_assets" in before
+        assert "search_brand_assets" not in after
+
+    def test_unknown_design_system_id_does_not_register_the_tool(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        with self._db(session):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=424242), {})]
+        assert "search_brand_assets" not in names
+
+    def test_a_lookup_failure_fails_closed(self, caplog):
+        """A DB failure must degrade the SAME way the prompt branch does — with no
+        brand material — rather than advertising a tool whose own lookup would
+        fail too."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        def _boom():
+            raise RuntimeError("database unreachable")
+
+        with patch("src.core.database.get_db_session", _boom):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=7), {})]
+        assert "search_brand_assets" not in names
+        assert "search_images" in names
