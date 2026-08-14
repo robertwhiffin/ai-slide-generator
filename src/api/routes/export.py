@@ -102,8 +102,22 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
         }
     )
     
+    # NO `crossorigin` — deliberately, and it must stay that way (WM-02).
+    #
+    # `crossorigin="anonymous"` turns these into CORS requests. cdn.tailwindcss.com
+    # answers with a 302 and no CORS headers, so the request failed with
+    # net::ERR_FAILED and Tailwind's Preflight never landed — measured consequence
+    # on a DS-OFF deck: h3 rendered 22px/600 in the exported file against
+    # 16px/400 on screen, up to 38.25 px of per-component drift and a heading
+    # losing a line to re-wrap. The frontend surfaces emit the same tag WITHOUT the
+    # attribute (see buildSlideDocument in frontend/src/services/slideDocument.ts)
+    # and it loads, so dropping it is parity with what the user actually saw.
+    #
+    # Safe to drop on its own because there is NO `integrity` attribute here: with
+    # SRI present, removing `crossorigin` would block the script outright and turn
+    # a 38 px drift into no styling at all.
     scripts_html = "\n".join([
-        f'    <script src="{src}" crossorigin="anonymous"></script>'
+        f'    <script src="{src}"></script>'
         for src in external_scripts
     ])
 
