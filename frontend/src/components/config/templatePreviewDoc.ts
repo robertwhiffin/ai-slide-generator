@@ -528,10 +528,13 @@ export type PreparedTemplatePreview = {
  * that cost is exactly what widened the window in which the frame showed its
  * pre-paint white canvas.
  *
- * TRADEOFF, stated: this retains a parsed Document for as long as the caller
- * holds the prepared value, in exchange for never re-parsing. It is bounded by
- * the same on-screen card set that already retains the source STRINGS, and it is
- * released when the component unmounts.
+ * TRADEOFF, stated precisely: this retains a parsed Document for as long as the
+ * caller holds the prepared value, in exchange for never re-parsing. The bound is
+ * NOT "cards currently on screen" — `LazyMount` never unmounts a card once it has
+ * become visible, so it is every MOUNTED, PREVIOUSLY-VISIBLE card, plus the modal
+ * when one is open. Opening the viewer for a template whose card is already mounted
+ * therefore holds a SECOND parsed document for that template until the modal
+ * closes. Each is released on unmount.
  */
 export function prepareTemplatePreview(
   layoutHtml: string,
