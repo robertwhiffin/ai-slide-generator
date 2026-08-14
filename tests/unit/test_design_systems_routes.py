@@ -105,6 +105,37 @@ class TestImportEndpoint:
         assert resp.status_code == 409
         assert "already exists" in resp.json()["detail"]
 
+    def test_name_taken_after_the_precheck_returns_409_not_500(self, client, db_session):
+        """The RACE path must answer with the same 409 the sequential path does.
+
+        The fail-fast name SELECT is a pre-check, not a lock. Here the name is
+        taken AFTER that check and BEFORE the write, so the partial unique index
+        ``uq_design_system_name_active`` is what refuses the import — which the
+        route previously surfaced as an opaque
+        ``500 {"detail":"Failed to import design system"}``.
+        """
+        from src.database.models.design_system import DesignSystem
+        from src.services import design_system_service
+
+        real_collect = design_system_service._collect_assets_and_files
+
+        def _collect_then_take_the_name(*args, **kwargs):
+            result = real_collect(*args, **kwargs)
+            db_session.add(DesignSystem(name="Acme Design System", is_active=True))
+            db_session.flush()
+            return result
+
+        with patch.object(
+            design_system_service,
+            "_collect_assets_and_files",
+            _collect_then_take_the_name,
+        ):
+            resp = _import(client)
+
+        assert resp.status_code == 409, resp.text
+        assert "already exists" in resp.json()["detail"]
+        assert "Acme Design System" in resp.json()["detail"]
+
     def test_import_name_override_via_form(self, client):
         assert _import(client).status_code == 201
         resp = _import(client, data={"name": "Acme Copy"})
