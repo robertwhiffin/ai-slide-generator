@@ -1366,10 +1366,15 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
                 import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
 
     def test_a_truncated_record_never_imports(self):
-        """A malformed record must not import. It happens to be caught one layer lower
-        — CPython validates extra-field framing while building the ZipFile and raises
-        ``BadZipFile``, which surfaces as "not a valid .zip bundle" — so this asserts
-        the OUTCOME rather than a message this code owns.
+        """A record whose declared ``size`` overruns the extra field must not import.
+
+        THIS shape is caught one layer lower: CPython validates extra-field framing
+        while building the ZipFile and raises ``BadZipFile``, which surfaces as "not a
+        valid .zip bundle". So this asserts the OUTCOME rather than a message this code
+        owns. Do not generalise that to every malformed record — an invalid-UTF-8
+        payload is NOT screened; see
+        :meth:`test_the_parser_reports_unframeable_records_rather_than_raising` for the
+        split.
         """
         from src.services.design_system_service import DesignSystemImportError, import_bundle
 
@@ -1379,23 +1384,69 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
             with pytest.raises(DesignSystemImportError):
                 import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
 
+    #: An invalid-UTF-8 0x7075 payload that CPython does NOT screen, because the
+    #: version byte is not 1 and so the decode it would have raised on never runs:
+    #: ``if up_version == 1 and up_name_crc == filename_crc: ...decode('utf-8')``.
+    #: The archive opens normally and the record reaches this module's parser.
+    ARCHIVE_REACHABLE_BAD_UTF8 = (
+        struct.pack("<HH", 0x7075, 7) + b"\x02" + struct.pack("<L", 0) + b"\xff\xfe"
+    )
+
+    def test_an_invalid_utf8_record_is_refused_through_a_real_archive(self):
+        """The malformed shape that is genuinely archive-reachable, pinned end to end.
+
+        CPython only decodes the declared name when the record's version is 1 AND its
+        name CRC matches, so a payload of invalid UTF-8 behind a version byte of 2 is
+        never decoded by the stdlib and raises nothing: the ``ZipFile`` opens and the
+        entry looks ordinary. Refusing it is therefore this module's job alone, and
+        this asserts it happens for a real upload rather than only for a directly
+        constructed ``ZipInfo``.
+        """
+        from src.services.design_system_service import (
+            _REASON_CORRUPT_EXTRA,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = self._zip(extra=self.ARCHIVE_REACHABLE_BAD_UTF8)
+        # Guard the guard: CPython really does open this, so the refusal below is ours.
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            assert self.CENTRAL in zf.namelist()
+
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=zip_bytes, user="u")
+        assert _REASON_CORRUPT_EXTRA in str(exc.value)
+
     @pytest.mark.parametrize(
         "extra",
         [
-            struct.pack("<HH", 0x7075, 40) + b"\x01\x02",       # size overruns the field
-            struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03",    # body shorter than 5
-            struct.pack("<HH", 0x7075, 7) + b"\x01\x00\x00\x00\x00\xff\xfe",  # bad UTF-8
+            struct.pack("<HH", 0x7075, 40) + b"\x01\x02",     # size overruns the field
+            struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03",  # body shorter than 5
         ],
-        ids=["overrun", "short-body", "invalid-utf8"],
+        ids=["overrun", "short-body"],
     )
-    def test_the_parser_reports_malformed_records_rather_than_raising(self, extra):
-        """Unit-level, deliberately: every malformed shape above is rejected by the
-        stdlib before this function is reached through a real archive, so an
-        archive-level test could not distinguish "handled" from "never called".
+    def test_the_parser_reports_unframeable_records_rather_than_raising(self, extra):
+        """Unit-level, because THESE two shapes really are unreachable through an
+        archive — unlike the invalid-UTF-8 case above.
 
-        Tested directly anyway, because the parser reads attacker-controlled bytes and
-        must not depend on another layer having screened them first — the premise of
-        this whole series is not trusting what a lower layer did with a name.
+        The distinction matters and was previously stated wrongly here, so it is worth
+        being exact about which category each shape is in:
+
+          * ARCHIVE-REACHABLE — an invalid-UTF-8 payload the stdlib never decodes
+            (version != 1, or a non-matching name CRC). Pinned end-to-end by
+            :meth:`test_an_invalid_utf8_record_is_refused_through_a_real_archive`.
+          * CPYTHON-SCREENED — the two below. ``_decodeExtra`` validates extra-field
+            FRAMING unconditionally while the ``ZipFile`` is built: an overrunning
+            ``size`` raises ``BadZipFile("Corrupt extra field 7075")`` and a body
+            shorter than the 5-byte header raises ``BadZipFile("Corrupt unicode path
+            extra field (0x7075)")``. Both surface as "not a valid .zip bundle" before
+            this module sees the entry, so an archive-level test could not tell
+            "handled here" from "never called".
+
+        Tested directly anyway: the parser reads attacker-controlled bytes and must not
+        depend on another layer having screened them first, which is the premise of this
+        whole series applied to its own dependency.
         """
         from src.services.design_system_service import (
             _REASON_CORRUPT_EXTRA,
@@ -1405,6 +1456,43 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
         info = zipfile.ZipInfo("assets/logo.svg")
         info.extra = extra
         assert _extra_field_name_refusal(info) == _REASON_CORRUPT_EXTRA
+
+    @pytest.mark.parametrize(
+        "extra,opens",
+        [
+            (struct.pack("<HH", 0x7075, 40) + b"\x01\x02", False),
+            (struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03", False),
+            (ARCHIVE_REACHABLE_BAD_UTF8, True),
+        ],
+        ids=["overrun-screened", "short-body-screened", "invalid-utf8-reachable"],
+    )
+    def test_the_documented_reachability_of_each_malformed_shape_is_accurate(
+        self, extra, opens
+    ):
+        """Pins the CLAIM the docstrings above make, so it cannot rot into a
+        confidently false reading of which layer catches what.
+
+        A security-path comment that misstates reachability is worse than no comment:
+        it tells the next reader a branch is dead when it is live. This asserts the
+        classification directly against CPython.
+        """
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            info = zipfile.ZipInfo("assets/logo.svg")
+            info.extra = extra
+            zf.writestr(info, SVG_LOGO)
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+                zf.namelist()
+            actually_opens = True
+        except zipfile.BadZipFile:
+            actually_opens = False
+
+        assert actually_opens is opens, (
+            f"reachability documented for {extra.hex()} is wrong: CPython "
+            f"{'opens' if actually_opens else 'rejects'} this archive"
+        )
 
     def test_the_parser_walks_past_other_records_to_find_a_later_one(self):
         """Extra fields are a SEQUENCE. A name-rewriting record placed after an
