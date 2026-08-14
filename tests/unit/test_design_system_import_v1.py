@@ -289,10 +289,13 @@ class TestPathSafety:
         from src.services.design_system_service import _safe_relpath
 
         assert _safe_relpath("assets/logo.svg") == "assets/logo.svg"
-        # The ONE tolerance: a Windows zip's ``\`` separator is folded. A fold can
-        # neither erase a segment nor change a basename, so nothing is laundered
-        # past a later rule.
-        assert _safe_relpath("a\\b\\c.png") == "a/b/c.png"
+        # NOTHING is rewritten any more — a non-None result is the argument, byte for
+        # byte. The ``\`` -> ``/`` fold that used to be the one tolerance is gone: it
+        # was the last place where the string validation judged differed from the one
+        # root discovery and the in-scope check use, and measured across the real
+        # exports not a single entry contains a backslash.
+        assert _safe_relpath("a\\b\\c.png") is None
+        assert _safe_relpath("assets\\logo.svg") is None
         # Everything else is VALIDATED, never rewritten. A spelling that is not the
         # plain relative form of the file it names is refused, because normalizing it
         # changes the very string the rules downstream judge — and collapses two
@@ -511,6 +514,28 @@ class TestZipSlipHardening:
             import_bundle(session, zip_bytes=buf.getvalue(), user="u")
         assert "symlink" in str(exc.value).lower()
 
+    def test_symlink_refusal_quotes_the_name_like_the_path_refusals_do(self, session):
+        """The symlink message interpolated the name bare while every path refusal
+        used ``!r``, so a control character in a symlink's name rendered raw into the
+        message. Same treatment for both."""
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        buf = io.BytesIO(make_bundle_zip())
+        with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as zf:
+            zi = zipfile.ZipInfo("assets/evil\tlink.png")
+            zi.external_attr = 0o120777 << 16  # S_IFLNK
+            zf.writestr(zi, b"../../../etc/passwd")
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=buf.getvalue(), user="u")
+        message = str(exc.value)
+        assert "symlink" in message.lower()
+        # The tab is escaped, not emitted raw.
+        assert "\t" not in message
+        assert repr("assets/evil\tlink.png") in message
+
     def test_symlink_detector_unit(self):
         from src.services.design_system_service import _is_symlink
 
@@ -658,7 +683,16 @@ class TestCssRetentionScope:
 
 
 class TestFontPathSafety:
-    def test_unsafe_font_paths_dropped_and_normalized(self):
+    def test_unsafe_declared_font_paths_are_dropped_never_rewritten(self):
+        """A manifest-declared font path is validated with the same rule as an
+        archive entry, and an invalid one is DROPPED rather than repaired.
+
+        The backslash spelling used to be normalized to ``fonts/acme-sans.woff2`` and
+        kept. Rewriting declared metadata has the same defect as rewriting an arcname:
+        the stored value stops being the value that was validated, and it silently
+        claims to reference a file the manifest never actually named. Dropping costs
+        only a font reference and never fails the bundle.
+        """
         from src.services.design_system_service import build_font_mapping
 
         manifest = {
@@ -667,7 +701,12 @@ class TestFontPathSafety:
                     "family": "Acme Sans",
                     "weight": "400",
                     "style": "normal",
-                    "files": ["../evil.woff2", "fonts\\acme-sans.woff2", "/abs/x.woff2"],
+                    "files": [
+                        "../evil.woff2",
+                        "fonts\\acme-sans.woff2",
+                        "/abs/x.woff2",
+                        "fonts/acme-sans.woff2",
+                    ],
                 }
             ],
         }
@@ -675,7 +714,10 @@ class TestFontPathSafety:
         files = [f for fam in fm["families"] for v in fam["variants"] for f in v["files"]]
         assert "../evil.woff2" not in files  # traversal dropped
         assert "/abs/x.woff2" not in files  # absolute dropped
-        assert "fonts/acme-sans.woff2" in files  # backslashes normalized, kept
+        assert "fonts\\acme-sans.woff2" not in files  # backslash dropped as declared…
+        assert "fonts/acme-sans.woff2" in files  # …and NOT rewritten into this
+        # The one already-valid path is the only survivor.
+        assert files == ["fonts/acme-sans.woff2"]
 
 
 # ---------------------------------------------------------------------------

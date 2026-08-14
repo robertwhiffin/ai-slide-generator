@@ -58,6 +58,7 @@ import json
 import logging
 import mimetypes
 import re
+import unicodedata
 import zipfile
 from typing import Any, NamedTuple, Optional
 
@@ -1059,6 +1060,22 @@ _REASON_EMPTY = "it has an empty name"
 _REASON_CONTROL = (
     "it contains a control character (a newline, tab or NUL byte, for instance)"
 )
+_REASON_BIDI = (
+    "it contains a bidirectional text control, which can make the name RENDER as a "
+    "different one than it is (a '.svg' that displays as '.png', for instance)"
+)
+_REASON_SURROGATE = "it contains an unpaired surrogate character, which is not text"
+_REASON_BACKSLASH = (
+    "it uses '\\' as a path separator. Only '/' is a separator in a .zip, so this "
+    "name is ambiguous: it would have to be rewritten to be interpreted, and this "
+    "importer validates names rather than rewriting them"
+)
+_REASON_STDLIB_REWRITE = (
+    "the name recorded in the archive is not the name a reader sees — Python's zip "
+    "reader silently TRUNCATES a name at a NUL byte, so an entry called "
+    "'thumbnail\\x00.exe' would be validated as 'thumbnail'. An entry whose real "
+    "name and read name differ cannot be judged safely and is refused"
+)
 _REASON_ABSOLUTE = (
     "it is an absolute path, so it names a location outside the bundle rather than "
     "a file inside it"
@@ -1067,9 +1084,15 @@ _REASON_DRIVE = (
     "it starts with a Windows drive letter, so it names a location outside the "
     "bundle rather than a file inside it"
 )
+# NOT "would place the file outside the bundle": 'assets/../logo.svg' resolves back
+# INSIDE it. The defect is that the name is not the plain relative path of the file
+# it names, so it can only be judged by resolving it — and resolving is the
+# rewriting this importer refuses to do. Some '..' paths do escape; the reason has
+# to be true of ALL of them.
 _REASON_TRAVERSAL = (
-    "it contains a parent-directory ('..') segment, which would place the file "
-    "outside the bundle"
+    "it contains a parent-directory ('..') segment, so which file it names can only "
+    "be worked out by resolving the path rather than read from it — and a '..' can "
+    "also lead outside the bundle entirely"
 )
 
 # The non-canonical SPELLINGS. Each names the spelling itself, not the category, so
@@ -1097,7 +1120,15 @@ _REARCHIVE_ADVICE = (
     "inside the bundle folder with 'cd <bundle-folder> && zip -r bundle.zip .': a "
     "tar-family re-archive such as 'bsdtar -a -cf bundle.zip -C <bundle-folder> .' "
     "prefixes EVERY entry with './', which is refused, as are '..' segments, "
-    "absolute paths, drive letters and control characters in a name."
+    "absolute paths, drive letters, '\\' separators and control characters in a name."
+)
+
+# A dotfile is SKIPPED rather than refused, and the user is TOLD. See
+# :func:`_classify_bundle_entry` for why this one class of junk is not fatal.
+_REASON_DOTFILE_SKIPPED = (
+    "it is a dot-prefixed file, which this importer does not store (the one "
+    "exception is a template folder's '.thumbnail' screenshot); it was ignored and "
+    "the rest of the bundle imported normally"
 )
 
 
@@ -1128,6 +1159,47 @@ def _collision_refusal_message(first: str, second: str, canonical: str) -> str:
         "order the archive happens to list them in. Remove the duplicate and "
         "re-create the archive with one entry per file."
     )
+
+
+# Bidirectional formatting and override characters. These are category Cf, and they
+# are singled out from the rest of Cf because they are the ones that make a name
+# DISPLAY as something other than what it is — the classic
+# "logo‮gnp.svg shows up as logo.svg" spoof — and this importer's paths are
+# rendered back to users in the file browser.
+_BIDI_CONTROLS = frozenset(
+    "‎‏‪‫‬‭‮⁦⁧⁨⁩"
+)
+
+
+def _forbidden_character_reason(name: str) -> Optional[str]:
+    """The reason ``name`` contains an unusable character, or ``None`` if it is clean.
+
+    Rejected:
+
+      * category ``Cc`` — the C0 range, DEL, **and the C1 range (0x80-0x9F)**. Testing
+        ``ord(ch) < 0x20 or ord(ch) == 0x7F`` missed C1 entirely, so ``U+0085`` (NEL,
+        which several parsers treat as a line break) passed and could be stored.
+      * category ``Cs`` — an unpaired surrogate is not text at all; nothing
+        downstream that encodes or renders a path can handle one meaningfully.
+      * :data:`_BIDI_CONTROLS` — a name that renders as a different name than it is.
+
+    NOT rejected: the rest of category ``Cf``, and unassigned/private-use code
+    points. ZWNJ (``U+200C``), ZWJ (``U+200D``) and SOFT HYPHEN (``U+00AD``) are Cf
+    and appear in legitimate filenames in Persian, Arabic and Indic scripts, so
+    refusing all of Cf would turn away a real bundle to close nothing — the display
+    spoof is specific to the bidi subset above. Unassigned code points are excluded
+    for the same reason: today's ``Cn`` is tomorrow's ordinary letter, and refusing
+    them dates the check rather than hardening it.
+    """
+    for ch in name:
+        category = unicodedata.category(ch)
+        if category == "Cc":
+            return _REASON_CONTROL
+        if category == "Cs":
+            return _REASON_SURROGATE
+        if ch in _BIDI_CONTROLS:
+            return _REASON_BIDI
+    return None
 
 
 def _segment_refusal(path: str) -> Optional[_EntryVerdict]:
@@ -1164,16 +1236,26 @@ def _entry_path_verdict(rel_path: str) -> _EntryVerdict:
         ``assets//x`` and ``assets/x`` all become ``assets/x`` — leaving which bytes
         get stored to zip member ordering.
 
-    Refused: an empty name, a C0/DEL control character (``\\n`` and NUL among them,
-    so no rule downstream has to cope with one), an absolute path (POSIX ``/`` or a
-    Windows drive), and any ``..``, EMPTY or ``.`` segment.
+    Refused: an empty name, an unusable character (see
+    :func:`_forbidden_character_reason`), an absolute path (POSIX ``/`` or a Windows
+    drive), a ``\\`` separator, and any ``..``, EMPTY or ``.`` segment.
 
-    Backslashes are folded to ``/`` first, and that is the ONE tolerance: zips
-    written on Windows use them as separators, and a fold can neither erase a segment
-    nor change a basename's junk-ness the way the collapses above do. It IS still a
-    route to two entries claiming one stored path, which is why
-    :func:`_claim_canonical_path` exists rather than this returning a unique identity
-    by construction.
+    There is now NO rewrite left here at all — a non-``None`` result is the argument,
+    unchanged. The ``\\`` -> ``/`` fold that used to be the one tolerance is gone,
+    because it was not free:
+
+      * :func:`_locate_root_prefix` and the ``startswith(root_prefix)`` scoping in
+        :func:`_iter_safe_entries` match RAW names, before any fold. So in a bundle
+        wrapped in ``safe/``, ``safe\\templates\\x\\.thumbnail`` folded to the same
+        logical path as ``safe/templates/x/.thumbnail`` — but failed the raw
+        root-prefix match and was SILENTLY SKIPPED instead of colliding with it. The
+        import succeeded, one entry vanished, and :func:`_claim_canonical_path` was
+        never reached. Two path identities in one importer is the whole bug class.
+      * measured, it buys nothing: across the real exports on hand (777, 777, 868 and
+        872 entries) not ONE entry contains a backslash.
+
+    So refusing it removes the last rewrite and leaves exactly one path identity for
+    validation, root discovery and storage to agree on.
 
     A trailing ``/`` marks a DIRECTORY entry, which is never stored — but the path it
     NAMES is still validated, so ``../evil/`` is refused rather than skipped. A
@@ -1190,28 +1272,34 @@ def _entry_path_verdict(rel_path: str) -> _EntryVerdict:
     """
     if not rel_path:
         return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_EMPTY)
-    folded = rel_path.replace("\\", "/")
-    # Control characters first: every rule below, and every consumer downstream,
-    # is written for a path that has none.
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in folded):
-        return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_CONTROL)
-    if folded.startswith("/"):
+    # Characters first: every rule below, and every consumer downstream, is written
+    # for a path that has none of these.
+    character_reason = _forbidden_character_reason(rel_path)
+    if character_reason is not None:
+        return _EntryVerdict(_ENTRY_REFUSE, reason=character_reason)
+    # Absolute and drive-letter before the backslash rule, so 'C:\\Windows\\x' is
+    # reported as the absolute Windows path it is rather than as a separator problem.
+    if rel_path.startswith("/"):
         return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_ABSOLUTE)
-    if re.match(r"^[A-Za-z]:", folded):
+    if re.match(r"^[A-Za-z]:", rel_path):
         return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_DRIVE)
-    if folded.endswith("/"):
-        named = folded[:-1]
+    if "\\" in rel_path:
+        return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_BACKSLASH)
+    if rel_path.endswith("/"):
+        named = rel_path[:-1]
         if not named:  # a bare "/" is already refused above as absolute
             return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_EMPTY)
         return _segment_refusal(named) or _EntryVerdict(_ENTRY_SKIP)
-    return _segment_refusal(folded) or _EntryVerdict(_ENTRY_FILE, path=folded)
+    return _segment_refusal(rel_path) or _EntryVerdict(_ENTRY_FILE, path=rel_path)
 
 
 def _safe_relpath(rel_path: str) -> Optional[str]:
     """The bundle-relative FILE path as stored, or ``None`` to refuse it.
 
-    VALIDATION, not laundering (see :func:`_entry_path_verdict`): the only difference
-    between the argument and a non-``None`` result is the ``\\`` -> ``/`` fold.
+    VALIDATION, not laundering (see :func:`_entry_path_verdict`): a non-``None`` result
+    is the argument, byte for byte. Nothing is rewritten, so this function and the raw
+    ``startswith(root_prefix)``/slice bookkeeping elsewhere cannot disagree about what
+    an entry's path is.
 
     Shape only — no junk/dotfile judgement — because its callers
     (:func:`_locate_root_prefix`, :func:`_declared_css_paths`,
@@ -1255,13 +1343,66 @@ def _classify_bundle_entry(rel_path: str) -> _EntryVerdict:
         return _EntryVerdict(_ENTRY_SKIP)
     base = _basename(low)
     # The ONE dot-prefixed shape the importer stores is a template folder's
-    # screenshot; every other dotfile stays skipped. Tested against the CANONICAL
-    # path — the same string the recognizer sees downstream.
+    # screenshot; every other dotfile is SKIPPED — and the user is told, via a
+    # non-fatal warning carried on the verdict's ``reason``.
+    #
+    # A DELIBERATE, DOCUMENTED DEVIATION from the acceptance battery's B8 wording,
+    # which lists dotfiles among the shapes to REFUSE. Refusal is wrong here on the
+    # evidence: the real export contains ZERO non-``.thumbnail`` dotfiles (4 dotfiles,
+    # all ``.thumbnail``), so refusal is untested against any real bundle — while
+    # ``.DS_Store`` is created invisibly and ubiquitously by macOS Finder. Refusing
+    # wholesale would fail a user's upload over a file they cannot see they have and
+    # cannot easily remove. Skipping is safe (a dotfile is never stored, so nothing
+    # unsafe reaches the database either way); the gap it leaves is that the user is
+    # not TOLD, and a warning closes exactly that gap without the false negative.
     if (base == ".ds_store" or base.startswith(".")) and not _is_template_preview(
         canonical
     ):
-        return _EntryVerdict(_ENTRY_SKIP)
+        return _EntryVerdict(_ENTRY_SKIP, reason=_REASON_DOTFILE_SKIPPED)
     return _EntryVerdict(_ENTRY_FILE, path=canonical)
+
+
+def _raw_entry_name(info: zipfile.ZipInfo) -> str:
+    """The name the ARCHIVE records for an entry, not the one Python hands back.
+
+    ``ZipInfo.__init__`` truncates ``filename`` at the first NUL byte and keeps the
+    real central-directory name in ``orig_filename``. Every gate here reads the name
+    through this function so validation judges what the archive actually says.
+    """
+    return getattr(info, "orig_filename", None) or info.filename
+
+
+def _entry_verdict_for_info(
+    info: zipfile.ZipInfo, rel_path: Optional[str] = None
+) -> _EntryVerdict:
+    """The verdict for one ZipInfo, judged on the name the archive really records.
+
+    ``rel_path`` is the name to CLASSIFY when it differs from the archive's — the
+    root-prefix-stripped path, for the in-scope iterator. It has to be a separate
+    argument because the template-thumbnail allowlist is anchored at ``templates/``:
+    a wrapped bundle's ``safe/templates/x/.thumbnail`` only matches once ``safe/`` is
+    off. The stdlib-rewrite check below always applies to the FULL recorded name,
+    which is the string the stdlib actually rewrote.
+
+    Refuses outright when Python's zip reader has REWRITTEN the name — i.e. when
+    ``orig_filename`` and ``filename`` differ. That one invariant is the whole fix for
+    a class of bypass, not just for NUL:
+
+        ``templates/x/.thumbnail\\x00.exe`` is truncated by the stdlib to
+        ``templates/x/.thumbnail``, which matches the template-thumbnail allowlist and
+        is stored if its bytes sniff as an image.
+
+    Validating the raw name alone would be enough to refuse that particular entry, but
+    it would leave the deeper problem: ``zf.read``/``namelist`` and the rest of the
+    importer all key off the TRUNCATED name, so raw-name validation and by-name
+    retrieval would be talking about different files. Refusing any divergence keeps
+    one name per entry everywhere, which is the same property the backslash refusal
+    buys (see :func:`_entry_path_verdict`).
+    """
+    raw = _raw_entry_name(info)
+    if raw != info.filename:
+        return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_STDLIB_REWRITE)
+    return _classify_bundle_entry(raw if rel_path is None else rel_path)
 
 
 def _is_symlink(info: zipfile.ZipInfo) -> bool:
@@ -1283,10 +1424,11 @@ def _claim_canonical_path(claimed: "dict[str, str]", name: str, canonical: str) 
     list them in — so the bundle is refused rather than imported with order-dependent
     content.
 
-    Strict path validation does NOT subsume this, which is why it is a separate check:
-    the ``\\`` -> ``/`` fold (``assets\\x`` and ``assets/x``) is a live route to a
-    collision between two individually-valid entries, and a zip may legally carry the
-    same arcname twice, where no path rule can see anything wrong at all.
+    Strict path validation does NOT subsume this, which is why it remains a separate
+    check even now that no rewrite is left to collapse two spellings together: a zip
+    may legally carry the SAME arcname twice, where both names are identical and
+    perfectly canonical and no path rule can see anything wrong at all. Only member
+    order would decide which bytes a reader gets.
 
     Shared by both gates, so a collision cannot be caught by one and missed by the
     other.
@@ -1307,33 +1449,49 @@ def _assert_bundle_paths_safe(zf: zipfile.ZipFile) -> None:
     root-prefix scoping — so a malicious entry that falls OUTSIDE the bundle root
     (e.g. ``../evil.png`` when the manifest sits under ``safe/``) is REJECTED, not
     silently skipped. EVERY entry is checked (no exemption for an empty name):
-    absolute paths, ``..`` traversal, control characters and empty names are
-    refused, and symlink entries are refused before any bytes are read.
+    absolute paths, ``..`` traversal, ``\\`` separators, unusable characters and empty
+    names are refused, and symlink entries are refused before any bytes are read.
 
-    Collisions are checked globally too, on the same canonical paths. That is
-    deliberately broader than the import scope — two colliding entries outside the
-    bundle root refuse the bundle even though neither would be stored — and matches
-    how this gate already treats an unsafe path outside the root.
+    Collisions are checked globally too, on the same paths. That is deliberately
+    broader than the import scope — two colliding entries outside the bundle root
+    refuse the bundle even though neither would be stored — and matches how this gate
+    already treats an unsafe path outside the root.
 
-    The path verdict comes from :func:`_classify_bundle_entry`, the SAME classifier
-    :func:`_iter_safe_entries` uses, so the two gates cannot disagree about a shape.
+    THIS GATE ESTABLISHES THE INVARIANT THE REST OF THE IMPORTER RELIES ON. It runs
+    before root discovery and before any read (see :func:`import_bundle`), and it
+    refuses any entry whose recorded name differs from the name Python reports or
+    which contains a ``\\``. Everything downstream — :func:`_locate_root_prefix`,
+    the ``startswith(root_prefix)`` scoping and slicing in
+    :func:`_iter_safe_entries`, and ``zf.read``-by-name — therefore works on names
+    that are exactly what validation judged. Weakening either refusal reintroduces
+    two path identities in one importer.
+
+    The verdict comes from :func:`_entry_verdict_for_info`, the SAME judgement
+    :func:`_iter_safe_entries` uses, so the two gates cannot disagree about an entry.
     """
     claimed: dict[str, str] = {}
     for info in zf.infolist():
-        name = info.filename
+        # The name the ARCHIVE records — not ``info.filename``, which the stdlib may
+        # have truncated. Reported with ``!r`` for the same reason the path refusals
+        # use it: a control character must not render raw into the message.
+        name = _raw_entry_name(info)
         if _is_symlink(info):
             raise DesignSystemImportError(
-                f"Bundle entry '{name}' is a symlink; refusing to import."
+                f"Bundle entry {name!r} is a symlink; refusing to import."
             )
         # No ``if name`` guard: an empty name is refused, not skipped.
-        verdict = _classify_bundle_entry(name)
+        verdict = _entry_verdict_for_info(info)
         if verdict.kind == _ENTRY_REFUSE:
             raise DesignSystemImportError(_path_refusal_message(name, verdict.reason))
         if verdict.kind == _ENTRY_FILE:
             _claim_canonical_path(claimed, name, verdict.path)
 
 
-def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
+def _iter_safe_entries(
+    zf: zipfile.ZipFile,
+    root_prefix: str,
+    warnings: "Optional[list[BundleImportWarning]]" = None,
+):
     """Yield ``(ZipInfo, safe_rel_path)`` for every in-scope bundle FILE entry.
 
     Skips directories, OS junk (``__MACOSX``, ``.DS_Store``) and dotfiles. Raises
@@ -1346,29 +1504,41 @@ def _iter_safe_entries(zf: zipfile.ZipFile, root_prefix: str):
     the recognizer alone reads as working in a unit test and still drops every real
     thumbnail, because the entry never reaches the recognizer.
 
-    Every path rule lives in :func:`_classify_bundle_entry` — the same classifier the
-    up-front scan uses — so an entry is judged on its CANONICAL path and neither gate
-    can be patched into disagreeing with the other. Stripping ``root_prefix`` is the
-    only work done here, and it is bookkeeping rather than a path rule.
+    Every path rule lives in :func:`_classify_bundle_entry`, reached through
+    :func:`_entry_verdict_for_info` — the same judgement the up-front scan uses — so
+    neither gate can be patched into disagreeing with the other. Stripping
+    ``root_prefix`` is the only work done here, and it is bookkeeping rather than a
+    path rule: it is a raw slice, which is sound precisely because no validated name
+    is ever a rewritten one (no ``\\`` fold, no stdlib truncation).
 
-    Two in-scope entries that canonicalize to ONE path are refused here as well as by
-    the up-front scan, so every path this yields is DISTINCT and callers do not need
-    a first-wins de-duplication that would have let zip order pick the bytes.
+    Two in-scope entries claiming ONE path are refused here as well as by the up-front
+    scan, so every path this yields is DISTINCT and callers do not need a first-wins
+    de-duplication that would have let zip order pick the bytes.
+
+    Args:
+        warnings: optional collector. A SKIPPED entry that the user should know about
+            — a non-allowlisted dotfile — is reported here rather than vanishing
+            silently. Skips with no ``reason`` (directory markers, ``__MACOSX``
+            mirrors) stay silent on purpose: they are per-directory bookkeeping and
+            would flood the list with one entry per real file while telling the user
+            nothing about their own content.
     """
     claimed: dict[str, str] = {}
     for info in zf.infolist():
-        name = info.filename
+        name = _raw_entry_name(info)
         if not name.startswith(root_prefix):
             continue
         rel_raw = name[len(root_prefix):]
         if not rel_raw:
             continue  # the root-prefix directory entry itself
-        verdict = _classify_bundle_entry(rel_raw)
+        verdict = _entry_verdict_for_info(info, rel_raw)
         if verdict.kind == _ENTRY_REFUSE:
             raise DesignSystemImportError(
                 _path_refusal_message(rel_raw, verdict.reason)
             )
         if verdict.kind == _ENTRY_SKIP:
+            if verdict.reason and warnings is not None:
+                warnings.append(BundleImportWarning(rel_raw, verdict.reason))
             continue
         _claim_canonical_path(claimed, rel_raw, verdict.path)
         yield info, verdict.path
@@ -1514,7 +1684,7 @@ def _collect_assets_and_files(
     # entries claim one canonical path, so every ``rel`` it yields is distinct. The
     # first-wins skip this replaced was the thing that let zip order decide which of
     # two colliding entries' bytes were stored.
-    for info, rel in _iter_safe_entries(zf, root_prefix):
+    for info, rel in _iter_safe_entries(zf, root_prefix, warnings):
         # Declared CSS token source: retain from the already-read (and budgeted)
         # bytes — no second read, no double-charge, and only declared sources.
         if rel in css_sources:
