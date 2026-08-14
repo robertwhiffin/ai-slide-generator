@@ -929,3 +929,55 @@ def test_exact_identity_contract_does_not_regress(
     assert client.delete(f"{BASE}/{ds.id}").status_code == 403, label
     db_session.refresh(ds)
     assert ds.is_active is True
+
+
+# --- clearing the org default UNFREEZES the creator (WD-01) -------------------
+
+
+def test_clearing_the_org_default_unfreezes_creator_rename(
+    client, db_session, production, monkeypatch, as_creator
+):
+    """The freeze must be a FUNCTION of is_default, in both directions.
+
+    A default that can be set but never removed left the freeze permanent: the
+    author lost rename/delete on their own upload for good, and D4's proven
+    legacy-fallback path was unreachable. Clearing the default is admin-only, so
+    this grants the creator nothing an admin could not already do — it just
+    returns the row to the non-default state where authorship works again.
+
+    Identical setup and caller on both sides; the ONLY thing that changes is the
+    org default, which is what makes the freeze condition load-bearing here.
+    """
+    ds = _seed(db_session, CREATOR, is_default=True)
+
+    def be_admin(is_admin: bool):
+        monkeypatch.setattr(production, "_admin_acl_probe", lambda user: is_admin)
+        production.reset_admin_cache()
+
+    # (1) FROZEN: the non-admin author may not rename their own org default.
+    be_admin(False)
+    assert client.put(f"{BASE}/{ds.id}", json={"name": "Nope"}).status_code == 403
+
+    # (2) An ADMIN removes the org default.
+    be_admin(True)
+    cleared = client.post(f"{BASE}/{ds.id}/clear-default")
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["is_default"] is False
+
+    # (3) UNFROZEN: the same non-admin author may manage it again.
+    be_admin(False)
+    renamed = client.put(f"{BASE}/{ds.id}", json={"name": "Mine again"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Mine again"
+
+
+def test_creator_non_admin_cannot_clear_the_org_default(
+    client, db_session, non_admin, as_creator
+):
+    """Removing org-wide state is admin-only, exactly like setting it — otherwise
+    the author could unfreeze their own row and then rename or delete it."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.post(f"{BASE}/{ds.id}/clear-default")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_default is True, "a denied clear must not touch the org default"

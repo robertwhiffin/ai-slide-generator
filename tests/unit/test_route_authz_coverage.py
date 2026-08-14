@@ -433,6 +433,9 @@ DESIGN_SYSTEM_MUTATION_LEVELS = {
     ("DELETE", "/api/settings/design-systems/{ds_id}"):
         "creator_or_admin_except_org_default",
     ("POST", "/api/settings/design-systems/{ds_id}/set-default"): "admin",
+    # Removing the org default is the same ORG-WIDE state change as setting it:
+    # it decides what EVERY user gets by default, so authorship must not buy it.
+    ("POST", "/api/settings/design-systems/{ds_id}/clear-default"): "admin",
     ("POST", "/api/settings/design-systems/import"): "open",
     ("POST", "/api/settings/design-systems"): "open",
 }

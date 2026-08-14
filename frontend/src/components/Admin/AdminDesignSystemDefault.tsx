@@ -36,15 +36,28 @@ export const AdminDesignSystemDefault: React.FC = () => {
     return () => { cancelled = true; };
   }, []);
 
-  const handleSet = async (id: number) => {
-    setSaving(id);
+  /**
+   * TOGGLE the org default. Removing it had no control on any surface, so an admin
+   * could promote a design system and switch between systems but never return the
+   * org to "no default" — the legacy slide-style fallback was unreachable without
+   * deleting the design system outright.
+   */
+  const handleToggle = async (ds: DesignSystemSummary) => {
+    setSaving(ds.id);
     try {
-      await configApi.setDesignSystemDefault(id);
-      await load();
-      showToast('Org default design system updated', 'success');
+      if (ds.is_default) {
+        await configApi.clearDesignSystemDefault(ds.id);
+        await load();
+        showToast('Org default cleared — new decks use the default slide style', 'success');
+      } else {
+        await configApi.setDesignSystemDefault(ds.id);
+        await load();
+        showToast('Org default design system updated', 'success');
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      showToast(`Failed to set org default: ${message}`, 'error');
+      const action = ds.is_default ? 'clear' : 'set';
+      showToast(`Failed to ${action} org default: ${message}`, 'error');
     } finally {
       setSaving(null);
     }
@@ -93,14 +106,21 @@ export const AdminDesignSystemDefault: React.FC = () => {
                   <div className="text-xs text-gray-500 mt-0.5">{ds.description}</div>
                 )}
               </div>
-              {ds.is_active && !ds.is_default && (
+              {(ds.is_default || ds.is_active) && (
                 <button
                   type="button"
                   disabled={saving === ds.id}
-                  onClick={() => void handleSet(ds.id)}
+                  onClick={() => void handleToggle(ds)}
+                  data-testid={`design-system-default-toggle-${ds.id}`}
                   className="shrink-0 text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline disabled:cursor-not-allowed disabled:text-blue-300"
                 >
-                  {saving === ds.id ? 'Setting…' : 'Set as org default'}
+                  {saving === ds.id
+                    ? ds.is_default
+                      ? 'Clearing…'
+                      : 'Setting…'
+                    : ds.is_default
+                      ? 'Clear org default'
+                      : 'Set as org default'}
                 </button>
               )}
             </li>

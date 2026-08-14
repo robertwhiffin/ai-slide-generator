@@ -606,6 +606,15 @@ export const configApi = {
     }),
 
   /**
+   * Remove the org-wide default so generation falls back to the legacy slide
+   * style. Admin-only, like its set- counterpart, and idempotent.
+   */
+  clearDesignSystemDefault: (dsId: number): Promise<DesignSystemDetail> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/clear-default`, {
+      method: 'POST',
+    }),
+
+  /**
    * Import a design-system bundle (.zip) via multipart upload.
    * The browser sets the multipart Content-Type/boundary — do not set it here.
    */

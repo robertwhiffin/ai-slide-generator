@@ -834,6 +834,60 @@ def set_default_design_system(ds_id: int, db: Session = Depends(get_db)):
         )
 
 
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only. REMOVING the
+# org default is the same org-wide state change as setting it, so it carries the
+# same gate — authorship must not buy it.
+@router.post(
+    "/{ds_id}/clear-default", response_model=DesignSystemDetail,
+    dependencies=[Depends(require_admin)],
+)
+def clear_default_design_system(ds_id: int, db: Session = Depends(get_db)):
+    """Remove the org-wide default, returning the library to "no default".
+
+    The lifecycle used to be ASYMMETRIC: ``set-default`` could promote a system and
+    switch between systems, but nothing could withdraw the flag — so returning to
+    no-default meant DELETING the design system or promoting a different one, and
+    the legacy slide-style fallback was unreachable in practice. Generation then
+    resolves no design system (``get_default_design_system_id`` returns None) and
+    new sessions take the legacy path.
+
+    Idempotent: clearing a system that is not the default succeeds and changes
+    nothing, so a double-click cannot produce an error to interpret.
+
+    Deliberately asymmetric with ``set-default``, which refuses an INACTIVE row:
+    promoting a tombstone into org-wide state is wrong, but REMOVING org-wide state
+    is always the safe direction and must never be blocked — refusing it would
+    strand the flag with no way to withdraw it.
+
+    Clearing correctly UNFREEZES rename/delete for the row's author: the freeze in
+    :func:`_require_creator_or_admin` is a function of the LOADED row's
+    ``is_default``, so it lifts when the flag does. That grants a non-admin nothing
+    new, because this route is itself admin-only.
+    """
+    try:
+        ds = db.query(DesignSystem).filter(DesignSystem.id == ds_id).first()
+        if not ds:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Design system {ds_id} not found",
+            )
+        if ds.is_default:
+            ds.is_default = False
+            db.commit()
+            db.refresh(ds)
+            logger.info(f"Cleared default design system: {ds.name} (id={ds.id})")
+        return _detail(ds)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error clearing default design system {ds_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear default design system",
+        )
+
+
 def _template_thumbnail_url(ds_id: int, template_id: int) -> str:
     return f"/api/settings/design-systems/{ds_id}/templates/{template_id}/thumbnail"
 

@@ -352,6 +352,82 @@ def fk_client(db_engine):
     event.remove(db_engine, "connect", _enforce_foreign_keys)
 
 
+class TestClearOrgDefault:
+    """WD-01: the org default could be SET and SWITCHED, but never REMOVED.
+
+    There was no route and no UI to return to "no default", so the lifecycle was
+    asymmetric and the legacy-slide-style fallback — which D4 proved correct — was
+    unreachable in practice: withdrawing a default meant DELETING the design system
+    or promoting a different one. Clearing is admin-gated exactly like setting,
+    because it changes what every user gets by default.
+    """
+
+    def test_clearing_returns_the_system_with_is_default_false(self, client):
+        ds_id = _import(client).json()["id"]
+        assert client.post(f"{BASE}/{ds_id}/set-default").json()["is_default"] is True
+
+        resp = client.post(f"{BASE}/{ds_id}/clear-default")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_default"] is False
+
+    def test_clearing_leaves_no_org_default_at_all(self, client):
+        """The state D4 needs: not "a different default", but none."""
+        first = _import(client).json()["id"]
+        second = _import(client, data={"name": "Second"}).json()["id"]
+        client.post(f"{BASE}/{first}/set-default")
+
+        assert client.post(f"{BASE}/{first}/clear-default").status_code == 200
+
+        listed = client.get(f"{BASE}?include_inactive=true").json()["design_systems"]
+        assert [s["id"] for s in listed if s["is_default"]] == []
+        assert client.get(f"{BASE}/{second}").json()["is_default"] is False
+
+    def test_generation_falls_back_to_the_legacy_slide_style(self, client, db_session):
+        """The consequence that matters (D4's discriminator): with no org default,
+        the resolver returns None, so a new session gets no design system and the
+        legacy slide-style path runs."""
+        from src.core.settings_db import get_default_design_system_id
+
+        ds_id = _import(client).json()["id"]
+        client.post(f"{BASE}/{ds_id}/set-default")
+
+        with patch("src.core.settings_db.get_db_session") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=db_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            assert get_default_design_system_id() == ds_id  # non-vacuity
+
+            assert client.post(f"{BASE}/{ds_id}/clear-default").status_code == 200
+            assert get_default_design_system_id() is None
+
+    def test_clearing_is_idempotent(self, client):
+        ds_id = _import(client).json()["id"]
+        # Never was the default: clearing is still a no-op success, so a double
+        # click cannot produce an error the user has to interpret.
+        assert client.post(f"{BASE}/{ds_id}/clear-default").status_code == 200
+        assert client.post(f"{BASE}/{ds_id}/clear-default").json()["is_default"] is False
+
+    def test_clearing_an_unknown_design_system_is_404(self, client):
+        assert client.post(f"{BASE}/999999/clear-default").status_code == 404
+
+    def test_an_inactive_system_can_still_be_cleared(self, client, db_session):
+        """Deliberately asymmetric with set-default, which 400s on an inactive row:
+        PROMOTING a tombstone to org-wide state is wrong, but REMOVING org-wide
+        state must never be blocked — that direction is always the safe one, and
+        refusing it would strand the flag with no way to withdraw it."""
+        from src.database.models.design_system import DesignSystem
+
+        ds_id = _import(client).json()["id"]
+        # Soft-delete already clears the flag, so force the awkward state directly.
+        ds = db_session.query(DesignSystem).filter(DesignSystem.id == ds_id).one()
+        ds.is_active = False
+        ds.is_default = True
+        db_session.commit()
+
+        resp = client.post(f"{BASE}/{ds_id}/clear-default")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_default"] is False
+
+
 class TestSoftDeleteRetainsAddressableBytes:
     """A soft-deleted design system is HIDDEN, not REVOKED — and that is the contract.
 
