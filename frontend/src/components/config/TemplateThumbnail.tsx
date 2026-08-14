@@ -209,31 +209,54 @@ export const LiveTemplateFrame: React.FC<{
   // once that frame's own `load` event fires. The element-level `load` DOES fire
   // for a `sandbox=""` srcdoc frame (measured 21-31 ms) while `contentDocument`
   // stays blocked, so nothing about the sandbox is relaxed to get this signal.
+  // A buffer tracks its document AND whether that document has finished loading.
+  // Both facts are needed: "already in the idle buffer" splits into two cases with
+  // OPPOSITE handling, and conflating them broke backward pagination — going back
+  // to a page still sitting in the idle buffer emitted no new `load` event, so the
+  // swap never happened and the pager advanced while the frame did not.
   const [buffers, setBuffers] = useState<{
-    a: string | null;
-    b: string | null;
+    a: { doc: string | null; loaded: boolean };
+    b: { doc: string | null; loaded: boolean };
     active: 'a' | 'b';
-  }>({ a: null, b: null, active: 'a' });
+  }>({ a: { doc: null, loaded: false }, b: { doc: null, loaded: false }, active: 'a' });
+
+  // The document the caller currently WANTS shown. Read by the load handler, which
+  // fires asynchronously and must not promote a buffer whose document is no longer
+  // the requested one (page forward, then straight back, while the forward
+  // navigation is still in flight).
+  const wantedDocRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!doc) return;
+    wantedDocRef.current = doc;
     setBuffers((prev) => {
-      if (prev[prev.active] === doc) return prev; // already the visible document
+      if (prev[prev.active].doc === doc) return prev; // already the visible document
       const idle = prev.active === 'a' ? 'b' : 'a';
-      if (prev[idle] === doc) return prev; // already loading in the idle buffer
-      return { ...prev, [idle]: doc };
+      if (prev[idle].doc === doc) {
+        // FAST PATH: this page is ALREADY in the idle buffer. If it finished
+        // loading, swap to it right now — there is nothing to navigate and no
+        // `load` event will ever come. If it is still loading, leave it alone and
+        // let its own load complete the swap.
+        return prev[idle].loaded ? { ...prev, active: idle } : prev;
+      }
+      return { ...prev, [idle]: { doc, loaded: false } };
     });
   }, [doc]);
 
   const handleBufferLoad = useCallback((slot: 'a' | 'b') => {
-    setBuffers((prev) =>
-      prev.active === slot || prev[slot] === null ? prev : { ...prev, active: slot },
-    );
+    setBuffers((prev) => {
+      const buffer = prev[slot];
+      if (buffer.doc === null) return prev;
+      const next = { ...prev, [slot]: { doc: buffer.doc, loaded: true } };
+      if (prev.active === slot) return next;
+      // Only become visible if this buffer holds what is currently wanted.
+      return buffer.doc === wantedDocRef.current ? { ...next, active: slot } : next;
+    });
   }, []);
 
-  const visibleDoc = buffers[buffers.active];
+  const visibleDoc = buffers[buffers.active].doc;
   const renderBuffer = (slot: 'a' | 'b') => {
-    const bufferDoc = buffers[slot];
+    const bufferDoc = buffers[slot].doc;
     if (bufferDoc === null) return null;
     const isActive = buffers.active === slot;
     return (

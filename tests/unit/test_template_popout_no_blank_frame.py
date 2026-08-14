@@ -17,12 +17,23 @@ zero unresolved `{{ds-asset:}}` handles. WHITE MEANS NO DOCUMENT IS IN THE FRAME
 
 These are SOURCE-LEVEL assertions on the wiring, in the same idiom as
 ``test_export_csp.py`` (which regex-reads slideDocument.ts to pin a shared
-constant): the frontend has no unit runner, and the real proof is a CDP frame
-timeline, which is deferred to the post-deploy re-run (0 white frames across 32/32
-pages, exactly ONE navigation per open, under 4x throttle). What IS pinned here is
-every structural property that fix depends on — so it cannot be silently undone,
-and so the fix can never be replaced by the cosmetic dark-background variant that
-merely HIDES the bug.
+constant), because the frontend has no unit runner. They pin every structural
+property the fix depends on, so it cannot be silently undone and cannot be replaced
+by the cosmetic dark-background variant that merely HIDES the bug.
+
+THEY ARE NOT SUFFICIENT ON THEIR OWN, and assuming otherwise cost us a regression.
+A cross-vendor review found that the first double-buffer implementation could not
+page BACKWARD — returning to a document still held in the idle buffer emitted no
+`load` event, so the pager advanced while the frame did not. Nothing here or in
+`tsc` could see that: it is an async state machine. It is now proven by EXECUTING
+`frontend/tests/e2e/template-viewer.spec.ts` in Chromium (10/10 pass; the 0->1->0
+case failed with `<h1>Acme Slide Two</h1>` before the fix), and
+``TestBackwardPaginationIsCoveredByAnE2ESpec`` below pins that coverage so it cannot
+quietly disappear.
+
+What remains for the post-deploy re-run is the TIMING measurement only: 0 white
+frames across 32/32 pages and exactly ONE navigation per open, under 4x throttle,
+via a CDP frame timeline.
 """
 from pathlib import Path
 
@@ -137,6 +148,27 @@ class TestDoubleBufferedFrames:
         """Never to the frame the user is looking at — that is the whole defect."""
         assert "const idle = prev.active === 'a' ? 'b' : 'a'" in thumbnail
 
+    def test_each_buffer_tracks_whether_its_document_has_loaded(self, thumbnail):
+        """"Already in the idle buffer" is TWO cases with opposite handling, and
+        conflating them broke backward pagination: returning to a page still sitting
+        in the idle buffer emits no new `load` event, so without a loaded flag the
+        swap never happened and the pager advanced while the frame did not."""
+        assert "{ doc: string | null; loaded: boolean }" in thumbnail
+        assert "{ doc: null, loaded: false }" in thumbnail
+
+    def test_an_already_loaded_idle_buffer_becomes_active_immediately(self, thumbnail):
+        """THE FAST PATH. Nothing needs navigating, and no load event will come, so
+        the swap must happen there and then. Behaviourally covered by the executed
+        0->1->0 pagination spec (see TestBackwardPaginationIsCoveredByAnE2ESpec)."""
+        assert "prev[idle].loaded ? { ...prev, active: idle } : prev" in thumbnail
+
+    def test_a_stale_load_does_not_steal_the_view(self, thumbnail):
+        """The load handler fires asynchronously, so it must not promote a buffer
+        whose document is no longer the requested one — page forward, then straight
+        back while the forward navigation is still in flight."""
+        assert "wantedDocRef" in thumbnail
+        assert "buffer.doc === wantedDocRef.current ? { ...next, active: slot } : next" in thumbnail
+
     def test_the_idle_buffer_still_paints_so_load_can_fire(self, thumbnail):
         """`display: none` would suppress layout and the load event with it, so the
         idle buffer is transparent instead."""
@@ -199,3 +231,43 @@ class TestSmallHardenings:
         source = _src(_DETAIL_PANEL)
         modal = source[source.index("<TemplateViewerModal") :]
         assert "key={viewerTemplate.id}" in modal[:400]
+
+
+class TestBackwardPaginationIsCoveredByAnE2ESpec:
+    """The coverage itself is pinned, because ITS ABSENCE IS WHAT FAILED US.
+
+    A cross-vendor review found that the first double-buffer implementation could
+    not return to a document already sitting in its idle buffer: after Next then
+    Previous the pager read "Slide 1 of 3" while the frame still rendered slide 2.
+    Executed in a browser, `template-viewer.spec.ts` catches it exactly — it
+    resolved `<h1>Acme Slide Two</h1>` where slide one was expected — but the spec
+    had not been run, and neither type-checking nor the source assertions above can
+    validate an async state machine.
+
+    So this asserts the e2e spec still contains that sequence. If someone deletes or
+    weakens it, this fails and says why, instead of the regression going quiet again.
+    """
+
+    _SPEC = (
+        Path(__file__).resolve().parents[2]
+        / "frontend" / "tests" / "e2e" / "template-viewer.spec.ts"
+    )
+
+    def test_the_spec_exercises_next_then_previous(self):
+        source = self._SPEC.read_text(encoding="utf-8")
+        start = source.index("multi-slide template paginates one slide at a time")
+        body = source[start : source.index("\n  test(", start + 1)]
+
+        # Forward, then BACK, with the RENDERED document asserted after each — not
+        # merely the pager counter, which was correct even while broken.
+        assert "template-viewer-next" in body
+        assert "template-viewer-prev" in body
+        assert body.index("template-viewer-next") < body.index("template-viewer-prev")
+        assert body.count("inner.locator('h1')") >= 3
+        assert "'Acme Slide One'" in body.split("template-viewer-prev")[1]
+
+    def test_the_spec_reads_inside_the_sandboxed_frame(self):
+        """It must assert on the frame's CONTENT. Asserting which buffer is flagged
+        active would have passed while the wrong document was on screen."""
+        source = self._SPEC.read_text(encoding="utf-8")
+        assert 'frameLocator(\'[data-testid="template-viewer-frame"]\')' in source
