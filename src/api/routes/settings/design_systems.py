@@ -172,6 +172,28 @@ class DesignSystemDetail(DesignSystemSummary):
     assets: List[AssetOut]
 
 
+class ImportWarningOut(BaseModel):
+    """One bundle entry the import ignored, and why."""
+    path: str
+    reason: str
+
+
+class DesignSystemImportResult(DesignSystemDetail):
+    """The /import response: the imported detail PLUS anything that was ignored.
+
+    Additive by design. Some entries are individually unusable without making the
+    bundle unusable (an unsniffable template screenshot, a non-UTF-8 token source);
+    those are dropped so one junk file cannot cost the whole upload. Reporting them
+    only to the server log told the user the import had succeeded and left them to
+    discover a missing thumbnail themselves.
+
+    A NON-FATAL list on a 201, and its own model rather than a field on
+    :class:`DesignSystemDetail`, so the GET/create/update responses are byte-for-byte
+    unchanged and an existing /import client simply ignores a field it does not read.
+    """
+    warnings: List[ImportWarningOut] = []
+
+
 class DesignSystemCreate(BaseModel):
     """Structured (in-app) create — thin. Assets arrive via /import."""
     # UNCAPPED, matching the unbounded ``design_system.name`` column; ``min_length``
@@ -496,7 +518,11 @@ def list_design_systems(
         )
 
 
-@router.post("/import", response_model=DesignSystemDetail, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/import",
+    response_model=DesignSystemImportResult,
+    status_code=status.HTTP_201_CREATED,
+)
 async def import_design_system(
     file: UploadFile = File(...),
     name: Optional[str] = Form(None),
@@ -517,14 +543,23 @@ async def import_design_system(
             detail=f"Upload exceeds the maximum bundle size of {MAX_BUNDLE_SIZE_BYTES} bytes",
         )
     try:
+        # Filled with the entries the import dropped without failing, so the caller
+        # learns about them instead of only the server log doing so.
+        dropped: list[design_system_service.BundleImportWarning] = []
         ds = design_system_service.import_bundle(
             db,
             zip_bytes=content,
             user=_current_user(),
             name_override=name,
             source_filename=file.filename,
+            warnings=dropped,
         )
-        return _detail(ds)
+        return DesignSystemImportResult(
+            **_detail(ds).model_dump(),
+            warnings=[
+                ImportWarningOut(path=w.path, reason=w.reason) for w in dropped
+            ],
+        )
     except DesignSystemNameConflictError as e:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))

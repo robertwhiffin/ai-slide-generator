@@ -290,7 +290,15 @@ class TestPathSafety:
 
         assert _safe_relpath("assets/logo.svg") == "assets/logo.svg"
         assert _safe_relpath("a\\b\\c.png") == "a/b/c.png"  # backslashes normalized
-        assert _safe_relpath("./assets/./logo.svg") == "assets/logo.svg"
+        # INVERTED deliberately. This used to assert
+        #     _safe_relpath("./assets/./logo.svg") == "assets/logo.svg"
+        # i.e. that a ``.`` segment was COLLAPSED. That collapsing was the defect:
+        # erasing a segment on the way to the junk/dotfile decision let
+        # ``assets/innocent/.`` arrive as ``assets/innocent`` — basename no longer
+        # dot-prefixed — and be stored under a path that was not the entry's name,
+        # and it let two entries collapse onto one identity. The helper now VALIDATES
+        # rather than rewrites: a non-canonical path is refused, not repaired.
+        assert _safe_relpath("./assets/./logo.svg") is None
         assert _safe_relpath("assets/../../evil") is None
         assert _safe_relpath("/etc/passwd") is None
         assert _safe_relpath("C:/Windows/x") is None

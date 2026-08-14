@@ -433,6 +433,265 @@ class TestThumbnailPathsAreStillZipSlipChecked:
 
 
 # ---------------------------------------------------------------------------
+# A bundle path is CANONICAL or it is refused — never laundered into one
+# ---------------------------------------------------------------------------
+#
+# Normalization used to run BEFORE the junk/dotfile decision, so a segment that
+# made an entry junk could be erased on the way to that decision:
+# ``assets/innocent/.`` normalized to ``assets/innocent``, whose basename is no
+# longer dot-prefixed, and the entry was STORED under a path that was not its own
+# name. Two entries could also collapse onto one identity (``assets/./x`` and
+# ``assets/x``), leaving which bytes win to zip ordering.
+#
+# The fix is to refuse a non-canonical path outright instead of rewriting it into
+# an acceptable one, and to make BOTH gates that look at bundle paths reach that
+# verdict through the SAME classifier, so they cannot disagree by construction.
+# ---------------------------------------------------------------------------
+
+#: Path shapes that are not canonical and must therefore be REFUSED outright.
+#: Every one of these was previously either stored under a laundered name or
+#: silently collapsed onto another entry's identity.
+NON_CANONICAL_ARCNAMES = [
+    "assets/innocent/.",
+    "fonts/x/.",
+    "assets/./x",
+    "assets/x/.",
+    "templates/x/.",
+    ".",
+    "..",
+    "assets/..",
+    "assets//x",
+    "./assets/logo2.svg",
+]
+
+#: Trailing junk on the ALLOWLISTED thumbnail shape. ``$`` matches before a single
+#: trailing newline in Python, so ``templates/x/.thumbnail\n`` satisfied a ``$``
+#: anchored allowlist and was stored; the rest are control characters that never
+#: belong in a path.
+CONTROL_CHAR_ARCNAMES = [
+    "templates/x/.thumbnail\n",
+    "templates/x/.thumbnail\r\n",
+    "templates/x/.thumbnail\r",
+    "templates/x/.thumbnail\t",
+    "templates/x/preview\n",
+    "templates/x/preview.png\n",
+]
+
+
+class TestNonCanonicalPathsAreRefused:
+    def test_all_shapes_refuse_the_whole_bundle(self, session):
+        """Every non-canonical shape refuses the import rather than storing
+        SOMETHING under a name that is not the entry's own."""
+        from src.services.design_system_service import DesignSystemImportError, import_bundle
+        from tests.unit.conftest_design_system import default_manifest
+
+        survived = []
+        for index, arcname in enumerate(NON_CANONICAL_ARCNAMES + CONTROL_CHAR_ARCNAMES):
+            # A distinct name per iteration: the unique index on a LIVE name would
+            # otherwise 409 on the second import and mask the real outcome.
+            manifest = default_manifest()
+            manifest["name"] = f"Acme Shape {index}"
+            files = {"assets/logo.svg": SVG_LOGO, arcname: webp_bytes()}
+            try:
+                ds = import_bundle(
+                    session,
+                    zip_bytes=make_bundle_zip(manifest=manifest, files=files),
+                    user="u",
+                )
+            except DesignSystemImportError:
+                continue
+            survived.append((arcname, sorted(f.path for f in ds.files)))
+        assert survived == [], f"non-canonical paths reached storage: {survived}"
+
+    @pytest.mark.parametrize(
+        "arcname", NON_CANONICAL_ARCNAMES + CONTROL_CHAR_ARCNAMES, ids=repr
+    )
+    def test_both_gates_agree_by_construction(self, arcname):
+        """The up-front whole-bundle scan and the per-entry iterator must reach the
+        SAME verdict on the same shape. The regression was exactly a disagreement:
+        the scan refused ``assets/innocent/.`` on its RAW basename while the
+        iterator accepted the same entry on its NORMALIZED one."""
+        import io
+        import zipfile
+
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _assert_bundle_paths_safe,
+            _iter_safe_entries,
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(arcname, webp_bytes())
+        raw = buf.getvalue()
+
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            with pytest.raises(DesignSystemImportError):
+                _assert_bundle_paths_safe(zf)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            with pytest.raises(DesignSystemImportError):
+                list(_iter_safe_entries(zf, ""))
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        NON_CANONICAL_ARCNAMES
+        + CONTROL_CHAR_ARCNAMES
+        + [
+            # A NUL cannot survive ``zipfile`` (it truncates the arcname on write),
+            # so it is unreachable end-to-end — the predicate still refuses it
+            # rather than relying on a stdlib detail for that property.
+            "templates/x/.thumbnail\x00",
+            "assets/lo\x00go.svg",
+            "",
+            "/etc/passwd",
+            "C:/Windows/x",
+        ],
+        ids=repr,
+    )
+    def test_safe_relpath_refuses_rather_than_rewrites(self, rel_path):
+        from src.services.design_system_service import _safe_relpath
+
+        assert _safe_relpath(rel_path) is None
+
+    @pytest.mark.parametrize(
+        "rel_path", ["assets/logo.svg", "templates/x/.thumbnail", "a/b/c.png"]
+    )
+    def test_canonical_paths_pass_through_unchanged(self, rel_path):
+        """Positive control: a canonical path is returned as-is, so the refusals
+        above are about non-canonical shapes, not about rejecting everything."""
+        from src.services.design_system_service import _safe_relpath
+
+        assert _safe_relpath(rel_path) == rel_path
+
+    def test_directory_entries_are_skipped_not_refused(self, session):
+        """A trailing-slash directory entry is never STORED, but it must not refuse
+        the bundle either — every real zip carries directory entries."""
+        import io
+        import zipfile
+
+        from src.services.design_system_service import _iter_safe_entries, import_bundle
+
+        files = {
+            "assets/": b"",
+            "assets/sub/": b"",
+            "fonts/": b"",
+            "assets/logo.svg": SVG_LOGO,
+        }
+        ds = import_bundle(session, zip_bytes=make_bundle_zip(files=files), user="u")
+        paths = {f.path for f in ds.files}
+        assert "assets/logo.svg" in paths
+        assert not any(p.rstrip("/") in ("assets", "assets/sub", "fonts") for p in paths)
+
+        # And the iterator yields nothing for a bare directory entry.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("assets/dir/", b"")
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            assert [rel for _, rel in _iter_safe_entries(zf, "")] == []
+
+    def test_traversal_directory_entry_is_still_refused(self):
+        """Skipping directory entries must not become a way to smuggle a traversal
+        path past the scan."""
+        import io
+        import zipfile
+
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _assert_bundle_paths_safe,
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("../evil/", b"")
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            with pytest.raises(DesignSystemImportError):
+                _assert_bundle_paths_safe(zf)
+
+
+class TestThumbnailAllowlistAnchoring:
+    """``$`` accepts a terminal newline in Python, so a ``$``-anchored allowlist on
+    a PATH accepts ``<allowed shape>\\n``. Every allowlist predicate on a path or
+    filename must reject trailing junk, not just the documented shapes."""
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "templates/x/.thumbnail\n",
+            "templates/x/.thumbnail\r\n",
+            "templates/x/.thumbnail\r",
+            "templates/x/.thumbnail\t",
+            "templates/x/.thumbnail ",
+            "templates/x/.thumbnail\x00",
+            "templates/x/thumbnail\n",
+            "templates/x/preview\n",
+        ],
+        ids=repr,
+    )
+    def test_thumbnail_recognizers_reject_trailing_junk(self, rel_path):
+        from src.services.design_system_service import (
+            _is_template_preview,
+            _is_template_thumbnail,
+        )
+
+        assert _is_template_thumbnail(rel_path) is False
+        assert _is_template_preview(rel_path) is False
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "templates/x/preview.png\n",
+            "templates/x/preview.webp\n",
+            "templates/x/preview.png\t",
+            "templates/x/preview.png ",
+            "templates/x/preview.png\x00",
+        ],
+        ids=repr,
+    )
+    def test_preview_recognizer_rejects_trailing_junk(self, rel_path):
+        """The SIBLING regex has the same ``$`` anchor and the same defect class."""
+        from src.services.design_system_service import _is_template_preview
+
+        assert _is_template_preview(rel_path) is False
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        ["templates/x/.thumbnail", "templates/x/preview.png", "templates/x/preview"],
+    )
+    def test_legitimate_shapes_still_recognized(self, rel_path):
+        """Positive control for the anchoring tests above."""
+        from src.services.design_system_service import _is_template_preview
+
+        assert _is_template_preview(rel_path) is True
+
+    @pytest.mark.parametrize(
+        "basename",
+        [
+            ".thumbnail\n",
+            ".thumbnail\r\n",
+            ".thumbnail\r",
+            ".thumbnail\t",
+            ".thumbnail\x00",
+            "preview\n",
+        ],
+        ids=repr,
+    )
+    def test_template_thumbnail_lookup_rejects_control_characters(self, basename):
+        """The THIRD gate on the same file (``design_system_templates``) picks the
+        row that becomes ``thumbnail_url``. Defence in depth: stored paths can no
+        longer carry a control character, and this predicate no longer depends on
+        the importer for that."""
+        from src.services.design_system_templates import _is_thumbnail_basename
+
+        assert _is_thumbnail_basename(basename) is False
+
+    @pytest.mark.parametrize("basename", [".thumbnail", "thumbnail", "preview.png"])
+    def test_template_thumbnail_lookup_still_matches_real_basenames(self, basename):
+        from src.services.design_system_templates import _is_thumbnail_basename
+
+        assert _is_thumbnail_basename(basename) is True
+
+
+# ---------------------------------------------------------------------------
 # Asset retrieval (used by the {{ds-asset:ID}} resolver + serve endpoint)
 # ---------------------------------------------------------------------------
 
