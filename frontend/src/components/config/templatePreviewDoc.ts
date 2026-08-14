@@ -28,6 +28,12 @@ export const PREVIEW_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;";
 
 /**
+ * The preview frame's own reset, injected ahead of the template's head so the
+ * template can still override it.
+ */
+export const PREVIEW_RESET_STYLE = '<style>html,body{margin:0;overflow:hidden}</style>';
+
+/**
  * A {{ds-asset:ID}} handle that still reaches the builder (a backend that
  * predates serve-time resolution, or an id its resolver could not satisfy)
  * would resolve as a relative URL inside the frame and be refused by the CSP
@@ -442,17 +448,13 @@ function parseLayout(layoutHtml: string): Document {
   return new DOMParser().parseFromString(layoutHtml, 'text/html');
 }
 
-/**
- * How many slide sections a template layout contains (0 when it is not
- * structured as slide sections — the whole layout is then one page).
+/*
+ * `countTemplateSlides` USED TO LIVE HERE and is deliberately gone: it re-parsed
+ * the whole multi-megabyte layout purely to count sections, so every viewer open
+ * paid for a second full DOMParser pass. The count now comes from
+ * `prepareTemplatePreview().slideCount`, off the parse the render already needs —
+ * same number, one parse. Do not reintroduce a counting helper that parses.
  */
-export function countTemplateSlides(layoutHtml: string): number {
-  try {
-    return parseLayout(layoutHtml).querySelectorAll(SLIDE_ROOT_SELECTOR).length;
-  } catch {
-    return 0;
-  }
-}
 
 /**
  * Compose the preview document: the template layout with its token
@@ -483,6 +485,46 @@ export function buildTemplatePreviewDoc(
   tokenCss: string | null,
   slideIndex?: number,
 ): string {
+  return renderTemplatePreview(prepareTemplatePreview(layoutHtml, tokenCss), slideIndex);
+}
+
+/**
+ * A template's source, parsed and sanitized ONCE, ready for per-page rendering.
+ *
+ * The `body` is a LIVE parsed node, deliberately: rendering page N clones it
+ * rather than re-parsing the source, which is what makes paging cheap.
+ */
+export type PreparedTemplatePreview = {
+  /** Slide sections found in the layout (0 when it is not slide-structured). */
+  slideCount: number;
+  /** CSP meta + token stylesheet + preview reset. Built once. */
+  guard: string;
+  /** The template's own head content, serialized once. */
+  head: string;
+  /** The parsed body, retained for cloning. Null only for unparseable input. */
+  body: HTMLElement | null;
+};
+
+/**
+ * Parse and sanitize a template source ONCE — the expensive half of the work.
+ *
+ * Every step here is per-SOURCE, not per-page: the DOMParser pass over a
+ * multi-megabyte layout, the `@import` strip (a character-wise scan that has to
+ * walk base64 `@font-face` payloads), the token-CSS strip, and the slide count.
+ * Paging a template used to redo all of it per page — and opening the viewer did
+ * it twice over, once for the full document and once for the isolated slide — and
+ * that cost is exactly what widened the window in which the frame showed its
+ * pre-paint white canvas.
+ *
+ * TRADEOFF, stated: this retains a parsed Document for as long as the caller
+ * holds the prepared value, in exchange for never re-parsing. It is bounded by
+ * the same on-screen card set that already retains the source STRINGS, and it is
+ * released when the component unmounts.
+ */
+export function prepareTemplatePreview(
+  layoutHtml: string,
+  tokenCss: string | null,
+): PreparedTemplatePreview {
   const inlineLayout = layoutHtml.replace(DS_ASSET_HANDLE_RE, 'data:,');
   // Token CSS is a stylesheet in its own right, so it is stripped directly; the
   // layout's @import rules are stripped from its parsed <style> elements below,
@@ -491,37 +533,64 @@ export function buildTemplatePreviewDoc(
     ? stripCssImports(tokenCss.replace(DS_ASSET_HANDLE_RE, 'data:,'))
     : tokenCss;
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
-  const previewReset = '<style>html,body{margin:0;overflow:hidden}</style>';
+  const previewReset = PREVIEW_RESET_STYLE;
   const guard = cspMeta + (inlineTokenCss ? `<style>${inlineTokenCss}</style>` : '') + previewReset;
   const parsed = parseLayout(inlineLayout);
   stripImportsFromStyleElements(parsed);
-  if (slideIndex !== undefined) {
-    const slides = Array.from(parsed.querySelectorAll(SLIDE_ROOT_SELECTOR));
-    if (slides.length > 1 && slideIndex >= 0 && slideIndex < slides.length) {
-      // Nothing on the path to the surviving slide may be removed.
-      const keep = new Set<Element>();
-      for (let n: Element | null = slides[slideIndex]; n; n = n.parentElement) keep.add(n);
-      slides.forEach((slide, idx) => {
-        if (idx === slideIndex) return;
-        // Drop the slide, then any wrapper it leaves EMPTY. An emptied wrapper
-        // is not inert: templates put the deck background on the wrapper
-        // (`section`), so under the frame contract it would stretch to the full
-        // stage and — being a later sibling — paint over the slide that
-        // survives, blanking the preview. Walk up only while the parent has no
-        // element children left, so a wrapper holding anything else stays.
-        let node: Element | null = slide;
-        while (node && !keep.has(node)) {
-          const parent: Element | null = node.parentElement;
-          node.remove();
-          if (!parent || keep.has(parent) || parent.children.length > 0) break;
-          node = parent;
-        }
-      });
-    }
+  return {
+    slideCount: parsed.querySelectorAll(SLIDE_ROOT_SELECTOR).length,
+    guard,
+    head: parsed.head?.innerHTML ?? '',
+    body: parsed.body ?? null,
+  };
+}
+
+/**
+ * Serialize ONE page of a prepared template.
+ *
+ * `slideIndex` isolates ONE slide section for the paginated viewer: the other
+ * sections are REMOVED from a CLONE of the parsed body rather than hidden with
+ * injected CSS, so the surviving slide keeps the template's own cascade exactly
+ * (an author `display` value is never fought over) and no extra rules are
+ * layered on. The clone is what lets the shared parse be reused — mutating the
+ * prepared body would destroy it for every other page. Out-of-range or
+ * non-slide layouts fall through to the full document unchanged.
+ */
+export function renderTemplatePreview(
+  prepared: PreparedTemplatePreview,
+  slideIndex?: number,
+): string {
+  const isolating =
+    slideIndex !== undefined &&
+    prepared.slideCount > 1 &&
+    slideIndex >= 0 &&
+    slideIndex < prepared.slideCount;
+  let body = prepared.body;
+  if (body && isolating) {
+    body = body.cloneNode(true) as HTMLElement;
+    const slides = Array.from(body.querySelectorAll(SLIDE_ROOT_SELECTOR));
+    // Nothing on the path to the surviving slide may be removed.
+    const keep = new Set<Element>();
+    for (let n: Element | null = slides[slideIndex as number]; n; n = n.parentElement) keep.add(n);
+    slides.forEach((slide, idx) => {
+      if (idx === slideIndex) return;
+      // Drop the slide, then any wrapper it leaves EMPTY. An emptied wrapper
+      // is not inert: templates put the deck background on the wrapper
+      // (`section`), so under the frame contract it would stretch to the full
+      // stage and — being a later sibling — paint over the slide that
+      // survives, blanking the preview. Walk up only while the parent has no
+      // element children left, so a wrapper holding anything else stays.
+      let node: Element | null = slide;
+      while (node && !keep.has(node)) {
+        const parent: Element | null = node.parentElement;
+        node.remove();
+        if (!parent || keep.has(parent) || parent.children.length > 0) break;
+        node = parent;
+      }
+    });
   }
-  const templateHead = parsed.head?.innerHTML ?? '';
-  const templateBody = parsed.body?.outerHTML ?? '<body></body>';
+  const templateBody = body?.outerHTML ?? '<body></body>';
   // The shim trails the template's own head so it wins on cascade ORDER as well
   // as importance; the CSP meta stays the first fetch-capable byte regardless.
-  return `<!DOCTYPE html><html><head>${guard}${templateHead}${PREVIEW_STAGE_SHIM}</head>${templateBody}</html>`;
+  return `<!DOCTYPE html><html><head>${prepared.guard}${prepared.head}${PREVIEW_STAGE_SHIM}</head>${templateBody}</html>`;
 }

@@ -92,7 +92,14 @@ export const TemplateViewerModal: React.FC<{
             dsId={dsId}
             templateId={template.id}
             name={template.name}
-            slideIndex={isPaginated ? index : undefined}
+            // UNCONDITIONAL, deliberately. Passing `undefined` until the count
+            // arrived meant every open built the FULL multi-megabyte document
+            // first and then rebuilt the isolated one — TWO navigations, so two
+            // white pre-paint windows, on every open. The builder already falls
+            // through to the full document when a layout has 0 or 1 slide
+            // sections, so this is semantically identical, and on the second
+            // render the identical string means React skips the DOM write.
+            slideIndex={index}
             onSlideCount={setSlideCount}
             testId="template-viewer-frame"
           />

@@ -14,17 +14,17 @@
  * the expanded viewer rather than downloaded twice.
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Layers } from 'lucide-react';
 import { configApi, resolveApiUrl } from '../../api/config';
 import type { DesignSystemTemplate } from '../../api/config';
 // The hardened preview-document builder (CSP + inert parse) lives in its own
 // module so the thumbnail and the expanded viewer share ONE renderer.
 import {
-  buildTemplatePreviewDoc,
-  countTemplateSlides,
+  prepareTemplatePreview,
   PREVIEW_STAGE_H,
   PREVIEW_STAGE_W,
+  renderTemplatePreview,
 } from './templatePreviewDoc';
 
 type TemplateSource = { layout_html: string; token_css: string | null };
@@ -134,7 +134,6 @@ export const LiveTemplateFrame: React.FC<{
 }> = ({ dsId, templateId, name, slideIndex, onSlideCount, testId }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(0);
-  const [doc, setDoc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [source, setSource] = useState<TemplateSource | null>(null);
 
@@ -153,21 +152,38 @@ export const LiveTemplateFrame: React.FC<{
     };
   }, [dsId, templateId]);
 
-  // Report the section count once per fetched source so the viewer can build
-  // its pager without parsing the layout a second time.
-  useEffect(() => {
-    if (source && onSlideCount) onSlideCount(countTemplateSlides(source.layout_html));
-  }, [source, onSlideCount]);
+  // ONE parse per template source. Paging then only clones + serializes, and the
+  // section count falls out of this same parse instead of a second one.
+  const prepared = useMemo(
+    () => (source ? prepareTemplatePreview(source.layout_html, source.token_css) : null),
+    [source],
+  );
 
+  // DERIVED DURING RENDER, not stored in state via an effect. Effect-stored docs
+  // mean the iframe can mount for one render carrying a document built from the
+  // PREVIOUS props — which is a blank/stale frame by construction.
+  const doc = useMemo(
+    () => (prepared ? renderTemplatePreview(prepared, slideIndex) : null),
+    [prepared, slideIndex],
+  );
+
+  // Report the section count once per prepared source so the viewer can build
+  // its pager without parsing the layout again.
   useEffect(() => {
-    if (!source) return;
-    setDoc(buildTemplatePreviewDoc(source.layout_html, source.token_css, slideIndex));
-  }, [source, slideIndex]);
+    if (prepared && onSlideCount) onSlideCount(prepared.slideCount);
+  }, [prepared, onSlideCount]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const updateScale = () => setScale(el.offsetWidth / PREVIEW_STAGE_W);
+    const updateScale = () => {
+      // A zero measurement is a TRANSIENT state (the modal's stage before layout,
+      // a display:none ancestor), not a real size. Writing it would unmount the
+      // iframe below and tear down an in-flight document load, so the last good
+      // scale is kept instead.
+      if (!el.offsetWidth) return;
+      setScale(el.offsetWidth / PREVIEW_STAGE_W);
+    };
     updateScale();
     const observer =
       typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScale) : null;
@@ -179,32 +195,93 @@ export const LiveTemplateFrame: React.FC<{
     };
   }, []);
 
+  // DOUBLE BUFFER — the fix for the reported blank white frame.
+  //
+  // Assigning a new srcdoc string is a FULL document navigation, and a navigating
+  // frame shows its pre-paint WHITE canvas until megabytes have parsed (measured:
+  // 217 ms cold, 75-85 ms per page change at 4x CPU throttle; 32/32 pages blank
+  // for at least one frame). The pager is parent state, so it was already correct
+  // during that window — which is exactly the reported symptom: "Slide 2 of 6"
+  // over a white rectangle.
+  //
+  // So a new document is never assigned to the frame the user is LOOKING at. It
+  // goes to the idle buffer, which parses invisibly, and the buffers swap only
+  // once that frame's own `load` event fires. The element-level `load` DOES fire
+  // for a `sandbox=""` srcdoc frame (measured 21-31 ms) while `contentDocument`
+  // stays blocked, so nothing about the sandbox is relaxed to get this signal.
+  const [buffers, setBuffers] = useState<{
+    a: string | null;
+    b: string | null;
+    active: 'a' | 'b';
+  }>({ a: null, b: null, active: 'a' });
+
+  useEffect(() => {
+    if (!doc) return;
+    setBuffers((prev) => {
+      if (prev[prev.active] === doc) return prev; // already the visible document
+      const idle = prev.active === 'a' ? 'b' : 'a';
+      if (prev[idle] === doc) return prev; // already loading in the idle buffer
+      return { ...prev, [idle]: doc };
+    });
+  }, [doc]);
+
+  const handleBufferLoad = useCallback((slot: 'a' | 'b') => {
+    setBuffers((prev) =>
+      prev.active === slot || prev[slot] === null ? prev : { ...prev, active: slot },
+    );
+  }, []);
+
+  const visibleDoc = buffers[buffers.active];
+  const renderBuffer = (slot: 'a' | 'b') => {
+    const bufferDoc = buffers[slot];
+    if (bufferDoc === null) return null;
+    const isActive = buffers.active === slot;
+    return (
+      <iframe
+        key={slot}
+        srcDoc={bufferDoc}
+        title={`${name} preview`}
+        sandbox=""
+        scrolling="no"
+        tabIndex={-1}
+        onLoad={() => handleBufferLoad(slot)}
+        // A thumbnail is decorative (the card names the template); the
+        // expanded viewer is the content the user came to read, so it is
+        // exposed to assistive tech. The SANDBOX and CSP are identical in
+        // both cases — only the a11y framing differs. The idle buffer is
+        // never announced, and only the ACTIVE frame carries the test id, so
+        // a test locator still resolves to exactly one element.
+        aria-hidden={testId === undefined || !isActive ? true : undefined}
+        data-testid={isActive ? testId ?? 'template-live-preview' : undefined}
+        className="border-0"
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: `${PREVIEW_STAGE_W}px`,
+          height: `${PREVIEW_STAGE_H}px`,
+          transform: `scale(${scale})`,
+          transformOrigin: 'top left',
+          pointerEvents: 'none',
+          // The idle buffer must still LAY OUT AND PAINT to reach `load`, so it
+          // is transparent rather than `display: none`.
+          opacity: isActive ? 1 : 0,
+        }}
+      />
+    );
+  };
+
   return (
     <div ref={containerRef} className="absolute inset-0 overflow-hidden">
-      {failed || !doc || scale === 0 ? (
-        <FramePlaceholder />
-      ) : (
-        <iframe
-          srcDoc={doc}
-          title={`${name} preview`}
-          sandbox=""
-          scrolling="no"
-          tabIndex={-1}
-          // A thumbnail is decorative (the card names the template); the
-          // expanded viewer is the content the user came to read, so it is
-          // exposed to assistive tech. The SANDBOX and CSP are identical in
-          // both cases — only the a11y framing differs.
-          aria-hidden={testId === undefined ? true : undefined}
-          data-testid={testId ?? 'template-live-preview'}
-          className="border-0"
-          style={{
-            width: `${PREVIEW_STAGE_W}px`,
-            height: `${PREVIEW_STAGE_H}px`,
-            transform: `scale(${scale})`,
-            transformOrigin: 'top left',
-            pointerEvents: 'none',
-          }}
-        />
+      {/* The placeholder holds the stage until the FIRST document has painted —
+          there is no earlier frame to keep showing, and the alternative is the
+          white canvas this fix exists to remove. */}
+      {failed || visibleDoc === null || scale === 0 ? <FramePlaceholder /> : null}
+      {scale === 0 ? null : (
+        <>
+          {renderBuffer('a')}
+          {renderBuffer('b')}
+        </>
       )}
     </div>
   );
