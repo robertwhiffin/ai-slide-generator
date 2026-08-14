@@ -58,6 +58,7 @@ import json
 import logging
 import mimetypes
 import re
+import struct
 import unicodedata
 import zipfile
 from typing import Any, NamedTuple, Optional
@@ -1070,11 +1071,17 @@ _REASON_BACKSLASH = (
     "name is ambiguous: it would have to be rewritten to be interpreted, and this "
     "importer validates names rather than rewriting them"
 )
-_REASON_STDLIB_REWRITE = (
-    "the name recorded in the archive is not the name a reader sees — Python's zip "
-    "reader silently TRUNCATES a name at a NUL byte, so an entry called "
-    "'thumbnail\\x00.exe' would be validated as 'thumbnail'. An entry whose real "
-    "name and read name differ cannot be judged safely and is refused"
+_REASON_NAME_MISMATCH = (
+    "the archive declares a name for this entry that does not match the name the zip "
+    "reader resolves for it, so the entry has TWO identities and there is no single "
+    "name that can be both validated and stored. A NUL byte in the name does this "
+    "(readers truncate at it, so 'thumbnail\\x00.exe' is read as 'thumbnail'), and so "
+    "does an Info-ZIP Unicode Path extra field that disagrees with the central "
+    "directory"
+)
+_REASON_CORRUPT_EXTRA = (
+    "its Info-ZIP Unicode Path extra field (0x7075) is malformed, so the name the "
+    "archive means to declare for this entry cannot be read at all"
 )
 _REASON_ABSOLUTE = (
     "it is an absolute path, so it names a location outside the bundle rather than "
@@ -1161,14 +1168,37 @@ def _collision_refusal_message(first: str, second: str, canonical: str) -> str:
     )
 
 
-# Bidirectional formatting and override characters. These are category Cf, and they
-# are singled out from the rest of Cf because they are the ones that make a name
-# DISPLAY as something other than what it is — the classic
-# "logo‮gnp.svg shows up as logo.svg" spoof — and this importer's paths are
-# rendered back to users in the file browser.
-_BIDI_CONTROLS = frozenset(
-    "‎‏‪‫‬‭‮⁦⁧⁨⁩"
+# Bidi classes carried by EXACTLY the nine explicit bidirectional formatting
+# characters — the embeddings, the overrides and the isolates. Verified over the whole
+# code space against Unicode 16.0.0: no other assigned character has any of these
+# classes, so this is a definitive derivation rather than a hand-kept list, and a
+# future Unicode release that adds another embedding-style control is covered without
+# a code change.
+_BIDI_FORMATTING_CLASSES = frozenset(
+    {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
 )
+
+# The three IMPLICIT bidi marks have to be listed, because they are deliberately
+# indistinguishable by bidi class from ordinary text: LRM is class "L" like "A", RLM
+# is "R" like a Hebrew letter, and ALM is "AL" like an Arabic letter. They are the
+# remainder of Unicode's Bidi_Control property (PropList.txt), and
+# ``test_the_refused_set_is_exactly_unicodes_bidi_control_property`` asserts the union
+# below is precisely those twelve characters, so an omission fails a test rather than
+# shipping. U+061C ALM was the omission that did ship.
+_BIDI_MARKS = frozenset("\u200e\u200f\u061c")
+
+
+def _is_bidi_control(ch: str) -> bool:
+    """True for a Unicode Bidi_Control character.
+
+    Nine of the twelve are derived from their bidi class; the three implicit marks are
+    named explicitly because no Unicode property available through
+    :mod:`unicodedata` separates them from ordinary letters.
+    """
+    return (
+        ch in _BIDI_MARKS
+        or unicodedata.bidirectional(ch) in _BIDI_FORMATTING_CLASSES
+    )
 
 
 def _forbidden_character_reason(name: str) -> Optional[str]:
@@ -1181,7 +1211,7 @@ def _forbidden_character_reason(name: str) -> Optional[str]:
         which several parsers treat as a line break) passed and could be stored.
       * category ``Cs`` — an unpaired surrogate is not text at all; nothing
         downstream that encodes or renders a path can handle one meaningfully.
-      * :data:`_BIDI_CONTROLS` — a name that renders as a different name than it is.
+      * :func:`_is_bidi_control` — a name that renders as a different name than it is.
 
     NOT rejected: the rest of category ``Cf``, and unassigned/private-use code
     points. ZWNJ (``U+200C``), ZWJ (``U+200D``) and SOFT HYPHEN (``U+00AD``) are Cf
@@ -1197,7 +1227,7 @@ def _forbidden_character_reason(name: str) -> Optional[str]:
             return _REASON_CONTROL
         if category == "Cs":
             return _REASON_SURROGATE
-        if ch in _BIDI_CONTROLS:
+        if _is_bidi_control(ch):
             return _REASON_BIDI
     return None
 
@@ -1372,6 +1402,70 @@ def _raw_entry_name(info: zipfile.ZipInfo) -> str:
     return getattr(info, "orig_filename", None) or info.filename
 
 
+# Info-ZIP Unicode Path Extra Field. Its whole purpose is to declare a name for an
+# entry OTHER than the one in the central directory, which makes it a name-rewriting
+# record and therefore this module's business.
+_UNICODE_PATH_EXTRA_TAG = 0x7075
+
+# Bytes of the 0x7075 payload before the name itself: a 1-byte version and a 4-byte
+# CRC-32 of the central-directory name.
+_UNICODE_PATH_HEADER_LEN = 5
+
+
+def _extra_field_name_refusal(info: zipfile.ZipInfo) -> Optional[str]:
+    """Refuse an entry whose EXTRA FIELD declares a different name, else ``None``.
+
+    Parsed from the raw ``info.extra`` bytes on purpose. No stdlib-processed attribute
+    can be trusted as an entry's identity, and this record is the proof: in CPython's
+    ``ZipInfo._decodeExtra`` a ``0x7075`` record assigns
+    ``self.filename = _sanitize_filename(declared_name)`` and never touches
+    ``orig_filename``. So an entry whose central name is already the clean
+    ``templates/x/.thumbnail`` and whose extra field declares
+    ``templates/x/.thumbnail\\x00.exe`` comes back with ``orig_filename`` EQUAL to
+    ``filename`` — the sanitizer removed the NUL — and the
+    "recorded name == read name" invariant sees nothing wrong. Measured: that entry
+    reached the thumbnail allowlist and was stored as a live template thumbnail.
+
+    ANY disagreement is refused, without consulting the record's version byte or name
+    CRC. Two reasons: replicating the stdlib's acceptance test would make this guard
+    depend on the very internals it exists to distrust, and an entry that declares two
+    different names is ambiguous whether or not this particular reader honours the
+    second one. The cost is that a legacy Info-ZIP archive which uses this field for
+    its intended purpose — carrying a UTF-8 name alongside a mangled CP437 one — is
+    refused rather than accepted on the UTF-8 name. That is the consistent choice for
+    this importer (refuse ambiguity, never resolve it), it is what the user can fix by
+    re-zipping, and it costs nothing measured: across the real exports, ZERO entries
+    carry a 0x7075 record. Modern tools set the UTF-8 flag and put the name straight in
+    the central directory, needing no extra field at all.
+
+    ``0x7075`` is the ONLY record that can rewrite a name: in the same stdlib function
+    the only other tag handled is ``0x0001`` (Zip64), which adjusts sizes and offsets
+    and never the filename. The Unicode COMMENT field (``0x6375``) carries a comment,
+    not a path. Unknown tags are skipped by both the stdlib and the loop below.
+    """
+    central = _raw_entry_name(info)
+    extra = info.extra or b""
+    offset = 0
+    while len(extra) - offset >= 4:
+        tag, size = struct.unpack_from("<HH", extra, offset)
+        body_start = offset + 4
+        body_end = body_start + size
+        if body_end > len(extra):
+            return _REASON_CORRUPT_EXTRA
+        if tag == _UNICODE_PATH_EXTRA_TAG:
+            body = extra[body_start:body_end]
+            if len(body) < _UNICODE_PATH_HEADER_LEN:
+                return _REASON_CORRUPT_EXTRA
+            try:
+                declared = body[_UNICODE_PATH_HEADER_LEN:].decode("utf-8")
+            except UnicodeDecodeError:
+                return _REASON_CORRUPT_EXTRA
+            if declared != central:
+                return _REASON_NAME_MISMATCH
+        offset = body_end
+    return None
+
+
 def _entry_verdict_for_info(
     info: zipfile.ZipInfo, rel_path: Optional[str] = None
 ) -> _EntryVerdict:
@@ -1381,27 +1475,32 @@ def _entry_verdict_for_info(
     root-prefix-stripped path, for the in-scope iterator. It has to be a separate
     argument because the template-thumbnail allowlist is anchored at ``templates/``:
     a wrapped bundle's ``safe/templates/x/.thumbnail`` only matches once ``safe/`` is
-    off. The stdlib-rewrite check below always applies to the FULL recorded name,
-    which is the string the stdlib actually rewrote.
+    off. The identity checks below always apply to the FULL recorded name, which is
+    the string a rewrite would have altered.
 
-    Refuses outright when Python's zip reader has REWRITTEN the name — i.e. when
-    ``orig_filename`` and ``filename`` differ. That one invariant is the whole fix for
-    a class of bypass, not just for NUL:
+    TWO identity checks, because there are two independent ways an entry can end up
+    with more than one name, and each is invisible to the other:
 
-        ``templates/x/.thumbnail\\x00.exe`` is truncated by the stdlib to
-        ``templates/x/.thumbnail``, which matches the template-thumbnail allowlist and
-        is stored if its bytes sniff as an image.
+      1. ``orig_filename != filename`` — the reader rewrote the central name. A NUL
+         byte does this: ``templates/x/.thumbnail\\x00.exe`` is truncated to
+         ``templates/x/.thumbnail``, which matches the thumbnail allowlist.
+      2. :func:`_extra_field_name_refusal` — an extra field declares a different name.
+         This one DEFEATS check 1 entirely, because the stdlib sanitizes the declared
+         name before assigning it, leaving the two attributes equal.
 
-    Validating the raw name alone would be enough to refuse that particular entry, but
-    it would leave the deeper problem: ``zf.read``/``namelist`` and the rest of the
-    importer all key off the TRUNCATED name, so raw-name validation and by-name
-    retrieval would be talking about different files. Refusing any divergence keeps
-    one name per entry everywhere, which is the same property the backslash refusal
-    buys (see :func:`_entry_path_verdict`).
+    Validating the raw name alone would refuse case 1's entry but leave the deeper
+    problem: ``zf.read``/``namelist`` and the rest of the importer key off
+    ``filename``, so raw-name validation and by-name retrieval would be talking about
+    different files. Refusing any divergence keeps one name per entry everywhere,
+    which is the same property the backslash refusal buys (see
+    :func:`_entry_path_verdict`).
     """
     raw = _raw_entry_name(info)
     if raw != info.filename:
-        return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_STDLIB_REWRITE)
+        return _EntryVerdict(_ENTRY_REFUSE, reason=_REASON_NAME_MISMATCH)
+    extra_reason = _extra_field_name_refusal(info)
+    if extra_reason is not None:
+        return _EntryVerdict(_ENTRY_REFUSE, reason=extra_reason)
     return _classify_bundle_entry(raw if rel_path is None else rel_path)
 
 
