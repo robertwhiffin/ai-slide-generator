@@ -545,6 +545,11 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
       {/* Expanded template viewer (read-only; same sandboxed renderer). */}
       {viewerTemplate && (
         <TemplateViewerModal
+          // Keyed by template so switching templates without closing remounts
+          // instead of carrying the previous template's slideCount and page index
+          // into the new one (latent today; the viewer is opened from a card, but
+          // nothing in the component prevents it).
+          key={viewerTemplate.id}
           dsId={detail.id}
           template={viewerTemplate}
           onClose={() => setViewerTemplate(null)}
