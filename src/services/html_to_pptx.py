@@ -155,6 +155,23 @@ class HtmlToPptxConverterV3:
             extra={"total_slides": total, "duration_s": f"{time.time() - t0:.1f}"},
         )
 
+        # FAIL LOUDLY. If codegen produced nothing for EVERY slide, the jail's
+        # per-slide fallback would emit a deck of bare "Slide N" placeholders and
+        # the route would answer 200 with a valid .pptx — a content-free file that
+        # looks like a successful export. Wholesale codegen failure is an upstream
+        # error (an LLM call that failed or was refused), never a legitimate deck,
+        # so it is raised instead of shipped.
+        #
+        # A PARTIAL failure deliberately still falls back per slide: that is the
+        # AST-guard's defence-in-depth path, where one rejected snippet must not
+        # cost the whole export.
+        if total and not any(codes):
+            raise PPTXConversionError(
+                f"Slide code generation failed for all {total} slide(s); refusing to "
+                "export a deck of empty placeholder slides. Check the converter "
+                "logs for the upstream LLM error."
+            )
+
         # -- Phase 2: Sequential execution INSIDE the subprocess jail ---------
         def _relay(current: int, total_slides: int, message: str) -> None:
             if progress_callback:
@@ -690,6 +707,65 @@ class HtmlToPptxConverterV3:
         cleaned = self._BASE64_IMG_RE.sub(_replace, html_str)
         return cleaned, filenames
 
+    #: How the prompt budget is shared when the ``<style>`` block ALONE would
+    #: consume all of it. The model needs both halves — colours and fonts come from
+    #: the CSS, structure from the body — so neither may be starved to nothing.
+    _STARVED_STYLE_SHARE = 0.5
+    _CSS_TRUNCATION_MARKER = "\n/* ... CSS truncated to fit the prompt budget ... */"
+    _BODY_TRUNCATION_MARKER = "..."
+
+    #: Falling back to the last complete CSS rule is only worth it if most of the
+    #: budget survives. A brand stylesheet often opens with one enormous
+    #: base64 ``@font-face``, so the last ``}`` inside the budget can sit a few
+    #: hundred chars in — trading a tidy cut for 95% of the colours. Below this
+    #: fraction the hard clip wins.
+    _MIN_RULE_BOUNDARY_YIELD = 0.6
+
+    @classmethod
+    def _clip_css(cls, css: str, budget: int) -> str:
+        """Clip *css* to *budget* chars, preferring the last complete rule.
+
+        Cutting mid-rule hands the model a dangling ``{``; ending on the last ``}``
+        keeps the stylesheet syntactically closed. But a tidy cut is not worth
+        losing most of the declarations, so it is only taken when it retains
+        :data:`_MIN_RULE_BOUNDARY_YIELD` of the budget.
+        """
+        if len(css) <= budget:
+            return css
+        clipped = css[:budget]
+        last_rule_end = clipped.rfind("}")
+        if last_rule_end >= budget * cls._MIN_RULE_BOUNDARY_YIELD:
+            clipped = clipped[: last_rule_end + 1]
+        return clipped + cls._CSS_TRUNCATION_MARKER
+
+    def _share_starved_budget(self, style_tags, body_content: str, max_length: int):
+        """Split the budget when the stylesheet alone would eat all of it.
+
+        Returns ``(style_content, body_content)``, both clipped so the
+        reconstructed document fits. The style tags are re-wrapped from their INNER
+        css rather than sliced as markup, because slicing ``<style>…</style>`` text
+        would drop the closing tag and hand the model malformed HTML.
+        """
+        overhead = len("<html><head><style></style></head></html>")
+        usable = max(0, max_length - overhead)
+        css = "\n".join(
+            tag.decode_contents() for tag in style_tags if hasattr(tag, "decode_contents")
+        )
+        css = self._clip_css(css, int(usable * self._STARVED_STYLE_SHARE))
+        style_content = f"<style>{css}</style>"
+        body_budget = max(0, usable - len(css))
+        if len(body_content) > body_budget:
+            body_content = body_content[:body_budget] + self._BODY_TRUNCATION_MARKER
+        logger.warning(
+            "Stylesheet alone exceeded the LLM prompt budget — truncating CSS too",
+            extra={
+                "max_length": max_length,
+                "css_kept": len(css),
+                "body_kept": len(body_content),
+            },
+        )
+        return style_content, body_content
+
     def _truncate_html(self, html_str: str, max_length: int = 15000) -> str:
         """Truncate HTML to reasonable length for LLM while preserving CSS.
         
@@ -738,10 +814,29 @@ class HtmlToPptxConverterV3:
                 body_max = max_length - len(style_content) - 500  # Reserve space for style
                 if body_max > 0:
                     body_content = body_content[:body_max] + "..."
-            
+                else:
+                    # The STYLE BLOCK ALONE overruns the entire budget: a design
+                    # system's stylesheet is ~358 KB against a 15,000-char budget,
+                    # so ``body_max`` goes NEGATIVE. This guard used to simply fail
+                    # and leave the body UNTRUNCATED — a function named "truncate"
+                    # returning a document 25x its budget. The oversized prompt
+                    # then came back 400 "Input is too long for requested model",
+                    # was swallowed to None, and EVERY slide silently degraded to a
+                    # bare "Slide N" placeholder while the route still answered 200
+                    # with a valid .pptx. So the CSS has to be truncated too.
+                    style_content, body_content = self._share_starved_budget(
+                        style_tags, body_content, max_length
+                    )
+
             # Reconstruct with style tag preserved
             truncated = f"<html><head>{style_content}</head>{body_content}</html>"
-            
+
+            # Unconditional backstop. Whatever the branch above decided, this
+            # function must never hand back more than its budget — that promise is
+            # the only thing standing between a large deck and an unusable prompt.
+            if len(truncated) > max_length:
+                truncated = truncated[:max_length]
+
             logger.debug(
                 "HTML truncated successfully (CSS preserved)",
                 extra={
