@@ -59,7 +59,7 @@ import json
 import logging
 import re
 import unicodedata
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +234,31 @@ _STYLE_HEADER = "SLIDE VISUAL STYLE"
 #   small label above a title — so the model guessed its size on every slide and
 #   those labels rendered inconsistently slide-to-slide. The band is derived from the
 #   bundle's own ramp (:func:`_eyebrow_px`), never from a constant.
-COMPILER_VERSION = 18
+# v19: the eyebrow band COLLAPSED ONTO THE FLOOR on the real bundle, so persisted v18
+# rows carry a band that states nothing and the bump is what makes them recompile.
+#
+# v18 derived the band as the largest ramp rung strictly below the body band. The real
+# bundle declares 12/16/20/24/32/40/56/64 — no rung at all between the 12px floor and
+# the 16px body band — so that rung IS the floor, and the artifact read
+# ``Eyebrow/kicker labels: 12px`` directly above ``Floor: never render ANY text below
+# 12px``: one number for two different bands, erasing the distinction the band exists
+# to make. Meanwhile all four of that bundle's templates hardcode
+# ``.eyebrow{font-size:14px}`` (8/8 rules) and reference ``var(--fs-*)`` zero times, so
+# the brand's real eyebrow size lives in its CSS but never as a token. Measured
+# consequence on the UNPINNED path: the generated deck emitted
+# ``.eyebrow{font-size:12px}`` (obeying the artifact) while the PINNED deck emitted 14px
+# (obeying the template CSS) — 19/19 eyebrow nodes at 12px across 7 unpinned decks.
+#
+# So when — and ONLY when — the derived rung is the floor itself, the band falls back to
+# the size the bundle's own stylesheet/template CSS declares
+# (:func:`_authored_eyebrow_px`), bounded strictly between the stated floor and the body
+# band. A ramp that ships a real sub-body rung is untouched: the brand's TOKENS remain
+# the authority, and no number is ever invented.
+#
+# BLAST RADIUS, measured: only systems whose largest sub-body rung equals the floor
+# compile differently. Every other ramp shape — including the one the docstring above
+# describes — is byte-identical apart from this version marker.
+COMPILER_VERSION = 19
 _COMPILER_VERSION_MARKER = f"[ds-compiler v{COMPILER_VERSION}]"
 
 # The EXACT, name-independent header prefix every compiled artifact opens with.
@@ -1123,7 +1147,11 @@ def _font_size_token_pairs(
     )
 
 
-def _eyebrow_px(sizes: list[float], body_bottom: float) -> float:
+def _eyebrow_px(
+    sizes: list[float],
+    body_bottom: float,
+    authored_px: Optional[float] = None,
+) -> float:
     """The ramp rung an eyebrow/kicker label sits on.
 
     THE LARGEST RUNG STRICTLY BELOW THE BODY BAND, falling back to the body band's
@@ -1137,15 +1165,73 @@ def _eyebrow_px(sizes: list[float], body_bottom: float) -> float:
     smallest body rung is then the honest one rather than a number invented to fill
     the gap.
 
-    Measured against the real bundle shape (12, 14, 16, 18, 20, 24, 32, 40, 48, 64):
-    body is 16-20, so this returns 14 — which is the size that bundle's own
-    ``.eyebrow`` CSS uses, reached without the compiler knowing anything about it.
+    On the ramp shape (12, 14, 16, 18, 20, 24, 32, 40, 48, 64) body is 16-20, so
+    this returns 14 straight from the ramp, without the compiler knowing anything
+    about the bundle's CSS.
+
+    WHEN THE RAMP CANNOT REACH IT (``authored_px``). The real bundle declares
+    12/16/20/24/32/40/56/64 — no rung at all between the 12px floor and the 16px
+    body band — so the largest sub-body rung IS the floor and the band collapses
+    onto it: "Eyebrow/kicker labels: 12px" sitting directly above "Floor: never
+    render ANY text below 12px". One number for two bands says nothing. That
+    bundle's own templates hardcode ``.eyebrow{font-size:14px}`` (8/8 rules) and
+    reference ``var(--fs-*)`` zero times, so its real eyebrow size exists in its
+    CSS but never as a token — which is exactly the case ``authored_px`` carries.
+
+    The RAMP STILL WINS whenever it has a real answer: the brand's tokens are the
+    authority, and this fallback only speaks when the derived rung is the floor
+    itself. The authored value is also bounded by the bands the artifact already
+    states — strictly above the floor and strictly below body — so a stray rule
+    can neither contradict the stated floor nor outrank body text.
     """
     below_body = [px for px in sizes if px < body_bottom]
-    return max(below_body) if below_body else body_bottom
+    derived = max(below_body) if below_body else body_bottom
+    floor_px = sizes[0] if sizes else derived
+    if derived > floor_px:
+        return derived
+    if authored_px is not None and floor_px < authored_px < body_bottom:
+        return authored_px
+    return derived
 
 
-def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
+#: Class names a bundle uses for the eyebrow/kicker label, and the font-size
+#: declaration inside such a rule. Used ONLY to recover a size the token ramp
+#: cannot express (see :func:`_eyebrow_px`); the value is parsed to a float, so
+#: nothing from the stylesheet's text can reach the compiled artifact.
+_EYEBROW_RULE_RE = re.compile(
+    r"\.(?:eyebrow|kicker|action-kicker|eyebrow-label)\b[^{}]*\{([^{}]*)\}",
+    re.IGNORECASE,
+)
+_FONT_SIZE_PX_RE = re.compile(
+    r"font-size\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*px", re.IGNORECASE
+)
+
+
+def _authored_eyebrow_px(sources: Iterable[str]) -> Optional[float]:
+    """The eyebrow font-size a bundle's own CSS declares, or ``None``.
+
+    Scans the retained stylesheet/template sources for an eyebrow-class rule with a
+    px ``font-size``. Returns the MOST FREQUENTLY declared value (ties broken by the
+    smaller size) so the answer is deterministic — the compiler's output is a pure
+    function of the record, and a bundle whose templates disagree must not compile
+    differently depending on row order.
+    """
+    counts: dict[float, int] = {}
+    for source in sources:
+        for body in _EYEBROW_RULE_RE.findall(source or ""):
+            match = _FONT_SIZE_PX_RE.search(body)
+            if match:
+                px = float(match.group(1))
+                counts[px] = counts.get(px, 0) + 1
+    if not counts:
+        return None
+    return min(counts, key=lambda px: (-counts[px], px))
+
+
+def _type_scale_section(
+    grouped: dict[str, list[tuple[str, str]]],
+    authored_eyebrow_px: Optional[float] = None,
+) -> str:
     """Build the BRAND TYPE SCALE block (always emitted; see comment above).
 
     Role mapping over the sorted distinct ramp sizes: cover/hero = top,
@@ -1193,7 +1279,8 @@ def _type_scale_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
             # formatted from a float the compiler parsed out of a px token value, so
             # the region stays numbers-only and no user text enters it.
             f"- Eyebrow/kicker labels (the small label above a title): "
-            f"{_fmt_px(_eyebrow_px(sizes, body_sizes[0]))}, the SAME size on every "
+            f"{_fmt_px(_eyebrow_px(sizes, body_sizes[0], authored_eyebrow_px))}, "
+            f"the SAME size on every "
             f"slide that carries one. {_EYEBROW_TREATMENT_CLAUSE}",
             f"- Floor: never render ANY text below {_fmt_px(floor_px)}, the "
             "bottom of the brand ramp.",
@@ -2162,6 +2249,7 @@ def compile_design_system(
     *,
     skill_md: Optional[str] = None,
     readme_md: Optional[str] = None,
+    authored_eyebrow_px: Optional[float] = None,
 ) -> str:
     """Serialize a structured design system into ``compiled_style_content``.
 
@@ -2174,6 +2262,12 @@ def compile_design_system(
     (Phase 1 ``design_system_file`` rows). When provided they compile into the
     BRAND MANUAL block (FULL, first); both default ``None`` so a design system
     without them — or the legacy positional call — simply omits the block.
+
+    ``authored_eyebrow_px`` is the eyebrow font-size the bundle's own CSS declares,
+    used ONLY when the token ramp cannot express it (see :func:`_eyebrow_px`). Like
+    the two above it is passed IN rather than read here, so this function keeps its
+    contract of being pure over the record's tokens/assets/manifest — the file rows
+    are the caller's business (:func:`recompute_compiled_style_content`).
 
     Emitted order: header (stamped with the compiler-version marker) ->
     description -> BRAND MANUAL (README + SKILL, full) -> scope firewall
@@ -2340,7 +2434,9 @@ def compile_design_system(
     # from — so no uploaded text can forge a delimiter. This replaces the v8
     # position-based marker scrub, which had to EXEMPT this section (it owns the
     # marker) and so could not protect the token names interpolated inside it.
-    parts.append(_delimit_region(_type_scale_section(grouped)))
+    parts.append(
+        _delimit_region(_type_scale_section(grouped, authored_eyebrow_px))
+    )
 
     # Fonts: inline @font-face references + family listing (both uncapped).
     font_assets = _font_assets_section(design_system)
@@ -2488,6 +2584,30 @@ def _brand_manual_text_from_files(
     return _join(skills), _join(readmes)
 
 
+def _style_sources_from_files(design_system: Any) -> list[str]:
+    """The retained STYLESHEET and TEMPLATE source text, in deterministic path order.
+
+    Same shape as :func:`_brand_manual_text_from_files` — reads the record's
+    ``files`` collection, decodes the in-DB bytes, skips reference rows (asset/font,
+    ``data`` is NULL). These are the sources a bundle states its own component sizes
+    in, and the only thing read out of them is a px number
+    (:func:`_authored_eyebrow_px`).
+    """
+    rows: list[tuple[str, str]] = []
+    for ds_file in getattr(design_system, "files", None) or []:
+        data = getattr(ds_file, "data", None)
+        if data is None:
+            continue
+        if (getattr(ds_file, "kind", "") or "") not in ("css", "template"):
+            continue
+        if isinstance(data, (bytes, bytearray)):
+            text = bytes(data).decode("utf-8", errors="replace")
+        else:
+            text = str(data)
+        rows.append((getattr(ds_file, "path", "") or "", text))
+    return [text for _, text in sorted(rows, key=lambda row: row[0])]
+
+
 def recompute_compiled_style_content(design_system: Any) -> str:
     """(Re)compute the compiled prompt text and store it on the record.
 
@@ -2499,7 +2619,12 @@ def recompute_compiled_style_content(design_system: Any) -> str:
     system with no source files simply compiles without the block.
     """
     skill_md, readme_md = _brand_manual_text_from_files(design_system)
-    compiled = compile_design_system(design_system, skill_md=skill_md, readme_md=readme_md)
+    compiled = compile_design_system(
+        design_system,
+        skill_md=skill_md,
+        readme_md=readme_md,
+        authored_eyebrow_px=_authored_eyebrow_px(_style_sources_from_files(design_system)),
+    )
     design_system.compiled_style_content = compiled
     return compiled
 
