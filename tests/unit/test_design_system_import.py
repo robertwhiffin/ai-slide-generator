@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import zipfile
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -24,6 +25,7 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
+from src.database.models.design_system import DesignSystem
 from src.services.design_system_service import _basename
 from tests.unit.conftest_design_system import (
     COLORS_AND_TYPE_CSS,
@@ -3363,3 +3365,285 @@ class TestTokenGroupWidth:
             got = conn.execute(text('SELECT "group" FROM design_system_token')).scalar()
         assert got == "g" * 200
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Concurrent same-name import: a CONFLICT, never an opaque server error
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentSameNameImportIsAConflict:
+    """Two importers racing for one name: the loser gets the same 409 the
+    sequential path returns, not an opaque 500.
+
+    The fail-fast name check is a SELECT taken before all the expensive
+    collect/compile work, and the partial unique index
+    ``uq_design_system_name_active`` is what actually decides. Two overlapping
+    importers both pass the SELECT, so the loser meets the index only at its
+    write — measured live as ``HTTP 500 {"detail":"Failed to import design
+    system"}`` while the sequential path returns a precise 409 naming the
+    winner. No data-integrity bug (the index held, the rollback held); a wrong
+    status code and an unactionable message on a race a user hits by
+    double-clicking Import.
+    """
+
+    def _bootstrap_db(self, tmp_path):
+        url = f"sqlite:///{tmp_path}/design_systems.db"
+        bootstrap = create_engine(url)
+        Base.metadata.create_all(bind=bootstrap)
+        bootstrap.dispose()
+        return url
+
+    def test_two_concurrent_imports_of_one_name_give_one_success_one_conflict(
+        self, tmp_path
+    ):
+        """DETERMINISTIC by construction, not by timing.
+
+        A barrier holds BOTH importers between their pre-check SELECT and their
+        first write, so the TOCTOU window is provably open; the writes are then
+        strictly ordered so the loser's INSERT meets a COMMITTED row. Nothing
+        here depends on how fast either thread runs.
+
+        Writes must be ordered rather than merely concurrent because SQLite
+        refuses a write-after-read lock upgrade with SQLITE_BUSY, which would
+        make the test flake on lock contention instead of exercising the index.
+        """
+        import threading
+
+        from src.database.models.design_system import (
+            DesignSystemAsset,
+            DesignSystemFile,
+            DesignSystemTemplate,
+            DesignSystemToken,
+        )
+        from src.services import design_system_service
+        from src.services.design_system_service import (
+            DesignSystemNameConflictError,
+            import_bundle,
+        )
+
+        url = self._bootstrap_db(tmp_path)
+        both_prechecked = threading.Barrier(2)
+        first_committed = threading.Event()
+        real_collect = design_system_service._collect_assets_and_files
+        outcomes: dict[str, str] = {}
+        conflict_messages: list[str] = []
+
+        def _collect_then_sequence(*args, **kwargs):
+            result = real_collect(*args, **kwargs)
+            # Reached AFTER the fail-fast name SELECT and BEFORE any write.
+            both_prechecked.wait(timeout=30)
+            if threading.current_thread().name == "importer-second":
+                first_committed.wait(timeout=30)
+            return result
+
+        def _run(tag):
+            engine = create_engine(url, connect_args={"timeout": 30})
+            try:
+                with Session(engine) as db:
+                    try:
+                        import_bundle(
+                            db,
+                            zip_bytes=make_bundle_zip(),
+                            user="racer@example.com",
+                            name_override="Race Me",
+                        )
+                        outcomes[tag] = "created"
+                    except DesignSystemNameConflictError as exc:
+                        db.rollback()
+                        outcomes[tag] = "conflict"
+                        conflict_messages.append(str(exc))
+                    except Exception as exc:  # noqa: BLE001 - recorded, then asserted on
+                        db.rollback()
+                        outcomes[tag] = f"{type(exc).__name__}: {exc}"
+            finally:
+                if tag == "first":
+                    first_committed.set()
+                engine.dispose()
+
+        with patch.object(
+            design_system_service,
+            "_collect_assets_and_files",
+            _collect_then_sequence,
+        ):
+            threads = [
+                threading.Thread(target=_run, args=(tag,), name=f"importer-{tag}")
+                for tag in ("first", "second")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60)
+            assert not any(t.is_alive() for t in threads), "importer thread hung"
+
+        assert sorted(outcomes.values()) == ["conflict", "created"], outcomes
+        # Actionable, and it names the name the caller must change.
+        assert "Race Me" in conflict_messages[0]
+        assert "already exists" in conflict_messages[0]
+
+        # ZERO ORPHAN ROWS: the loser's rollback left nothing behind, so the
+        # winner owns every child row in the database.
+        verify = create_engine(url)
+        with Session(verify) as db:
+            systems = db.query(DesignSystem).all()
+            assert len(systems) == 1, [(s.id, s.name) for s in systems]
+            winner_id = systems[0].id
+            for model in (
+                DesignSystemToken,
+                DesignSystemAsset,
+                DesignSystemFile,
+                DesignSystemTemplate,
+            ):
+                rows = db.query(model).all()
+                assert all(r.design_system_id == winner_id for r in rows), (
+                    f"orphan {model.__name__} rows survived the loser's rollback"
+                )
+            # Non-vacuity for the sweep above: the winner really did write child
+            # rows, so "no orphans" is not just an empty database. (The default
+            # synthetic manifest declares no templates[], so DesignSystemTemplate
+            # is legitimately empty and is checked for orphans only.)
+            for model in (DesignSystemToken, DesignSystemAsset, DesignSystemFile):
+                assert db.query(model).count() > 0, (
+                    f"{model.__name__} should carry the winner's rows"
+                )
+        verify.dispose()
+
+    def test_the_precheck_still_wins_when_there_is_no_race(self, tmp_path):
+        """Non-vacuity: without the barrier the SEQUENTIAL path is what answers,
+        so the test above is measuring the race and not the pre-check."""
+        from src.services.design_system_service import (
+            DesignSystemNameConflictError,
+            import_bundle,
+        )
+
+        url = self._bootstrap_db(tmp_path)
+        engine = create_engine(url, connect_args={"timeout": 30})
+        with Session(engine) as db:
+            first = import_bundle(
+                db, zip_bytes=make_bundle_zip(), user="u", name_override="Race Me"
+            )
+            with pytest.raises(DesignSystemNameConflictError) as excinfo:
+                import_bundle(
+                    db, zip_bytes=make_bundle_zip(), user="u", name_override="Race Me"
+                )
+        # The sequential message can name the winner's id; the race one cannot.
+        assert f"id={first.id}" in str(excinfo.value)
+        engine.dispose()
+
+
+class TestTranslateNameConflictError:
+    """The translator matches THIS index and nothing else."""
+
+    def _integrity_error(self, orig):
+        from sqlalchemy.exc import IntegrityError
+
+        return IntegrityError(
+            "INSERT INTO design_system (name) VALUES (?)", {}, orig
+        )
+
+    def _pg_error(self, sqlstate, constraint_name, message):
+        class _Diag:
+            pass
+
+        diag = _Diag()
+        diag.constraint_name = constraint_name
+
+        class _PgError(Exception):
+            pass
+
+        err = _PgError(message)
+        err.pgcode = sqlstate
+        err.diag = diag
+        return err
+
+    def test_translates_a_unique_violation_on_the_active_name_index(self):
+        from src.services.design_system_service import (
+            DesignSystemNameConflictError,
+            translate_name_conflict_error,
+        )
+
+        exc = self._integrity_error(
+            self._pg_error(
+                "23505",
+                "uq_design_system_name_active",
+                'duplicate key value violates unique constraint '
+                '"uq_design_system_name_active"\nDETAIL:  Key (name)=(Acme) already exists.',
+            )
+        )
+        with pytest.raises(DesignSystemNameConflictError) as excinfo:
+            translate_name_conflict_error(exc, name="Acme")
+        assert "Acme" in str(excinfo.value)
+
+    def test_translates_the_sqlite_form_of_the_same_index(self):
+        """SQLite names the COLUMN rather than the index, and it is the same rule
+        (this is the only unique index over design_system.name)."""
+        import sqlite3
+
+        from src.services.design_system_service import (
+            DesignSystemNameConflictError,
+            translate_name_conflict_error,
+        )
+
+        exc = self._integrity_error(
+            sqlite3.IntegrityError("UNIQUE constraint failed: design_system.name")
+        )
+        with pytest.raises(DesignSystemNameConflictError):
+            translate_name_conflict_error(exc, name="Acme")
+
+    @pytest.mark.parametrize(
+        "orig_factory,label",
+        [
+            # A unique violation on a DIFFERENT constraint must keep its own
+            # identity — reporting it as a name conflict would send the caller
+            # off to rename something that is not the problem.
+            (
+                lambda self: self._pg_error(
+                    "23505",
+                    "uq_session_lock",
+                    'duplicate key value violates unique constraint "uq_session_lock"',
+                ),
+                "other unique constraint",
+            ),
+            # NOT NULL, foreign key, check: all IntegrityError, none a conflict.
+            (
+                lambda self: self._pg_error(
+                    "23502", None, 'null value in column "name" violates not-null constraint'
+                ),
+                "not-null violation",
+            ),
+            (
+                lambda self: self._pg_error(
+                    "23503",
+                    "design_system_asset_design_system_id_fkey",
+                    "insert or update on table violates foreign key constraint",
+                ),
+                "foreign key violation",
+            ),
+            (
+                lambda self: __import__("sqlite3").IntegrityError(
+                    "UNIQUE constraint failed: design_system_template.name"
+                ),
+                "unique violation on another table",
+            ),
+            (
+                lambda self: __import__("sqlite3").IntegrityError(
+                    "NOT NULL constraint failed: design_system.name"
+                ),
+                "sqlite not-null violation",
+            ),
+        ],
+    )
+    def test_leaves_every_other_integrity_error_alone(self, orig_factory, label):
+        from src.services.design_system_service import translate_name_conflict_error
+
+        exc = self._integrity_error(orig_factory(self))
+        # Returns without raising: the caller's own `raise` then surfaces the
+        # real error instead of a misleading 409.
+        translate_name_conflict_error(exc, name="Acme")
+
+    def test_leaves_an_unrelated_exception_alone(self):
+        from src.services.design_system_service import translate_name_conflict_error
+
+        translate_name_conflict_error(
+            ValueError("some entirely unrelated failure"), name="Acme"
+        )

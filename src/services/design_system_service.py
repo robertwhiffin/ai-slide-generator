@@ -245,6 +245,73 @@ def translate_name_index_limit_error(exc: BaseException, *, name: Optional[str])
     ) from exc
 
 
+#: The partial unique index that actually decides name uniqueness over LIVE rows
+#: (see the ``DesignSystem`` model). Matched by NAME so this translation stays
+#: specific to it: any OTHER integrity violation must keep its own identity.
+_ACTIVE_NAME_INDEX = "uq_design_system_name_active"
+
+#: PostgreSQL ``unique_violation``. Matched on the SQLSTATE rather than the message
+#: where the driver exposes it, since the message is localizable.
+_UNIQUE_VIOLATION_SQLSTATE = "23505"
+
+#: How SQLite reports the SAME rule. It names the COLUMN rather than the index, and
+#: this is the only unique index over ``design_system.name``, so the two are
+#: equivalent — which is what lets the unit suite (SQLite) cover this at all.
+_SQLITE_ACTIVE_NAME_MARKER = "unique constraint failed: design_system.name"
+
+
+def _is_active_name_conflict_error(exc: BaseException) -> bool:
+    """True when *exc* is the active-name index refusing a duplicate name.
+
+    Walks the exception chain the same way :func:`_is_name_index_limit_error` does.
+    A unique violation that names a DIFFERENT constraint returns False immediately
+    rather than falling through to the message check — a positive identification of
+    someone else's constraint is not a maybe.
+    """
+    seen: set[int] = set()
+    candidate: Optional[BaseException] = exc
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        code = getattr(candidate, "pgcode", None) or getattr(candidate, "sqlstate", None)
+        if code == _UNIQUE_VIOLATION_SQLSTATE:
+            constraint = getattr(getattr(candidate, "diag", None), "constraint_name", None)
+            if constraint:
+                return constraint == _ACTIVE_NAME_INDEX
+        candidate = getattr(candidate, "orig", None) or candidate.__cause__
+
+    message = str(exc).lower()
+    return _ACTIVE_NAME_INDEX in message or _SQLITE_ACTIVE_NAME_MARKER in message
+
+
+def translate_name_conflict_error(exc: BaseException, *, name: Optional[str]) -> None:
+    """Re-raise *exc* as :class:`DesignSystemNameConflictError` if that is what it is.
+
+    THE DATABASE IS THE AUTHORITY — the same doctrine as
+    :func:`translate_name_index_limit_error`, applied to the other thing this index
+    decides. The fail-fast SELECT in :func:`import_bundle` is a pre-check, not a
+    lock: two importers of one name both pass it, and the loser meets
+    ``uq_design_system_name_active`` only at its write. Untranslated, that
+    ``UniqueViolation`` reaches the route's generic handler as an opaque 500, where
+    the sequential path returns a precise 409 — a wrong status code and an
+    unactionable message on a race a user hits by double-clicking Import.
+
+    Scoped to THIS index by name. A unique violation on any other constraint, and
+    every other class of integrity error, passes straight through so the caller's
+    own ``raise`` still surfaces it — mislabelling those as a name conflict would
+    send the caller off to rename something that is not the problem.
+
+    Unlike the pre-check's message this one cannot name the winner's id: the
+    transaction is already aborted, so there is nothing left to query.
+    """
+    if not _is_active_name_conflict_error(exc):
+        return
+    labelled = f" named '{name}'" if name else ""
+    raise DesignSystemNameConflictError(
+        f"A design system{labelled} already exists. Choose a different name to "
+        "import a copy."
+    ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Small pure helpers
 # ---------------------------------------------------------------------------
@@ -704,6 +771,11 @@ def import_bundle(
         db.flush()
     except Exception as exc:
         translate_name_index_limit_error(exc, name=name)
+        # The pre-check above is not a lock: a CONCURRENT importer of the same name
+        # can have committed between that SELECT and this write, and then the partial
+        # unique index is what refuses us. Translated to the same 409 the sequential
+        # path returns, instead of escaping as an opaque 500.
+        translate_name_conflict_error(exc, name=name)
         raise
     # Materialize addressable template entities (v1 Phase 4) AFTER the flush so
     # the rewritten layout's {{ds-asset:ID}} refs point at real asset ids. Local
@@ -720,6 +792,7 @@ def import_bundle(
         db.commit()
     except Exception as exc:
         translate_name_index_limit_error(exc, name=name)
+        translate_name_conflict_error(exc, name=name)
         raise
     db.refresh(design_system)
 
