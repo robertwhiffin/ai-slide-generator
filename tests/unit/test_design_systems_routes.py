@@ -281,6 +281,151 @@ class TestDeleteAndDefault:
         assert client.post(f"{BASE}/{ds_id}/set-default").status_code == 400
 
 
+@pytest.fixture(scope="function")
+def fk_client(db_engine):
+    """A client whose SQLite connection ENFORCES foreign keys.
+
+    The design-system child relationships are declared ``passive_deletes=True``
+    with ``ondelete="CASCADE"``, so a HARD delete revokes an asset's bytes via the
+    DATABASE's cascade, not via the ORM. SQLite defaults ``PRAGMA foreign_keys``
+    to OFF, which would leave that cascade silently inert and make the negative
+    control below unable to fail — the orphaned asset row would keep answering
+    200. Enabling the pragma makes SQLite enforce the same rule PostgreSQL does
+    (the same reason the partial name index is declared with ``sqlite_where``).
+    """
+    from sqlalchemy import event
+    from sqlalchemy import text as sa_text
+
+    @event.listens_for(db_engine, "connect")
+    def _enforce_foreign_keys(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    session_local = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+    session = session_local()
+    # Fixtures reuse a pooled connection opened before the listener was attached.
+    session.execute(sa_text("PRAGMA foreign_keys=ON"))
+
+    def override_get_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+    session.close()
+    event.remove(db_engine, "connect", _enforce_foreign_keys)
+
+
+class TestSoftDeleteRetainsAddressableBytes:
+    """A soft-deleted design system is HIDDEN, not REVOKED — and that is the contract.
+
+    WHY THIS IS PINNED: decks generated while a system was live keep
+    ``{{ds-asset:ID}}`` handles in their STORED html and css, including
+    ``@font-face { src: url('{{ds-asset:N}}') }``. The resolver reads those bytes
+    back BY ID at every deck-response boundary (render, export, MCP). If a
+    tombstone's bytes started returning 404, every historic deck and every export
+    that used that brand would silently lose its fonts and images — a regression
+    dressed up as a hardening. ``?hard_delete=true`` is the verb that really
+    destroys the bytes, and it is exercised below so the distinction between the
+    two verbs stays load-bearing rather than accidental.
+
+    Retention is NOT a disclosure relaxation: every GET on this router is open by
+    design (org-shared library), so a tombstone exposes no new data to no new
+    principal, and the cross-design-system scoping guard still fails closed on a
+    tombstone — also pinned below, in both directions.
+    """
+
+    def _asset(self, body, filename):
+        return next(a for a in body["assets"] if a["filename"] == filename)
+
+    def test_asset_bytes_are_byte_identical_after_soft_delete(self, client):
+        body = _import(client).json()
+        logo = self._asset(body, "logo.svg")
+        before = client.get(logo["url"])
+        assert before.status_code == 200
+        assert before.content
+
+        assert client.delete(f"{BASE}/{body['id']}").status_code == 204
+
+        after = client.get(logo["url"])
+        assert after.status_code == 200
+        assert after.content == before.content
+        assert after.headers["content-type"] == before.headers["content-type"]
+
+    def test_asset_thumbnail_still_served_after_soft_delete(self, client):
+        body = _import(client).json()
+        png = self._asset(body, "hero-bg.png")
+        before = client.get(png["thumbnail_url"])
+        assert before.status_code == 200
+
+        assert client.delete(f"{BASE}/{body['id']}").status_code == 204
+
+        after = client.get(png["thumbnail_url"])
+        assert after.status_code == 200
+        assert after.content == before.content
+
+    def test_font_file_bytes_still_served_after_soft_delete(self, client):
+        """The `@font-face` case the ruling turns on: a font is a REFERENCE row
+        whose bytes resolve through an ownership-checked asset lookup."""
+        body = _import(client).json()
+        font_url = f"{BASE}/{body['id']}/files/fonts/acme-sans.woff2"
+        before = client.get(font_url)
+        assert before.status_code == 200
+        assert before.content
+
+        assert client.delete(f"{BASE}/{body['id']}").status_code == 204
+
+        after = client.get(font_url)
+        assert after.status_code == 200
+        assert after.content == before.content
+
+    def test_hard_delete_revokes_the_same_bytes(self, fk_client):
+        """The negative control: these routes CAN 404, so every 200 above is a
+        property of the SOFT delete rather than of a route that cannot refuse.
+
+        Uses the foreign-key-enforcing client because revocation is the DB's
+        ``ON DELETE CASCADE`` doing the work (``passive_deletes=True``)."""
+        body = _import(fk_client).json()
+        logo = self._asset(body, "logo.svg")
+        png = self._asset(body, "hero-bg.png")
+        font_url = f"{BASE}/{body['id']}/files/fonts/acme-sans.woff2"
+        assert fk_client.get(logo["url"]).status_code == 200
+
+        resp = fk_client.delete(f"{BASE}/{body['id']}?hard_delete=true")
+        assert resp.status_code == 204, resp.text
+
+        assert fk_client.get(logo["url"]).status_code == 404
+        assert fk_client.get(png["thumbnail_url"]).status_code == 404
+        assert fk_client.get(font_url).status_code == 404
+
+    def test_cross_design_system_reads_through_a_tombstone_are_404(self, client):
+        """Scoping still fails closed BOTH ways once one side is a tombstone."""
+        live = _import(client).json()
+        dead = _import(client, data={"name": "Tombstoned"}).json()
+        live_asset = self._asset(live, "logo.svg")
+        dead_asset = self._asset(dead, "logo.svg")
+
+        assert client.delete(f"{BASE}/{dead['id']}").status_code == 204
+
+        # the tombstone's own id still serves its own bytes...
+        assert client.get(dead_asset["url"]).status_code == 200
+        # ...but it is not a path to anyone else's, and it is not reachable
+        # through a live system's id either.
+        assert (
+            client.get(f"{BASE}/{dead['id']}/assets/{live_asset['id']}").status_code
+            == 404
+        )
+        assert (
+            client.get(f"{BASE}/{live['id']}/assets/{dead_asset['id']}").status_code
+            == 404
+        )
+
+
 # ---------------------------------------------------------------------------
 # Serve asset
 # ---------------------------------------------------------------------------
