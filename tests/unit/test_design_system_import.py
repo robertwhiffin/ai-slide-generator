@@ -2123,16 +2123,47 @@ class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
                 import_bundle(isolated, zip_bytes=self._zip(), user="u")
         assert _REASON_EMPTY_RECORDED_NAME in str(exc.value)
 
-    def test_the_iterator_does_not_yield_it_either(self):
-        """The gate that decides what gets STORED. Before the fix it yielded
-        ``slides/benign.bin`` — an entry with two raw header identities, on its way to
-        a row."""
-        from src.services.design_system_service import _iter_safe_entries
+    def test_the_iterator_refuses_it_rather_than_skipping_it(self):
+        """The gate that decides what gets STORED, asserted as a REFUSAL.
+
+        Before the fix it yielded ``slides/benign.bin`` — an entry with two raw header
+        identities, on its way to a row. "Not yielded" was too weak an assertion to
+        replace that with: this entry's recorded name is ``""``, which strips to nothing
+        under every root prefix, so the iterator's ``if not rel_raw: continue`` SKIPPED
+        it silently and satisfied a not-yielded assertion while judging it not at all.
+        Refusing is the property that matters, because a skip leaves the entry's second
+        identity unremarked and leans entirely on the up-front scan having run.
+        """
+        from src.services.design_system_service import (
+            _REASON_EMPTY_RECORDED_NAME,
+            DesignSystemImportError,
+            _iter_safe_entries,
+        )
 
         with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
-            yielded = [path for _, path in _iter_safe_entries(zf, "")]
-        assert self.TARGET not in yielded
-        assert "assets/logo.svg" in yielded, "the rest of the bundle must still enumerate"
+            with pytest.raises(DesignSystemImportError) as exc:
+                list(_iter_safe_entries(zf, ""))
+        assert _REASON_EMPTY_RECORDED_NAME in str(exc.value)
+
+    def test_the_iterator_refuses_it_out_of_scope_too(self):
+        """The same refusal under a root prefix the entry does not sit under.
+
+        An empty recorded name is hostile wherever it sits: there is no root prefix that
+        makes "the archive records no name for this entry" acceptable. Pinned separately
+        from the case above because the two failed for DIFFERENT reasons — in scope the
+        empty remainder swallowed it, out of scope the ``startswith`` did — and a fix
+        that only reordered one of them would leave the other.
+        """
+        from src.services.design_system_service import (
+            _REASON_EMPTY_RECORDED_NAME,
+            DesignSystemImportError,
+            _iter_safe_entries,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            with pytest.raises(DesignSystemImportError) as exc:
+                list(_iter_safe_entries(zf, "no-such-root/"))
+        assert _REASON_EMPTY_RECORDED_NAME in str(exc.value)
 
     def test_nothing_is_stored(self):
         from src.database.models.design_system import (
@@ -2180,6 +2211,204 @@ class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
         with _isolated_session() as isolated:
             ds = import_bundle(isolated, zip_bytes=make_bundle_zip(), user="u")
             assert "assets/logo.svg" in {f.path for f in ds.files}
+
+
+class TestIdentityIsJudgedBeforeScopeSoTheIteratorRefusesOnItsOwn:
+    """TWO GATES, and either one alone must refuse a hostile entry.
+
+    Every entry is judged twice — by the up-front whole-bundle scan
+    (:func:`_assert_bundle_paths_safe`) and again by the per-entry iterator
+    (:func:`_iter_safe_entries`) — and the point of the second gate is that it does not
+    depend on the first having run. The iterator had quietly dropped to ONE gate: it
+    filtered by SCOPE first (``startswith(root_prefix)``, then a non-empty remainder)
+    and only asked for a verdict afterwards, so any entry the scope filter dropped was
+    never judged at all. Its identity — whether the archive gives it one name or two —
+    went unexamined.
+
+    Nothing was exploitable. The only production caller reaches the iterator through
+    ``_collect_assets_and_files``, and :func:`import_bundle` runs the scan first, before
+    root discovery and before any read; there is no MCP, retry, streaming or alternate
+    caller. So the hole was latent — and a latent hole in the second of two gates is
+    exactly the thing that becomes live the day someone adds a third caller.
+
+    THE DISTINCTION THE FIX TURNS ON: a safety/identity verdict is not a scoping
+    decision. Where an entry sits decides whether THIS import stores it; whether the
+    archive gives it one name decides whether the archive is acceptable at all. So the
+    identity verdict is evaluated for EVERY member before the scope filter runs, and the
+    scope filter is unchanged behind it — see
+    :meth:`test_a_safe_out_of_scope_entry_is_still_skipped_silently` for the half that
+    must NOT change.
+
+    Every test here calls the iterator DIRECTLY with NO prior
+    ``_assert_bundle_paths_safe``, and hands it a ``root_prefix`` the hostile entry does
+    not sit under, so a refusal cannot be coming from the other gate and cannot be
+    coming from the path rules either — out of scope, those are never reached.
+    """
+
+    CENTRAL = "templates/x/.thumbnail"
+
+    #: A prefix no entry of any archive below starts with, so every entry is OUT OF
+    #: SCOPE and the pre-fix iterator skipped the lot without a verdict.
+    OUT_OF_SCOPE_ROOT = "no-such-root/"
+
+    @staticmethod
+    def _mismatched_local_name_zip():
+        """A bundle whose entry's two headers record DIFFERENT NAMES.
+
+        The local name is patched to an equal-length one so every length and offset in
+        the archive stays valid and CPython opens it happily — the same recipe as
+        :meth:`TestTheLocalFileHeaderIsInspectedToo.test_a_local_filename_that_disagrees_is_refused_before_any_read`,
+        which pins this shape through ``import_bundle``. Here it is the iterator's turn.
+        """
+        central = TestIdentityIsJudgedBeforeScopeSoTheIteratorRefusesOnItsOwn.CENTRAL
+        raw = bytearray(
+            _bundle_with_asymmetric_extra_fields(
+                central, local_extra=b"", central_extra=b"", payload=webp_bytes()
+            )
+        )
+        offset, local_name, _ = _local_header_of(bytes(raw), central)
+        other = b"templates/y/.thumbnail"
+        assert len(other) == len(local_name), "equal length keeps the archive framed"
+        raw[offset + 30 : offset + 30 + len(local_name)] = other
+        return bytes(raw)
+
+    def _refusal_out_of_scope(self, zip_bytes):
+        """The iterator's own refusal message for an archive it is asked to scope AWAY.
+
+        Fails with the yielded list rather than a bare ``DidNotRaise`` if nothing is
+        refused, because "the iterator skipped it" is the regression being guarded and
+        it is worth reading that in the failure.
+        """
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _iter_safe_entries,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            try:
+                yielded = [path for _, path in _iter_safe_entries(zf, self.OUT_OF_SCOPE_ROOT)]
+            except DesignSystemImportError as exc:
+                return str(exc)
+        pytest.fail(
+            f"the iterator did not refuse the entry; it yielded {yielded!r} and "
+            "skipped the hostile member silently"
+        )
+
+    def test_the_crafted_archives_really_are_out_of_scope_and_otherwise_ordinary(self):
+        """NON-VACUITY, on the two facts every test below depends on: CPython opens each
+        archive, and NO entry in it starts with the root prefix the iterator is given —
+        so the pre-fix iterator reached its ``continue`` for every member and the
+        refusals below are genuinely coming from the hoisted identity check."""
+        archives = {
+            "mismatched-local-name": self._mismatched_local_name_zip(),
+            "corrupt-extra": _bundle_with_extra_field(
+                self.CENTRAL, b"\x75\x70", webp_bytes()
+            ),
+            "unreadable-local-header": make_zip64_header_offset_archive(),
+        }
+        for label, raw in archives.items():
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                names = zf.namelist()
+            assert names, f"{label}: the archive must open and list its entries"
+            assert not any(
+                name.startswith(self.OUT_OF_SCOPE_ROOT) for name in names
+            ), f"{label}: every entry must be OUT of scope or the test proves nothing"
+
+    def test_a_local_name_disagreeing_with_the_central_one_is_refused(self):
+        """Identity route 3 — the two headers record different names — out of scope."""
+        from src.services.design_system_service import _REASON_NAME_MISMATCH
+
+        assert _REASON_NAME_MISMATCH in self._refusal_out_of_scope(
+            self._mismatched_local_name_zip()
+        )
+
+    @pytest.mark.parametrize(
+        "fragment",
+        [b"\x75", b"\x75\x70", b"\x75\x70\x20"],
+        ids=["one-byte", "tag-only", "three-bytes"],
+    )
+    def test_a_trailing_extra_field_fragment_is_refused(self, fragment):
+        """An extra field ending in bytes too short to be a record header: the name the
+        record meant to declare cannot be read, so the entry's identity cannot be
+        established. CPython opens such an archive without complaint (its own walk has
+        the same four-byte floor), so this gate is the only one that sees it."""
+        from src.services.design_system_service import _REASON_CORRUPT_EXTRA
+
+        raw = _bundle_with_extra_field(self.CENTRAL, fragment, webp_bytes())
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            info = next(i for i in zf.infolist() if i.filename == self.CENTRAL)
+            assert info.extra == fragment, "the fragment must survive into the archive"
+
+        assert _REASON_CORRUPT_EXTRA in self._refusal_out_of_scope(raw)
+
+    def test_an_unreadable_local_header_is_refused(self):
+        """The hostile ZIP64 offset: the local header is not where the central directory
+        says it is, so the entry's second name is unknown rather than absent. Fail
+        closed, out of scope as well as in."""
+        from src.services.design_system_service import _REASON_LOCAL_HEADER
+
+        assert _REASON_LOCAL_HEADER in self._refusal_out_of_scope(
+            make_zip64_header_offset_archive()
+        )
+
+    def test_a_safe_out_of_scope_entry_is_still_skipped_silently(self):
+        """THE HALF THAT MUST NOT CHANGE, and the reason identity was hoisted rather
+        than the whole verdict.
+
+        Scoping is this iterator's contract: it yields the entries THIS import stores,
+        and an entry outside the discovered root is simply not one of them. A safe
+        neighbour must therefore still be passed over without a word — no refusal and no
+        warning — exactly as before. Hoisting the full verdict instead of the identity
+        half would have turned this into a refusal and widened the iterator from "the
+        entries this import stores" to "every entry in the archive".
+        """
+        from src.services.design_system_service import _iter_safe_entries
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("safe/assets/logo.svg", SVG_LOGO)
+            zf.writestr("outside/logo.svg", SVG_LOGO)
+        warnings = []
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as zf:
+            yielded = [path for _, path in _iter_safe_entries(zf, "safe/", warnings)]
+        assert yielded == ["assets/logo.svg"]
+        assert warnings == [], "an out-of-scope neighbour is not the user's problem"
+
+    def test_an_unsafe_path_out_of_scope_is_still_the_scans_business_not_this_gates(self):
+        """The line, drawn deliberately and pinned so it is not crossed by accident.
+
+        A ``..`` entry outside the root is refused by the WHOLE-BUNDLE SCAN, which
+        judges paths globally — that is where an unsafe path outside the import scope
+        belongs, and it is why the bundle below cannot be imported. This iterator still
+        skips it, because deciding that an out-of-scope PATH refuses the bundle is the
+        scan's judgement to make and duplicating it here would change what this
+        generator is for.
+
+        Identity is different in kind, which is the whole distinction: "the archive
+        gives this entry two names" is a fact about the archive, true wherever the entry
+        sits, and no root prefix makes it acceptable.
+        """
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            _assert_bundle_paths_safe,
+            _iter_safe_entries,
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("safe/assets/logo.svg", SVG_LOGO)
+            zf.writestr("../evil.png", webp_bytes())
+        raw = buf.getvalue()
+        assert "../evil.png" in zipfile.ZipFile(io.BytesIO(raw)).namelist()
+
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            yielded = [path for _, path in _iter_safe_entries(zf, "safe/")]
+        assert yielded == ["assets/logo.svg"]
+
+        # ...and the gate that DOES own it refuses the bundle, so nothing is lost.
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            with pytest.raises(DesignSystemImportError):
+                _assert_bundle_paths_safe(zf)
 
 
 class TestStdlibRewrittenNamesAreRefused:
