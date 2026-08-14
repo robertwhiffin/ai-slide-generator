@@ -534,10 +534,21 @@ _SLIDE_FRAME_CONSTRAINTS = (
     "1280x720 frame, with no in-slide scrolling. If content would overflow, trim "
     "it or split it across additional slides until it fits — NEVER shrink type "
     "below the BRAND TYPE SCALE to make room.\n"
-    "- Safe area (soft guidance): keep primary content (titles, body text, charts, "
-    "tables) roughly 72px clear of the top and bottom edges and 88px clear of the "
-    "left and right edges; let only full-bleed backgrounds or images reach the "
-    "slide edges.\n"
+    # MEASUREMENT-GATED (WL-02). The previous wording was "(soft guidance) … keep
+    # primary content roughly 72px clear", with zero occurrences of MUST/REQUIRED in
+    # the whole block, and the model obeyed it exactly as written: across 6 unpinned
+    # runs / 18 slides the HORIZONTAL 88px held on 18/18 slides and 313/314 ink boxes
+    # (99.7%), while padding-top was the brand's 72px on only 3 of 18 slides —
+    # observed 64px, 56px and 88px — with minimum top clearance falling to 54px.
+    # Nothing was clipped, so this is a CONSISTENCY defect, not breakage.
+    # So: the horizontal number becomes a MUST (it was already being honoured
+    # exactly), the vertical gets an imperative FLOOR rather than an exact demand —
+    # requiring exactly 72px would over-constrain composition and can produce worse
+    # layouts — and 72px stays the stated target.
+    "- Safe area: keep primary content (titles, body text, charts, tables) clear of "
+    "the slide edges. Left and right clearance MUST be at least 88px. Vertically, "
+    "TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. "
+    "Only full-bleed backgrounds or images may reach the slide edges.\n"
     "- The slide's root element carries NO outer margin: it starts at the very "
     "top-left corner of its frame. Styling the root like a floating print-preview "
     "card shifts everything past the frame edge, and the bottom of the slide gets "
@@ -1588,6 +1599,29 @@ _CONTRAST_DERIVED_HEADING = (
 # extremes do not: the measured failures were mid-tone ON mid-tone, which is
 # exactly the pair a palette makes easy to reach for and a luminance table cannot
 # enumerate without listing every combination.
+# MEASUREMENT-GATED (WE-02). The pairings above were AVAILABLE AND IGNORED, not
+# missing: on the measured deck all three offending backgrounds were enumerated WITH
+# a prescribed AA-passing text color, and the model chose otherwise every time —
+# coral #FF5F46 on oat #F9F7F4 at 2.8146:1 where #000000 (19.64:1) was named, lava
+# #FF3621 on white where #000000 (21:1) was named, and for the CTA it picked the
+# EXACT INVERSE of what the artifact stated for that background. 24 of 108 rated
+# node-cells fell below 4.5:1; 0 were primary text, and every offender was a brand
+# ACCENT used as text, all of them in the model-authored CSS tail. No color was
+# invented — the palette was misused, not exceeded.
+#
+# So the pairing is stated as a REQUIREMENT for the TEXT role specifically. The
+# colors themselves are NOT rewritten: silently correcting a brand's palette would
+# defeat the purpose of a design system.
+_CONTRAST_TEXT_ROLE_IMPERATIVE_LINE = (
+    "- Those pairings are REQUIREMENTS for TEXT, not suggestions: whenever you use a "
+    "background listed above, its text color is the one named for it. Do NOT use a "
+    "brand accent (or any other palette color) as the text color on a listed "
+    "background because it looks on-brand — accents belong in fills, rules, icons "
+    "and imagery unless that exact pair meets the ratio above. This applies to small "
+    "label text (eyebrows, kickers, captions, tags) and to link and button labels "
+    "just as much as to body copy."
+)
+
 _CONTRAST_PAIR_RULE_LINE = (
     "- For any other pair of these colors, work out the ratio before you use it: "
     f"two mid-tone brand colors together almost never reach {_CONTRAST_AA_NORMAL:g}:1. "
@@ -1787,14 +1821,16 @@ def _contrast_section(grouped: dict[str, list[tuple[str, str]]]) -> str:
     ]
     if on_lightest:
         lines.append(
-            f"- Use {lightest} as the text color on these backgrounds: "
+            f"- On these backgrounds the text color MUST be {lightest}: "
             f"{', '.join(on_lightest)}"
         )
     if on_darkest:
         lines.append(
-            f"- Use {darkest} as the text color on these backgrounds: "
+            f"- On these backgrounds the text color MUST be {darkest}: "
             f"{', '.join(on_darkest)}"
         )
+    if on_lightest or on_darkest:
+        lines.append(_CONTRAST_TEXT_ROLE_IMPERATIVE_LINE)
     if unusable:
         lines.append(
             "- Never set normal text on these colors — they reach "
