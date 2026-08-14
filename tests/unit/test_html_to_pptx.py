@@ -338,3 +338,139 @@ class TestSvgContentImageExtraction:
         # Verify the saved file is valid PNG (not raw SVG bytes)
         saved_bytes = (tmp_path / filenames[0]).read_bytes()
         assert saved_bytes[:8] == b'\x89PNG\r\n\x1a\n', "SVG should be converted to PNG"
+
+
+class TestTruncateHtmlBudget:
+    """``_truncate_html`` must never hand the LLM more than its budget.
+
+    WF-01: the function preserved the WHOLE ``<style>`` block unconditionally, so
+    for a design-system deck (~358 KB of CSS against a 15,000-char budget)
+    ``body_max = max_length - len(style) - 500`` went NEGATIVE, the
+    ``if body_max > 0`` guard failed, and the body was never truncated — a function
+    named "truncate" returning a document 25x its budget. The oversized prompt came
+    back ``400 "Input is too long for requested model"``, was swallowed to None,
+    and every slide degraded to a bare "Slide N" placeholder while the route still
+    answered 200 with a valid .pptx.
+    """
+
+    MAX = 15000
+
+    def _doc(self, css: str, body: str) -> str:
+        return f"<html><head><style>{css}</style></head><body>{body}</body></html>"
+
+    def test_document_within_budget_is_returned_verbatim(self):
+        converter = _make_converter()
+        doc = self._doc("body{color:red}", "<p>short</p>")
+        assert converter._truncate_html(doc) == doc
+
+    def test_small_stylesheet_keeps_the_original_body_budget(self):
+        """The WORKING path's arithmetic is pinned byte-for-byte.
+
+        A DS-OFF deck goes through here and produces real content today, so the
+        reserve of 500 and the slice point must not drift — a different prompt is a
+        different deck.
+        """
+        converter = _make_converter()
+        css = "body{color:red}"
+        body_text = "x" * 40000
+        out = converter._truncate_html(self._doc(css, body_text))
+
+        style_content = f"<style>{css}</style>"
+        body_content = f"<body>{body_text}</body>"
+        body_max = self.MAX - len(style_content) - 500
+        expected = (
+            f"<html><head>{style_content}</head>"
+            f"{body_content[:body_max]}...</html>"
+        )
+        assert out == expected
+
+    def test_oversized_stylesheet_still_fits_the_budget(self):
+        converter = _make_converter()
+        css = ".rule-%d{color:#123456}" % 0 + "".join(
+            ".r%d{color:#abcdef;background:#fedcba}" % i for i in range(12000)
+        )
+        assert len(css) > 300000, "fixture must dwarf the budget"
+        out = converter._truncate_html(self._doc(css, "<p>real body text</p>" * 500))
+        assert len(out) <= self.MAX
+
+    def test_oversized_stylesheet_leaves_room_for_both_halves(self):
+        """Neither half may be starved: colours come from the CSS, structure from
+        the body, and the model needs both to build the slide."""
+        converter = _make_converter()
+        css = "".join(".r%d{color:#abcdef}" % i for i in range(20000))
+        body = "<p>UNIQUE-BODY-MARKER</p>" + ("<div>filler</div>" * 2000)
+        out = converter._truncate_html(self._doc(css, body))
+
+        assert len(out) <= self.MAX
+        # CSS survives, and it is syntactically closed markup (not a sliced tag).
+        assert "<style>" in out and "</style>" in out
+        assert "color:#abcdef" in out
+        # The body survives too.
+        assert "UNIQUE-BODY-MARKER" in out
+        head = out[out.index("<head>") : out.index("</head>")]
+        after_head = out[out.index("</head>") + len("</head>") :]
+        assert len(head) > 1000, "CSS must not be starved to nothing"
+        assert len(after_head) > 1000, "body must not be starved to nothing"
+
+    def test_a_single_enormous_css_rule_does_not_discard_the_whole_stylesheet(self):
+        """A brand stylesheet often opens with one huge base64 @font-face. Cutting
+        back to the last complete rule would then keep almost nothing, so the hard
+        clip wins instead."""
+        converter = _make_converter()
+        css = "@font-face{src:url(data:font/woff2;base64,%s)}" % ("A" * 200000)
+        css += "".join(".r%d{color:#abcdef}" % i for i in range(5000))
+        out = converter._truncate_html(self._doc(css, "<p>body</p>" * 400))
+
+        assert len(out) <= self.MAX
+        head = out[out.index("<head>") : out.index("</head>")]
+        # Most of the CSS budget is used, rather than collapsing to a few hundred
+        # chars because the first '}' sits 200 KB in.
+        assert len(head) > 3000, f"CSS budget collapsed to {len(head)} chars"
+
+
+class TestWholesaleCodegenFailureIsLoud:
+    """A deck of empty placeholders must never be presented as a successful export.
+
+    When codegen fails for EVERY slide the jail's per-slide fallback emits bare
+    "Slide N" placeholders and the route answers 200 with a valid .pptx — measured
+    live as 4 slides x 941 B, sole text "Slide 1".."Slide 4". That is silent content
+    loss, so it is now raised. A PARTIAL failure still falls back per slide: that is
+    the AST guard's defence-in-depth path, where one rejected snippet must not cost
+    the whole export.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_slides_failing_codegen_raises_instead_of_exporting(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        slides = ["<html><body>one</body></html>", "<html><body>two</body></html>"]
+
+        with patch.object(
+            converter, "_generate_all_codes", AsyncMock(return_value=[None, None])
+        ), patch.object(converter, "_run_pptx_conversion") as mock_run:
+            with pytest.raises(PPTXConversionError) as excinfo:
+                await converter.convert_slide_deck(slides, str(out_path))
+
+        assert "all 2 slide" in str(excinfo.value)
+        # It fails BEFORE the converter runs, so no placeholder file is produced.
+        mock_run.assert_not_called()
+        assert not out_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_a_partial_codegen_failure_still_exports(self, tmp_path):
+        """Non-vacuity: the guard is scoped to WHOLESALE failure."""
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        slides = ["<html><body>one</body></html>", "<html><body>two</body></html>"]
+
+        with patch.object(
+            converter,
+            "_generate_all_codes",
+            AsyncMock(return_value=[None, "slide = prs.slides.add_slide(layout)"]),
+        ), patch.object(converter, "_run_pptx_conversion") as mock_run:
+            result = await converter.convert_slide_deck(slides, str(out_path))
+
+        assert result == str(out_path)
+        mock_run.assert_called_once()
