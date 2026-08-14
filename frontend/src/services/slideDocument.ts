@@ -167,8 +167,28 @@ export function slideHostFrameStyle(hostSelector: string): string {
 // shared root reset pins the slide root to the frame origin instead of
 // truncating its bottom edge, and the frame contract gives a
 // background-carrying slide wrapper the area it needs to paint at all.
+//
+// NO UNIVERSAL `* { box-sizing: border-box }`, DELIBERATELY — and this is the
+// canonical statement of it for all four preview surfaces (the pop-out's
+// PREVIEW_RESET_STYLE, SlideSelection and PresentationMode point here).
+//
+// Slide content is CONTENT-box in Claude Design. The templates' own index.html
+// declares no `box-sizing` whatsoever, and their deck-stage.js (73,974 B,
+// byte-identical across all four families) declares it only SCOPED — on
+// `::slotted(*)`, from inside its shadow root, plus its own `.rail` chrome. So
+// the box model a template was authored against is the UA default, narrowed by
+// that one scoped rule, which `slideHostFrameStyle` below mirrors exactly.
+//
+// A universal reset was added here once, to make the four preview surfaces
+// agree with each other. It did that, and it cost ground-truth fidelity: the
+// pop-out measured against the template rendered by its own authentic
+// deck-stage.js went from 0 to 283,317 / 29,491,200 differing pixels on 7
+// slides, and GT-faithful surfaces went 3/5 -> 0/5. Removing it from all four —
+// including the two that had carried it all along, which were themselves
+// ~91,034 px from ground truth — returns every surface to 0 px vs GT AND keeps
+// them agreeing with each other. Cross-surface agreement is not the reference;
+// ground truth is. Pinned by tests/unit/test_preview_box_model_parity.py.
 export const SLIDE_PREVIEW_RESET_STYLE = `
-  * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; overflow: hidden; }
   ${SLIDE_ROOT_RESET_STYLE}
   ${slideHostFrameStyle('body')}
