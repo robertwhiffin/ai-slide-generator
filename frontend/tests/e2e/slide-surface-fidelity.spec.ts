@@ -356,17 +356,29 @@ const EXPOSED_DECK_CSS =
   '.slide { box-sizing: border-box; width: 1280px; height: 720px; padding: 72px 88px; }'
   + '.step-card { width: 256px; padding: 18px; border: 1px solid #ccd; background: #eef; }';
 const IMMUNE_DECK_CSS = `* { box-sizing: border-box; } ${EXPOSED_DECK_CSS}`;
+// The `h1`/`p` are load-bearing, not decoration. The reset that replaced the
+// universal rule has TWO halves — `box-sizing` AND `margin: 0; padding: 0` — and
+// the card alone cannot see the second one: a bare `div` carries no UA margin, so
+// a universal margin reset and a scoped one look identical through it. These two
+// elements DO carry UA margins, so they fail if the scoped `html, body` reset is
+// dropped (the standalone document then takes the UA's 8px body margin) or if it
+// is re-universalised (slide descendants then lose UA margins the previews keep).
 const BOX_SLIDE_HTML =
-  '<div class="slide"><div class="step-card">Discover</div></div>';
+  '<div class="slide"><h1>Heading</h1><p>Body copy</p>'
+  + '<div class="step-card">Discover</div></div>';
 
-/** Widths of the probe card, and its computed box-sizing, in a given document. */
-async function cardBox(page: Page, doc: string, selector: string) {
+/** Box model of the probe card, plus the UA-margin and shell witnesses. */
+async function boxProbe(page: Page, doc: string, selector: string) {
   await page.setContent(doc, { waitUntil: 'load' });
   return page.evaluate((sel) => {
     const el = document.querySelector(sel) as HTMLElement;
+    const slide = el.closest('.slide') as HTMLElement;
     return {
       width: +el.getBoundingClientRect().width.toFixed(2),
       boxSizing: getComputedStyle(el).boxSizing,
+      h1MarginTop: getComputedStyle(slide.querySelector('h1')!).marginTop,
+      pMarginTop: getComputedStyle(slide.querySelector('p')!).marginTop,
+      bodyMarginTop: getComputedStyle(document.body).marginTop,
     };
   }, selector);
 }
@@ -386,13 +398,13 @@ test.describe('UI <-> export box-model parity', () => {
       } as never;
 
       await page.setViewportSize({ width: 1280, height: 720 });
-      const ui = await cardBox(
+      const ui = await boxProbe(
         page,
         buildSlideDocument(BOX_SLIDE_HTML, { css, extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE }),
         '.step-card',
       );
       await page.setViewportSize({ width: 1600, height: 1000 });
-      const exported = await cardBox(
+      const exported = await boxProbe(
         page,
         buildStandaloneDeckDocument(deck),
         '.slide-container > .slide > .step-card',
@@ -401,16 +413,30 @@ test.describe('UI <-> export box-model parity', () => {
       expect(exported.boxSizing, 'computed box-sizing must agree').toBe(ui.boxSizing);
       expect(exported.width, 'card width must agree').toBe(ui.width);
 
+      // The MARGIN half of the scoped reset. Non-vacuity first: if the witnesses
+      // ever stop carrying a UA margin they pin nothing, so assert they do before
+      // asserting they agree.
+      expect(ui.h1MarginTop, 'h1 witness must carry a UA margin').not.toBe('0px');
+      expect(ui.pMarginTop, 'p witness must carry a UA margin').not.toBe('0px');
+      expect(exported.h1MarginTop, 'h1 UA margin must agree').toBe(ui.h1MarginTop);
+      expect(exported.pMarginTop, 'p UA margin must agree').toBe(ui.pMarginTop);
+      // …and the other direction: the scoped reset must still zero the SHELL, or a
+      // standalone document (no app shell above it) takes the UA's 8px body margin.
+      expect(exported.bodyMarginTop, 'export shell must zero its own body margin').toBe('0px');
+      expect(exported.bodyMarginTop, 'shell margin must match the preview').toBe(ui.bodyMarginTop);
+
       // CONTROL — re-inject the universal reset the fix removed and show the
       // divergence coming straight back, so this test cannot pass vacuously.
-      // On the exposed deck the card goes 256 (content-box: 256 + 36 padding +
-      // 2 border) -> 220; on the immune deck the deck's own rule already wins,
-      // which is precisely why a corpus of those measured 0.00 and missed this.
+      // On the exposed deck THIS FIXTURE's card goes 294 (content-box: authored
+      // 256 + 36 padding + 2 border) -> 256 (border-box); the live deck that
+      // exposed the defect authored 220 and so measured 256 -> 220. On the immune
+      // deck the deck's own rule already wins, which is precisely why a corpus of
+      // those measured 0.00 and missed this.
       const broken = buildStandaloneDeckDocument(deck).replace(
         '<body>',
         '<style>* { box-sizing: border-box; margin: 0; padding: 0; }</style><body>',
       );
-      const reinjected = await cardBox(page, broken, '.slide-container > .slide > .step-card');
+      const reinjected = await boxProbe(page, broken, '.slide-container > .slide > .step-card');
       if (css === EXPOSED_DECK_CSS) {
         expect(reinjected.boxSizing, 'control: reset must reach the card').toBe('border-box');
         expect(
@@ -423,6 +449,18 @@ test.describe('UI <-> export box-model parity', () => {
           'control: a deck with its own universal rule is immune either way',
         ).toBe(ui.width);
       }
+      // Holds on BOTH decks: neither declares a universal MARGIN rule of its own,
+      // so re-universalising strips the UA margins the previews keep. This is the
+      // control for the margin half, which `_universal_box_sizing_rules` — keyed on
+      // `box-sizing` — would not catch on its own.
+      expect(
+        reinjected.h1MarginTop,
+        'control: a universal reset must strip the h1 UA margin',
+      ).toBe('0px');
+      expect(
+        reinjected.pMarginTop,
+        'control: a universal reset must strip the p UA margin',
+      ).toBe('0px');
     });
   }
 });
