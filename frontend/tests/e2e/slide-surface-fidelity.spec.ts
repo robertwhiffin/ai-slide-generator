@@ -8,10 +8,12 @@ import {
 import { buildSlideHTML as buildPdfSlideHTML } from '../../src/services/pdf_client';
 import { buildSlideHTML as buildPptxSlideHTML } from '../../src/services/pptx_client';
 import { buildSlideHtml as buildScreenshotSlideHtml } from '../../src/services/screenshotCapture';
-import { buildCompositeHtml } from '../../src/services/domWalker';
+import { buildCompositeHtml, WALKER_SOURCE } from '../../src/services/domWalker';
 import {
   buildSlideDocument,
   buildStandaloneDeckDocument,
+  findSlideRoot,
+  slideHostFrameStyle,
   SLIDE_PREVIEW_RESET_STYLE,
 } from '../../src/services/slideDocument';
 
@@ -382,6 +384,221 @@ async function boxProbe(page: Page, doc: string, selector: string) {
     };
   }, selector);
 }
+
+// ─── DS-pinned (WRAPPED) deck export fidelity ────────────────────────────────
+// THE DEFECT: "Download PDF" shipped a design-system-pinned deck on a PURE BLACK
+// ground. Five preview surfaces injected the slide-host frame contract; NO export
+// builder did. A pinned deck's slide root is a <section> carrying the ground via a
+// bare TYPE selector, with `.slide` absolutely positioned inside it — so the
+// <section> holds no in-flow content, collapses to height 0, and the ground it
+// carries never paints. Measured on the delivered PDF's own DCTDecode streams:
+// ground rgb(0,0,0) at 90.9%, brand inks at 1.5450 / 1.8027 / 2.9292, failing
+// WCAG AA at both 4.5:1 and 3:1 for every ink except --db-ink-muted.
+//
+// WHY THIS FIXTURE SHAPE. An UNWRAPPED corpus cannot see this defect at all — 0 of
+// 47 pre-existing decks wrap, which is exactly how it shipped — and a
+// `dark`/`event`/`white` variant class paints its own ground and is immune. So the
+// deck below WRAPS, and its slide carries a BARE class="slide".
+const DS_GROUND_RGBA = '249,247,244,255';
+const DS_WRAPPED_DECK_CSS =
+  'html, body { background: #0E1A1F; }'
+  + 'section { background: #F9F7F4; color: #3A3838; font-family: Arial, Helvetica, sans-serif; overflow: hidden; }'
+  + '.slide { position: absolute; inset: 0; padding: 72px 88px; display: flex; flex-direction: column; gap: 24px; }'
+  + 'h1.headline { color: #1B3139; font-size: 64px; margin: 0; }'
+  + 'p.bodycopy { color: #3A3838; font-size: 24px; margin: 0; }'
+  + 'p.mutedink { color: #5A5755; font-size: 20px; margin: 0; }';
+const DS_WRAPPED_SLIDE_HTML =
+  '<section data-label="Ground"><div class="slide">'
+  + '<h1 class="headline">Acme Quarterly</h1>'
+  + '<p class="bodycopy">Body copy on the brand paper ground.</p>'
+  + '<p class="mutedink">Muted supporting line.</p>'
+  + '</div></section>';
+
+/** The three brand inks from the defect report, with their AA thresholds. */
+const BRAND_INKS: Record<string, readonly [number, number, number]> = {
+  'headline 1B3139': [0x1b, 0x31, 0x39],
+  'body 3A3838': [0x3a, 0x38, 0x38],
+  'subtitle 5A5755': [0x5a, 0x57, 0x55],
+};
+
+function srgbChannel(c: number): number {
+  const v = c / 255;
+  return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+function relativeLuminance(rgb: readonly number[]): number {
+  return (
+    0.2126 * srgbChannel(rgb[0])
+    + 0.7152 * srgbChannel(rgb[1])
+    + 0.0722 * srgbChannel(rgb[2])
+  );
+}
+function contrastRatio(a: readonly number[], b: readonly number[]): number {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+const dsWrappedDeck = () =>
+  ({
+    title: 'DS-pinned wrapped deck',
+    css: DS_WRAPPED_DECK_CSS,
+    scripts: '',
+    external_scripts: [],
+    slides: [{ slide_id: 's1', html: DS_WRAPPED_SLIDE_HTML, scripts: '' }],
+  }) as never;
+
+/**
+ * Remove the frame contract from a built document, and PROVE it was there.
+ *
+ * This is both halves of the requirement in one helper: the assertion pins that
+ * the builder really injects the contract (so no test here can pass against an
+ * un-fixed builder), and the return value is the un-fixed document that every
+ * control below is measured against.
+ */
+function withoutFrameContract(doc: string, hostSelector: string): string {
+  const rule = slideHostFrameStyle(hostSelector);
+  expect(doc, `builder must inject slideHostFrameStyle('${hostSelector}')`).toContain(rule);
+  return doc.replace(rule, '');
+}
+
+/**
+ * The MODAL PAINTED COLOUR of a region, read from a real screenshot's pixels.
+ *
+ * Deliberately not getComputedStyle: a 1280x0 <section> still COMPUTES
+ * rgb(249,247,244), so computed style cannot see this defect at all. Only paint
+ * can. Alpha is included because the screenshot-PPTX path emits PNG, where a
+ * transparent capture stays transparent rather than flattening to black.
+ */
+async function paintedGround(page: Page, doc: string) {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.setContent(doc, { waitUntil: 'load' });
+  const shot = await page.screenshot({
+    clip: { x: 0, y: 0, width: 1280, height: 720 },
+  });
+  const dataUrl = `data:image/png;base64,${shot.toString('base64')}`;
+  return page.evaluate(async (url) => {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error('decode failed'));
+      img.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const counts = new Map<string, number>();
+    for (let i = 0; i < data.length; i += 4) {
+      const key = `${data[i]},${data[i + 1]},${data[i + 2]},${data[i + 3]}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    let best = '';
+    let bestN = -1;
+    for (const [k, n] of counts) if (n > bestN) { best = k; bestN = n; }
+    return {
+      rgba: best,
+      rgb: best.split(',').slice(0, 3).map(Number),
+      share: bestN / (data.length / 4),
+    };
+  }, dataUrl);
+}
+
+test.describe('DS-pinned (wrapped) deck export fidelity', () => {
+  for (const [name, build, host] of [
+    ['pdf export', buildPdfSlideHTML, 'body'],
+    ['screenshot capture', buildScreenshotSlideHtml, 'body'],
+  ] as const) {
+    test(`${name} paints the wrapper ground on a wrapped deck`, async ({ page }) => {
+      const doc = build(dsWrappedDeck(), 0);
+
+      const fixed = await paintedGround(page, doc);
+      expect(fixed.rgba, `${name}: painted ground`).toBe(DS_GROUND_RGBA);
+      for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
+        expect(
+          contrastRatio(rgb, fixed.rgb),
+          `${name}: ${ink} on the painted ground must clear WCAG AA`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+
+      // CONTROL — the same document without the contract. Must go dark, or this
+      // test would pass against the builder that shipped the defect.
+      const broken = await paintedGround(page, withoutFrameContract(doc, host));
+      expect(broken.rgba, `${name} control: ground must collapse`).not.toBe(DS_GROUND_RGBA);
+      for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
+        expect(
+          contrastRatio(rgb, broken.rgb),
+          `${name} control: ${ink} must FAIL AA without the contract`,
+        ).toBeLessThan(4.5);
+      }
+    });
+  }
+
+  test('the records walker descends a wrapped slide and emits text', async ({ page }) => {
+    // The walker's isVisible() is false at height === 0 and visit() returns
+    // WITHOUT descending, so a collapsed wrapper does not merely fail to paint —
+    // it PRUNES THE WHOLE SLIDE SUBTREE. The real fallback artifact carried 1
+    // shape and 0 text runs per slide.
+    const doc = buildCompositeHtml(dsWrappedDeck());
+
+    const count = async (html: string) => {
+      await page.setContent(html, { waitUntil: 'load' });
+      await page.addScriptTag({ content: WALKER_SOURCE });
+      return page.evaluate(() => {
+        const extract = (window as unknown as {
+          __extractSlide: (el: Element) => { records: { kind: string }[] };
+        }).__extractSlide(document.querySelector('section.slide-container')!);
+        return {
+          text: extract.records.filter((r) => r.kind === 'text').length,
+          total: extract.records.length,
+        };
+      });
+    };
+
+    const fixed = await count(doc);
+    expect(fixed.text, 'text records must come back on a wrapped deck').toBeGreaterThan(0);
+
+    // CONTROL — proven to fire: without the contract the subtree is pruned.
+    const broken = await count(withoutFrameContract(doc, 'section.slide-container'));
+    expect(broken.text, 'control: a collapsed wrapper must prune every text run').toBe(0);
+  });
+
+  test('findSlideRoot resolves to the ground-carrying wrapper, not .slide', async ({ page }) => {
+    // Root cause #2, independent of the contract: the capture surfaces aimed at
+    // `.slide`, which on a pinned deck is the TRANSPARENT child of the wrapper.
+    // Captured with backgroundColor: null that transparency reaches the artifact,
+    // where JPEG (no alpha) flattens it to BLACK.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.setContent(buildPdfSlideHTML(dsWrappedDeck(), 0), { waitUntil: 'load' });
+    // Injected as an inline <script> (allowed by SLIDE_CSP's 'unsafe-inline'),
+    // never new Function() — the slide CSP withholds 'unsafe-eval' on purpose.
+    await page.addScriptTag({
+      content: `window.__findSlideRoot = ${findSlideRoot.toString()};`,
+    });
+
+    const probe = await page.evaluate(() => {
+      const root = (window as unknown as {
+        __findSlideRoot: (d: Document) => HTMLElement;
+      }).__findSlideRoot(document);
+      const legacy = document.querySelector('.slide') as HTMLElement;
+      return {
+        rootTag: root.tagName.toLowerCase(),
+        rootBg: getComputedStyle(root).backgroundColor,
+        rootHeight: Math.round(root.getBoundingClientRect().height),
+        legacyTag: legacy.tagName.toLowerCase(),
+        legacyBg: getComputedStyle(legacy).backgroundColor,
+      };
+    });
+
+    expect(probe.rootTag, 'the slide root is the wrapper').toBe('section');
+    expect(probe.rootBg, 'the wrapper is what carries the ground').toBe('rgb(249, 247, 244)');
+    expect(probe.rootHeight, 'and the contract gives it real area').toBe(720);
+    // CONTROL — what the old locator returned: a transparent element. This is the
+    // whole of root cause #2, and it is why the delivered JPEG was pure black.
+    expect(probe.legacyTag).toBe('div');
+    expect(probe.legacyBg, 'the old target paints nothing').toBe('rgba(0, 0, 0, 0)');
+  });
+});
 
 test.describe('UI <-> export box-model parity', () => {
   for (const [label, css] of [
