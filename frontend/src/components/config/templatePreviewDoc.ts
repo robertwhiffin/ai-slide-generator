@@ -181,7 +181,11 @@ function skipString(css: string, start: number): number {
       continue;
     }
     if (char === quote) return index + 1;
-    if (char === '\n') return index;
+    // CSS preprocessing normalises a lone CR and a FF to LF, so each of those ends an
+    // unterminated string exactly as LF does. Recognising only LF let a raw CR carry the
+    // string on past the point the browser ends it, and the two then disagreed about
+    // where the following rules began.
+    if (char === '\n' || char === '\r' || char === '\f') return index;
     index += 1;
   }
   return css.length;
@@ -198,7 +202,12 @@ function startsImportAtRule(css: string, start: number): boolean {
   const candidate = css.slice(start, start + IMPORT_AT_KEYWORD.length);
   if (candidate.toLowerCase() !== IMPORT_AT_KEYWORD) return false;
   const next = css[start + IMPORT_AT_KEYWORD.length];
-  return next === undefined || !IDENT_CHAR_RE.test(next);
+  if (next === undefined) return true;
+  // CSS preprocessing replaces NUL with U+FFFD, which IS an ident code point, so
+  // `@import<NUL>url(x)` is a different at-keyword and not an import at all. Checked here
+  // rather than in IDENT_CHAR_RE because a NUL in the pattern trips no-control-regex.
+  if (next === '\u0000') return false;
+  return !IDENT_CHAR_RE.test(next);
 }
 
 /**
@@ -321,6 +330,19 @@ export function stripCssImports(css: string): string {
   let atStatementStart = true;
   while (index < css.length) {
     const char = css[index];
+    if (char === '\\') {
+      // An escape is ONE unit, so an escaped DELIMITER is data and never a boundary.
+      // MEASURED, on `:root{--lesson:\;@import url('inert.css');--after:#123456}`: the
+      // `\;` used to set `atStatementStart`, the `@import` after it was then read as an
+      // at-rule and removed, and the shortened `--lesson` value ran on to swallow the
+      // NEXT declaration — `--after` was never declared and `.ok` went from
+      // rgb(18,52,86) to black. Copying both code points through keeps the rule position
+      // closed, which is the conservative direction this flag is meant to fail in.
+      out += css.slice(index, index + 2);
+      index += 2;
+      atStatementStart = false;
+      continue;
+    }
     if (char === '"' || char === "'") {
       const end = skipString(css, index);
       out += css.slice(index, end);
