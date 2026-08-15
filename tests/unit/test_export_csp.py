@@ -209,7 +209,7 @@ def test_build_slide_html_injects_the_frame_contract_after_deck_css():
     assert html.index(contract) > html.index(_WRAPPED_DECK_CSS)
 
 
-def test_the_frame_contract_is_in_the_POST_DECK_SHEET_ONLY():
+def test_the_frame_contract_is_in_the_post_deck_sheet_only():
     """WF-03: sheet 2 must stay byte-equal to the deck's CSS.
 
     `@import` is only valid before every other rule of ITS OWN stylesheet, so a
