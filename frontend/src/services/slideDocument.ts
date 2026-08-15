@@ -259,13 +259,31 @@ export function buildStandaloneDeckDocument(deck: SlideDeck): string {
     .join('\n');
 
   // Multi-slide wrapper/reset layout for the standalone export document.
+  //
+  // SCOPED to the document shell, never universal — same shape as the preview
+  // resets (`html, body { margin: 0; … }`), for the same reason. A universal
+  // `* { margin: 0; padding: 0; box-sizing: border-box }` used to sit here, and
+  // it made SLIDE DESCENDANTS border-box in the export while the previews render
+  // them content-box, which is the box model Claude Design ground truth uses
+  // (see SLIDE_PREVIEW_RESET_STYLE). Measured on `.step-card`: UI content-box
+  // w=256 vs export border-box w=220 at identical padding — up to 72 px of
+  // component drift across 6 live slides. Zeroing margin/padding universally
+  // cost a further flat 15 px, because the previews leave UA element margins
+  // alone. Scoping both to `html, body` returns all 6 to 0.00 px.
+  //
+  // `box-sizing` is KEPT on the shell and only there: this document sizes the
+  // shell with `html, body { width: 100% }` and then pads `body`, which is
+  // 1600px wide under border-box and 1640 under content-box. Dropping it
+  // outright overflowed the page horizontally and shifted the slide card 20 px
+  // (measured: scrollWidth 1640 vs clientWidth 1600). box-sizing does not
+  // inherit, so pinning the shell leaves slide content on the UA default.
+  // Pinned by tests/unit/test_preview_box_model_parity.py and
+  // frontend/tests/e2e/slide-surface-fidelity.spec.ts.
   const wrapperStyle = `
-    * {
+    html, body {
       margin: 0;
       padding: 0;
       box-sizing: border-box;
-    }
-    html, body {
       width: 100%;
       height: 100%;
       overflow: auto;

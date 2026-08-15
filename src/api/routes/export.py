@@ -174,11 +174,17 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
   <title>{slide_deck.get("title", "Slide")} - Slide {slide.get("slide_id", "")}</title>
 {scripts_html}
   <style>
-    * {{
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }}
+    /* SCOPED to the document shell, never universal — the same shape the preview
+       resets use, for the same reason. A UNIVERSAL reset (border-box plus zeroed
+       margin and padding, on every element) used to sit here, and it laid SLIDE
+       DESCENDANTS out border-box and margin-free in the export while every preview
+       surface lays them out content-box with UA margins — the box model Claude
+       Design ground truth uses. Measured on the same 6 live slides the standalone
+       builder diverged on: up to 69.87 px of component drift here.
+       The shell needs no box model of its own: this is a fixed 1280x720 document
+       whose padding is zeroed both above and (after deck CSS) below, so the two box
+       models are provably identical for html/body here — unlike the standalone
+       multi-slide builder, which pads `body` and therefore pins its shell. */
     html, body {{
       width: 1280px;
       height: 720px;
