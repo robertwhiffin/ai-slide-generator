@@ -1,6 +1,7 @@
 """Export endpoints for PDF and PPTX generation."""
 
 import logging
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -41,6 +42,141 @@ class ExportPPTXRequest(BaseModel):
     chart_images: Optional[list[list[ChartImage]]] = None  # Chart images per slide (client-side captured)
 
 
+# WF-03. `@import` is only valid before every other rule except `@charset`, and this
+# document injects `*{}` and `html,body{}` ahead of the deck's CSS — so a deck whose CSS
+# OPENS with a webfont `@import` had that rule silently discarded by the browser.
+# Measured: 0 font faces in the export against 35 in the UI, which is the whole of the
+# long-unexplained 38.25 px per-component residual on the DS-OFF deck. It is
+# crossorigin-independent and survived WM-02 unchanged. Hoisting only that rule takes
+# the drift to 0.00 px on 32/32 and 30/30.
+#
+# ONLY a LEADING run is moved. An `@import` sitting after another rule is ALREADY
+# invalid in the deck's own stylesheet, before this document exists; promoting it would
+# change what the deck means rather than preserve it.
+#
+# The rule is followed through its own BRACKETING, never to the first `;`: a Google
+# Fonts URL carries semicolons inside its query (`wght@400;500;600;700`), so cutting at
+# the first one truncates the URL and leaves an orphaned fragment behind.
+#
+# The scan below is a deliberate port of the frontend's, in
+# `frontend/src/components/config/templatePreviewDoc.ts` (`skipString`, `skipComment`,
+# `startsImportAtRule`, `skipImportAtRule`) — same ident guard, same string/comment
+# transparency, same paren-depth rule. Keeping the two in step is the point: the surfaces
+# must agree on what counts as an `@import` at-rule, or an export/UI parity gap reappears
+# as exactly the drift WF-03 is closing. It diverges in ONE way, deliberately: where the
+# frontend CONSUMES a `{` block (it is removing the rule), this refuses to hoist at all,
+# because moving a block would move author CSS rather than preserve it.
+#
+# KNOWN AND ACCEPTED, same as the frontend's: an ESCAPED at-keyword (`@\69 mport url(…)`)
+# is a spelling a browser honours and this scan does not recognise. Such a rule keeps
+# today's behaviour — it stays after the resets and is dropped — so the limit costs a font
+# that is already missing and never changes a deck's meaning.
+
+#: CSS ident characters, so `@import` does not also match `@imports` / `@import-x`.
+_CSS_IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_-]")
+
+#: The only at-rules that may legally precede other rules, in cascade order.
+_HOISTABLE_AT_KEYWORDS = ("@charset", "@import")
+
+
+def _skip_css_string(css: str, start: int) -> int:
+    """Index just past the string literal starting at `start`.
+
+    Backslash escapes are skipped as a unit so an escaped quote does not end the string
+    early; an unterminated string ends at the newline, as CSS says it does.
+    """
+    quote = css[start]
+    index = start + 1
+    while index < len(css):
+        char = css[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        if char == "\n":
+            return index
+        index += 1
+    return len(css)
+
+
+def _skip_css_comment(css: str, start: int) -> int:
+    """Index just past the CSS block comment starting at `start`."""
+    close = css.find("*/", start + 2)
+    return len(css) if close < 0 else close + 2
+
+
+def _hoistable_at_keyword(css: str, index: int) -> Optional[str]:
+    """The hoistable at-keyword starting at `index`, or None."""
+    lowered = css[index : index + max(len(k) for k in _HOISTABLE_AT_KEYWORDS)].lower()
+    for keyword in _HOISTABLE_AT_KEYWORDS:
+        if lowered.startswith(keyword):
+            following = css[index + len(keyword) : index + len(keyword) + 1]
+            if not following or not _CSS_IDENT_CHAR_RE.match(following):
+                return keyword
+    return None
+
+
+def _end_of_at_rule(css: str, start: int) -> int:
+    """Index just past the `;` terminating the at-rule at `start`, or -1.
+
+    -1 means "do not hoist this": either the rule is unterminated, or a brace arrived
+    first, which makes it a block at-rule that `@import`/`@charset` never take.
+    """
+    index = start
+    paren_depth = 0
+    while index < len(css):
+        char = css[index]
+        if char in "\"'":
+            index = _skip_css_string(css, index)
+            continue
+        if char == "/" and css[index + 1 : index + 2] == "*":
+            index = _skip_css_comment(css, index)
+            continue
+        if char == "(":
+            paren_depth += 1
+        elif char == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif paren_depth == 0:
+            if char == ";":
+                return index + 1
+            if char in "{}":
+                return -1
+        index += 1
+    return -1
+
+
+def _hoist_leading_css_at_rules(deck_css: str) -> tuple[str, str]:
+    """Split `deck_css` into (leading @charset/@import rules, everything after them).
+
+    Returns ``("", deck_css)`` unchanged when there is no leading run, so a deck
+    without an `@import` — the majority — is emitted byte-identically.
+    """
+    index = 0
+    end_of_last_rule = -1
+    while index < len(deck_css):
+        char = deck_css[index]
+        if char.isspace():
+            index += 1
+            continue
+        # Comments are transparent: they may precede an `@import` without making it
+        # non-leading.
+        if char == "/" and deck_css[index + 1 : index + 2] == "*":
+            index = _skip_css_comment(deck_css, index)
+            continue
+        if char == "@" and _hoistable_at_keyword(deck_css, index):
+            end = _end_of_at_rule(deck_css, index)
+            if end < 0:
+                break
+            end_of_last_rule = end
+            index = end
+            continue
+        break
+    if end_of_last_rule < 0:
+        return "", deck_css
+    return deck_css[:end_of_last_rule], deck_css[end_of_last_rule:]
+
+
 def build_slide_html(slide: dict, slide_deck: dict) -> str:
     """Build complete HTML for a single slide.
     
@@ -56,12 +192,18 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     external_scripts = slide_deck.get("external_scripts", [])
     deck_css = slide_deck.get("css", "")
     deck_scripts = slide_deck.get("scripts", "")
+
+    # WF-03: lift a leading `@charset`/`@import` run out of the deck CSS so it can be
+    # emitted as the FIRST thing in the sheet, ahead of the injected resets. The
+    # trailing "\n    " lines the next rule up with the rest of the block; when there
+    # is nothing to hoist the prefix is empty and the document is byte-identical.
+    hoisted_at_rules, deck_css = _hoist_leading_css_at_rules(deck_css)
+    at_rules_prefix = f"{hoisted_at_rules}\n    " if hoisted_at_rules else ""
     
     # Clean up deck_scripts: remove any trailing extra IIFE closings
     # deck_scripts should be a series of (function() { ... })(); blocks
     # but sometimes there might be an extra })(); at the end
     if deck_scripts:
-        import re
         # Remove any trailing })(); that might be extra
         deck_scripts = deck_scripts.rstrip()
         # Count opening and closing IIFEs
@@ -147,7 +289,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
   <title>{slide_deck.get("title", "Slide")} - Slide {slide.get("slide_id", "")}</title>
 {scripts_html}
   <style>
-    * {{
+    {at_rules_prefix}* {{
       box-sizing: border-box;
       margin: 0;
       padding: 0;
