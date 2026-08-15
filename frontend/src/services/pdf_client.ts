@@ -6,7 +6,7 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE } from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE, slideHostFrameStyle } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -15,6 +15,22 @@ const SLIDE_HEIGHT = 720;
  * Build HTML for a single slide.
  * Matches the structure used in SlideTile for consistent rendering.
  * Exported so tests can pin the document's layout guarantees.
+ *
+ * The document injects {@link slideHostFrameStyle} after deck CSS, exactly as
+ * the five preview surfaces do. A design-system-pinned deck nests the slide two
+ * levels deep: a <section> carries the slide ground via a bare TYPE selector,
+ * and inside it the .slide root is absolutely positioned at inset 0. With no
+ * in-flow content that <section> collapses to height 0, so the ground it carries
+ * never paints and the deck's own dark html/body shows through — measured
+ * contrast 1.3025, the dsv4/dsv5 dark-on-dark signature. Stretching the host's
+ * CHILD is what gives the wrapper area; sizing the root does not, because the
+ * wrapper stays a static-flow child and still collapses.
+ *
+ * The contract is NECESSARY BUT NOT SUFFICIENT for this surface. It gives the
+ * wrapper area, but the capture step must also aim at the element that has that
+ * area — see the slide-root locator in exportSlideDeckToPDF. With the contract
+ * alone the delivered PDF still measured a 100% black frame at contrast 1.5450;
+ * only both together reach rgb(248,247,243) and 12.6794.
  */
 export function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
   const slide = slideDeck.slides[slideIndex];
@@ -60,6 +76,8 @@ ${externalScripts}
        shifts content past the clip and truncates the export's bottom edge
        (same neutralization as every other surface). */
     ${SLIDE_ROOT_RESET_STYLE}
+    /* After deck CSS: the shared slide-host frame contract. */
+    ${slideHostFrameStyle('body')}
     /* CRITICAL: Explicitly preserve subtitle spacing - override any global resets */
     /* This must come AFTER slideDeck.css to override any * { margin: 0; } resets */
     .subtitle, p.subtitle, h2.subtitle, div.subtitle, [class*="subtitle"] {
