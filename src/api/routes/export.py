@@ -58,22 +58,44 @@ class ExportPPTXRequest(BaseModel):
 # Fonts URL carries semicolons inside its query (`wght@400;500;600;700`), so cutting at
 # the first one truncates the URL and leaves an orphaned fragment behind.
 #
-# The scan below is a deliberate port of the frontend's, in
+# The scan below began as a port of the frontend's, in
 # `frontend/src/components/config/templatePreviewDoc.ts` (`skipString`, `skipComment`,
-# `startsImportAtRule`, `skipImportAtRule`) — same ident guard, same string/comment
-# transparency, same paren-depth rule. Keeping the two in step is the point: the surfaces
-# must agree on what counts as an `@import` at-rule, or an export/UI parity gap reappears
-# as exactly the drift WF-03 is closing. It diverges in ONE way, deliberately: where the
-# frontend CONSUMES a `{` block (it is removing the rule), this refuses to hoist at all,
-# because moving a block would move author CSS rather than preserve it.
+# `startsImportAtRule`, `skipImportAtRule`), and shares its string/comment transparency
+# and its paren-depth rule. The surfaces SHOULD agree on what counts as an `@import`
+# at-rule — an export/UI disagreement reappears as exactly the drift WF-03 closes — but
+# they must agree on CORRECT behaviour, so where the port would have inherited a bug this
+# side is strict and the divergence is recorded here:
 #
-# KNOWN AND ACCEPTED, same as the frontend's: an ESCAPED at-keyword (`@\69 mport url(…)`)
-# is a spelling a browser honours and this scan does not recognise. Such a rule keeps
-# today's behaviour — it stays after the resets and is dropped — so the limit costs a font
-# that is already missing and never changes a deck's meaning.
+#  - WHITE SPACE. `_CSS_WHITESPACE` accepts only what CSS does. The frontend's `/\s/`
+#    also matches NBSP/VT/NEL, which would treat a rule the browser sees as NON-leading as
+#    leading; measured to change computed style, so it is not inert here.
+#  - ESCAPES AT THE TOP LEVEL. `_end_of_at_rule` consumes `\x` as a unit outside strings
+#    too, so `url(…\);…)` is not split mid-token.
+#  - IDENT BOUNDARY. `_CSS_IDENT_CHAR_RE` counts code points >= U+0080 and escapes, so
+#    `@importé` is left alone as the distinct at-keyword it is.
+#  - BLOCK AT-RULES. Where the frontend CONSUMES a `{` block (it is removing the rule),
+#    this refuses to hoist at all, because moving a block would move author CSS.
+#
+# KNOWN AND ACCEPTED: an ESCAPED at-keyword (`@\69 mport url(…)`) is a spelling a browser
+# honours and this scan does not recognise, so such a rule keeps today's behaviour — it
+# stays after the resets and is dropped. The limit costs a font that is already missing and
+# never changes a deck's meaning; recognising it would mean decoding escapes to compare
+# keywords, which is more machinery than the gain justifies.
 
-#: CSS ident characters, so `@import` does not also match `@imports` / `@import-x`.
-_CSS_IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_-]")
+#: CSS white space, and NOTHING else. `str.isspace()` is the wrong test: it also accepts
+#: U+00A0 NBSP, U+000B VT and U+0085 NEL, none of which CSS treats as white space. NBSP in
+#: particular is an IDENT code point, so a sheet opening ` @import …` has no leading
+#: at-rule at all — the NBSP starts an ident, which opens a qualified rule whose prelude
+#: runs to the next `{}` block and swallows the `@import` on the way. Hoisting there is not
+#: an inert mistake: it moves the rule out of the prelude so the prelude swallows the
+#: INJECTED RESET instead, and computed style flips (browser-verified).
+_CSS_WHITESPACE = " \t\n\r\f"
+
+#: A CSS ident code point: ASCII letter/digit/`_`/`-`, ANY code point >= U+0080, or the
+#: backslash that begins an escape. Guards the at-keyword boundary so `@imports`,
+#: `@import-x` and `@importé` — each a DIFFERENT at-keyword — are not read as
+#: `@import` followed by junk and moved.
+_CSS_IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_-]|[^\x00-\x7F]|\\")
 
 #: The only at-rules that may legally precede other rules, in cascade order.
 _HOISTABLE_AT_KEYWORDS = ("@charset", "@import")
@@ -127,6 +149,13 @@ def _end_of_at_rule(css: str, start: int) -> int:
     paren_depth = 0
     while index < len(css):
         char = css[index]
+        if char == "\\":
+            # An escape is ONE unit, and that has to hold at the top level too, not just
+            # inside string literals: `\)` in an unquoted `url(…\);…)` is DATA, so reading
+            # it as the closing paren cuts a VALID rule mid-token and leaves the tail
+            # behind as a malformed fragment.
+            index += 2
+            continue
         if char in "\"'":
             index = _skip_css_string(css, index)
             continue
@@ -149,14 +178,18 @@ def _end_of_at_rule(css: str, start: int) -> int:
 def _hoist_leading_css_at_rules(deck_css: str) -> tuple[str, str]:
     """Split `deck_css` into (leading @charset/@import rules, everything after them).
 
-    Returns ``("", deck_css)`` unchanged when there is no leading run, so a deck
-    without an `@import` — the majority — is emitted byte-identically.
+    Returns ``("", deck_css)`` unchanged unless the leading run contains an ACTUAL
+    `@import`. Rescuing an `@import` is the entire purpose, so every other sheet — no
+    leading at-rule, or a leading `@charset` on its own — comes back untouched and is
+    emitted byte-identically. `@charset` still travels when it legitimately precedes a
+    hoisted `@import`, because their relative order matters.
     """
     index = 0
     end_of_last_rule = -1
+    found_import = False
     while index < len(deck_css):
         char = deck_css[index]
-        if char.isspace():
+        if char in _CSS_WHITESPACE:
             index += 1
             continue
         # Comments are transparent: they may precede an `@import` without making it
@@ -164,15 +197,16 @@ def _hoist_leading_css_at_rules(deck_css: str) -> tuple[str, str]:
         if char == "/" and deck_css[index + 1 : index + 2] == "*":
             index = _skip_css_comment(deck_css, index)
             continue
-        if char == "@" and _hoistable_at_keyword(deck_css, index):
-            end = _end_of_at_rule(deck_css, index)
-            if end < 0:
-                break
-            end_of_last_rule = end
-            index = end
-            continue
-        break
-    if end_of_last_rule < 0:
+        keyword = _hoistable_at_keyword(deck_css, index) if char == "@" else None
+        if keyword is None:
+            break
+        end = _end_of_at_rule(deck_css, index)
+        if end < 0:
+            break
+        found_import = found_import or keyword == "@import"
+        end_of_last_rule = end
+        index = end
+    if end_of_last_rule < 0 or not found_import:
         return "", deck_css
     return deck_css[:end_of_last_rule], deck_css[end_of_last_rule:]
 
