@@ -42,175 +42,31 @@ class ExportPPTXRequest(BaseModel):
     chart_images: Optional[list[list[ChartImage]]] = None  # Chart images per slide (client-side captured)
 
 
-# WF-03. `@import` is only valid before every other rule except `@charset`, and this
-# document injects `*{}` and `html,body{}` ahead of the deck's CSS — so a deck whose CSS
-# OPENS with a webfont `@import` had that rule silently discarded by the browser.
-# Measured: 0 font faces in the export against 35 in the UI, which is the whole of the
-# long-unexplained 38.25 px per-component residual on the DS-OFF deck. It is
-# crossorigin-independent and survived WM-02 unchanged. Hoisting only that rule takes
-# the drift to 0.00 px on 32/32 and 30/30.
+# WF-03. `@import` is only valid before every other rule of ITS OWN STYLESHEET, and this
+# document used to inject `*{}` and `html,body{}` ahead of the deck's CSS in a SINGLE
+# `<style>` — so a deck whose CSS OPENS with a webfont `@import` had that rule silently
+# discarded. Measured: 0 font faces in the export against 35 in the UI, which was the whole
+# of the long-unexplained 38.25 px per-component residual on the DS-OFF deck.
 #
-# ONLY a LEADING run is moved. An `@import` sitting after another rule is ALREADY
-# invalid in the deck's own stylesheet, before this document exists; promoting it would
-# change what the deck means rather than preserve it.
+# The fix is STRUCTURAL, and it is the reason there is no CSS parsing here. Two `<style>`
+# elements are two stylesheets, so the deck gets its OWN `<style>`: its leading `@import` is
+# then already first in its own sheet and valid with NO rewriting at all. Cascade order
+# between separate `<style>` elements is document order, so resets-then-deck-then-resets
+# keeps exactly the precedence the single combined sheet had.
 #
-# The rule is followed through its own BRACKETING, never to the first `;`: a Google
-# Fonts URL carries semicolons inside its query (`wght@400;500;600;700`), so cutting at
-# the first one truncates the URL and leaves an orphaned fragment behind.
+# MEASURED IN CHROMIUM under the real SLIDE_CSP: combined -> 1 sheet, 0 font faces, import
+# dead; split -> 2 sheets, font faces registered, import applied; and with a reset and the
+# deck setting the same property at equal specificity, the DECK still wins on order.
 #
-# The scan below is a port of the frontend's, in
-# `frontend/src/components/config/templatePreviewDoc.ts` (`skipString`, `skipComment`,
-# `startsImportAtRule`, `skipImportAtRule`), and shares its string/comment transparency and
-# its paren-depth rule. The surfaces must agree on what counts as an `@import` at-rule — a
-# disagreement reappears as exactly the drift WF-03 closes — and they must agree on CORRECT
-# behaviour, so three defects found in review were fixed on BOTH sides together:
-#
-#  - WHITE SPACE. `_CSS_WHITESPACE` accepts only what CSS does. `str.isspace()` (and the
-#    frontend's former `/\s/`) also match NBSP/VT/NEL. NBSP is an IDENT code point, so a
-#    sheet opening with one has no leading at-rule at all, and acting on it was measured to
-#    CHANGE COMPUTED STYLE — not inert.
-#  - ESCAPES AT THE TOP LEVEL. `_end_of_at_rule` consumes `\x` as a unit outside strings
-#    too, so `url(…\);…)` is not split mid-token.
-#  - IDENT BOUNDARY. `_CSS_IDENT_CHAR_RE` counts code points >= U+0080 and escapes, so
-#    `@importé` is left alone as the distinct at-keyword it is.
-#
-# ONE divergence remains, and it is inherent rather than an oversight: where the frontend
-# CONSUMES a `{` block (it is REMOVING the rule), this refuses to hoist at all, because
-# moving a block would move author CSS rather than preserve it.
-#
-# KNOWN AND ACCEPTED: an ESCAPED at-keyword (`@\69 mport url(…)`) is a spelling a browser
-# honours and this scan does not recognise, so such a rule keeps today's behaviour — it
-# stays after the resets and is dropped. The limit costs a font that is already missing and
-# never changes a deck's meaning; recognising it would mean decoding escapes to compare
-# keywords, which is more machinery than the gain justifies.
-
-#: CSS white space, and NOTHING else. `str.isspace()` is the wrong test: it also accepts
-#: U+00A0 NBSP, U+000B VT and U+0085 NEL, none of which CSS treats as white space. NBSP in
-#: particular is an IDENT code point, so a sheet opening ` @import …` has no leading
-#: at-rule at all — the NBSP starts an ident, which opens a qualified rule whose prelude
-#: runs to the next `{}` block and swallows the `@import` on the way. Hoisting there is not
-#: an inert mistake: it moves the rule out of the prelude so the prelude swallows the
-#: INJECTED RESET instead, and computed style flips (browser-verified).
-_CSS_WHITESPACE = " \t\n\r\f"
-
-#: A CSS ident code point: ASCII letter/digit/`_`/`-`, ANY code point >= U+0080, or the
-#: backslash that begins an escape. Guards the at-keyword boundary so `@imports`,
-#: `@import-x` and `@importé` — each a DIFFERENT at-keyword — are not read as
-#: `@import` followed by junk and moved.
-_CSS_IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_-]|[^\x00-\x7F]|\\")
-
-#: The only at-rules that may legally precede other rules, in cascade order.
-_HOISTABLE_AT_KEYWORDS = ("@charset", "@import")
-
-
-def _skip_css_string(css: str, start: int) -> int:
-    """Index just past the string literal starting at `start`.
-
-    Backslash escapes are skipped as a unit so an escaped quote does not end the string
-    early; an unterminated string ends at the newline, as CSS says it does.
-    """
-    quote = css[start]
-    index = start + 1
-    while index < len(css):
-        char = css[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == quote:
-            return index + 1
-        if char == "\n":
-            return index
-        index += 1
-    return len(css)
-
-
-def _skip_css_comment(css: str, start: int) -> int:
-    """Index just past the CSS block comment starting at `start`."""
-    close = css.find("*/", start + 2)
-    return len(css) if close < 0 else close + 2
-
-
-def _hoistable_at_keyword(css: str, index: int) -> Optional[str]:
-    """The hoistable at-keyword starting at `index`, or None."""
-    lowered = css[index : index + max(len(k) for k in _HOISTABLE_AT_KEYWORDS)].lower()
-    for keyword in _HOISTABLE_AT_KEYWORDS:
-        if lowered.startswith(keyword):
-            following = css[index + len(keyword) : index + len(keyword) + 1]
-            if not following or not _CSS_IDENT_CHAR_RE.match(following):
-                return keyword
-    return None
-
-
-def _end_of_at_rule(css: str, start: int) -> int:
-    """Index just past the `;` terminating the at-rule at `start`, or -1.
-
-    -1 means "do not hoist this": either the rule is unterminated, or a brace arrived
-    first, which makes it a block at-rule that `@import`/`@charset` never take.
-    """
-    index = start
-    paren_depth = 0
-    while index < len(css):
-        char = css[index]
-        if char == "\\":
-            # An escape is ONE unit, and that has to hold at the top level too, not just
-            # inside string literals: `\)` in an unquoted `url(…\);…)` is DATA, so reading
-            # it as the closing paren cuts a VALID rule mid-token and leaves the tail
-            # behind as a malformed fragment.
-            index += 2
-            continue
-        if char in "\"'":
-            index = _skip_css_string(css, index)
-            continue
-        if char == "/" and css[index + 1 : index + 2] == "*":
-            index = _skip_css_comment(css, index)
-            continue
-        if char == "(":
-            paren_depth += 1
-        elif char == ")":
-            paren_depth = max(0, paren_depth - 1)
-        elif paren_depth == 0:
-            if char == ";":
-                return index + 1
-            if char in "{}":
-                return -1
-        index += 1
-    return -1
-
-
-def _hoist_leading_css_at_rules(deck_css: str) -> tuple[str, str]:
-    """Split `deck_css` into (leading @charset/@import rules, everything after them).
-
-    Returns ``("", deck_css)`` unchanged unless the leading run contains an ACTUAL
-    `@import`. Rescuing an `@import` is the entire purpose, so every other sheet — no
-    leading at-rule, or a leading `@charset` on its own — comes back untouched and is
-    emitted byte-identically. `@charset` still travels when it legitimately precedes a
-    hoisted `@import`, because their relative order matters.
-    """
-    index = 0
-    end_of_last_rule = -1
-    found_import = False
-    while index < len(deck_css):
-        char = deck_css[index]
-        if char in _CSS_WHITESPACE:
-            index += 1
-            continue
-        # Comments are transparent: they may precede an `@import` without making it
-        # non-leading.
-        if char == "/" and deck_css[index + 1 : index + 2] == "*":
-            index = _skip_css_comment(deck_css, index)
-            continue
-        keyword = _hoistable_at_keyword(deck_css, index) if char == "@" else None
-        if keyword is None:
-            break
-        end = _end_of_at_rule(deck_css, index)
-        if end < 0:
-            break
-        found_import = found_import or keyword == "@import"
-        end_of_last_rule = end
-        index = end
-    if end_of_last_rule < 0 or not found_import:
-        return "", deck_css
-    return deck_css[:end_of_last_rule], deck_css[end_of_last_rule:]
+# This REPLACES a hand-written leading-`@charset`/`@import` scanner that lived here. Three
+# rounds of review found four tokenizer defects in it (`str.isspace()` accepting NBSP, an
+# unescaped top-level `\)`, a lone `@charset` rewriting the document, an ASCII-only ident
+# guard) and then a fifth (`@layer name;` may legally precede `@import`, which it missed,
+# re-losing the font for ordinary modern CSS). Every one of those was a bug in DECIDING what
+# the deck's CSS means. Emitting the deck's CSS VERBATIM in its own sheet removes the need to
+# decide, so that entire class of defect is now unreachable rather than patched: NUL bytes,
+# top-level `<!--`, a lone CR inside a string, escaped at-keywords and `@layer` are all
+# simply the browser's business, exactly as they are in the deck's own stylesheet.
 
 
 def build_slide_html(slide: dict, slide_deck: dict) -> str:
@@ -229,13 +85,6 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     deck_css = slide_deck.get("css", "")
     deck_scripts = slide_deck.get("scripts", "")
 
-    # WF-03: lift a leading `@charset`/`@import` run out of the deck CSS so it can be
-    # emitted as the FIRST thing in the sheet, ahead of the injected resets. The
-    # trailing "\n    " lines the next rule up with the rest of the block; when there
-    # is nothing to hoist the prefix is empty and the document is byte-identical.
-    hoisted_at_rules, deck_css = _hoist_leading_css_at_rules(deck_css)
-    at_rules_prefix = f"{hoisted_at_rules}\n    " if hoisted_at_rules else ""
-    
     # Clean up deck_scripts: remove any trailing extra IIFE closings
     # deck_scripts should be a series of (function() { ... })(); blocks
     # but sometimes there might be an extra })(); at the end
@@ -325,7 +174,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
   <title>{slide_deck.get("title", "Slide")} - Slide {slide.get("slide_id", "")}</title>
 {scripts_html}
   <style>
-    {at_rules_prefix}* {{
+    * {{
       box-sizing: border-box;
       margin: 0;
       padding: 0;
@@ -339,7 +188,9 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       background: #ffffff;
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
-    {deck_css}
+  </style>
+  <style>{deck_css}</style>
+  <style>
     /* After deck CSS: the fixed-frame document owns its OWN box (WM-01).
        The html/body rule above is emitted BEFORE the deck, so a deck-authored
        `body {{ padding: 48px 0; gap: 48px }}` — real generator output — used to win
@@ -356,7 +207,10 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
        depends on `body {{ padding: 40px 20px }}`.
        No `!important`, matching the frontend rule: it wins by ORDER at equal
        specificity, so both surfaces treat a deck's `!important` body padding the
-       same way and cannot drift apart. */
+       same way and cannot drift apart. That ORDER now spans separate `<style>`
+       elements — the deck has a stylesheet of its own so its leading `@import`
+       stays valid (WF-03) — and the cascade orders separate sheets by DOCUMENT
+       ORDER, so this later sheet still wins exactly as it did inside one block. */
     html, body {{
       margin: 0;
       padding: 0;
