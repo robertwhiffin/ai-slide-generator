@@ -160,6 +160,43 @@ export function slideHostFrameStyle(hostSelector: string): string {
 `;
 }
 
+/**
+ * The READ-SIDE counterpart of {@link slideHostFrameStyle}: the slide ROOT of a
+ * built single-slide document — the direct child of <body> that IS, or CONTAINS,
+ * the slide.
+ *
+ * Every html2canvas capture surface needs this, and none of them had it. They
+ * reached for `querySelector('.slide')`, which is NOT the slide root: on a
+ * design-system-pinned deck the root is a <section> wrapper and `.slide` is its
+ * absolutely positioned child, so `.slide` is the one element of the pair that is
+ * TRANSPARENT — the ground lives on the wrapper. Captured with
+ * `backgroundColor: null` that transparency survives into the artifact, where
+ * JPEG (no alpha channel) flattens it to BLACK and PNG keeps it transparent.
+ *
+ * The frame contract does NOT fix this on its own, measured on both surfaces:
+ * giving the wrapper area does not change WHICH element is captured, so the
+ * delivered PDF stayed rgb(0,0,0) at contrast 1.5450 and the screenshot PNG
+ * stayed rgba(0,0,0,0). The contract and this locator are independent.
+ *
+ * Walks UP from the slide rather than matching `body > :has(.slide)`, so no
+ * capture path depends on `:has()` support — `querySelector` THROWS on a selector
+ * the browser cannot parse, which would take a whole export down instead of
+ * degrading it.
+ *
+ * Falls back to <body>, as every previous locator did: a deck with no `.slide` has
+ * no wrapper to find, and <body> is itself the fixed frame with its child
+ * stretched to fill it.
+ */
+export function findSlideRoot(doc: Document): HTMLElement {
+  const slide = doc.querySelector('.slide');
+  if (!slide) return doc.body;
+  let el: Element = slide;
+  while (el.parentElement && el.parentElement !== doc.body) {
+    el = el.parentElement;
+  }
+  return (el.parentElement === doc.body ? el : doc.body) as HTMLElement;
+}
+
 // Layout reset for fixed-frame preview surfaces (slide tiles, visual editor).
 // The UA's default 8px body margin alone pushes 1280x720 content past the
 // frame and draws scrollbars inside the preview; these surfaces clip instead
