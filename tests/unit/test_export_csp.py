@@ -24,6 +24,16 @@ _FRONTEND_SLIDE_DOC = (
     / "frontend" / "src" / "services" / "slideDocument.ts"
 )
 
+#: A real Google Fonts import — the WF-03 shape, whose query contains SEMICOLONS.
+_FONT_IMPORT = (
+    "@import url('https://fonts.googleapis.com/css2?"
+    "family=Inter:wght@400;500;600;700&display=swap');"
+)
+
+
+def _deck_with_css(css: str) -> dict:
+    return {"title": "T", "css": css, "scripts": "", "external_scripts": []}
+
 
 def _frontend_slide_csp() -> str:
     """Extract and concatenate the SLIDE_CSP string literal from the TS source."""
@@ -166,6 +176,59 @@ def test_build_slide_html_flattens_the_slide_root_after_deck_css():
     assert html.index(SLIDE_ROOT_RESET_STYLE) > html.index(deck["css"])
     assert "border-radius: 0 !important" in html
     assert "box-shadow: none !important" in html
+
+
+#: A DESIGN-SYSTEM-PINNED deck: the ground is painted by a bare TYPE selector on a
+#: <section> wrapper, and the slide root inside it is out of flow. An UNWRAPPED
+#: corpus cannot see this defect at all — 0 of 47 pre-existing decks wrap — and a
+#: `dark`/`event`/`white` variant class would paint its own ground and be immune,
+#: so the fixture carries a BARE class="slide".
+_WRAPPED_DECK_CSS = (
+    "html, body { background: #0E1A1F; }"
+    "section { background: #F9F7F4; color: #3A3838; }"
+    ".slide { position: absolute; inset: 0; padding: 72px 88px; }"
+)
+_WRAPPED_SLIDE = {
+    "slide_id": "s1",
+    "html": '<section><div class="slide"><h1>Acme</h1></div></section>',
+}
+
+
+def test_build_slide_html_injects_the_frame_contract_after_deck_css():
+    """The export document must carry the same frame contract the previews carry.
+
+    Without it the <section> that paints the ground collapses to height 0 and the
+    deck's own dark html/body shows through at contrast 1.3025.
+    """
+    deck = _deck_with_css(_WRAPPED_DECK_CSS)
+    html = build_slide_html(_WRAPPED_SLIDE, deck)
+
+    contract = slide_host_frame_style("body")
+    assert contract in html, "the frame contract was not injected at all"
+    # Order is the mechanism for the non-important half of the rule.
+    assert html.index(contract) > html.index(_WRAPPED_DECK_CSS)
+
+
+def test_the_frame_contract_is_in_the_POST_DECK_SHEET_ONLY():
+    """WF-03: sheet 2 must stay byte-equal to the deck's CSS.
+
+    `@import` is only valid before every other rule of ITS OWN stylesheet, so a
+    single injected declaration in the deck's sheet costs a deck that opens with
+    `@import url(fonts.googleapis…)` its webfont. The contract therefore belongs in
+    the post-deck sheet and nowhere else.
+    """
+    css = f"{_FONT_IMPORT}\n{_WRAPPED_DECK_CSS}"
+    html = build_slide_html(_WRAPPED_SLIDE, _deck_with_css(css))
+    blocks = re.findall(r"<style>(.*?)</style>", html, re.DOTALL)
+
+    assert len(blocks) == 3, [b[:60] for b in blocks]
+    assert blocks[1] == css, "sheet 2 is no longer byte-equal to the deck's CSS"
+    assert blocks[1].startswith("@import"), "the deck's leading @import moved"
+
+    marker = ":not(#tellr-host-frame-boost)"
+    assert marker not in blocks[0], "the contract leaked into the pre-deck sheet"
+    assert marker not in blocks[1], "the contract leaked into the DECK's sheet (WF-03)"
+    assert marker in blocks[2], "the contract is missing from the post-deck sheet"
 
 
 def test_build_slide_html_neutralises_deck_authored_body_padding():
