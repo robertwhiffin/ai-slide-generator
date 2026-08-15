@@ -41,9 +41,15 @@ unit runner), and the ground-truth bundle is not vendored into this repo. This
 file pins the invariant GT implies and the direction of the reference; the pixel
 proof lives in the harness run recorded with the fix.
 
-GENERATED decks are unaffected either way — their own CSS sets box-sizing, which
-is why they measured byte-identical before and after. The gap bit only TEMPLATE
-slides, which rely on the host reset.
+"GENERATED DECKS ARE UNAFFECTED EITHER WAY" — this file used to close with that
+claim, on the grounds that a generated deck's own CSS sets box-sizing, and it is
+FALSE as stated. Of the 46 live decks, 29 declare a UNIVERSAL box-sizing rule and
+are genuinely immune; the other 17 declare one only SCOPED (`.slide { … }`), so
+their descendants take whatever the host injects. Measuring only decks of the
+first kind is what produced an earlier "0.00 px on 95/95 components" result and
+hid a live 40-72 px divergence — see
+``test_the_export_documents_use_the_same_box_model_as_the_previews``. A corpus
+that cannot distinguish the two classes cannot answer this question at all.
 """
 import re
 from pathlib import Path
@@ -185,12 +191,9 @@ def test_every_preview_surface_routes_its_frame_through_the_shared_contract(slid
     )
 
 
-def test_the_export_path_is_untouched(slide_document):
-    """GUARDRAIL 13C/G4, unchanged by the correction. The standalone MULTI-slide
-    export carries its OWN reset and is NOT a preview surface: its universal
-    block is legitimate (it lays out a scrolling stack of slides, not one framed
-    slide against GT) and it was measured at 0.00 px on 95/95 components. The
-    preview reset has exactly two consumers, neither an export path."""
+def test_the_preview_reset_has_exactly_two_consumers(slide_document):
+    """Neither of them an export path, so the preview reset and the export resets
+    stay separately attributable."""
     consumers = [
         p
         for p in (_FRONTEND).rglob("*.tsx")
@@ -202,4 +205,54 @@ def test_the_export_path_is_untouched(slide_document):
     wrapper_start = slide_document.index("const wrapperStyle = `")
     wrapper = slide_document[wrapper_start : slide_document.index("`;", wrapper_start)]
     assert "SLIDE_PREVIEW_RESET_STYLE" not in wrapper
-    assert _universal_box_sizing_rules(wrapper) != []
+
+
+def test_the_export_documents_use_the_same_box_model_as_the_previews(slide_document):
+    """WHAT THIS ASSERTION USED TO SAY, AND WHY IT WAS WRONG.
+
+    It used to assert the OPPOSITE — that the standalone export's wrapper still
+    DOES declare a universal box-sizing reset — on the stated premise that the
+    export "lays out a scrolling stack of slides, not one framed slide against
+    GT", citing 0.00 px on 95/95 components. That corpus could not see the defect:
+    EVERY deck in it declared a universal reset of its OWN, which masks the
+    injected one. Across the 46 live decks, 29 are immune for exactly that reason
+    and 17 declare `box-sizing` only SCOPED — and those 17 are the exposed ones.
+
+    So f19627d, which correctly removed the universal reset from the four PREVIEW
+    resets, left slide descendants CONTENT-box on screen and BORDER-box in the
+    export. Measured on `.step-card`: UI w=256 vs export w=220 at identical
+    padding; MAX component drift 40-72 px on 6 live slides, and 230 elements
+    disagreeing on computed `box-sizing`. Scoping the reset to `html, body` — the
+    shape the previews already use — returns all 6 to 0.00 px and leaves the 29
+    immune decks at 0.00 px.
+
+    BOTH document builders are asserted. They are separate implementations (TS for
+    the standalone "Save as HTML" export, Python for the PPTX / huashu /
+    Google-Slides path) and BOTH carried the rule, so fixing one alone would look
+    closed while the other still diverged (69.87 px on the same slides).
+    """
+    wrapper_start = slide_document.index("const wrapperStyle = `")
+    wrapper = slide_document[wrapper_start : slide_document.index("`;", wrapper_start)]
+    assert _universal_box_sizing_rules(wrapper) == [], (
+        "buildStandaloneDeckDocument declares a universal box-sizing reset; slide "
+        "content is CONTENT-box on every preview surface, so the export diverges"
+    )
+    # The scoped replacement must actually be there — dropping the universal rule
+    # without it leaves `html, body { width: 100% }` plus `body { padding }` to
+    # overflow the page by 40px and shift the slide card 20px.
+    assert "html, body {" in wrapper
+    assert "box-sizing: border-box;" in wrapper
+
+    # The Python builder, asserted on the RENDERED document rather than on source
+    # text: its resets live in an f-string where every brace is doubled, so a
+    # source-level regex for `* { … }` would not match the rule even if present.
+    from src.api.routes.export import build_slide_html
+
+    document = build_slide_html(
+        {"slide_id": "s1", "html": '<div class="slide">x</div>', "scripts": ""},
+        {"css": ".slide { color: red }", "title": "t", "external_scripts": [], "scripts": ""},
+    )
+    assert _universal_box_sizing_rules(document) == [], (
+        "build_slide_html injects a universal box-sizing reset; the PPTX/huashu "
+        "export document must use the previews' box model too"
+    )

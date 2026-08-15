@@ -168,8 +168,14 @@ def test_the_injected_resets_are_an_earlier_stylesheet_than_the_deck():
     deck_index = _deck_stylesheet_index(blocks, css)
 
     assert deck_index > 0, "the deck's sheet must not be first"
-    assert "box-sizing: border-box" in blocks[deck_index - 1]
+    # Witnessed by the fixed-frame shell sizing, NOT by a `box-sizing` substring:
+    # that reset is scoped to `html, body` now (it was universal, which made slide
+    # descendants border-box in the export and content-box on screen), and the
+    # comment explaining why quotes the old declaration — so a substring check
+    # would pass on the prose alone.
+    assert "html, body" in blocks[deck_index - 1]
     assert "width: 1280px" in blocks[deck_index - 1]
+    assert "overflow: hidden" in blocks[deck_index - 1]
 
 
 def test_the_post_deck_resets_are_a_later_stylesheet_than_the_deck():

@@ -9,7 +9,11 @@ import { buildSlideHTML as buildPdfSlideHTML } from '../../src/services/pdf_clie
 import { buildSlideHTML as buildPptxSlideHTML } from '../../src/services/pptx_client';
 import { buildSlideHtml as buildScreenshotSlideHtml } from '../../src/services/screenshotCapture';
 import { buildCompositeHtml } from '../../src/services/domWalker';
-import { buildStandaloneDeckDocument } from '../../src/services/slideDocument';
+import {
+  buildSlideDocument,
+  buildStandaloneDeckDocument,
+  SLIDE_PREVIEW_RESET_STYLE,
+} from '../../src/services/slideDocument';
 
 /**
  * Slide preview-surface fidelity tests (dsv2 battery F2/F3).
@@ -334,4 +338,91 @@ test.describe('Uniform root-slide reset (dsv2 cross-review F2)', () => {
         .toContain('rgba(16, 32, 48, 0.35)');
     }
   });
+});
+
+// ─── UI <-> export box-model parity ─────────────────────────────────────────
+// f19627d removed the universal `* { box-sizing: border-box }` from the four
+// PREVIEW resets, because Claude Design ground truth lays slide content out in
+// CONTENT-box. It left the one remaining occurrence in the export builders, so
+// slide descendants became content-box on screen and border-box in the export.
+//
+// The deck below is the shape that is EXPOSED to this: it declares `box-sizing`
+// only SCOPED, on `.slide`, so its descendants inherit nothing and take whatever
+// the host injects. 17 of 46 live decks are shaped this way. The other 29 declare
+// a universal rule of their OWN, which masks an injected one entirely — measuring
+// only those is what let this ship, so IMMUNE_DECK_CSS is pinned here too as the
+// control that proves the probe is reading the host and not the deck.
+const EXPOSED_DECK_CSS =
+  '.slide { box-sizing: border-box; width: 1280px; height: 720px; padding: 72px 88px; }'
+  + '.step-card { width: 256px; padding: 18px; border: 1px solid #ccd; background: #eef; }';
+const IMMUNE_DECK_CSS = `* { box-sizing: border-box; } ${EXPOSED_DECK_CSS}`;
+const BOX_SLIDE_HTML =
+  '<div class="slide"><div class="step-card">Discover</div></div>';
+
+/** Widths of the probe card, and its computed box-sizing, in a given document. */
+async function cardBox(page: Page, doc: string, selector: string) {
+  await page.setContent(doc, { waitUntil: 'load' });
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel) as HTMLElement;
+    return {
+      width: +el.getBoundingClientRect().width.toFixed(2),
+      boxSizing: getComputedStyle(el).boxSizing,
+    };
+  }, selector);
+}
+
+test.describe('UI <-> export box-model parity', () => {
+  for (const [label, css] of [
+    ['deck scoping box-sizing to .slide (17/46 live decks)', EXPOSED_DECK_CSS],
+    ['deck declaring its own universal rule (29/46, immune)', IMMUNE_DECK_CSS],
+  ] as const) {
+    test(`standalone export matches the preview box model — ${label}`, async ({ page }) => {
+      const deck = {
+        title: 'T',
+        css,
+        scripts: '',
+        external_scripts: [],
+        slides: [{ slide_id: 's1', html: BOX_SLIDE_HTML, scripts: '' }],
+      } as never;
+
+      await page.setViewportSize({ width: 1280, height: 720 });
+      const ui = await cardBox(
+        page,
+        buildSlideDocument(BOX_SLIDE_HTML, { css, extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE }),
+        '.step-card',
+      );
+      await page.setViewportSize({ width: 1600, height: 1000 });
+      const exported = await cardBox(
+        page,
+        buildStandaloneDeckDocument(deck),
+        '.slide-container > .slide > .step-card',
+      );
+
+      expect(exported.boxSizing, 'computed box-sizing must agree').toBe(ui.boxSizing);
+      expect(exported.width, 'card width must agree').toBe(ui.width);
+
+      // CONTROL — re-inject the universal reset the fix removed and show the
+      // divergence coming straight back, so this test cannot pass vacuously.
+      // On the exposed deck the card goes 256 (content-box: 256 + 36 padding +
+      // 2 border) -> 220; on the immune deck the deck's own rule already wins,
+      // which is precisely why a corpus of those measured 0.00 and missed this.
+      const broken = buildStandaloneDeckDocument(deck).replace(
+        '<body>',
+        '<style>* { box-sizing: border-box; margin: 0; padding: 0; }</style><body>',
+      );
+      const reinjected = await cardBox(page, broken, '.slide-container > .slide > .step-card');
+      if (css === EXPOSED_DECK_CSS) {
+        expect(reinjected.boxSizing, 'control: reset must reach the card').toBe('border-box');
+        expect(
+          Math.abs(reinjected.width - ui.width),
+          'control: re-injecting the universal reset must reintroduce the drift',
+        ).toBeGreaterThan(1);
+      } else {
+        expect(
+          reinjected.width,
+          'control: a deck with its own universal rule is immune either way',
+        ).toBe(ui.width);
+      }
+    });
+  }
 });
