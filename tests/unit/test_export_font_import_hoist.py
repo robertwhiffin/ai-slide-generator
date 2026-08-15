@@ -26,6 +26,8 @@ comment or a string is not hoisted, and — the majority case — that a deck wi
 import hashlib
 import re
 
+import pytest
+
 from src.api.routes.export import build_slide_html
 
 _SLIDE = {"slide_id": "s1", "html": '<div class="slide">hi</div>'}
@@ -64,6 +66,28 @@ _PRE_FIX_DOCUMENT_SHA256 = "9f2cfc28c31c4519bee698db011e1b1ed9312f1ed95d6821f6b3
 #: Length of that same pre-fix document, restated so a failure says WHETHER bytes were
 #: added as well as that they changed.
 _PRE_FIX_DOCUMENT_LENGTH = 13514
+
+# A CSS ident code point is [A-Za-z0-9_-], any code point >= U+0080, or an escape — so
+# `@importé` is ONE unknown at-keyword, not `@import` plus junk, and moving it would
+# reorder a rule the author placed deliberately.
+_NON_ASCII_IDENT_IMPORT = "@import\u00e9 url('https://example.invalid/x.css');"
+
+# U+00A0 NBSP is NOT CSS white space; it is an ident code point. A sheet opening with one
+# therefore has NO leading at-rule at all — the NBSP starts an ident, which opens a
+# QUALIFIED rule whose prelude runs to the next `{}` block, swallowing the `@import` on
+# its way. BROWSER-VERIFIED: hoisting here does not merely fail to help, it CHANGES
+# RENDERING. Before, the invalid construct swallows `.x`; after, it swallows the injected
+# `*` reset instead, and computed style flips from border-box/black to
+# content-box/rgb(1, 2, 3).
+_NBSP_LEADING_CSS = (
+    "\u00a0@import url(https://example.invalid/x.css);\n.x { color: rgb(1, 2, 3); }"
+)
+
+# `\)` is an ESCAPE, so it is DATA inside this unquoted url() and does not close it: the
+# whole line is ONE valid `@import`. Reading the `\)` as the closing paren cuts the rule
+# at the following `;`, hoisting `…/foo\);` and leaving `bar.css);` behind — a malformed
+# remainder that can go on to swallow the injected reset block.
+_ESCAPED_PAREN_IMPORT = "@import url(https://example.invalid/foo\\);bar.css);"
 
 
 def _deck(css: str) -> dict:
@@ -140,20 +164,63 @@ def test_the_rest_of_the_deck_css_keeps_its_position_after_the_resets():
     assert style.index(".slide { color: red }") < style.rindex("html, body {")
 
 
-def test_a_deck_with_no_import_produces_a_byte_identical_document():
-    """GUARDRAIL A5, the majority case. Not "equivalent" — the same BYTES as the pre-fix
-    code produced, so the fix cannot have moved anything for a deck it does not apply
-    to."""
-    document = build_slide_html(_SLIDE, _deck(_REALISTIC_DECK_CSS))
+#: Every deck CSS the hoist must pass through UNTOUCHED, against the length and sha256 of
+#: the document the PRE-WF-03 code produced for it (export.py at 9cc36e7, hoist entirely
+#: absent). "No-op" here means the same BYTES, not an equivalent sheet. The guarantee is
+#: NOT only about a missing `@import`: a leading `@charset` ALONE is no reason to rewrite
+#: the document either, and neither is a leading NBSP.
+_NO_OP_FIXTURES = {
+    "realistic-no-import": (
+        _REALISTIC_DECK_CSS,
+        _PRE_FIX_DOCUMENT_LENGTH,
+        _PRE_FIX_DOCUMENT_SHA256,
+    ),
+    "empty": (
+        "",
+        13156,
+        "faad92ddf28178233b251632aaa77f3eba490c0e4523d35349ca7ee49365739e",
+    ),
+    "whitespace-only": (
+        "  \n\t\n",
+        13161,
+        "408ed51ac40196ce40eb2eb4433ed8353b7125ee4ea498ce75b9f3bc757724b9",
+    ),
+    "comment-only": (
+        "/* nothing but a banner */",
+        13182,
+        "020d23b08ae3b25336747ab310c83205c9f3d4c5a4da5c266f88e2d243a6b471",
+    ),
+    "comment-then-rule": (
+        "/* banner */\n.slide { color: red }",
+        13190,
+        "9ce3c8b0f15d115023c6363855ee3da0da528e67d4e5767bae23471607da0e61",
+    ),
+    "charset-only": (
+        '@charset "UTF-8";\n.x {}',
+        13179,
+        "5d6d0367e79e18ff562633c9b2bb105a62c21689399764de6c3c0fb2443fe0e9",
+    ),
+    "nbsp-then-import": (
+        _NBSP_LEADING_CSS,
+        13228,
+        "0d73ee728c5a939e3c145b0b00b07ce76d57d6147875beb2ab9d634608c1292f",
+    ),
+}
 
-    assert len(document) == _PRE_FIX_DOCUMENT_LENGTH, (
-        f"document length moved {_PRE_FIX_DOCUMENT_LENGTH} -> {len(document)}"
-    )
+
+@pytest.mark.parametrize("fixture_name", sorted(_NO_OP_FIXTURES))
+def test_a_deck_the_hoist_does_not_apply_to_is_byte_identical(fixture_name):
+    """GUARDRAIL A5/C5, the majority case. Not "equivalent" — the same BYTES as the
+    pre-fix code produced, so the change cannot have moved anything for a deck it does
+    not apply to."""
+    css, expected_length, expected_sha = _NO_OP_FIXTURES[fixture_name]
+    document = build_slide_html(_SLIDE, _deck(css))
+
     digest = hashlib.sha256(document.encode("utf-8")).hexdigest()
-    assert digest == _PRE_FIX_DOCUMENT_SHA256, (
-        "the generated document changed for a deck with NO leading @import — WF-03 was "
-        f"meant to be a no-op there.\nexpected {_PRE_FIX_DOCUMENT_SHA256}\ngot      "
-        f"{digest}"
+    assert (len(document), digest) == (expected_length, expected_sha), (
+        f"the generated document changed for fixture {fixture_name!r}, which the hoist "
+        f"must not touch.\nexpected {expected_length} bytes / {expected_sha}\n"
+        f"got      {len(document)} bytes / {digest}"
     )
 
 
@@ -234,6 +301,89 @@ def test_a_leading_comment_does_not_stop_the_hoist():
     style = _style_block(build_slide_html(_SLIDE, _deck(css)))
 
     assert _FONT_IMPORT in _hoisted_region(style), style[:300]
+
+
+def test_a_nbsp_before_the_import_stops_the_hoist():
+    """BLOCKER 1, browser-verified. U+00A0 is an ident code point, not CSS white space, so
+    the browser does NOT see a leading at-rule here — the NBSP opens a qualified rule
+    whose prelude swallows the `@import`. Hoisting anyway does not just fail to help, it
+    CHANGES RENDERING: the invalid construct stops swallowing `.x` and starts swallowing
+    the injected `*` reset, flipping computed style to content-box/rgb(1, 2, 3)."""
+    style = _style_block(build_slide_html(_SLIDE, _deck(_NBSP_LEADING_CSS)))
+
+    assert "@import" not in _hoisted_region(style), (
+        f"a NBSP is not CSS white space; nothing here is leading:\n{style[:300]}"
+    )
+    assert _NBSP_LEADING_CSS in style, "the deck CSS must be passed through unchanged"
+    # The injected reset must still be the first thing the sheet declares.
+    assert style.lstrip().startswith("* {"), style[:200]
+
+
+@pytest.mark.parametrize("space", [" ", "\t", "\n", "\r", "\f"])
+def test_real_css_white_space_before_the_import_stays_transparent(space):
+    """The five code points CSS actually calls white space — space, tab, LF, CR, FF — do
+    not make an `@import` non-leading, so the font must still be rescued after any of
+    them."""
+    style = _style_block(
+        build_slide_html(_SLIDE, _deck(f"{space}{_FONT_IMPORT}\n.x {{ color: red }}"))
+    )
+
+    assert _FONT_IMPORT in _hoisted_region(style), style[:300]
+
+
+@pytest.mark.parametrize(
+    "not_space",
+    ["\u00a0", "\u000b", "\u0085"],
+    ids=["nbsp", "vertical-tab", "next-line"],
+)
+def test_code_points_css_does_not_call_white_space_stop_the_hoist(not_space):
+    """Each of these satisfies Python's `str.isspace()` and NONE of them is CSS white
+    space, which is precisely why `str.isspace()` cannot be the test. To CSS they are an
+    ident code point (NBSP, NEL) or a delim (VT) — either way they open a qualified rule
+    whose prelude swallows the `@import`, so it is NOT leading and must not move."""
+    css = f"{not_space}{_FONT_IMPORT}\n.x {{ color: red }}"
+    style = _style_block(build_slide_html(_SLIDE, _deck(css)))
+
+    assert "@import" not in _hoisted_region(style), style[:300]
+    assert css in style, "the deck CSS must be passed through unchanged"
+
+
+def test_an_escaped_paren_inside_an_unquoted_url_does_not_end_the_rule():
+    """BLOCKER 2. `\\)` is an escape, so it is DATA inside this url() and the whole line is
+    ONE valid `@import`. Cutting at the `;` that follows it hoists a truncated rule and
+    leaves `bar.css);` behind — a malformed remainder that can swallow the reset block."""
+    style = _style_block(
+        build_slide_html(_SLIDE, _deck(f"{_ESCAPED_PAREN_IMPORT}\n.x {{ color: red }}"))
+    )
+
+    assert _ESCAPED_PAREN_IMPORT in _hoisted_region(style), (
+        f"the rule was split mid-token:\n{style[:400]}"
+    )
+    # No orphaned fragment anywhere after the resets.
+    assert "bar.css" not in style[style.index("* {"):], style[style.index("* {"):][:300]
+    assert style.count("@import") == 1, style.count("@import")
+
+
+def test_a_charset_alone_is_not_a_reason_to_rewrite_the_sheet():
+    """BLOCKER 3. `@charset` is hoistable only as a TRAVELLING COMPANION to a real
+    `@import`. On its own it must stay exactly where the author put it, or the byte-
+    identical guarantee stops being true for a whole class of sheets."""
+    css = '@charset "UTF-8";\n.x {}'
+    style = _style_block(build_slide_html(_SLIDE, _deck(css)))
+
+    assert "@charset" not in _hoisted_region(style), style[:300]
+    assert css in style, "the deck CSS must be passed through unchanged"
+
+
+def test_a_non_ascii_ident_is_not_mistaken_for_the_import_keyword():
+    """A CSS ident code point includes anything >= U+0080, so `@importé` is ONE unknown
+    at-keyword rather than `@import` followed by junk. Moving it would reorder a rule the
+    author placed deliberately."""
+    css = f"{_NON_ASCII_IDENT_IMPORT}\n.x {{ color: red }}"
+    style = _style_block(build_slide_html(_SLIDE, _deck(css)))
+
+    assert _NON_ASCII_IDENT_IMPORT not in _hoisted_region(style), style[:300]
+    assert css in style, "the deck CSS must be passed through unchanged"
 
 
 def test_an_unterminated_import_is_left_alone():
