@@ -136,11 +136,33 @@ const DS_ASSET_HANDLE_RE = /\{\{ds-asset:\d+\}\}/g;
  */
 const IMPORT_AT_KEYWORD = '@import';
 
-/** CSS ident characters, used to keep `@import` from matching `@imports`. */
-const IDENT_CHAR_RE = /[A-Za-z0-9_-]/;
+/**
+ * CSS ident code points, used to keep `@import` from matching a DIFFERENT at-keyword
+ * that merely starts with it.
+ *
+ * An ident code point is an ASCII letter/digit/`_`/`-`, ANY code point >= U+0080, or the
+ * backslash that begins an escape — so `@imports`, `@import-x` and `@importé` are each
+ * one at-keyword of their own, and none of them is `@import` followed by junk.
+ *
+ * The non-ASCII half is written as `[\u0080-\uFFFF]` rather than `[^\x00-\x7F]` because
+ * the latter puts control characters in the pattern (`no-control-regex`). It is tested
+ * against ONE UTF-16 code unit, and every unit of an astral pair is a surrogate in
+ * `\uD800-\uDFFF`, so the two spellings accept exactly the same set here.
+ */
+const IDENT_CHAR_RE = /[A-Za-z0-9_-]|[\u0080-\uFFFF]|\\/;
 
-/** CSS white space, which never ends a rule position. */
-const WHITESPACE_RE = /\s/;
+/**
+ * CSS white space, which never ends a rule position — and NOTHING else.
+ *
+ * Deliberately not `/\s/`: that also matches U+00A0 NBSP, U+000B VT, U+2028/9 and the
+ * U+2000 block, none of which CSS calls white space. NBSP in particular is an IDENT code
+ * point, so `<NBSP>@import url(x); .x{}` has no at-rule in it at all — the NBSP starts an
+ * ident, which opens a qualified rule whose prelude swallows the `@import`. Treating it as
+ * white space would make this scan act on a construct the browser parses completely
+ * differently. Measured on the export side (WF-03), where the same looseness moved a rule
+ * the browser did not consider leading and CHANGED COMPUTED STYLE.
+ */
+const WHITESPACE_RE = /[ \t\n\r\f]/;
 
 /**
  * Index just past the string literal starting at `start`.
@@ -205,6 +227,13 @@ function skipImportAtRule(css: string, start: number): number {
   let parenDepth = 0;
   while (index < css.length) {
     const char = css[index];
+    if (char === '\\') {
+      // An escape is ONE unit here too, not only inside string literals: `\)` in an
+      // unquoted `url(…\);…)` is DATA, so reading it as the closing paren would end the
+      // rule at the wrong `;` and leave a malformed tail behind.
+      index += 2;
+      continue;
+    }
     if (char === '"' || char === "'") {
       index = skipString(css, index);
       continue;
@@ -238,6 +267,12 @@ function skipBlock(css: string, start: number): number {
   let depth = 0;
   while (index < css.length) {
     const char = css[index];
+    if (char === '\\') {
+      // Same reason as in skipImportAtRule: an escaped `{` or `}` is data, and counting
+      // it would throw the brace balance off.
+      index += 2;
+      continue;
+    }
     if (char === '"' || char === "'") {
       index = skipString(css, index);
       continue;

@@ -58,23 +58,25 @@ class ExportPPTXRequest(BaseModel):
 # Fonts URL carries semicolons inside its query (`wght@400;500;600;700`), so cutting at
 # the first one truncates the URL and leaves an orphaned fragment behind.
 #
-# The scan below began as a port of the frontend's, in
+# The scan below is a port of the frontend's, in
 # `frontend/src/components/config/templatePreviewDoc.ts` (`skipString`, `skipComment`,
-# `startsImportAtRule`, `skipImportAtRule`), and shares its string/comment transparency
-# and its paren-depth rule. The surfaces SHOULD agree on what counts as an `@import`
-# at-rule — an export/UI disagreement reappears as exactly the drift WF-03 closes — but
-# they must agree on CORRECT behaviour, so where the port would have inherited a bug this
-# side is strict and the divergence is recorded here:
+# `startsImportAtRule`, `skipImportAtRule`), and shares its string/comment transparency and
+# its paren-depth rule. The surfaces must agree on what counts as an `@import` at-rule — a
+# disagreement reappears as exactly the drift WF-03 closes — and they must agree on CORRECT
+# behaviour, so three defects found in review were fixed on BOTH sides together:
 #
-#  - WHITE SPACE. `_CSS_WHITESPACE` accepts only what CSS does. The frontend's `/\s/`
-#    also matches NBSP/VT/NEL, which would treat a rule the browser sees as NON-leading as
-#    leading; measured to change computed style, so it is not inert here.
+#  - WHITE SPACE. `_CSS_WHITESPACE` accepts only what CSS does. `str.isspace()` (and the
+#    frontend's former `/\s/`) also match NBSP/VT/NEL. NBSP is an IDENT code point, so a
+#    sheet opening with one has no leading at-rule at all, and acting on it was measured to
+#    CHANGE COMPUTED STYLE — not inert.
 #  - ESCAPES AT THE TOP LEVEL. `_end_of_at_rule` consumes `\x` as a unit outside strings
 #    too, so `url(…\);…)` is not split mid-token.
 #  - IDENT BOUNDARY. `_CSS_IDENT_CHAR_RE` counts code points >= U+0080 and escapes, so
 #    `@importé` is left alone as the distinct at-keyword it is.
-#  - BLOCK AT-RULES. Where the frontend CONSUMES a `{` block (it is removing the rule),
-#    this refuses to hoist at all, because moving a block would move author CSS.
+#
+# ONE divergence remains, and it is inherent rather than an oversight: where the frontend
+# CONSUMES a `{` block (it is REMOVING the rule), this refuses to hoist at all, because
+# moving a block would move author CSS rather than preserve it.
 #
 # KNOWN AND ACCEPTED: an ESCAPED at-keyword (`@\69 mport url(…)`) is a spelling a browser
 # honours and this scan does not recognise, so such a rule keeps today's behaviour — it
