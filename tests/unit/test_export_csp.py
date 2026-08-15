@@ -7,8 +7,17 @@ way the in-app iframe does.
 import re
 from pathlib import Path
 
+import pytest
+
 from src.api.routes.export import build_slide_html
-from src.utils.html_safety import SLIDE_CSP, SLIDE_CSP_META, SLIDE_ROOT_RESET_STYLE
+from src.utils.html_safety import (
+    SLIDE_CSP,
+    SLIDE_CSP_META,
+    SLIDE_FRAME_H,
+    SLIDE_FRAME_W,
+    SLIDE_ROOT_RESET_STYLE,
+    slide_host_frame_style,
+)
 
 _FRONTEND_SLIDE_DOC = (
     Path(__file__).resolve().parents[2]
@@ -66,6 +75,77 @@ def test_backend_root_reset_matches_frontend_root_reset():
     # frontend constant changes, this fails loudly so the backend mirror is
     # updated in lockstep.
     assert SLIDE_ROOT_RESET_STYLE == _frontend_slide_root_reset()
+
+
+def _frontend_frame_dims() -> tuple[int, int]:
+    """The frontend's fixed slide-frame dimensions."""
+    src = _FRONTEND_SLIDE_DOC.read_text()
+    w = re.search(r"export const SLIDE_FRAME_W = (\d+);", src)
+    h = re.search(r"export const SLIDE_FRAME_H = (\d+);", src)
+    assert w and h, "could not find SLIDE_FRAME_W/H in slideDocument.ts"
+    return int(w.group(1)), int(h.group(1))
+
+
+def _frontend_host_frame(host_selector: str) -> str:
+    """Render the TS `slideHostFrameStyle` body for `host_selector`.
+
+    Substitutes the template literal's interpolations rather than reimplementing
+    the rule, so this cannot silently agree with a Python copy that drifted.
+    """
+    src = _FRONTEND_SLIDE_DOC.read_text()
+    m = re.search(
+        r"export function slideHostFrameStyle\(hostSelector: string\): string \{\s*"
+        r"return `(.*?)`;",
+        src,
+        re.DOTALL,
+    )
+    assert m, "could not find slideHostFrameStyle in slideDocument.ts"
+    width, height = _frontend_frame_dims()
+    return (
+        m.group(1)
+        .replace("${hostSelector}", host_selector)
+        .replace("${SLIDE_FRAME_W}", str(width))
+        .replace("${SLIDE_FRAME_H}", str(height))
+    )
+
+
+def test_backend_frame_dims_match_the_frontend():
+    assert (SLIDE_FRAME_W, SLIDE_FRAME_H) == _frontend_frame_dims()
+
+
+@pytest.mark.parametrize("host", ["body", "section.slide-container", ".slide-container"])
+def test_backend_host_frame_contract_matches_the_frontend(host):
+    """ONE frame contract for every surface, preview and export alike.
+
+    The export builders used to inject no frame contract at all, which is what
+    shipped a design-system-pinned deck's PDF on a pure-black ground. If the
+    frontend rule changes, this fails loudly so the backend mirror moves with it.
+    """
+    assert slide_host_frame_style(host) == _frontend_host_frame(host)
+
+
+def test_the_host_frame_contract_is_not_vacuous():
+    """Non-vacuity: the extractor must actually be reading a rule out of the TS.
+
+    A regex that silently matched nothing would make the parity test above pass
+    against an empty string on both sides.
+    """
+    rendered = _frontend_host_frame("body")
+    assert "position: relative !important" in rendered
+    assert "width: 1280px !important" in rendered
+    # The CHILD arm is the load-bearing half — sizing the host alone leaves the
+    # background-carrying wrapper collapsed.
+    assert "body > :not(#tellr-host-frame-boost):not(.slide-wrapper)" in rendered
+    assert "height: 100% !important" in rendered
+
+
+def test_the_host_frame_contract_cannot_reach_the_standalone_export_wrapper():
+    """`.slide-wrapper` is the per-slide block of the standalone MULTI-slide export.
+
+    Stretching those to one frame would stack the whole deck into a single pile, so
+    the contract is written to be incapable of it wherever it is injected.
+    """
+    assert ":not(.slide-wrapper)" in slide_host_frame_style("body")
 
 
 def test_build_slide_html_flattens_the_slide_root_after_deck_css():
