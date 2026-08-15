@@ -6,7 +6,12 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE, slideHostFrameStyle } from './slideDocument';
+import {
+  SLIDE_CSP,
+  SLIDE_ROOT_RESET_STYLE,
+  findSlideRoot,
+  slideHostFrameStyle,
+} from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -102,49 +107,6 @@ ${slide.html}
   </script>
 </body>
 </html>`;
-}
-
-/**
- * The slide ROOT of a built slide document: the direct child of <body> that IS,
- * or CONTAINS, the slide.
- *
- * `querySelector('.slide')` is NOT the slide root. On a design-system-pinned
- * deck the root is a <section> wrapper and `.slide` is its absolutely positioned
- * child, so capturing `.slide` captures the one element in the pair that is
- * TRANSPARENT — the ground lives on the wrapper. html2canvas is handed
- * `backgroundColor: null`, so that transparent capture reaches
- * `toDataURL('image/jpeg')`, which has no alpha channel and flattens it to
- * BLACK. That is why the delivered PDF (1.5450 on pure black) was WORSE than its
- * own source document (1.3025 on the deck's dark html/body).
- *
- * This is the SECOND of two independent root causes. Measured on the delivered
- * PDF, the frame contract alone stays black at 1.5450, and this locator alone
- * already reaches rgb(248,247,243) at 12.6794 — but only because
- * exportSlideDeckToPDF force-sizes its capture target inline, a block that
- * previously only ever reached `.slide`. That is a RUNTIME patch, not a correct
- * document: without the contract the wrapper still measures 1280x0 in the
- * document itself, and `.slide` resolves its `inset: 0` against <body> instead of
- * against its own wrapper, because a collapsed static wrapper is not a containing
- * block. Both are therefore kept.
- *
- * Walking UP from the slide (rather than matching `body > :has(.slide)`) states
- * the same structural rule the preview surfaces document, and avoids making PDF
- * export depend on `:has()` support — `querySelector` THROWS on a selector the
- * browser cannot parse, which would take the whole export down rather than
- * degrade it.
- *
- * Falls back to <body>, exactly as the previous locator did: a deck with no
- * `.slide` at all has no wrapper to find, and <body> is itself the fixed
- * 1280x720 frame with its child stretched to fill it.
- */
-export function findSlideRoot(doc: Document): HTMLElement {
-  const slide = doc.querySelector('.slide');
-  if (!slide) return doc.body;
-  let el: Element = slide;
-  while (el.parentElement && el.parentElement !== doc.body) {
-    el = el.parentElement;
-  }
-  return (el.parentElement === doc.body ? el : doc.body) as HTMLElement;
 }
 
 /**
