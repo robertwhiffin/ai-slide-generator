@@ -165,6 +165,28 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
             extra={"slide_id": slide_id, "patterns": findings},
         )
 
+    # THE FIRST RESET SHEET BELOW IS SCOPED TO `html, body`, NEVER UNIVERSAL.
+    #
+    # A universal reset — border-box plus zeroed margin and padding, on every
+    # element — used to sit there. It laid slide DESCENDANTS out border-box and
+    # margin-free in the export while every preview surface lays them out
+    # content-box with UA margins, which is the box model Claude Design ground
+    # truth uses. That cost up to 69.87 px of per-component drift here, on the
+    # same 6 live slides the standalone builder diverged on by the same mechanism.
+    #
+    # This shell needs no box model of its own: it is a fixed 1280x720 document
+    # whose padding is zeroed both above and (after deck CSS) below, so the two
+    # box models are provably identical for html/body here. The standalone
+    # MULTI-slide builder does pad `body`, so it keeps `box-sizing` on its shell —
+    # see buildStandaloneDeckDocument in frontend/src/services/slideDocument.ts.
+    #
+    # Deliberately a `#` comment and NOT part of the f-string. Anything inside the
+    # f-string is EMITTED into every exported document, where it (a) displaces
+    # useful deck CSS from the ~15,000-char budget `_truncate_html` hands the LLM,
+    # and (b) eats headroom under the 2000-char length threshold a sheet-role
+    # classifier uses to tell this reset sheet from the deck's own. Keep the
+    # rendered comment to one short line and put the reasoning here instead.
+    # Pinned by tests/unit/test_preview_box_model_parity.py.
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -174,17 +196,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
   <title>{slide_deck.get("title", "Slide")} - Slide {slide.get("slide_id", "")}</title>
 {scripts_html}
   <style>
-    /* SCOPED to the document shell, never universal — the same shape the preview
-       resets use, for the same reason. A UNIVERSAL reset (border-box plus zeroed
-       margin and padding, on every element) used to sit here, and it laid SLIDE
-       DESCENDANTS out border-box and margin-free in the export while every preview
-       surface lays them out content-box with UA margins — the box model Claude
-       Design ground truth uses. Measured on the same 6 live slides the standalone
-       builder diverged on: up to 69.87 px of component drift here.
-       The shell needs no box model of its own: this is a fixed 1280x720 document
-       whose padding is zeroed both above and (after deck CSS) below, so the two box
-       models are provably identical for html/body here — unlike the standalone
-       multi-slide builder, which pads `body` and therefore pins its shell. */
+    /* Shell-scoped, never universal: slide content stays content-box, as in every preview. */
     html, body {{
       width: 1280px;
       height: 720px;
