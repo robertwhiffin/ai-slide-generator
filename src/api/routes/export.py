@@ -22,6 +22,7 @@ from src.utils.html_safety import (
     SLIDE_CSP_META,
     SLIDE_ROOT_RESET_STYLE,
     scan_html_for_unsafe_patterns,
+    slide_host_frame_style,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,12 +182,36 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     # see buildStandaloneDeckDocument in frontend/src/services/slideDocument.ts.
     #
     # Deliberately a `#` comment and NOT part of the f-string. Anything inside the
-    # f-string is EMITTED into every exported document, where it (a) displaces
-    # useful deck CSS from the ~15,000-char budget `_truncate_html` hands the LLM,
-    # and (b) eats headroom under the 2000-char length threshold a sheet-role
-    # classifier uses to tell this reset sheet from the deck's own. Keep the
-    # rendered comment to one short line and put the reasoning here instead.
+    # f-string is EMITTED into every exported document, where it displaces useful
+    # deck CSS from the ~15,000-char budget `_truncate_html` hands the LLM — an
+    # oversize injected stylesheet driving that budget negative is what produced
+    # the all-placeholder export bug (WF-01). Keep every rendered comment to one
+    # short line and put the reasoning here instead.
+    #
+    # There is NO 2000-char sheet-role classifier, despite what this comment used
+    # to claim. Nothing in src/ or tests/ keys off a stylesheet's length; the tests
+    # identify sheets POSITIONALLY (`blocks[0..2]`, `len(blocks) == 3`) and by
+    # content (the deck's sheet is the one equal to the deck's CSS verbatim). This
+    # sheet is already over that supposed cap at 2,098 chars, so budgeting against
+    # it would be budgeting against nothing. The real cost is the LLM budget above.
     # Pinned by tests/unit/test_preview_box_model_parity.py.
+    #
+    # THE FRAME CONTRACT GOES IN THIS SHEET ONLY, NEVER SHEET 2 (WF-03). Sheet 2
+    # must stay byte-equal to the deck's own CSS, or a deck whose CSS opens with
+    # `@import url(fonts.googleapis…)` loses its webfont: `@import` is only valid
+    # before every other rule of ITS OWN stylesheet. Pinned by
+    # tests/unit/test_export_deck_stylesheet.py.
+    #
+    # WHY THE CONTRACT IS HERE AT ALL. A design-system-pinned deck nests the slide
+    # two levels deep: a `<section>` carries the slide ground via a bare TYPE
+    # selector, and inside it `.slide` is `position: absolute; inset: 0`. The
+    # wrapper holds no in-flow content, collapses to height 0, and the ground it
+    # carries never paints — the deck's own dark `html, body` shows through at
+    # contrast 1.3025. Five preview surfaces injected this contract; no export
+    # builder did. Latent on this path today (the huashu sidecar reads
+    # `getComputedStyle(root).backgroundColor`, and a 1280x0 element still computes
+    # the right colour, so the .pptx was immune BY CONSTRUCTION) — but the
+    # divergence is real and this is where it stops being one.
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -238,6 +263,8 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
        shifts content past the clip and truncates the export's bottom edge
        (same neutralization as every other surface). */
     {SLIDE_ROOT_RESET_STYLE}
+    /* After deck CSS: the shared slide-host frame contract. */
+    {slide_host_frame_style("body")}
   </style>
 </head>
 <body>
