@@ -12,7 +12,12 @@
 
 import html2canvas from 'html2canvas';
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE } from './slideDocument';
+import {
+  SLIDE_CSP,
+  SLIDE_ROOT_RESET_STYLE,
+  findSlideRoot,
+  slideHostFrameStyle,
+} from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -43,6 +48,8 @@ ${externalScripts}
      a root margin inside this fixed 1280x720 overflow:hidden document shifts
      content past the clip and truncates the capture's bottom edge. */
   ${SLIDE_ROOT_RESET_STYLE}
+  /* After deck CSS: the shared slide-host frame contract. */
+  ${slideHostFrameStyle('body')}
 </style>
 </head>
 <body>
@@ -94,7 +101,8 @@ export async function captureDeckAsPngDataUrls(deck: SlideDeck): Promise<string[
       await waitForCharts(win, 4000);
       try { await (win as any).document.fonts.ready; } catch (_) { /* best effort */ }
       await new Promise(r => setTimeout(r, 150));
-      const slideEl = (doc.querySelector('.slide') || doc.body) as HTMLElement;
+      // The slide ROOT, which is NOT `.slide` once a design system wraps it.
+      const slideEl = findSlideRoot(doc);
       const canvas = await html2canvas(slideEl, {
         width: SLIDE_WIDTH,
         height: SLIDE_HEIGHT,
