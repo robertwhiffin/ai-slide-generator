@@ -1032,6 +1032,232 @@ async def test_get_deck_status_falls_back_to_db_when_job_popped_from_memory(
         assert result["metadata"]["latency_ms"] == 15000
 
 
+# ---- get_deck_status: clarification turns (WG2-01) ----------------------
+#
+# When an edit instruction names no slide, chat_service DELIBERATELY asks which
+# slide and changes nothing (RC10). That product behaviour is correct; what was
+# wrong is the REPORTING. Such a turn completes normally, so the worker stores a
+# "completed" chat_request and this tool answers status "ready" with
+# replacement_info None and 0 slides changed — indistinguishable, to a client
+# reading `status`, from an edit that applied. Measured over MCP: ready in 1.3 s,
+# deck untouched, and the only trace was a message_type "clarification" in the
+# turn's transcript.
+
+#: Verbatim from chat_service.py's RC10 clarification — the streaming twin the MCP
+#: job queue actually runs (chat_service.py:965-970) and its sync twin
+#: (chat_service.py:446-451) emit this same text.
+_RC10_CLARIFICATION_TEXT = (
+    "I'd like to help edit your slides. Could you please specify which slide? "
+    "You can either:\n"
+    "- Say the slide number (e.g., 'change slide 3 background to blue')\n"
+    "- Or select the slide from the panel on the left"
+)
+
+#: The other clarification chat_service raises the same way — ambiguous add-vs-replace
+#: intent on a session that already holds a deck (streaming chat_service.py:931-936,
+#: sync chat_service.py:414-419). Both twins ship the IDENTICAL metadata shape,
+#: ``{"clarification_needed": True}``, which is why one reporting fix covers all four.
+_AMBIGUOUS_INTENT_CLARIFICATION_TEXT = (
+    "You have 3 slides in this session. Would you like to:\n"
+    "- Add new slides to the existing deck?\n"
+    "- Replace the entire deck with a new presentation?\n\n"
+    "Please reply with your full request, e.g., 'add 3 slides about X' or "
+    "'replace with new slides about X'."
+)
+
+_UNCHANGED_DECK = {
+    "title": "Q3 Pitch",
+    "slides": [{"html": "<div class='slide'>A</div>", "scripts": ""}],
+    "css": "",
+    "external_scripts": [],
+    "head_meta": {},
+}
+
+
+async def _ready_status(fake_request, identity, *, result_metadata, replacement_info,
+                        turn_messages):
+    """Drive the ready path of ``_get_deck_status_impl`` over one stored worker result.
+
+    ``result["metadata"]`` is the COMPLETE StreamEvent's metadata copied verbatim by
+    ``job_queue.process_chat_request``, so passing chat_service's own dict here is the
+    real inter-layer contract, not a restatement of it.
+    """
+    from src.api import mcp_server
+
+    chat_request = {
+        "request_id": "req-1",
+        "session_id": 42,  # integer PK, as the real session_manager returns
+        "status": "completed",
+        "error_message": None,
+        "created_at": "2026-04-22T12:00:00",
+        "completed_at": "2026-04-22T12:00:01",
+        "result": {
+            "slides": _UNCHANGED_DECK["slides"],
+            "raw_html": "<html>...</html>",
+            "replacement_info": replacement_info,
+            "experiment_url": None,
+            "metadata": result_metadata,
+            "session_title": "Q3 Pitch",
+        },
+    }
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status", return_value=None), \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = True
+
+        sm = MagicMock()
+        sm.get_chat_request.return_value = chat_request
+        sm.get_session_id_for_request.return_value = "sess-1"
+        sm.get_slide_deck.return_value = _UNCHANGED_DECK
+        sm.get_session.return_value = {"session_id": "sess-1", "title": "Q3 Pitch"}
+        sm.get_messages_for_request.return_value = turn_messages
+        get_sm.return_value = sm
+
+        return await mcp_server._get_deck_status_impl(
+            request=fake_request,
+            session_id="sess-1",
+            request_id="req-1",
+        )
+
+
+def _clarification_turn(text):
+    """The turn transcript a clarification produces: the query, then the question."""
+    return [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "On the first slide only, make the title bigger",
+            "message_type": "user_query",
+            "created_at": "2026-04-22T12:00:00",
+            "metadata": None,
+        },
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": text,
+            "message_type": "clarification",
+            "created_at": "2026-04-22T12:00:01",
+            "metadata": None,
+        },
+    ]
+
+
+def _applied_edit_turn():
+    return [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "On slide 2, make the title bigger",
+            "message_type": "user_query",
+            "created_at": "2026-04-22T12:00:00",
+            "metadata": None,
+        },
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": "Updated slide 2.",
+            "message_type": None,
+            "created_at": "2026-04-22T12:00:09",
+            "metadata": None,
+        },
+    ]
+
+
+async def _clarification_status(fake_request, identity, text=_RC10_CLARIFICATION_TEXT):
+    return await _ready_status(
+        fake_request,
+        identity,
+        # Exactly what chat_service attaches to the COMPLETE event, plus the counters
+        # the worker always reports.
+        result_metadata={"clarification_needed": True, "tool_calls": 0, "latency_ms": 1300},
+        replacement_info=None,
+        turn_messages=_clarification_turn(text),
+    )
+
+
+async def _applied_edit_status(fake_request, identity):
+    return await _ready_status(
+        fake_request,
+        identity,
+        result_metadata={"tool_calls": 3, "latency_ms": 41000},
+        replacement_info={"replaced": [2], "count": 1},
+        turn_messages=_applied_edit_turn(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_flags_a_clarification_turn(fake_request, identity):
+    """The fix. chat_service sets ``clarification_needed`` on the turn it declines to
+    apply; the tool must pass that on rather than drop it while rebuilding metadata."""
+    result = await _clarification_status(fake_request, identity)
+
+    assert result["metadata"]["clarification_needed"] is True
+    # `status` is deliberately NOT redefined — existing clients read it and a
+    # clarification IS a completed turn.
+    assert result["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_surfaces_the_clarification_question(fake_request, identity):
+    """A client that must act on the clarification needs the QUESTION, not just a
+    boolean, and it should not have to re-derive it by filtering the transcript."""
+    result = await _clarification_status(fake_request, identity)
+
+    assert result["metadata"]["clarification"] == _RC10_CLARIFICATION_TEXT
+
+
+@pytest.mark.asyncio
+async def test_a_clarification_is_distinguishable_from_an_applied_edit(
+    fake_request, identity
+):
+    """The finding itself. Both turns are genuinely "ready", and both can carry a null
+    replacement_info, so neither of those fields separates them — a client reading only
+    the documented response must still be able to tell that nothing was applied."""
+    clarified = await _clarification_status(fake_request, identity)
+    applied = await _applied_edit_status(fake_request, identity)
+
+    # Pin WHY the extra field is needed: status alone cannot tell these apart.
+    assert clarified["status"] == applied["status"] == "ready"
+    # And with it, they are unambiguous.
+    assert clarified["metadata"]["clarification_needed"] is True
+    assert applied["metadata"]["clarification_needed"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_applied_edit_still_reports_exactly_as_it_did(fake_request, identity):
+    """The other half: adding the signal must not disturb the success case. Every field
+    a client reads today keeps its value, and the new flag reads falsey."""
+    result = await _applied_edit_status(fake_request, identity)
+
+    assert result["status"] == "ready"
+    assert result["replacement_info"] == {"replaced": [2], "count": 1}
+    assert result["slide_count"] == 1
+    assert result["metadata"]["tool_calls"] == 3
+    assert result["metadata"]["latency_ms"] == 41000
+    assert result["metadata"]["session_title"] == "Q3 Pitch"
+    assert result["metadata"]["clarification_needed"] is False
+    assert result["metadata"]["clarification"] is None
+
+
+@pytest.mark.asyncio
+async def test_both_clarification_kinds_are_reported_the_same_way(fake_request, identity):
+    """chat_service raises two different clarifications, in a streaming and a sync twin
+    each, and all four attach the same ``{"clarification_needed": True}``. The reporting
+    fix is therefore one lookup, and it must not be specific to RC10's wording."""
+    result = await _clarification_status(
+        fake_request, identity, text=_AMBIGUOUS_INTENT_CLARIFICATION_TEXT
+    )
+
+    assert result["metadata"]["clarification_needed"] is True
+    assert result["metadata"]["clarification"] == _AMBIGUOUS_INTENT_CLARIFICATION_TEXT
+
+
 # ---- edit_deck ----------------------------------------------------------
 
 

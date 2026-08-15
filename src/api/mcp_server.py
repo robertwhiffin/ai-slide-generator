@@ -649,7 +649,10 @@ def _render_deck_response(
         "Poll the status of a deck generation or edit job. Returns "
         "lightweight status while pending/running; when ready, returns the "
         "complete deck as structured slide data, a standalone HTML "
-        "document, and URLs into tellr's full editor and view-only surfaces."
+        "document, and URLs into tellr's full editor and view-only surfaces. "
+        "A ready turn is not always an applied change: when "
+        "metadata.clarification_needed is true the deck was left UNCHANGED and "
+        "metadata.clarification carries the question to answer before retrying."
     ),
 )
 async def get_deck_status(
@@ -795,6 +798,34 @@ async def _get_deck_status_impl(
                 for m in db_messages
             ]
 
+            # WG2-01. An edit instruction that names no slide is DELIBERATELY not
+            # applied: chat_service asks which slide instead (its RC10 twins, plus the
+            # ambiguous add-vs-replace pair) and attaches ``clarification_needed`` to
+            # the COMPLETE event, which ``job_queue.process_chat_request`` copies
+            # verbatim into ``result["metadata"]``.
+            #
+            # Such a turn completes normally, so "ready" is the honest status and
+            # ``replacement_info`` is None — which is indistinguishable from an edit
+            # that applied but replaced nothing. Rebuilding ``metadata`` from
+            # hand-picked keys DROPPED the flag, so an automated caller reading
+            # ``status`` concluded the edit had landed when the deck was untouched; the
+            # only remaining trace was a ``message_type == "clarification"`` row in the
+            # transcript. Surfaced ADDITIVELY, and ``status`` keeps its existing meaning
+            # for clients already reading it.
+            clarification_needed = bool(result_metadata.get("clarification_needed"))
+            clarification = None
+            if clarification_needed:
+                # The question itself, so a caller can act on it without re-filtering
+                # the transcript. Last one wins: it is the turn's most recent ask.
+                clarification = next(
+                    (
+                        message.get("content")
+                        for message in reversed(messages)
+                        if message.get("message_type") == "clarification"
+                    ),
+                    None,
+                )
+
             return {
                 "session_id": session_id,
                 "request_id": request_id,
@@ -808,6 +839,8 @@ async def _get_deck_status_impl(
                     or result_metadata.get("latency_seconds"),
                     "experiment_url": result.get("experiment_url"),
                     "session_title": result.get("session_title"),
+                    "clarification_needed": clarification_needed,
+                    "clarification": clarification,
                 },
             }
     except MCPToolError:
@@ -851,7 +884,11 @@ def _check_contiguous(indices: list[int]) -> None:
         "The edit is applied in-place; the session_id and deck_url stay "
         "stable across edits. Returns a request_id; the caller polls "
         "get_deck_status for completion and receives the updated deck "
-        "plus replacement_info summarizing what changed."
+        "plus replacement_info summarizing what changed. An instruction that "
+        "identifies no slide — neither via slide_indices nor by naming one in "
+        "the text — is answered with a clarifying question INSTEAD of an edit: "
+        "get_deck_status then reports metadata.clarification_needed with the "
+        "deck unchanged."
     ),
 )
 async def edit_deck(
