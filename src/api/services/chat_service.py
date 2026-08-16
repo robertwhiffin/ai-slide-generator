@@ -35,9 +35,35 @@ from src.utils.html_utils import (
     extract_canvas_ids_from_html,
     split_script_by_canvas,
 )
+from src.utils.ds_asset_utils import (
+    substitute_deck_dict_ds_assets,
+    substitute_ds_asset_placeholders,
+)
 from src.utils.image_utils import substitute_deck_dict_images, substitute_image_placeholders
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_active_design_system_id(session_id: Optional[str]) -> Optional[int]:
+    """The session's pinned/active design-system id, or None.
+
+    ``{{ds-asset:ID}}`` resolution is scoped to this id at every deck response
+    boundary (render, export). A generated deck can only legitimately reference
+    assets of the session's active design system, so scoping to it makes a
+    foreign handle — e.g. one echoed from a crafted pinned template's HTML into
+    the generated deck — go inert instead of leaking another system's bytes.
+    Any lookup miss (no session, no pin) resolves to None, which the resolver
+    treats as fail-closed (nothing resolves).
+    """
+    if not session_id:
+        return None
+    from src.api.services.session_manager import get_session_manager
+
+    try:
+        session = get_session_manager().get_session(session_id)
+    except Exception:
+        return None
+    return resolve_agent_config(session.get("agent_config")).design_system_id
 
 
 def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -87,12 +113,18 @@ class ChatService:
 
         logger.info("ChatService initialized successfully")
 
-    def _substitute_images_for_response(self, deck_dict, raw_html=None):
-        """Apply image placeholder substitution before sending to client.
+    def _substitute_images_for_response(self, deck_dict, raw_html=None, *, session_id):
+        """Apply image + design-system asset substitution before sending to client.
 
-        Converts {{image:ID}} placeholders to base64 data URIs in deck dicts
-        and raw HTML. Called at API response boundaries so that stored/cached
-        HTML keeps lightweight placeholders (avoiding LLM context bloat).
+        Converts {{image:ID}} placeholders (image_assets) and {{ds-asset:ID}}
+        placeholders (design_system_asset) to base64 data URIs in deck dicts and
+        raw HTML. Called at API response boundaries so that stored/cached HTML
+        keeps lightweight placeholders (avoiding LLM context bloat). The two
+        namespaces are resolved independently.
+
+        ``session_id`` (keyword-only, mandatory) scopes ds-asset resolution to the
+        session's active design system so a foreign ``{{ds-asset:ID}}`` handle
+        cannot disclose another system's bytes.
         """
         from src.core.database import get_db_session
 
@@ -101,13 +133,54 @@ class ChatService:
         )
         needs_html = raw_html and "{{image:" in raw_html
         needs_deck_html = deck_dict and deck_dict.get("html_content") and "{{image:" in deck_dict.get("html_content", "")
+        # background-image url() references live in the deck's top-level
+        # ``css``, not in slide html — gate on it too, else a deck whose only
+        # image reference is in css skips the resolver entirely (same gap the
+        # ds-asset gate below closed; substitute_deck_dict_images covers the
+        # css field).
+        needs_deck_css = bool(
+            deck_dict
+            and deck_dict.get("css")
+            and "{{image:" in deck_dict.get("css", "")
+        )
 
-        if needs_deck or needs_html or needs_deck_html:
+        # Design-system brand assets ({{ds-asset:ID}}) — parallel, orthogonal namespace.
+        ds_needs_deck = deck_dict and any(
+            "{{ds-asset:" in s.get("html", "") for s in deck_dict.get("slides", [])
+        )
+        ds_needs_html = raw_html and "{{ds-asset:" in raw_html
+        ds_needs_deck_html = bool(
+            deck_dict
+            and deck_dict.get("html_content")
+            and "{{ds-asset:" in deck_dict.get("html_content", "")
+        )
+        # @font-face src url() fonts and background-image url() live in the deck's
+        # top-level ``css``, not in slide html — gate on it too, else a deck whose
+        # only brand-asset reference is in css skips the resolver entirely
+        # (substitute_deck_dict_ds_assets covers the css field).
+        ds_needs_deck_css = bool(
+            deck_dict
+            and deck_dict.get("css")
+            and "{{ds-asset:" in deck_dict.get("css", "")
+        )
+
+        if (
+            needs_deck or needs_html or needs_deck_html or needs_deck_css
+            or ds_needs_deck or ds_needs_html or ds_needs_deck_html or ds_needs_deck_css
+        ):
             with get_db_session() as db:
-                if needs_deck or needs_deck_html:
+                if needs_deck or needs_deck_html or needs_deck_css:
                     substitute_deck_dict_images(deck_dict, db)
                 if needs_html:
                     raw_html = substitute_image_placeholders(raw_html, db)
+                if ds_needs_deck or ds_needs_deck_html or ds_needs_deck_css or ds_needs_html:
+                    ds_id = resolve_active_design_system_id(session_id)
+                    if ds_needs_deck or ds_needs_deck_html or ds_needs_deck_css:
+                        substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
+                    if ds_needs_html:
+                        raw_html = substitute_ds_asset_placeholders(
+                            raw_html, db, design_system_id=ds_id
+                        )
         return deck_dict, raw_html
 
     def _build_agent_for_session(
@@ -591,6 +664,11 @@ class ChatService:
 
             # Persist slide deck to database
             if current_deck and slide_deck_dict:
+                # WB-1 backstop: re-emit the pinned template's token
+                # stylesheet when the model dropped it, then rebuild the dict
+                # so both persisted representations agree.
+                if self._ensure_pinned_template_token_css(session_id, current_deck):
+                    slide_deck_dict = current_deck.to_dict()
                 try:
                     _user = get_current_username()
                 except Exception:
@@ -691,7 +769,9 @@ class ChatService:
                     )
 
             # Substitute image placeholders before sending to client
-            slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
+            slide_deck_dict, raw_html = self._substitute_images_for_response(
+                slide_deck_dict, raw_html, session_id=session_id
+            )
 
             # Build response. Appended notices need a timestamp — MessageResponse
             # requires it, and omitting it raises a Pydantic ValidationError that
@@ -866,7 +946,9 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
                     )
-                    early_deck_dict, _ = self._substitute_images_for_response(existing_deck.to_dict())
+                    early_deck_dict, _ = self._substitute_images_for_response(
+                        existing_deck.to_dict(), session_id=session_id
+                    )
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
@@ -897,7 +979,9 @@ class ChatService:
                         type=StreamEventType.ASSISTANT,
                         content=clarification_msg,
                     )
-                    early_deck_dict, _ = self._substitute_images_for_response(existing_deck.to_dict())
+                    early_deck_dict, _ = self._substitute_images_for_response(
+                        existing_deck.to_dict(), session_id=session_id
+                    )
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
                         slides=early_deck_dict,
@@ -969,7 +1053,9 @@ class ChatService:
                     )
                     early_deck_dict = existing_deck.to_dict() if existing_deck else None
                     if early_deck_dict:
-                        early_deck_dict, _ = self._substitute_images_for_response(early_deck_dict)
+                        early_deck_dict, _ = self._substitute_images_for_response(
+                            early_deck_dict, session_id=session_id
+                        )
                     # Include error in metadata for ReplacementFeedback display
                     yield StreamEvent(
                         type=StreamEventType.COMPLETE,
@@ -1377,6 +1463,11 @@ class ChatService:
 
         # Persist slide deck to database
         if current_deck and slide_deck_dict:
+            # WB-1 backstop: re-emit the pinned template's token stylesheet
+            # when the model dropped it, then rebuild the dict so both
+            # persisted representations agree.
+            if self._ensure_pinned_template_token_css(session_id, current_deck):
+                slide_deck_dict = current_deck.to_dict()
             try:
                 _user = get_current_username()
             except Exception:
@@ -1433,7 +1524,9 @@ class ChatService:
         session_manager.update_last_activity(session_id)
 
         # Substitute image placeholders before sending to client
-        slide_deck_dict, raw_html = self._substitute_images_for_response(slide_deck_dict, raw_html)
+        slide_deck_dict, raw_html = self._substitute_images_for_response(
+            slide_deck_dict, raw_html, session_id=session_id
+        )
 
         # RC11: Include conflict note in metadata for ReplacementFeedback display
         complete_metadata = result.get("metadata") or {}
@@ -1927,6 +2020,74 @@ class ChatService:
 
         context = "\n\n[Attached images]\n" + "\n".join(image_descriptions)
         return message + context
+
+    def _resolve_pinned_template_token_css(self, session_id: str) -> Optional[str]:
+        """Token stylesheet of the session's pinned template, or ``None``.
+
+        Mirrors ``agent_factory._get_prompt_content``'s resolution: the
+        session's agent_config names the design system + template pin, the
+        active DesignSystem row owns the template. Any miss (no pin, inactive
+        system, stale template id) resolves to ``None`` — the guarantee only
+        applies where a pin actually supplied a token stylesheet.
+        """
+        session_manager = get_session_manager()
+        session = session_manager.get_session(session_id)
+        config = resolve_agent_config(session.get("agent_config"))
+        if config.design_system_id is None or config.template_id is None:
+            return None
+
+        from src.core.database import get_db_session
+        from src.database.models import DesignSystem
+        from src.services.design_system_templates import get_template_for_generation
+
+        with get_db_session() as db:
+            design_system = (
+                db.query(DesignSystem)
+                .filter_by(id=config.design_system_id, is_active=True)
+                .first()
+            )
+            if design_system is None:
+                return None
+            template = get_template_for_generation(design_system, config.template_id)
+            if template is None:
+                return None
+            return (getattr(template, "token_css", None) or "").strip() or None
+
+    def _ensure_pinned_template_token_css(self, session_id: str, deck: SlideDeck) -> bool:
+        """Deterministic WB-1 backstop, applied right before every deck save.
+
+        The pinned-template prompt block ASKS the model to carry the TOKEN
+        STYLESHEET into the deck CSS; the live battery proved it can refuse
+        (57 var() references, zero definitions — washout in preview and both
+        PPTX paths). When the session pins a template and the deck CSS lost
+        the template's token definitions, they are re-emitted into
+        ``deck.css`` (see ``ensure_deck_token_css``). Returns True when the
+        deck changed so callers can rebuild derived representations. Never
+        raises — a failed guarantee must not block saving the deck.
+        """
+        try:
+            token_css = self._resolve_pinned_template_token_css(session_id)
+            if not token_css:
+                return False
+
+            from src.services.design_system_templates import ensure_deck_token_css
+
+            ensured = ensure_deck_token_css(deck.css, token_css)
+            if ensured == (deck.css or ""):
+                return False
+            deck.css = ensured
+            logger.info(
+                "Re-emitted pinned template token stylesheet into deck CSS "
+                "(model omitted its definitions)",
+                extra={"session_id": session_id},
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Token-css guarantee failed; saving deck unchanged",
+                extra={"session_id": session_id},
+            )
+            return False
 
     def _deck_versions(self) -> Dict[str, int]:
         """Return the cached-deck version map, creating it if needed.
@@ -2496,7 +2657,9 @@ class ChatService:
             # Use session_manager to get deck with verification merged
             deck_dict = session_manager.get_slide_deck(session_id)
             if deck_dict and deck_dict.get("slides"):
-                deck_dict, _ = self._substitute_images_for_response(deck_dict)
+                deck_dict, _ = self._substitute_images_for_response(
+                    deck_dict, session_id=session_id
+                )
                 return deck_dict
         except Exception as e:
             logger.warning(f"Failed to load deck from session_manager: {e}")
@@ -2514,7 +2677,7 @@ class ChatService:
                 deck_dict["version"] = db_deck["version"]
         except Exception:
             deck_dict.setdefault("version", 0)
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
     def reorder_slides(self, session_id: str, new_order: List[int], *, expected_version: Optional[int] = None) -> Dict[str, Any]:
@@ -2599,7 +2762,7 @@ class ChatService:
             extra={"new_order": new_order, "session_id": session_id},
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
     def update_slide(self, session_id: str, index: int, html: str, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
@@ -2749,7 +2912,7 @@ class ChatService:
             },
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
     def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
@@ -2813,7 +2976,7 @@ class ChatService:
             },
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict)
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
 

@@ -17,7 +17,8 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Header: title + session metadata + navigation                         │
-│ [New Session] [My Sessions] [Profiles] [Deck Prompts] [Slide Styles] [Help] │
+│ [New Session] [My Sessions] [Profiles] [Deck Prompts] [Slide Styles]        │
+│ [Design Systems] [Images] [Help]                                            │
 ├──────────────┬──────────────┬─────────────────────────────────────────┤
 │ Chat Panel   │ Selection    │ Slide Panel                             │
 │ (32% width)  │ Ribbon       │ (flex-1)                                │
@@ -36,9 +37,10 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 - **Profiles** (`/profiles`): Saved configuration snapshots
 - **Deck Prompts** (`/deck-prompts`): Presentation template library management
 - **Slide Styles** (`/slide-styles`): Visual style library management (typography, colors, layout)
+- **Design Systems** (`/design-systems`): Brand bundle library — tokens, fonts, assets, named templates. See [Design System Library](design-system-library.md)
 - **Images** (`/images`): Image library management
 - **Help** (`/help`): Documentation and usage guide
-- **Admin** (`/admin`): Admin page with feedback dashboard and Google Slides OAuth configuration
+- **Admin** (`/admin`): Wrapped in `<RequireAdmin>`. Six tabs — Usage, Feedback, Google Slides, Design System, Slide Style, Judge. The Design System and Slide Style tabs are the **only** place the workspace-wide org default is set
 - **Feedback redirect** (`/feedback`): Redirects to `/admin`
 
 The landing page (`/`) now shows the generator directly in pre-session mode.
@@ -139,17 +141,42 @@ loadProfile(profileId)     // Load a profile's config into current session
 
 Used by: `AgentConfigBar`, `ChatPanel`.
 
-**Default resolution:** When no stored config exists (new session or first visit), the context resolves defaults for each config field using localStorage user preferences:
+**Default resolution:** When no stored config exists (new session or first visit), the context resolves defaults for each config field.
 
 | Config Field | localStorage Key | Priority |
 |---|---|---|
 | Profile | `userDefaultProfileId` | localStorage > server `is_my_default` > server `is_default` |
-| Slide Style | `userDefaultSlideStyleId` | localStorage > server `is_default` > server `is_system` |
 | Deck Prompt | `userDefaultDeckPromptId` | localStorage only (no server-side default) |
 
-Users set their personal defaults via the "Set as default" button on each settings page (`/profiles`, `/slide-styles`, `/deck-prompts`). The preference is per-browser, not synced to the backend.
+Users set their personal defaults via the "Set as default" button on each settings page. The preference is per-browser and is not synced to the backend.
 
-For slide styles specifically, the server-side `is_default` row is the **system-wide corporate default**, set only from the hidden `/admin` → "Slide Style" tab. New users (who haven't clicked "Set as default" on any slide style in their browser) see the corporate default on every new deck, mirroring the "new Google Slides deck follows corporate branding" experience. MCP `create_deck` always uses the system default — it cannot read per-user localStorage — so flipping the admin choice instantly affects all MCP-initiated decks.
+**The visual-style slot is mutually exclusive, but resolution is entry-path dependent.** A design system and a slide style cannot both apply; when both are present the design system wins and the style is dropped — enforced in the model serializer, the column bind, and a database `BEFORE INSERT OR UPDATE` trigger.
+
+There is **no ordering over the sources that holds on every path.** The context runs a decision tree per entry path, and each returns early: the guards distinguish a field the caller omitted from one it set to `null`, and they read persisted provenance (`style_source`) rather than re-deriving it by comparing an id to the current default. The browser's paths:
+
+| Path | Behaviour |
+|---|---|
+| **Fresh pre-session surface** | No `localStorage` mirror. Load the selected profile, stamp its provenance, then resolve through `withResolvedStyleSource(config, { isNewSurface: true })`. The session `GET` passes the same flag when the server holds no config for that session. |
+| **Stored mirror / restored surface** | The mirror's **existence**, never its content, selects this path — an explicit "Design System: None" is byte-identical to the first-paint placeholder. Resolves without `isNewSurface`, so an absent `style_source` is preserved as the user's choice. Runs only when `design_system_id` or `deck_prompt_id` is missing, and a mirror stamped `'seeded'` clears both guards — with an empty design-system slot it still picks up a later org default. |
+| **Default profile** | `profileStyleSource` stamps `'user'` for a profile whose `created_by` is not `system`, or a system profile re-pointed at another style; `'seeded'` only for the server's own profile still holding the style the server seeds. A `'user'` stamp short-circuits every lower default. |
+| **New session** | Seeding is the server's (`_apply_org_default_style_source`), per field, and only for fields absent from `model_fields_set`. An explicit `null` is a choice and is left alone. `template_id` is stripped by `_without_template_pin`. |
+| **Existing session** | The persisted slot is used as stored. The `GET` sanitizes stale design-system and template **pins** and flags a cleared design system as `design_system_unavailable`; `withResolvedStyleSource` runs only when the server holds no config for the session. |
+
+`withResolvedStyleSource` returns at the first matching guard:
+
+1. `style_source === 'user'` → unchanged (covers "neither a design system nor a style").
+2. `!isNewSurface && style_source == null` → unchanged.
+3. `design_system_id != null` → unchanged.
+4. Personal default design system → claim the slot, clear `slide_style_id`, stamp `'user'`.
+5. `slide_style_id != null` **and** a personal default style exists → claim the slot, stamp `'user'`. **Returns before the org default design system is resolved**, so a personal style default can suppress org-default design-system seeding.
+6. Org default design system → claim the slot, clear `slide_style_id`, stamp `'seeded'`.
+7. Otherwise personal default style (`'user'`), else the server's `is_default` — falling back to `is_system` — style (`'seeded'`).
+
+**Clearing a personal default releases the config slot, not just the localStorage key.** Removing only the key would leave the resolved id in the mirrored config, so guard 3 would short-circuit and the preference below would never take effect. `setUserDefaultDesignSystem(null)` writes `design_system_id: null`, `template_id: null`, `slide_style_id: userPreferredStyleId()` and `style_source: 'user'` **before** dropping the key, so a failed release keeps the preference and a later attempt can retry. The Clear button does not stay visible through that failure — `DesignSystemLibrary` clears its local `userDefaultId` state before awaiting the release and renders the button from that state, so it returns only on remount, re-read from the surviving key. It does **not** rerun lower-default resolution on that surface — the surface now carries `style_source: 'user'`.
+
+**Personal defaults are invisible to MCP.** `create_deck` cannot read per-user localStorage. An explicit `design_system_id` wins; otherwise an explicit `slide_style_id` suppresses implicit org-default design-system seeding; otherwise the org default design system, then the tellr-configured default slide style. Flipping the admin choice therefore affects MCP-initiated decks with no explicit source immediately. For a durable, cross-browser personal default, save a profile carrying the design system and set that profile as your default.
+
+**Server-side, `agent_factory` is a branch, not a fallthrough chain.** It selects the design-system branch when `design_system_id` is present, otherwise the slide-style branch when `slide_style_id` is present. Either lookup is filtered on `is_active = true`, and **a miss leaves the hardcoded `DEFAULT_SLIDE_STYLE`** — an inactive design system does not fall through to the deck's slide style, because that branch is an `elif` and is never evaluated. The constant is not a database row. See [Design System Library §4](./design-system-library.md) for the full cross-surface reference.
 
 ### 4c. Profile Context (`src/contexts/ProfileContext.tsx`)
 
@@ -316,6 +343,14 @@ interface SlideStyle {
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
 | `src/components/config/SlideStyleList.tsx` | Slide style library management: list, create, edit, delete styles | `configApi.listSlideStyles`, `configApi.createSlideStyle`, `configApi.updateSlideStyle`, `configApi.deleteSlideStyle` |
 | `src/components/config/SlideStyleForm.tsx` | Modal form for creating/editing slide styles with Monaco editor | None (callback props) |
+| `src/components/config/DesignSystemLibrary.tsx` | Design system library: list, personal default, delete | `/api/settings/design-systems` |
+| `src/components/config/DesignSystemDetailPanel.tsx` | Detail panel: tokens, assets, plus templates and files via their own endpoints | `GET /design-systems/{id}` |
+| `src/components/config/DesignSystemUploadDialog.tsx` | Bundle upload | `POST /design-systems/import` |
+| `src/components/config/DesignSystemFileBrowser.tsx` | Browse and serve bundle files | `GET /design-systems/{id}/files` |
+| `src/components/config/TemplateThumbnail.tsx` | Template picker image; renders a live preview when no stored thumbnail exists | `GET /templates/{id}/thumbnail` |
+| `src/components/config/TemplateViewerModal.tsx` | Full-size template preview with paging | `GET /templates/{id}/source` |
+| `src/components/config/templatePreviewDoc.ts` | Builds the sandboxed preview document for a template | None (pure) |
+| `src/components/Admin/AdminDesignSystemDefault.tsx` | **Admin only.** Sets/clears the workspace org default | `POST /design-systems/{id}/set-default`, `/clear-default` |
 | `src/components/UpdateBanner/UpdateBanner.tsx` | Displays update notification when new version available; different messaging for patch vs major updates | None (props only) |
 | `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load via direct `fetch`; returns update availability and type | `GET /api/version/check` (direct fetch, not via `api` object) |
 | `src/components/SavePoints/SavePointDropdown.tsx` | Version selection dropdown, triggers preview on selection | `api.listVersions`, `api.previewVersion` |
@@ -464,9 +499,13 @@ The version check is performed via a direct `fetch` call inside the `useVersionC
 | `exportPPTXAsync` | POST | `/api/export/pptx/async` | `{ session_id, slide_deck, chart_images? }` | `{ job_id, status, total_slides }` |
 | `pollPPTXExport` | GET | `/api/export/pptx/poll/{id}` | – | `{ status, progress?, error? }` |
 | `downloadPPTX` | GET | `/api/export/pptx/download/{id}` | – | `Blob` |
-| `exportToGoogleSlides` | POST | `/api/export/google-slides/async` | `{ session_id, slide_deck, chart_images? }` | `{ job_id, status }` |
+| `exportPptxHuashu` | POST | `/api/export/pptx/editable/huashu/from-html` | `{ session_id }` | `Blob` — **Primary.** The route the Export → PowerPoint button calls |
+| `exportPptxEditable` | POST | `/api/export/pptx/editable/from-records` | `{ session_id, … }` | `Blob` — **Fallback** |
+| `exportToGoogleSlides` | POST | `/api/export/google-slides/from-huashu` | `{ session_id }` | `{ presentation_id, presentation_url, total_slides, succeeded, failures }` |
 
-Both PPTX and Google Slides exports use the same async job pattern: submit, poll until complete, then download. Chart images are captured client-side before submission to preserve Chart.js visualizations in the export.
+**PPTX and Google Slides no longer share one pattern.** Both call the huashu render first, and Google Slides succeeds in a **single synchronous round-trip** carrying only `session_id`. Both also have a records-pipeline fallback, but they trigger it differently: the **Google** fallback fires only on HTTP `503` (`if (response.status === 503 && slideDeck)` in `api.ts`), while the **PPTX** fallback additionally matches the error text for the pipeline being unavailable or still installing (`SlidePanel.tsx`). Client-side chart and DOM extraction happens **only** on the fallback request, not on the primary one.
+
+> **Historical note.** `exportPPTXAsync` / `pollPPTXExport` / `downloadPPTX` above target the LLM code-generation path (`POST /api/export/pptx/async`, `src/services/html_to_pptx.py`). That path is **superseded** and no UI surface reaches it — a repo-wide search finds no caller in the checked-in frontend. That cannot rule out an external caller invoking the route directly. The code still exists but should be treated as legacy. See [Export Features](export-features.md).
 
 ### Configuration API (`src/api/config.ts`)
 
@@ -478,6 +517,7 @@ The `configApi` module provides a separate API client for profile and settings m
 - **Prompts Config** – get/update per-profile prompt settings
 - **Deck Prompts Library** – CRUD for reusable presentation templates
 - **Slide Styles Library** – CRUD for visual style definitions
+- **Design Systems** – list, detail, bundle import, templates, assets, files, and the admin-only org default. See [Design System Library](design-system-library.md)
 - **Google OAuth Credentials** – upload/check/delete app-wide Google credentials (admin)
 - **Identities** – search Databricks workspace users and groups
 - **Profile Contributors** – manage sharing permissions for profiles

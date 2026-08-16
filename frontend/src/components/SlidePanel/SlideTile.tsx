@@ -10,7 +10,7 @@ import { HTMLEditorModal } from './HTMLEditorModal';
 import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildSlideDocument, SLIDE_PREVIEW_RESET_STYLE } from '../../services/slideDocument';
 
 function formatRelativeTime(iso: string): string {
   const date = new Date(iso);
@@ -61,7 +61,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(1);
-  const [contentHeight, setContentHeight] = useState<number>(SLIDE_HEIGHT);
   const { selectedIndices, setSelection } = useSelection();
   
   const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>(
@@ -142,40 +141,13 @@ export const SlideTile: React.FC<SlideTileProps> = ({
 
   const slideHTML = useMemo(() => {
     const slideScripts = slide.scripts || '';
-    const slideId = slide.slide_id.replace(/'/g, "\\'");
-    const heightReporter = `
-(function() {
-  function sendHeight() {
-    var h = Math.max(document.documentElement.scrollHeight, document.documentElement.offsetHeight, document.body.scrollHeight, document.body.offsetHeight);
-    try { window.parent.postMessage({ type: 'slideHeight', slideId: '${slideId}', height: h }, '*'); } catch (e) {}
-  }
-  if (document.readyState === 'complete') sendHeight(); else window.addEventListener('load', sendHeight);
-  setTimeout(sendHeight, 100);
-  setTimeout(sendHeight, 500);
-})();`;
     return buildSlideDocument(slide.html, {
       css: slideDeck.css,
       externalScripts: slideDeck.external_scripts,
-      scripts: `${slideScripts}\n${heightReporter}`,
+      scripts: slideScripts,
+      extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE,
     });
-  }, [slide.html, slide.scripts, slide.slide_id, slideDeck.css, slideDeck.external_scripts]);
-
-  useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      const d = e.data;
-      if (d?.type === 'slideHeight' && d?.slideId === slide.slide_id && typeof d?.height === 'number')
-        setContentHeight(Math.max(SLIDE_HEIGHT, d.height));
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [slide.slide_id]);
-
-  useEffect(() => {
-    setContentHeight(SLIDE_HEIGHT);
-  }, [slide.html]);
-
-  const displayHeight = Math.max(SLIDE_HEIGHT, contentHeight);
-  const scaledHeight = displayHeight * scale;
+  }, [slide.html, slide.scripts, slideDeck.css, slideDeck.external_scripts]);
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -288,11 +260,14 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           </div>
       </div>
 
-      {/* Slide Preview */}
+      {/* Slide Preview — a FIXED 1280x720 frame, CLIPPED like the presentation
+          viewer / export (VisualEditorPanel uses the same pattern). The tile no
+          longer grows to fit tall content, so overflow is visible while editing
+          instead of being a surprise at export time. */}
       <div
         ref={containerRef}
         className="relative bg-muted/20 overflow-hidden"
-        style={{ height: `${scaledHeight}px`, minHeight: `${SLIDE_HEIGHT * scale}px` }}
+        style={{ height: `${SLIDE_HEIGHT * scale}px` }}
       >
         <iframe
           ref={iframeRef}
@@ -300,9 +275,10 @@ export const SlideTile: React.FC<SlideTileProps> = ({
           title={`Slide ${index + 1}`}
           className="absolute top-0 left-0 border-0"
           sandbox="allow-scripts"
+          scrolling="no"
           style={{
             width: `${SLIDE_WIDTH}px`,
-            height: `${displayHeight}px`,
+            height: `${SLIDE_HEIGHT}px`,
             transform: `scale(${scale})`,
             transformOrigin: 'top left',
           }}
