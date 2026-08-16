@@ -465,6 +465,8 @@ test.describe('Design System Library — personal default & delete', () => {
       .toBe('2');
     // …the control flips to its Clear counterpart…
     await expect(nimbusCard.getByRole('button', { name: 'Clear default' })).toBeVisible();
+    // …the page discloses the precedence the preference carries…
+    await expect(page.getByTestId('ds-personal-default-hint')).toContainText(/overrides/i);
     // …and no org-wide endpoint was called: this is not an admin action.
     expect(orgDefaultCalls).toEqual([]);
   });

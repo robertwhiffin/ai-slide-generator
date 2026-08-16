@@ -33,6 +33,9 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+/** Ties the default controls to the one-line precedence note in the header. */
+const PERSONAL_DEFAULT_HINT_ID = 'ds-personal-default-hint';
+
 export const DesignSystemLibrary: React.FC = () => {
   const { setUserDefaultDesignSystem } = useAgentConfig();
 
@@ -188,6 +191,17 @@ export const DesignSystemLibrary: React.FC = () => {
             Org-shared, on-brand design systems — templates, color tokens, fonts, and brand assets.
             Upload a bundle, then select one in Agent Config to generate on-brand slides.
           </p>
+          {/* Referenced by both default controls via aria-describedby, so the
+              precedence is announced with the button rather than only read as
+              page text. */}
+          <p
+            id={PERSONAL_DEFAULT_HINT_ID}
+            data-testid="ds-personal-default-hint"
+            className="mt-1 text-xs text-muted-foreground"
+          >
+            Your default applies to new decks in this browser and overrides your default slide
+            style.
+          </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
@@ -288,6 +302,7 @@ export const DesignSystemLibrary: React.FC = () => {
                               variant="ghost"
                               size="sm"
                               className="h-8 px-2 text-xs text-muted-foreground"
+                              aria-describedby={PERSONAL_DEFAULT_HINT_ID}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 void handleClearPersonalDefault();
@@ -301,6 +316,7 @@ export const DesignSystemLibrary: React.FC = () => {
                               variant="ghost"
                               size="sm"
                               className="h-8 px-2 text-xs text-muted-foreground"
+                              aria-describedby={PERSONAL_DEFAULT_HINT_ID}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 void handleSetPersonalDefault(system);
