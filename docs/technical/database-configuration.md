@@ -1,8 +1,5 @@
 # Database Configuration System
 
-**Status:** Complete - Configuration & Session Models  
-**Last Updated:** April 2, 2026
-
 ## Overview
 
 The AI Slide Generator uses a PostgreSQL database to manage configuration profiles. This replaces the previous YAML-based configuration system and enables:
@@ -16,7 +13,7 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 
 ### Database Schema
 
-The database consists of configuration and session tables:
+The database holds **28 tables**, every `__tablename__` declared under `src/database/models`. A table added there without a line here makes this inventory wrong, and the fixtures that reset schema between tests are keyed off the same list.
 
 **Configuration Tables:**
 1. **`config_profiles`** - Named configuration snapshots with `agent_config` JSON, plus **`llm_judge_backend`** (`mlflow` \| `direct`) for slide verification (default `mlflow`; see [LLM as Judge](llm-as-judge-verification.md))
@@ -29,25 +26,34 @@ The database consists of configuration and session tables:
 8. **`google_oauth_tokens`** - Per-user encrypted Google OAuth tokens (unique on `user_identity` only)
 9. **`user_profile_preferences`** - Per-user default profile preferences
 
+**Design System Tables:** (all in `src/database/models/design_system.py`; see [Design System Library](design-system-library.md))
+10. **`design_system`** - Parent record: name, description, author, active/default flags, and `compiled_style_content`
+11. **`design_system_asset`** - Binary brand assets and webfonts, bucketed by `kind`
+12. **`design_system_token`** - Colour, type and spacing tokens, bucketed by `group`
+13. **`design_system_file`** - Verbatim bundle files, addressable by path; binary entries reference an asset row rather than re-storing bytes
+14. **`design_system_template`** - Named slide templates, with an optional `thumbnail_asset_id` (`ON DELETE SET NULL`)
+
 **Session Tables:**
-10. **`user_sessions`** - User conversation sessions with processing locks and contributor support
-11. **`session_messages`** - Chat messages with request_id for polling
-12. **`session_slide_decks`** - Slide deck state per session with editing locks and optimistic concurrency
-13. **`slide_deck_versions`** - Save point snapshots (up to 40 per session)
-14. **`chat_requests`** - Async chat request tracking for polling mode
-15. **`export_jobs`** - Async PPTX export job tracking
-16. **`deck_contributors`** - Deck sharing/collaboration permissions (user/group access)
+15. **`user_sessions`** - User conversation sessions with processing locks and contributor support
+16. **`session_messages`** - Chat messages with request_id for polling
+17. **`session_slide_decks`** - Slide deck state per session with editing locks and optimistic concurrency
+18. **`slide_deck_versions`** - Save point snapshots (up to 40 per session)
+19. **`chat_requests`** - Async chat request tracking for polling mode
+20. **`export_jobs`** - Async PPTX export job tracking
+21. **`deck_contributors`** - Deck sharing/collaboration permissions (user/group access)
 
 **Asset Tables:**
-17. **`image_assets`** - Uploaded images with binary data and thumbnails
+22. **`image_assets`** - Uploaded images with binary data and thumbnails
 
 **Feedback & Monitoring Tables:**
-18. **`feedback_conversations`** - AI-assisted feedback chat storage with structured summaries
-19. **`survey_responses`** - User satisfaction survey data
-20. **`request_logs`** - Per-request performance metrics
+23. **`feedback_conversations`** - AI-assisted feedback chat storage with structured summaries
+24. **`survey_responses`** - User satisfaction survey data
+25. **`request_logs`** - Per-request performance metrics
+26. **`usage_events`** - Durable login/deck activity log for admin analytics. Never pruned, and `session_id` is deliberately **not** a foreign key so events outlive the sessions they describe (see the model docstring)
 
-**Identity Tables:**
-21. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)
+**Identity & Key Tables:**
+27. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)
+28. **`encryption_keys`** - Single-row (`id = 1`) Fernet master key for Google OAuth credential and token encryption, held in the ACL-governed data schema rather than `app.yaml`
 
 ### Entity Relationships
 
@@ -269,7 +275,7 @@ class DesignSystem(Base):
 
 ### DesignSystemAsset
 
-Binary assets and webfonts. Bytes live in the row, so bundle size is database size.
+Binary assets and webfonts. **Imported binary payloads live in database rows, but the database footprint is not the uploaded ZIP's size**: the archive is compressed while stored payloads are not, most ZIP entries are never stored, each asset's `design_system_file` row is a path-only reference that does not duplicate the bytes, and row metadata adds its own overhead.
 
 ```python
 class DesignSystemAsset(Base):
@@ -284,7 +290,7 @@ class DesignSystemAsset(Base):
     size_bytes: int
 ```
 
-**Assets are resolved by `(asset_id, design_system_id)`, never by global id.** Resolving by global id was a shipped confused-deputy defect: a foreign handle returned another design system's bytes.
+**Assets are resolved by `(asset_id, design_system_id)`, never by global id**, so a foreign handle cannot return another design system's bytes. `get_asset_base64` documents this as the confused-deputy guard and makes the scope a mandatory keyword argument; `design_system_id=None` is fail-closed, because the column is `NOT NULL` and the `IS NULL` filter matches no row.
 
 ### DesignSystemToken
 
@@ -299,7 +305,7 @@ class DesignSystemToken(Base):
     value: str
 ```
 
-**Identifiers are normalised before comparison**, so the manifest name `--brand-core-primary` and the CSS variable `primary` reduce to one identifier. **Deduplication requires a matching name *and* value** — the same identifier declared with two different values remains two rows.
+**Identifiers are normalised before comparison**, so the manifest name `--brand-core-primary` and the CSS variable `primary` reduce to one identifier. **Deduplication is source-aware.** Manifest entries collide on `(group, canonical name)`, and a later manifest entry is dropped even when its value differs — so two entries sharing a canonical name in different groups both survive as semantic aliases. CSS restatements are compared by `(canonical name, value)`: a `:root` var that restates a manifest token collapses into it, while one sharing the name with a different value is a distinct row.
 
 ### DesignSystemFile
 
@@ -332,7 +338,7 @@ class DesignSystemTemplate(Base):
     entry_path: str                  # Path of the template's entry file within the bundle
     layout_html: str
     token_css: str | None
-    thumbnail_asset_id: int | None   # NULL when the bundle shipped no `.thumbnail` for this template
+    thumbnail_asset_id: int | None   # Optional recognized preview asset; ON DELETE SET NULL
 ```
 
 **A NULL `thumbnail_asset_id` has two causes:** the bundle shipped no recognised preview for that template (either `.thumbnail` or `preview.<ext>`), or the referenced asset was deleted — the FK is `ON DELETE SET NULL`. Either way the template still works, and the frontend can render a live preview from the template's own HTML instead. See [Design System Bundle Format](design-system-bundle-format.md).
