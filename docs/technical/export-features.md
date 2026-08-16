@@ -49,18 +49,17 @@ PDF export is client-side and is not a route.
 
 3. **Export as PowerPoint**
    - Click "Export as PowerPoint"
-   - Charts are captured client-side before sending to server
-   - The export runs asynchronously on the server with real-time progress updates
-   - Progress displays "Processing slide X of Y..." during conversion
+   - The primary path sends only `session_id` to the **synchronous** huashu route and downloads the returned PPTX blob — there is no job/poll cycle
+   - If that pipeline is unavailable on the deployment (HTTP 503, or an error naming the pipeline as unavailable or still installing), the UI extracts DOM records client-side and retries through the records fallback
    - A PPTX file will be downloaded automatically when complete
    - Filename format: `{slide_deck_title}_{timestamp}.pptx`
 
 ### Export Status
 
-- The export button shows "Exporting PowerPoint: Processing slide X of Y..." during PPTX export
+- The export button shows "Generating PPTX…" while the primary path runs, and "Falling back to records pipeline (slower)…" if the fallback is taken
 - The dropdown menu closes automatically when an export starts
-- Progress updates every 2 seconds via polling
-- If an error occurs, an alert will display the error message
+- A **partial** export is reported loudly: a persistent error toast names each slide that failed, because the downloaded file is silently missing them
+- If an error occurs, the message is surfaced to the user
 
 ## Technical Details
 
@@ -108,8 +107,9 @@ PDF export is client-side and is not a route.
 > **Historical note.** The LLM code-generation path described in this section
 > (`src/services/html_to_pptx.py`, `POST /api/export/pptx` and its `/async`
 > twin, and the `export_job_queue` worker) is **superseded** by the huashu
-> render above and is no longer the route the UI calls — it has no production
-> callers. It re-runs per-slide code generation on every request and is
+> render above and is no longer the route the UI calls: no caller exists in
+> this repository's checked-in frontend, though external direct callers cannot
+> be ruled out from here. It re-runs per-slide code generation on every request and is
 > therefore non-deterministic. The code still exists but should be treated as
 > legacy; the detail below is retained for readers working on that code and is
 > not a description of current export behaviour.
@@ -214,7 +214,7 @@ PDF export is client-side and is not a route.
 
 **Location:**
 - `src/api/routes/google_slides.py` — API endpoints (auth + export)
-- `src/api/routes/settings/google_credentials.py` — Credential management endpoints
+- `src/api/routes/admin.py` — Google credential management endpoints (upload, status, delete)
 - `src/services/google_slides_auth.py` — OAuth2 flow and token management
 - `src/services/html_to_google_slides.py` — LLM-powered converter
 
