@@ -203,9 +203,11 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
 | `POST` | `/api/export/pptx/editable/huashu/from-html` | **Primary.** Render the deck HTML to PowerPoint | `routes/export.export_pptx_huashu_from_html` |
-| `POST` | `/api/export/pptx/editable/from-records` | **Fallback** — used only when the huashu route returns 503 | `routes/export.export_pptx_editable_from_records` |
-| `POST` | `/api/export/pptx` | **Legacy** — LLM code-generation path, no production callers; the UI uses the huashu route above | `routes/export.export_to_pptx` |
-| `POST` | `/api/export/pptx/async` | **Legacy** — async twin of the above, no production callers | `routes/export.start_pptx_export_async` |
+| `POST` | `/api/export/pptx/editable/from-records` | **Fallback** — fires on 503 or an unavailable/installing pipeline message | `routes/export.export_pptx_editable_from_records` |
+| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Synchronous Google Slides export via Drive conversion | `routes/google_slides` |
+| `POST` | `/api/export/google-slides/from-records` | **Fallback** for the Google path | `routes/google_slides` |
+| `POST` | `/api/export/pptx` | **Legacy** — LLM code-generation path; no caller exists in this repository's frontend, and the UI uses the huashu route above | `routes/export.export_to_pptx` |
+| `POST` | `/api/export/pptx/async` | **Legacy** — async twin of the above; no caller in this repository's frontend | `routes/export.start_pptx_export_async` |
 | `GET` | `/api/export/pptx/poll/{job_id}` | Poll PPTX export status | `routes/export.poll_pptx_export` |
 | `GET` | `/api/export/pptx/download/{job_id}` | Download completed PPTX | `routes/export.download_pptx_export` |
 | `GET` | `/api/export/google-slides/auth/status` | Check user authorization | `routes/google_slides.auth_status` |
@@ -374,7 +376,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 - **ChatRequest** ensures `message` length, `max_slides` bounds (1-50), and (when present) `slide_context` contiguous indices + matching HTML count. This keeps backend/LLM alignment with the frontend selection ribbon.
 - **ChatResponse** always returns every message in the current turn so the UI can stream tool and assistant chatter without reconstructing history.
 - **SlideDeck** caches the canonical state:
-  - `slides` store raw HTML whose root is a slide wrapper. The wrapper is **not** div-only — slide roots are discovered by tag set, so a `<section class="slide">` root (as design-system templates use) is equally valid. Each `Slide` object holds its own `scripts` attribute.
+  - `slides` store raw HTML whose root carries the `slide` class. The root is **not** div-only — discovery keys on the class token independent of tag name, so a `<section class="slide">` root (as design-system templates use) is equally valid. Each `Slide` object holds its own `scripts` attribute.
   - `css`, `external_scripts` preserve deck-level styling and CDN references.
   - Canvas/script integrity is enforced via `_validate_canvas_scripts_in_html()` before caching full decks and `validate_canvas_scripts()` during replacements.
 

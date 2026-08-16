@@ -14,19 +14,20 @@ All export options are accessible through a unified dropdown menu in the slide p
 | Route | Status | Notes |
 |---|---|---|
 | `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML |
-| `POST /api/export/pptx/editable/from-records` | **Live — fallback** | Used only when the huashu route returns `503`; DOM-walker records → pptxgenjs |
-| `POST /api/export/google-slides/from-huashu` | **Live** | Synchronous; uploads the rendered PPTX to Drive for conversion |
+| `POST /api/export/pptx/editable/from-records` | **Live — fallback** | DOM-walker records → pptxgenjs. Fires on a `503` **or** when the error text indicates the pipeline is unavailable or installing — not status-code-only |
+| `POST /api/export/google-slides/from-huashu` | **Live — primary** | Synchronous; uploads the rendered PPTX to Drive for conversion. Returns `presentation_id`, `presentation_url`, `total_slides`, `succeeded`, `failures` |
+| `POST /api/export/google-slides/from-records` | **Live — fallback** | The Google equivalent of the records fallback |
 | `POST /api/export/pptx/editable/from-images` | Live, unreachable | Rasterised path, reached only when `fontMode === 'screenshot'`, which no UI surface passes |
-| `POST /api/export/pptx` · `/pptx/async` | **Legacy** | LLM code-generation; superseded, **no production callers** |
-| `POST /api/export/google-slides` | **Legacy** | LLM code-generation twin; superseded, no production callers |
+| `POST /api/export/pptx` · `/pptx/async` | **Legacy** | LLM code-generation; superseded, and **no caller exists in this repository's frontend** |
+| `POST /api/export/google-slides` | **Legacy** | LLM code-generation twin; superseded, no caller in this repository's frontend |
 
 PDF export is client-side and is not a route.
 
-**Table fidelity differs by route, and both behaviours are intended.** The legacy code-generation path emits a **native PowerPoint table** (`<a:tbl>` inside a `<p:graphicFrame>`), because the model writes `python-pptx` directly. The huashu path emits **positioned text boxes and no `<a:tbl>` at all** — its DOM walker produces no records for `<td>`/`<th>`, so cells are flattened into absolutely-positioned elements. The result renders correctly and is positionally faithful, but is not editable *as a table* in PowerPoint. This is a design limitation of the huashu emitter, not a regression.
+**Table fidelity differs by route.** The huashu path emits **positioned text boxes and no `<a:tbl>`** — its DOM walker produces no records for `<td>`/`<th>`, so cells are flattened into absolutely-positioned elements. The result is positionally faithful but not editable *as a table*. The legacy code-generation path prompts an LLM to write `python-pptx`, and its prompt uses `add_table`, so it *can* produce a native `<a:tbl>` — though being model-generated, that is not guaranteed per run. Treat the huashu flattening as current behaviour and a known limitation; nothing in the code establishes noneditable tables as a permanent product contract.
 
-**Fonts survive because the export document keeps the deck's CSS in its own stylesheet.** `@import` is only valid at the top of a stylesheet, so injected resets are emitted as separate `<style>` elements rather than prepended to the deck's CSS — otherwise a deck's leading webfont `@import` is discarded and the export silently falls back to a system font.
+**A deck's leading webfont `@import` must stay first in its stylesheet.** `@import` is only valid at the top of a stylesheet, so anything prepended to the deck's CSS discards it and the export silently falls back to a system font. The Python `build_slide_html` builder achieves this by emitting the deck's CSS in its **own** `<style>` element. `buildStandaloneDeckDocument` instead concatenates deck and wrapper CSS into a single `<style>`, and remains correct only because the deck's CSS is placed first within it.
 
-**Geometry is scoped, not universal.** Neither export builder applies a universal `* { box-sizing }` rule; margin, padding and box-sizing resets are scoped to `html, body`. Slide content keeps the browser default, which is what the preview surfaces use — see [Slide Host Frame Contract](slide-host-frame-contract.md).
+**No universal `* { box-sizing }` rule is applied** by either export builder, so slide content keeps the browser default. The resets that do exist are narrower than "scoped to `html, body`" — the Python builder's shell reset omits `box-sizing` entirely, and the preview host applies `box-sizing: border-box` to the host's direct child rather than to the document shell. See [Slide Host Frame Contract](slide-host-frame-contract.md).
 
 **Known export limitations.** Inline background pills (used for agenda badges) are centred against their resolved ancestor, so badges on a wide list can land away from their item. `<code>` chips do not receive their pill background. The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
 

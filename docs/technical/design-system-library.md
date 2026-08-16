@@ -1,6 +1,6 @@
 # Design System Library
 
-**One-Line Summary:** Org-shared brand bundles — tokens, fonts, assets and named slide templates — imported as a zip, compiled into a single prompt artifact, and resolved onto a deck through a six-tier default ladder.
+**One-Line Summary:** Org-shared brand bundles — tokens, fonts, assets and named slide templates — imported as a zip, compiled into a single prompt artifact, and resolved onto a deck through per-path default resolution.
 
 ---
 
@@ -30,7 +30,7 @@ Key design decisions:
 | Prompt compiler | `src/services/design_system_compiler.py` |
 | Resolution for generation | `src/api/services/agent_factory.py` |
 | Default ladder (client) | `frontend/src/contexts/AgentConfigContext.tsx` |
-| Library UI | `frontend/src/components/DesignSystem*/`, `TemplateViewerModal.tsx` |
+| Library UI | `frontend/src/components/config/` — `DesignSystemLibrary.tsx`, `DesignSystemDetailPanel.tsx`, `DesignSystemUploadDialog.tsx`, `DesignSystemFileBrowser.tsx`, `TemplateThumbnail.tsx`, `TemplateViewerModal.tsx`, `templatePreviewDoc.ts` |
 | Org-default admin UI | `frontend/src/components/Admin/AdminDesignSystemDefault.tsx` |
 
 All routes are mounted under `/api/settings/design-systems`.
@@ -40,51 +40,69 @@ All routes are mounted under `/api/settings/design-systems`.
 ## 3. Architecture Snapshot
 
 ```
-bundle.zip ──▶ import_design_system ──▶ classify each entry
-                                          ├─ assets/**  ──▶ design_system_asset   (bucketed by `kind`)
-                                          ├─ fonts/**   ──▶ design_system_asset
-                                          ├─ tokens/**  ──▶ design_system_token   (bucketed by `group`)
-                                          ├─ templates/<slug>/**
-                                          │              ├─ .thumbnail ──▶ design_system_template
-                                          │              └─ *.html     ──▶ design_system_file
-                                          └─ everything else ──▶ skipped (allowlist)
-                                                    │
-                                                    ▼
-                                    recompute_compiled_style_content
-                                                    │
-                                                    ▼
-                                        compiled_style_content
-                                                    │
-                    ┌───────────────────────────────┴───────────────────────────────┐
-                    ▼                                                               ▼
-        build_generation_system_prompt                                  {{ds-asset:ID}} resolution
-        (agent_factory, generation path)                                (render + export paths)
+bundle.zip
+   │
+   ├─ _ds_manifest.json  ──▶ manifest_json; declares tokens[] / templates[] / cards[]
+   │                            └──▶ design_system_token      (grouped by `group`)
+   ├─ CSS the manifest declares ──▶ further tokens, and retained as design_system_file
+   ├─ assets/** · fonts/**   ──▶ design_system_asset          (grouped by `kind`)
+   ├─ README.md · SKILL.md   ──▶ design_system_file           (the authoring layer)
+   ├─ templates/<slug>/index.html ──▶ design_system_file
+   ├─ templates/<slug>/.thumbnail | preview.<ext>
+   │        └──▶ design_system_asset, referenced by a design_system_template row
+   └─ everything else ──▶ ignored (some ignores are reported as import warnings)
+                             │
+                             ▼
+             recompute_compiled_style_content
+                             │
+                             ▼
+                 compiled_style_content
+                             │
+         ┌───────────────────┴──────────────────┐
+         ▼                                      ▼
+ build_generation_system_prompt      {{ds-asset:ID}} resolution
+ (agent_factory, generation path)    (render + export paths)
 ```
 
----
-
-## 4. Default Resolution — the six-tier ladder
-
-This is the contract that decides which brand a new deck uses. It is evaluated client-side in `AgentConfigContext.tsx`, and mirrored server-side for callers that have no browser (MCP).
-
-| Tier | Source | Scope | Set by |
-|---|---|---|---|
-| 1 | Explicit per-deck choice in Agent Config | this deck | anyone |
-| 2 | Personal default design system | this browser | anyone |
-| 3 | Personal default slide style | this browser | anyone |
-| 4 | Org default design system | workspace | **admin only** |
-| 5 | Server default slide style | workspace | **admin only** |
-| 6 | Hardcoded default style constant | — | — |
-
-**A design system and a slide style are mutually exclusive.** When both arrive, the design system wins and the style is dropped. This is enforced in three independent places — the model serializer, the column bind, and a database `BEFORE INSERT OR UPDATE` trigger — so a caller cannot construct a deck that carries both.
-
-**Tier 3 does not fire on a fresh surface.** The personal-slide-style branch is gated on an *incoming* non-null style, and on both the fresh-surface and new-session resolve paths the incoming style is null — so on a genuinely new deck the org design system (tier 4) wins over a personal style default. The `/admin` panel's helper text currently overstates this; see §10.
-
-**Personal defaults are browser-local and therefore invisible to MCP.** They are a `localStorage` key with no server call and no authorization surface. An MCP-created deck resolves from tier 4 down. Clearing a personal default releases the config slot, not just the key, so tier 3 or 4 takes effect on the same surface without a reload.
-
-For the durable, cross-browser equivalent, save a **profile** carrying the design system and set that profile as your default — a profile stores the whole agent config, design system included, and auto-applies on a fresh surface.
+**Tokens come from the manifest and the CSS it declares**, not from scanning a directory. **A template's thumbnail is an asset row that the template references** — it is not stored on the template itself.
 
 ---
+
+## 4. Which brand a deck gets
+
+A deck carries **one** visual-style slot. A design system and a slide style are mutually exclusive: when both are present the design system wins and the style is dropped. That exclusivity is enforced in three independent places — the model serializer, the column bind, and a database `BEFORE INSERT OR UPDATE` trigger — so a caller cannot construct a deck carrying both.
+
+Resolution is **path-dependent**: the browser, a saved profile, a newly created session and an MCP call do not all consult the same sources. Documenting it as one ordered list overstates how uniform it is, so each path is given separately.
+
+### Server-side resolution (`agent_factory`)
+
+This is the only path that always applies, and it is short:
+
+1. `design_system_id`, if set — looked up with `is_active = true`
+2. otherwise `slide_style_id`, if set — also looked up with `is_active = true`
+3. otherwise the default slide-style constant
+
+**An inactive id resolves to nothing rather than to an error**, so a deck pinned to a soft-deleted design system falls through to whatever comes next.
+
+### Browser resolution (`AgentConfigContext`)
+
+The client seeds an unconfigured surface from its own preferences before the server sees a request. It reads two `localStorage` keys — a personal default design system and a personal default slide style — and prefers the design system when both are set.
+
+**Which key wins on any given render depends on the path taken**, because the context also has to respect an incoming config, a mirrored pre-session config, and a default profile. In particular a personal slide-style default *is* seeded on initial render, so it is **not** correct to say a personal style default never applies on a new deck.
+
+Clearing a personal default **releases the config slot, not just the key** — removing only the key would leave the resolved id in the mirrored config and the lower preference would never take effect.
+
+### Saved profiles
+
+A profile stores the whole agent config, design system included, and a default profile is applied on a fresh surface. **This is the only personal default that follows a user across browsers and machines**, because the other two live in `localStorage`.
+
+### MCP
+
+MCP has no browser, so it never sees a personal default. With neither `design_system_id` nor `slide_style_id` supplied, the **org default design system** is applied. An explicit `slide_style_id` suppresses that implicit seeding. See [MCP Server Reference](./mcp-server.md).
+
+### Workspace defaults
+
+The **org default design system** is a database flag, admin-only, and applies to any caller that has expressed no preference — including MCP. Beneath it sit the server default slide style, then a protected `is_system` style, then the hardcoded constant.
 
 ## 5. Interfaces
 
@@ -95,7 +113,7 @@ Authorization follows an org-shared, user-contributed model: **reads are open, m
 | `GET` | `` | List all systems with token/asset/template counts | `list_design_systems` |
 | `POST` | `/import` | Import a bundle zip | `import_design_system` |
 | `POST` | `` | Create a token-only system (no binaries) | `create_design_system` |
-| `GET` | `/{ds_id}` | Detail: tokens, templates, assets, files | `get_design_system` |
+| `GET` | `/{ds_id}` | Detail: summary plus `manifest_json`, `compiled_style_content`, **tokens and assets only** | `get_design_system` |
 | `PUT` | `/{ds_id}` | Update name, description, tokens | `update_design_system` |
 | `DELETE` | `/{ds_id}` | Soft delete; `?hard_delete=true` for permanent | `delete_design_system` |
 | `POST` | `/{ds_id}/set-default` | **Admin only.** Set the org default | `set_default_design_system` |
@@ -110,7 +128,7 @@ Authorization follows an org-shared, user-contributed model: **reads are open, m
 
 **`set-default` refuses an inactive system** with a `400` rather than silently setting a tombstone as the org brand.
 
-**A concurrent same-name import returns `409`, not `500`.** The fail-fast name check and the partial unique index leave a time-of-check window, so the index violation is translated to a conflict. The sequential and concurrent paths return the same status, the same reason, and the same rollback — the losing request creates no row.
+**A concurrent same-name import returns `409`, not `500`.** The fail-fast name check and the partial unique index leave a time-of-check window, so the index violation is translated to a conflict. Both paths return `409` and roll back — the losing request creates no row — but their **messages differ**: the sequential check can name the conflicting row, while the concurrent path cannot query it once its transaction has failed.
 
 ### 5.1 Authorization
 
@@ -150,20 +168,29 @@ Five tables, all in `src/database/models/design_system.py`. Full column-level sc
 
 ---
 
-## 7. Soft Delete — the retention invariant
+## 7. Soft Delete — retained bytes, resolvable references
 
-**A soft-deleted design system is hidden, not gone, and its asset bytes remain servable on purpose.** Stored decks embed handles such as `@font-face { src: url('{{ds-asset:408}}') }`. Returning `404` for a tombstoned system's bytes would silently strip fonts and images from **every historic deck** that used it.
+Soft delete (`is_active = false`) hides a design system and stops it being selected for new decks. What it does **not** do is guarantee that a stored deck keeps rendering, and the difference matters:
 
-Consequences a reader must not "fix":
+> Soft deletion retains the asset rows and keeps their scoped URLs servable. It does **not** guarantee that stored decks continue resolving their design-system handles once the session configuration has been revalidated.
 
-- `GET /{ds_id}/assets/{asset_id}` continues to serve bytes for a tombstoned system. This is the contract, not an oversight.
-- `?hard_delete=true` is the permanent verb. If bytes must actually disappear, that is the route.
-- The generation path *does* filter on `is_active`, so a tombstoned system is never selected for a **new** deck. The render and asset paths deliberately do not filter, so **existing** decks keep rendering.
-- A tombstoned name is freed for re-import, so a delete-then-reimport cycle succeeds.
+Both halves are needed to resolve a handle: the **bytes** must still exist, *and* the deck's stored `design_system_id` must still be there to scope the lookup. Soft delete preserves the first and can lose the second.
 
-**Cross-system asset scoping fails closed, at two layers.** An asset is resolved by `(asset_id, design_system_id)`, never by global id — a handle belonging to another system does not resolve. The two layers report the miss differently: the asset route returns `404`, while the MCP resolver leaves the handle **literal** and emits zero bytes. Both are correct for their layer; a test asserting `404` at the MCP boundary is asserting the wrong contract.
+**Reading a session's agent config repairs a stale pin.** The config read checks the referenced design system for `is_active` and, if it is false, **clears `design_system_id` and persists that repair**. So the pin does not merely go unused — it is removed.
 
----
+What that means per surface:
+
+| Surface | After the design system is soft-deleted |
+|---|---|
+| **Reopening the session in the app** | Text, layout, colours and ordinary CSS remain. Design-system **fonts fall back** and `{{ds-asset:…}}` **images do not appear**, because the pin needed to scope them has been cleared. A cached or already-resolved first paint may briefly look intact — that is a race, not a contract |
+| **Exporting** | Conditional. If the stored pin is still present the retained bytes resolve; once the pin has been cleared, fonts and design-system images can be missing from the export |
+| **Fetching an asset URL directly** | Still works. The route scopes by `(design_system_id, asset_id)` and does not check `is_active`; only hard deletion or asset removal stops it |
+
+**`?hard_delete=true` is the permanent verb.** If bytes must actually disappear, that is the route.
+
+**Do not add an `is_active` filter to the asset or render paths.** The generation path does filter it, so a tombstoned system is never chosen for a *new* deck. Filtering the asset path as well would stop retained bytes being served at all, removing the only part of the retention behaviour that currently holds.
+
+**Cross-system scoping fails closed at two layers, and reports the miss differently.** An asset is resolved by `(asset_id, design_system_id)`, never by global id — resolving by global id was a defect the current code prevents. The asset route returns `404` on a scope miss; the MCP resolver instead leaves the handle **literal** and emits zero bytes. A test asserting `404` at the MCP boundary is asserting the wrong layer's contract.
 
 ## 8. The Compiled Artifact and Its Currency Contract
 
@@ -176,7 +203,7 @@ A bundle is flattened once into `compiled_style_content` by `recompute_compiled_
 
 **The artifact embeds the design system's name**, so its character count and hash depend on what the system is called. Two systems with equal-length names produce equal character counts but **different hashes**. When comparing artifacts across builds, compare character counts and state the name they were measured under; a hash is only comparable at a byte-identical name.
 
-**Type-scale derivation reads tokens, not template CSS.** The eyebrow band derives its size from the font-size token ramp and emits `14px`. A bundle whose templates hardcode a size but declare no matching token will compile to the ramp's floor instead — the fix is a token, not a template edit.
+**Type-scale derivation prefers tokens.** Derived sizes such as the eyebrow band read the font-size token ramp; where the ramp cannot supply a distinct rung, the compiler may fall back to inspecting authored template or CSS declarations, so the emitted size is not a fixed value. Declaring the rung as a token is the reliable route — the fix for an unexpected size is usually a token, not a template edit.
 
 ---
 
@@ -184,7 +211,7 @@ A bundle is flattened once into `compiled_style_content` by `recompute_compiled_
 
 Each named template contributes layout HTML plus a thumbnail. Templates are selected per deck in Agent Config, not from the library page.
 
-**Pinning a template raises fidelity substantially.** A pinned deck reuses the template's own classes and declaration bodies; an unpinned deck receives only a short catalog of template names and descriptions with **no CSS**, so the model picks a template sensibly and then authors its own styling. Unpinned adherence is therefore bounded by the mechanism, not by prompt wording — stronger instructions cannot copy CSS that was never supplied. Pin a template when brand fidelity matters.
+**Pinning supplies the template's own CSS; not pinning does not.** A pinned deck receives the template's classes and declaration bodies; an unpinned deck receives only a short catalog of template names and descriptions with **no CSS**, so the model picks a template and then authors its own styling. Unpinned adherence is therefore bounded by what the mechanism supplies rather than by prompt wording — stronger instructions cannot copy CSS that was never provided. How much this changes the generated result is a model-quality question and not established by the code; pin a template when brand fidelity matters.
 
 **Template pinning does not survive the pre-session browser path.** A pin submitted on the request that *creates* a session is stripped, because a pin arriving at session-creation cannot be distinguished from another surface's carry-over. Pinning works on an existing session, and over MCP via `template_name`.
 
@@ -194,8 +221,8 @@ Each named template contributes layout HTML plus a thumbnail. Templates are sele
 
 | Limitation | Detail |
 |---|---|
-| `/admin` helper text overstates tier 3 | The panel says a personal default in *either* library takes precedence. True for a design system; **not** true for a slide style on a fresh surface — see §4. The copy, not the ladder, is wrong. |
-| Personal defaults do not reach MCP | Browser-local by design. MCP resolves from the org default down. |
+| `/admin` helper text overstates precedence | The panel states a personal default in *either* library takes precedence over the org default. That is reliable for a personal **design system**; for a personal **slide style** it depends on the resolution path — see §4. The copy asserts a uniform rule the code does not have. |
+| Personal defaults do not reach MCP | They live in `localStorage`, which the server cannot read. MCP resolves from the org default down. A profile is the cross-browser alternative. |
 | No in-app bundle authoring | `POST ""` creates a **token-only** system; assets, fonts and templates require an imported bundle. |
 | Agenda-badge placement in PPTX | Inline background pills are centred against their resolved ancestor, so badges on a wide list can land away from their item. Affects export only. |
 | Unpinned template adherence | Bounded by the catalog mechanism, not by wording. See §9. |
@@ -204,7 +231,7 @@ Each named template contributes layout HTML plus a thumbnail. Templates are sele
 
 ## 11. Extension Guidance
 
-- **Adding a bundle folder** — extend the allowlist in `design_system_service.py`; entries outside it are skipped silently by design. Document the addition in [Design System Bundle Format](./design-system-bundle-format.md).
+- **Adding a bundle folder** — extend the allowlist in `design_system_service.py`; entries outside it are skipped, some with an import warning and most without. Document the addition in [Design System Bundle Format](./design-system-bundle-format.md).
 - **Changing compiled output** — bump `COMPILER_VERSION` in the same commit, or the change will not reach existing rows. See §8.
 - **Adding a table** — five tables exist; test fixtures that reset design-system schema must be extended, or a sixth table's rows will survive between tests.
 - **Adding a route that resolves assets** — scope by `(asset_id, design_system_id)`. Never resolve an asset by global id; that was a shipped confused-deputy defect.
