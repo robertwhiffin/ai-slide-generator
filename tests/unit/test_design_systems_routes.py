@@ -1481,18 +1481,41 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
         shows "None" instead of binding to an id that no longer exists (see
         ``test_config_load_returns_null_for_a_dangling_pin``).
 
-        ``get_db_session`` must be patched alongside the two mocks below. The
-        route reaches the database by TWO different paths: the ``get_db``
-        dependency, which the ``client`` fixture overrides onto the in-memory
-        SQLite session, and ``_sanitize_stale_pins``, which opens its own
-        ``get_db_session()`` context. Only the first is covered by the fixture,
-        so without this patch the sanitiser dials the configured DATABASE_URL —
-        real PostgreSQL on localhost:5432 — and the test fails with
-        ``OperationalError: Connection refused`` anywhere that is not running
-        one, CI included. Patched exactly as every sibling here does it, so the
-        sanitiser reads the same SQLite session the rest of the test wrote to,
-        which is also what makes the assertion below meaningful rather than
-        incidental.
+        ``get_db_session`` must be patched alongside the two mocks below, and the
+        ``client`` fixture is no substitute for it. That fixture overrides the
+        ``get_db`` DEPENDENCY, which this endpoint never declares —
+        ``get_agent_config`` at ``src/api/routes/agent_config.py:175`` takes
+        ``session_id`` and no ``Depends`` at all — so the override is inert here.
+        The endpoint reaches the database through the module-level
+        ``get_db_session`` import instead, on two calls: ``_sanitize_stale_pins``
+        opens one context (``agent_config.py:57``), and because the pin below IS
+        cleared, the GET then persists that repair through ``_save_agent_config``,
+        which opens another (``agent_config.py:152``). Patching the single name in
+        the route module covers both.
+
+        The sanitiser is the call that breaks unpatched: the GET runs it with no
+        guard (``agent_config.py:198``), so its ``OperationalError: connection
+        refused`` surfaces as a 500 anywhere nothing answers on the configured
+        DATABASE_URL — CI included, which runs plain ``pytest tests/unit`` with no
+        database service. The persist call sits behind a deliberate guard that must
+        never fail a read (``agent_config.py:214``) and would only degrade to a
+        warning, but unpatched it aims a WRITE at whatever DATABASE_URL points to,
+        so it belongs on the test's own session as well. A locally running PostgreSQL
+        serves both and hides the whole problem, so a green local run is not
+        evidence of isolation.
+
+        Patched exactly as every sibling here does it, which is also what makes the
+        assertion below meaningful rather than incidental: the sanitiser reads the
+        same in-memory SQLite session the rest of the test wrote to, so it clears
+        the pin because THAT row is inactive, not because some unrelated database
+        never held the row at all.
+
+        What this buys is bounded to the RESPONSE PATH, which no longer depends on
+        a reachable database. Request logging and usage logging still schedule
+        best-effort background writes against DATABASE_URL
+        (``src/api/middleware/request_logging.py:112`` and
+        ``src/api/services/usage_events.py:47``); each swallows its own failure and
+        neither feeds the response, so whether they connect is immaterial here.
         """
         from src.database.models import UserSession
 
