@@ -5,7 +5,6 @@ import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpe
 import {
   mockDesignSystems,
   mockDefaultAgentConfig,
-  mockDesignSystemDetail,
   mockDesignSystemTemplatesWithLive,
   mockSessions,
 } from '../fixtures/mocks';
@@ -1154,49 +1153,39 @@ test.describe('AgentConfigBar — design system selector', () => {
     expect(sentConfig.design_system_id).toBe(dsId);
   });
 
-  test('Use from the detail panel affects only the current session config', async ({ page }) => {
-    // Using a template from the design-system library (a non-session route)
-    // must not write into any existing session's config, and the
-    // cross-session localStorage mirror never keeps the template part.
-    const dsId = mockDesignSystems.design_systems[0].id;
+  test('a personal default set from the library affects only the pre-session config', async ({ page }) => {
+    // Inherited from the retired per-template "Use" button, whose valuable
+    // property was this one: a config write made from the design-system library
+    // (a non-session route) must not reach any existing session's config, and
+    // the cross-session localStorage mirror never keeps a template pin.
+    //
+    // Nimbus, deliberately: it is NOT the org default, so a design_system_id of
+    // 2 in the mirror can only have come from the click.
+    const nimbus = mockDesignSystems.design_systems[1];
 
     const sessionConfigPuts: string[] = [];
     await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/agent-config`), (route, request) => {
       if (request.method() === 'PUT') sessionConfigPuts.push(request.postData() ?? '');
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
     });
-    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+$/), (route, request) => {
-      if (request.method() === 'GET') {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemDetail) });
-        return;
-      }
-      route.continue();
-    });
-    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates$/), (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
-    });
-    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/files$/), (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files: [], total: 0 }) });
-    });
-    await page.route(apiPathMatching(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/), (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 2, name: 'Acme Content', layout_html: '<section></section>', token_css: null }) });
-    });
 
-    // Pick a template from the library page (no active session in the URL).
+    // Set a personal default from the library page (no session in the URL).
     await page.goto('/design-systems');
-    await page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' }).click();
-    await expect(page.getByTestId('design-system-detail')).toBeVisible();
-    await page.getByTestId('use-template-button').first().click();
+    await page
+      .locator('[data-testid="design-system-card"]')
+      .filter({ hasText: nimbus.name })
+      .getByRole('button', { name: 'Set as default' })
+      .click();
 
     // No session config was touched…
     expect(sessionConfigPuts).toEqual([]);
-    // …and the cross-session mirror keeps the design system but never the pin.
+    // …and the cross-session mirror keeps the design system but never a pin.
     await expect
       .poll(async () => {
         const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
         return raw ? JSON.parse(raw) : null;
       })
-      .toMatchObject({ design_system_id: dsId, template_id: null });
+      .toMatchObject({ design_system_id: nimbus.id, template_id: null });
   });
 });
 

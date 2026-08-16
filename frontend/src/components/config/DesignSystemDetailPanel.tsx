@@ -2,7 +2,9 @@
  * Design System detail panel.
  *
  * Renders the runtime detail of a selected design system (Claude-Design-style):
- *  - Templates (from the manifest)
+ *  - Templates (addressable entities, or the manifest listing as a fallback).
+ *    PREVIEW ONLY: a template is chosen for generation in Agent Config, which is
+ *    the one place a template pin belongs — it is session-scoped state.
  *  - Color tokens (swatch + name + hex) and other tokens grouped
  *  - Brand-asset summary grouped by kind
  *
@@ -31,7 +33,6 @@ import type {
   DesignSystemTemplate,
   DesignSystemToken,
 } from '../../api/config';
-import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useToast } from '../../contexts/ToastContext';
 import { DesignSystemFileBrowser } from './DesignSystemFileBrowser';
 import { LazyMount, TemplateThumbnail } from './TemplateThumbnail';
@@ -150,11 +151,11 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
   error,
   onRenamed,
 }) => {
-  const { agentConfig, updateConfig } = useAgentConfig();
   const { showToast } = useToast();
 
-  // Addressable template entities (thumbnail + "Use"). Systems imported before
-  // source files were retained have none — the manifest listing is the fallback.
+  // Addressable template entities (thumbnail + expandable preview). Systems
+  // imported before source files were retained have none — the manifest listing
+  // is the fallback.
   const [entityTemplates, setEntityTemplates] = useState<DesignSystemTemplate[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   // The template currently expanded in the read-only viewer popup (null = closed).
@@ -180,21 +181,6 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
 
     return () => { cancelled = true; };
   }, [detailId]);
-
-  const handleUseTemplate = async (template: DesignSystemTemplate) => {
-    if (detailId == null) return;
-    // One atomic config update: selecting a template also selects its design
-    // system (the same selection the AgentConfigBar dropdowns drive).
-    const applied = await updateConfig({
-      ...agentConfig,
-      design_system_id: detailId,
-      template_id: template.id,
-    });
-    // On failure the context has already reverted and shown the error toast.
-    if (applied) {
-      showToast(`Template "${template.name}" selected for generation`, 'success');
-    }
-  };
 
   // Rename (in-place) — PUT /design-systems/{id} with the new name.
   const [renaming, setRenaming] = useState(false);
@@ -361,61 +347,40 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
           <p className="text-xs text-muted-foreground">Loading templates…</p>
         ) : entityTemplates.length > 0 ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" data-testid="template-cards">
-            {entityTemplates.map((tmpl) => {
-              const isSelected =
-                agentConfig.design_system_id === detail.id &&
-                agentConfig.template_id === tmpl.id;
-              return (
-                <div
-                  key={tmpl.id}
-                  className="flex flex-col overflow-hidden rounded-md border border-border bg-muted/20"
-                  data-testid="template-card"
-                >
-                  <div className="group relative">
-                    <TemplateThumbnail
-                      dsId={detail.id}
-                      template={tmpl}
-                      className="aspect-video w-full border-b border-border bg-background"
-                    />
-                    {/* Expand → read-only viewer popup. Sits over the
-                        thumbnail (which is inert: pointer-events:none) so the
-                        card layout is unchanged. */}
-                    <button
-                      type="button"
-                      onClick={() => setViewerTemplate(tmpl)}
-                      aria-label={`Expand ${tmpl.name} preview`}
-                      title="Expand preview"
-                      data-testid="expand-template-button"
-                      className="absolute right-1.5 top-1.5 rounded bg-background/80 p-1 text-muted-foreground opacity-0 shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground focus:opacity-100 focus-visible:opacity-100 group-hover:opacity-100"
-                    >
-                      <Expand className="size-3.5" />
-                    </button>
-                  </div>
-                  <div className="flex flex-1 flex-col gap-1 p-3">
-                    <div className="text-sm font-medium text-foreground">{tmpl.name}</div>
-                    {tmpl.description && (
-                      <div className="text-xs text-muted-foreground">{tmpl.description}</div>
-                    )}
-                    <div className="mt-auto pt-2">
-                      <button
-                        onClick={() => handleUseTemplate(tmpl)}
-                        disabled={isSelected}
-                        className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-default disabled:opacity-70"
-                        data-testid="use-template-button"
-                      >
-                        {isSelected ? (
-                          <>
-                            <Check className="size-3" /> Selected
-                          </>
-                        ) : (
-                          'Use'
-                        )}
-                      </button>
-                    </div>
-                  </div>
+            {entityTemplates.map((tmpl) => (
+              <div
+                key={tmpl.id}
+                className="flex flex-col overflow-hidden rounded-md border border-border bg-muted/20"
+                data-testid="template-card"
+              >
+                <div className="group relative">
+                  <TemplateThumbnail
+                    dsId={detail.id}
+                    template={tmpl}
+                    className="aspect-video w-full border-b border-border bg-background"
+                  />
+                  {/* Expand → read-only viewer popup. Sits over the
+                      thumbnail (which is inert: pointer-events:none) so the
+                      card layout is unchanged. */}
+                  <button
+                    type="button"
+                    onClick={() => setViewerTemplate(tmpl)}
+                    aria-label={`Expand ${tmpl.name} preview`}
+                    title="Expand preview"
+                    data-testid="expand-template-button"
+                    className="absolute right-1.5 top-1.5 rounded bg-background/80 p-1 text-muted-foreground opacity-0 shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground focus:opacity-100 focus-visible:opacity-100 group-hover:opacity-100"
+                  >
+                    <Expand className="size-3.5" />
+                  </button>
                 </div>
-              );
-            })}
+                <div className="flex flex-1 flex-col gap-1 p-3">
+                  <div className="text-sm font-medium text-foreground">{tmpl.name}</div>
+                  {tmpl.description && (
+                    <div className="text-xs text-muted-foreground">{tmpl.description}</div>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         ) : templates.length === 0 ? (
           <p className="text-xs text-muted-foreground">No templates in this design system.</p>
