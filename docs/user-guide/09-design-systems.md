@@ -53,7 +53,7 @@ The app fills the empty slot once, in this order, and **stops at the first one t
 3. **The organisation default design system**, if an admin has set one.
 4. **The workspace's default slide style**, if there is no org design system.
 
-**If this browser already holds a configuration you have used before, that configuration is used as it is** — none of the four steps above run. So an org default an admin sets today will not appear on a browser that already has settings; it appears on a genuinely fresh start.
+**If this browser already holds a configuration you have used before, the choices you made yourself are kept.** A design system or slide style you picked — including **None** — is not replaced by any default. What can still change is a slot the app filled in for you and you never touched: if that is how the current style got there and you have not chosen a design system yourself, an organisation design system set later takes the slot the next time the app loads. So a new org default does reach a browser whose style was only ever filled in automatically, and leaves alone a browser where you made the choice.
 
 ### Clearing a personal default
 
