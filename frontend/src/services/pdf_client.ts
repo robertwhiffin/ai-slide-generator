@@ -6,12 +6,7 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type { SlideDeck } from '../types/slide';
-import {
-  SLIDE_CSP,
-  SLIDE_ROOT_RESET_STYLE,
-  findSlideRoot,
-  slideHostFrameStyle,
-} from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE, findSlideRoot } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -21,30 +16,23 @@ const SLIDE_HEIGHT = 720;
  * Matches the structure used in SlideTile for consistent rendering.
  * Exported so tests can pin the document's layout guarantees.
  *
- * The document injects {@link slideHostFrameStyle} after deck CSS, exactly as
- * the five preview surfaces do. A design-system-pinned deck nests the slide two
- * levels deep: a <section> carries the slide ground via a bare TYPE selector,
- * and inside it the .slide root is absolutely positioned at inset 0. With no
- * in-flow content that <section> collapses to height 0, so the ground it carries
- * never paints and the deck's own dark html/body shows through — measured
- * contrast 1.3025, the dsv4/dsv5 dark-on-dark signature. Stretching the host's
- * CHILD is what gives the wrapper area; sizing the root does not, because the
- * wrapper stays a static-flow child and still collapses.
+ * NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. A rule framing `body` and
+ * stretching its CHILD to `position: absolute !important; inset: 0 !important;
+ * width/height: 100% !important` was injected here at 0.4.2.dev17 and is
+ * REVERTED: it is the same shared rule the server document injected, and there it
+ * collapsed every flattened table cell onto one rect on the huashu path. The
+ * export builders now inject no frame contract at all — see the reverted comment
+ * in src/api/routes/export.py for the mechanism and the measurements.
  *
- * The contract is not sufficient on its own: the capture step must also aim at the
- * element that HAS that area — see the slide-root locator in exportSlideDeckToPDF.
- * With the contract alone the delivered PDF still measured a 100% black frame at
- * contrast 1.5450.
- *
- * The converse is NOT true, and this comment used to overstate it. The locator
- * alone DOES produce the corrected artifact — measured rgb(248,247,243) at
- * 12.6794 — because exportSlideDeckToPDF force-sizes its capture target inline
- * (see below), and that block reaches the wrapper once the locator resolves to it.
- * What the contract buys is a correct DOCUMENT rather than a runtime repair: the
- * initial layout is otherwise 1280x0, the absolute slide resolves `inset: 0`
- * against <body> instead of its own wrapper because a collapsed static wrapper is
- * no containing block, and deck scripts and charts can observe that wrong layout
- * before the runtime correction happens. Both are kept for those reasons.
+ * What the DS-pinned dark-on-dark defect actually needs on this surface is the
+ * capture step aiming at the element that carries the ground — see
+ * {@link findSlideRoot} in exportSlideDeckToPDF. That locator alone produces the
+ * corrected artifact, measured on the delivered PDF's own DCTDecode streams:
+ * ground rgb(248,247,243) with brand inks at 12.6794 / 10.8670 / 6.6878, against
+ * rgb(0,0,0) at 1.5450 / 1.8027 / 2.9292 before. It works because
+ * exportSlideDeckToPDF force-sizes its capture target inline (see below), and
+ * that block reaches the wrapper once the locator resolves to it. The locator
+ * injects no CSS, so unlike the contract it cannot perturb emitted geometry.
  */
 export function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
   const slide = slideDeck.slides[slideIndex];
@@ -90,8 +78,6 @@ ${externalScripts}
        shifts content past the clip and truncates the export's bottom edge
        (same neutralization as every other surface). */
     ${SLIDE_ROOT_RESET_STYLE}
-    /* After deck CSS: the shared slide-host frame contract. */
-    ${slideHostFrameStyle('body')}
     /* CRITICAL: Explicitly preserve subtitle spacing - override any global resets */
     /* This must come AFTER slideDeck.css to override any * { margin: 0; } resets */
     .subtitle, p.subtitle, h2.subtitle, div.subtitle, [class*="subtitle"] {
