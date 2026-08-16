@@ -410,28 +410,114 @@ test.describe('Design System Library — upload', () => {
 });
 
 // ============================================
-// Set Default + Delete
+// Personal Default + Delete
 // ============================================
 
-test.describe('Design System Library — set default & delete', () => {
+/**
+ * The in-app library control is a PERSONAL, browser-local default. The org-wide
+ * default is an admin action and lives on /admin — so nothing here may call
+ * `set-default` / `clear-default`, and the control is available to every user.
+ */
+test.describe('Design System Library — personal default & delete', () => {
   test.beforeEach(async ({ page }) => {
     await setupShellMocks(page);
     await setupDesignSystemMocks(page);
   });
 
-  test('Set as org default calls the API and reflects the change', async ({ page }) => {
-    let setDefaultCalled = false;
-    await page.route(/\/api\/settings\/design-systems\/\d+\/set-default$/, (route) => {
-      setDefaultCalled = true;
+  /** Route guard: records any call to the ORG-wide default endpoints. */
+  async function watchOrgDefaultEndpoints(page: Page): Promise<string[]> {
+    const calls: string[] = [];
+    await page.route(/\/api\/settings\/design-systems\/\d+\/(set|clear)-default$/, (route, request) => {
+      calls.push(request.url());
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemSetDefaultResponse) });
     });
+    return calls;
+  }
+
+  /**
+   * Which source holds the STYLE SLOT in the pre-session working config, read
+   * from its localStorage mirror. An absent key and an explicit null both mean
+   * "nothing selected" — profile fixtures omit `design_system_id` altogether —
+   * so both normalize to null here.
+   */
+  async function mirroredStyleSlot(
+    page: Page,
+  ): Promise<{ design_system_id: number | null; slide_style_id: number | null }> {
+    const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
+    const config = raw ? (JSON.parse(raw) as Record<string, number | null>) : {};
+    return {
+      design_system_id: config.design_system_id ?? null,
+      slide_style_id: config.slide_style_id ?? null,
+    };
+  }
+
+  test('Set as default stores a personal preference and calls no API', async ({ page }) => {
+    const orgDefaultCalls = await watchOrgDefaultEndpoints(page);
 
     await goToLibrary(page);
-    // Nimbus is not the default → it exposes a "Set as org default" control.
+    // Nimbus is not the org default → its control is the personal one.
     const nimbusCard = page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Nimbus Theme' });
-    await nimbusCard.getByRole('button', { name: /Set as org default/i }).click();
+    await nimbusCard.getByRole('button', { name: 'Set as default' }).click();
 
-    await expect.poll(() => setDefaultCalled).toBe(true);
+    // The preference is browser-local…
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
+      .toBe('2');
+    // …the control flips to its Clear counterpart…
+    await expect(nimbusCard.getByRole('button', { name: 'Clear default' })).toBeVisible();
+    // …and no org-wide endpoint was called: this is not an admin action.
+    expect(orgDefaultCalls).toEqual([]);
+  });
+
+  test('Clear default hands the style slot back to the personal slide-style default', async ({ page }) => {
+    // THE requirement this control exists to satisfy. The resolver
+    // short-circuits on a design_system_id that is already set, and the working
+    // config is mirrored to localStorage where it is authoritative once
+    // present — so a Clear that only dropped the preference key would leave the
+    // resolved design system winning until a genuinely fresh surface, which
+    // reads as "Clear does nothing". Clear must release the slot HERE.
+    await page.addInitScript(() => {
+      localStorage.removeItem('pendingAgentConfig');
+      localStorage.removeItem('userDefaultDesignSystemId');
+      // The personal slide-style default that must come back.
+      localStorage.setItem('userDefaultSlideStyleId', '2');
+    });
+    const orgDefaultCalls = await watchOrgDefaultEndpoints(page);
+
+    await goToLibrary(page);
+
+    // Baseline: the personal style default holds the style slot.
+    await expect.poll(async () => (await mirroredStyleSlot(page)).slide_style_id).toBe(2);
+    expect((await mirroredStyleSlot(page)).design_system_id).toBeNull();
+
+    // Set a personal design-system default → it takes the slot, style drops.
+    const nimbusCard = page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Nimbus Theme' });
+    await nimbusCard.getByRole('button', { name: 'Set as default' }).click();
+    await expect.poll(async () => (await mirroredStyleSlot(page)).design_system_id).toBe(2);
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBeNull();
+
+    // Clear it — SAME surface, no reload: the style default applies again.
+    await nimbusCard.getByRole('button', { name: 'Clear default' }).click();
+    await expect.poll(async () => (await mirroredStyleSlot(page)).design_system_id).toBeNull();
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBe(2);
+
+    // The preference key is gone; nothing else in storage was wiped; no
+    // org-wide endpoint was ever called.
+    expect(await page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId'))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem('userDefaultSlideStyleId'))).toBe('2');
+    expect(orgDefaultCalls).toEqual([]);
+  });
+
+  test('a stale personal default is pruned when its design system is gone', async ({ page }) => {
+    // The omission that bit the slide-style page: a stored id whose row no
+    // longer exists must not survive the list load.
+    await page.addInitScript(() => localStorage.setItem('userDefaultDesignSystemId', '999'));
+
+    await goToLibrary(page);
+
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
+      .toBeNull();
   });
 
   test('Delete asks for confirmation then removes the system', async ({ page }) => {
