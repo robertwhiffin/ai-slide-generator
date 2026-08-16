@@ -241,6 +241,102 @@ class SlideStyleLibrary(Base):
 3. When generating slides, the style content is included in the system prompt
 4. `is_system=True` styles (e.g., "System Default") are protected from user modification
 
+### DesignSystem
+
+Parent record for an uploaded brand bundle. Org-shared; see [Design System Library](design-system-library.md).
+
+```python
+class DesignSystem(Base):
+    id: int
+    name: str                        # Unique among active rows; a soft-deleted name is freed for re-import
+    description: str | None
+    created_by: str | None           # Author. NULLABLE - a NULL/blank row is ADMIN-ONLY to mutate
+    published: bool                  # Declarative only; not used as a query predicate anywhere
+    is_default: bool                 # The workspace org default. Settable only from /admin -> "Design System"
+    is_active: bool                  # False = soft-deleted (hidden, not gone - see below)
+    version: int
+    manifest_json: dict | None       # The parsed design-system.json
+    compiled_style_content: str|None # The flattened prompt artifact; stamped with COMPILER_VERSION
+    font_mapping_json: dict | None   # Font-family -> asset mapping
+    created_at: datetime
+    updated_by: str | None
+    updated_at: datetime
+```
+
+**Soft delete is retention, not tidiness.** `is_active=False` hides the row and stops it being selected for new decks, but its asset bytes remain servable on purpose: stored decks embed `{{ds-asset:ID}}` handles inside `@font-face src:` declarations, so 404ing them would strip fonts and images from every historic deck. `?hard_delete=true` is the permanent verb. The generation path filters on `is_active`; the render and asset paths deliberately do not.
+
+**`compiled_style_content` currency is an exact version match.** A stored artifact is current only when its stamp equals the running `COMPILER_VERSION`, so **any change to compiler output must bump the version** or existing rows are never recompiled.
+
+### DesignSystemAsset
+
+Binary assets and webfonts. Bytes live in the row, so bundle size is database size.
+
+```python
+class DesignSystemAsset(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    kind: str                        # logo | icon | lockup | illustration | background | font | ...
+    filename: str
+    mime: str
+    data: bytes                      # attribute `data`, column name `bytes`
+    width: int | None
+    height: int | None
+    size_bytes: int
+```
+
+**Assets are resolved by `(asset_id, design_system_id)`, never by global id.** Resolving by global id was a shipped confused-deputy defect: a foreign handle returned another design system's bytes.
+
+### DesignSystemToken
+
+Normalised colour, type and spacing tokens.
+
+```python
+class DesignSystemToken(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    group: str                       # core | accents | ink | tints | type | spacing
+    name: str                        # Normalised identifier - a leading `--` and a `brand-` namespace are stripped
+    value: str
+```
+
+**Identifiers are normalised before insert**, so the manifest name `--brand-core-primary` and the CSS variable `primary` reduce to one identifier and one row rather than two.
+
+### DesignSystemFile
+
+Verbatim bundle files, addressable by path.
+
+```python
+class DesignSystemFile(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    path: str                        # Path within the bundle
+    kind: str
+    mime: str
+    data: bytes | None               # NULL when the row points at an asset instead of holding bytes
+    size_bytes: int
+    asset_id: int | None             # FK -> design_system_asset.id; avoids storing the same bytes twice
+```
+
+**A file row either holds bytes or points at an asset, not both** — so a file that duplicates an already-imported asset does not double the storage.
+
+### DesignSystemTemplate
+
+Named slide templates and their picker thumbnails.
+
+```python
+class DesignSystemTemplate(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    name: str                        # Human-readable; what MCP's `template_name` matches
+    description: str | None
+    entry_path: str                  # Path of the template's entry file within the bundle
+    layout_html: str
+    token_css: str | None
+    thumbnail_asset_id: int | None   # NULL when the bundle shipped no `.thumbnail` for this template
+```
+
+**A NULL `thumbnail_asset_id` means the bundle omitted `templates/<slug>/.thumbnail`** — dot-prefixed and extension-less. The template still works; it just has no preview image in the picker. See [Design System Bundle Format](design-system-bundle-format.md).
+
 ### GoogleGlobalCredentials
 
 App-wide Google OAuth credentials (single row). Uploaded via admin page.

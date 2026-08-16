@@ -237,6 +237,20 @@ in their cell. It now branches on `position` — author-positioned
 "eyebrow"/"cadence" tags that used to drift to the slide center on export),
 while normal-flow badges are still centered.
 
+**Known limitation — normal-flow badges on a wide container.** Centering a
+normal-flow pill uses the resolved positioned ancestor's width. Inside a table
+cell that is correct. Inside a wide list — a numbered agenda, for example — the
+centre of the *list* is not the position of the *item*, so every badge resolves
+to roughly the same x and they overlap. It is layout-dependent rather than
+intermittent: the same markup fails the same way every time, and a narrow
+single-column list looks fine while a wide or two-column one does not.
+Affects the exported artifact only; the on-screen deck is unaffected.
+
+**Tables are not native tables.** The huashu emitter produces no records for
+`<td>`/`<th>`, so cells are flattened to absolutely-positioned text boxes: the
+layout is faithful but the result is not editable *as a table* in PowerPoint or
+Slides. This is by design. See [Export Features](./export-features.md).
+
 ### Records PPTX pipeline (`src/services/pptx_from_records.py`)
 
 The fallback path. `build_pptx(...)` takes the `SlideExtract[]` records that
