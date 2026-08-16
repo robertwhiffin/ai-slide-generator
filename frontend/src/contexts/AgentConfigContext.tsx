@@ -130,6 +130,24 @@ function userPreferredStyleId(): number | null {
 }
 
 /**
+ * Storage key for the user's PERSONAL default design system.
+ *
+ * Deliberately BARE rather than namespaced per user, for consistency with the
+ * three preference keys that already exist (`userDefaultProfileId`,
+ * `userDefaultDeckPromptId`, `userDefaultSlideStyleId`). The consequence is
+ * accepted and documented: a browser profile shared by two people shares this
+ * preference too. It is a display/seeding preference only — it grants no
+ * access, and every server-side authorization check is unaffected by it.
+ */
+export const USER_DEFAULT_DESIGN_SYSTEM_KEY = 'userDefaultDesignSystemId';
+
+/** The user's OWN explicit "make this my default design system" preference. */
+function userPreferredDesignSystemId(): number | null {
+  const stored = localStorage.getItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+  return stored ? Number(stored) : null;
+}
+
+/**
  * The slide style the SERVER seeds as its default — the id that
  * `init_default_profile.py` writes into the default profile's
  * `selected_slide_style_id`, and therefore the value that means "nobody chose
@@ -212,7 +230,9 @@ async function resolveDefaultDesignSystemId(): Promise<number | null> {
 
 /**
  * Fill in whichever style SOURCE a config is missing, honouring the product
- * decision that an org-default design system OUTRANKS the default slide style.
+ * decision that an org-default design system OUTRANKS the default slide style —
+ * and, for the same reason, that a user's PERSONAL default design system
+ * outranks their personal default slide style.
  *
  * Mutates and returns a copy. Only ever fills a gap — with one deliberate
  * exception: a slide-style id the SERVER SEEDED is treated as an unfilled gap,
@@ -256,6 +276,26 @@ async function withResolvedStyleSource(
   if (!isNewSurface && config.style_source == null) return config;
 
   if (config.design_system_id != null) return config;
+
+  // The user's own PERSONAL DEFAULT DESIGN SYSTEM. This tier sits ABOVE the
+  // personal-style branch below, because a design system beats a slide style
+  // everywhere else in the product — the schema validator, the ORM types and a
+  // database trigger all enforce that a config carrying both resolves to the
+  // design system. Below the style branch it would be dead weight for exactly
+  // the users most likely to reach for it: anyone still holding an older
+  // `userDefaultSlideStyleId` would set a design-system default and see
+  // nothing change.
+  const userPreferredDesignSystem = userPreferredDesignSystemId();
+  if (userPreferredDesignSystem != null) {
+    // Clear the style so the two sources never compete in one prompt — the
+    // mirror image of what the org-default branch does further down.
+    return {
+      ...config,
+      design_system_id: userPreferredDesignSystem,
+      slide_style_id: null,
+      style_source: 'user',
+    };
+  }
 
   if (config.slide_style_id != null) {
     // The user's own default-style preference outranks both the seed and the
@@ -324,11 +364,19 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     () => {
       const stored = readStoredConfig();
       if (stored) return stored;
-      // Apply user defaults synchronously so dropdowns show them immediately
+      // Apply user defaults synchronously so dropdowns show them immediately.
+      // A personal design-system default takes the style slot ahead of a
+      // personal style default — the same precedence `withResolvedStyleSource`
+      // applies — so the placeholder never shows both competing at once.
       const config = { ...DEFAULT_AGENT_CONFIG };
-      const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-      if (userStyleId) {
-        config.slide_style_id = Number(userStyleId);
+      const userDesignSystemId = userPreferredDesignSystemId();
+      if (userDesignSystemId != null) {
+        config.design_system_id = userDesignSystemId;
+      } else {
+        const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+        if (userStyleId) {
+          config.slide_style_id = Number(userStyleId);
+        }
       }
       const userDeckPromptId = resolveDefaultDeckPromptId();
       if (userDeckPromptId) {
