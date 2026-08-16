@@ -6,17 +6,19 @@
 
 ## 1. Overview
 
-A slide is authored once and rendered in seven places: four preview surfaces, a pop-out viewer, presentation mode, and the export builders. They share no rendering code, so consistency is a **contract** rather than a consequence.
+A slide is authored once and rendered in seven places: four preview surfaces, a pop-out viewer, presentation mode, and the export builders. The surfaces **share some document-building and reset utilities** — `buildSlideDocument`, `SLIDE_ROOT_RESET_STYLE` and `slideHostFrameStyle` from `frontend/src/services/slideDocument.ts`, consumed by `SlideTile.tsx`, `SlideSelection.tsx`, `PresentationMode.tsx` and `config/templatePreviewDoc.ts` — but each still has its own wrapper, and the export builders are separate code in Python. Parity therefore depends on an explicit **contract** as well as on the shared helpers.
 
 The contract has three rules, each documented with the failure mode it produces when violated — because in every case the failure is silent rather than an error.
 
-**The reference for "correct" is the source design system's own rendering, not agreement between surfaces.** Note that the parity tests compare against a reference bundle that is **not vendored in this repository** (`tests/.../test_preview_box_model_parity.py`), so the reference rendering cannot be reproduced from a clean checkout — the tests skip without it. Treat the rules below as the contract; the measurements that established them are not reproducible here.
+**The reference for "correct" is the source design system's own rendering, not agreement between surfaces.** `tests/unit/test_preview_box_model_parity.py` pins the source-level invariants that follow from that reference: it reads the checked-in TypeScript and Python builders and asserts on their text. The reference bundle and the pixel proof are **not vendored in this repository**, so ground-truth visual parity cannot be reproduced from this checkout — the tests state the invariant and the direction of the reference, not a measurement you can re-run here.
 
 ---
 
 ## 2. Rule 1 — Fixed frame, measured at the origin
 
-Every slide occupies a fixed 16:9 frame, positioned at the origin of its host. Both the slide root **and** any wrapper element it sits inside must occupy that frame.
+Every slide occupies a fixed 16:9 frame, positioned at the origin of its host.
+
+**The child-stretch half of this rule is surface-specific.** Single-slide preview surfaces frame the host and stretch its slide wrapper through `slideHostFrameStyle`, so there both the slide root **and** the wrapper it sits inside occupy the frame. The Python `build_slide_html` builder **omits that child-stretch rule**, and its source comment records the omission as deliberate: on the huashu path a `body > *` important rule collapses the flattened table cells that `preprocess.mjs` appends to `body` (see §5), so that path relies on emitter-specific handling instead. Do not "restore consistency" by adding the rule to the Python builder.
 
 **Why the wrapper matters.** Design-system templates wrap the slide root in a `<section>` that carries the deck background. If that wrapper is allowed to collapse to zero height, its background paints nothing and whatever sits behind it shows through instead.
 
@@ -30,9 +32,9 @@ Every slide occupies a fixed 16:9 frame, positioned at the origin of its host. B
 
 **Slide content uses the browser default box model (`content-box`).** No surface may introduce a universal `* { box-sizing: border-box }` rule.
 
-This is counter-intuitive, so it is worth stating plainly: slide content is expected to inherit the UA default, and a surface that "helpfully" normalises the box model diverges from the source rendering rather than converging on it.
+This is counter-intuitive, so it is worth stating plainly: slide content is expected to inherit the UA default. The reference design system's `deck-stage.js` declares `box-sizing` only **scoped** — `::slotted(*)` from inside its shadow root, plus its own chrome — so a surface that "helpfully" normalises the box model universally is not converging on the source rendering.
 
-**Failure mode — surfaces agreeing with each other and all being wrong.** A universal rule added to *some* surfaces makes those surfaces disagree with the rest; added to *all* surfaces it makes them agree with each other while every one of them diverges from ground truth. The second case is the dangerous one, because inter-surface parity tests pass.
+**Failure mode — surfaces agreeing with each other and all being wrong.** A universal rule added to *some* surfaces makes those surfaces disagree with the rest; added to *all* surfaces it makes them agree with each other while all of them share the same departure from the reference. The second case is the dangerous one, because inter-surface parity tests pass. `test_preview_box_model_parity.py` guards both halves for exactly this reason: the surfaces must agree, **and** they must agree on the reference box model, so a "fix" that restores parity by re-adding the universal rule to all four fails the second assertion.
 
 > **Inter-surface agreement is not a correctness oracle.** A test asserting that all preview surfaces match one another will pass when every surface is wrong in the same way. Any parity assertion must compare against ground truth, not against a sibling surface.
 
@@ -68,7 +70,7 @@ Two failure modes occur **after** the document is built, so they are invisible t
 
 ## 6. Verification Guidance
 
-The contract is easy to test badly. Four rules, each learned from a check that produced a confident wrong answer:
+The contract is easy to test badly. Four rules, each naming the wrong answer it prevents:
 
 | Rule | Why |
 |---|---|
@@ -77,7 +79,7 @@ The contract is easy to test badly. Four rules, each learned from a check that p
 | **Anchor geometry probes at the slide root, not at `.slide`** | A `.slide` that is `position: absolute; inset: 0` resolves against its containing block and reports the full frame **even when its wrapper has collapsed** — so the probe reads healthy on the exact defect it was written to catch. |
 | **Never use settle-to-stable screenshots for a transient defect** | Waiting for two identical captures structurally discards the unsettled window. A frame-timeline capture is required for anything that appears during navigation or load. |
 
-And one rule about the corpus rather than the instrument: **a deck that declares its own universal `box-sizing` is immune to box-model defects.** A corpus composed only of such decks cannot exhibit the failure, so a green result across it means nothing. Fixture selection must include a deck that relies on the host contract — which is harder than it sounds here, since the reference bundle is not vendored.
+And one rule about the corpus rather than the instrument: **a deck that declares its own universal `box-sizing` is immune to box-model defects, while a deck that declares one only scoped (`.slide { … }`) takes whatever the host injects.** A corpus composed only of the first kind cannot exhibit the failure, so a green result across it means nothing. Fixture selection must include a deck that relies on the host contract — which is harder than it sounds here, since the reference bundle is not vendored.
 
 ---
 
