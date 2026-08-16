@@ -139,7 +139,12 @@ export const DesignSystemLibrary: React.FC = () => {
     if (systems.some((system) => system.id === userDefaultId && system.is_active)) return;
     const staleId = userDefaultId;
     setUserDefaultId(null);
-    void setUserDefaultDesignSystem(null, { releaseSlotOnlyIfHolding: staleId });
+    setUserDefaultDesignSystem(null, { releaseSlotOnlyIfHolding: staleId }).catch((err) => {
+      // Surfaced rather than discarded. The mutator drops the preference LAST, so
+      // a failure here leaves it in place and the next visit retries this prune —
+      // but a rejection nobody can see is how a silent wedge gets missed.
+      console.error('Failed to prune the stale design-system default:', err);
+    });
   }, [systems, loading, error, userDefaultId, setUserDefaultDesignSystem]);
 
   /**
