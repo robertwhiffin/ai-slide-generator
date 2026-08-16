@@ -106,8 +106,22 @@ export const DesignSystemLibrary: React.FC = () => {
   /**
    * PRUNE a stale preference: a stored id whose design system has since been
    * deleted or deactivated is not a default any more, and leaving it in place
-   * lets it keep claiming the style slot on every new surface for a design
-   * system that can no longer be shown or selected.
+   * lets it keep claiming the style slot for a design system that can no longer
+   * be shown or selected.
+   *
+   * It RELEASES THE SLOT through the same mutator explicit Clear uses, and that
+   * is the whole point. Removing the preference key alone left the dead id
+   * sitting in the working config while deleting the only control that could
+   * release it — the Clear button is rendered from this preference, so pruning
+   * the key hid the escape hatch and wedged the user: a blank design-system
+   * selection, no personal style default coming back, and a stale id free to
+   * travel into the next deck. Both paths therefore go through
+   * `setUserDefaultDesignSystem(null)`, so the key removal and the slot release
+   * cannot drift apart.
+   *
+   * IDEMPOTENT by the guard above: dropping `userDefaultId` first means the next
+   * render returns early, so neither the release's config update nor the new
+   * callback identity it produces can re-enter this effect.
    *
    * Gated on a SUCCESSFUL load rather than on a non-empty list, so that deleting
    * your only design system prunes the preference too, while a failed list
@@ -116,9 +130,9 @@ export const DesignSystemLibrary: React.FC = () => {
   useEffect(() => {
     if (loading || error != null || userDefaultId == null) return;
     if (systems.some((system) => system.id === userDefaultId && system.is_active)) return;
-    localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
     setUserDefaultId(null);
-  }, [systems, loading, error, userDefaultId]);
+    void setUserDefaultDesignSystem(null);
+  }, [systems, loading, error, userDefaultId, setUserDefaultDesignSystem]);
 
   /**
    * The user's PERSONAL default — browser-local, no server call and no authz, so

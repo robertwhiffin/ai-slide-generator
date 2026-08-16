@@ -510,16 +510,96 @@ test.describe('Design System Library — personal default & delete', () => {
     expect(orgDefaultCalls).toEqual([]);
   });
 
-  test('a stale personal default is pruned when its design system is gone', async ({ page }) => {
+  /**
+   * Seed an ALREADY-RESOLVED pre-session mirror alongside the two preferences —
+   * the state a user is actually in when they come BACK to this page: their
+   * personal default claimed the style slot on an earlier visit.
+   *
+   * This seeding is load-bearing, not convenience. On a genuinely fresh surface
+   * the design-system list load (and so the prune) RACES config resolution, and
+   * the prune usually wins — it deletes the key before the resolver ever reads
+   * it, so the slot is never filled and a prune bug cannot show up at all. A
+   * stale-prune test written without this seeding passes on broken code.
+   */
+  async function seedResolvedMirror(page: Page, designSystemId: number, userStyleId: number) {
+    await page.addInitScript(
+      ([dsId, styleId]) => {
+        localStorage.setItem('userDefaultDesignSystemId', String(dsId));
+        localStorage.setItem('userDefaultSlideStyleId', String(styleId));
+        localStorage.setItem(
+          'pendingAgentConfig',
+          JSON.stringify({
+            tools: [],
+            slide_style_id: null,
+            design_system_id: dsId,
+            template_id: null,
+            deck_prompt_id: null,
+            system_prompt: null,
+            slide_editing_instructions: null,
+            style_source: 'user',
+          }),
+        );
+      },
+      [designSystemId, userStyleId] as [number, number],
+    );
+  }
+
+  test('a stale personal default is pruned AND releases the style slot', async ({ page }) => {
     // The omission that bit the slide-style page: a stored id whose row no
-    // longer exists must not survive the list load.
-    await page.addInitScript(() => localStorage.setItem('userDefaultDesignSystemId', '999'));
+    // longer exists must not survive the list load. Deleting the KEY alone is
+    // not enough and is the worse half of the bug — the resolved id stays in the
+    // working config while the Clear button, the only control that releases it,
+    // disappears with the key. That is a sticky dead-end with no UI escape, so
+    // the prune must release the slot with the same semantics as explicit Clear.
+    // Design system 999 is not in the list at all — deleted. Style default 2 is
+    // what must come back.
+    await seedResolvedMirror(page, 999, 2);
+    // A prune that re-triggered itself would show up here as React's own
+    // update-depth error, so an infinite loop cannot pass this test quietly.
+    const loopErrors: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error' && /Maximum update depth/i.test(msg.text())) loopErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => {
+      if (/Maximum update depth/i.test(String(err))) loopErrors.push(String(err));
+    });
 
     await goToLibrary(page);
 
+    // The stale preference is dropped…
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
       .toBeNull();
+    // …and the slot it was holding is released, not left wedged. Split in two
+    // so each half can fail on its own.
+    await expect.poll(async () => (await mirroredStyleSlot(page)).design_system_id).toBeNull();
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBe(2);
+
+    // IDEMPOTENT: the effect ran once and settled. Re-reading after a beat finds
+    // the same state, and React logged no update-depth error.
+    const settled = await mirroredStyleSlot(page);
+    await page.waitForTimeout(500);
+    expect(await mirroredStyleSlot(page)).toEqual(settled);
+    expect(await page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId'))).toBeNull();
+    expect(loopErrors).toEqual([]);
+  });
+
+  test('a VALID personal default is left alone by the prune', async ({ page }) => {
+    // The other side of the guardrail: the prune must do nothing at all while
+    // the design system is present and active — no key removal, and above all
+    // no release of a slot the user legitimately filled.
+    // Acme (id 1) is present and active in the fixture list.
+    await seedResolvedMirror(page, 1, 2);
+
+    await goToLibrary(page);
+
+    // The design system keeps the slot; the style default stays displaced.
+    await expect.poll(async () => (await mirroredStyleSlot(page)).design_system_id).toBe(1);
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBeNull();
+    // The preference survives, so the escape hatch is still on screen.
+    expect(await page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId'))).toBe('1');
+    const acmeCard = page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' });
+    await expect(acmeCard.getByRole('button', { name: 'Clear default' })).toBeVisible();
   });
 
   test('Delete asks for confirmation then removes the system', async ({ page }) => {
