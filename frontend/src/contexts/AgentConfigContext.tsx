@@ -292,6 +292,16 @@ async function withResolvedStyleSource(
   // the users most likely to reach for it: anyone still holding an older
   // `userDefaultSlideStyleId` would set a design-system default and see
   // nothing change.
+  //
+  // KNOWN OPEN: the stored id is NOT validated here, so a design system deleted
+  // while this preference points at it stays in the seeded slot until the
+  // Design System Library is next opened, whose prune releases it
+  // (`DesignSystemLibrary.tsx`, the stale-preference effect). Validating on this
+  // path would mean fetching the design-system list on a branch that currently
+  // makes no request at all, and the first-paint seed below is synchronous and
+  // could not await it — so it is deliberately left to the prune. The SESSION
+  // path is already covered server-side: an unavailable design_system_id comes
+  // back cleared with `design_system_unavailable`, handled in the session GET.
   const userPreferredDesignSystem = userPreferredDesignSystemId();
   if (userPreferredDesignSystem != null) {
     // Clear the style so the two sources never compete in one prompt — the
