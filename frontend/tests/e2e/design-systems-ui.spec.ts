@@ -442,9 +442,15 @@ test.describe('Design System Library — personal default & delete', () => {
    */
   async function mirroredStyleSlot(
     page: Page,
-  ): Promise<{ design_system_id: number | null; slide_style_id: number | null }> {
+  ): Promise<{
+    // Deliberately admits `string`: the mirror is hydrated by an unchecked
+    // JSON.parse, so a test asserting on it must be able to see a "999" that the
+    // declared AgentConfig type says cannot exist.
+    design_system_id: number | string | null;
+    slide_style_id: number | string | null;
+  }> {
     const raw = await page.evaluate(() => localStorage.getItem('pendingAgentConfig'));
-    const config = raw ? (JSON.parse(raw) as Record<string, number | null>) : {};
+    const config = raw ? (JSON.parse(raw) as Record<string, number | string | null>) : {};
     return {
       design_system_id: config.design_system_id ?? null,
       slide_style_id: config.slide_style_id ?? null,
@@ -527,8 +533,10 @@ test.describe('Design System Library — personal default & delete', () => {
     userStyleId: number,
     // Which design system the working SLOT holds. Defaults to the preference,
     // which is the normal case; pass a different id to model a user who then
-    // picked something else in Agent Config.
-    slotDesignSystemId = designSystemId,
+    // picked something else in Agent Config. Accepts a STRING because the mirror
+    // is hydrated by an unchecked JSON.parse — a stored id really can come back
+    // as "999" rather than 999, and consumers comparing ids must survive that.
+    slotDesignSystemId: number | string = designSystemId,
   ) {
     await page.addInitScript(
       ([dsId, styleId, slotId]) => {
@@ -548,7 +556,7 @@ test.describe('Design System Library — personal default & delete', () => {
           }),
         );
       },
-      [designSystemId, userStyleId, slotDesignSystemId] as [number, number, number],
+      [designSystemId, userStyleId, slotDesignSystemId] as [number, number, number | string],
     );
   }
 
@@ -633,6 +641,65 @@ test.describe('Design System Library — personal default & delete', () => {
     const acmeCard = page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' });
     await expect(acmeCard.getByRole('button', { name: 'Clear default' })).toHaveCount(0);
     await expect(acmeCard.getByRole('button', { name: 'Set as default' })).toBeVisible();
+  });
+
+  test('a stale id stored as a STRING is still recognised and released', async ({ page }) => {
+    // The mirror is hydrated by an unchecked `JSON.parse(raw) as AgentConfig`, so
+    // `design_system_id` can arrive as "999" rather than 999 — the TS type buys
+    // nothing at runtime. A strict `!==` in the prune's slot guard would then
+    // decide the slot is holding "something else", skip the release, and delete
+    // the key anyway: the ORIGINAL wedged dead-end, reinstated through a type
+    // mismatch. Identity has to be compared by VALUE, not by representation.
+    await seedResolvedMirror(page, 999, 2, '999');
+    const loopErrors: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error' && /Maximum update depth/i.test(msg.text())) loopErrors.push(msg.text());
+    });
+
+    await goToLibrary(page);
+
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
+      .toBeNull();
+    // The slot must be released exactly as it is for a numeric id.
+    await expect.poll(async () => (await mirroredStyleSlot(page)).design_system_id).toBeNull();
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBe(2);
+    expect(loopErrors).toEqual([]);
+  });
+
+  test('a DIFFERENT valid id stored as a STRING is still preserved', async ({ page }) => {
+    // The other direction: making the comparison type-robust must not flatten it
+    // into "any id matches". Preference points at deleted 999; the slot holds
+    // Acme as the string "1", an explicit choice that must survive untouched.
+    await seedResolvedMirror(page, 999, 2, '1');
+
+    await goToLibrary(page);
+
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
+      .toBeNull();
+    // Untouched means untouched: the value is not rewritten, not even normalised.
+    expect((await mirroredStyleSlot(page)).design_system_id).toBe('1');
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBeNull();
+  });
+
+  test('a non-numeric slot value is never mistaken for the stale id', async ({ page }) => {
+    // The coercion must not flatten junk into "matches anything". A slot holding
+    // 'abc' denotes no design system at all, so it is not THIS preference's to
+    // release: the key goes, the config is not written, and the personal style
+    // default does NOT appear (which is what a wrongly-fired release would look
+    // like). '' and a missing key reduce to this same branch, and JSON cannot
+    // carry NaN or undefined at all.
+    await seedResolvedMirror(page, 999, 2, 'abc');
+
+    await goToLibrary(page);
+
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
+      .toBeNull();
+    expect((await mirroredStyleSlot(page)).design_system_id).toBe('abc');
+    // No release fired, so the style default never claimed the slot.
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBeNull();
   });
 
   test('a VALID personal default is left alone by the prune', async ({ page }) => {

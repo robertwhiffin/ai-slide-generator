@@ -163,6 +163,44 @@ function userPreferredDesignSystemId(): number | null {
 }
 
 /**
+ * The value as a design-system id, or null when it cannot denote one.
+ *
+ * Everything that is not a finite number or a numeric string collapses to null —
+ * `null`, `undefined`, `''`, whitespace, `'abc'`, `NaN`, booleans, objects — and
+ * null never compares equal in {@link isSameDesignSystem}, so no such value can
+ * be mistaken for a real id OR for another junk value.
+ */
+function asDesignSystemId(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/**
+ * Do these two values denote the SAME design system, whatever their runtime
+ * representation? Compared by VALUE rather than by identity because ids are not
+ * reliably numbers at runtime.
+ *
+ * KNOWN OPEN (systemic): the config mirror is hydrated by an unchecked
+ * `JSON.parse(raw) as AgentConfig` in `readStoredConfig` (this file, ~:129) and
+ * session configs by a raw `response.json()` in `services/api.ts`
+ * (`getAgentConfig`, ~:1914), so `design_system_id` can arrive as `"999"` even
+ * though `types/agentConfig.ts:73` declares `number | null`. A strict `===`
+ * anywhere downstream is therefore a latent bug — it was one here, and skipping
+ * a slot release on a string id silently reinstated a wedged config. The real fix
+ * is coercing id fields once at hydration; that is a hot path every surface
+ * depends on and is deliberately deferred, so this comparison absorbs the hazard
+ * locally instead.
+ */
+function isSameDesignSystem(a: unknown, b: unknown): boolean {
+  const left = asDesignSystemId(a);
+  return left !== null && left === asDesignSystemId(b);
+}
+
+/**
  * The slide style the SERVER seeds as its default — the id that
  * `init_default_profile.py` writes into the default profile's
  * `selected_slide_style_id`, and therefore the value that means "nobody chose
@@ -989,22 +1027,34 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
       await setDesignSystem(designSystemId);
       return;
     }
-    localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
-    if (
-      releaseSlotOnlyIfHolding != null &&
-      agentConfig.design_system_id !== releaseSlotOnlyIfHolding
-    ) {
-      // The slot is empty, or holds something the user picked for themselves.
-      // Either way there is nothing of THIS preference's to release.
-      return;
+    // The release runs BEFORE the key is dropped, and the key is dropped only
+    // once the release has actually landed. Removing the key first meant any
+    // failure in between left the key gone while the slot was still held — and
+    // the Clear button is rendered FROM that key, so the only control that could
+    // release the slot disappeared with it. In this order both torn states are
+    // recoverable: a failed release keeps the preference, so the user still has
+    // Clear (and an automatic prune simply retries on the next visit), while a
+    // failure after a successful release has nothing left to undo. Nothing in the
+    // release depends on the removal that now follows it — it reads the STYLE
+    // preference, a different key, and writes `design_system_id: null` outright.
+    const slotHoldsThisPreference =
+      releaseSlotOnlyIfHolding == null ||
+      isSameDesignSystem(agentConfig.design_system_id, releaseSlotOnlyIfHolding);
+    if (slotHoldsThisPreference) {
+      const released = await updateConfig({
+        ...agentConfig,
+        design_system_id: null,
+        template_id: null,
+        slide_style_id: userPreferredStyleId(),
+        style_source: 'user',
+      });
+      // Keep the preference when the release did not stick, so the escape hatch
+      // survives and the next attempt can succeed.
+      if (!released) return;
     }
-    await updateConfig({
-      ...agentConfig,
-      design_system_id: null,
-      template_id: null,
-      slide_style_id: userPreferredStyleId(),
-      style_source: 'user',
-    });
+    // Either the slot was released, or it is empty / holds a design system the
+    // user chose for themselves — which this automatic caller must not touch.
+    localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
   }, [agentConfig, setDesignSystem, updateConfig]);
 
   const setTemplate = useCallback(async (templateId: number | null) => {
