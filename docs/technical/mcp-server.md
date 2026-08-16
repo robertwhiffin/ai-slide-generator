@@ -141,8 +141,21 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 |-------|------|----------|-------------|
 | `prompt` | string | yes | Natural-language description of the deck. Any length; longer prompts with explicit slide-by-slide structure tend to work best. |
 | `num_slides` | integer (1–50) | no | Target slide count. The agent is not strictly constrained; treat as a hint. |
-| `slide_style_id` | integer | no | ID of a `SlideStyle` row in tellr's config. Omit to use the system default — the row marked `is_default=true` in `slide_style_library`, settable by an admin at tellr's `/admin` page. MCP cannot see per-user browser-side overrides (localStorage). |
+| `design_system_id` | integer | no | ID of a design system. Supplies the full brand package — tokens, fonts, brand assets, named templates. Omit to use the **org default design system**, if one is set. |
+| `template_name` | string | no | Human-readable name of one of that design system's named templates (e.g. `"Executive Events"`). Pins the template instead of letting the model pick. Pinning substantially raises brand fidelity. |
+| `slide_style_id` | integer | no | ID of a `SlideStyle` row. **Supplying this suppresses the org default design system** — see the precedence note below. |
 | `deck_prompt_id` | integer | no | ID of a `DeckPrompt` row. Omit for default. |
+
+**Style precedence for MCP callers.** A design system and a slide style are mutually exclusive:
+
+| Caller supplies | Result |
+|---|---|
+| `design_system_id` | that design system wins |
+| `slide_style_id` only | that style applies, and the org default design system is **suppressed** |
+| both | the design system wins; the style is dropped in-handler |
+| neither | the **org default design system** applies silently, if one is set; otherwise the server default slide style |
+
+MCP cannot see per-user browser-side defaults (they live in `localStorage`), so it always resolves from the org default down. No field in the response reports which design system was used — open the deck URL to confirm. A nonexistent or soft-deleted `design_system_id` does not error; the deck is generated with generic styling. See [Design System Library](./design-system-library.md).
 | `correlation_id` | string | no | Opaque ID echoed in server logs for cross-system trace correlation. |
 
 **Output schema**
@@ -241,10 +254,14 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
     "tool_calls": 3,                                     // number of tool invocations during this generation
     "latency_ms": 47213,
     "experiment_url": "https://.../mlflow/...",
-    "session_title": "Q3 renewals briefing"
+    "session_title": "Q3 renewals briefing",
+    "clarification_needed": false,                       // true when the agent asked a question instead of editing
+    "clarification": null                                // the question text, when clarification_needed is true
   }
 }
 ```
+
+**`status: "ready"` does not mean the edit was applied.** When the agent decides it needs more information, it asks a question rather than changing the deck — and the turn still completes, so `status` is `"ready"` and `replacement_info` is `null`. **An automated caller must check `metadata.clarification_needed`**, not `status` alone, or it will report success for a turn in which nothing changed. `metadata.clarification` carries the question text to relay back to the user.
 
 **Output schema (failed)**
 
@@ -549,6 +566,7 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Version | Tellr release | Notes |
 |---------|---------------|-------|
 | v1.0 | 0.3.0 | Initial release. Four tools: `create_deck`, `get_deck_status`, `edit_deck`, `get_deck`. Dual-token auth. Prompt-only generation (no Genie / Vector Search / other tools). 10-minute hard timeout. |
+| v1.1 | 0.4.2 | `create_deck` accepts `design_system_id` and `template_name`. With neither it, nor `slide_style_id`, supplied, the org default design system applies. `get_deck_status` surfaces `metadata.clarification_needed` and `metadata.clarification`. |
 | v1.1 (planned) | TBD | Export tools (`export_pptx`, `export_google_slides`), structural edit tools (reorder / insert / delete at slide granularity), `chart_js_cdn` passthrough. See the design spec's "Deferred items" section for the full list. |
 
 ---

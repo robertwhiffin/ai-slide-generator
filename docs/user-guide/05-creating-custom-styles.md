@@ -7,9 +7,11 @@ This guide covers what goes into a Slide Style, what CSS is safe to include, and
 Every new deck starts with a slide style applied. Where that style comes from depends on whether you've customized things for yourself.
 
 - **Corporate default (system-wide).** One slide style is marked as the organization's default. Every user who hasn't overridden it sees that style on every new deck — the same way a new document in your corporate Google Workspace picks up your company's template. Decks generated via the MCP API also use this default. Tellr admins set the corporate default from the hidden `/admin` page ("Slide Style" tab); there's no link in the main navigation — you need to know the URL.
-- **Personal override.** You can pin a different style as *your* default by clicking "Set as default" on any style in the Slide Styles page. Your choice is remembered in your current browser only and takes precedence over the corporate default for your new decks. (MCP decks still use the corporate default regardless of your personal choice.)
+- **Personal override.** You can pin a different style as *your* default by clicking "Set as default" on any style in the Slide Styles page. Your choice is remembered in your current browser only. (MCP decks still use the corporate default regardless of your personal choice.)
 
 For one-off decks, you can always change the style for a single session from the agent config bar without affecting either default.
+
+**Design systems take precedence over slide styles.** A [design system](./09-design-systems.md) supplies the whole brand package — tokens, webfonts, brand imagery and named templates — and a deck cannot have both. If your workspace has an organisation-default design system, new decks use that brand rather than the default slide style, and a personal slide-style default does **not** override it. To use a slide style instead, set it explicitly on the deck from the agent config bar, or clear your personal design-system default on the Design Systems page.
 
 ## Overview
 
