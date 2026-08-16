@@ -28,8 +28,8 @@ Key design decisions:
 | ORM models (5 tables) | `src/database/models/design_system.py` |
 | Import + classification | `src/services/design_system_service.py` |
 | Prompt compiler | `src/services/design_system_compiler.py` |
-| Resolution for generation | `src/api/services/agent_factory.py` |
-| Default ladder (client) | `frontend/src/contexts/AgentConfigContext.tsx` |
+| Resolution for generation | `src/services/agent_factory.py` |
+| Default resolution (client) | `frontend/src/contexts/AgentConfigContext.tsx` |
 | Library UI | `frontend/src/components/config/` — `DesignSystemLibrary.tsx`, `DesignSystemDetailPanel.tsx`, `DesignSystemUploadDialog.tsx`, `DesignSystemFileBrowser.tsx`, `TemplateThumbnail.tsx`, `TemplateViewerModal.tsx`, `templatePreviewDoc.ts` |
 | Org-default admin UI | `frontend/src/components/Admin/AdminDesignSystemDefault.tsx` |
 
@@ -44,7 +44,7 @@ bundle.zip
    │
    ├─ _ds_manifest.json  ──▶ manifest_json; declares tokens[] / templates[] / cards[]
    │                            └──▶ design_system_token      (grouped by `group`)
-   ├─ CSS the manifest declares ──▶ further tokens, and retained as design_system_file
+   ├─ globalCssPaths + root colors_and_type.css ──▶ further tokens, retained as design_system_file
    ├─ assets/** · fonts/**   ──▶ design_system_asset          (grouped by `kind`)
    ├─ README.md · SKILL.md   ──▶ design_system_file           (the authoring layer)
    ├─ templates/<slug>/index.html ──▶ design_system_file
@@ -64,7 +64,7 @@ bundle.zip
  (agent_factory, generation path)    (render + export paths)
 ```
 
-**Tokens come from the manifest and the CSS it declares**, not from scanning a directory. **A template's thumbnail is an asset row that the template references** — it is not stored on the template itself.
+**Tokens come from the manifest, the CSS paths named by `globalCssPaths`, and the conventional root `colors_and_type.css` when present** — not from scanning a directory. The conventional path needs no manifest declaration: `_declared_css_paths` appends `DEFAULT_CSS_TOKEN_SOURCE` to whatever `globalCssPaths` lists (`src/services/design_system_service.py`). **A template's thumbnail is an asset row that the template may reference** — it is not stored on the template itself, and the reference is optional.
 
 ---
 
@@ -72,37 +72,94 @@ bundle.zip
 
 A deck carries **one** visual-style slot. A design system and a slide style are mutually exclusive: when both are present the design system wins and the style is dropped. That exclusivity is enforced in three independent places — the model serializer, the column bind, and a database `BEFORE INSERT OR UPDATE` trigger — so a caller cannot construct a deck carrying both.
 
-Resolution is **path-dependent**: the browser, a saved profile, a newly created session and an MCP call do not all consult the same sources. Documenting it as one ordered list overstates how uniform it is, so each path is given separately.
+There is **no single ordered list of sources.** The code implements one decision tree per **entry path**, and every tree returns early. Its guards distinguish a field the caller *omitted* from a field the caller *set to `null`*, they read recorded provenance (`style_source`) instead of re-deriving it from values, and they preserve an explicit `style_source: 'user'` against every lower default. A tier table cannot express that: it has to assume one total order, and each path evaluates a different set of guards. So read the **entry path** first, then only the guards on that path.
 
-### Server-side resolution (`agent_factory`)
+The six entry paths, and what decides each:
 
-This is the only path that always applies, and it is short:
+| Entry path | Resolver | Workspace-default seeding eligible? |
+|---|---|---|
+| 4.1 Fresh pre-session browser surface | `AgentConfigContext` pre-session effect | Yes — the only browser path that passes `isNewSurface` |
+| 4.2 Stored mirror / restored surface | same effect, mirror branch | No |
+| 4.3 Default profile | `profileStyleSource` | Only when the profile is server-seeded |
+| 4.4 Browser-created new session | `_apply_org_default_style_source` (`src/api/routes/chat.py`) | Per field, and only for omitted fields |
+| 4.5 Existing session | agent-config `GET` (`src/api/routes/agent_config.py`) | No |
+| 4.6 MCP | `create_deck` (`src/api/mcp_server.py`) | Yes, unless an explicit source is passed |
 
-1. `design_system_id`, if set — looked up with `is_active = true`
-2. otherwise `slide_style_id`, if set — also looked up with `is_active = true`
-3. otherwise the default slide-style constant
+### 4.1 Entry path: a fresh pre-session browser surface
 
-**An inactive id resolves to nothing rather than to an error**, so a deck pinned to a soft-deleted design system falls through to whatever comes next.
+The pre-session effect in `frontend/src/contexts/AgentConfigContext.tsx`:
 
-### Browser resolution (`AgentConfigContext`)
+1. Read the `localStorage` mirror. **Its existence, never its content, decides the branch.** A config whose only edit was "Design System: None" is byte-identical to the untouched first-paint placeholder, so no content test can separate them; a mirror that exists means path 4.2.
+2. No mirror: load the selected profile (`userDefaultProfileId`, else the server `is_default` profile) and stamp its provenance — path 4.3.
+3. Resolve through `withResolvedStyleSource(config, { isNewSurface: true })`. **This is the only browser path that passes `isNewSurface`**, so it is the only one on which workspace-default seeding is eligible at all.
 
-The client seeds an unconfigured surface from its own preferences before the server sees a request. It reads two `localStorage` keys — a personal default design system and a personal default slide style — and prefers the design system when both are set.
+`withResolvedStyleSource` evaluates these guards in order and returns at the first one that matches:
 
-**Which key wins on any given render depends on the path taken**, because the context also has to respect an incoming config, a mirrored pre-session config, and a default profile. In particular a personal slide-style default *is* seeded on initial render, so it is **not** correct to say a personal style default never applies on a new deck.
+| Guard | Outcome |
+|---|---|
+| `style_source === 'user'` | Return unchanged. The slot is the user's decision — including the decision to hold neither a design system nor a style. |
+| `!isNewSurface && style_source == null` | Return unchanged. Missing provenance on an existing config is read as a choice, not as a gap. |
+| `design_system_id != null` | Return unchanged. |
+| Personal default design system (`localStorage`) | Set `design_system_id`, clear `slide_style_id`, stamp `style_source: 'user'`. |
+| `slide_style_id != null` **and** a personal default slide style exists | Set that style, stamp `style_source: 'user'`. **This returns before the org-default design system is ever resolved.** |
+| Org default design system resolves | Set `design_system_id`, clear `slide_style_id`, stamp `style_source: 'seeded'`. |
+| No org default | Personal default style (`'user'`), otherwise the server's `is_default` — falling back to `is_system` — style (`'seeded'`). |
 
-Clearing a personal default **releases the config slot, not just the key** — removing only the key would leave the resolved id in the mirrored config and the lower preference would never take effect.
+**A personal slide-style default can suppress org-default design-system seeding.** It is reached before the org-default branch and returns, so the org brand is never resolved on that surface. Any copy asserting that a personal style default cannot outrank the org design system is wrong; the behaviour is pinned by `frontend/tests/e2e/design-system-selector.spec.ts`.
 
-### Saved profiles
+**Clearing a personal design-system default releases the slot, it does not re-seed it.** `setUserDefaultDesignSystem(null)` writes `design_system_id: null`, `template_id: null`, `slide_style_id: userPreferredStyleId()` and `style_source: 'user'`, then drops the `localStorage` key. The write happens **before** the key is removed: if the release fails the preference survives, and the Clear control — which is rendered from that key — survives with it. Workspace defaults reappear only when a later entry path performs seeding, because the surface now carries `style_source: 'user'`.
 
-A profile stores the whole agent config, design system included, and a default profile is applied on a fresh surface. **This is the only personal default that follows a user across browsers and machines**, because the other two live in `localStorage`.
+### 4.2 Entry path: a stored mirror or restored surface
 
-### MCP
+Stored state is authoritative. The mirror branch resolves without `isNewSurface`, so the second guard above fires and **an absent provenance marker is preserved as the user's choice rather than treated as a fresh gap.** The branch fills only the genuinely empty `deck_prompt_id` slot.
 
-MCP has no browser, so it never sees a personal default. With neither `design_system_id` nor `slide_style_id` supplied, the **org default design system** is applied. An explicit `slide_style_id` suppresses that implicit seeding. See [MCP Server Reference](./mcp-server.md).
+### 4.3 Entry path: the default profile
 
-### Workspace defaults
+Provenance comes from **who wrote the profile**, not from comparing its style id to the current default. `profileStyleSource` stamps `style_source: 'user'` for a profile whose `created_by` is not `system`, and for a system profile that has since been re-pointed at a different style; it stamps `'seeded'` only for the server's own profile still holding the style the server seeds.
 
-The **org default design system** is a database flag, admin-only, and applies to any caller that has expressed no preference — including MCP. Beneath it sit the server default slide style, then a protected `is_system` style, then the hardcoded constant.
+**A human-authored profile therefore short-circuits every lower default.** Comparing a stored config against a live `is_default` flag instead cannot distinguish a seed from a user picking that same value, and retroactively reinterprets stored configs whenever the flag is flipped.
+
+A profile is also the **only** personal default that follows a user across browsers and machines; the personal design-system and slide-style defaults live in `localStorage`.
+
+### 4.4 Entry path: a browser-created new session
+
+`_apply_org_default_style_source` in `src/api/routes/chat.py` seeds **per field, and only fields the client omitted.** Presence comes from the request's `model_fields_set`, so an explicit `null` is a choice ("no style source") and is left alone, while an omitted key is a gap the org default may fill. Value inspection cannot make that distinction — both read as `None`.
+
+- `slide_style_id` present in the payload (including as `null`) → return; no seeding at all.
+- `design_system_id` already non-null → return.
+- `design_system_id` omitted → seed the org default design system if one resolves, and stop.
+- `design_system_id` explicitly `null` → the design-system default is off the table, but the org default *slide style* may still fill the style slot the client never mentioned.
+
+**Session-creating requests strip `template_id`.** A pin arriving on the request that creates a session can only be another surface's carry-over, so `_without_template_pin` drops it; the design system and everything else carries over.
+
+### 4.5 Entry path: an existing session
+
+The persisted slot is used as stored. The agent-config `GET` sanitizes stale **pins** — a `design_system_id` or `template_id` whose row is gone is cleared and the repair is persisted — and reports a cleared design system out-of-band as `design_system_unavailable` so the emptied dropdown can be explained. It does **not** reapply current workspace defaults over stored choices: `withResolvedStyleSource` runs on this path only when the server holds no stored config for the session (`is_configured` false), which is genuine creation.
+
+### 4.6 Entry path: MCP
+
+MCP has no browser, so it never sees a `localStorage` preference. `create_deck` resolves in this order:
+
+1. An explicit `design_system_id` wins, and only then is `template_name` resolved to a pin.
+2. Otherwise, **an explicit `slide_style_id` suppresses implicit org-default design-system seeding** — the org default is consulted only when *neither* id was supplied.
+3. Otherwise the org default design system.
+4. Otherwise the tellr-configured default slide style: the `is_default` row, falling back to `is_system`, lowest id first on either.
+
+Only when no persisted id resolves does `agent_factory` fall through to its hardcoded constant. See [MCP Server Reference](./mcp-server.md).
+
+### 4.7 After resolution: prompt assembly
+
+Whatever the entry path decided is persisted as a mutually exclusive pair, and `agent_factory` reads it as a **branch, not a ladder**:
+
+```python
+if config.design_system_id is not None:   # design-system branch
+    ...
+elif config.slide_style_id is not None:    # legacy slide-style branch
+```
+
+**An inactive `design_system_id` resolves without an error but leaves generation on `DEFAULT_SLIDE_STYLE`.** The design-system branch is chosen on the id being *present*, so a lookup filtered by `is_active = true` that misses logs a warning and leaves the hardcoded constant in place. The `slide_style_id` branch is an `elif` and **is not evaluated at all** — there is no fallthrough from a soft-deleted design system to the deck's former style. `DEFAULT_SLIDE_STYLE` is a constant, not a database lookup.
+
+---
 
 ## 5. Interfaces
 
@@ -164,7 +221,7 @@ Five tables, all in `src/database/models/design_system.py`. Full column-level sc
 | `DesignSystemFile` | `design_system_file` | Verbatim bundle files, addressable by path |
 | `DesignSystemTemplate` | `design_system_template` | Named slide templates and their thumbnails |
 
-**Asset and token bucketing is by field, not by folder.** Assets are grouped by their `kind` column and tokens by their `group` column, so the compiled artifact's structure is independent of how the bundle author arranged directories.
+**Rows are grouped by their stored `kind` and `group` columns, but directory layout still matters.** Paths decide whether an asset is imported at all — only `assets/**`, `fonts/**` and recognized template previews are stored — and `_infer_asset_kind` reads pathname text (`fonts/`, `logo`, `icon`, `lockup`, `background`) to choose the `kind` a row is then grouped by. Rearranging a bundle's directories can therefore change both what is imported and how it is bucketed.
 
 ---
 
@@ -190,18 +247,20 @@ What that means per surface:
 
 **Do not add an `is_active` filter to the asset or render paths.** The generation path does filter it, so a tombstoned system is never chosen for a *new* deck. Filtering the asset path as well would stop retained bytes being served at all, removing the only part of the retention behaviour that currently holds.
 
-**Cross-system scoping fails closed at two layers, and reports the miss differently.** An asset is resolved by `(asset_id, design_system_id)`, never by global id — resolving by global id was a defect the current code prevents. The asset route returns `404` on a scope miss; the MCP resolver instead leaves the handle **literal** and emits zero bytes. A test asserting `404` at the MCP boundary is asserting the wrong layer's contract.
+**Cross-system scoping fails closed at two layers, and reports the miss differently.** An asset is resolved by `(asset_id, design_system_id)`, never by global id: resolving by global id would let a foreign handle return another design system's bytes. The asset route returns `404` on a scope miss; the MCP resolver instead leaves the handle **literal** and emits zero bytes. A test asserting `404` at the MCP boundary is asserting the wrong layer's contract.
+
+---
 
 ## 8. The Compiled Artifact and Its Currency Contract
 
 A bundle is flattened once into `compiled_style_content` by `recompute_compiled_style_content`. The artifact is stamped with `COMPILER_VERSION` (currently `20`, `src/services/design_system_compiler.py`).
 
-**Currency is an exact version match, not a comparison.** A stored artifact is considered current only when its stamp equals the running `COMPILER_VERSION`. Two consequences that have each caused a shipped bug:
+**Currency is an exact version match, not a comparison.** A stored artifact is considered current only when its stamp equals the running `COMPILER_VERSION`. Two consequences follow from that exact-version check:
 
 - **A compiler change that does not move the version is invisible in production.** Existing rows read as current and are never recompiled, so the change only affects systems imported afterwards. **Any change to compiler output must bump the version.**
 - **"The new version is unreleased" is a perishable premise.** Reasoning that a stale row will be invalidated *later* by an as-yet-unshipped version stops being true the moment that version deploys. Re-check what is deployed before relying on it.
 
-**The artifact embeds the design system's name**, so its character count and hash depend on what the system is called. Two systems with equal-length names produce equal character counts but **different hashes**. When comparing artifacts across builds, compare character counts and state the name they were measured under; a hash is only comparable at a byte-identical name.
+**The artifact embeds the design system's name**, so its character count and hash depend on what the system is called — but the name is only one input. Length and hash depend on the complete compiled content: description, README and SKILL text, tokens, fonts, the template section, the frame guardrails and the asset contract all vary independently of the name. Equal-length names therefore guarantee neither equal character counts nor different hashes. **Compare either measure only across byte-identical inputs**, and state what those inputs were.
 
 **Type-scale derivation prefers tokens.** Derived sizes such as the eyebrow band read the font-size token ramp; where the ramp cannot supply a distinct rung, the compiler may fall back to inspecting authored template or CSS declarations, so the emitted size is not a fixed value. Declaring the rung as a token is the reliable route — the fix for an unexpected size is usually a token, not a template edit.
 
@@ -209,7 +268,7 @@ A bundle is flattened once into `compiled_style_content` by `recompute_compiled_
 
 ## 9. Templates
 
-Each named template contributes layout HTML plus a thumbnail. Templates are selected per deck in Agent Config, not from the library page.
+Each named template contributes layout HTML and may reference an optional thumbnail. `thumbnail_asset_id` is nullable and its foreign key is `ON DELETE SET NULL`, so a template exists without a preview when the bundle shipped none the importer recognized, and an existing reference becomes null when the thumbnail asset is deleted or replaced — deleting a thumbnail never deletes the template. Templates are selected per deck in Agent Config, not from the library page.
 
 **Pinning supplies the template's own CSS; not pinning does not.** A pinned deck receives the template's classes and declaration bodies; an unpinned deck receives only a short catalog of template names and descriptions with **no CSS**, so the model picks a template and then authors its own styling. Unpinned adherence is therefore bounded by what the mechanism supplies rather than by prompt wording — stronger instructions cannot copy CSS that was never provided. How much this changes the generated result is a model-quality question and not established by the code; pin a template when brand fidelity matters.
 
@@ -234,7 +293,7 @@ Each named template contributes layout HTML plus a thumbnail. Templates are sele
 - **Adding a bundle folder** — extend the allowlist in `design_system_service.py`; entries outside it are skipped, some with an import warning and most without. Document the addition in [Design System Bundle Format](./design-system-bundle-format.md).
 - **Changing compiled output** — bump `COMPILER_VERSION` in the same commit, or the change will not reach existing rows. See §8.
 - **Adding a table** — five tables exist; test fixtures that reset design-system schema must be extended, or a sixth table's rows will survive between tests.
-- **Adding a route that resolves assets** — scope by `(asset_id, design_system_id)`. Never resolve an asset by global id; that was a shipped confused-deputy defect.
+- **Adding a route that resolves assets** — scope by `(asset_id, design_system_id)`. Never resolve an asset by global id; always scope the lookup. `get_asset_base64` documents this as the confused-deputy guard: a `{{ds-asset:<foreign_id>}}` handle from a crafted bundle must not resolve to another system's bytes. `design_system_id=None` is fail-closed, because the column is `NOT NULL` and the `IS NULL` filter matches no row.
 - **Tightening `is_active` filters** — filter on the generation path only. The render and asset paths must keep resolving tombstones. See §7.
 
 ---
@@ -243,7 +302,7 @@ Each named template contributes layout HTML plus a thumbnail. Templates are sele
 
 - [Design System Bundle Format](./design-system-bundle-format.md) — folder contract, `.thumbnail` convention, import security refusals
 - [Database Configuration](./database-configuration.md) — column-level schema for the five tables
-- [Frontend Overview](./frontend-overview.md) — the default ladder in context, library and admin components
+- [Frontend Overview](./frontend-overview.md) — the same entry paths from the client's side, library and admin components
 - [MCP Server Reference](./mcp-server.md) — `design_system_id` and `template_name` over MCP
 - [Permissions Model](./permissions-model.md) — `require_admin` semantics for the org default
 - [Backend Overview](./backend-overview.md) — router registration and prompt-assembly order
