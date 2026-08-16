@@ -270,11 +270,15 @@ class TestNormalizationIsSurgical:
     def test_no_config_does_not_become_an_empty_config(self, engine, db):
         """``None`` is "no config at all", which is NOT an empty config.
 
-        Whether the column holds SQL NULL (key omitted, ``default=None``) or the JSON
-        scalar ``null`` (``None`` passed explicitly) is pre-existing SQLAlchemy JSON
-        semantics and not this fix's business. What matters is that the normalizer
-        does not invent a config where there was none — reading either form back must
-        still be "nothing".
+        Both shapes of "no config" — the key omitted and ``None`` passed explicitly —
+        must land as SQL NULL. That half is asserted in SQL rather than through
+        :func:`_stored`, because ``_stored`` PARSES the column and so cannot see the
+        difference: ``json.loads("null")`` is ``None``, identical to what SQL NULL
+        returns. Reading it only that way is what let this column start storing the
+        JSON scalar ``null`` with the whole suite still green, and the JSON scalar
+        breaks the startup backfill, which selects rows with ``IS NULL``. The
+        invariant is owned by ``tests/unit/test_unset_agent_config_is_sql_null.py``;
+        it is re-asserted here so this suite cannot go back to laundering it.
         """
         omitted = UserSession(session_id="synthetic-no-config-omitted")
         explicit = UserSession(session_id="synthetic-no-config-explicit", agent_config=None)
@@ -284,6 +288,15 @@ class TestNormalizationIsSurgical:
         for row, how in ((omitted, "omitted"), (explicit, "explicit None")):
             assert _stored(engine, "user_sessions", row.id) is None, (
                 f"agent_config {how} was turned into a config by the persistence hook"
+            )
+            with engine.connect() as conn:
+                is_sql_null = conn.execute(
+                    text("SELECT agent_config IS NULL FROM user_sessions WHERE id = :id"),
+                    {"id": row.id},
+                ).scalar()
+            assert is_sql_null, (
+                f"agent_config {how} was stored as the JSON scalar null, not SQL NULL, "
+                "so every backfill that selects on IS NULL skips the row"
             )
 
     def test_a_non_dict_blob_is_passed_through(self, engine, db):

@@ -70,9 +70,20 @@ class NormalizedAgentConfig(TypeDecorator):
     not have its caller's dict edited underneath it).
 
     Emits an ordinary ``JSON`` column, so adopting it needs no migration.
+
+    ``none_as_null=True`` is load-bearing, not tidiness. ``sqlalchemy.JSON`` defaults
+    to ``none_as_null=False``, which serializes a bound ``None`` into the two-byte
+    document ``null`` instead of leaving the column as SQL NULL — and the JSON scalar
+    ``null`` is NOT SQL NULL. It is a stored value that merely READS as empty:
+    ``IS NULL`` does not match it, while the ORM attribute deserializes it to ``None``
+    exactly like SQL NULL, so nothing above the driver can tell the two apart. The
+    startup backfill ``migrate_profiles`` selects the rows it has to fill with
+    ``agent_config.is_(None)``, so adopting this type silently made every freshly
+    seeded profile invisible to it. See
+    ``tests/unit/test_unset_agent_config_is_sql_null.py``.
     """
 
-    impl = JSON
+    impl = JSON(none_as_null=True)
     cache_ok = True
 
     def process_bind_param(self, value: Any, dialect: Any) -> Any:
