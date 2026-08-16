@@ -13,10 +13,7 @@ from src.api.routes.export import build_slide_html
 from src.utils.html_safety import (
     SLIDE_CSP,
     SLIDE_CSP_META,
-    SLIDE_FRAME_H,
-    SLIDE_FRAME_W,
     SLIDE_ROOT_RESET_STYLE,
-    slide_host_frame_style,
 )
 
 _FRONTEND_SLIDE_DOC = (
@@ -119,19 +116,82 @@ def _frontend_host_frame(host_selector: str) -> str:
     )
 
 
-def test_backend_frame_dims_match_the_frontend():
-    assert (SLIDE_FRAME_W, SLIDE_FRAME_H) == _frontend_frame_dims()
+#: The four EXPORT builders. None of them may inject a slide-host frame contract.
+#:
+#: A contract framing `body` (or `section.slide-container`) and stretching its
+#: CHILD to `position: absolute !important; inset: 0 !important; width/height: 100%
+#: !important` was injected into all four at 0.4.2.dev17 and reverted. On the
+#: huashu -> PPTX -> Google Slides path it DESTROYS TABLES:
+#: preprocess.mjs::flattenTables() re-emits every <td>/<th> as an absolutely
+#: positioned <div> whose left/top/width/height are NON-important INLINE styles and
+#: appends it to `body`, so a stylesheet !important rule on `body > *` outranks each
+#: cell's own position and collapses all of them onto one rect. Measured on a real
+#: 21-cell deck: distinct cell rects in ppt/slides/slide1.xml 42 -> 11.
+#:
+#: There is deliberately NO Python mirror of the rule any more — it existed only to
+#: serve build_slide_html. The frontend `slideHostFrameStyle` REMAINS, because the
+#: four PREVIEW surfaces still depend on it
+#: (tests/unit/test_preview_box_model_parity.py pins those); it simply may not
+#: reach an export builder.
+_EXPORT_BUILDERS = (
+    "src/api/routes/export.py",
+    "frontend/src/services/pdf_client.ts",
+    "frontend/src/services/screenshotCapture.ts",
+    "frontend/src/services/domWalker.ts",
+)
+
+#: Substring that appears in a CALL to the contract builder, in either language.
+#: Matches `slideHostFrameStyle(` / `slide_host_frame_style(` but NOT the prose in
+#: the reverted-comment blocks, which name the function without calling it.
+_CONTRACT_CALLS = ("slideHostFrameStyle(", "slide_host_frame_style(")
+
+#: The contract's fingerprint in EMITTED CSS. The `#tellr-host-frame-boost` id is
+#: never minted on any element; it exists purely to lift the rule's specificity, so
+#: its presence in a document means the contract rendered into it.
+_CONTRACT_MARKER = ":not(#tellr-host-frame-boost)"
 
 
-@pytest.mark.parametrize("host", ["body", "section.slide-container", ".slide-container"])
-def test_backend_host_frame_contract_matches_the_frontend(host):
-    """ONE frame contract for every surface, preview and export alike.
+@pytest.mark.parametrize("rel_path", _EXPORT_BUILDERS)
+def test_no_export_builder_injects_the_frame_contract(rel_path):
+    """THE REGRESSION GUARD. Reintroducing the contract into a builder fails here.
 
-    The export builders used to inject no frame contract at all, which is what
-    shipped a design-system-pinned deck's PDF on a pure-black ground. If the
-    frontend rule changes, this fails loudly so the backend mirror moves with it.
+    Deliberately a source scan and not a document assertion: three of the four
+    builders are TypeScript, and the huashu damage is EMIT-TIME (the built document
+    is unchanged, so a document-level probe reads 0.00 px and is blind to it).
+    Scanning the source is what actually catches the reintroduction.
     """
-    assert slide_host_frame_style(host) == _frontend_host_frame(host)
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / rel_path).read_text(encoding="utf-8")
+    for call in _CONTRACT_CALLS:
+        assert call not in src, (
+            f"{rel_path} injects the slide-host frame contract again. On the huashu "
+            "path this collapses every flattened table cell onto one rect "
+            "(42 -> 11 distinct rects measured). If a DS-pinned deck's ground needs "
+            "fixing on a capture surface, re-aim the capture with findSlideRoot "
+            "instead — it injects no CSS."
+        )
+
+
+def test_the_export_builder_scan_is_not_vacuous():
+    """Non-vacuity for the guard above: the paths must exist and be readable.
+
+    A renamed builder would make the scan pass against a file that is not there.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for rel_path in _EXPORT_BUILDERS:
+        path = repo_root / rel_path
+        assert path.is_file(), f"{rel_path} no longer exists — the guard is vacuous"
+        assert path.read_text(encoding="utf-8").strip(), f"{rel_path} is empty"
+
+    # And the pattern must be capable of matching: it matches the PREVIEW surface
+    # that legitimately still calls the contract builder.
+    preview = (
+        repo_root / "frontend" / "src" / "components" / "SlidePanel" / "SlideSelection.tsx"
+    ).read_text(encoding="utf-8")
+    assert "slideHostFrameStyle(" in preview, (
+        "the scan pattern no longer matches a known call site, so the guard above "
+        "would pass no matter what an export builder does"
+    )
 
 
 def test_the_host_frame_contract_is_not_vacuous():
@@ -153,9 +213,10 @@ def test_the_host_frame_contract_cannot_reach_the_standalone_export_wrapper():
     """`.slide-wrapper` is the per-slide block of the standalone MULTI-slide export.
 
     Stretching those to one frame would stack the whole deck into a single pile, so
-    the contract is written to be incapable of it wherever it is injected.
+    the contract is written to be incapable of it wherever the PREVIEW surfaces
+    inject it. Read from the TS source: there is no longer a Python mirror.
     """
-    assert ":not(.slide-wrapper)" in slide_host_frame_style("body")
+    assert ":not(.slide-wrapper)" in _frontend_host_frame("body")
 
 
 def test_build_slide_html_flattens_the_slide_root_after_deck_css():
@@ -194,28 +255,34 @@ _WRAPPED_SLIDE = {
 }
 
 
-def test_build_slide_html_injects_the_frame_contract_after_deck_css():
-    """The export document must carry the same frame contract the previews carry.
+def test_build_slide_html_does_not_inject_the_frame_contract():
+    """The export document must carry NO frame contract, on a WRAPPED deck too.
 
-    Without it the <section> that paints the ground collapses to height 0 and the
-    deck's own dark html/body shows through at contrast 1.3025.
+    The wrapped fixture is the one the contract was added for, so it is the case
+    most likely to tempt a reintroduction. Asserted on the emitted document, which
+    is the artifact the huashu sidecar actually consumes.
     """
-    deck = _deck_with_css(_WRAPPED_DECK_CSS)
-    html = build_slide_html(_WRAPPED_SLIDE, deck)
+    html = build_slide_html(_WRAPPED_SLIDE, _deck_with_css(_WRAPPED_DECK_CSS))
 
-    contract = slide_host_frame_style("body")
-    assert contract in html, "the frame contract was not injected at all"
-    # Order is the mechanism for the non-important half of the rule.
-    assert html.index(contract) > html.index(_WRAPPED_DECK_CSS)
+    assert _CONTRACT_MARKER not in html, (
+        "the frame contract is back in the server slide document; on the huashu "
+        "path this collapses every flattened table cell onto one rect"
+    )
+    # The declarations that did the damage, checked individually: a reintroduction
+    # under a different selector would still collapse the cells.
+    assert "inset: 0 !important" not in html
+    assert "height: 100% !important" not in html
 
 
-def test_the_frame_contract_is_in_the_post_deck_sheet_only():
-    """WF-03: sheet 2 must stay byte-equal to the deck's CSS.
+def test_the_post_deck_sheet_carries_only_the_root_reset():
+    """WF-03 still holds with the contract gone: 3 sheets, sheet 2 byte-equal.
 
     `@import` is only valid before every other rule of ITS OWN stylesheet, so a
     single injected declaration in the deck's sheet costs a deck that opens with
-    `@import url(fonts.googleapis…)` its webfont. The contract therefore belongs in
-    the post-deck sheet and nowhere else.
+    `@import url(fonts.googleapis…)` its webfont. Sheet 2 must stay verbatim.
+
+    Sheet 3 keeps the html/body reset and the shared slide-root reset, and must
+    carry no frame contract in any sheet.
     """
     css = f"{_FONT_IMPORT}\n{_WRAPPED_DECK_CSS}"
     html = build_slide_html(_WRAPPED_SLIDE, _deck_with_css(css))
@@ -225,10 +292,12 @@ def test_the_frame_contract_is_in_the_post_deck_sheet_only():
     assert blocks[1] == css, "sheet 2 is no longer byte-equal to the deck's CSS"
     assert blocks[1].startswith("@import"), "the deck's leading @import moved"
 
-    marker = ":not(#tellr-host-frame-boost)"
-    assert marker not in blocks[0], "the contract leaked into the pre-deck sheet"
-    assert marker not in blocks[1], "the contract leaked into the DECK's sheet (WF-03)"
-    assert marker in blocks[2], "the contract is missing from the post-deck sheet"
+    for i, block in enumerate(blocks):
+        assert _CONTRACT_MARKER not in block, f"the contract is back in sheet {i + 1}"
+
+    # Sheet 3 still does its own job — this is what must NOT be reverted with it.
+    assert SLIDE_ROOT_RESET_STYLE in blocks[2]
+    assert "margin: 0;" in blocks[2]
 
 
 def test_build_slide_html_neutralises_deck_authored_body_padding():

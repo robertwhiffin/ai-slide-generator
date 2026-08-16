@@ -52,47 +52,6 @@ SLIDE_ROOT_RESET_STYLE = """
   }
 """
 
-# The fixed 16:9 frame every slide surface renders into. Mirrors the frontend's
-# SLIDE_FRAME_W / SLIDE_FRAME_H; tests/unit/test_export_csp.py pins both.
-SLIDE_FRAME_W = 1280
-SLIDE_FRAME_H = 720
-
-
-def slide_host_frame_style(host_selector: str) -> str:
-    """The slide-host frame contract: frame ``host_selector``, STRETCH ITS CHILD.
-
-    Byte-identical mirror of the frontend builder's ``slideHostFrameStyle``
-    (frontend/src/services/slideDocument.ts), which carries the full rationale and
-    the per-declaration measurements. ``tests/unit/test_export_csp.py`` asserts
-    this renders exactly what the TS function renders, so the two cannot drift.
-
-    Why any of it is needed: a design-system-pinned deck nests the slide two
-    levels deep — a ``<section>`` carries the slide ground via a bare TYPE
-    selector, and inside it ``.slide`` is ``position: absolute; inset: 0``. The
-    wrapper therefore holds no in-flow content and collapses to ``height: 0``, so
-    the ground it carries never paints and the deck's own dark ``html, body``
-    shows through instead. Colour and font still inherit, which is why the result
-    is readable DARK-ON-DARK rather than an obviously blank slide. Sizing the ROOT
-    does not fix it; only stretching the host's CHILD gives the
-    background-carrying element area.
-    """
-    return f"""
-  {host_selector} {{
-    position: relative !important;
-    width: {SLIDE_FRAME_W}px !important;
-    height: {SLIDE_FRAME_H}px !important;
-    overflow: hidden;
-  }}
-  {host_selector} > :not(#tellr-host-frame-boost):not(.slide-wrapper) {{
-    position: absolute !important;
-    inset: 0 !important;
-    width: 100% !important;
-    height: 100% !important;
-    box-sizing: border-box !important;
-    overflow: hidden;
-  }}
-"""
-
 # Script sources allowed in slides (Chart.js + Tailwind Play CDN + Google Fonts).
 # Google Fonts <link>s are allowed by the slide CSP `style-src`/`font-src` at
 # runtime, so the scanner must not flag them as external resources.
