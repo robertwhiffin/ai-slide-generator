@@ -77,11 +77,12 @@ export const AdminDesignSystemDefault: React.FC = () => {
       <h2 className="text-lg font-semibold text-gray-900 mb-2">Org Default Design System</h2>
       <p className="text-sm text-gray-500 mb-4">
         The design system marked as the org default is preselected for new decks.
-        Decks created via MCP use it, because a personal default is stored in the
-        user's browser and the server cannot see it. In the app, a user who has set
-        their own default — in the Design System or Slide Style library — gets that
-        instead. Where the org default does apply, it outranks the default slide
-        style, so those decks use the brand.
+        A deck created via MCP uses it whenever the caller supplies neither a design
+        system nor a slide style of its own; a personal default never applies there,
+        because it is stored in the user's browser and the server cannot see it. In
+        the app, a user who has set their own default — in the Design System or Slide
+        Style library — gets that instead. Where the org default does apply, it
+        outranks the default slide style, so those decks use the brand.
       </p>
       {systems.length === 0 ? (
         <div className="text-sm text-gray-500">
