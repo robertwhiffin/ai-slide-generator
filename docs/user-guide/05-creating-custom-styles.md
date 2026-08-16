@@ -4,12 +4,28 @@ This guide covers what goes into a Slide Style, what CSS is safe to include, and
 
 ## Defaults: corporate vs. personal
 
-Every new deck starts with a slide style applied. Where that style comes from depends on whether you've customized things for yourself.
+A new deck normally starts with a visual style applied — either a slide style or a [design system](./09-design-systems.md), and never both. It can start with neither: a profile you built that holds no style and no design system is used exactly as it stands, and so is a deck started in a workspace whose style library has no default style to fall back on. Which one you get depends on **how the deck was started**, so the cases below are separate rather than one ranking of settings.
 
-- **Corporate default (system-wide).** One slide style is marked as the organization's default. Every user who hasn't overridden it sees that style on every new deck — the same way a new document in your corporate Google Workspace picks up your company's template. Decks generated via the MCP API also use this default. Tellr admins set the corporate default from the hidden `/admin` page ("Slide Style" tab); there's no link in the main navigation — you need to know the URL.
-- **Personal override.** You can pin a different style as *your* default by clicking "Set as default" on any style in the Slide Styles page. Your choice is remembered in your current browser only and takes precedence over the corporate default for your new decks. (MCP decks still use the corporate default regardless of your personal choice.)
+**The deck in front of you.** Change the style from the agent config bar. That is an explicit choice, saved on this deck only, and no default overrides it afterwards.
 
-For one-off decks, you can always change the style for a single session from the agent config bar without affecting either default.
+**A brand-new deck in this browser.** The empty slot is filled once, stopping at the first that applies:
+
+1. Your **personal design-system default** ("Set as default" on the Design Systems page).
+2. Your **personal slide-style default** ("Set as default" on the Slide Styles page).
+3. The organisation's **default design system**.
+4. The organisation's **default slide style**.
+
+**A personal slide-style default can stop the organisation's design system being applied.** Step 2 comes before step 3, so once your personal style claims the slot the org brand is not resolved for that deck at all. This is the opposite of what the ordering might suggest from the design-system side of the product. It applies only when the deck's starting point already carries a slide style, because the preference replaces a style rather than introducing one. The default profile that ships with tellr normally supplies one, but it is not guaranteed to — the exact condition is in [Design System Library §4](../technical/design-system-library.md).
+
+**If this browser already holds a configuration you have used before, the choices you made yourself are kept** — a style or design system you picked is not replaced, including after an admin changes a corporate default. A slot the app filled in for you is different: if you never chose a design system yourself, a corporate design system set later can still take the slot on a subsequent load.
+
+**A deck started from a profile.** A profile you built is treated as an explicit choice and nothing is layered over it. The default profile shipped with tellr is treated as a starting point, so the steps above may still fill its empty slots. A profile is also the only personal default that follows you between browsers and machines; both "Set as default" preferences are stored in this browser only.
+
+**A deck created through the MCP API.** MCP cannot see anything in your browser. A style or design system passed explicitly in the call wins — and passing a slide style explicitly also stops the org design system being applied. Otherwise MCP uses the org default design system, then the organisation's default slide style.
+
+**Where corporate defaults are set.** Tellr admins set the corporate slide style from the hidden `/admin` page ("Slide Style" tab) and the org design system from the same page's "Design System" tab. There is no link in the main navigation — you need the URL.
+
+**If a configuration ends up carrying both, the design system wins.** A design system supplies the whole brand package — tokens, webfonts, brand imagery and named templates — so when both ids are present the design system is kept and the slide style is dropped. To use a slide style instead, set it explicitly on the deck from the agent config bar, or clear your personal design-system default on the Design Systems page.
 
 ## Overview
 
@@ -118,7 +134,7 @@ The rendering pipeline has structural requirements that **cannot be overridden**
 
 | Constraint | Detail |
 |---|---|
-| **Slide wrapper must be `<div class="slide">`** | The parser uses `find_all('div', class_='slide')` at every stage — parsing, editing, validation. A `<section>`, `<article>`, or any other element produces zero slides. |
+| **Slide wrapper must carry `class="slide"`** | Discovery keys on the `slide` **class token**, not on the tag name, so `<div class="slide">` and `<section class="slide">` both work (design-system templates use the latter). What produces zero slides is an element **without** that class. |
 | **Dimensions: 1280×720px** | The frontend iframe, presentation mode, and all export paths assume this fixed size. |
 | **No presentation frameworks** | Do not instruct the AI to use reveal.js, Slidev, Impress.js, Marp, or any framework. These use incompatible DOM structures. |
 | **CSS must be in `<style>` blocks** | The parser extracts CSS from `<style>` tags only. `<link>` references to external stylesheets are ignored. |
@@ -128,8 +144,8 @@ The rendering pipeline has structural requirements that **cannot be overridden**
 
 | What the user writes | What breaks |
 |---|---|
-| "Use reveal.js for transitions" | Parser finds zero `<div class="slide">` elements — empty deck |
-| "Use `<section>` tags for slides" | Same — `<section class="slide">` does not match the parser |
+| "Use reveal.js for transitions" | Parser finds no element carrying the `slide` class — empty deck |
+| "Use `<section>` tags for slides" | Fine **only if the class is there**: `<section class="slide">` is valid, a bare `<section>` is not |
 | "Set slides to 1920×1080" | Slides overflow the 1280×720 iframe; charts mis-scale |
 | "Link to an external stylesheet" | `<link>` tags are ignored; styles don't apply |
 | `.slide { display: none; }` | Slides parse correctly but render as invisible |
@@ -174,14 +190,16 @@ Output format — return a single text block containing:
    above. The CSS must follow these rules:
    - Target a fixed slide canvas of 1280x720px
    - Include: body { width: 1280px; height: 720px; margin: 0; padding: 0; overflow: hidden; }
-   - Every slide is wrapped in <div class="slide"> — style this class as the slide container
+   - Every slide root carries class="slide" — style this class as the slide
+     container. <div class="slide"> and <section class="slide"> are both valid
    - Use descriptive class names for recurring elements
      (e.g., .title-slide, .content-slide, .metric-card, .section-header)
    - Include @import for any Google Fonts needed
    - Use CSS variables on :root for the color palette so colors are easy to adjust
    - Do NOT use any presentation framework markup (no reveal.js, Slidev, etc.)
    - Do NOT use <link> stylesheet references — all CSS must be in <style> blocks
-   - Do NOT use <section> or <article> as slide wrappers — only <div class="slide">
+   - Do NOT use framework-specific wrapper structures; the slide root must
+     carry the "slide" class whatever its tag
 6. A "Content Per Slide" section with guidelines like max words, max charts,
    title length
 

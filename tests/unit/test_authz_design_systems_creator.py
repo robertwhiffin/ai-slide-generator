@@ -1,0 +1,983 @@
+"""Design-system rename/delete are CREATOR-OR-ADMIN gated (Option C).
+
+Supersedes the admin-only half of ``test_authz_design_systems_admin.py`` for
+PUT/DELETE. The product model design systems actually implement:
+
+    all GETs              OPEN
+    POST /import          OPEN  — any user may CONTRIBUTE
+    POST ""    (create)   OPEN  — any user may CONTRIBUTE
+    PUT    /{ds_id}       CREATOR OR ADMIN, except ADMIN-ONLY while is_default
+    DELETE /{ds_id}       CREATOR OR ADMIN, except ADMIN-ONLY while is_default
+    POST /{ds_id}/set-default   ADMIN ONLY  — org-wide blast radius (always)
+
+Design systems are org-shared, user-contributed content: any user may add one
+AND manage the ones they uploaded, nobody may touch someone else's, and admins
+may manage anything.
+
+ORG-DEFAULT FREEZE (product owner's decision: "only admin when it's org
+default"). Creator-or-admin was not sufficient on its own: a non-admin CREATOR
+could delete the ACTIVE ORG DEFAULT design system and get 204, leaving the row
+inactive/non-default while OTHER users' sessions still pointed at it. So an
+admin's act of promoting a system to org default could be undone by its author.
+The moment a row becomes the org default, rename/delete on THAT row require
+admin; creators keep full control of every NON-default system they uploaded.
+The verdict reads ``is_default`` off the LOADED ROW inside the handler's
+transaction — never from client input.
+
+IDENTITY (why these tests are honest): the caller is resolved server-side from
+``get_permission_context().user_name``, which the OBO middleware
+(``src/api/main.py``) populates from the authenticated token — in production
+from ``user_client.current_user.me()``, and in dev/test from ``DEV_USER_ID``.
+These tests therefore steer identity by setting ``DEV_USER_ID`` and letting the
+REAL middleware build the permission context, rather than monkeypatching the
+guard or the getter. Nothing the client sends (body, query, header) can change
+the verdict, so there is no spoofable seam for a test to accidentally bless.
+
+Every case runs against a REAL seeded design system, so a missing gate answers
+200/204 rather than 403 — a 403 proves the gate fired and cannot be a
+404-by-accident on an absent row. All fixtures are SYNTHETIC.
+
+Fixture idiom (in-memory SQLite ``get_db`` override + the
+``production``/``non_admin``/``admin`` monkeypatch triple) copied from
+``tests/unit/test_authz_design_systems_admin.py``.
+"""
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from src.api.main import app
+from src.core.database import Base, get_db
+from src.database.models.design_system import DesignSystem
+from tests.unit.conftest_design_system import make_bundle_zip
+
+BASE = "/api/settings/design-systems"
+
+CREATOR = "creator@test.com"
+OTHER = "someone-else@test.com"
+
+
+@pytest.fixture(scope="function")
+def db_engine():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    yield engine
+    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+
+
+@pytest.fixture(scope="function")
+def db_session(db_engine):
+    session_local = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+    session = session_local()
+    yield session
+    session.close()
+
+
+@pytest.fixture(scope="function")
+def client(db_session):
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+def _seed(db_session, created_by, name="Acme Synthetic DS", is_default=False):
+    """Seed a real, active design system authored by ``created_by``.
+
+    ``is_default`` seeds the row as the ORG DEFAULT, which is what the freeze
+    tests below toggle. It is written to the DB row, never sent by the client —
+    the guard must read it from the row it loaded.
+    """
+    ds = DesignSystem(
+        name=name,
+        description="synthetic fixture",
+        created_by=created_by,
+        updated_by=created_by,
+        version=1,
+        published=False,
+        is_default=is_default,
+        is_active=True,
+    )
+    db_session.add(ds)
+    db_session.commit()
+    db_session.refresh(ds)
+    return ds
+
+
+@pytest.fixture
+def production(monkeypatch):
+    """Turn OFF the dev-mode admin bypass so the admin verdict is real."""
+    from src.api.routes import _authz
+
+    monkeypatch.setattr(_authz, "_is_production", lambda: True)
+    monkeypatch.setattr(_authz, "get_current_user", lambda: "user@test.com")
+    _authz.reset_admin_cache()
+    yield _authz
+    _authz.reset_admin_cache()
+
+
+@pytest.fixture
+def non_admin(production, monkeypatch):
+    monkeypatch.setattr(production, "_admin_acl_probe", lambda user: False)
+
+
+@pytest.fixture
+def admin(production, monkeypatch):
+    monkeypatch.setattr(production, "_admin_acl_probe", lambda user: True)
+
+
+@pytest.fixture
+def as_creator(monkeypatch):
+    """Authenticate the request AS the seeded design system's author."""
+    monkeypatch.setenv("DEV_USER_ID", CREATOR)
+
+
+@pytest.fixture
+def as_other_user(monkeypatch):
+    """Authenticate the request as a DIFFERENT user than the author."""
+    monkeypatch.setenv("DEV_USER_ID", OTHER)
+
+
+# --- (a)/(b) the creator may manage their OWN NON-DEFAULT design system -----
+#
+# ``_seed`` defaults to ``is_default=False``, which is now load-bearing: these
+# two cases are the NON-default half of the org-default freeze, and they must
+# stay green (creators keep full control of what they uploaded).
+
+
+def test_creator_non_admin_can_rename_own_non_default_design_system(
+    client, db_session, non_admin, as_creator
+):
+    """(a) A plain user renames the NON-DEFAULT design system they uploaded."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Acme DS renamed by its author"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "Acme DS renamed by its author"
+
+
+def test_creator_non_admin_can_delete_own_non_default_design_system(
+    client, db_session, non_admin, as_creator
+):
+    """(b) A plain user deletes the NON-DEFAULT design system they uploaded."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 204, resp.text
+
+
+# --- (c)/(d) nobody may touch someone else's -------------------------------
+
+
+def test_non_creator_non_admin_cannot_rename_other_users_design_system(
+    client, db_session, non_admin, as_other_user
+):
+    """(c) A plain user may NOT rename a design system they did not upload."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Hijacked by a stranger"})
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS", "denied rename must not mutate the row"
+
+
+def test_non_creator_non_admin_cannot_delete_other_users_design_system(
+    client, db_session, non_admin, as_other_user
+):
+    """(d) A plain user may NOT delete a design system they did not upload."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_active is True, "denied delete must not deactivate the row"
+
+
+# --- (e) admins may manage ANY design system, including others' ------------
+
+
+def test_admin_can_rename_design_system_they_did_not_create(
+    client, db_session, admin, as_other_user
+):
+    """(e) Admin overrides authorship on rename."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by an admin"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_admin_can_delete_design_system_they_did_not_create(
+    client, db_session, admin, as_other_user
+):
+    """(e) Admin overrides authorship on delete."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 204, resp.text
+
+
+# --- (f) set-default stays ADMIN-ONLY (org-wide blast radius) --------------
+
+
+def test_creator_non_admin_cannot_set_default_on_own_design_system(
+    client, db_session, non_admin, as_creator
+):
+    """(f) Authorship does NOT buy set-default — it changes what EVERYONE gets."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.post(f"{BASE}/{ds.id}/set-default")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_default is False, "denied set-default must not flip the org default"
+
+
+def test_admin_can_set_default(client, db_session, admin, as_other_user):
+    """(f) Behavior preserved for the admin half of set-default."""
+    ds = _seed(db_session, CREATOR)
+    resp = client.post(f"{BASE}/{ds.id}/set-default")
+    assert resp.status_code == 200, resp.text
+
+
+# --- (g) the core user story: contributing stays OPEN ----------------------
+
+
+def test_non_admin_can_still_import_bundle(client, non_admin, as_other_user):
+    """(g) Any authenticated user may CONTRIBUTE a design system by upload."""
+    resp = client.post(
+        f"{BASE}/import",
+        files={"file": ("synthetic.zip", make_bundle_zip(), "application/zip")},
+    )
+    assert resp.status_code == 201, resp.text
+
+
+def test_non_admin_can_still_create(client, non_admin, as_other_user):
+    """(g) Any authenticated user may CONTRIBUTE a design system via create."""
+    resp = client.post(BASE, json={"name": "Contributed by a regular user"})
+    assert resp.status_code == 201, resp.text
+
+
+# --- (h) blank authorship falls back to ADMIN-ONLY (security requirement) --
+#
+# ``design_system.created_by`` is nullable and legacy rows may carry NULL or a
+# blank string. A blank author must NEVER resolve to "anyone may manage this":
+# an unauthenticated/blank CALLER must not match a blank OWNER either, so the
+# comparison can never be satisfied by two empty values.
+
+
+@pytest.mark.parametrize(
+    "blank", [None, "", "   "], ids=["null", "empty", "whitespace"]
+)
+def test_creatorless_design_system_is_admin_only_for_non_admin(
+    client, db_session, non_admin, as_creator, blank
+):
+    """(h) NULL/blank ``created_by`` -> admin-only, so a non-admin gets 403."""
+    ds = _seed(db_session, blank)
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via blank authorship"})
+    assert put.status_code == 403, f"PUT on blank-author DS -> {put.status_code} {put.text}"
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE on blank-author DS -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    "blank", [None, "", "   "], ids=["null", "empty", "whitespace"]
+)
+def test_creatorless_design_system_is_still_manageable_by_admin(
+    client, db_session, admin, as_creator, blank
+):
+    """(h) The admin-only fallback still lets an ADMIN clean up legacy rows."""
+    ds = _seed(db_session, blank)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Adopted by an admin"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_blank_caller_cannot_match_blank_creator(client, db_session, non_admin, monkeypatch):
+    """(h) A blank CALLER must not match a blank OWNER — the both-empty trap.
+
+    Belt-and-braces on the fallback: even if identity resolution yields an
+    empty username, `"" == ""` must not be read as "the caller is the author".
+    """
+    monkeypatch.setenv("DEV_USER_ID", "")
+    ds = _seed(db_session, "")
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+# --- (i) VISUALLY EMPTY authorship is blank too -----------------------------
+#
+# ``str.strip()`` removes ASCII and Unicode WHITESPACE (Zs/Zl/Zp), but a
+# zero-width character is category Cf — ``isspace()`` is False and ``strip()``
+# leaves it untouched. So a ``created_by`` of ZERO WIDTH SPACE passed the
+# non-blank test on BOTH sides and satisfied the creator branch, handing
+# "anyone may manage this" to an author-less row.
+#
+# The fix normalizes (NFKC) and strips format/separator characters before the
+# non-blank test, so any value that is semantically empty is BLANK -> admin-only.
+# Case sensitivity is deliberately NOT relaxed: differing case still fails
+# closed, which the existing suite pins.
+
+# Cf format characters (zero-width and friends), plus combinations with real
+# whitespace. Each must read as BLANK.
+_INVISIBLE_BLANKS = [
+    ("zwsp", "​"),          # ZERO WIDTH SPACE
+    ("zwnj", "‌"),          # ZERO WIDTH NON-JOINER
+    ("zwj", "‍"),           # ZERO WIDTH JOINER
+    ("bom", "﻿"),           # ZERO WIDTH NO-BREAK SPACE / BOM
+    ("word_joiner", "⁠"),   # WORD JOINER
+    ("soft_hyphen", "­"),   # SOFT HYPHEN (Cf)
+    ("lrm", "‎"),           # LEFT-TO-RIGHT MARK
+    ("mixed_zw_and_spaces", "  ​ ﻿\t‌  "),
+    ("zw_with_nbsp", " ​ "),
+    ("ideographic_space_zw", "　‍"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"), _INVISIBLE_BLANKS, ids=[label for label, _ in _INVISIBLE_BLANKS]
+)
+def test_zero_width_authorship_is_admin_only_for_non_admin(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(i) A visually empty ``created_by`` is admin-only, even when the CALLER
+    presents the very same invisible string."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via invisible authorship"})
+    assert put.status_code == 403, (
+        f"PUT with {label} caller+owner -> {put.status_code} {put.text}"
+    )
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} caller+owner -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"), _INVISIBLE_BLANKS, ids=[label for label, _ in _INVISIBLE_BLANKS]
+)
+def test_zero_width_authorship_still_manageable_by_admin(
+    client, db_session, admin, monkeypatch, label, blank
+):
+    """(i) The admin fallback still applies, so these rows stay cleanable."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Adopted by an admin"})
+    assert resp.status_code == 200, resp.text
+
+
+# Owner and caller that differ ONLY by invisible characters. These are not
+# "blank vs blank" — they are a REAL name against a decorated variant, which
+# must not be treated as the same principal.
+_INVISIBLE_DIFFERENCES = [
+    ("owner_has_zwsp", f"{CREATOR}​", CREATOR),
+    ("caller_has_zwsp", CREATOR, f"{CREATOR}​"),
+    ("owner_has_bom_prefix", f"﻿{CREATOR}", CREATOR),
+    ("caller_has_soft_hyphen", CREATOR, "cre­ator@test.com"),
+    ("owner_zwj_inside", "cre‍ator@test.com", CREATOR),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "owner", "caller"),
+    _INVISIBLE_DIFFERENCES,
+    ids=[label for label, _, _ in _INVISIBLE_DIFFERENCES],
+)
+def test_owner_and_caller_differing_by_invisibles_are_not_the_same_principal(
+    client, db_session, non_admin, monkeypatch, label, owner, caller
+):
+    """(i) Stripping invisibles must not become a LOOSER comparison: a caller
+    whose name merely resembles the owner's is still denied."""
+    monkeypatch.setenv("DEV_USER_ID", caller)
+    ds = _seed(db_session, owner)
+
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+# --- (j) ORG-DEFAULT FREEZE: admin-only while the row IS the org default ----
+#
+# The hole an independent cross-vendor review PROVED by running it: a non-admin
+# CREATOR deleted the ACTIVE ORG DEFAULT design system and got 204. The row went
+# inactive/non-default while ANOTHER user's session still pointed at the
+# now-broken id, so an admin's promotion could be undone by the row's author.
+#
+# Product owner's decision, verbatim: "only admin when it's org default".
+#
+# These cases seed the SAME author and call as the SAME caller as the (a)/(b)
+# cases above — the ONLY difference is ``is_default``. That is what makes the
+# new condition load-bearing rather than incidental: identical setups must give
+# OPPOSITE verdicts, which the flip test below asserts inside a single test body.
+
+
+def test_creator_non_admin_cannot_rename_own_design_system_while_org_default(
+    client, db_session, non_admin, as_creator
+):
+    """(j1) The author may NOT rename their own system while it IS the org default."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed under the admin's feet"})
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS", "denied rename must not mutate the row"
+    assert ds.is_default is True, "denied rename must leave the org default intact"
+    assert ds.version == 1, "denied rename must not bump the version"
+
+
+def test_creator_non_admin_cannot_delete_own_design_system_while_org_default(
+    client, db_session, non_admin, as_creator
+):
+    """(j2) The author may NOT delete their own system while it IS the org default.
+
+    This is the reviewer's exact reproduction: it answered 204 before the freeze.
+    """
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_active is True, "denied delete must not deactivate the org default"
+    assert ds.is_default is True, "denied delete must not clear the org default"
+
+
+def test_admin_can_rename_design_system_that_is_org_default(
+    client, db_session, admin, as_other_user
+):
+    """(j3) An ADMIN may still rename the org default (the freeze is admin-ONLY,
+    not nobody-may)."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Org default renamed by an admin"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "Org default renamed by an admin"
+
+
+def test_admin_can_delete_design_system_that_is_org_default(
+    client, db_session, admin, as_other_user
+):
+    """(j3) An ADMIN may still delete the org default."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 204, resp.text
+    db_session.refresh(ds)
+    assert ds.is_active is False
+    assert ds.is_default is False, "deleting the default must not leave it flagged default"
+
+
+def test_org_default_flag_alone_flips_the_verdict_for_the_same_creator(
+    client, db_session, non_admin, as_creator
+):
+    """(j4) THE FLIP TEST — one row, one author, one caller, opposite verdicts.
+
+    Everything is held constant: the SAME design system row, authored by the
+    SAME principal, called by the SAME non-admin caller, over the SAME route.
+    The ONLY thing that changes between the two halves is ``is_default`` on the
+    row. If the guard ignored ``is_default``, both halves would return the same
+    status and this test fails — which is what makes the new condition provably
+    load-bearing rather than incidentally satisfied by some other difference.
+    """
+    ds = _seed(db_session, CREATOR)
+    ds_id = ds.id
+
+    # --- is_default OFF -> the creator branch applies -> ALLOWED -------------
+    assert ds.is_default is False
+    allowed = client.put(f"{BASE}/{ds_id}", json={"name": "Allowed while not default"})
+    assert allowed.status_code == 200, (
+        f"creator must manage their own NON-default system: {allowed.status_code} {allowed.text}"
+    )
+
+    # --- flip the SAME row to the org default (server-side, not client input) -
+    db_session.refresh(ds)
+    ds.is_default = True
+    db_session.commit()
+    db_session.refresh(ds)
+    assert ds.is_default is True
+    name_while_default = ds.name
+
+    # --- is_default ON -> admin-only -> DENIED -------------------------------
+    denied = client.put(f"{BASE}/{ds_id}", json={"name": "Denied while default"})
+    assert denied.status_code == 403, (
+        f"same row+author+caller, is_default=True must be DENIED: "
+        f"{denied.status_code} {denied.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == name_while_default, "denied rename must not mutate the row"
+
+    # --- and flip it BACK OFF -> allowed again (the condition is the ONLY gate)
+    ds.is_default = False
+    db_session.commit()
+    reallowed = client.put(f"{BASE}/{ds_id}", json={"name": "Allowed again once not default"})
+    assert reallowed.status_code == 200, (
+        f"clearing is_default must restore creator control: "
+        f"{reallowed.status_code} {reallowed.text}"
+    )
+
+
+def test_org_default_flag_alone_flips_the_delete_verdict_for_the_same_creator(
+    client, db_session, non_admin, as_creator
+):
+    """(j5) The flip test for DELETE — the route the reviewer actually exploited.
+
+    DELETE is destructive, so the two halves cannot reuse one row (the allowed
+    half consumes it). Two rows with the SAME author, called by the SAME
+    non-admin caller, differing ONLY in ``is_default``, must give opposite
+    verdicts.
+    """
+    non_default = _seed(db_session, CREATOR, name="Acme Non-Default")
+    default = _seed(db_session, CREATOR, name="Acme Org Default", is_default=True)
+
+    allowed = client.delete(f"{BASE}/{non_default.id}")
+    assert allowed.status_code == 204, (
+        f"creator must delete their own NON-default system: "
+        f"{allowed.status_code} {allowed.text}"
+    )
+
+    denied = client.delete(f"{BASE}/{default.id}")
+    assert denied.status_code == 403, (
+        f"same author+caller, is_default=True must be DENIED: "
+        f"{denied.status_code} {denied.text}"
+    )
+    db_session.refresh(default)
+    assert default.is_active is True
+    assert default.is_default is True
+
+
+def test_frozen_org_default_is_denied_before_any_mutation_or_recompute(
+    client, db_session, non_admin, as_creator, monkeypatch
+):
+    """(j6) ORDERING: the freeze must deny BEFORE the handler does any work.
+
+    A gate that runs after the mutation (or after the expensive compile) would
+    still answer 403 while having already changed the row or burned the work, so
+    a status-code-only assertion cannot tell a correctly-ordered gate from a
+    late one. This installs a landmine in ``recompute_compiled_style_content``
+    — the PUT path's expensive step — and asserts the denied request never
+    reaches it, then asserts the row is byte-for-byte untouched.
+    """
+    from src.api.routes.settings import design_systems as ds_routes
+
+    ds = _seed(db_session, CREATOR, is_default=True)
+    before = (ds.name, ds.description, ds.version, ds.is_default, ds.is_active)
+
+    def _landmine(*args, **kwargs):
+        raise AssertionError(
+            "recompute_compiled_style_content ran on a DENIED request: the "
+            "org-default gate is ordered AFTER the handler's expensive work"
+        )
+
+    monkeypatch.setattr(ds_routes, "recompute_compiled_style_content", _landmine)
+
+    resp = client.put(
+        f"{BASE}/{ds.id}",
+        json={"name": "Renamed past the gate", "description": "and re-described"},
+    )
+    assert resp.status_code == 403, resp.text
+
+    db_session.refresh(ds)
+    assert (ds.name, ds.description, ds.version, ds.is_default, ds.is_active) == before, (
+        "a denied request must leave the row completely unmodified"
+    )
+
+
+def test_frozen_org_default_denial_explains_why_without_leaking_the_row(
+    client, db_session, non_admin, as_creator
+):
+    """(j7) The 403 detail must be debuggable — it names the org-default REASON,
+    so this is distinguishable from the not-the-author denial — while disclosing
+    nothing about the row (no name, no author, no id) beyond what the OPEN read
+    endpoints already return to any authenticated caller."""
+    ds = _seed(db_session, CREATOR, name="Acme Confidential Fixture", is_default=True)
+
+    resp = client.delete(f"{BASE}/{ds.id}")
+    assert resp.status_code == 403, resp.text
+    detail = resp.json()["detail"]
+
+    assert "default" in detail.lower(), f"denial must name the reason: {detail!r}"
+    assert detail != "Admin access required", (
+        "the freeze denial must be distinguishable from a plain admin denial"
+    )
+    for leak in ("Acme Confidential Fixture", CREATOR):
+        assert leak not in detail, f"denial leaked {leak!r}: {detail!r}"
+
+
+# --- (k) HANGUL FILLERS are blank, and identity is compared EXACTLY ----------
+#
+# Two defects in the creator check, found by an adversarial review.
+#
+# (i) The Hangul filler characters — U+3164 HANGUL FILLER and U+115F HANGUL
+#     CHOSEONG FILLER — render as nothing, but NFKC maps them to U+1160 / U+115F
+#     whose category is Lo (a LETTER). The invisible-category test therefore read
+#     them as real, visible content: an author-less row whose ``created_by`` was
+#     a filler could be claimed by any caller presenting the same filler, exactly
+#     the hole the zero-width cases (i) closed for Cf.
+#
+# (ii) The comparison stripped BOTH sides (``(x or "").strip()``) before testing
+#      identity, which contradicts the documented "exact identity match": it made
+#      ``"creator@test.com "`` and ``"creator@test.com"`` the same principal. The
+#      blank DETERMINATION may normalize; the identity COMPARISON may not.
+
+# Each of these renders as nothing but survives NFKC as category Lo.
+_HANGUL_FILLER_BLANKS = [
+    ("hangul_filler", "ㅤ"),
+    ("hangul_choseong_filler", "ᅟ"),
+    ("hangul_jungseong_filler", "ᅠ"),
+    ("filler_with_spaces", "  ㅤ \t"),
+    ("filler_with_zwsp", "​ㅤ"),
+    ("two_fillers", "ㅤᅟ"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_authorship_is_admin_only_for_non_admin(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(k1) Filler as OWNER *and* as CALLER — the both-sides claim. A visually
+    empty author names nobody, so the row is admin-only."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via filler authorship"})
+    assert put.status_code == 403, (
+        f"PUT with {label} caller+owner -> {put.status_code} {put.text}"
+    )
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} caller+owner -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_owner_denies_a_real_caller(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(k2) Filler as OWNER only: a real caller must not inherit an author-less
+    row either."""
+    monkeypatch.setenv("DEV_USER_ID", OTHER)
+    ds = _seed(db_session, blank)
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_caller_cannot_claim_a_real_owner(
+    client, db_session, non_admin, monkeypatch, label, blank
+):
+    """(k3) Filler as CALLER only: a blank caller matches nobody."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, CREATOR)
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("label", "blank"),
+    _HANGUL_FILLER_BLANKS,
+    ids=[label for label, _ in _HANGUL_FILLER_BLANKS],
+)
+def test_hangul_filler_authorship_still_manageable_by_admin(
+    client, db_session, admin, monkeypatch, label, blank
+):
+    """(k4) The admin fallback still applies, so these rows stay cleanable."""
+    monkeypatch.setenv("DEV_USER_ID", blank)
+    ds = _seed(db_session, blank)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Adopted by an admin"})
+    assert resp.status_code == 200, resp.text
+
+
+# Identity pairs that differ ONLY by surrounding whitespace or by case. The
+# documented contract is an EXACT match, so each must be DENIED.
+_NON_IDENTICAL_IDENTITIES = [
+    ("owner_trailing_space", f"{CREATOR} ", CREATOR),
+    ("caller_trailing_space", CREATOR, f"{CREATOR} "),
+    ("owner_leading_space", f" {CREATOR}", CREATOR),
+    ("caller_leading_tab", CREATOR, f"\t{CREATOR}"),
+    ("case_differs_upper", CREATOR.upper(), CREATOR),
+    ("case_differs_caller", CREATOR, CREATOR.upper()),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "owner", "caller"),
+    _NON_IDENTICAL_IDENTITIES,
+    ids=[label for label, _, _ in _NON_IDENTICAL_IDENTITIES],
+)
+def test_identity_is_compared_exactly_without_mutual_stripping(
+    client, db_session, non_admin, monkeypatch, label, owner, caller
+):
+    """(k5) The comparison must not normalize either side. Mutual ``.strip()``
+    made a padded name the same principal as the bare one; case has always been
+    (and stays) significant."""
+    monkeypatch.setenv("DEV_USER_ID", caller)
+    ds = _seed(db_session, owner)
+
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, (
+        f"DELETE with {label} -> {delete.status_code} {delete.text}"
+    )
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+def test_exact_identity_match_still_authorizes_the_real_creator(
+    client, db_session, non_admin, as_creator
+):
+    """(k6) The exactness must not break the happy path it protects."""
+    ds = _seed(db_session, CREATOR)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by its author"})
+    assert resp.status_code == 200, resp.text
+
+
+# --- (l) BLANKNESS is a PROPERTY, not a list of code points ------------------
+#
+# Round 2 review: U+2800 BRAILLE PATTERN BLANK renders nothing but its category
+# is ``So`` (symbol), so the category test counted it as visible content and an
+# all-invisible identity authorized as CREATOR on an author-less row.
+#
+# The previous two rounds each added the specific code points that had just been
+# demonstrated (Cf/Cc/Zs/Zl/Zp, then the Hangul fillers). That is the pattern the
+# reviewer told us to stop: the property is "renders no visible glyph", and the
+# test below is table-driven over that property rather than over examples we
+# happened to think of.
+
+# Every character here renders as NOTHING. Grouped by why a category-only test
+# misses it, so a future reader can see the shape of the class.
+_NON_RENDERING = [
+    # Zs/Zl/Zp separators
+    ("space", " "),
+    ("ideographic_space_U3000", "　"),
+    ("nbsp_U00A0", " "),
+    ("ogham_space_U1680", " "),
+    ("en_quad_U2000", " "),
+    ("hair_space_U200A", " "),
+    ("narrow_nbsp_U202F", " "),
+    ("medium_math_space_U205F", " "),
+    ("line_separator_U2028", " "),
+    ("paragraph_separator_U2029", " "),
+    # Cf format
+    ("zwsp_U200B", "​"),
+    ("zwnj_U200C", "‌"),
+    ("zwj_U200D", "‍"),
+    ("lrm_U200E", "‎"),
+    ("word_joiner_U2060", "⁠"),
+    ("bom_UFEFF", "﻿"),
+    ("soft_hyphen_U00AD", "­"),
+    ("mongolian_vowel_sep_U180E", "᠎"),
+    # Cc control
+    ("tab", "\t"),
+    ("newline", "\n"),
+    ("nul", "\x00"),
+    # Lo letters that render nothing (the round-1 finding)
+    ("hangul_filler_U3164", "ㅤ"),
+    ("hangul_choseong_filler_U115F", "ᅟ"),
+    ("hangul_jungseong_filler_U1160", "ᅠ"),
+    # So symbol that renders nothing (the round-2 finding)
+    ("braille_blank_U2800", "⠀"),
+    # Mn combining mark with no standalone glyph
+    ("combining_grave_U0300", "̀"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "char"), _NON_RENDERING, ids=[label for label, _ in _NON_RENDERING]
+)
+def test_every_non_rendering_character_is_blank(label, char):
+    """The PROPERTY, asserted directly on the predicate: a string made only of
+    non-rendering characters names nobody."""
+    from src.api.routes.settings.design_systems import _is_blank_identity
+
+    assert _is_blank_identity(char), f"{label} was treated as visible content"
+    assert _is_blank_identity(char * 5)
+    # Mixed with each other, still blank.
+    assert _is_blank_identity(char + "⠀​ ㅤ")
+
+
+# NUL cannot travel through ``DEV_USER_ID``: ``os.environ`` rejects an embedded
+# null byte ("ValueError: embedded null byte"), so the END-TO-END case cannot be
+# expressed via the env var. The PREDICATE is still asserted for it above — that
+# is where NUL's blankness is pinned.
+_NON_RENDERING_ENV_SAFE = [
+    (label, char) for label, char in _NON_RENDERING if "\x00" not in char
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "char"),
+    _NON_RENDERING_ENV_SAFE,
+    ids=[label for label, _ in _NON_RENDERING_ENV_SAFE],
+)
+def test_non_rendering_identity_is_admin_only_end_to_end(
+    client, db_session, non_admin, monkeypatch, label, char
+):
+    """The authz consequence, through the real gate: caller AND owner both set to
+    the invisible value must NOT satisfy the creator branch."""
+    monkeypatch.setenv("DEV_USER_ID", char)
+    ds = _seed(db_session, char)
+
+    put = client.put(f"{BASE}/{ds.id}", json={"name": "Claimed via invisible identity"})
+    assert put.status_code == 403, f"PUT with {label} -> {put.status_code} {put.text}"
+    delete = client.delete(f"{BASE}/{ds.id}")
+    assert delete.status_code == 403, f"DELETE with {label} -> {delete.status_code}"
+    db_session.refresh(ds)
+    assert ds.name == "Acme Synthetic DS"
+    assert ds.is_active is True
+
+
+def test_reviewers_exact_braille_repro_denies(client, db_session, non_admin, monkeypatch):
+    """The reviewer's verbatim case: U+2800 as both caller and created_by."""
+    monkeypatch.setenv("DEV_USER_ID", "⠀")
+    ds = _seed(db_session, "⠀")
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+def test_a_visible_character_is_never_treated_as_blank():
+    """The inverse property. A FALSE DENY of a legitimate creator is also a
+    defect, so anything that renders must stay non-blank — including scripts and
+    symbols that a naive 'strip everything unusual' rule would eat."""
+    from src.api.routes.settings.design_systems import _is_blank_identity
+
+    for visible in (
+        "creator@test.com",
+        "a",
+        "0",
+        "-",
+        ".",
+        "_",
+        "ㅎ",              # real Hangul letter (NOT a filler)
+        "サイズ",           # Katakana
+        "Кириллица",       # Cyrillic
+        "🎨",              # emoji: So, but it DOES render
+        "⠁",              # braille with dots raised — renders
+        "⠀a⠀",   # invisible padding around a real character
+    ):
+        assert not _is_blank_identity(visible), f"{visible!r} was wrongly called blank"
+
+
+def test_normal_email_creator_is_still_allowed(client, db_session, non_admin, as_creator):
+    """End-to-end no-false-deny: identical raw values still authorize."""
+    ds = _seed(db_session, CREATOR)
+
+    resp = client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by its real author"})
+    assert resp.status_code == 200, resp.text
+
+
+# The exact-identity contract MUST NOT regress: the reviewer confirmed raw
+# trailing-space and case differences correctly DENY, and blankness normalization
+# must not quietly become a looser comparison.
+_STILL_DENIED = [
+    ("trailing_space_owner", f"{CREATOR} ", CREATOR),
+    ("trailing_space_caller", CREATOR, f"{CREATOR} "),
+    ("leading_space_owner", f" {CREATOR}", CREATOR),
+    ("case_upper_owner", CREATOR.upper(), CREATOR),
+    ("case_upper_caller", CREATOR, CREATOR.upper()),
+    ("braille_padded_owner", f"⠀{CREATOR}", CREATOR),
+    ("zwsp_padded_caller", CREATOR, f"{CREATOR}​"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "owner", "caller"),
+    _STILL_DENIED,
+    ids=[label for label, _, _ in _STILL_DENIED],
+)
+def test_exact_identity_contract_does_not_regress(
+    client, db_session, non_admin, monkeypatch, label, owner, caller
+):
+    monkeypatch.setenv("DEV_USER_ID", caller)
+    ds = _seed(db_session, owner)
+
+    assert client.delete(f"{BASE}/{ds.id}").status_code == 403, label
+    db_session.refresh(ds)
+    assert ds.is_active is True
+
+
+# --- clearing the org default UNFREEZES the creator (WD-01) -------------------
+
+
+def test_clearing_the_org_default_unfreezes_creator_rename(
+    client, db_session, production, monkeypatch, as_creator
+):
+    """The freeze must be a FUNCTION of is_default, in both directions.
+
+    A default that can be set but never removed left the freeze permanent: the
+    author lost rename/delete on their own upload for good, and D4's proven
+    legacy-fallback path was unreachable. Clearing the default is admin-only, so
+    this grants the creator nothing an admin could not already do — it just
+    returns the row to the non-default state where authorship works again.
+
+    Identical setup and caller on both sides; the ONLY thing that changes is the
+    org default, which is what makes the freeze condition load-bearing here.
+    """
+    ds = _seed(db_session, CREATOR, is_default=True)
+
+    def be_admin(is_admin: bool):
+        monkeypatch.setattr(production, "_admin_acl_probe", lambda user: is_admin)
+        production.reset_admin_cache()
+
+    # (1) FROZEN: the non-admin author may not rename their own org default.
+    be_admin(False)
+    assert client.put(f"{BASE}/{ds.id}", json={"name": "Nope"}).status_code == 403
+
+    # (2) An ADMIN removes the org default.
+    be_admin(True)
+    cleared = client.post(f"{BASE}/{ds.id}/clear-default")
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["is_default"] is False
+
+    # (3) UNFROZEN: the same non-admin author may manage it again.
+    be_admin(False)
+    renamed = client.put(f"{BASE}/{ds.id}", json={"name": "Mine again"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Mine again"
+
+
+def test_creator_non_admin_cannot_clear_the_org_default(
+    client, db_session, non_admin, as_creator
+):
+    """Removing org-wide state is admin-only, exactly like setting it — otherwise
+    the author could unfreeze their own row and then rename or delete it."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+    resp = client.post(f"{BASE}/{ds.id}/clear-default")
+    assert resp.status_code == 403, resp.text
+    db_session.refresh(ds)
+    assert ds.is_default is True, "a denied clear must not touch the org default"
