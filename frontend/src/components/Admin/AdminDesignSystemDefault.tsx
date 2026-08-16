@@ -8,8 +8,10 @@ import { useToast } from '../../contexts/ToastContext';
  * {@link AdminSlideStyleDefault}, deliberately mirroring its shape.
  *
  * Setting the org default is what makes a design system apply to new decks (the
- * flag was previously settable but never consumed). Because a design system
- * outranks the legacy default slide style, the copy says so explicitly.
+ * flag was previously settable but never consumed) FOR USERS WHO HAVE NOT CHOSEN
+ * A DEFAULT OF THEIR OWN — a personal default outranks this one. Because a
+ * design system also outranks the legacy default slide style, the copy says both
+ * things explicitly rather than promising every new deck.
  */
 export const AdminDesignSystemDefault: React.FC = () => {
   const [systems, setSystems] = useState<DesignSystemSummary[]>([]);
@@ -74,9 +76,11 @@ export const AdminDesignSystemDefault: React.FC = () => {
     <div>
       <h2 className="text-lg font-semibold text-gray-900 mb-2">Org Default Design System</h2>
       <p className="text-sm text-gray-500 mb-4">
-        The design system marked as the org default is preselected for every new deck —
-        including those created via MCP. A design system takes precedence over the
-        default slide style, so new decks use the brand rather than the style.
+        The design system marked as the org default is preselected for new decks —
+        including those created via MCP — for users who have not chosen a default of
+        their own. A user's personal default, set in the Design System or Slide Style
+        library, takes precedence over this one. Where the org default does apply, it
+        outranks the default slide style, so those decks use the brand.
       </p>
       {systems.length === 0 ? (
         <div className="text-sm text-gray-500">
