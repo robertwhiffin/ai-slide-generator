@@ -22,7 +22,6 @@ from src.utils.html_safety import (
     SLIDE_CSP_META,
     SLIDE_ROOT_RESET_STYLE,
     scan_html_for_unsafe_patterns,
-    slide_host_frame_style,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,27 +190,38 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     # There is NO 2000-char sheet-role classifier, despite what this comment used
     # to claim. Nothing in src/ or tests/ keys off a stylesheet's length; the tests
     # identify sheets POSITIONALLY (`blocks[0..2]`, `len(blocks) == 3`) and by
-    # content (the deck's sheet is the one equal to the deck's CSS verbatim). This
-    # sheet is already over that supposed cap at 2,098 chars, so budgeting against
-    # it would be budgeting against nothing. The real cost is the LLM budget above.
+    # content (the deck's sheet is the one equal to the deck's CSS verbatim), so
+    # budgeting against that supposed cap would be budgeting against nothing. The
+    # real cost is the LLM budget above.
     # Pinned by tests/unit/test_preview_box_model_parity.py.
     #
-    # THE FRAME CONTRACT GOES IN THIS SHEET ONLY, NEVER SHEET 2 (WF-03). Sheet 2
-    # must stay byte-equal to the deck's own CSS, or a deck whose CSS opens with
-    # `@import url(fonts.googleapis…)` loses its webfont: `@import` is only valid
-    # before every other rule of ITS OWN stylesheet. Pinned by
-    # tests/unit/test_export_deck_stylesheet.py.
+    # NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. A contract framing `body`
+    # and stretching its CHILD to `position: absolute !important; inset: 0
+    # !important; width/height: 100% !important` was injected into this sheet at
+    # 0.4.2.dev17 and is REVERTED, because on the huashu path it destroys tables.
     #
-    # WHY THE CONTRACT IS HERE AT ALL. A design-system-pinned deck nests the slide
-    # two levels deep: a `<section>` carries the slide ground via a bare TYPE
-    # selector, and inside it `.slide` is `position: absolute; inset: 0`. The
-    # wrapper holds no in-flow content, collapses to height 0, and the ground it
-    # carries never paints — the deck's own dark `html, body` shows through at
-    # contrast 1.3025. Five preview surfaces injected this contract; no export
-    # builder did. Latent on this path today (the huashu sidecar reads
+    # `services/pptx-emit-huashu/preprocess.mjs::flattenTables()` reads every
+    # `<td>/<th>`'s bounding rect and re-emits each cell as an absolutely
+    # positioned <div> carrying its own `left/top/width/height` as NON-important
+    # INLINE styles, then calls `document.body.appendChild(div)`. Every cell is
+    # therefore a DIRECT CHILD of `body` by the time the walker runs, so a
+    # stylesheet `!important` rule on `body > *` outranks each cell's inline
+    # position and collapses all of them onto one rect. Measured on a real
+    # 21-cell deck: distinct cell rects in ppt/slides/slide1.xml went 42 -> 11,
+    # with 12 shapes stacked at (12.0, 349.8) and 12 more at (0.0, 719.5).
+    #
+    # The document itself is unchanged by this — `body` has exactly one rendered
+    # child before scripts run — so a document-level geometry probe reads 0.00 px
+    # and is structurally blind to the defect. It is an EMIT-TIME regression; only
+    # diffing the emitted slide XML can see it.
+    #
+    # What the contract was for (a section-wrapped design-system deck whose ground
+    # never paints) is handled on the capture surfaces by aiming at the slide ROOT
+    # instead — see `findSlideRoot` in frontend/src/services/slideDocument.ts. That
+    # locator injects no CSS, so it cannot perturb huashu geometry. This path never
+    # needed the contract regardless: the sidecar reads
     # `getComputedStyle(root).backgroundColor`, and a 1280x0 element still computes
-    # the right colour, so the .pptx was immune BY CONSTRUCTION) — but the
-    # divergence is real and this is where it stops being one.
+    # the right colour, so the .pptx was immune here BY CONSTRUCTION.
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -263,8 +273,6 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
        shifts content past the clip and truncates the export's bottom edge
        (same neutralization as every other surface). */
     {SLIDE_ROOT_RESET_STYLE}
-    /* After deck CSS: the shared slide-host frame contract. */
-    {slide_host_frame_style("body")}
   </style>
 </head>
 <body>
