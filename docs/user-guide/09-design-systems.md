@@ -49,7 +49,7 @@ Pick a design system in the agent config bar. That choice is saved on the deck, 
 The app fills the empty slot once, in this order, and **stops at the first one that applies**:
 
 1. **Your personal design-system default** — **Set as default** in the library. Remembered **in this browser only**.
-2. **Your personal slide-style default**, if you have one and no personal design-system default. This is the case that surprises people: a personal *style* default takes the slot and **the organisation's design system is then not applied at all**.
+2. **Your personal slide-style default** — if you have one, you have no personal design-system default, *and* the deck's starting point already carries some slide style. That last condition is easy to miss: the preference replaces a style, it does not introduce one, so a starting point holding no style at all skips this step. When it does apply, this is the case that surprises people: a personal *style* default takes the slot and **the organisation's design system is then not applied at all**.
 3. **The organisation default design system**, if an admin has set one.
 4. **The workspace's default slide style**, if there is no org design system.
 
