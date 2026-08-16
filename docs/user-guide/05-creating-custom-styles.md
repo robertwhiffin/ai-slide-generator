@@ -120,7 +120,7 @@ The rendering pipeline has structural requirements that **cannot be overridden**
 
 | Constraint | Detail |
 |---|---|
-| **Slide wrapper must be `<div class="slide">`** | The parser uses `find_all('div', class_='slide')` at every stage — parsing, editing, validation. A `<section>`, `<article>`, or any other element produces zero slides. |
+| **Slide wrapper must carry `class="slide"`** | Discovery keys on the `slide` **class token**, not on the tag name, so `<div class="slide">` and `<section class="slide">` both work (design-system templates use the latter). What produces zero slides is an element **without** that class. |
 | **Dimensions: 1280×720px** | The frontend iframe, presentation mode, and all export paths assume this fixed size. |
 | **No presentation frameworks** | Do not instruct the AI to use reveal.js, Slidev, Impress.js, Marp, or any framework. These use incompatible DOM structures. |
 | **CSS must be in `<style>` blocks** | The parser extracts CSS from `<style>` tags only. `<link>` references to external stylesheets are ignored. |

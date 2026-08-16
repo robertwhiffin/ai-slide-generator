@@ -161,7 +161,7 @@ Users set their personal defaults via the "Set as default" button on each settin
 | 5 | Server default slide style (`is_default`) | workspace | **admin only** |
 | 6 | Protected `is_system` style, then a hardcoded constant | — | — |
 
-**Tier 3 does not fire on a fresh surface.** That branch is gated on an *incoming* non-null style, and on both the fresh-surface and new-session resolve paths the incoming style is null — so on a genuinely new deck the org design system (tier 4) wins over a personal style default. The `/admin` → Design System panel's helper text currently claims otherwise; the copy is wrong, not the ladder.
+**Treat the table as the sources consulted, not as one uniform ordering.** Resolution is path-dependent: the context has to reconcile an incoming config, a mirrored pre-session config and a default profile as well as these preferences, and which one wins differs between a first render, a restored session and a newly created one. A personal slide-style default **is** seeded on initial render, so it is not correct to say it never applies to a new deck. The server-side chain (`agent_factory`) is the only part that always holds, and it is short: `design_system_id` → `slide_style_id` → the default style constant, each looked up with `is_active = true`.
 
 **Clearing a personal default releases the config slot, not just the localStorage key.** Removing only the key would leave the resolved id in the mirrored config, so the lower tier would never take effect. Clearing hands the slot back, and the next tier applies on the same surface with no reload.
 
@@ -332,13 +332,13 @@ interface SlideStyle {
 | `src/components/config/DeckPromptForm.tsx` | Modal form for creating/editing deck prompts with Monaco editor | None (callback props) |
 | `src/components/config/SlideStyleList.tsx` | Slide style library management: list, create, edit, delete styles | `configApi.listSlideStyles`, `configApi.createSlideStyle`, `configApi.updateSlideStyle`, `configApi.deleteSlideStyle` |
 | `src/components/config/SlideStyleForm.tsx` | Modal form for creating/editing slide styles with Monaco editor | None (callback props) |
-| `src/components/DesignSystem/DesignSystemLibrary.tsx` | Design system library: list, personal default, delete | `/api/settings/design-systems` |
-| `src/components/DesignSystem/DesignSystemDetailPanel.tsx` | Detail panel: templates, tokens, assets, files | `GET /design-systems/{id}` |
-| `src/components/DesignSystem/DesignSystemUploadDialog.tsx` | Bundle upload | `POST /design-systems/import` |
-| `src/components/DesignSystem/DesignSystemFileBrowser.tsx` | Browse and serve bundle files | `GET /design-systems/{id}/files` |
-| `src/components/DesignSystem/TemplateThumbnail.tsx` | Template picker image | `GET /templates/{id}/thumbnail` |
-| `src/components/DesignSystem/TemplateViewerModal.tsx` | Full-size template preview with paging | `GET /templates/{id}/source` |
-| `src/components/DesignSystem/templatePreviewDoc.ts` | Builds the sandboxed preview document for a template | None (pure) |
+| `src/components/config/DesignSystemLibrary.tsx` | Design system library: list, personal default, delete | `/api/settings/design-systems` |
+| `src/components/config/DesignSystemDetailPanel.tsx` | Detail panel: tokens, assets, plus templates and files via their own endpoints | `GET /design-systems/{id}` |
+| `src/components/config/DesignSystemUploadDialog.tsx` | Bundle upload | `POST /design-systems/import` |
+| `src/components/config/DesignSystemFileBrowser.tsx` | Browse and serve bundle files | `GET /design-systems/{id}/files` |
+| `src/components/config/TemplateThumbnail.tsx` | Template picker image; renders a live preview when no stored thumbnail exists | `GET /templates/{id}/thumbnail` |
+| `src/components/config/TemplateViewerModal.tsx` | Full-size template preview with paging | `GET /templates/{id}/source` |
+| `src/components/config/templatePreviewDoc.ts` | Builds the sandboxed preview document for a template | None (pure) |
 | `src/components/Admin/AdminDesignSystemDefault.tsx` | **Admin only.** Sets/clears the workspace org default | `POST /design-systems/{id}/set-default`, `/clear-default` |
 | `src/components/UpdateBanner/UpdateBanner.tsx` | Displays update notification when new version available; different messaging for patch vs major updates | None (props only) |
 | `src/hooks/useVersionCheck.ts` | Checks PyPI for new versions on app load via direct `fetch`; returns update availability and type | `GET /api/version/check` (direct fetch, not via `api` object) |
@@ -489,12 +489,12 @@ The version check is performed via a direct `fetch` call inside the `useVersionC
 | `pollPPTXExport` | GET | `/api/export/pptx/poll/{id}` | – | `{ status, progress?, error? }` |
 | `downloadPPTX` | GET | `/api/export/pptx/download/{id}` | – | `Blob` |
 | `exportPptxHuashu` | POST | `/api/export/pptx/editable/huashu/from-html` | `{ session_id }` | `Blob` — **Primary.** The route the Export → PowerPoint button calls |
-| `exportPptxEditable` | POST | `/api/export/pptx/editable/from-records` | `{ session_id, … }` | `Blob` — **Fallback**, used only when the huashu route returns 503 |
-| `exportToGoogleSlides` | POST | `/api/export/google-slides/from-huashu` | `{ session_id }` | `{ presentation_id, presentation_url }` |
+| `exportPptxEditable` | POST | `/api/export/pptx/editable/from-records` | `{ session_id, … }` | `Blob` — **Fallback** |
+| `exportToGoogleSlides` | POST | `/api/export/google-slides/from-huashu` | `{ session_id }` | `{ presentation_id, presentation_url, total_slides, succeeded, failures }` |
 
-**PPTX and Google Slides no longer share one pattern.** PPTX goes through the huashu render (with the records pipeline as its 503 fallback); Google Slides is a **single synchronous round-trip** that uploads the rendered PPTX to Drive and lets Drive convert it. Chart images are captured client-side before submission to preserve Chart.js visualizations.
+**PPTX and Google Slides no longer share one pattern.** Both call the huashu render first, and Google Slides succeeds in a **single synchronous round-trip** carrying only `session_id`. Both also have a records-pipeline fallback, which fires on a `503` **or** when the error text indicates the pipeline is unavailable or still installing — so it is not status-code-only. Client-side chart and DOM extraction happens **only** on the fallback request, not on the primary one.
 
-> **Historical note.** `exportPPTXAsync` / `pollPPTXExport` / `downloadPPTX` above target the LLM code-generation path (`POST /api/export/pptx/async`, `src/services/html_to_pptx.py`). That path is **superseded** and has no production callers — no UI surface reaches it. The code still exists but should be treated as legacy. See [Export Features](export-features.md).
+> **Historical note.** `exportPPTXAsync` / `pollPPTXExport` / `downloadPPTX` above target the LLM code-generation path (`POST /api/export/pptx/async`, `src/services/html_to_pptx.py`). That path is **superseded** and no UI surface reaches it — a repo-wide search finds no caller in the checked-in frontend. That cannot rule out an external caller invoking the route directly. The code still exists but should be treated as legacy. See [Export Features](export-features.md).
 
 ### Configuration API (`src/api/config.ts`)
 

@@ -48,9 +48,9 @@ def from_html_string(cls, html_content: str) -> 'SlideDeck':
     soup = BeautifulSoup(html_content, 'html.parser')
     
     # Phase 1: Parse slides and build canvas-to-slide index
-    # Slide roots are discovered by TAG SET, not by tag name - see
-    # "Slide root discovery" below. A <section class="slide"> root is as
-    # valid as a <div class="slide"> one.
+    # Slide roots are discovered by the `slide` CLASS TOKEN, independent of
+    # tag name - see "Slide root discovery" below. A <section class="slide">
+    # root is as valid as a <div class="slide"> one.
     slide_elements = find_slide_roots(soup)
     slides = []
     canvas_to_slide: Dict[str, int] = {}  # canvas_id -> slide_index
@@ -166,9 +166,9 @@ def merge_css(existing_css: str, replacement_css: str) -> str:
 
 ### 2b. Slide Root Discovery
 
-**A slide root is identified by a tag set, not by a tag name.** Both `<div class="slide">` and `<section class="slide">` are valid roots — design-system templates use the latter — so any code that locates slides must go through the shared discovery helper rather than matching on `div`.
+**A slide root is identified by the `slide` class token, independent of tag name** (`find_slide_roots`, `src/utils/html_utils.py`). Both `<div class="slide">` and `<section class="slide">` are valid roots — design-system templates use the latter — so any code that locates slides must go through the shared helper rather than matching on `div`.
 
-**A wrapper around the slide root is promoted through.** Where a template wraps its slide in an outer element, the parser resolves to the intended root rather than treating the wrapper as the slide. This matters because the wrapper commonly carries the deck background: mistaking one for the other yields a slide with no background, or a background element treated as a slide.
+**Some wrappers are promoted through, but not all.** `_promote_through_slide_wrapper` resolves past an outer element only when it is a **sole-child semantic `section` or `article`**. A generic `div` wrapper, or any wrapper with more than one child, is **not** promoted. This matters because a wrapper commonly carries the deck background: mistaking one for the other yields a slide with no background, or a background element treated as a slide.
 
 **Breaking this contract does not raise.** A `div`-only match against a `<section>`-rooted deck simply finds **zero** slides, which surfaces as an empty deck rather than an error — so a parser change must be tested against a `<section>`-rooted deck specifically. See [Slide Host Frame Contract](slide-host-frame-contract.md).
 

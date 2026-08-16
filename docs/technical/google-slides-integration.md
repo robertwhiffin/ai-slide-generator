@@ -249,7 +249,8 @@ Affects the exported artifact only; the on-screen deck is unaffected.
 **Tables are not native tables.** The huashu emitter produces no records for
 `<td>`/`<th>`, so cells are flattened to absolutely-positioned text boxes: the
 layout is faithful but the result is not editable *as a table* in PowerPoint or
-Slides. This is by design. See [Export Features](./export-features.md).
+Slides. This is current behaviour of the flattening approach rather than a
+stated product contract. See [Export Features](./export-features.md).
 
 ### Records PPTX pipeline (`src/services/pptx_from_records.py`)
 

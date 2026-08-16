@@ -255,15 +255,15 @@ class DesignSystem(Base):
     is_default: bool                 # The workspace org default. Settable only from /admin -> "Design System"
     is_active: bool                  # False = soft-deleted (hidden, not gone - see below)
     version: int
-    manifest_json: dict | None       # The parsed design-system.json
+    manifest_json: dict | None       # The parsed _ds_manifest.json (tokens[], templates[], cards[])
     compiled_style_content: str|None # The flattened prompt artifact; stamped with COMPILER_VERSION
-    font_mapping_json: dict | None   # Font-family -> asset mapping
+    font_mapping_json: dict | None   # Font families -> weight/style variants, paths and token linkage
     created_at: datetime
     updated_by: str | None
     updated_at: datetime
 ```
 
-**Soft delete is retention, not tidiness.** `is_active=False` hides the row and stops it being selected for new decks, but its asset bytes remain servable on purpose: stored decks embed `{{ds-asset:ID}}` handles inside `@font-face src:` declarations, so 404ing them would strip fonts and images from every historic deck. `?hard_delete=true` is the permanent verb. The generation path filters on `is_active`; the render and asset paths deliberately do not.
+**Soft delete retains the bytes; it does not guarantee a stored deck still resolves them.** `is_active=False` hides the row and stops it being selected for new decks, and the asset route keeps serving its bytes. But resolving a `{{ds-asset:ID}}` handle also needs the deck's stored `design_system_id`, and reading a session's agent config **clears and persists** that pin when the referenced system is inactive. `?hard_delete=true` is the permanent verb. See [Design System Library §7](design-system-library.md) for the per-surface behaviour.
 
 **`compiled_style_content` currency is an exact version match.** A stored artifact is current only when its stamp equals the running `COMPILER_VERSION`, so **any change to compiler output must bump the version** or existing rows are never recompiled.
 
@@ -294,12 +294,12 @@ Normalised colour, type and spacing tokens.
 class DesignSystemToken(Base):
     id: int
     design_system_id: int            # FK -> design_system.id
-    group: str                       # core | accents | ink | tints | type | spacing
+    group: str                       # Free text. Common values: core, accents, ink, tints, type, spacing, shadow
     name: str                        # Normalised identifier - a leading `--` and a `brand-` namespace are stripped
     value: str
 ```
 
-**Identifiers are normalised before insert**, so the manifest name `--brand-core-primary` and the CSS variable `primary` reduce to one identifier and one row rather than two.
+**Identifiers are normalised before comparison**, so the manifest name `--brand-core-primary` and the CSS variable `primary` reduce to one identifier. **Deduplication requires a matching name *and* value** — the same identifier declared with two different values remains two rows.
 
 ### DesignSystemFile
 
@@ -317,7 +317,7 @@ class DesignSystemFile(Base):
     asset_id: int | None             # FK -> design_system_asset.id; avoids storing the same bytes twice
 ```
 
-**A file row either holds bytes or points at an asset, not both** — so a file that duplicates an already-imported asset does not double the storage.
+**The importer populates either `data` or `asset_id`, not both** — so a file duplicating an already-imported asset does not double the storage. Note this is an **importer convention, not a database constraint**: both columns are nullable and there is no `CHECK`/XOR, so another writer could populate both or neither.
 
 ### DesignSystemTemplate
 
@@ -335,7 +335,7 @@ class DesignSystemTemplate(Base):
     thumbnail_asset_id: int | None   # NULL when the bundle shipped no `.thumbnail` for this template
 ```
 
-**A NULL `thumbnail_asset_id` means the bundle omitted `templates/<slug>/.thumbnail`** — dot-prefixed and extension-less. The template still works; it just has no preview image in the picker. See [Design System Bundle Format](design-system-bundle-format.md).
+**A NULL `thumbnail_asset_id` has two causes:** the bundle shipped no recognised preview for that template (either `.thumbnail` or `preview.<ext>`), or the referenced asset was deleted — the FK is `ON DELETE SET NULL`. Either way the template still works, and the frontend can render a live preview from the template's own HTML instead. See [Design System Bundle Format](design-system-bundle-format.md).
 
 ### GoogleGlobalCredentials
 

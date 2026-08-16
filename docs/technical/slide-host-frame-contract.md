@@ -8,9 +8,9 @@
 
 A slide is authored once and rendered in seven places: four preview surfaces, a pop-out viewer, presentation mode, and the export builders. They share no rendering code, so consistency is a **contract** rather than a consequence.
 
-The contract has three rules. Each has been broken at least once, and each break produced a defect that a passing test suite did not catch — so each rule is documented here with its failure mode.
+The contract has three rules, each documented with the failure mode it produces when violated — because in every case the failure is silent rather than an error.
 
-Ground truth for these rules is the reference design system's own rendering. When a surface and ground truth disagree, **ground truth wins** — not the majority of surfaces.
+**The reference for "correct" is the source design system's own rendering, not agreement between surfaces.** Note that the parity tests compare against a reference bundle that is **not vendored in this repository** (`tests/.../test_preview_box_model_parity.py`), so the reference rendering cannot be reproduced from a clean checkout — the tests skip without it. Treat the rules below as the contract; the measurements that established them are not reproducible here.
 
 ---
 
@@ -20,7 +20,7 @@ Every slide occupies a fixed 16:9 frame, positioned at the origin of its host. B
 
 **Why the wrapper matters.** Design-system templates wrap the slide root in a `<section>` that carries the deck background. If that wrapper is allowed to collapse to zero height, its background paints nothing and whatever sits behind it shows through instead.
 
-**Failure mode — dark-on-dark.** A collapsed wrapper over a dark page background produces dark text on a dark ground at a contrast ratio near 1.3:1 — unreadable, and invisible to any check that measures element *positions*, because nothing moves. Its signature is a contrast ratio in the 1.25–1.35 band; if you see one, suspect a collapsed wrapper before suspecting the palette.
+**Failure mode — dark-on-dark.** A collapsed wrapper over a dark page background leaves dark text on a dark ground: unreadable, and invisible to any check that measures element *positions*, because nothing moves. If you measure a very low contrast ratio on text that looks correctly coloured in the source, suspect a collapsed wrapper before suspecting the palette.
 
 **Do not diagnose this from computed style.** Where a background image or gradient is involved, `getComputedStyle` reports the declared value regardless of whether anything painted. **Sample the painted pixel.**
 
@@ -30,15 +30,15 @@ Every slide occupies a fixed 16:9 frame, positioned at the origin of its host. B
 
 **Slide content uses the browser default box model (`content-box`).** No surface may introduce a universal `* { box-sizing: border-box }` rule.
 
-This is counter-intuitive, so it is worth stating plainly: the reference design system's templates declare **no** `box-sizing` at all, and the rules that do exist in its stage component are **scoped to specific containers**. Slide content therefore inherits the UA default, and a surface that "helpfully" normalises the box model diverges from ground truth.
+This is counter-intuitive, so it is worth stating plainly: slide content is expected to inherit the UA default, and a surface that "helpfully" normalises the box model diverges from the source rendering rather than converging on it.
 
 **Failure mode — surfaces agreeing with each other and all being wrong.** A universal rule added to *some* surfaces makes those surfaces disagree with the rest; added to *all* surfaces it makes them agree with each other while every one of them diverges from ground truth. The second case is the dangerous one, because inter-surface parity tests pass.
 
 > **Inter-surface agreement is not a correctness oracle.** A test asserting that all preview surfaces match one another will pass when every surface is wrong in the same way. Any parity assertion must compare against ground truth, not against a sibling surface.
 
-**Where the resets belong.** Margin, padding and `box-sizing` resets are scoped to `html, body`, which works precisely because `box-sizing` does not inherit — the document shell is normalised while slide content keeps the UA default.
+**Where the resets belong.** Shell resets are narrow rather than universal, and they are not uniform across builders: the Python slide builder's shell reset omits `box-sizing` entirely, while the preview host applies `box-sizing: border-box` to the host's **direct child**. What matters is that no rule reaches slide content generally — which works because `box-sizing` does not inherit.
 
-**Deleting the shell reset is not the fix either.** Removing it entirely lets the export shell overflow its own frame, because the document sizes itself with `width: 100%` and then pads `body`. Scope it; do not delete it.
+**Deleting a shell reset is not the fix either.** Removing the margin/padding reset lets the export shell overflow its own frame, because the document sizes itself with `width: 100%` and then pads `body`. Narrow them; do not delete them.
 
 ---
 
@@ -48,9 +48,9 @@ This is counter-intuitive, so it is worth stating plainly: the reference design 
 
 **Failure mode — silent webfont loss.** Concatenating injected resets ahead of the deck's CSS pushes the `@import` out of first position, the browser discards it, and the export renders in a fallback face. Nothing errors; the file simply comes out in the wrong typeface.
 
-**The contract.** Emit injected resets as **separate `<style>` elements**, before and after the deck's own stylesheet, and pass the deck's CSS through **verbatim**. Cascade order between style elements follows document order, so precedence is unchanged.
+**The contract.** The deck's CSS must be passed through **verbatim** with nothing prepended to it. The Python `build_slide_html` builder satisfies this by emitting injected resets as **separate `<style>` elements** around the deck's own sheet; `buildStandaloneDeckDocument` instead concatenates deck and wrapper CSS into a single `<style>` and stays correct only because the deck's CSS is placed first within it. The separate-element form is the more robust of the two, since it cannot be broken by a later change to concatenation order.
 
-This also removes a class of parsing bug entirely: with the deck's CSS in its own sheet, there is no need to *find* the leading `@import` in order to hoist it — and hand-written CSS tokenizers are where several defects lived before the restructure. **Prefer restructuring over parsing.**
+Either way, note what this avoids: there is no need to *find* the leading `@import` in order to hoist it, and hand-written CSS tokenizers are a recurring source of defects. **Prefer restructuring over parsing.**
 
 ---
 
@@ -77,7 +77,7 @@ The contract is easy to test badly. Four rules, each learned from a check that p
 | **Anchor geometry probes at the slide root, not at `.slide`** | A `.slide` that is `position: absolute; inset: 0` resolves against its containing block and reports the full frame **even when its wrapper has collapsed** — so the probe reads healthy on the exact defect it was written to catch. |
 | **Never use settle-to-stable screenshots for a transient defect** | Waiting for two identical captures structurally discards the unsettled window. A frame-timeline capture is required for anything that appears during navigation or load. |
 
-And one rule about the corpus rather than the instrument: **a deck that declares its own universal `box-sizing` is immune to box-model defects.** A corpus composed only of such decks cannot exhibit the failure, so a green result across it means nothing. Fixture selection must include a deck that relies on the host contract.
+And one rule about the corpus rather than the instrument: **a deck that declares its own universal `box-sizing` is immune to box-model defects.** A corpus composed only of such decks cannot exhibit the failure, so a green result across it means nothing. Fixture selection must include a deck that relies on the host contract — which is harder than it sounds here, since the reference bundle is not vendored.
 
 ---
 

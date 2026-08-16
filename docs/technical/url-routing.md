@@ -28,7 +28,7 @@ No backend changes were required — the existing FastAPI catch-all route alread
 | `/slide-styles` | `AppLayout` | `slide_styles` | Slide style library |
 | `/design-systems` | `AppLayout` | `design_systems` | Design system library |
 | `/images` | `AppLayout` | `images` | Image library |
-| `/admin` | `AdminPage` | — | Admin dashboard (separate component, not `AppLayout`) |
+| `/admin` | `AdminPage` wrapped in `RequireAdmin` | — | Admin dashboard (separate component, not `AppLayout`). Six tabs: Usage, Feedback, Google Slides, Design System, Slide Style, Judge |
 | `/feedback` | redirect | — | Redirects to `/admin` |
 | `/sessions/:sessionId/edit` | `AppLayout` | `main` | Full editing: chat + slides |
 | `/sessions/:sessionId/view` | `AppLayout` | `main` + `viewOnly` | Read-only viewer |
@@ -57,7 +57,7 @@ function AppRoutes() {
       <Route path="/design-systems" element={<AppLayout key={layoutKey} initialView="design_systems" />} />
       <Route path="/images" element={<AppLayout key={layoutKey} initialView="images" />} />
       <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
-      <Route path="/admin" element={<AdminPage />} />
+      <Route path="/admin" element={<RequireAdmin><AdminPage /></RequireAdmin>} />
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
@@ -67,7 +67,7 @@ function AppRoutes() {
 }
 ```
 
-The `/admin` route renders a dedicated `AdminPage` component instead of `AppLayout`. The `/feedback` route redirects to `/admin`, and the catch-all `*` route redirects unknown paths to `/`.
+The `/admin` route renders a dedicated `AdminPage` component instead of `AppLayout`, wrapped in `RequireAdmin` — a client-side guard that redirects a non-admin away. That guard is cosmetic; the server-side `require_admin` dependency on the admin API routes is the actual control. See [Permissions Model](permissions-model.md). The `/feedback` route redirects to `/admin`, and the catch-all `*` route redirects unknown paths to `/`.
 
 ### Setup Check
 
