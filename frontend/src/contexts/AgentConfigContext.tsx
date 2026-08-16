@@ -42,6 +42,13 @@ interface AgentConfigContextValue {
   updateToolEntry: (tool: ToolEntry) => Promise<void>;
   setStyle: (styleId: number | null) => Promise<void>;
   setDesignSystem: (designSystemId: number | null) => Promise<void>;
+  /**
+   * Set (or, with `null`, release) the user's PERSONAL default design system —
+   * a browser-local preference; the org-wide default is an admin setting under
+   * /admin. Stores the preference AND applies it to the working config, so the
+   * effect is visible on the surface the user is standing on.
+   */
+  setUserDefaultDesignSystem: (designSystemId: number | null) => Promise<void>;
   setTemplate: (templateId: number | null) => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
@@ -926,6 +933,37 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     });
   }, [agentConfig, updateConfig]);
 
+  /**
+   * The user's PERSONAL default design system: store the preference, and move
+   * the style slot with it.
+   *
+   * Applying one is just `setDesignSystem`, which already owns the exclusivity
+   * rule. RELEASING one has to do the same work in reverse, and that is the
+   * whole reason this lives here rather than in the settings page: the working
+   * config is mirrored to localStorage and that mirror is AUTHORITATIVE once
+   * present, while the resolver short-circuits on a `design_system_id` that is
+   * already set. A release that only dropped the preference key would therefore
+   * leave the already-resolved design system winning until some genuinely fresh
+   * surface came along — indistinguishable, to the user, from a control that
+   * does nothing. So the slot is handed back to the personal style default here
+   * and now, and the dependent template pin goes with the design system.
+   */
+  const setUserDefaultDesignSystem = useCallback(async (designSystemId: number | null) => {
+    if (designSystemId != null) {
+      localStorage.setItem(USER_DEFAULT_DESIGN_SYSTEM_KEY, String(designSystemId));
+      await setDesignSystem(designSystemId);
+      return;
+    }
+    localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+    await updateConfig({
+      ...agentConfig,
+      design_system_id: null,
+      template_id: null,
+      slide_style_id: userPreferredStyleId(),
+      style_source: 'user',
+    });
+  }, [agentConfig, setDesignSystem, updateConfig]);
+
   const setTemplate = useCallback(async (templateId: number | null) => {
     await updateConfig({ ...agentConfig, template_id: templateId });
   }, [agentConfig, updateConfig]);
@@ -1051,6 +1089,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     updateToolEntry,
     setStyle,
     setDesignSystem,
+    setUserDefaultDesignSystem,
     setTemplate,
     setDeckPrompt,
     saveAsProfile,

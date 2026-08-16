@@ -6,7 +6,9 @@
  *    org-default badge), mirroring SlideStyleList
  *  - a detail panel (templates, color tokens, brand assets) via GET /{id}
  *  - the headline "Upload design system" control (POST .zip to /import)
- *  - Set-as-org-default and soft Delete, mirroring slide-style patterns
+ *  - a PERSONAL default (browser-local) and soft Delete, mirroring slide-style
+ *    patterns. The ORG-WIDE default is an admin action and lives under /admin:
+ *    this page is per-user, so every user can use all of it.
  *  - a minimal "New" placeholder (the full structured editor is a later phase)
  *
  * Everything rendered here is RUNTIME data from the API — no brand content is
@@ -19,6 +21,10 @@ import { Button } from '@/ui/button';
 import { Badge } from '@/ui/badge';
 import { configApi } from '../../api/config';
 import type { DesignSystemSummary, DesignSystemDetail } from '../../api/config';
+import {
+  USER_DEFAULT_DESIGN_SYSTEM_KEY,
+  useAgentConfig,
+} from '../../contexts/AgentConfigContext';
 import { ConfirmDialog } from './ConfirmDialog';
 import { DesignSystemDetailPanel } from './DesignSystemDetailPanel';
 import { DesignSystemUploadDialog } from './DesignSystemUploadDialog';
@@ -28,9 +34,16 @@ function pluralize(count: number, noun: string): string {
 }
 
 export const DesignSystemLibrary: React.FC = () => {
+  const { setUserDefaultDesignSystem } = useAgentConfig();
+
   const [systems, setSystems] = useState<DesignSystemSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [userDefaultId, setUserDefaultId] = useState<number | null>(() => {
+    const stored = localStorage.getItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+    return stored ? Number(stored) : null;
+  });
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<DesignSystemDetail | null>(null);
@@ -88,28 +101,39 @@ export const DesignSystemLibrary: React.FC = () => {
   }, [loadSystems]);
 
   /**
-   * TOGGLE the org default. Setting it was always available; REMOVING it had no
-   * route and no control at all, so the lifecycle was one-way — withdrawing a
-   * default meant deleting the design system or promoting a different one, and the
-   * legacy slide-style fallback was unreachable. Both directions are admin-only.
+   * PRUNE a stale preference: a stored id whose design system has since been
+   * deleted or deactivated is not a default any more, and leaving it in place
+   * lets it keep claiming the style slot on every new surface for a design
+   * system that can no longer be shown or selected.
+   *
+   * Gated on a SUCCESSFUL load rather than on a non-empty list, so that deleting
+   * your only design system prunes the preference too, while a failed list
+   * request never discards it.
    */
-  const handleToggleDefault = useCallback(async (system: DesignSystemSummary) => {
-    setActionId(system.id);
-    try {
-      if (system.is_default) {
-        await configApi.clearDesignSystemDefault(system.id);
-      } else {
-        await configApi.setDesignSystemDefault(system.id);
-      }
-      await loadSystems();
-      if (selectedId === system.id) await selectSystem(system.id);
-    } catch (err) {
-      const action = system.is_default ? 'clear' : 'set';
-      setError(err instanceof Error ? err.message : `Failed to ${action} default`);
-    } finally {
-      setActionId(null);
-    }
-  }, [loadSystems, selectSystem, selectedId]);
+  useEffect(() => {
+    if (loading || error != null || userDefaultId == null) return;
+    if (systems.some((system) => system.id === userDefaultId && system.is_active)) return;
+    localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+    setUserDefaultId(null);
+  }, [systems, loading, error, userDefaultId]);
+
+  /**
+   * The user's PERSONAL default — browser-local, no server call and no authz, so
+   * it is available to every user. The ORG-WIDE default is a different thing
+   * with a different audience and lives under /admin; this control used to call
+   * that admin endpoint from a per-user page, which meant one user's click
+   * silently re-branded every other user's new decks (and simply 403'd, tearing
+   * the page down, for everyone who was not an admin).
+   */
+  const handleSetPersonalDefault = useCallback(async (system: DesignSystemSummary) => {
+    setUserDefaultId(system.id);
+    await setUserDefaultDesignSystem(system.id);
+  }, [setUserDefaultDesignSystem]);
+
+  const handleClearPersonalDefault = useCallback(async () => {
+    setUserDefaultId(null);
+    await setUserDefaultDesignSystem(null);
+  }, [setUserDefaultDesignSystem]);
 
   const handleDelete = useCallback((system: DesignSystemSummary) => {
     setConfirmDialog({
@@ -259,23 +283,30 @@ export const DesignSystemLibrary: React.FC = () => {
 
                         {/* Actions */}
                         <div className="flex shrink-0 items-center gap-1">
-                          {(system.is_default || system.is_active) && (
+                          {system.id === userDefaultId && (
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-8 px-2 text-xs text-muted-foreground"
-                              disabled={actionId === system.id}
-                              title={
-                                system.is_default
-                                  ? 'Remove the org default — generation falls back to the slide-style default'
-                                  : undefined
-                              }
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleToggleDefault(system);
+                                void handleClearPersonalDefault();
                               }}
                             >
-                              {system.is_default ? 'Clear org default' : 'Set as org default'}
+                              Clear default
+                            </Button>
+                          )}
+                          {system.id !== userDefaultId && system.is_active && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs text-muted-foreground"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleSetPersonalDefault(system);
+                              }}
+                            >
+                              Set as default
                             </Button>
                           )}
                           <Button
