@@ -150,22 +150,33 @@ Used by: `AgentConfigBar`, `ChatPanel`.
 
 Users set their personal defaults via the "Set as default" button on each settings page. The preference is per-browser and is not synced to the backend.
 
-**The visual style slot is a single mutually-exclusive field resolved through a six-tier ladder.** A design system and a slide style cannot both apply; when both are present the design system wins and the style is dropped — enforced in the model serializer, the column bind, and a database `BEFORE INSERT OR UPDATE` trigger.
+**The visual-style slot is mutually exclusive, but resolution is entry-path dependent.** A design system and a slide style cannot both apply; when both are present the design system wins and the style is dropped — enforced in the model serializer, the column bind, and a database `BEFORE INSERT OR UPDATE` trigger.
 
-| Tier | Source | Scope | Set by |
-|---|---|---|---|
-| 1 | Explicit per-deck choice in Agent Config | this deck | anyone |
-| 2 | Personal default **design system** | this browser | anyone |
-| 3 | Personal default **slide style** | this browser | anyone |
-| 4 | **Org default design system** | workspace | **admin only** |
-| 5 | Server default slide style (`is_default`) | workspace | **admin only** |
-| 6 | Protected `is_system` style, then a hardcoded constant | — | — |
+There is **no ordering over the sources that holds on every path.** The context runs a decision tree per entry path, and each returns early: the guards distinguish a field the caller omitted from one it set to `null`, and they read persisted provenance (`style_source`) rather than re-deriving it by comparing an id to the current default. The browser's paths:
 
-**Treat the table as the sources consulted, not as one uniform ordering.** Resolution is path-dependent: the context has to reconcile an incoming config, a mirrored pre-session config and a default profile as well as these preferences, and which one wins differs between a first render, a restored session and a newly created one. A personal slide-style default **is** seeded on initial render, so it is not correct to say it never applies to a new deck. The server-side chain (`agent_factory`) is the only part that always holds, and it is short: `design_system_id` → `slide_style_id` → the default style constant, each looked up with `is_active = true`.
+| Path | Behaviour |
+|---|---|
+| **Fresh pre-session surface** | No `localStorage` mirror. Load the selected profile, stamp its provenance, then resolve through `withResolvedStyleSource(config, { isNewSurface: true })`. The only browser path that passes `isNewSurface`, so the only one where workspace-default seeding can run. |
+| **Stored mirror / restored surface** | The mirror's **existence**, never its content, selects this path — an explicit "Design System: None" is byte-identical to the first-paint placeholder. Resolves without `isNewSurface`, so an absent `style_source` is preserved as the user's choice and never reseeded. |
+| **Default profile** | `profileStyleSource` stamps `'user'` for a profile whose `created_by` is not `system`, or a system profile re-pointed at another style; `'seeded'` only for the server's own profile still holding the style the server seeds. A `'user'` stamp short-circuits every lower default. |
+| **New session** | Seeding is the server's (`_apply_org_default_style_source`), per field, and only for fields absent from `model_fields_set`. An explicit `null` is a choice and is left alone. `template_id` is stripped by `_without_template_pin`. |
+| **Existing session** | The persisted slot is used as stored. The `GET` sanitizes stale design-system and template **pins** and flags a cleared design system as `design_system_unavailable`; `withResolvedStyleSource` runs only when the server holds no config for the session. |
 
-**Clearing a personal default releases the config slot, not just the localStorage key.** Removing only the key would leave the resolved id in the mirrored config, so the lower tier would never take effect. Clearing hands the slot back, and the next tier applies on the same surface with no reload.
+`withResolvedStyleSource` returns at the first matching guard:
 
-**Personal defaults are invisible to MCP.** `create_deck` cannot read per-user localStorage, so it resolves from tier 4 down: with neither `design_system_id` nor `slide_style_id` it uses the **org default design system**; an explicit `slide_style_id` suppresses it. Flipping the admin choice therefore affects all MCP-initiated decks immediately. For a durable, cross-browser personal default, save a profile carrying the design system and set that profile as your default.
+1. `style_source === 'user'` → unchanged (covers "neither a design system nor a style").
+2. `!isNewSurface && style_source == null` → unchanged.
+3. `design_system_id != null` → unchanged.
+4. Personal default design system → claim the slot, clear `slide_style_id`, stamp `'user'`.
+5. `slide_style_id != null` **and** a personal default style exists → claim the slot, stamp `'user'`. **Returns before the org default design system is resolved**, so a personal style default can suppress org-default design-system seeding.
+6. Org default design system → claim the slot, clear `slide_style_id`, stamp `'seeded'`.
+7. Otherwise personal default style (`'user'`), else the server's `is_default` — falling back to `is_system` — style (`'seeded'`).
+
+**Clearing a personal default releases the config slot, not just the localStorage key.** Removing only the key would leave the resolved id in the mirrored config, so guard 3 would short-circuit and the preference below would never take effect. `setUserDefaultDesignSystem(null)` writes `design_system_id: null`, `template_id: null`, `slide_style_id: userPreferredStyleId()` and `style_source: 'user'` **before** dropping the key, so a failed release keeps both the preference and the Clear control that is rendered from it. It does **not** rerun lower-default resolution on that surface — the surface now carries `style_source: 'user'`.
+
+**Personal defaults are invisible to MCP.** `create_deck` cannot read per-user localStorage. An explicit `design_system_id` wins; otherwise an explicit `slide_style_id` suppresses implicit org-default design-system seeding; otherwise the org default design system, then the tellr-configured default slide style. Flipping the admin choice therefore affects MCP-initiated decks with no explicit source immediately. For a durable, cross-browser personal default, save a profile carrying the design system and set that profile as your default.
+
+**Server-side, `agent_factory` is a branch, not a fallthrough chain.** It selects the design-system branch when `design_system_id` is present, otherwise the slide-style branch when `slide_style_id` is present. Either lookup is filtered on `is_active = true`, and **a miss leaves the hardcoded `DEFAULT_SLIDE_STYLE`** — an inactive design system does not fall through to the deck's slide style, because that branch is an `elif` and is never evaluated. The constant is not a database row. See [Design System Library §4](./design-system-library.md) for the full cross-surface reference.
 
 ### 4c. Profile Context (`src/contexts/ProfileContext.tsx`)
 
@@ -492,7 +503,7 @@ The version check is performed via a direct `fetch` call inside the `useVersionC
 | `exportPptxEditable` | POST | `/api/export/pptx/editable/from-records` | `{ session_id, … }` | `Blob` — **Fallback** |
 | `exportToGoogleSlides` | POST | `/api/export/google-slides/from-huashu` | `{ session_id }` | `{ presentation_id, presentation_url, total_slides, succeeded, failures }` |
 
-**PPTX and Google Slides no longer share one pattern.** Both call the huashu render first, and Google Slides succeeds in a **single synchronous round-trip** carrying only `session_id`. Both also have a records-pipeline fallback, which fires on a `503` **or** when the error text indicates the pipeline is unavailable or still installing — so it is not status-code-only. Client-side chart and DOM extraction happens **only** on the fallback request, not on the primary one.
+**PPTX and Google Slides no longer share one pattern.** Both call the huashu render first, and Google Slides succeeds in a **single synchronous round-trip** carrying only `session_id`. Both also have a records-pipeline fallback, but they trigger it differently: the **Google** fallback fires only on HTTP `503` (`if (response.status === 503 && slideDeck)` in `api.ts`), while the **PPTX** fallback additionally matches the error text for the pipeline being unavailable or still installing (`SlidePanel.tsx`). Client-side chart and DOM extraction happens **only** on the fallback request, not on the primary one.
 
 > **Historical note.** `exportPPTXAsync` / `pollPPTXExport` / `downloadPPTX` above target the LLM code-generation path (`POST /api/export/pptx/async`, `src/services/html_to_pptx.py`). That path is **superseded** and no UI surface reaches it — a repo-wide search finds no caller in the checked-in frontend. That cannot rule out an external caller invoking the route directly. The code still exists but should be treated as legacy. See [Export Features](export-features.md).
 

@@ -142,21 +142,21 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 | `prompt` | string | yes | Natural-language description of the deck. Any length; longer prompts with explicit slide-by-slide structure tend to work best. |
 | `num_slides` | integer (1–50) | no | Target slide count. The agent is not strictly constrained; treat as a hint. |
 | `design_system_id` | integer | no | ID of a design system. Supplies the full brand package — tokens, fonts, brand assets, named templates. Omit to use the **org default design system**, if one is set. |
-| `template_name` | string | no | Human-readable name of one of that design system's named templates (e.g. `"Executive Events"`). Pins the template instead of letting the model pick. Pinning substantially raises brand fidelity. |
+| `template_name` | string | no | Human-readable name of one of that design system's named templates (e.g. `"Executive Events"`). Pins the template, so the deck receives that template's own layout HTML and CSS instead of only a catalog of names and descriptions. Resolved only when a design system is in play; an unmatched name is logged and generation continues without a pin. |
 | `slide_style_id` | integer | no | ID of a `SlideStyle` row. **Supplying this suppresses the org default design system** — see the precedence note below. |
 | `deck_prompt_id` | integer | no | ID of a `DeckPrompt` row. Omit for default. |
+| `correlation_id` | string | no | Opaque ID echoed in server logs for cross-system trace correlation. |
 
-**Style precedence for MCP callers.** A design system and a slide style are mutually exclusive:
+**Style precedence for MCP callers.** This is the MCP branch only; the mutual-exclusion invariant and the other entry paths are documented in [Design System Library §4](./design-system-library.md).
 
 | Caller supplies | Result |
 |---|---|
-| `design_system_id` | that design system wins |
-| `slide_style_id` only | that style applies, and the org default design system is **suppressed** |
+| `design_system_id` | that design system wins, and `template_name` is resolved against it |
+| `slide_style_id` only | that style applies, and the org default design system is **suppressed** — the org default is consulted only when *neither* id is supplied |
 | both | the design system wins; the style is dropped in-handler |
-| neither | the **org default design system** applies silently, if one is set; otherwise the server default slide style |
+| neither | the **org default design system** applies silently, if one is set; otherwise the tellr-configured default slide style — the `is_default` row, falling back to `is_system`, lowest id first on either |
 
-MCP cannot see per-user browser-side defaults (they live in `localStorage`), so it always resolves from the org default down. No field in the response reports which design system was used — open the deck URL to confirm. A nonexistent or soft-deleted `design_system_id` does not error; the deck is generated with generic styling. See [Design System Library](./design-system-library.md).
-| `correlation_id` | string | no | Opaque ID echoed in server logs for cross-system trace correlation. |
+MCP cannot see per-user browser-side defaults (they live in `localStorage`), so it never applies one. No field in the response reports which design system was used — open the deck URL to confirm. A nonexistent or soft-deleted `design_system_id` does not error: the lookup is filtered on `is_active = true`, the miss is logged, and generation stays on the hardcoded `DEFAULT_SLIDE_STYLE` rather than falling through to any other source.
 
 **Output schema**
 
