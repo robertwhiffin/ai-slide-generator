@@ -521,9 +521,17 @@ test.describe('Design System Library — personal default & delete', () => {
    * it, so the slot is never filled and a prune bug cannot show up at all. A
    * stale-prune test written without this seeding passes on broken code.
    */
-  async function seedResolvedMirror(page: Page, designSystemId: number, userStyleId: number) {
+  async function seedResolvedMirror(
+    page: Page,
+    designSystemId: number,
+    userStyleId: number,
+    // Which design system the working SLOT holds. Defaults to the preference,
+    // which is the normal case; pass a different id to model a user who then
+    // picked something else in Agent Config.
+    slotDesignSystemId = designSystemId,
+  ) {
     await page.addInitScript(
-      ([dsId, styleId]) => {
+      ([dsId, styleId, slotId]) => {
         localStorage.setItem('userDefaultDesignSystemId', String(dsId));
         localStorage.setItem('userDefaultSlideStyleId', String(styleId));
         localStorage.setItem(
@@ -531,7 +539,7 @@ test.describe('Design System Library — personal default & delete', () => {
           JSON.stringify({
             tools: [],
             slide_style_id: null,
-            design_system_id: dsId,
+            design_system_id: slotId,
             template_id: null,
             deck_prompt_id: null,
             system_prompt: null,
@@ -540,7 +548,7 @@ test.describe('Design System Library — personal default & delete', () => {
           }),
         );
       },
-      [designSystemId, userStyleId] as [number, number],
+      [designSystemId, userStyleId, slotDesignSystemId] as [number, number, number],
     );
   }
 
@@ -582,6 +590,49 @@ test.describe('Design System Library — personal default & delete', () => {
     expect(await mirroredStyleSlot(page)).toEqual(settled);
     expect(await page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId'))).toBeNull();
     expect(loopErrors).toEqual([]);
+  });
+
+  test('a stale default is pruned WITHOUT disturbing a different valid selection', async ({ page }) => {
+    // The prune is AUTOMATIC — the user never asked for it — so it may clean up
+    // its own stale preference but must not touch a choice the user made
+    // deliberately. Here the preference points at deleted 999 while the slot
+    // holds Acme (1), picked afterwards in Agent Config. Releasing the slot on
+    // this path would silently replace that explicit choice with the style
+    // default, with no notice and no undo.
+    //
+    // Explicit Clear stays unconditional: it IS the control the user asked for.
+    await seedResolvedMirror(page, 999, 2, 1);
+    const loopErrors: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error' && /Maximum update depth/i.test(msg.text())) loopErrors.push(msg.text());
+    });
+    page.on('pageerror', (err) => {
+      if (/Maximum update depth/i.test(String(err))) loopErrors.push(String(err));
+    });
+
+    await goToLibrary(page);
+
+    // The stale preference goes…
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('userDefaultDesignSystemId')))
+      .toBeNull();
+    // …and the user's own selection is left exactly as it was. THIS is the
+    // assertion that fails if the release is unconditional.
+    expect((await mirroredStyleSlot(page)).design_system_id).toBe(1);
+    expect((await mirroredStyleSlot(page)).slide_style_id).toBeNull();
+
+    // Settled, once, with no update-depth error on this branch either.
+    const settled = await mirroredStyleSlot(page);
+    await page.waitForTimeout(500);
+    expect(await mirroredStyleSlot(page)).toEqual(settled);
+    expect(loopErrors).toEqual([]);
+
+    // The accepted UI consequence: the preference is gone, so Acme now offers
+    // "Set as default" rather than "Clear default" — while still being the
+    // selected design system.
+    const acmeCard = page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' });
+    await expect(acmeCard.getByRole('button', { name: 'Clear default' })).toHaveCount(0);
+    await expect(acmeCard.getByRole('button', { name: 'Set as default' })).toBeVisible();
   });
 
   test('a VALID personal default is left alone by the prune', async ({ page }) => {

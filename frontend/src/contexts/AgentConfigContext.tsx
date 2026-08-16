@@ -47,8 +47,16 @@ interface AgentConfigContextValue {
    * a browser-local preference; the org-wide default is an admin setting under
    * /admin. Stores the preference AND applies it to the working config, so the
    * effect is visible on the surface the user is standing on.
+   *
+   * `releaseSlotOnlyIfHolding` is for AUTOMATIC callers: the slot is released
+   * only if it currently holds that id, so a cleanup the user did not ask for
+   * cannot overwrite a selection they made deliberately. User-initiated clears
+   * omit it and always release.
    */
-  setUserDefaultDesignSystem: (designSystemId: number | null) => Promise<void>;
+  setUserDefaultDesignSystem: (
+    designSystemId: number | null,
+    options?: { releaseSlotOnlyIfHolding?: number },
+  ) => Promise<void>;
   setTemplate: (templateId: number | null) => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
@@ -957,14 +965,39 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
    * surface came along — indistinguishable, to the user, from a control that
    * does nothing. So the slot is handed back to the personal style default here
    * and now, and the dependent template pin goes with the design system.
+   *
+   * `releaseSlotOnlyIfHolding` makes the release CONDITIONAL for callers that
+   * did not come from the user. A person clicking "Clear default" asked for
+   * exactly this, so that path passes nothing and always releases. The automatic
+   * stale-preference prune passes the id it is retiring: if the slot has since
+   * moved on to a different design system the user chose deliberately, the
+   * preference is still dropped but the slot is left completely alone. Releasing
+   * there would silently replace an explicit choice as a side effect of a
+   * cleanup nobody requested — automatic is not the same as requested, and only
+   * the automatic path has to earn its silence.
+   *
+   * The condition lives HERE rather than at the call site so that the key
+   * removal and the field writes each exist in exactly one place; the two
+   * callers differ only by the option they pass.
    */
-  const setUserDefaultDesignSystem = useCallback(async (designSystemId: number | null) => {
+  const setUserDefaultDesignSystem = useCallback(async (
+    designSystemId: number | null,
+    { releaseSlotOnlyIfHolding }: { releaseSlotOnlyIfHolding?: number } = {},
+  ) => {
     if (designSystemId != null) {
       localStorage.setItem(USER_DEFAULT_DESIGN_SYSTEM_KEY, String(designSystemId));
       await setDesignSystem(designSystemId);
       return;
     }
     localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+    if (
+      releaseSlotOnlyIfHolding != null &&
+      agentConfig.design_system_id !== releaseSlotOnlyIfHolding
+    ) {
+      // The slot is empty, or holds something the user picked for themselves.
+      // Either way there is nothing of THIS preference's to release.
+      return;
+    }
     await updateConfig({
       ...agentConfig,
       design_system_id: null,

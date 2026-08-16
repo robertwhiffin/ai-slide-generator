@@ -119,9 +119,16 @@ export const DesignSystemLibrary: React.FC = () => {
    * `setUserDefaultDesignSystem(null)`, so the key removal and the slot release
    * cannot drift apart.
    *
+   * `releaseSlotOnlyIfHolding` is what separates this from explicit Clear. The
+   * prune is automatic, so it may retire its own stale preference but must not
+   * disturb a design system the user has since chosen in Agent Config: with a
+   * different (or no) id in the slot, the key still goes and the slot is left
+   * untouched. Explicit Clear passes no option and always releases — it is the
+   * control the user asked for.
+   *
    * IDEMPOTENT by the guard above: dropping `userDefaultId` first means the next
    * render returns early, so neither the release's config update nor the new
-   * callback identity it produces can re-enter this effect.
+   * callback identity it produces can re-enter this effect — on either branch.
    *
    * Gated on a SUCCESSFUL load rather than on a non-empty list, so that deleting
    * your only design system prunes the preference too, while a failed list
@@ -130,8 +137,9 @@ export const DesignSystemLibrary: React.FC = () => {
   useEffect(() => {
     if (loading || error != null || userDefaultId == null) return;
     if (systems.some((system) => system.id === userDefaultId && system.is_active)) return;
+    const staleId = userDefaultId;
     setUserDefaultId(null);
-    void setUserDefaultDesignSystem(null);
+    void setUserDefaultDesignSystem(null, { releaseSlotOnlyIfHolding: staleId });
   }, [systems, loading, error, userDefaultId, setUserDefaultDesignSystem]);
 
   /**
