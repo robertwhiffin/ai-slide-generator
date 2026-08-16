@@ -24,8 +24,20 @@
  * force-size in captureDeckAsPngDataUrls, mirroring pdf_client.ts:290-298).
  * Measured on the wrapped deck, 100.00% transparent / 0 colours / 0 ink pixels
  * becomes 0.00% transparent, ground rgb(249,247,244), 47,369 ink pixels, darkest
- * ink rgb(27,49,57) at contrast 12.7110 against that ground. Unwrapped decks do
- * not move: byte-identical capture, FNV-1a 68079f00 either side.
+ * ink rgb(27,49,57) at contrast 12.7110 against that ground. Unwrapped decks that
+ * are ALREADY frame-sized — root 1280x720 at (0,0), margin-reset, no padding or
+ * border — do not move: byte-identical capture, FNV-1a 68079f00 either side.
+ *
+ * A content-box root declaring 1280x720 PLUS padding DOES move, intentionally: it
+ * measures 1456x864, overflowing its own frame by 176px, and `border-box` refits it
+ * to 1280x720 (FNV-1a bbcab96b -> a36bd956, ink 67,316 -> 68,885, both sides 0.00%
+ * transparent / 495 non-white colours). That refit is the product-wide fixed-frame
+ * contract, applied identically on the certified PDF path at pdf_client.ts:290-298
+ * all along — a consistency consequence, not new behaviour here. It is not a free
+ * win either: 1456x864 -> 1280x720 necessarily shrinks the content area to
+ * 1104x576, so text may re-wrap and flex content reflow, and the higher ink count
+ * therefore does NOT by itself prove recovered clipping — it cannot tell reflow
+ * from recovered clipping.
  *
  * That is a force-size, NOT the frame contract, and the distinction is the whole
  * point — it injects no CSS, so it cannot outrank the inline coordinates
