@@ -600,6 +600,178 @@ test.describe('DS-pinned (wrapped) deck export fidelity', () => {
   });
 });
 
+// ─── The two CAPTURE CALL SITES ──────────────────────────────────────────────
+// The block above pins findSlideRoot itself, and the documents' painted ground.
+// Neither reaches the two lines that actually USE the locator —
+// `findSlideRoot(iframeDoc)` in exportSlideDeckToPDF and `findSlideRoot(doc)` in
+// captureDeckAsPngDataUrls. Those two lines ARE root cause #2, and reverting both
+// to the legacy `.slide` target left every other test in this file green.
+//
+// So these two tests run the REAL SHIPPED FUNCTIONS in a real page, via the Vite
+// dev server, and assert on what the capture ACTUALLY PRODUCES — the delivered PDF
+// and the delivered PNG — rather than on the locator in isolation. Testing a
+// function while leaving its callers unpinned is precisely the gap.
+//
+// Each carries a STALENESS GUARD. `reuseExistingServer` will happily serve a vite
+// from a different worktree on port 3000, which is how a spec silently tests code
+// that is not the code under review; importing the module and requiring
+// findSlideRoot to exist turns that into a loud failure instead of a false green.
+//
+// No <canvas> in this fixture, deliberately: the Chart.js trap (a canvas left at
+// 300x150 on one side only) needs a chart to bite, and a CDN dependency would add
+// nothing to a defect about which element gets painted. Both `scripts` and
+// `external_scripts` are still passed, so the deck shape is the real one.
+
+/** Decode a data URL and report its modal pixel plus how much is transparent. */
+async function measureDataUrl(page: Page, dataUrl: string) {
+  return page.evaluate(async (url) => {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error('decode failed'));
+      img.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const counts = new Map<string, number>();
+    let transparent = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] === 0) transparent++;
+      const key = `${data[i]},${data[i + 1]},${data[i + 2]},${data[i + 3]}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    let best = '';
+    let bestN = -1;
+    for (const [k, n] of counts) if (n > bestN) { best = k; bestN = n; }
+    const total = data.length / 4;
+    return {
+      w: canvas.width,
+      h: canvas.height,
+      rgba: best,
+      rgb: best.split(',').slice(0, 3).map(Number),
+      share: bestN / total,
+      transparentShare: transparent / total,
+    };
+  }, dataUrl);
+}
+
+/** Require that port 3000 is serving THIS worktree, not another one. */
+async function assertFreshDevServer(page: Page) {
+  const kinds = await page.evaluate(async () => {
+    const m = (await import('/src/services/slideDocument.ts')) as Record<string, unknown>;
+    return { findSlideRoot: typeof m.findSlideRoot, hostFrame: typeof m.slideHostFrameStyle };
+  });
+  expect(
+    kinds.findSlideRoot,
+    'dev server on :3000 is serving a worktree without findSlideRoot — stale vite, results would be meaningless',
+  ).toBe('function');
+  expect(kinds.hostFrame).toBe('function');
+}
+
+/** Every JPEG the PDF actually ships, anchored on /DCTDecode. */
+function extractJpegStreams(buf: Buffer): Buffer[] {
+  const out: Buffer[] = [];
+  const hay = buf.toString('latin1');
+  let idx = 0;
+  while ((idx = hay.indexOf('/DCTDecode', idx)) !== -1) {
+    const s = hay.indexOf('stream', idx);
+    if (s === -1) break;
+    let p = s + 'stream'.length;
+    if (hay[p] === '\r') p++;
+    if (hay[p] === '\n') p++;
+    const e = hay.indexOf('endstream', p);
+    if (e === -1) break;
+    let end = e;
+    while (end > p && (hay[end - 1] === '\n' || hay[end - 1] === '\r')) end--;
+    const bytes = buf.subarray(p, end);
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) out.push(bytes);
+    idx = e;
+  }
+  return out;
+}
+
+test.describe('Export capture call sites (root cause #2)', () => {
+  test('exportSlideDeckToPDF captures the wrapper, so the delivered PDF has a ground', async ({
+    page,
+  }) => {
+    test.setTimeout(120000);
+    await page.goto('/');
+    await assertFreshDevServer(page);
+
+    const download = page.waitForEvent('download', { timeout: 90000 });
+    await page.evaluate(async (deck) => {
+      const m = (await import('/src/services/pdf_client.ts')) as {
+        exportSlideDeckToPDF: (d: unknown, f: string, o: unknown) => Promise<void>;
+      };
+      await m.exportSlideDeckToPDF(deck, 'capture-site.pdf', {});
+    }, dsWrappedDeck());
+
+    const stream = await (await download).createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const c of stream) chunks.push(c as Buffer);
+    const jpegs = extractJpegStreams(Buffer.concat(chunks));
+    expect(jpegs.length, 'the PDF must ship one DCTDecode image per slide').toBe(1);
+
+    const m = await measureDataUrl(page, `data:image/jpeg;base64,${jpegs[0].toString('base64')}`);
+
+    // The failure mode this pins: aiming at the transparent `.slide` sends
+    // transparency into toDataURL('image/jpeg'), which has no alpha channel and
+    // flattens it to BLACK. Measured with the legacy target: rgb(0,0,0) at 1.5450.
+    for (const [i, channel] of ['r', 'g', 'b'].entries()) {
+      expect(
+        m.rgb[i],
+        `delivered PDF ground ${channel} — rgb(${m.rgb.join(',')}) must be the brand paper, not black`,
+      ).toBeGreaterThan(240);
+    }
+    // Tight enough to pin the actual colour, loose enough for JPEG quantisation.
+    const expected: Record<string, number> = {
+      'headline 1B3139': 12.6794,
+      'body 3A3838': 10.867,
+      'subtitle 5A5755': 6.6878,
+    };
+    for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
+      const ratio = contrastRatio(rgb, m.rgb);
+      expect(ratio, `${ink} must clear WCAG AA in the delivered PDF`).toBeGreaterThanOrEqual(4.5);
+      expect(
+        Math.abs(ratio - expected[ink]),
+        `${ink} measured ${ratio.toFixed(4)}, expected ~${expected[ink]}`,
+      ).toBeLessThan(0.25);
+    }
+  });
+
+  test('captureDeckAsPngDataUrls captures the wrapper, so the PNG is opaque', async ({ page }) => {
+    test.setTimeout(120000);
+    await page.goto('/');
+    await assertFreshDevServer(page);
+
+    const dataUrl = await page.evaluate(async (deck) => {
+      const m = (await import('/src/services/screenshotCapture.ts')) as {
+        captureDeckAsPngDataUrls: (d: unknown) => Promise<string[]>;
+      };
+      return (await m.captureDeckAsPngDataUrls(deck))[0];
+    }, dsWrappedDeck());
+
+    const m = await measureDataUrl(page, dataUrl);
+
+    // PNG keeps alpha, so the legacy target does not blacken — it produces an
+    // almost entirely TRANSPARENT picture and the .pptx loses the brand ground
+    // outright. Measured with the legacy target: 99.89% transparent.
+    expect(
+      m.transparentShare,
+      `delivered PNG is ${(m.transparentShare * 100).toFixed(2)}% transparent — the capture missed the ground-carrying wrapper`,
+    ).toBeLessThan(0.01);
+    // Lossless, so the exact brand ground is assertable here.
+    expect(m.rgba, 'delivered PNG modal pixel').toBe(DS_GROUND_RGBA);
+    for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
+      expect(contrastRatio(rgb, m.rgb), `${ink} in the delivered PNG`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
+
 test.describe('UI <-> export box-model parity', () => {
   for (const [label, css] of [
     ['deck scoping box-sizing to .slide (17/46 live decks)', EXPOSED_DECK_CSS],
