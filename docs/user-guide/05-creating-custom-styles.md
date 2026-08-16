@@ -19,7 +19,7 @@ Every new deck starts with a visual style applied — either a slide style or a 
 
 **If this browser already holds a configuration you have used before, that configuration is used as it is** and none of the four steps run — including after an admin changes a corporate default.
 
-**A deck started from a profile.** A profile you built is treated as a deliberate choice and nothing is layered over it. The default profile shipped with tellr is treated as a starting point, so the steps above may still fill its empty slots. A profile is also the only personal default that follows you between browsers and machines; both "Set as default" preferences are stored in this browser only.
+**A deck started from a profile.** A profile you built is treated as an explicit choice and nothing is layered over it. The default profile shipped with tellr is treated as a starting point, so the steps above may still fill its empty slots. A profile is also the only personal default that follows you between browsers and machines; both "Set as default" preferences are stored in this browser only.
 
 **A deck created through the MCP API.** MCP cannot see anything in your browser. A style or design system passed explicitly in the call wins — and passing a slide style explicitly also stops the org design system being applied. Otherwise MCP uses the org default design system, then the organisation's default slide style.
 
