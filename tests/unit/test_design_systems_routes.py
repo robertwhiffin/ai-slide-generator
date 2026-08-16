@@ -1479,7 +1479,21 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
         """B can still LOAD the session rather than being bricked. The GET now
         also SANITISES the dangling pin instead of echoing it, so the dropdown
         shows "None" instead of binding to an id that no longer exists (see
-        ``test_config_load_returns_null_for_a_dangling_pin``)."""
+        ``test_config_load_returns_null_for_a_dangling_pin``).
+
+        ``get_db_session`` must be patched alongside the two mocks below. The
+        route reaches the database by TWO different paths: the ``get_db``
+        dependency, which the ``client`` fixture overrides onto the in-memory
+        SQLite session, and ``_sanitize_stale_pins``, which opens its own
+        ``get_db_session()`` context. Only the first is covered by the fixture,
+        so without this patch the sanitiser dials the configured DATABASE_URL —
+        real PostgreSQL on localhost:5432 — and the test fails with
+        ``OperationalError: Connection refused`` anywhere that is not running
+        one, CI included. Patched exactly as every sibling here does it, so the
+        sanitiser reads the same SQLite session the rest of the test wrote to,
+        which is also what makes the assertion below meaningful rather than
+        incidental.
+        """
         from src.database.models import UserSession
 
         ds = self._import(db_session)
@@ -1496,10 +1510,15 @@ class TestDeletedDesignSystemAndOtherUsersSessions:
         ds.is_active = False
         db_session.commit()
 
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=db_session)
+        cm.__exit__ = MagicMock(return_value=False)
         with patch(
             "src.api.routes.agent_config._check_deck_permission_for_session",
             lambda *a, **k: None,
-        ), patch("src.api.routes.agent_config.get_session_manager") as mgr:
+        ), patch("src.api.routes.agent_config.get_db_session", return_value=cm), patch(
+            "src.api.routes.agent_config.get_session_manager"
+        ) as mgr:
             mgr.return_value.get_session.return_value = {
                 "session_id": "sess-foreign",
                 "agent_config": {
