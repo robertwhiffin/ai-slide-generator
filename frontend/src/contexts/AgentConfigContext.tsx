@@ -289,11 +289,34 @@ async function resolveDefaultDesignSystemId(): Promise<number | null> {
  *
  * Mutates and returns a copy. Only ever fills a gap — with one deliberate
  * exception: a slide-style id the SERVER SEEDED is treated as an unfilled gap,
- * not as a choice. The server-seeded default profile always populates
- * `slide_style_id` (`init_default_profile.py`, and the profile -> agent_config
- * migration), and the browser loads that profile before resolving defaults, so
- * honouring it as an explicit choice meant the org-default design system could
- * never win in the real browser flow.
+ * not as a choice.
+ *
+ * The case that MOTIVATES the exception is a stored config THIS FUNCTION wrote.
+ * Its last branch fills an empty slot with `seededDefaultStyleId()` and stamps
+ * `style_source: 'seeded'`, and that config is persisted to the localStorage
+ * mirror. If the org configures a default design system afterwards, the stored
+ * seeded style has to yield to it — so on the next load the mirror must re-enter
+ * resolution rather than return early, which is precisely what treating a seeded
+ * style id as a gap buys. Pinned by `design-system-selector.spec.ts`, "a
+ * SERVER-SEEDED style is still overridden by the org-default design system",
+ * which seeds a MIRROR (not a profile) stamped `'seeded'`.
+ *
+ * The seeded `default` PROFILE is NOT part of that story, contrary to what this
+ * comment claimed for several rounds, on two independent counts:
+ *
+ * - `init_default_profile.py` never writes `agent_config` at all. It writes
+ *   `config_prompts.selected_slide_style_id`. Only the startup backfill
+ *   (`migrate_profiles`) turns that into `agent_config.slide_style_id`, and it
+ *   selects rows with `IS NULL` — a predicate the column type broke for a while
+ *   by storing the JSON scalar `null` (see `src/database/types.py`). So "always
+ *   populates `slide_style_id`" was never true of the seeder, and was not even
+ *   true of the backfill throughout.
+ * - a real caller cannot load that profile anyway. `GET /api/profiles` filters
+ *   through `get_accessible_profile_ids`, and the seeded row — `created_by:
+ *   'system'`, no `global_permission`, no contributor rows — matches none of its
+ *   branches, so it never reaches the browser and `profileStyleSource` never runs
+ *   on it. (It is still visible to the UNFILTERED duplicate check in
+ *   `save-from-session`, which is why it can cause a 409 while being invisible.)
  *
  * "Seeded" is read from PERSISTED provenance (`style_source`), never inferred by
  * comparing the id to the current default. Value equality cannot tell the two
