@@ -176,7 +176,7 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 | `GET` | `/api/settings/design-systems/{id}/files` | List bundle files | `list_design_system_files` |
 | `GET` | `/api/settings/design-systems/{id}/files/{path}` | Serve a bundle file | `serve_design_system_file` |
 
-**Asset resolution is scoped by `(asset_id, design_system_id)`, never by global id.** Resolving an asset by global id was a shipped confused-deputy defect: a foreign `{{ds-asset:ID}}` handle returned another design system's bytes. Any new route that resolves assets must carry the same scoping.
+**Asset resolution is scoped by `(asset_id, design_system_id)`, never by global id.** Resolving by global id would permit cross-system asset disclosure: a foreign `{{ds-asset:ID}}` handle from a crafted bundle would return another design system's bytes. `get_asset_base64` documents this as the confused-deputy guard and makes the scope a mandatory keyword argument, and `design_system_id=None` is fail-closed. Any new route that resolves assets must carry the same scoping.
 
 ### Settings: Contributors & Identities
 
