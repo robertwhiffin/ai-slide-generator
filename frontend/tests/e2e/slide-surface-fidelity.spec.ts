@@ -387,13 +387,34 @@ async function boxProbe(page: Page, doc: string, selector: string) {
 
 // ─── DS-pinned (WRAPPED) deck export fidelity ────────────────────────────────
 // THE DEFECT: "Download PDF" shipped a design-system-pinned deck on a PURE BLACK
-// ground. Five preview surfaces injected the slide-host frame contract; NO export
-// builder did. A pinned deck's slide root is a <section> carrying the ground via a
-// bare TYPE selector, with `.slide` absolutely positioned inside it — so the
-// <section> holds no in-flow content, collapses to height 0, and the ground it
-// carries never paints. Measured on the delivered PDF's own DCTDecode streams:
-// ground rgb(0,0,0) at 90.9%, brand inks at 1.5450 / 1.8027 / 2.9292, failing
-// WCAG AA at both 4.5:1 and 3:1 for every ink except --db-ink-muted.
+// ground. A pinned deck's slide root is a <section> carrying the ground via a bare
+// TYPE selector, with `.slide` absolutely positioned inside it — so the <section>
+// holds no in-flow content, collapses to height 0, and the ground it carries never
+// paints. Measured on the delivered PDF's own DCTDecode streams: ground rgb(0,0,0)
+// at 90.9%, brand inks at 1.5450 / 1.8027 / 2.9292, failing WCAG AA at both 4.5:1
+// and 3:1 for every ink except --db-ink-muted.
+//
+// TWO CANDIDATE FIXES WERE SHIPPED TOGETHER AT 0.4.2.dev17; ONE IS REVERTED.
+//
+//   REVERTED — the slide-host frame contract in the four export builders. It
+//   framed `body` and stretched its CHILD with `position: absolute !important;
+//   inset: 0 !important; width/height: 100% !important`. On the huashu path that
+//   DESTROYS TABLES: preprocess.mjs::flattenTables() appends every <td>/<th> to
+//   `body` as an absolutely positioned <div> whose left/top/width/height are
+//   NON-important INLINE styles, so the stylesheet !important rule outranks each
+//   cell's own position. Measured on a real 21-cell deck: distinct cell rects in
+//   ppt/slides/slide1.xml 42 -> 11, with 12 shapes stacked at (12.0, 349.8).
+//   The built DOCUMENT is unchanged by it, so a document probe reads 0.00 px and
+//   is blind — the damage is EMIT-TIME.
+//
+//   KEPT — the slide-root LOCATOR (findSlideRoot). It aims the capture at the
+//   element that carries the ground instead of at `.slide`. Locator-only measures
+//   the delivered PDF at rgb(248,247,243) with inks 12.6794 / 10.8670 / 6.6878,
+//   because exportSlideDeckToPDF force-sizes whatever the locator resolves to. It
+//   injects no CSS, so it cannot perturb emitted geometry.
+//
+// So the tests below pin the contract's ABSENCE in the documents, and pin the
+// ground on the DELIVERED ARTIFACTS rather than on the documents.
 //
 // WHY THIS FIXTURE SHAPE. An UNWRAPPED corpus cannot see this defect at all — 0 of
 // 47 pre-existing decks wrap, which is exactly how it shipped — and a
@@ -447,17 +468,24 @@ const dsWrappedDeck = () =>
   }) as never;
 
 /**
- * Remove the frame contract from a built document, and PROVE it was there.
+ * Assert a built EXPORT document carries no slide-host frame contract.
  *
- * This is both halves of the requirement in one helper: the assertion pins that
- * the builder really injects the contract (so no test here can pass against an
- * un-fixed builder), and the return value is the un-fixed document that every
- * control below is measured against.
+ * The contract was injected into all four export builders at 0.4.2.dev17 and is
+ * reverted: on the huashu path it collapses every flattened table cell onto one
+ * rect (preprocess.mjs::flattenTables appends each cell to `body` with its
+ * position as NON-important inline styles, so a `body > *` !important rule
+ * outranks them — 42 -> 11 distinct cell rects measured on a real 21-cell deck).
+ *
+ * Checked two ways so a reintroduction under a different host selector is still
+ * caught: the exact rendered rule for this host, and the `#tellr-host-frame-boost`
+ * specificity id, which is never minted on any element and therefore appears in a
+ * document only when the contract rendered into it.
  */
-function withoutFrameContract(doc: string, hostSelector: string): string {
-  const rule = slideHostFrameStyle(hostSelector);
-  expect(doc, `builder must inject slideHostFrameStyle('${hostSelector}')`).toContain(rule);
-  return doc.replace(rule, '');
+function expectNoFrameContract(doc: string, hostSelector: string, label: string): void {
+  expect(doc, `${label} must not inject slideHostFrameStyle('${hostSelector}')`)
+    .not.toContain(slideHostFrameStyle(hostSelector));
+  expect(doc, `${label} must not carry the frame contract under ANY selector`)
+    .not.toContain('#tellr-host-frame-boost');
 }
 
 /**
@@ -509,58 +537,67 @@ test.describe('DS-pinned (wrapped) deck export fidelity', () => {
     ['pdf export', buildPdfSlideHTML, 'body'],
     ['screenshot capture', buildScreenshotSlideHtml, 'body'],
   ] as const) {
-    test(`${name} paints the wrapper ground on a wrapped deck`, async ({ page }) => {
+    test(`${name} injects no frame contract, even on a wrapped deck`, async ({ page }) => {
+      // THE REGRESSION GUARD on this surface. The wrapped deck is the fixture the
+      // contract was added for, so it is where a reintroduction is most tempting.
       const doc = build(dsWrappedDeck(), 0);
+      expectNoFrameContract(doc, host, name);
 
-      const fixed = await paintedGround(page, doc);
-      expect(fixed.rgba, `${name}: painted ground`).toBe(DS_GROUND_RGBA);
-      for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
-        expect(
-          contrastRatio(rgb, fixed.rgb),
-          `${name}: ${ink} on the painted ground must clear WCAG AA`,
-        ).toBeGreaterThanOrEqual(4.5);
-      }
-
-      // CONTROL — the same document without the contract. Must go dark, or this
-      // test would pass against the builder that shipped the defect.
-      const broken = await paintedGround(page, withoutFrameContract(doc, host));
-      expect(broken.rgba, `${name} control: ground must collapse`).not.toBe(DS_GROUND_RGBA);
-      for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
-        expect(
-          contrastRatio(rgb, broken.rgb),
-          `${name} control: ${ink} must FAIL AA without the contract`,
-        ).toBeLessThan(4.5);
-      }
+      // And the honest consequence, measured rather than asserted away: WITHOUT
+      // the contract this DOCUMENT's wrapper collapses and its ground does not
+      // paint. That is the dev16 behaviour.
+      //
+      // It does not follow that the delivered artifact is wrong. For the PDF the
+      // slide-root LOCATOR repairs it at capture time, because
+      // exportSlideDeckToPDF force-sizes whatever the locator resolves to — see
+      // 'exportSlideDeckToPDF captures the wrapper' below, which measures the
+      // DELIVERED PDF's own pixels. Document-level ground is therefore recorded
+      // here, not required.
+      const ground = await paintedGround(page, doc);
+      expect(
+        ground.rgba,
+        `${name}: the wrapper ground must NOT paint in the document — if it does, `
+          + 'something is stretching the wrapper again and tables are at risk',
+      ).not.toBe(DS_GROUND_RGBA);
     });
   }
 
-  test('the records walker descends a wrapped slide and emits text', async ({ page }) => {
+  test('the records composite injects no contract, and prunes a wrapped slide', async ({
+    page,
+  }) => {
+    // THE ACCEPTED REGRESSION, pinned rather than hidden.
+    //
     // The walker's isVisible() is false at height === 0 and visit() returns
-    // WITHOUT descending, so a collapsed wrapper does not merely fail to paint —
-    // it PRUNES THE WHOLE SLIDE SUBTREE. The real fallback artifact carried 1
-    // shape and 0 text runs per slide.
+    // WITHOUT descending, so on a section-wrapped deck a collapsed wrapper does
+    // not merely fail to paint — it PRUNES THE WHOLE SLIDE SUBTREE, giving 1 rect
+    // and 0 text records per slide. The frame contract gave the wrapper area and
+    // brought the text back, but it is reverted because the same rule destroys
+    // tables on the PRIMARY (huashu) path, and this composite is only the records
+    // FALLBACK: it runs when the sidecar is unavailable, i.e. the startup 503
+    // window. It was equally broken before 0.4.2.dev17.
+    //
+    // There is no locator to keep here, unlike the PDF and screenshot surfaces:
+    // the walker is handed `section.slide-container` by selector.
+    //
+    // This test is a guard in BOTH directions — it fails if the contract comes
+    // back, and it fails if the pruning silently changes.
     const doc = buildCompositeHtml(dsWrappedDeck());
+    expectNoFrameContract(doc, 'section.slide-container', 'records composite');
 
-    const count = async (html: string) => {
-      await page.setContent(html, { waitUntil: 'load' });
-      await page.addScriptTag({ content: WALKER_SOURCE });
-      return page.evaluate(() => {
-        const extract = (window as unknown as {
-          __extractSlide: (el: Element) => { records: { kind: string }[] };
-        }).__extractSlide(document.querySelector('section.slide-container')!);
-        return {
-          text: extract.records.filter((r) => r.kind === 'text').length,
-          total: extract.records.length,
-        };
-      });
-    };
+    await page.setContent(doc, { waitUntil: 'load' });
+    await page.addScriptTag({ content: WALKER_SOURCE });
+    const counted = await page.evaluate(() => {
+      const extract = (window as unknown as {
+        __extractSlide: (el: Element) => { records: { kind: string }[] };
+      }).__extractSlide(document.querySelector('section.slide-container')!);
+      return {
+        text: extract.records.filter((r) => r.kind === 'text').length,
+        total: extract.records.length,
+      };
+    });
 
-    const fixed = await count(doc);
-    expect(fixed.text, 'text records must come back on a wrapped deck').toBeGreaterThan(0);
-
-    // CONTROL — proven to fire: without the contract the subtree is pruned.
-    const broken = await count(withoutFrameContract(doc, 'section.slide-container'));
-    expect(broken.text, 'control: a collapsed wrapper must prune every text run').toBe(0);
+    expect(counted.text, 'accepted: a collapsed wrapper prunes every text run').toBe(0);
+    expect(counted.total, 'accepted: one rect survives for the wrapper itself').toBe(1);
   });
 
   test('findSlideRoot resolves to the ground-carrying wrapper, not .slide', async ({ page }) => {
@@ -592,7 +629,13 @@ test.describe('DS-pinned (wrapped) deck export fidelity', () => {
 
     expect(probe.rootTag, 'the slide root is the wrapper').toBe('section');
     expect(probe.rootBg, 'the wrapper is what carries the ground').toBe('rgb(249, 247, 244)');
-    expect(probe.rootHeight, 'and the contract gives it real area').toBe(720);
+    // The wrapper has NO area in the document — it holds no in-flow content and
+    // `.slide` inside it is out of flow. That is the point of the locator rather
+    // than an argument against it: it names the element that CARRIES THE GROUND,
+    // and exportSlideDeckToPDF then force-sizes exactly that element inline before
+    // capturing. Asserting 720 here would be asserting the reverted frame
+    // contract, which is what destroyed tables on the huashu path.
+    expect(probe.rootHeight, 'the wrapper is collapsed in the document itself').toBe(0);
     // CONTROL — what the old locator returned: a transparent element. This is the
     // whole of root cause #2, and it is why the delivered JPEG was pure black.
     expect(probe.legacyTag).toBe('div');
@@ -743,7 +786,9 @@ test.describe('Export capture call sites (root cause #2)', () => {
     }
   });
 
-  test('captureDeckAsPngDataUrls captures the wrapper, so the PNG is opaque', async ({ page }) => {
+  test('captureDeckAsPngDataUrls stays transparent on a wrapped deck (accepted)', async ({
+    page,
+  }) => {
     test.setTimeout(120000);
     await page.goto('/');
     await assertFreshDevServer(page);
@@ -757,18 +802,27 @@ test.describe('Export capture call sites (root cause #2)', () => {
 
     const m = await measureDataUrl(page, dataUrl);
 
-    // PNG keeps alpha, so the legacy target does not blacken — it produces an
-    // almost entirely TRANSPARENT picture and the .pptx loses the brand ground
-    // outright. Measured with the legacy target: 99.89% transparent.
+    // THE ACCEPTED REGRESSION ON THIS SURFACE, pinned with its measured value.
+    //
+    // The locator is NOT sufficient here, and measurement settled it: 100.00%
+    // transparent on a section-wrapped deck. The PDF surface differs because
+    // exportSlideDeckToPDF force-sizes whatever the locator resolves to before
+    // capturing; captureDeckAsPngDataUrls hands the element straight to
+    // html2canvas with `backgroundColor: null` and never sizes it, so the wrapper
+    // is still 1280x0 at capture time and PNG keeps the alpha.
+    //
+    // Not fixed with the frame contract, because that same rule collapses every
+    // flattened table cell onto one rect on the huashu path (42 -> 11 distinct
+    // rects on a real 21-cell deck). A working table export on the PRIMARY path
+    // outranks the ground on this one, which is API-only with no UI entry point.
+    // The correct fix here is a force-size at the capture site, mirroring the PDF.
+    //
+    // Pinned rather than deleted so the number cannot drift unobserved, and so
+    // reintroducing the contract fails HERE too.
     expect(
       m.transparentShare,
-      `delivered PNG is ${(m.transparentShare * 100).toFixed(2)}% transparent — the capture missed the ground-carrying wrapper`,
-    ).toBeLessThan(0.01);
-    // Lossless, so the exact brand ground is assertable here.
-    expect(m.rgba, 'delivered PNG modal pixel').toBe(DS_GROUND_RGBA);
-    for (const [ink, rgb] of Object.entries(BRAND_INKS)) {
-      expect(contrastRatio(rgb, m.rgb), `${ink} in the delivered PNG`).toBeGreaterThanOrEqual(4.5);
-    }
+      `delivered PNG transparency on a wrapped deck (dev16 behaviour, accepted)`,
+    ).toBeGreaterThan(0.99);
   });
 });
 

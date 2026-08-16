@@ -13,14 +13,19 @@
  * export builder, because on the huashu path that shared rule collapsed flattened
  * table cells onto one rect (see src/api/routes/export.py).
  *
- * The slide-root locator below is kept, but it carries less weight here than on
- * the PDF surface: captureDeckAsPngDataUrls hands the located element straight to
- * html2canvas with `backgroundColor: null` and never force-sizes it, which is the
- * step that makes the locator sufficient in exportSlideDeckToPDF. On a
- * section-wrapped design-system deck the wrapper can therefore still be 1280x0 at
- * capture time. Whatever this route delivers for such a deck is the dev16
- * behaviour, and it is API-only (no UI entry point), so it is accepted rather than
- * papered over with a rule that breaks tables.
+ * The slide-root locator below is kept, but MEASUREMENT SAYS IT IS NOT SUFFICIENT
+ * HERE: on a section-wrapped design-system deck the delivered PNG is 100.00%
+ * transparent. The PDF surface differs because exportSlideDeckToPDF force-sizes
+ * whatever the locator resolves to before capturing; this function hands the
+ * element straight to html2canvas with `backgroundColor: null` and never sizes it,
+ * so the wrapper is still 1280x0 at capture time and PNG keeps the alpha.
+ *
+ * That is the dev16 behaviour on an API-only route with no UI entry point, so it
+ * is accepted rather than papered over with a rule that destroys tables on the
+ * primary path. The correct fix, when this route matters, is a force-size at the
+ * capture site mirroring exportSlideDeckToPDF — NOT the frame contract. Pinned by
+ * 'captureDeckAsPngDataUrls stays transparent on a wrapped deck (accepted)' in
+ * frontend/tests/e2e/slide-surface-fidelity.spec.ts.
  */
 
 import html2canvas from 'html2canvas';
