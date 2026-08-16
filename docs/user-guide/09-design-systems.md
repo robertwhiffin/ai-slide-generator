@@ -24,7 +24,7 @@ Design systems are **shared across your workspace**. Anyone can upload one, and 
 
 Go to **Design Systems** in the navigation, then **Upload design system**.
 
-Bundles are usually produced by a brand or design team rather than assembled by hand. Whoever builds yours needs to know four things, because entries outside these rules are skipped silently:
+Bundles are usually produced by a brand or design team rather than assembled by hand. Whoever builds yours needs to know five things, because entries outside these rules are skipped silently:
 
 - Brand images and logos go in **`assets/`**. Anything in a differently-named folder — `brand/`, `images/`, `logo/` — **is not imported**, and you get no error.
 - Webfonts go in **`fonts/`**.
@@ -38,23 +38,53 @@ After upload, the library shows the token, asset and template counts. Check them
 
 ## Choosing which design system a deck uses
 
-There are three levels, and they apply in this order.
+This is not a single ranking of settings. What a deck gets depends on **how the deck was started**, so find your case below.
 
-**1. This deck only.** Pick a design system in the agent config bar. This overrides everything below and affects only the current deck.
+### The deck in front of you
 
-**2. Your personal default.** Click **Set as default** on a design system in the library. Every new deck of yours uses it. This is remembered **in your current browser only** — it does not follow you to another laptop, and it does not apply to decks created through the MCP API.
+Pick a design system in the agent config bar. That choice is saved on the deck, and nothing later overrides it — not your personal default, not the organisation default, not an admin changing the org default afterwards. Picking **None** is a choice too, and it is preserved the same way.
 
-Click **Clear default** to stop using it. Your slide-style default, or the organisation default, then applies again.
+### A brand-new deck, started in this browser
 
-**3. The organisation default.** One design system can be marked as the org default, and it applies to everyone who hasn't set a personal one — including decks created through the MCP API. **Only a tellr admin can set this**, from the `/admin` page under the "Design System" tab.
+The app fills the empty slot once, in this order, and **stops at the first one that applies**:
 
-> If you want a personal default that follows you between browsers and machines, use a **profile** instead: choose the design system, save the configuration as a profile, then set that profile as your default. Profiles are stored server-side.
+1. **Your personal design-system default** — **Set as default** in the library. Remembered **in this browser only**.
+2. **Your personal slide-style default**, if you have one and no personal design-system default. This is the case that surprises people: a personal *style* default takes the slot and **the organisation's design system is then not applied at all**.
+3. **The organisation default design system**, if an admin has set one.
+4. **The workspace's default slide style**, if there is no org design system.
+
+**If this browser already holds a configuration you have used before, that configuration is used as it is** — none of the four steps above run. So an org default an admin sets today will not appear on a browser that already has settings; it appears on a genuinely fresh start.
+
+### Clearing a personal default
+
+Click **Clear default** to stop using it. That does two things: it forgets the preference, and it hands the slot back on the surface you are on — the design system **and any pinned template** are cleared, and your personal slide-style default takes the slot if you have one.
+
+**It does not immediately put the organisation default in place.** That surface now counts as configured by you. The org default applies to decks started later on a surface where the app is still filling in defaults.
+
+### A deck started from a profile
+
+A **profile** you built yourself is treated as a deliberate choice: whatever it contains is used, and no default is layered over it. The default profile that ships with tellr is treated as a starting point instead, so defaults may still fill its empty slots.
+
+> A profile is also the only personal default that **follows you between browsers and machines** — the two "Set as default" preferences live in this browser only. Choose the design system, save the configuration as a profile, then set that profile as your default.
+
+### A deck created through the MCP API
+
+MCP cannot see anything stored in your browser. It resolves, stopping at the first that applies:
+
+1. A **design system passed explicitly** in the call.
+2. A **slide style passed explicitly** — which also stops the organisation's design system being applied.
+3. The **organisation default design system**.
+4. The **workspace's default slide style**.
+
+### The organisation default
+
+One design system can be marked as the org default. **Only a tellr admin can set this**, from the `/admin` page under the "Design System" tab.
 
 ## Pinning a template
 
 A design system's templates appear in the detail panel with preview images. Selecting a template for your deck is done from the **agent config bar**, not from the library.
 
-**Pinning a template matters more than it sounds.** With a template pinned, the deck reuses that template's actual styling. Without one, the model is only given a short list of template names and descriptions — no styling — so it picks a sensible template and then invents its own layout. The result is still on-brand in colour and typeface, but it will not match the template.
+**Pinning a template matters more than it sounds.** With a template pinned, the deck receives that template's own layout HTML and CSS. Without a pin, the model receives only a short list of template names and descriptions — **no layout CSS at all** — so which template it works from, and how closely the result resembles it, are down to the model rather than to anything the app supplies. Stronger prompt wording cannot recover styling that was never sent.
 
 If brand fidelity matters, pin a template.
 
@@ -74,9 +104,9 @@ Deleting hides a design system from the library and stops it being used for new 
 | Templates show no stored preview | The template folder has neither a `.thumbnail` (extension-less) nor a `preview.<ext>` file, or the file was not a recognised image format. The app can still render a live preview from the template. |
 | Headings come out smaller than the template's | A text size is set in template CSS but not declared as a token. Derived sizes read the tokens. |
 | Deck ignores the design system entirely | A slide style is set on that deck. Setting a slide style stops the organisation's design system being applied automatically — clear the style in the agent config bar. (If a design system **is** explicitly chosen, it wins and the style is dropped.) |
-| The org default doesn't seem to apply to you | You have a personal default set in this browser. Use **Clear default** on the design system library page. |
+| The org default doesn't seem to apply to you | You have a personal design-system or slide-style default set in this browser, or this browser already holds a configuration you have used before. Use **Clear default** on the design system library page, and see "A brand-new deck, started in this browser". |
 | Upload rejected with a message about the file paths | The zip contains an entry whose path is ambiguous or unsafe. Re-export the bundle from its source tool rather than repacking it by hand. |
-| A deck made via MCP ignored your personal default | Personal defaults live in your browser and cannot be seen by the API. MCP decks use the org default, or an explicit design system passed in the call. |
+| A deck made via MCP ignored your personal default | Personal defaults live in your browser and cannot be seen by the API. MCP uses a design system or slide style passed explicitly in the call; failing that the org default design system, then the workspace's default slide style. |
 
 ## Related guides
 
