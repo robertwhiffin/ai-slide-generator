@@ -13,7 +13,7 @@
  */
 
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE, slideHostFrameStyle } from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE } from './slideDocument';
 
 /** Font strategy for the editable export. */
 export type EditableFontMode =
@@ -80,18 +80,25 @@ const SLIDE_SETTLE_MS = 400;
 
 // Exported so tests can pin the composite document's layout guarantees.
 //
-// This document injects slideHostFrameStyle on `section.slide-container`, the
-// same contract every preview surface uses. Sizing the container is NOT enough on
-// its own: a design-system-pinned deck nests a <section> wrapper that carries the
-// slide ground inside the container, with the `.slide` root absolutely positioned
-// at inset 0. The wrapper therefore holds no in-flow content and collapses to
-// height 0 — measured 1280x0 in this very document.
+// NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. This document injected
+// slideHostFrameStyle on `section.slide-container` at 0.4.2.dev17; it is reverted
+// with every other export builder because the same shared rule collapses
+// flattened table cells onto one rect on the huashu path (see
+// src/api/routes/export.py for the mechanism and measurements).
 //
-// For THIS surface a collapsed wrapper does not merely fail to paint, it deletes
-// the slide: isVisible() is false at height === 0 and visit() returns WITHOUT
-// descending, so the whole slide subtree is pruned. Measured on a wrapped deck,
-// per slide: 1 rect and 0 text records, against 3 on the same content unwrapped.
-// A .pptx built from that has no text in it at all.
+// THE ACCEPTED COST, stated plainly. On a section-wrapped design-system deck the
+// wrapper carries no in-flow content and collapses to 1280x0 in this document. The
+// walker's isVisible() is false at height === 0 and visit() returns WITHOUT
+// descending, so the whole slide subtree is pruned: 1 rect and 0 text records per
+// slide, and a .pptx built from that has no text in it. That is the dev16
+// behaviour and it was equally broken before dev17.
+//
+// It is accepted because this composite is the RECORDS FALLBACK: it only runs when
+// the huashu sidecar is unavailable, which in practice is the startup 503 window.
+// Trading a working table export on the primary path for a text-bearing fallback
+// on a wrapped deck is the wrong trade, and there is no locator equivalent here —
+// the walker is handed `section.slide-container` by selector, so there is nothing
+// to re-aim.
 export function buildCompositeHtml(deck: SlideDeck): string {
   const slides = deck.slides || [];
   const sections = slides.map((s, i) => {
@@ -133,8 +140,6 @@ section.slide-container { width: ${DESIGN_W}px; height: ${DESIGN_H}px; position:
    flattens the root — whatever its class — exactly like every other surface. */
 ${SLIDE_ROOT_RESET_STYLE}
 ${deck.css || ''}
-/* After deck CSS: the shared slide-host frame contract. */
-${slideHostFrameStyle('section.slide-container')}
 </style>
 </head>
 <body>
