@@ -15,6 +15,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import zipfile
 from unittest.mock import patch
 
@@ -1284,9 +1285,29 @@ def _local_header_of(raw, central_name):
     return offset, raw[name_at:extra_at], raw[extra_at : extra_at + extra_len]
 
 
+#: Whether this interpreter's ``ZipInfo._decodeExtra`` READS ``0x7075`` records.
+#:
+#: CPython 3.12 taught it to, and the same change brought the framing check that
+#: rejects a record whose body is shorter than its own 5-byte header. On 3.10 and
+#: 3.11 no ``0x7075`` record is read at all, so a short body is never inspected and
+#: the archive OPENS — which moves that shape from CPYTHON-SCREENED to
+#: ARCHIVE-REACHABLE on those interpreters, and makes THIS MODULE'S parser the only
+#: thing that refuses it there.
+#:
+#: Measured: 3.10.20 and 3.11.15 open the short-body archive and leave an empty
+#: central name empty; 3.12.11 and 3.14.3 raise ``BadZipFile("Corrupt unicode path
+#: extra field (0x7075)")`` and resolve the declared name. The project supports
+#: >=3.10 and CI runs 3.11, so both halves are live and neither may be assumed.
+#:
+#: Used ONLY to state what the stdlib does. Every refusal this module owns is
+#: asserted unconditionally, because none of them depends on which half we are on.
+_STDLIB_READS_UNICODE_PATH_RECORDS = sys.version_info >= (3, 12)
+
+
 class TestUnicodePathExtraFieldCannotRewriteAName:
     """A ``0x7075`` extra field declares a name for an entry OTHER than the central
-    directory's — and CPython acts on it.
+    directory's — and CPython acts on it (3.12+; see
+    :data:`_STDLIB_READS_UNICODE_PATH_RECORDS`).
 
     ``ZipInfo._decodeExtra`` runs ``self.filename = _sanitize_filename(declared)`` for
     this record and never touches ``orig_filename``. So the NUL bypass comes straight
@@ -1412,6 +1433,16 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
             with pytest.raises(DesignSystemImportError):
                 import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
 
+    #: A 0x7075 record whose declared ``size`` overruns the extra field it sits in:
+    #: 40 bytes of body promised, 2 supplied. Screened by CPython on every supported
+    #: interpreter, because the framing walk runs whatever a record's tag is.
+    OVERRUN_RECORD = struct.pack("<HH", 0x7075, 40) + b"\x01\x02"
+
+    #: A 0x7075 record whose body is shorter than its own 5-byte header. Screened by
+    #: CPython from 3.12; genuinely archive-reachable on 3.10 and 3.11, where reading
+    #: that header is something the stdlib never attempts.
+    SHORT_BODY_RECORD = struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03"
+
     def test_a_truncated_record_never_imports(self):
         """A record whose declared ``size`` overruns the extra field must not import.
 
@@ -1425,11 +1456,44 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
         """
         from src.services.design_system_service import DesignSystemImportError, import_bundle
 
-        # Declares 40 bytes of payload but supplies 2.
-        extra = struct.pack("<HH", 0x7075, 40) + b"\x01\x02"
         with _isolated_session() as isolated:
             with pytest.raises(DesignSystemImportError):
-                import_bundle(isolated, zip_bytes=self._zip(extra=extra), user="u")
+                import_bundle(
+                    isolated, zip_bytes=self._zip(extra=self.OVERRUN_RECORD), user="u"
+                )
+
+    def test_a_short_body_record_is_refused_on_every_interpreter(self):
+        """The shape whose REACHABILITY moves with the stdlib, refused either way.
+
+        This is the test the version-gated classification above is safe to be gated
+        because of. On 3.12+ the ``ZipFile`` never opens and the refusal comes from the
+        stdlib's framing check, surfacing as "not a valid .zip bundle"; on 3.10 and 3.11
+        the archive opens, the entry reaches
+        :func:`_extra_field_name_refusal`, and the refusal is this module's own
+        ``_REASON_CORRUPT_EXTRA``. Two different layers, two different messages, one
+        outcome — and the OUTCOME is the guarantee, so it is asserted unconditionally.
+
+        Written because the version split revealed a real coverage gap rather than only
+        a wrong comment: this shape had no end-to-end test at all, on the belief that
+        CPython always screened it. On the interpreter CI actually runs, it does not.
+        """
+        from src.services.design_system_service import (
+            _REASON_CORRUPT_EXTRA,
+            DesignSystemImportError,
+            import_bundle,
+        )
+
+        zip_bytes = self._zip(extra=self.SHORT_BODY_RECORD)
+        with _isolated_session() as isolated:
+            with pytest.raises(DesignSystemImportError) as exc:
+                import_bundle(isolated, zip_bytes=zip_bytes, user="u")
+
+        # Non-vacuity: assert the layer we EXPECT to refuse it really is the one that
+        # did, so this cannot pass for the wrong reason on either half of the split.
+        if _STDLIB_READS_UNICODE_PATH_RECORDS:
+            assert "not a valid .zip bundle" in str(exc.value)
+        else:
+            assert _REASON_CORRUPT_EXTRA in str(exc.value)
 
     #: An invalid-UTF-8 0x7075 payload that CPython does NOT screen, because the
     #: version byte is not 1 and so the decode it would have raised on never runs:
@@ -1468,32 +1532,36 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
     @pytest.mark.parametrize(
         "extra",
         [
-            struct.pack("<HH", 0x7075, 40) + b"\x01\x02",     # size overruns the field
-            struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03",  # body shorter than 5
+            OVERRUN_RECORD,     # size overruns the field
+            SHORT_BODY_RECORD,  # body shorter than the 5-byte header
         ],
         ids=["overrun", "short-body"],
     )
     def test_the_parser_reports_unframeable_records_rather_than_raising(self, extra):
-        """Unit-level, because THESE two shapes really are unreachable through an
-        archive — unlike the invalid-UTF-8 case above.
+        """Unit-level, because reachability through an archive VARIES for these two.
 
-        The distinction matters and was previously stated wrongly here, so it is worth
-        being exact about which category each shape is in:
+        The distinction matters and was previously stated wrongly here — twice: first
+        by calling the invalid-UTF-8 shape screened, then by calling both shapes below
+        unconditionally screened when one of them is screened only from 3.12. So it is
+        worth being exact about which category each shape is in:
 
-          * ARCHIVE-REACHABLE — an invalid-UTF-8 payload the stdlib never decodes
-            (version != 1, or a non-matching name CRC). Pinned end-to-end by
+          * ARCHIVE-REACHABLE ON EVERY INTERPRETER — an invalid-UTF-8 payload the
+            stdlib never decodes (version != 1, or a non-matching name CRC). Pinned
+            end-to-end by
             :meth:`test_an_invalid_utf8_record_is_refused_through_a_real_archive`.
-          * CPYTHON-SCREENED — the two below. ``_decodeExtra`` validates extra-field
-            FRAMING unconditionally while the ``ZipFile`` is built: an overrunning
-            ``size`` raises ``BadZipFile("Corrupt extra field 7075")`` and a body
-            shorter than the 5-byte header raises ``BadZipFile("Corrupt unicode path
-            extra field (0x7075)")``. Both surface as "not a valid .zip bundle" before
-            this module sees the entry, so an archive-level test could not tell
-            "handled here" from "never called".
+          * CPYTHON-SCREENED ON EVERY INTERPRETER — the overrunning ``size``.
+            ``_decodeExtra`` walks record FRAMING whatever the tag, so it raises
+            ``BadZipFile("Corrupt extra field 7075")`` while the ``ZipFile`` is built.
+          * SCREENED ONLY FROM 3.12 — the body shorter than the 5-byte header. Reading
+            that header requires reading the record, which 3.10 and 3.11 do not do, so
+            there the archive OPENS and this parser is the only thing that refuses it.
+            Pinned end-to-end, unconditionally, by
+            :meth:`test_a_short_body_record_is_refused_on_every_interpreter`.
 
         Tested directly anyway: the parser reads attacker-controlled bytes and must not
         depend on another layer having screened them first, which is the premise of this
-        whole series applied to its own dependency.
+        whole series applied to its own dependency — and which the 3.11 half of that
+        third category shows was never hypothetical.
         """
         from src.services.design_system_service import (
             _REASON_CORRUPT_EXTRA,
@@ -1508,11 +1576,20 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
     @pytest.mark.parametrize(
         "extra,opens",
         [
-            (struct.pack("<HH", 0x7075, 40) + b"\x01\x02", False),
-            (struct.pack("<HH", 0x7075, 3) + b"\x01\x02\x03", False),
+            # An overrunning ``size`` is caught by the framing walk that every
+            # supported interpreter performs over EVERY record, whatever its tag.
+            (OVERRUN_RECORD, False),
+            # A short body is only inspected by a reader that reads the record at
+            # all, so this one flips with the stdlib. See
+            # :data:`_STDLIB_READS_UNICODE_PATH_RECORDS`.
+            (SHORT_BODY_RECORD, not _STDLIB_READS_UNICODE_PATH_RECORDS),
             (ARCHIVE_REACHABLE_BAD_UTF8, True),
         ],
-        ids=["overrun-screened", "short-body-screened", "invalid-utf8-reachable"],
+        ids=[
+            "overrun-screened",
+            "short-body-screened-from-3.12",
+            "invalid-utf8-reachable",
+        ],
     )
     def test_the_documented_reachability_of_each_malformed_shape_is_accurate(
         self, extra, opens
@@ -1523,6 +1600,14 @@ class TestUnicodePathExtraFieldCannotRewriteAName:
         A security-path comment that misstates reachability is worse than no comment:
         it tells the next reader a branch is dead when it is live. This asserts the
         classification directly against CPython.
+
+        The expectation is VERSION-GATED rather than tolerant of both answers, which
+        is the opposite of the rule applied everywhere else in this file. It is
+        deliberate and confined to this test: its entire subject IS the stdlib
+        classification, so accepting either answer would leave it asserting nothing.
+        Nothing this module owns is gated — the refusal that has to hold on every
+        interpreter is pinned unconditionally by
+        :meth:`test_a_short_body_record_is_refused_on_every_interpreter`.
         """
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
@@ -2037,6 +2122,15 @@ class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
     ``""`` so the raw name is the raw name; and an empty raw name is REFUSED, because
     no legitimate archive member has one and an entry with no recorded name has no
     identity for the gate to establish.
+
+    THE LAUNDERING IS THE STDLIB'S AND ONLY HAPPENS FROM 3.12, so this class separates
+    the two things it used to conflate. Our refusal is asserted unconditionally: it
+    keys off the raw recorded name being empty, which it is on EVERY supported
+    interpreter, so nothing here is version-gated. What varies is only how visible the
+    attack's payoff is — on 3.10 and 3.11 ``filename`` stays ``""`` because no
+    ``0x7075`` record is read (:data:`_STDLIB_READS_UNICODE_PATH_RECORDS`), so there is
+    no rewritten name for the ``or`` to substitute and the entry is refused for exactly
+    the same reason. The one test whose subject IS the substitution says so.
     """
 
     TARGET = "slides/benign.bin"
@@ -2068,24 +2162,87 @@ class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
             info.extra = _unicode_path_extra(central_name, declared)
         return buf.getvalue()
 
-    def test_cpython_really_launders_the_empty_name_into_a_usable_one(self):
-        """NON-VACUITY, and the reason an empty name is worth attacking with. The
-        central directory records NO name; CPython resolves a perfectly ordinary
-        storable one and leaves the two attributes DIFFERENT — which is precisely the
-        divergence route 1 exists to catch and which the ``or`` hid from it."""
+    def _hostile_entry(self, zf):
+        """The entry whose CENTRAL name is empty, found without a version assumption.
+
+        Locating it by ``filename == TARGET`` is what a laundering stdlib makes
+        possible, so it cannot be the way to find it: on 3.10 and 3.11 nothing rewrites
+        the name and no entry has that filename, which raised ``StopIteration`` rather
+        than a failed assertion — a lookup failure wearing the mask of a broken guard.
+
+        The RAW recorded name is empty on every interpreter, and this bundle's other
+        four entries all record their own names, so it is an unambiguous key.
+        """
+        hostile = [i for i in zf.infolist() if i.orig_filename == ""]
+        assert len(hostile) == 1, (
+            "the fixture must contain exactly ONE entry with an empty central name, "
+            f"found {len(hostile)} in {[i.orig_filename for i in zf.infolist()]}"
+        )
+        return hostile[0]
+
+    def test_the_archive_really_records_no_name_for_the_entry(self):
+        """NON-VACUITY, and the reason an empty name is worth attacking with: the
+        central directory records NO name at all.
+
+        Unconditional, because it is a fact about the ARCHIVE the fixture builds rather
+        than about any reader of it. What the stdlib then does with that empty name is
+        :meth:`test_cpython_launders_the_empty_name_into_a_usable_one_from_3_12`.
+        """
         with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
-            info = next(i for i in zf.infolist() if i.filename == self.TARGET)
+            info = self._hostile_entry(zf)
         assert info.orig_filename == "", "the central name must really be EMPTY"
-        assert info.filename == self.TARGET
-        assert info.orig_filename != info.filename
+
+    def test_cpython_launders_the_empty_name_into_a_usable_one_from_3_12(self):
+        """The stdlib's substitution, which is what makes route 1 blind — where it
+        exists.
+
+        A ``0x7075`` record's CRC has to match the central name, and the CRC-32 of
+        ``b""`` is 0, so a record against an EMPTY name is always honoured by a reader
+        that reads such records: ``filename`` becomes a perfectly ordinary storable name
+        while ``orig_filename`` stays ``""``, leaving the two attributes DIFFERENT.
+
+        Split off from the archive fact above and version-gated because it is a claim
+        about CPYTHON, not about us: 3.10 and 3.11 read no ``0x7075`` record, so the
+        substitution simply does not occur there and the empty name stays empty. Both
+        branches assert, so neither interpreter runs a test that checks nothing — and
+        our refusal, which is what actually protects the importer, is asserted
+        unconditionally by :meth:`test_the_shared_judgement_refuses_the_entry` and the
+        bundle-level tests below.
+        """
+        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
+            info = self._hostile_entry(zf)
+
+        if _STDLIB_READS_UNICODE_PATH_RECORDS:
+            assert info.filename == self.TARGET
+            assert info.orig_filename != info.filename, (
+                "the substitution is only interesting because these DIFFER"
+            )
+        else:
+            assert info.filename == "", (
+                "3.10/3.11 read no 0x7075 record, so the empty name must stay empty; "
+                "a rewritten name here means the stdlib gained the behaviour and "
+                "_STDLIB_READS_UNICODE_PATH_RECORDS needs its bound lowered"
+            )
 
     def test_the_raw_name_is_the_empty_one_the_archive_records(self):
         """The laundering itself, at the one line that does it. Everything else in this
-        class is a consequence of this function's answer."""
+        class is a consequence of this function's answer.
+
+        Asserted against a ``ZipInfo`` carrying the hostile attribute pair DIRECTLY,
+        which is both the contract of a pure function of a ``ZipInfo`` and the only way
+        to pin it on every interpreter. Reading the pair out of an archive instead would
+        test this on 3.12+ and silently stop discriminating on 3.10/3.11, where
+        ``filename`` is ``""`` as well and a restored ``or`` would return ``""`` too —
+        passing while asserting nothing. Constructing the state follows this class's own
+        precedent in
+        :meth:`test_an_absent_attribute_still_falls_back_to_the_filename`; that the
+        state is REAL is what the two tests above pin.
+        """
         from src.services.design_system_service import _raw_entry_name
 
-        with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
-            info = next(i for i in zf.infolist() if i.filename == self.TARGET)
+        info = zipfile.ZipInfo(self.TARGET)
+        info.orig_filename = ""
+        assert info.filename == self.TARGET, "control: the rewritten name is present"
         assert _raw_entry_name(info) == ""
 
     def test_an_absent_attribute_still_falls_back_to_the_filename(self):
@@ -2100,7 +2257,14 @@ class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
         assert _raw_entry_name(info) == "assets/logo.svg"
 
     def test_the_shared_judgement_refuses_the_entry(self):
-        """The judgement BOTH gates read, so neither can be left behind."""
+        """The judgement BOTH gates read, so neither can be left behind.
+
+        Unconditional on purpose, and it is the assertion that carries this class: the
+        refusal keys off the RAW recorded name being empty, which no interpreter
+        difference touches. Both the reason and the verdict kind are pinned, so removing
+        the refusal fails here on every interpreter rather than degrading into whichever
+        later reason happens to fire next.
+        """
         from src.services.design_system_service import (
             _ENTRY_REFUSE,
             _REASON_EMPTY_RECORDED_NAME,
@@ -2108,7 +2272,7 @@ class TestAnEmptyCentralNameIsRefusedRatherThanLaundered:
         )
 
         with zipfile.ZipFile(io.BytesIO(self._zip())) as zf:
-            info = next(i for i in zf.infolist() if i.filename == self.TARGET)
+            info = self._hostile_entry(zf)
             verdict = _entry_verdict_for_info(zf, info)
         assert verdict.kind == _ENTRY_REFUSE
         assert verdict.reason == _REASON_EMPTY_RECORDED_NAME
