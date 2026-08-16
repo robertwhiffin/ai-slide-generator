@@ -31,11 +31,20 @@ const SLIDE_HEIGHT = 720;
  * CHILD is what gives the wrapper area; sizing the root does not, because the
  * wrapper stays a static-flow child and still collapses.
  *
- * The contract is NECESSARY BUT NOT SUFFICIENT for this surface. It gives the
- * wrapper area, but the capture step must also aim at the element that has that
- * area — see the slide-root locator in exportSlideDeckToPDF. With the contract
- * alone the delivered PDF still measured a 100% black frame at contrast 1.5450;
- * only both together reach rgb(248,247,243) and 12.6794.
+ * The contract is not sufficient on its own: the capture step must also aim at the
+ * element that HAS that area — see the slide-root locator in exportSlideDeckToPDF.
+ * With the contract alone the delivered PDF still measured a 100% black frame at
+ * contrast 1.5450.
+ *
+ * The converse is NOT true, and this comment used to overstate it. The locator
+ * alone DOES produce the corrected artifact — measured rgb(248,247,243) at
+ * 12.6794 — because exportSlideDeckToPDF force-sizes its capture target inline
+ * (see below), and that block reaches the wrapper once the locator resolves to it.
+ * What the contract buys is a correct DOCUMENT rather than a runtime repair: the
+ * initial layout is otherwise 1280x0, the absolute slide resolves `inset: 0`
+ * against <body> instead of its own wrapper because a collapsed static wrapper is
+ * no containing block, and deck scripts and charts can observe that wrong layout
+ * before the runtime correction happens. Both are kept for those reasons.
  */
 export function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
   const slide = slideDeck.slides[slideIndex];
