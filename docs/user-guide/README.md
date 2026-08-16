@@ -14,6 +14,7 @@ Welcome to the Databricks Tellr user guide. This documentation covers the main w
 | [Exporting to Google Slides](./07-exporting-to-google-slides.md) | Set up Google OAuth and export decks to Google Slides |
 | [Profile Sharing Permissions](./08-profile-sharing-permissions.md) | Understand CAN VIEW, CAN EDIT, and CAN MANAGE permission levels |
 | [Retrieving Feedback](./04-retrieving-feedback.md) | View the Feedback Dashboard, survey metrics, and AI-generated summaries |
+| [Design Systems](./09-design-systems.md) | Upload a brand bundle, set your default, and pin a template |
 
 ## Quick Start
 

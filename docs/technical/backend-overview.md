@@ -154,6 +154,30 @@ Save points are created on the backend immediately after deck persistence (in `C
 | `PUT` | `/api/settings/slide-styles/{id}` | Update slide style | `routes/settings/slide_styles.update_slide_style` |
 | `DELETE` | `/api/settings/slide-styles/{id}` | Delete slide style | `routes/settings/slide_styles.delete_slide_style` |
 
+### Settings: Design Systems
+
+All routes live in `routes/settings/design_systems.py`, mounted under `/api/settings`. Reads are open (design systems are org-shared); mutations are creator-or-admin; the two default routes are admin-only. See [Design System Library §5](design-system-library.md).
+
+| Method | Path | Purpose | Backend handler |
+|--------|------|---------|-----------------|
+| `GET` | `/api/settings/design-systems` | List with token/asset/template counts | `list_design_systems` |
+| `POST` | `/api/settings/design-systems/import` | Import a bundle zip | `import_design_system` |
+| `POST` | `/api/settings/design-systems` | Create a token-only system | `create_design_system` |
+| `GET` | `/api/settings/design-systems/{id}` | Detail | `get_design_system` |
+| `PUT` | `/api/settings/design-systems/{id}` | Update | `update_design_system` |
+| `DELETE` | `/api/settings/design-systems/{id}` | Soft delete; `?hard_delete=true` for permanent | `delete_design_system` |
+| `POST` | `/api/settings/design-systems/{id}/set-default` | **Admin only.** Set the org default | `set_default_design_system` |
+| `POST` | `/api/settings/design-systems/{id}/clear-default` | **Admin only.** Clear the org default | `clear_default_design_system` |
+| `GET` | `/api/settings/design-systems/{id}/templates` | List named templates | `list_design_system_templates` |
+| `GET` | `/api/settings/design-systems/{id}/templates/{tid}/thumbnail` | Serve a template thumbnail | `serve_design_system_template_thumbnail` |
+| `GET` | `/api/settings/design-systems/{id}/templates/{tid}/source` | Serve template HTML | `get_design_system_template_source` |
+| `GET` | `/api/settings/design-systems/{id}/assets/{aid}` | Serve asset bytes | `serve_design_system_asset` |
+| `GET` | `/api/settings/design-systems/{id}/assets/{aid}/thumbnail` | Serve an asset thumbnail | `serve_design_system_asset_thumbnail` |
+| `GET` | `/api/settings/design-systems/{id}/files` | List bundle files | `list_design_system_files` |
+| `GET` | `/api/settings/design-systems/{id}/files/{path}` | Serve a bundle file | `serve_design_system_file` |
+
+**Asset resolution is scoped by `(asset_id, design_system_id)`, never by global id.** Resolving an asset by global id was a shipped confused-deputy defect: a foreign `{{ds-asset:ID}}` handle returned another design system's bytes. Any new route that resolves assets must carry the same scoping.
+
 ### Settings: Contributors & Identities
 
 | Method | Path | Purpose | Backend handler |
@@ -178,8 +202,10 @@ Save points are created on the backend immediately after deck persistence (in `C
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/export/pptx` | Export deck to PowerPoint (synchronous) | `routes/export.export_to_pptx` |
-| `POST` | `/api/export/pptx/async` | Start async PPTX export (polling) | `routes/export.start_pptx_export_async` |
+| `POST` | `/api/export/pptx/editable/huashu/from-html` | **Primary.** Render the deck HTML to PowerPoint | `routes/export.export_pptx_huashu_from_html` |
+| `POST` | `/api/export/pptx/editable/from-records` | **Fallback** — used only when the huashu route returns 503 | `routes/export.export_pptx_editable_from_records` |
+| `POST` | `/api/export/pptx` | **Legacy** — LLM code-generation path, no production callers; the UI uses the huashu route above | `routes/export.export_to_pptx` |
+| `POST` | `/api/export/pptx/async` | **Legacy** — async twin of the above, no production callers | `routes/export.start_pptx_export_async` |
 | `GET` | `/api/export/pptx/poll/{job_id}` | Poll PPTX export status | `routes/export.poll_pptx_export` |
 | `GET` | `/api/export/pptx/download/{job_id}` | Download completed PPTX | `routes/export.download_pptx_export` |
 | `GET` | `/api/export/google-slides/auth/status` | Check user authorization | `routes/google_slides.auth_status` |
@@ -348,7 +374,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 - **ChatRequest** ensures `message` length, `max_slides` bounds (1-50), and (when present) `slide_context` contiguous indices + matching HTML count. This keeps backend/LLM alignment with the frontend selection ribbon.
 - **ChatResponse** always returns every message in the current turn so the UI can stream tool and assistant chatter without reconstructing history.
 - **SlideDeck** caches the canonical state:
-  - `slides` store raw HTML with `<div class="slide">`. Each `Slide` object holds its own `scripts` attribute.
+  - `slides` store raw HTML whose root is a slide wrapper. The wrapper is **not** div-only — slide roots are discovered by tag set, so a `<section class="slide">` root (as design-system templates use) is equally valid. Each `Slide` object holds its own `scripts` attribute.
   - `css`, `external_scripts` preserve deck-level styling and CDN references.
   - Canvas/script integrity is enforced via `_validate_canvas_scripts_in_html()` before caching full decks and `validate_canvas_scripts()` during replacements.
 

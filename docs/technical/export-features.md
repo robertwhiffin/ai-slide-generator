@@ -4,10 +4,31 @@
 
 The AI Slide Generator supports exporting slide decks in three formats:
 - **PDF**: Client-side generation using browser APIs
-- **PPTX**: Server-side async generation using LLM-powered conversion with polling
-- **Google Slides**: Server-side export to a new Google Slides presentation via OAuth2
+- **PPTX**: Server-side render of the deck HTML via the huashu pipeline — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
+- **Google Slides**: Synchronous server-side export — the rendered PPTX is uploaded to Drive, which converts it to native editable Slides
 
 All export options are accessible through a unified dropdown menu in the slide panel.
+
+### The export routes, and which are live
+
+| Route | Status | Notes |
+|---|---|---|
+| `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML |
+| `POST /api/export/pptx/editable/from-records` | **Live — fallback** | Used only when the huashu route returns `503`; DOM-walker records → pptxgenjs |
+| `POST /api/export/google-slides/from-huashu` | **Live** | Synchronous; uploads the rendered PPTX to Drive for conversion |
+| `POST /api/export/pptx/editable/from-images` | Live, unreachable | Rasterised path, reached only when `fontMode === 'screenshot'`, which no UI surface passes |
+| `POST /api/export/pptx` · `/pptx/async` | **Legacy** | LLM code-generation; superseded, **no production callers** |
+| `POST /api/export/google-slides` | **Legacy** | LLM code-generation twin; superseded, no production callers |
+
+PDF export is client-side and is not a route.
+
+**Table fidelity differs by route, and both behaviours are intended.** The legacy code-generation path emits a **native PowerPoint table** (`<a:tbl>` inside a `<p:graphicFrame>`), because the model writes `python-pptx` directly. The huashu path emits **positioned text boxes and no `<a:tbl>` at all** — its DOM walker produces no records for `<td>`/`<th>`, so cells are flattened into absolutely-positioned elements. The result renders correctly and is positionally faithful, but is not editable *as a table* in PowerPoint. This is a design limitation of the huashu emitter, not a regression.
+
+**Fonts survive because the export document keeps the deck's CSS in its own stylesheet.** `@import` is only valid at the top of a stylesheet, so injected resets are emitted as separate `<style>` elements rather than prepended to the deck's CSS — otherwise a deck's leading webfont `@import` is discarded and the export silently falls back to a system font.
+
+**Geometry is scoped, not universal.** Neither export builder applies a universal `* { box-sizing }` rule; margin, padding and box-sizing resets are scoped to `html, body`. Slide content keeps the browser default, which is what the preview surfaces use — see [Slide Host Frame Contract](slide-host-frame-contract.md).
+
+**Known export limitations.** Inline background pills (used for agenda badges) are centred against their resolved ancestor, so badges on a wide list can land away from their item. `<code>` chips do not receive their pill background. The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
 
 ## User Guide
 
@@ -81,7 +102,16 @@ All export options are accessible through a unified dropdown menu in the slide p
 - Requires modern browser with canvas support
 - Charts are rendered as images (not editable in PDF)
 
-### PPTX Export (Server-Side Async)
+### PPTX Export (Server-Side Async) — legacy
+
+> **Historical note.** The LLM code-generation path described in this section
+> (`src/services/html_to_pptx.py`, `POST /api/export/pptx` and its `/async`
+> twin, and the `export_job_queue` worker) is **superseded** by the huashu
+> render above and is no longer the route the UI calls — it has no production
+> callers. It re-runs per-slide code generation on every request and is
+> therefore non-deterministic. The code still exists but should be treated as
+> legacy; the detail below is retained for readers working on that code and is
+> not a description of current export behaviour.
 
 **Location**: 
 - `src/api/routes/export.py` - API endpoints
