@@ -8,16 +8,24 @@
  *
  * Used only for the "Screenshot-based PPTX" option where the user
  * picks pixel-perfect fidelity over editability.
+ *
+ * NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY — reverted with every other
+ * export builder, because on the huashu path that shared rule collapsed flattened
+ * table cells onto one rect (see src/api/routes/export.py).
+ *
+ * The slide-root locator below is kept, but it carries less weight here than on
+ * the PDF surface: captureDeckAsPngDataUrls hands the located element straight to
+ * html2canvas with `backgroundColor: null` and never force-sizes it, which is the
+ * step that makes the locator sufficient in exportSlideDeckToPDF. On a
+ * section-wrapped design-system deck the wrapper can therefore still be 1280x0 at
+ * capture time. Whatever this route delivers for such a deck is the dev16
+ * behaviour, and it is API-only (no UI entry point), so it is accepted rather than
+ * papered over with a rule that breaks tables.
  */
 
 import html2canvas from 'html2canvas';
 import type { SlideDeck } from '../types/slide';
-import {
-  SLIDE_CSP,
-  SLIDE_ROOT_RESET_STYLE,
-  findSlideRoot,
-  slideHostFrameStyle,
-} from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE, findSlideRoot } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -48,8 +56,6 @@ ${externalScripts}
      a root margin inside this fixed 1280x720 overflow:hidden document shifts
      content past the clip and truncates the capture's bottom edge. */
   ${SLIDE_ROOT_RESET_STYLE}
-  /* After deck CSS: the shared slide-host frame contract. */
-  ${slideHostFrameStyle('body')}
 </style>
 </head>
 <body>
