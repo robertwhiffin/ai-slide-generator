@@ -78,11 +78,11 @@ The six entry paths, and what decides each:
 
 | Entry path | Resolver | Workspace-default seeding eligible? |
 |---|---|---|
-| 4.1 Fresh pre-session browser surface | `AgentConfigContext` pre-session effect | Yes — the only browser path that passes `isNewSurface` |
-| 4.2 Stored mirror / restored surface | same effect, mirror branch | No |
+| 4.1 Fresh pre-session browser surface | `AgentConfigContext` pre-session effect | Yes — resolves with `isNewSurface: true` |
+| 4.2 Stored mirror / restored surface | same effect, mirror branch | Only for a mirror stamped `style_source: 'seeded'` whose design-system slot is empty |
 | 4.3 Default profile | `profileStyleSource` | Only when the profile is server-seeded |
 | 4.4 Browser-created new session | `_apply_org_default_style_source` (`src/api/routes/chat.py`) | Per field, and only for omitted fields |
-| 4.5 Existing session | agent-config `GET` (`src/api/routes/agent_config.py`) | No |
+| 4.5 Existing session | agent-config `GET` (`src/api/routes/agent_config.py`) | Only when the server holds no stored config for the session (`is_configured` false) |
 | 4.6 MCP | `create_deck` (`src/api/mcp_server.py`) | Yes, unless an explicit source is passed |
 
 ### 4.1 Entry path: a fresh pre-session browser surface
@@ -91,7 +91,7 @@ The pre-session effect in `frontend/src/contexts/AgentConfigContext.tsx`:
 
 1. Read the `localStorage` mirror. **Its existence, never its content, decides the branch.** A config whose only edit was "Design System: None" is byte-identical to the untouched first-paint placeholder, so no content test can separate them; a mirror that exists means path 4.2.
 2. No mirror: load the selected profile (`userDefaultProfileId`, else the server `is_default` profile) and stamp its provenance — path 4.3.
-3. Resolve through `withResolvedStyleSource(config, { isNewSurface: true })`. **This is the only browser path that passes `isNewSurface`**, so it is the only one on which workspace-default seeding is eligible at all.
+3. Resolve through `withResolvedStyleSource(config, { isNewSurface: true })`. One other browser path passes the same flag — the session `GET`, when the server holds no stored config for that session (§4.5). And `isNewSurface` is not what gates seeding overall: it decides only the second guard below, so the stored-mirror branch, which passes no flag, is still eligible when its provenance is `'seeded'` (§4.2).
 
 `withResolvedStyleSource` evaluates these guards in order and returns at the first one that matches:
 
@@ -111,7 +111,15 @@ The pre-session effect in `frontend/src/contexts/AgentConfigContext.tsx`:
 
 ### 4.2 Entry path: a stored mirror or restored surface
 
-Stored state is authoritative. The mirror branch resolves without `isNewSurface`, so the second guard above fires and **an absent provenance marker is preserved as the user's choice rather than treated as a fresh gap.** The branch fills only the genuinely empty `deck_prompt_id` slot.
+Stored state is authoritative, but it is not uniformly final. The branch runs at all only when the stored config is missing a `design_system_id` or a `deck_prompt_id`, and it then resolves without `isNewSurface` — so recorded provenance decides which of **three** outcomes follows:
+
+| Stored `style_source` | Outcome |
+|---|---|
+| `'user'` | Returned unchanged at the first guard. The slot is the user's decision, including the decision to hold neither a design system nor a style. |
+| absent (`null`) | Returned unchanged at the second guard, which fires precisely because this path passes no `isNewSurface`. **An absent provenance marker is preserved as the user's choice rather than treated as a fresh gap.** |
+| `'seeded'` | **Not an early return.** The config clears both guards, and with an empty design-system slot it reaches the org-default branch, which takes the slot, clears the seeded style and re-stamps `'seeded'`. |
+
+The third row is the one a summary tends to lose: a stored mirror the user has never edited still tracks a later org default. It is pinned by `frontend/tests/e2e/design-system-selector.spec.ts` — "a SERVER-SEEDED style is still overridden by the org-default design system" seeds a mirror with `style_source: 'seeded'` and asserts the org-default design system ends up selected. Outside the style slot, the branch fills only a genuinely empty `deck_prompt_id`.
 
 ### 4.3 Entry path: the default profile
 
