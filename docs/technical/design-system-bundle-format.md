@@ -25,7 +25,7 @@ See [Design System Library](./design-system-library.md) for what happens to a bu
 
 **`_ds_manifest.json`** at the bundle root (or in a single top-level folder) is required — the importer locates the bundle root by finding it. It declares `tokens[]`, `templates[]` and `cards[]`.
 
-**Tokens come from the manifest and from CSS sources the manifest declares** — not from scanning a `tokens/` directory. A stray CSS file the manifest does not reference contributes nothing.
+**Tokens come from the manifest, from the CSS paths listed in `globalCssPaths`, and from the conventional root `colors_and_type.css`** — not from scanning a `tokens/` directory. `_declared_css_paths` appends `colors_and_type.css` to the declared list unconditionally, so that one path is a token source without any manifest declaration. Any other CSS file the manifest does not reference contributes nothing.
 
 ### What each path becomes
 
@@ -34,7 +34,7 @@ See [Design System Library](./design-system-library.md) for what happens to a bu
 | `assets/**` | `design_system_asset` rows — brand imagery |
 | `fonts/**` | `design_system_asset` rows — webfonts |
 | `_ds_manifest.json` | parsed into `manifest_json`; drives tokens, templates and cards |
-| CSS files the manifest declares | token sources, plus retained as `design_system_file` |
+| CSS in `globalCssPaths`, plus root `colors_and_type.css` | token sources, plus retained as `design_system_file` |
 | `README.md`, `SKILL.md` | retained as `design_system_file` — the authoring/brand-manual layer |
 | `templates/<slug>/index.html` | retained as `design_system_file` — the template's layout source |
 | `templates/<slug>/.thumbnail` or `preview*` | a `design_system_asset`, referenced by the template row |
@@ -87,7 +87,13 @@ Tokens are grouped by their `group` value. `group` is **free text**, not a fixed
 
 **Token identifiers are normalised before comparison.** A leading `--` and a `brand-` namespace are stripped, so `--brand-core-primary` and `primary` reduce to the same identifier.
 
-**Deduplication requires a matching name *and* value.** Two sources declaring the same normalised identifier with the same value collapse to one row; the same identifier with *different* values remains two rows.
+**Deduplication is source-aware**, so it collapses genuine restatements without merging distinct tokens:
+
+| Comparison | Key | Effect |
+|---|---|---|
+| Manifest vs manifest | `(group, canonical name)` | A later manifest entry is dropped **even if its value differs**. Two entries sharing a canonical name in *different* groups are both kept, so semantic aliases survive. |
+| CSS vs manifest | `(canonical name, value)` | A `:root` var that restates a manifest token is dropped, so the manifest's `kind`-derived group wins. A CSS var sharing a name but carrying a **different value is a distinct token and is retained.** |
+| CSS vs CSS | `(canonical name, value)` | Identical repeats collapse. |
 
 **Type-scale rungs should exist as tokens.** Derived sizes prefer the font-size token ramp; where the ramp cannot supply a distinct rung, the compiler may fall back to inspecting authored template or CSS declarations. Declaring the rung as a token is the reliable route.
 
@@ -99,7 +105,7 @@ After import, assets are grouped by `kind` — logo, icon, lockup, illustration,
 
 **`kind` is inferred partly from the pathname**, and asset eligibility is restricted by path in the first place. So layout is *not* irrelevant: moving a file can change how it is classified, or remove it from the import entirely.
 
-Prefer SVG for logos and marks, compressed raster for photography, and subset webfonts. Bytes are stored as rows, so bundle size is database size.
+Prefer SVG for logos and marks, compressed raster for photography, and subset webfonts. **Imported asset and retained-source bytes live in database rows, but the database footprint is not the ZIP's size**: the archive is compressed while stored payloads are not, most entries are skipped entirely, each asset's file row is a path-only reference that does not re-store the bytes, and row metadata adds its own overhead.
 
 ---
 
@@ -110,7 +116,7 @@ A bundle is untrusted input. The importer **refuses an entry whose identity is u
 | Class | Refused because |
 |---|---|
 | **Symlink or zip-slip path** | **Rejects the whole bundle up-front, before any bytes are read** — not a per-entry skip |
-| **Duplicate canonical path** | Two entries normalise to the same destination, so which one wins would depend on archive order |
+| **Duplicate canonical path** | Two entries claim the same canonical archive path, so archive order would otherwise decide which bytes win. Noncanonical spellings are refused rather than rewritten, so this is not collision-by-normalisation: a ZIP may legally carry the same already-canonical arcname twice, which no path rule can see |
 | **Empty or unreadable name** | No name, or a recorded central-directory name that is empty while a name is declared elsewhere |
 | **Non-text characters** | Control characters, bidirectional overrides, unpaired surrogates |
 | **Path escape** | Absolute paths, drive letters, `..` traversal, empty segments, dot segments |
@@ -124,7 +130,7 @@ Two properties worth stating explicitly:
 
 **Dotfiles are skipped rather than refused.** Refusing them would break template previews, and failing an entire multi-hundred-megabyte bundle over a `.DS_Store` would be hostile. A non-allowlisted dotfile is skipped with a warning.
 
-**A malformed archive produces a client error, not a server error** — a crafted offset that cannot be seeked yields a `400`, not a `500`.
+**Recognized invalid-bundle conditions are reported as `400`, not `500`** — every `DesignSystemImportError`, an unreadable ZIP, and a crafted local-header offset that cannot be seeked all become a client error. An *unexpected* importer failure still falls through to the generic `500` handler, so a `500` on an upload is a bug rather than a documented outcome.
 
 ---
 
@@ -141,7 +147,7 @@ Design system names are unique among active systems.
 ## 8. Authoring Guidance
 
 - Include **`_ds_manifest.json`** at the bundle root. Without it the importer cannot locate the bundle root.
-- Declare tokens **in the manifest**, or in a CSS file the manifest references. Unreferenced CSS contributes nothing.
+- Declare tokens **in the manifest**, in a CSS file listed in `globalCssPaths`, or in a root **`colors_and_type.css`** — that filename is picked up without being declared. Other unreferenced CSS contributes nothing.
 - Put brand imagery under **`assets/`** and webfonts under **`fonts/`**. Other folder names contribute no assets.
 - Give each template folder a preview — either `.thumbnail` (no extension) or `preview.<ext>`.
 - Keep **`README.md`** substantive: its first heading can name the design system, and its content reaches the model as brand context.
