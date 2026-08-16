@@ -13,19 +13,26 @@
  * export builder, because on the huashu path that shared rule collapsed flattened
  * table cells onto one rect (see src/api/routes/export.py).
  *
- * The slide-root locator below is kept, but MEASUREMENT SAYS IT IS NOT SUFFICIENT
- * HERE: on a section-wrapped design-system deck the delivered PNG is 100.00%
- * transparent. The PDF surface differs because exportSlideDeckToPDF force-sizes
- * whatever the locator resolves to before capturing; this function hands the
- * element straight to html2canvas with `backgroundColor: null` and never sizes it,
- * so the wrapper is still 1280x0 at capture time and PNG keeps the alpha.
+ * The slide-root locator is not sufficient on its own here, and for a while this
+ * file said so and stopped there: on a section-wrapped design-system deck the
+ * delivered PNG measured 100.00% transparent, 0 non-white colours, entirely
+ * blank. Locating the ground-carrying element does not give it AREA, and
+ * html2canvas photographs the box it is handed.
  *
- * That is the dev16 behaviour on an API-only route with no UI entry point, so it
- * is accepted rather than papered over with a rule that destroys tables on the
- * primary path. The correct fix, when this route matters, is a force-size at the
- * capture site mirroring exportSlideDeckToPDF — NOT the frame contract. Pinned by
- * 'captureDeckAsPngDataUrls stays transparent on a wrapped deck (accepted)' in
- * frontend/tests/e2e/slide-surface-fidelity.spec.ts.
+ * FIXED at the capture site, the way the PDF surface always did it: force the
+ * resolved element's geometry with INLINE styles before capturing (see the
+ * force-size in captureDeckAsPngDataUrls, mirroring pdf_client.ts:290-298).
+ * Measured on the wrapped deck, 100.00% transparent / 0 colours / 0 ink pixels
+ * becomes 0.00% transparent, ground rgb(249,247,244), 47,369 ink pixels, darkest
+ * ink rgb(27,49,57) at contrast 12.7110 against that ground. Unwrapped decks do
+ * not move: byte-identical capture, FNV-1a 68079f00 either side.
+ *
+ * That is a force-size, NOT the frame contract, and the distinction is the whole
+ * point — it injects no CSS, so it cannot outrank the inline coordinates
+ * preprocess.mjs::flattenTables() gives each flattened table cell. Pinned by
+ * 'captureDeckAsPngDataUrls paints the ground AND the ink on a wrapped deck' in
+ * frontend/tests/e2e/slide-surface-fidelity.spec.ts, which asserts the ground and
+ * the ink SEPARATELY so neither half can regress alone.
  */
 
 import html2canvas from 'html2canvas';
@@ -114,6 +121,29 @@ export async function captureDeckAsPngDataUrls(deck: SlideDeck): Promise<string[
       await new Promise(r => setTimeout(r, 150));
       // The slide ROOT, which is NOT `.slide` once a design system wraps it.
       const slideEl = findSlideRoot(doc);
+      // Force the resolved element's geometry, exactly as exportSlideDeckToPDF
+      // does (pdf_client.ts): on a section-wrapped deck the root is 1280x0 in the
+      // document — `.slide` inside it is out of flow, so the wrapper has no
+      // in-flow content — and html2canvas photographs that collapsed box, which
+      // with `backgroundColor: null` delivers an entirely transparent PNG.
+      //
+      // INLINE, ON THIS ONE ELEMENT, never a stylesheet: a document-level rule is
+      // what destroyed table layout on the huashu path, where
+      // preprocess.mjs::flattenTables() appends every cell to `body` with its
+      // coordinates as NON-important inline styles that a `body > *` rule outranks.
+      // An inline style on the element html2canvas was already given cannot reach
+      // a sibling, so that path is untouched.
+      //
+      // Padding is preserved — the slide's safe area lives there — and
+      // `border-box` is what keeps a padded root at frame size instead of
+      // overflowing to 1280+padding, which is why the width/height and the box
+      // model have to be set together.
+      if (slideEl !== doc.body) {
+        slideEl.style.width = `${SLIDE_WIDTH}px`;
+        slideEl.style.height = `${SLIDE_HEIGHT}px`;
+        slideEl.style.margin = '0';
+        slideEl.style.boxSizing = 'border-box';
+      }
       const canvas = await html2canvas(slideEl, {
         width: SLIDE_WIDTH,
         height: SLIDE_HEIGHT,

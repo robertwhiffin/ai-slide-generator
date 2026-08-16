@@ -467,6 +467,36 @@ const dsWrappedDeck = () =>
     slides: [{ slide_id: 's1', html: DS_WRAPPED_SLIDE_HTML, scripts: '' }],
   }) as never;
 
+// The UNWRAPPED counterpart — the shape 47 of 47 pre-existing decks have, and the
+// control for the capture-site force-size. `.slide` is the direct child of <body>
+// here, so findSlideRoot's walk-up never executes and it returns `.slide` ITSELF,
+// not <body>: the force-size's guard is `!== doc.body`, so this deck goes down the
+// SAME branch as a wrapped one and is the deck that would show collateral damage.
+// Same palette as the wrapped fixture so the two are directly comparable.
+const DS_UNWRAPPED_DECK_CSS =
+  'html, body { background: #0E1A1F; }'
+  + '.slide { width: 1280px; height: 720px; background: #F9F7F4; color: #3A3838;'
+  + ' font-family: Arial, Helvetica, sans-serif; display: flex; flex-direction: column;'
+  + ' gap: 24px; overflow: hidden; }'
+  + 'h1.headline { color: #1B3139; font-size: 64px; margin: 0; }'
+  + 'p.bodycopy { color: #3A3838; font-size: 24px; margin: 0; }'
+  + 'p.mutedink { color: #5A5755; font-size: 20px; margin: 0; }';
+const DS_UNWRAPPED_SLIDE_HTML =
+  '<div class="slide">'
+  + '<h1 class="headline">Acme Quarterly</h1>'
+  + '<p class="bodycopy">Body copy on the brand paper ground.</p>'
+  + '<p class="mutedink">Muted supporting line.</p>'
+  + '</div>';
+
+const dsUnwrappedDeck = () =>
+  ({
+    title: 'unwrapped deck',
+    css: DS_UNWRAPPED_DECK_CSS,
+    scripts: '',
+    external_scripts: [],
+    slides: [{ slide_id: 's1', html: DS_UNWRAPPED_SLIDE_HTML, scripts: '' }],
+  }) as never;
+
 /**
  * Assert a built EXPORT document carries no slide-host frame contract.
  *
@@ -702,6 +732,106 @@ async function measureDataUrl(page: Page, dataUrl: string) {
   }, dataUrl);
 }
 
+/**
+ * Composite a delivered PNG over WHITE, then report its GROUND and its INK
+ * separately — because on this surface those two failure modes are independent.
+ *
+ * `backgroundColor: null` means a capture can ship ink with no ground (the
+ * pre-locator behaviour: 98.50% transparent, its darkest ink contrasting 13.5922
+ * against the white it lands on) or a ground with no ink (a force-sized wrapper
+ * whose text never resolved), and only one of those four combinations is a
+ * correct slide. A single scalar cannot tell them apart, so this returns both.
+ *
+ * White is the right compositing ground because white is what every consumer of
+ * these PNGs actually supplies: /api/export/pptx/editable/from-images embeds
+ * each one as a full-slide picture on a PPTX slide. Raw alpha is reported too —
+ * a fully transparent PNG composites to pure white and would otherwise read as
+ * a perfectly clean white slide rather than as the blank it is.
+ *
+ * Ink is defined as "clears WCAG AA against the modal painted colour", which
+ * counts glyph cores and excludes antialiased edges, and is the same measure
+ * the delivered-PDF test applies to its ground.
+ */
+async function measurePngOverWhite(page: Page, dataUrl: string) {
+  return page.evaluate(async (url) => {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error('decode failed'));
+      img.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // WCAG maths, restated here because this body is evaluated in the page.
+    const chan = (c: number) => {
+      const v = c / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    };
+    const lum = (r: number, g: number, b: number) =>
+      0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b);
+    const ratio = (a: number, b: number) =>
+      (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    const over = (c: number, a: number) => Math.round((c * a) / 255 + 255 * (1 - a / 255));
+
+    // Pass 1 — the ground: modal composited colour, distinct non-white colours,
+    // and the UNCOMPOSITED alpha share.
+    const counts = new Map<number, number>();
+    let transparent = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const a = data[i + 3];
+      if (a === 0) transparent++;
+      const key = (over(data[i], a) << 16) | (over(data[i + 1], a) << 8) | over(data[i + 2], a);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    let ground = 0;
+    let groundN = -1;
+    let uniqueNonWhite = 0;
+    for (const [k, n] of counts) {
+      if (k !== 0xffffff) uniqueNonWhite++;
+      if (n > groundN) {
+        groundN = n;
+        ground = k;
+      }
+    }
+    const groundRgb = [(ground >> 16) & 255, (ground >> 8) & 255, ground & 255];
+    const groundLum = lum(groundRgb[0], groundRgb[1], groundRgb[2]);
+
+    // Pass 2 — the ink: every composited pixel clearing AA against that ground,
+    // plus the darkest pixel in the image, which is the headline.
+    let inkPixels = 0;
+    let darkest = ground;
+    let darkestLum = groundLum;
+    for (let i = 0; i < data.length; i += 4) {
+      const a = data[i + 3];
+      const r = over(data[i], a);
+      const g = over(data[i + 1], a);
+      const b = over(data[i + 2], a);
+      const l = lum(r, g, b);
+      if (ratio(l, groundLum) >= 4.5) inkPixels++;
+      if (l < darkestLum) {
+        darkestLum = l;
+        darkest = (r << 16) | (g << 8) | b;
+      }
+    }
+    const total = data.length / 4;
+    return {
+      w: canvas.width,
+      h: canvas.height,
+      transparentShare: transparent / total,
+      groundRgb,
+      groundShare: groundN / total,
+      uniqueNonWhite,
+      inkPixels,
+      darkestRgb: [(darkest >> 16) & 255, (darkest >> 8) & 255, darkest & 255],
+    };
+  }, dataUrl);
+}
+
 /** Require that port 3000 is serving THIS worktree, not another one. */
 async function assertFreshDevServer(page: Page) {
   const kinds = await page.evaluate(async () => {
@@ -786,7 +916,7 @@ test.describe('Export capture call sites (root cause #2)', () => {
     }
   });
 
-  test('captureDeckAsPngDataUrls stays transparent on a wrapped deck (accepted)', async ({
+  test('captureDeckAsPngDataUrls paints the ground AND the ink on a wrapped deck', async ({
     page,
   }) => {
     test.setTimeout(120000);
@@ -800,29 +930,159 @@ test.describe('Export capture call sites (root cause #2)', () => {
       return (await m.captureDeckAsPngDataUrls(deck))[0];
     }, dsWrappedDeck());
 
-    const m = await measureDataUrl(page, dataUrl);
+    const m = await measurePngOverWhite(page, dataUrl);
 
-    // THE ACCEPTED REGRESSION ON THIS SURFACE, pinned with its measured value.
+    // WHAT THIS TEST USED TO SAY, AND WHY IT WAS WRONG.
     //
-    // The locator is NOT sufficient here, and measurement settled it: 100.00%
-    // transparent on a section-wrapped deck. The PDF surface differs because
-    // exportSlideDeckToPDF force-sizes whatever the locator resolves to before
-    // capturing; captureDeckAsPngDataUrls hands the element straight to
-    // html2canvas with `backgroundColor: null` and never sizes it, so the wrapper
-    // is still 1280x0 at capture time and PNG keeps the alpha.
+    // Until this commit the assertion here was `transparentShare > 0.99`, under
+    // the name '...stays transparent on a wrapped deck (accepted)'. That pinned a
+    // 100.00%-transparent, ZERO-COLOUR, ENTIRELY BLANK PNG as the correct output
+    // of an export. It encoded a wrong belief: that because the only alternative
+    // on offer was the slide-host frame contract — which collapses flattened
+    // table cells onto one rect on the huashu path — a blank artifact was the
+    // best this surface could do, and the number was worth pinning so it could
+    // not drift.
     //
-    // Not fixed with the frame contract, because that same rule collapses every
-    // flattened table cell onto one rect on the huashu path (42 -> 11 distinct
-    // rects on a real 21-cell deck). A working table export on the PRIMARY path
-    // outranks the ground on this one, which is API-only with no UI entry point.
-    // The correct fix here is a force-size at the capture site, mirroring the PDF.
+    // The premise was false. The contract was never the only alternative: the
+    // capture site can force the resolved element's geometry with INLINE styles
+    // on that one element, which is what exportSlideDeckToPDF has always done
+    // (pdf_client.ts) and which injects no CSS into the document at all — so it
+    // cannot reach a flattened table cell, and the huashu path is untouched.
+    // Both halves below now hold, so there is nothing left to accept.
     //
-    // Pinned rather than deleted so the number cannot drift unobserved, and so
-    // reintroducing the contract fails HERE too.
+    // Do not restore the old assertion. A test that passes on a blank export is
+    // worse than no test: it reports the defect as a settled decision.
+    expect([m.w, m.h], 'scale:2 over a 1280x720 frame').toEqual([2560, 1440]);
+
+    // GROUND half — pinned INDEPENDENTLY of the ink, so a text-only capture (the
+    // pre-locator behaviour, 98.50% transparent) fails here even though its ink
+    // assertions would pass. On a wrapped deck the ground lives on the <section>,
+    // which is 1280x0 in the document; nothing paints unless it is sized first.
+    expect(m.transparentShare, 'the delivered PNG must not be transparent').toBeLessThan(0.005);
+    expect(m.groundRgb, 'the modal painted colour must be the brand paper').toEqual([
+      249, 247, 244,
+    ]);
+    expect(m.groundShare, 'the paper must be most of the slide').toBeGreaterThan(0.5);
+
+    // INK half — pinned INDEPENDENTLY of the ground, so a ground-only capture (a
+    // sized wrapper whose text never resolved) fails here even though its ground
+    // assertions would pass. The pre-locator capture measured 47,660 ink pixels
+    // for these same three text runs at scale:2; a floor well under that cannot
+    // be reached by antialiasing noise, and 0 is what a blank export scores.
+    expect(m.inkPixels, 'the three text runs must survive into the PNG').toBeGreaterThan(20000);
+    expect(m.uniqueNonWhite, 'a blank export has exactly 0 non-white colours').toBeGreaterThan(100);
+    for (const [i, channel] of ['r', 'g', 'b'].entries()) {
+      expect(
+        Math.abs(m.darkestRgb[i] - BRAND_INKS['headline 1B3139'][i]),
+        `darkest ink ${channel} — rgb(${m.darkestRgb.join(',')}) must be the #1B3139 headline`,
+      ).toBeLessThanOrEqual(2);
+    }
+
+    // …and the two halves TOGETHER: the ink has to be legible against the ground
+    // that now exists. Both figures are asserted because the fix changes which
+    // comparison is even meaningful. 12.7110 is the headline against the brand
+    // paper — the delivered PDF measures the same ink at 12.6794, the difference
+    // being JPEG quantisation of the ground. 13.5922 is that same ink against
+    // pure white, which is exactly what the pre-locator capture scored back when
+    // it shipped ink and NO paper; holding it proves the INK did not change while
+    // the ground appeared, rather than some new colour arriving.
+    const overGround = contrastRatio(m.darkestRgb, m.groundRgb);
+    expect(overGround, 'the headline must clear WCAG AA against the paper').toBeGreaterThanOrEqual(
+      4.5,
+    );
     expect(
-      m.transparentShare,
-      `delivered PNG transparency on a wrapped deck (dev16 behaviour, accepted)`,
-    ).toBeGreaterThan(0.99);
+      Math.abs(overGround - 12.711),
+      `headline vs paper measured ${overGround.toFixed(4)}, expected ~12.7110`,
+    ).toBeLessThan(0.25);
+    const overWhite = contrastRatio(m.darkestRgb, [255, 255, 255]);
+    expect(
+      Math.abs(overWhite - 13.5922),
+      `headline vs white measured ${overWhite.toFixed(4)}, expected ~13.5922 (the pre-locator figure)`,
+    ).toBeLessThan(0.25);
+  });
+
+  test('the force-size does not move an UNWRAPPED deck', async ({ page }) => {
+    // THE COLLATERAL-DAMAGE CONTROL for the test above. The fix it pins force-sizes
+    // whatever findSlideRoot resolves to, and on an unwrapped deck that is `.slide`
+    // ITSELF — not <body> — so this deck takes the same branch. 47 of 47
+    // pre-existing decks are this shape, so a regression here would be the whole
+    // corpus, while the wrapped test would stay happily green.
+    test.setTimeout(120000);
+    await page.goto('/');
+    await assertFreshDevServer(page);
+
+    // GEOMETRY IDENTITY, asserted by applying the force-size to a live document
+    // and re-measuring: the point is not that some numbers look right, it is that
+    // these four properties are a NO-OP on a deck that already declares its frame.
+    // This is machine-independent, where an exact glyph count would not be.
+    const geom = await page.evaluate(async (deck) => {
+      const sd = (await import('/src/services/slideDocument.ts')) as {
+        findSlideRoot: (doc: Document) => HTMLElement;
+      };
+      const sc = (await import('/src/services/screenshotCapture.ts')) as {
+        buildSlideHtml: (d: unknown, i: number) => string;
+      };
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'width:1280px;height:720px;position:fixed;left:-99999px;top:0;';
+      document.body.appendChild(frame);
+      frame.srcdoc = sc.buildSlideHtml(deck, 0);
+      await new Promise((r) => {
+        frame.onload = r;
+      });
+      const doc = frame.contentDocument!;
+      const root = sd.findSlideRoot(doc);
+      const read = () => {
+        const r = root.getBoundingClientRect();
+        const cs = doc.defaultView!.getComputedStyle(root);
+        return `${Math.round(r.width)}x${Math.round(r.height)} @${Math.round(r.left)},${Math.round(
+          r.top,
+        )} pad=${cs.paddingTop}/${cs.paddingLeft} margin=${cs.marginTop}/${cs.marginLeft}`;
+      };
+      const before = read();
+      root.style.width = '1280px';
+      root.style.height = '720px';
+      root.style.margin = '0';
+      root.style.boxSizing = 'border-box';
+      const after = read();
+      const out = {
+        isBody: root === doc.body,
+        tag: root.tagName.toLowerCase(),
+        cls: root.className,
+        before,
+        after,
+      };
+      document.body.removeChild(frame);
+      return out;
+    }, dsUnwrappedDeck());
+
+    // Non-vacuity FIRST: if the locator returned <body> the force-size would be
+    // skipped and "nothing moved" would prove nothing at all.
+    expect(geom.isBody, 'the locator must NOT fall back to body on this deck').toBe(false);
+    expect([geom.tag, geom.cls], 'the resolved root is `.slide` itself').toEqual(['div', 'slide']);
+    expect(geom.after, 'the force-size must be a no-op on an unwrapped deck').toBe(geom.before);
+
+    // …and the delivered PNG, which is what actually ships. Measured identical
+    // either side of the fix — FNV-1a of the raw pixels 68079f00 both times.
+    // Pinned as invariants rather than as that hash: glyph rasterisation is
+    // platform-specific, so an exact count would fail on CI while proving nothing
+    // extra here.
+    const dataUrl = await page.evaluate(async (deck) => {
+      const m = (await import('/src/services/screenshotCapture.ts')) as {
+        captureDeckAsPngDataUrls: (d: unknown) => Promise<string[]>;
+      };
+      return (await m.captureDeckAsPngDataUrls(deck))[0];
+    }, dsUnwrappedDeck());
+
+    const m = await measurePngOverWhite(page, dataUrl);
+    expect(m.transparentShare, 'an unwrapped capture was never transparent').toBe(0);
+    expect(m.groundRgb, 'and its ground is still the brand paper').toEqual([249, 247, 244]);
+    expect(m.inkPixels, 'and its text is still there').toBeGreaterThan(20000);
+    for (const [i, channel] of ['r', 'g', 'b'].entries()) {
+      expect(
+        Math.abs(m.darkestRgb[i] - BRAND_INKS['headline 1B3139'][i]),
+        `darkest ink ${channel} — rgb(${m.darkestRgb.join(',')}) must still be #1B3139`,
+      ).toBeLessThanOrEqual(2);
+    }
   });
 });
 
