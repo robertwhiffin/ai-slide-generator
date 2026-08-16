@@ -49,7 +49,7 @@ The database holds **28 tables**, every `__tablename__` declared under `src/data
 23. **`feedback_conversations`** - AI-assisted feedback chat storage with structured summaries
 24. **`survey_responses`** - User satisfaction survey data
 25. **`request_logs`** - Per-request performance metrics
-26. **`usage_events`** - Durable login/deck activity log for admin analytics. Never pruned, and `session_id` is deliberately **not** a foreign key so events outlive the sessions they describe (see the model docstring)
+26. **`usage_events`** - Durable login/deck activity log for admin analytics. Never pruned, and `session_id` is **not** a foreign key, which the column's own comment states is intentional so that events survive session deletion
 
 **Identity & Key Tables:**
 27. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)

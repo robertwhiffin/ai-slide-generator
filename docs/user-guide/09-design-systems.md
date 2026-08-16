@@ -63,7 +63,7 @@ Click **Clear default** to stop using it. That does two things: it forgets the p
 
 ### A deck started from a profile
 
-A **profile** you built yourself is treated as a deliberate choice: whatever it contains is used, and no default is layered over it. The default profile that ships with tellr is treated as a starting point instead, so defaults may still fill its empty slots.
+A **profile** you built yourself is treated as an explicit choice: whatever it contains is used, and no default is layered over it. The default profile that ships with tellr is treated as a starting point instead, so defaults may still fill its empty slots.
 
 > A profile is also the only personal default that **follows you between browsers and machines** — the two "Set as default" preferences live in this browser only. Choose the design system, save the configuration as a profile, then set that profile as your default.
 
