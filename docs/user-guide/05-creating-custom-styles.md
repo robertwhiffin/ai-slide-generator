@@ -15,7 +15,7 @@ Every new deck starts with a visual style applied — either a slide style or a 
 3. The organisation's **default design system**.
 4. The organisation's **default slide style**.
 
-**A personal slide-style default can stop the organisation's design system being applied.** Step 2 comes before step 3, so once your personal style claims the slot the org brand is not resolved for that deck at all. This is the opposite of what the ordering might suggest from the design-system side of the product. The exact condition — the starting configuration must already carry a slide style, which the shipped default profile always does — is in [Design System Library §4](../technical/design-system-library.md).
+**A personal slide-style default can stop the organisation's design system being applied.** Step 2 comes before step 3, so once your personal style claims the slot the org brand is not resolved for that deck at all. This is the opposite of what the ordering might suggest from the design-system side of the product. It applies only when the deck's starting point already carries a slide style, because the preference replaces a style rather than introducing one. The default profile that ships with tellr normally supplies one, but it is not guaranteed to — the exact condition is in [Design System Library §4](../technical/design-system-library.md).
 
 **If this browser already holds a configuration you have used before, the choices you made yourself are kept** — a style or design system you picked is not replaced, including after an admin changes a corporate default. A slot the app filled in for you is different: if you never chose a design system yourself, a corporate design system set later can still take the slot on a subsequent load.
 
