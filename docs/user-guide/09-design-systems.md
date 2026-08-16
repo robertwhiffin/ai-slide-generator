@@ -42,7 +42,9 @@ This is not a single ranking of settings. What a deck gets depends on **how the 
 
 ### The deck in front of you
 
-Pick a design system in the agent config bar. That choice is saved on the deck, and nothing later overrides it — not your personal default, not the organisation default, not an admin changing the org default afterwards. Picking **None** is a choice too, and it is preserved the same way.
+Pick a design system in the agent config bar. That choice is saved on the deck, and no default is applied over it afterwards — not the organisation default, and not an admin changing the org default later. Picking **None** is a choice too, and it is preserved the same way.
+
+The **Set as default** and **Clear default** buttons in the library are the exception, because they are you making another choice: each one moves the slot on the surface you are on as well as recording the preference.
 
 ### A brand-new deck, started in this browser
 

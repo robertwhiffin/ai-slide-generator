@@ -4,7 +4,7 @@ This guide covers what goes into a Slide Style, what CSS is safe to include, and
 
 ## Defaults: corporate vs. personal
 
-Every new deck starts with a visual style applied — either a slide style or a [design system](./09-design-systems.md), and never both. Which one you get depends on **how the deck was started**, so the cases below are separate rather than one ranking of settings.
+A new deck normally starts with a visual style applied — either a slide style or a [design system](./09-design-systems.md), and never both. It can start with neither: a profile you built that holds no style and no design system is used exactly as it stands, and so is a deck started in a workspace whose style library has no default style to fall back on. Which one you get depends on **how the deck was started**, so the cases below are separate rather than one ranking of settings.
 
 **The deck in front of you.** Change the style from the agent config bar. That is an explicit choice, saved on this deck only, and no default overrides it afterwards.
 
