@@ -53,13 +53,23 @@ class UpdateSessionRequest(BaseModel):
     slide_count: Optional[int] = Field(None, ge=0, description="Deck slide count")
 
 
-def _substitute_deck_images(deck_dict: dict) -> None:
-    """Substitute {{image:ID}} placeholders in a deck dict with base64 data URIs."""
+def _substitute_deck_images(deck_dict: dict, session_id: str) -> None:
+    """Substitute {{image:ID}} + {{ds-asset:ID}} placeholders in a deck dict with
+    base64 data URIs.
+
+    ds-asset resolution is scoped to the session's active design system so a
+    foreign ``{{ds-asset:ID}}`` handle in the deck cannot disclose another
+    system's asset bytes.
+    """
+    from src.api.services.chat_service import resolve_active_design_system_id
     from src.core.database import get_db_session
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
 
+    ds_id = resolve_active_design_system_id(session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(deck_dict, db)
+        substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
 
 
 @router.post("")
@@ -101,7 +111,7 @@ async def create_session(request: CreateSessionRequest = None):
         logger.error(f"Failed to create session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to create session: {str(e)}",
+            detail="Failed to create session",
         ) from e
 
 
@@ -149,7 +159,7 @@ async def list_sessions(
         logger.error(f"Failed to list sessions: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list sessions: {str(e)}",
+            detail="Failed to list sessions",
         ) from e
 
 
@@ -235,7 +245,7 @@ async def list_shared_presentations(
         logger.error(f"Failed to list shared presentations: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list shared presentations: {str(e)}",
+            detail="Failed to list shared presentations",
         ) from e
 
 
@@ -356,7 +366,7 @@ async def get_or_create_contributor_session(
         logger.error(f"Failed to create contributor session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to create contributor session: {str(e)}",
+            detail="Failed to create contributor session",
         ) from e
 
 
@@ -401,7 +411,7 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
 
         # Substitute {{image:ID}} placeholders with base64 before sending to client
         if slide_deck:
-            await asyncio.to_thread(_substitute_deck_images, slide_deck)
+            await asyncio.to_thread(_substitute_deck_images, slide_deck, session_id)
 
         return {
             **session,
@@ -421,7 +431,7 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
         logger.error(f"Failed to get session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get session: {str(e)}",
+            detail="Failed to get session",
         ) from e
 
 
@@ -478,7 +488,7 @@ async def update_session(
         logger.error(f"Failed to update session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to update session: {str(e)}",
+            detail="Failed to update session",
         ) from e
 
 
@@ -583,7 +593,7 @@ async def delete_session(session_id: str, db: Session = Depends(get_db)):
         logger.error(f"Failed to delete session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to delete session: {str(e)}",
+            detail="Failed to delete session",
         ) from e
 
 
@@ -637,7 +647,7 @@ async def get_session_messages(
         logger.error(f"Failed to get session messages: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get messages: {str(e)}",
+            detail="Failed to get messages",
         ) from e
 
 
@@ -693,7 +703,7 @@ async def add_message(session_id: str, request: AddMessageRequest):
         logger.error(f"Failed to add message: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to add message: {str(e)}",
+            detail="Failed to add message",
         ) from e
 
 
@@ -717,7 +727,7 @@ async def get_session_slides(session_id: str):
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
         if deck:
-            await asyncio.to_thread(_substitute_deck_images, deck)
+            await asyncio.to_thread(_substitute_deck_images, deck, session_id)
 
         return {"session_id": session_id, "slide_deck": deck}
 
@@ -732,7 +742,7 @@ async def get_session_slides(session_id: str):
         logger.error(f"Failed to get session slides: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get slides: {str(e)}",
+            detail="Failed to get slides",
         ) from e
 
 
@@ -755,7 +765,7 @@ async def cleanup_expired_sessions():
         logger.error(f"Failed to cleanup sessions: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Cleanup failed: {str(e)}",
+            detail="Cleanup failed",
         ) from e
 
 
@@ -837,7 +847,7 @@ async def export_session(session_id: str):
         logger.error(f"Failed to export session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Export failed: {str(e)}",
+            detail="Export failed",
         ) from e
 
 
@@ -870,7 +880,7 @@ async def acquire_editing_lock(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
         logger.error(f"Failed to acquire editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to acquire editing lock")
 
 
 @router.delete("/{session_id}/lock")
@@ -895,7 +905,7 @@ async def release_editing_lock(session_id: str):
         return {"status": "released"}
     except Exception as e:
         logger.error(f"Failed to release editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to release editing lock")
 
 
 @router.get("/{session_id}/lock")
@@ -914,7 +924,7 @@ async def get_editing_lock_status(session_id: str):
         )
     except Exception as e:
         logger.error(f"Failed to check editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to check editing lock")
 
 
 @router.put("/{session_id}/lock/heartbeat")
@@ -939,5 +949,4 @@ async def heartbeat_editing_lock(session_id: str):
         return {"renewed": ok}
     except Exception as e:
         logger.error(f"Failed to heartbeat editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
+        raise HTTPException(status_code=500, detail="Failed to heartbeat editing lock")

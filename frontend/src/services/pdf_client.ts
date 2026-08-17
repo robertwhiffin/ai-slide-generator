@@ -6,7 +6,7 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP } from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE, findSlideRoot } from './slideDocument';
 
 const SLIDE_WIDTH = 1280;
 const SLIDE_HEIGHT = 720;
@@ -14,8 +14,27 @@ const SLIDE_HEIGHT = 720;
 /**
  * Build HTML for a single slide.
  * Matches the structure used in SlideTile for consistent rendering.
+ * Exported so tests can pin the document's layout guarantees.
+ *
+ * NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. A rule framing `body` and
+ * stretching its CHILD to `position: absolute !important; inset: 0 !important;
+ * width/height: 100% !important` was injected here at 0.4.2.dev17 and is
+ * REVERTED: it is the same shared rule the server document injected, and there it
+ * collapsed every flattened table cell onto one rect on the huashu path. The
+ * export builders now inject no frame contract at all — see the reverted comment
+ * in src/api/routes/export.py for the mechanism and the measurements.
+ *
+ * What the DS-pinned dark-on-dark defect actually needs on this surface is the
+ * capture step aiming at the element that carries the ground — see
+ * {@link findSlideRoot} in exportSlideDeckToPDF. That locator alone produces the
+ * corrected artifact, measured on the delivered PDF's own DCTDecode streams:
+ * ground rgb(248,247,243) with brand inks at 12.6794 / 10.8670 / 6.6878, against
+ * rgb(0,0,0) at 1.5450 / 1.8027 / 2.9292 before. It works because
+ * exportSlideDeckToPDF force-sizes its capture target inline (see below), and
+ * that block reaches the wrapper once the locator resolves to it. The locator
+ * injects no CSS, so unlike the contract it cannot perturb emitted geometry.
  */
-function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
+export function buildSlideHTML(slideDeck: SlideDeck, slideIndex: number): string {
   const slide = slideDeck.slides[slideIndex];
   const externalScripts = slideDeck.external_scripts
     .map((src) => `    <script src="${src}"></script>`)
@@ -54,6 +73,11 @@ ${externalScripts}
       position: relative;
     }
     ${slideDeck.css}
+    /* After deck CSS: flatten the slide root (outer margin / radius / shadow) —
+       inside this fixed 1280x720 overflow:hidden document a root margin
+       shifts content past the clip and truncates the export's bottom edge
+       (same neutralization as every other surface). */
+    ${SLIDE_ROOT_RESET_STYLE}
     /* CRITICAL: Explicitly preserve subtitle spacing - override any global resets */
     /* This must come AFTER slideDeck.css to override any * { margin: 0; } resets */
     .subtitle, p.subtitle, h2.subtitle, div.subtitle, [class*="subtitle"] {
@@ -258,9 +282,8 @@ export async function exportSlideDeckToPDF(
       iframeDoc.body.style.position = 'relative';
       iframeDoc.body.style.boxSizing = 'border-box';
 
-      // Find the first child element (usually the slide content)
-      // If there's a .slide element, use that; otherwise use body
-      const slideElement = iframeDoc.querySelector('.slide') || iframeDoc.body;
+      // Capture the slide ROOT, which is NOT always the `.slide` element.
+      const slideElement = findSlideRoot(iframeDoc);
       
       // Ensure slide element has exact dimensions but preserve its padding
       // Don't remove padding - slides typically have padding: 60px 80px for proper spacing

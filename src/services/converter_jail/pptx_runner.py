@@ -106,14 +106,22 @@ def run(job_dir: str, output_path: str, emit: Optional[Callable[[str], None]] = 
         sdir = Path(job_dir) / entry["dir"]
         assets_dir = str(sdir / protocol.ASSETS_DIR)
 
+        # Report whether this slide got REAL content or the deterministic
+        # placeholder. Both fallback branches below are invisible in the saved
+        # file — it is a valid .pptx either way — so the host cannot otherwise
+        # tell an all-placeholder deck from a good one.
+        rendered = True
         if not entry.get("has_code"):
             _add_fallback(prs, i, f"Slide {i}")
+            rendered = False
         else:
             html_str = (sdir / protocol.HTML_NAME).read_text(encoding="utf-8")
             code = (sdir / protocol.CODE_NAME).read_text(encoding="utf-8")
             if not _exec_snippet(code, prs, html_str, assets_dir):
                 _add_fallback(prs, i, "Slide Content")
+                rendered = False
 
+        emit(protocol.encode_slide_result(entry["index"], rendered))
         emit(protocol.encode_progress(i, total, f"Building slide {i}/{total}…"))
 
     prs.save(output_path)

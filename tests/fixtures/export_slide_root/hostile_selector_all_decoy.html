@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* The BENIGN twin of the hostile_foreach_* and hostile_selector_decoy
+         fixtures: identical but for each of those fixtures' added <script>.
+
+         collection_passes.html drives FOUR of the preprocess pass's collection
+         reads. This one drives EVERY one of them, because the raw-accessor
+         defect is spread across ten sub-passes and a fixture that leaves any of
+         them at zero cannot attribute a regression to the site that caused it.
+         Each element below is the sole reason one count is non-zero:
+
+           .slide            the slide-root ground        -> bgTransferred
+           .code             monospace panel, 2 child divs -> codeBlocks
+           .prose            bare inline text in a <div>   -> wrapped
+           .tile             div with a background-image    -> replacedImgs
+           <img> data: svg   svg data-URI image             -> svgImgsRasterized
+           <svg>             inline svg                     -> inlineSvgsRasterized
+           p.badge           <p> carrying a background      -> peeledTextTags
+           <table>           one th + one td                -> tableCells
+           <canvas>          drawn in the shared script     -> canvasImgs
+           span.pill         inline element with background  -> inlineBgs
+
+         Every colour is synthetic (#123456 ground, #abcdef accent) and the only
+         name is Acme, so nothing here is anyone's brand. */
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; background: #123456;
+               color: #ffffff; font-family: Arial, sans-serif; }
+      h1 { font-size: 48px; }
+      p { font-size: 24px; }
+      .prose { font-size: 24px; }
+      .code { font-family: monospace; font-size: 20px; }
+      /* A non-gradient url() background: the one shape replaceBackgroundImageWithImg
+         acts on. Kept a data: URI so the fixture never touches the network, and
+         base64 PNG rather than inline SVG because that pass matches the url with
+         [^"')]+ — the quotes an svg+xml payload carries would end the match early
+         and leave this count at zero. */
+      .tile { width: 60px; height: 60px;
+              background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGNYffY9VsQwtCQAAkyZwR/tUEcAAAAASUVORK5CYII="); }
+      .badge { background: #abcdef; color: #123456; padding: 4px; }
+      table { border-collapse: collapse; }
+      th, td { border: 1px solid #abcdef; padding: 6px; font-size: 20px; }
+      .pill { background: #abcdef; color: #123456; padding: 2px 8px; }
+    </style>
+    <script>
+      // Poisoned querySelectorAll on BOTH Document.prototype and
+      // Element.prototype -> a plain array-like holding one detached decoy.
+      //
+      // Document's and Element's copies of querySelectorAll are DISTINCT
+      // function objects (a Document one invoked on an Element throws Illegal
+      // invocation), so a fix that captures only one of them leaves the other
+      // open — this fixture is what makes that measurable.
+      //
+      // The returned object is deliberately not a NodeList. Every consumer in
+      // the pass then breaks in a different way: `.forEach` is absent
+      // (TypeError), and the two sites that hand a raw result to
+      // nodeListToArray make the pristine NodeList length getter throw on a
+      // foreign receiver. Both take down the whole pass.
+      // Reported on document.title so the suite can prove the poisoning TOOK
+      // before asserting anything else — a poisoning the browser refused would
+      // make every expectation vacuous.
+      var decoy = document.createElement('div');
+      decoy.className = 'slide';
+      decoy.style.background = '#654321';
+      var report = { configurable: {}, direct: {}, redefineResult: 'ok' };
+      function poisonQuerySelectorAll(name, proto) {
+        var descriptor = Object.getOwnPropertyDescriptor(proto, 'querySelectorAll');
+        report.direct[name] = !!descriptor;
+        report.configurable[name] = descriptor ? !!descriptor.configurable : true;
+        try {
+          Object.defineProperty(proto, 'querySelectorAll', {
+            configurable: true,
+            value: function () { return { length: 1, 0: decoy }; },
+          });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poisonQuerySelectorAll('Document', Document.prototype);
+      poisonQuerySelectorAll('Element', Element.prototype);
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <div class="slide">
+      <h1>Acme Every Collection Pass</h1>
+      <div class="prose">Synthetic fixture slide.</div>
+      <div class="code">
+        <div>SELECT one</div>
+        <div>FROM acme</div>
+      </div>
+      <div class="tile"></div>
+      <img width="40" height="40" alt="" src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='40'%20height='40'%3E%3Ccircle%20cx='20'%20cy='20'%20r='18'%20fill='%23ffffff'/%3E%3C/svg%3E" />
+      <svg width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" fill="#ffffff"></rect></svg>
+      <p class="badge">Acme badge</p>
+      <table>
+        <tr><th>Acme head</th><td>Acme cell</td></tr>
+      </table>
+      <canvas id="acme-canvas" width="80" height="40"></canvas>
+      <p>Acme prose with a <span class="pill">pill</span> inside.</p>
+    </div>
+    <script>
+      // Shared by every twin: rasterizeCanvases() skips a canvas whose
+      // toDataURL() is under 200 chars, which a never-drawn canvas always is.
+      // Drawing two synthetic rects is the least that makes the pass reach it.
+      (function () {
+        var canvas = document.getElementById('acme-canvas');
+        var ctx = canvas && canvas.getContext && canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = '#abcdef';
+        ctx.fillRect(0, 0, 80, 40);
+        ctx.fillStyle = '#123456';
+        ctx.fillRect(8, 8, 30, 24);
+      })();
+    </script>
+  </body>
+</html>

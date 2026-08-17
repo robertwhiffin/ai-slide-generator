@@ -218,7 +218,7 @@ Use [nvm-windows](https://github.com/coreybutler/nvm-windows)
 - Active Databricks workspace (AWS, Azure, or GCP)
 - Admin or appropriate permissions to:
   - Create model serving endpoints
-  - Create Genie spaces
+  - Create Genie agents
   - Generate personal access tokens
 
 ### 1. Authenticate with Databricks
@@ -251,12 +251,12 @@ Default endpoints in Databricks:
 - `databricks-llama-3-1-70b-instruct`
 - `databricks-mixtral-8x7b-instruct`
 
-### 3. Create/Access Genie Space
+### 3. Create/Access Genie Agent
 
 Genie provides natural language SQL queries:
 
 1. **Go to** Data Intelligence → Genie
-2. **Create** or select a Genie space
+2. **Create** or select a Genie agent
 3. **Note** the Space ID:
    - Found in URL: `...databricks.com/genie/spaces/{space-id}`
    - Or use existing space ID

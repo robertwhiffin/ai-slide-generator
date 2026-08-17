@@ -6,6 +6,12 @@ import re
 from typing import Dict, List, Tuple
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
+
+# Semantic sectioning tags a design-system template may emit as a wrapper
+# around a slide body. Only these are promoted to slide root — see
+# find_slide_roots for why a <div> wrapper is deliberately excluded.
+SLIDE_WRAPPER_TAGS = frozenset({"section", "article"})
 
 CANVAS_ID_PATTERN = re.compile(r"getElementById\s*\(\s*['\"]([\w\-.:]+)['\"]\s*\)")
 QUERY_SELECTOR_PATTERN = re.compile(r"querySelector\s*\(\s*['\"]#([\w\-.:]+)['\"]\s*\)")
@@ -35,6 +41,58 @@ def extract_canvas_ids_from_script(script_text: str) -> List[str]:
             seen.add(canvas_id)
             ordered.append(canvas_id)
     return ordered
+
+
+def find_slide_roots(soup: BeautifulSoup) -> List[Tag]:
+    """Return each slide's outermost root element, in document order.
+
+    A slide root is the outermost element carrying the ``slide`` class token,
+    whatever its tag (``div``, ``section``, ``article``, ...), promoted outward
+    through any semantic wrapper that exists solely to hold it.
+
+    The promotion step matters because a pinned design-system template makes
+    the model emit the template's own structure — a ``<section>`` wrapper
+    around the ``div.slide`` body — while every ``<style>`` block is copied
+    verbatim into the deck CSS. Dropping the wrapper therefore keeps rules like
+    ``section { background: ...; color: ...; font-family: ... }`` while
+    deleting the only element they could ever match, so those declarations
+    never reach the slide subtree.
+
+    A wrapper is promoted only when it is a semantic sectioning tag whose sole
+    element child is the slide root. A ``<div>`` is never promoted: it would
+    risk swallowing a deck-level container that happens to hold one slide, and
+    a wrapper holding several slides is a container, not a slide root.
+
+    Args:
+        soup: Parsed document (or fragment) to scan.
+
+    Returns:
+        Slide root elements in document order, one per slide.
+    """
+    classed = soup.find_all(class_="slide")
+    # Identity, not equality: BeautifulSoup compares tags by name/attrs/contents,
+    # so two structurally identical slides would compare equal to each other.
+    classed_ids = {id(element) for element in classed}
+
+    roots: List[Tag] = []
+    for element in classed:
+        # Keep only the outermost element of any nested slide-classed pair.
+        if any(id(parent) in classed_ids for parent in element.parents):
+            continue
+        roots.append(_promote_through_slide_wrapper(element))
+    return roots
+
+
+def _promote_through_slide_wrapper(root: Tag) -> Tag:
+    """Walk outward from a slide-classed element through sole-child wrappers."""
+    while True:
+        parent = root.parent
+        if parent is None or parent.name not in SLIDE_WRAPPER_TAGS:
+            return root
+        element_children = parent.find_all(recursive=False)
+        if len(element_children) != 1 or element_children[0] is not root:
+            return root
+        root = parent
 
 
 def extract_canvas_ids_from_html(html_content: str) -> List[str]:

@@ -13,7 +13,7 @@
  */
 
 import type { SlideDeck } from '../types/slide';
-import { SLIDE_CSP } from './slideDocument';
+import { SLIDE_CSP, SLIDE_ROOT_RESET_STYLE } from './slideDocument';
 
 /** Font strategy for the editable export. */
 export type EditableFontMode =
@@ -78,7 +78,28 @@ const DESIGN_W = 1280;
 const DESIGN_H = 720;
 const SLIDE_SETTLE_MS = 400;
 
-function buildCompositeHtml(deck: SlideDeck): string {
+// Exported so tests can pin the composite document's layout guarantees.
+//
+// NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. This document injected
+// slideHostFrameStyle on `section.slide-container` at 0.4.2.dev17; it is reverted
+// with every other export builder because the same shared rule collapses
+// flattened table cells onto one rect on the huashu path (see
+// src/api/routes/export.py for the mechanism and measurements).
+//
+// THE ACCEPTED COST, stated plainly. On a section-wrapped design-system deck the
+// wrapper carries no in-flow content and collapses to 1280x0 in this document. The
+// walker's isVisible() is false at height === 0 and visit() returns WITHOUT
+// descending, so the whole slide subtree is pruned: 1 rect and 0 text records per
+// slide, and a .pptx built from that has no text in it. That is the dev16
+// behaviour and it was equally broken before dev17.
+//
+// It is accepted because this composite is the RECORDS FALLBACK: it only runs when
+// the huashu sidecar is unavailable, which in practice is the startup 503 window.
+// Trading a working table export on the primary path for a text-bearing fallback
+// on a wrapped deck is the wrong trade, and there is no locator equivalent here —
+// the walker is handed `section.slide-container` by selector, so there is nothing
+// to re-aim.
+export function buildCompositeHtml(deck: SlideDeck): string {
   const slides = deck.slides || [];
   const sections = slides.map((s, i) => {
     const hidden = i === 0 ? '' : ' style="display:none"';
@@ -112,15 +133,12 @@ ${ext}
 html, body { margin: 0; padding: 0; }
 html { width: ${DESIGN_W}px; height: ${DESIGN_H}px; }
 section.slide-container { width: ${DESIGN_W}px; height: ${DESIGN_H}px; position: relative; overflow: hidden; }
-/* Authored decks often wrap each slide in an inner <div class="slide">
-   styled like a print-preview card (margin: 40px auto; border-radius: 12px;
-   box-shadow: ...). That 40px margin shifts every absolutely-positioned
-   descendant out past the 720px clip rect. Neutralize. */
-section.slide-container > .slide, section.slide-container .slide {
-  margin: 0 !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-}
+/* Authored decks often style the slide root like a print-preview card
+   (margin: 40px auto; border-radius: 12px; box-shadow: ...). The 40px margin
+   shifts every absolutely-positioned descendant out past the 720px clip rect,
+   and pptxgenjs cannot render root rounding/shadows. The shared reset
+   flattens the root — whatever its class — exactly like every other surface. */
+${SLIDE_ROOT_RESET_STYLE}
 ${deck.css || ''}
 </style>
 </head>
@@ -137,8 +155,11 @@ ${sections}
  * scaffold reference (walker.js), with the font-mode override pass added so
  * iframe measurements reflect the fallback font's metrics when font_mode is
  * "universal".
+ *
+ * Exported so tests/e2e/svg-raster-export.spec.ts can drive the exact
+ * shipped walker string in a Playwright page.
  */
-const WALKER_SOURCE = `
+export const WALKER_SOURCE = `
 (function () {
   const PX_PER_IN = 96;
 
@@ -337,6 +358,55 @@ const WALKER_SOURCE = `
     }
   }
 
+  // ─── SVG-image rasterization ────────────────────────────────────────
+  // pptxgenjs in Node emits data:image/svg+xml images with a hardcoded
+  // broken-image placeholder PNG as the primary <a:blip>; the vector only
+  // survives in the <asvg:svgBlip> extension, which Google Slides' PPTX
+  // conversion and LibreOffice ignore. Rasterize here instead — this
+  // browser already decoded the SVG. 2x the layout box keeps it crisp.
+  // Returns a PNG data URI, or null so the caller keeps the raw SVG src
+  // (exactly the pre-fix payload).
+  // The raster must not DISTORT the artwork when the layout box's aspect
+  // ratio differs from the image's own (a footer logo box flex-stretched to
+  // the full row width smeared a 3:1 logo across ~14:1). The canvas keeps the
+  // BOX size — downstream record placement is unchanged — but the drawn
+  // geometry honours the image's fit intent: object-fit:cover fills the box by
+  // center-cropping the overflowing axis, anything else letterboxes
+  // (object-fit:contain). A ratio-true box is unaffected: the scale is then
+  // equal on both axes and the offsets are 0. Mirrors the same correction in
+  // services/pptx-emit-huashu/preprocess.mjs.
+  function rasterizeSvgImage(el) {
+    try {
+      if (!el.complete || !el.naturalWidth) return null;
+      const r = el.getBoundingClientRect();
+      const w = Math.max(1, Math.round(r.width * 2));
+      const h = Math.max(1, Math.round(r.height * 2));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      if (!ctx) return null;
+      const srcW = el.naturalWidth;
+      const srcH = el.naturalHeight;
+      const objectFit = getComputedStyle(el).objectFit;
+      if (!srcW || !srcH) {
+        ctx.drawImage(el, 0, 0, w, h);
+      } else if (objectFit === 'cover') {
+        const scale = Math.max(w / srcW, h / srcH);
+        const sw = Math.min(srcW, w / scale);
+        const sh = Math.min(srcH, h / scale);
+        ctx.drawImage(el, (srcW - sw) / 2, (srcH - sh) / 2, sw, sh, 0, 0, w, h);
+      } else {
+        const scale = Math.min(w / srcW, h / srcH);
+        const dw = srcW * scale;
+        const dh = srcH * scale;
+        ctx.drawImage(el, (w - dw) / 2, (h - dh) / 2, dw, dh);
+      }
+      return c.toDataURL('image/png');
+    } catch (e) {
+      return null;
+    }
+  }
+
   // ─── text-run extraction ────────────────────────────────────────────
   function runStyle(cs) {
     const color = parseColor(cs.color);
@@ -510,8 +580,17 @@ const WALKER_SOURCE = `
       // 3. <img>.
       if (el.tagName === 'IMG' && el.src) {
         const ibox = rotation !== null ? getRotatedBox(el, box, rotation) : box;
+        let src = el.currentSrc || el.src;
+        if (/^data:image\\/svg\\+xml/i.test(src)) {
+          const png = rasterizeSvgImage(el);
+          if (png) {
+            src = png;
+          } else {
+            console.warn('[walker] svg raster failed, keeping raw SVG data URI');
+          }
+        }
         const rec = Object.assign({ kind: 'image' }, ibox, {
-          src: el.currentSrc || el.src,
+          src: src,
           _depth: depth,
         });
         if (rotation !== null) rec.rotate = rotation;
@@ -540,7 +619,105 @@ const WALKER_SOURCE = `
     return { width: rootRect.width, height: rootRect.height, records: records };
   }
 
+  // ─── pre-walk mutation: inline <svg> → <img data:image/svg+xml> ──────
+  // visit() covers text leaves, <img> (with SVG-src raster), <canvas>, and
+  // background fills — but inline <svg> ELEMENTS had no handler: the walk
+  // recursed into SVG children and emitted nothing, so icon glyphs vanished
+  // from the records export (the huashu path materializes them). Swap each
+  // top-level svg for an equal-box <img> whose src is the serialized svg;
+  // the existing IMG branch + rasterizeSvgImage then emit a PNG record.
+  // Layout-critical styles are copied so the swap holds the svg's box in
+  // flex/absolute layouts; currentColor is frozen via an explicit color.
+  // Serialization failures keep the svg in place (warn, never throw).
+  function materializeInlineSvgs(root, decodes) {
+    const svgs = Array.prototype.filter.call(
+      root.querySelectorAll('svg'),
+      function (s) { return !s.ownerSVGElement; }
+    );
+    let converted = 0;
+    for (const svg of svgs) {
+      const cs = getComputedStyle(svg);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      const r = svg.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1 || !svg.parentNode) continue;
+      let src;
+      try {
+        const clone = svg.cloneNode(true);
+        if (!clone.getAttribute('xmlns')) {
+          clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        }
+        // Standalone svg loses the CSS-sized box and inherited currentColor;
+        // freeze both so the raster matches the rendered glyph.
+        if (!clone.getAttribute('viewBox') && svg.hasAttribute('width') && svg.hasAttribute('height')) {
+          clone.setAttribute('viewBox', '0 0 ' + svg.getAttribute('width') + ' ' + svg.getAttribute('height'));
+        }
+        clone.setAttribute('width', String(r.width));
+        clone.setAttribute('height', String(r.height));
+        clone.style.color = cs.color;
+        src = 'data:image/svg+xml;charset=utf-8,' +
+          encodeURIComponent(new XMLSerializer().serializeToString(clone));
+      } catch (e) {
+        console.warn('[walker] inline svg serialize failed, glyph kept as-is:', e.message);
+        continue;
+      }
+      const img = document.createElement('img');
+      img.src = src;
+      img.style.cssText =
+        'width:' + r.width + 'px;height:' + r.height + 'px;' +
+        'position:' + cs.position + ';left:' + cs.left + ';top:' + cs.top + ';' +
+        'right:' + cs.right + ';bottom:' + cs.bottom + ';margin:' + cs.margin + ';' +
+        'transform:' + cs.transform + ';vertical-align:' + cs.verticalAlign + ';' +
+        'z-index:' + cs.zIndex + ';flex-shrink:0;';
+      svg.parentNode.replaceChild(img, svg);
+      converted++;
+      decodes.push(img.decode().catch(function () {
+        console.warn('[walker] inline svg decode failed, record keeps raw src: ' + img.src.slice(0, 80));
+      }));
+    }
+    return converted;
+  }
+
+  // ─── pre-walk mutation: CSS background-image url() → real <img> ──────
+  // The walker has no handler for non-gradient background-image layers:
+  // hasVisualFill() sees them but only ever emits the solid backgroundColor
+  // rect, so url() assets (logos, photos, data-URI icons) are silently
+  // dropped from the export. Materialize each one as an absolutely-
+  // positioned <img> child before walking — the existing image branch then
+  // emits it (including the SVG→PNG raster for data:image/svg+xml sources,
+  // whose sync .complete/.naturalWidth check is why decodes are awaited
+  // here). Idempotent: the source backgroundImage is cleared on conversion.
+  // Inline <svg> elements are materialized first (same decode barrier).
+  async function prepareSlideForExtract(root) {
+    const decodes = [];
+    materializeInlineSvgs(root, decodes);
+    const candidates = [root].concat(Array.from(root.querySelectorAll('*')));
+    for (const el of candidates) {
+      if (el.tagName === 'IMG' || el.tagName === 'CANVAS') continue;
+      const cs = getComputedStyle(el);
+      const bg = cs.backgroundImage;
+      if (!bg || bg === 'none' || bg.indexOf('url(') === -1) continue;
+      if (bg.indexOf('gradient') !== -1) continue; // gradient raster path owns these
+      const m = bg.match(/url\\((["']?)([^"')]+)\\1\\)/);
+      if (!m) continue;
+      el.style.backgroundImage = 'none';
+      if (cs.position === 'static' || !cs.position) el.style.position = 'relative';
+      const img = document.createElement('img');
+      img.src = m[2];
+      img.style.cssText =
+        'position:absolute;left:0;top:0;width:100%;height:100%;' +
+        'object-fit:' + (cs.backgroundSize === 'contain' ? 'contain' : 'cover') + ';' +
+        'pointer-events:none;';
+      el.insertBefore(img, el.firstChild);
+      decodes.push(img.decode().catch(function () {
+        console.warn('[walker] bg-image decode failed, record keeps raw src: ' + img.src.slice(0, 80));
+      }));
+    }
+    await Promise.all(decodes);
+    return decodes.length;
+  }
+
   window.__extractSlide = walk;
+  window.__prepareSlideForExtract = prepareSlideForExtract;
 })();
 `;
 
@@ -679,6 +856,21 @@ export async function extractSlideRecordsForExport(
         const root = d.querySelector(
           `section.slide-container[data-slide-index="${i}"]`
         );
+        if (root) {
+          // Materialize inline <svg> elements and CSS background-image url()
+          // layers as <img> before the walk — the walker has handlers for
+          // neither, so without this pass those visuals drop out of the
+          // export entirely.
+          try {
+            await (
+              w as unknown as {
+                __prepareSlideForExtract: (el: Element) => Promise<number>;
+              }
+            ).__prepareSlideForExtract(root);
+          } catch (prepErr) {
+            console.warn(`[walker] bg-image prepare failed on slide ${i}:`, prepErr);
+          }
+        }
         extract = root ? (w as any).__extractSlide(root) : null;
       } catch (e) {
         console.error(`[walker] extract failed on slide ${i}:`, e);

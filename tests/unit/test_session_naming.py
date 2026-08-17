@@ -61,15 +61,71 @@ class TestGenerateSessionTitle:
 
         assert title is None
 
-    def test_truncates_excessively_long_title(self):
-        """Titles longer than 100 characters are truncated."""
+    def test_rejects_excessively_long_title(self):
+        """An output longer than 100 chars is an overrun, not a title —
+        rejected so the caller keeps the session's default name (never a
+        mid-word truncation of junk)."""
         mock_model = MagicMock()
         long_title = "A" * 150
         mock_model.invoke.return_value = AIMessage(content=long_title)
 
         title = generate_session_title("Some prompt", mock_model)
 
-        assert len(title) <= 100
+        assert title is None
+
+    def test_strips_complete_thinking_block(self):
+        """A leading <thinking> block is removed; the title line survives."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content=(
+                "<thinking>The user wants a revenue deck, so a good title "
+                "would mention revenue.</thinking>\nQ3 Revenue Analysis"
+            )
+        )
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title == "Q3 Revenue Analysis"
+
+    def test_unclosed_thinking_block_rejected_to_fallback(self):
+        """max_tokens can cut the model mid-thought: an unclosed <thinking>
+        tag means NO title was produced — return None (safe fallback name)."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="<thinking>The user is asking about Q3 revenue and I sh"
+        )
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title is None
+
+    def test_takes_first_non_empty_line_only(self):
+        """Explanatory prose after the title never leaks into the name."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="\n\nQ3 Revenue Analysis\n\nThis title captures the request."
+        )
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title == "Q3 Revenue Analysis"
+
+    def test_strips_markdown_decoration(self):
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(content="**Q3 Revenue Analysis**")
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title == "Q3 Revenue Analysis"
+
+    def test_tag_only_response_rejected(self):
+        """A response that is nothing but markup yields None, not '<...>'."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(content="<thinking></thinking>")
+
+        title = generate_session_title("Show me Q3 revenue", mock_model)
+
+        assert title is None
 
 
 # ============================================
@@ -197,7 +253,7 @@ class TestSessionNamingInStreaming:
         service._detect_explicit_replace_intent = MagicMock(return_value=False)
         service._get_or_load_deck = MagicMock(return_value=None)
         service._substitute_images_for_response = MagicMock(
-            side_effect=lambda d, r=None: (d, r)
+            side_effect=lambda d, r=None, *, session_id: (d, r)
         )
         service._persist_genie_conversation_ids = MagicMock()
 
@@ -269,7 +325,7 @@ class TestSessionNamingInStreaming:
         service._detect_explicit_replace_intent = MagicMock(return_value=False)
         service._get_or_load_deck = MagicMock(return_value=None)
         service._substitute_images_for_response = MagicMock(
-            side_effect=lambda d, r=None: (d, r)
+            side_effect=lambda d, r=None, *, session_id: (d, r)
         )
         service._persist_genie_conversation_ids = MagicMock()
 
@@ -320,7 +376,7 @@ class TestSessionNamingInStreaming:
         service._detect_explicit_replace_intent = MagicMock(return_value=False)
         service._get_or_load_deck = MagicMock(return_value=None)
         service._substitute_images_for_response = MagicMock(
-            side_effect=lambda d, r=None: (d, r)
+            side_effect=lambda d, r=None, *, session_id: (d, r)
         )
         service._persist_genie_conversation_ids = MagicMock()
 
@@ -356,3 +412,65 @@ class TestSessionNamingInStreaming:
             e for e in events if e.type == StreamEventType.ERROR
         ]
         assert len(error_events) == 0
+
+
+class TestDegenerateOverrunTitles:
+    """Live-reproduced failure shape (diag, 2/2): the naming model emits the
+    correct title, then keeps generating — a fused degenerate `Endtml` marker
+    plus tag-style reasoning — and max_tokens slices it mid-thought
+    (finish_reason == "length"). Both signals must be handled: overruns are
+    rejected outright, and the fused marker is stripped when a provider
+    reports no finish metadata."""
+
+    def test_finish_reason_length_is_rejected(self):
+        """An overrun naming call is junk, never a title — safe fallback."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content=(
+                "Acme Robotics Q3 Autonomy RoadmapEndtml\n<thinking>\nThe user "
+                "wants me to create a presentation with 3 slides"
+            ),
+            response_metadata={"finish_reason": "length"},
+        )
+
+        title = generate_session_title("Create 3 slides on autonomy", mock_model)
+
+        assert title is None
+
+    def test_anthropic_style_max_tokens_is_rejected(self):
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="Acme Roadmap<thinking>and now I will",
+            response_metadata={"stop_reason": "max_tokens"},
+        )
+
+        title = generate_session_title("Create slides", mock_model)
+
+        assert title is None
+
+    def test_fused_endtml_marker_stripped_without_finish_metadata(self):
+        """Same content shape but no finish metadata: the fused degenerate
+        marker on the title line is stripped, the thinking tail is gone."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content=(
+                "Acme Robotics Q3 Autonomy RoadmapEndtml\n<thinking>\nThe user "
+                "wants me to create a presentation"
+            )
+        )
+
+        title = generate_session_title("Create 3 slides on autonomy", mock_model)
+
+        assert title == "Acme Robotics Q3 Autonomy Roadmap"
+
+    def test_legit_title_ending_in_end_survives(self):
+        """'End' as a real word (e.g. quarter end) is not the marker."""
+        mock_model = MagicMock()
+        mock_model.invoke.return_value = AIMessage(
+            content="Preparing for Quarter End",
+            response_metadata={"finish_reason": "stop"},
+        )
+
+        title = generate_session_title("Quarter end prep", mock_model)
+
+        assert title == "Preparing for Quarter End"
