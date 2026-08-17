@@ -526,9 +526,464 @@ def _run_migrations(engine, schema: str | None = None):
 
         # --- image_assets.token: unguessable external id + backfill (SDR-4437 F-TM-7) ---
         _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite)
+        # --- agent_config: style precedence in the DB, for the raw-SQL writers no
+        # --- Python-side bind hook can see (PostgreSQL only; no-op on SQLite) ---
+        _migrate_agent_config_precedence_trigger(
+            conn, inspector, schema, _qual, is_sqlite
+        )
+
+        # --- design system library: additive design_system(+asset/+token) tables ---
+        _migrate_design_system_tables(conn, schema)
+
+        # --- design system: add is_active (soft-delete) to pre-existing tables ---
+        _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- design system (v1): add font_mapping_json to pre-existing tables ---
+        _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- design system: free-form brand text -> UNCAPPED TEXT (no cap at all) ---
+        # SUPERSEDES the two ``design_system_token`` widen migrations (name 100 ->
+        # 255, group 50 -> 255). Their target columns are now unbounded ``TEXT``,
+        # which is strictly wider than anything they could produce, so running them
+        # can only ever move a column the WRONG way — see
+        # :func:`_migrate_widen_token_name` for the oscillation and the startup
+        # failure that caused. They are retained as documented no-ops rather than
+        # deleted, so a reader of this list can see what happened to them.
+        _migrate_uncap_brand_text_columns(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- design system: name uniqueness scoped to LIVE rows, so a soft delete
+        # --- stops reserving the name forever (partial unique index) ---
+        _migrate_design_system_partial_name_index(
+            conn, inspector, schema, _qual, is_sqlite
+        )
 
         # --- keep newly created objects owned by the shared role (prod forks) ---
+        # Runs LAST so every object created above — including the partial name index
+        # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
+    """Create the additive design-system tables (idempotent, dialect-safe).
+
+    Design System Library. Adds five NEW tables — ``design_system``,
+    ``design_system_asset``, ``design_system_token``, ``design_system_file``,
+    ``design_system_template`` — without touching ``slide_style_library`` or any
+    existing table, so the current slide-style prompt path is unaffected.
+    ``design_system_file`` (v1 Phase 1) retains bundle source files + path
+    references, and ``design_system_template`` (v1 Phase 4) makes templates
+    individually addressable; both are created AFTER their parents so their
+    foreign keys to ``design_system`` and ``design_system_asset`` resolve.
+
+    ``Base.metadata.create_all()`` (run first in ``init_db``) already creates these
+    on fresh installs; this hand-rolled step guarantees they also exist on
+    already-provisioned Lakebase/Postgres databases and lets the migration be
+    exercised on its own. Creation is driven from the ORM metadata via
+    ``Table.create(checkfirst=True)`` — a single source of truth for the schema,
+    idempotent (a no-op when the table exists) and correctly compiled for both
+    PostgreSQL/Lakebase and the SQLite used in tests. Parent tables are created
+    first so the child foreign keys resolve.
+    """
+    from src.database.models.design_system import (
+        DesignSystem,
+        DesignSystemAsset,
+        DesignSystemFile,
+        DesignSystemTemplate,
+        DesignSystemToken,
+    )
+
+    for model in (
+        DesignSystem,
+        DesignSystemAsset,
+        DesignSystemToken,
+        DesignSystemFile,
+        DesignSystemTemplate,
+    ):
+        table = model.__table__
+        # Match init_db()'s schema handling so a qualified deployment creates the
+        # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        # NOTE: this mutates the module-global Table.schema on the shared ORM
+        # metadata — intentional, and identical to what init_db() already does.
+        if schema and table.schema is None:
+            table.schema = schema
+        table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: design_system tables ensured")
+
+
+def _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add ``is_active`` to ``design_system`` for Phase-3 soft-delete (idempotent).
+
+    Phase 3 introduces soft-delete on design systems, mirroring
+    ``slide_style_library.is_active``. ``Base.metadata.create_all()`` adds the
+    column on fresh installs, but it does NOT alter an already-provisioned
+    ``design_system`` table (created by an earlier Phase 1/2 deploy). This
+    hand-rolled ALTER backfills it. Defaults to TRUE so every existing design
+    system remains visible/usable. Column existence is probed with the inspector
+    passed from ``_run_migrations`` (or a fresh one when called standalone);
+    ``get_columns`` reflects the live table even when it was created earlier in
+    this same migration transaction.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspector or inspect(conn)
+    try:
+        cols = {c["name"] for c in insp.get_columns("design_system", schema=schema)}
+    except Exception:
+        return
+    if not cols or "is_active" in cols:
+        return
+
+    logger.info("Migration: adding is_active column to design_system")
+    conn.execute(text(
+        f"ALTER TABLE {_qual('design_system')} ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL"
+    ))
+
+
+def _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add ``font_mapping_json`` to ``design_system`` (v1 Phase 1, idempotent).
+
+    v1 Phase 1 stores a normalized font mapping (manifest ``fonts[]`` /
+    ``brandFonts[]`` -> family/weight/style + token linkage) on the parent record.
+    ``Base.metadata.create_all()`` adds the column on fresh installs, but does NOT
+    alter a ``design_system`` table provisioned by an earlier deploy; this
+    hand-rolled ALTER backfills it. The column is nullable (a bundle may declare
+    no fonts) so no default/backfill value is required. Column existence is probed
+    with the inspector passed from ``_run_migrations`` (or a fresh one when called
+    standalone). Dialect-safe: ``JSONB`` on PostgreSQL/Lakebase, ``JSON`` (TEXT
+    affinity) on the SQLite used in tests — matching the model's ``with_variant``
+    column and the existing ``agent_config JSON`` migration.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspector or inspect(conn)
+    try:
+        cols = {c["name"] for c in insp.get_columns("design_system", schema=schema)}
+    except Exception:
+        return
+    if not cols or "font_mapping_json" in cols:
+        return
+
+    col_type = "JSON" if is_sqlite else "JSONB"
+    logger.info("Migration: adding font_mapping_json column to design_system")
+    conn.execute(text(
+        f"ALTER TABLE {_qual('design_system')} ADD COLUMN font_mapping_json {col_type} NULL"
+    ))
+
+
+def _migrate_widen_token_name(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """RETIRED no-op: ``design_system_token.name`` 100 -> 255, superseded by TEXT.
+
+    This once issued ``ALTER COLUMN name TYPE VARCHAR(255)`` for the
+    zero-token-loss requirement (a name over 100 characters failed the ENTIRE
+    bundle import, costing every other token in it). 255 was then reopened by a
+    longer real string, and :func:`_migrate_uncap_brand_text_columns` removed the
+    bound instead of moving it again. ``TEXT`` is strictly wider than VARCHAR(255),
+    so there is no longer any state from which this migration's target is an
+    improvement — it can only NARROW a column the newer migration widened.
+
+    It did exactly that, because its skip guard read ``length is None`` — the
+    signature of an unbounded ``TEXT`` column, i.e. the WIDEST possible state — as
+    "no width yet, needs widening". Two concrete failures on PostgreSQL 14:
+
+    1. The schema OSCILLATED instead of converging. A fresh ``create_all``
+       database starts at ``text``; run 1 narrowed it to ``varchar(255)``; the
+       uncap migration then converted it back on run 2, and so on. (The uncap
+       migration could not repair it within the SAME run because it read column
+       types from the shared inspector, whose reflection cache still described the
+       pre-ALTER state, so it skipped those columns as "already unbounded".)
+    2. Worse, it could HARD-FAIL STARTUP. Once a token longer than 255 characters
+       existed — which is the entire point of the uncap migration — the narrowing
+       ALTER raised ``StringDataRightTruncation``, and because the SAVEPOINT here
+       was not wrapped in a try/except, the error escaped and aborted the single
+       transaction that carries EVERY migration. A database holding legitimate
+       brand data could not boot.
+
+    So the function is retired to a no-op rather than repaired: a widener whose
+    target is now ``TEXT`` must never fire. It is kept (as is its call site's
+    comment) so this history is discoverable, and because deleting a migration
+    function that historical databases' logs refer to loses that thread. The
+    SQLite contract it always had is unchanged and still asserted by tests: length
+    is unenforced there, so there was never anything to do.
+
+    Convergence on every dialect is now owned solely by
+    :func:`_migrate_uncap_brand_text_columns`, which re-reads the LIVE column type
+    per column and is a true fixpoint.
+    """
+    return
+
+
+def _migrate_widen_token_group(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """RETIRED no-op: ``design_system_token.group`` 50 -> 255, superseded by TEXT.
+
+    Retired for exactly the reasons given in :func:`_migrate_widen_token_name` —
+    same oscillation, same potential startup abort, same superseding migration.
+    ``design_system_token.group`` is in :data:`_BRAND_TEXT_COLUMNS`, so its
+    conversion to unbounded ``TEXT`` is guaranteed there instead.
+    """
+    return
+
+
+#: Every FREE-FORM BRAND TEXT column, as ``(table, column)``. Converted to
+#: unbounded ``TEXT`` by :func:`_migrate_uncap_brand_text_columns`.
+#:
+#: Deliberately EXCLUDED, because they are not brand text and an unbounded enum
+#: column would be a defect rather than a feature: ``design_system_asset.kind``/
+#: ``.mime``, ``design_system_file.kind``/``.mime`` (importer-classified enums and
+#: derived media types) and ``design_system.created_by``/``.updated_by`` (platform
+#: identity strings). The per-asset / per-bundle BYTE limits are untouched — they
+#: are OOM guards, not brand-data limits.
+_BRAND_TEXT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("design_system", "name"),
+    ("design_system_token", "group"),
+    ("design_system_token", "name"),
+    ("design_system_token", "value"),
+    ("design_system_asset", "filename"),
+    ("design_system_file", "path"),
+    ("design_system_template", "name"),
+    ("design_system_template", "entry_path"),
+)
+
+
+def _migrate_uncap_brand_text_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Convert every free-form BRAND TEXT column to unbounded ``TEXT``.
+
+    A length cap on a field the BRAND authors turns the brand away, and because a
+    bundle import is ONE request, a single over-length string failed the WHOLE
+    import — costing every other token in the bundle. Two earlier migrations raised
+    caps (``design_system_token.name`` 100 -> 255,  ``.group`` 50 -> 255) and each
+    was reopened by a longer real-world string, because the NUMBER was never the
+    problem. This removes the bound instead of moving it, for every such column at
+    once (:data:`_BRAND_TEXT_COLUMNS`).
+
+    Superseding, not duplicating, the two widen migrations: they still run first and
+    stay correct (a VARCHAR(50) -> VARCHAR(255) -> TEXT sequence is valid and each
+    step is individually idempotent), and they are kept so a database that has only
+    ever run the older code still reaches a sane intermediate state.
+
+    Idempotent: each column's current type is probed and skipped when it already has
+    no length, so repeated runs — and a run on a fresh ``create_all`` database, where
+    the ORM already declares ``Text`` — are no-ops.
+
+    Dialect behaviour, deliberately not papered over:
+
+    - PostgreSQL / Lakebase (the real target): ``ALTER COLUMN TYPE TEXT`` from
+      ``VARCHAR(n)`` is a no-rewrite change — ``text`` and ``varchar`` share a
+      storage representation, so Postgres only updates the catalog. Existing values
+      are preserved exactly; ``text`` has no length limit to violate.
+      ``design_system.name`` is covered by a unique index — the PARTIAL
+      ``uq_design_system_name_active``, see
+      :func:`_migrate_design_system_partial_name_index` — which is unaffected: a
+      unique btree index over ``text`` is normal, bounded only by the ~2704-byte
+      index-tuple maximum that a design-system name does not approach. If one ever
+      did, the INSERT would fail loudly rather than truncate — so no prefix or
+      expression index is introduced, and the product's name-uniqueness rule is
+      kept.
+    - SQLite (tests only): declared VARCHAR length is NOT ENFORCED and
+      ``ALTER COLUMN TYPE`` does not exist, so this returns early exactly like the
+      two widen migrations. A 1000-character value already round-trips there, which
+      is why the meaningful SQLite assertion is the end-to-end round trip and the
+      ORM declaration rather than the column type.
+
+    Each ALTER is wrapped in its OWN SAVEPOINT so one failure (e.g. insufficient
+    privileges on a locked-down deploy, or an inherited foreign-owned table on a
+    copy-on-write branch fork) cannot poison the outer migration transaction or
+    prevent the remaining columns from being converted.
+    """
+    from sqlalchemy import inspect, text
+
+    if is_sqlite:
+        # Length is unenforced here; see the docstring. Nothing to do.
+        return
+
+    for table_name, column_name in _BRAND_TEXT_COLUMNS:
+        # Reflect with a FRESH inspector per column, deliberately NOT the shared one
+        # ``_run_migrations`` threads through: an inspector caches its reflection,
+        # so a shared one answers with the schema as it was when first read. That
+        # staleness is not hypothetical — it is why this migration used to SKIP the
+        # two ``design_system_token`` columns that ran right before it, leaving them
+        # narrowed. Deciding on a live read is what makes this a true fixpoint from
+        # any starting state.
+        try:
+            columns = {
+                c["name"]: c
+                for c in inspect(conn).get_columns(table_name, schema=schema)
+            }
+        except Exception:
+            continue  # table absent on this deploy
+        column = columns.get(column_name)
+        if column is None:
+            continue
+        current_length = getattr(column.get("type"), "length", None)
+        if current_length is None:
+            continue  # already unbounded TEXT
+
+        logger.info(
+            "Migration: converting %s.%s to TEXT (was length %s)",
+            table_name,
+            column_name,
+            current_length,
+        )
+        try:
+            with conn.begin_nested():
+                # ``group`` is a SQL reserved word; quote every identifier so the
+                # statement is correct for any column in the list.
+                conn.execute(text(
+                    f"ALTER TABLE {_qual(table_name)} "
+                    f'ALTER COLUMN "{column_name}" TYPE TEXT'
+                ))
+        except Exception:
+            logger.warning(
+                "Migration: could not convert %s.%s to TEXT; it keeps its current "
+                "width and the remaining columns are still converted",
+                table_name,
+                column_name,
+                exc_info=True,
+            )
+
+
+#: Name of the partial unique index that scopes design-system name uniqueness to
+#: LIVE rows. Must match the ``Index(...)`` declared in
+#: ``src/database/models/design_system.py`` — ``create_all`` builds it under this
+#: name on fresh installs and this migration builds it under the same name on
+#: already-provisioned ones, so the two paths converge on one schema.
+_DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
+
+
+def _migrate_design_system_partial_name_index(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Scope ``design_system.name`` uniqueness to LIVE rows (idempotent).
+
+    ``design_system.name`` originally carried a whole-table UNIQUE constraint. That
+    made the soft delete leak the name PERMANENTLY: ``DELETE`` tombstones the row
+    (``is_active = False``), the list endpoint hides it, and the tombstone then held
+    its name against every subsequent import — a name the user could no longer see,
+    delete, or reuse. The reported symptom was an unfixable
+    "A design system named 'X' already exists (id=N)" on re-importing a corrected
+    bundle under the name the user had just deleted.
+
+    Filtering only the application-side name pre-checks would NOT have fixed it: it
+    converts the clean 409 into an ``IntegrityError`` at commit, i.e. an HTTP 500 on
+    a legitimate upload. The uniqueness RULE itself is what was wrong, so this
+    replaces the whole-table constraint with a PARTIAL unique index over
+    ``WHERE is_active``. Tombstones are then unconstrained — many may share one name,
+    which is what lets a delete/re-import cycle repeat indefinitely instead of
+    working exactly once — while two LIVE rows still cannot.
+
+    Ordering is deliberate: the replacement index is CREATED FIRST and the old
+    constraint is dropped ONLY IF that succeeded. The database is therefore never
+    left with no uniqueness enforcement at all — including on a database where the
+    constraint was already dropped but duplicate live names somehow exist, in which
+    case the CREATE fails, the DROP is skipped, and the existing constraint stays.
+
+    Idempotent: returns early once the partial index is present, so repeat startups
+    and a fresh ``create_all`` database (where the ORM already declares the index)
+    are both no-ops. Each statement runs in its OWN SAVEPOINT so a failure — e.g.
+    insufficient privileges on a locked-down deploy, or an inherited foreign-owned
+    table on a copy-on-write branch fork — cannot poison the outer migration
+    transaction.
+
+    Discovery, not assumption: the old constraint's name is REFLECTED rather than
+    hardcoded to Postgres's ``design_system_name_key`` default, and both shapes are
+    handled — a UNIQUE *constraint* (what a column-level ``unique=True`` emits, and
+    what needs ``DROP CONSTRAINT``) and a bare unique *index* (which needs
+    ``DROP INDEX``).
+
+    No-op on SQLite. It is not a deployment target (``_get_database_url`` only ever
+    returns PostgreSQL unless ``DATABASE_URL`` is set explicitly), and the tests
+    build their schema with ``create_all``, which emits the partial index directly —
+    SQLite has supported partial indexes since 3.8, so the unit suite exercises the
+    SAME rule as Lakebase. An explicitly-configured pre-existing SQLite file would
+    keep its inline table-level UNIQUE, which SQLite cannot drop without rebuilding
+    the table; rebuilding a table of brand blobs is not worth doing for a
+    configuration nothing deploys, so it is left alone rather than silently rewritten.
+    """
+    from sqlalchemy import inspect, text
+
+    if is_sqlite:
+        return
+
+    # Reflect LIVE, with a fresh inspector: the shared one caches its reflection
+    # from before the design_system table may have been created earlier in this same
+    # migration transaction.
+    try:
+        insp = inspect(conn)
+        indexes = insp.get_indexes("design_system", schema=schema)
+        unique_constraints = insp.get_unique_constraints("design_system", schema=schema)
+    except Exception:
+        return  # table absent on this deploy
+
+    if any(ix.get("name") == _DS_NAME_ACTIVE_INDEX for ix in indexes):
+        return  # already scoped
+
+    logger.info(
+        "Migration: scoping design_system.name uniqueness to active rows (%s)",
+        _DS_NAME_ACTIVE_INDEX,
+    )
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"CREATE UNIQUE INDEX {_DS_NAME_ACTIVE_INDEX} "
+                f'ON {_qual("design_system")} (name) WHERE is_active'
+            ))
+    except Exception:
+        logger.warning(
+            "Migration: could not create %s; design_system.name keeps its existing "
+            "whole-table uniqueness and a soft-deleted name stays reserved",
+            _DS_NAME_ACTIVE_INDEX,
+            exc_info=True,
+        )
+        return
+
+    # Only now is it safe to remove the whole-table rule the new index replaces.
+    # A column-level ``unique=True`` emits a UNIQUE CONSTRAINT; some databases may
+    # instead carry a bare unique index. Drop whichever is actually there, and only
+    # when it covers exactly ``(name)`` — a composite unique over more columns is a
+    # different rule this migration has no business removing.
+    for constraint in unique_constraints:
+        if list(constraint.get("column_names") or []) != ["name"]:
+            continue
+        name = constraint.get("name")
+        if not name:
+            continue
+        try:
+            with conn.begin_nested():
+                conn.execute(text(
+                    f'ALTER TABLE {_qual("design_system")} DROP CONSTRAINT "{name}"'
+                ))
+            logger.info("Migration: dropped whole-table unique constraint %s", name)
+        except Exception:
+            logger.warning(
+                "Migration: could not drop unique constraint %s; a soft-deleted "
+                "design-system name stays reserved until it is removed",
+                name,
+                exc_info=True,
+            )
+
+    constraint_names = {c.get("name") for c in unique_constraints}
+    for index in indexes:
+        if not index.get("unique") or list(index.get("column_names") or []) != ["name"]:
+            continue
+        name = index.get("name")
+        # A constraint-backing index is dropped with its constraint above; issuing
+        # DROP INDEX for it would fail.
+        if not name or name in constraint_names:
+            continue
+        try:
+            with conn.begin_nested():
+                qualified = f'"{schema}"."{name}"' if schema else f'"{name}"'
+                conn.execute(text(f"DROP INDEX {qualified}"))
+            logger.info("Migration: dropped whole-table unique index %s", name)
+        except Exception:
+            logger.warning(
+                "Migration: could not drop unique index %s; a soft-deleted "
+                "design-system name stays reserved until it is removed",
+                name,
+                exc_info=True,
+            )
 
 
 def _reassign_new_objects_to_shared_owner(
@@ -643,6 +1098,133 @@ def _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite) -
     ))
     if not is_sqlite:
         conn.execute(text(f"ALTER TABLE {q} ALTER COLUMN token SET NOT NULL"))
+#: The one place the precedence rule is written in SQL. ``$$``-quoted so the body
+#: needs no escaping, and named after the rule rather than the tables, since both
+#: ``agent_config`` columns share it.
+_AGENT_CONFIG_PRECEDENCE_FUNCTION = "tellr_agent_config_precedence"
+
+#: Trigger name, per table. Contains "agent_config" so the tests (and a human
+#: reading ``pg_trigger``) can find every installation of the rule.
+_AGENT_CONFIG_TRIGGER = "trg_agent_config_precedence"
+
+#: Both columns the rule governs (``src/database/types.py``).
+_AGENT_CONFIG_TABLES = ("user_sessions", "config_profiles")
+
+
+def _migrate_agent_config_precedence_trigger(conn, inspector, schema, _qual, is_sqlite):
+    """Enforce agent_config style precedence in the DATABASE (PostgreSQL only).
+
+    ``NormalizedAgentConfig`` (``src/database/types.py``) is the primary enforcement
+    and covers every writer that goes through a column object. RAW SQL does not:
+    ``conn.execute(text("INSERT ..."))`` hands the statement to the driver as
+    written, so no Python-side hook is positioned to intervene, and a both-set
+    config reached real PostgreSQL intact. The database is the only place downstream
+    of EVERY writer, so the rule is restated here as a ``BEFORE INSERT OR UPDATE``
+    trigger.
+
+    Same rule, same direction: DESIGN SYSTEM WINS, ``slide_style_id`` is set to
+    NULL, and the row is stored. Deliberately NOT a ``RAISE`` — an exception here
+    would be the 422 that already wedged every legacy both-set row on every save,
+    one layer lower and harder to see. Only the contradiction is repaired; every
+    other key, including ones no model knows about, is left exactly as written.
+
+    IDEMPOTENT, and converging from ANY starting state. ``CREATE OR REPLACE
+    FUNCTION`` plus ``DROP TRIGGER IF EXISTS`` then ``CREATE TRIGGER`` reaches the
+    same end state whether the trigger is absent, present, or present in an older
+    form — so a re-run is a no-op and an upgrade needs no version check. That
+    property is the whole point: the two brand-text column migrations on this branch
+    inferred "needs migrating" from a state their own predecessor produced, so they
+    fought each other and the schema OSCILLATED between runs instead of converging
+    (see :func:`_migrate_widen_token_name`).
+
+    PER-ITEM CONTAINMENT. Every statement runs inside a SAVEPOINT and failures are
+    logged, never raised. The whole migration run shares one transaction, so an
+    escaping error would abort every LATER migration too — a database that merely
+    lacks permission to create a trigger (a copy-on-write branch whose service
+    principal does not own the inherited table) must still boot with the Python-side
+    normalization doing its job.
+
+    No-op on SQLite: the body is PL/pgSQL and SQLite has neither the language nor
+    the JSON operators, so the SQLite suite is untouched.
+    """
+    if is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    present = []
+    for table in _AGENT_CONFIG_TABLES:
+        try:
+            cols = {c["name"] for c in inspector.get_columns(table, schema=schema)}
+        except Exception:
+            cols = set()
+        if "agent_config" in cols:
+            present.append(table)
+    if not present:
+        return
+
+    # ``jsonb`` for the key test and the edit (``json`` has neither ``->``-comparable
+    # equality nor ``jsonb_set``), then back out through ``::text`` so the assignment
+    # re-parses into whichever of ``json``/``jsonb`` the column actually declares —
+    # PL/pgSQL coerces ``NEW.agent_config`` to the column's own type, so the function
+    # fits both without knowing which it is. Key ORDER is not preserved through
+    # jsonb, which is why the tests assert on the parsed authorities rather than on
+    # the stored byte string.
+    function_sql = f"""
+        CREATE OR REPLACE FUNCTION {_AGENT_CONFIG_PRECEDENCE_FUNCTION}()
+        RETURNS trigger AS $$
+        BEGIN
+            IF NEW.agent_config IS NOT NULL
+               AND jsonb_typeof(NEW.agent_config::jsonb) = 'object'
+               AND COALESCE(NEW.agent_config::jsonb -> 'slide_style_id', 'null'::jsonb)
+                   <> 'null'::jsonb
+               AND COALESCE(NEW.agent_config::jsonb -> 'design_system_id', 'null'::jsonb)
+                   <> 'null'::jsonb
+            THEN
+                RAISE LOG 'agent_config carried BOTH style authorities; '
+                          'design system wins, slide style dropped';
+                NEW.agent_config := jsonb_set(
+                    NEW.agent_config::jsonb, '{{slide_style_id}}', 'null'::jsonb
+                )::text;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """
+
+    try:
+        with conn.begin_nested():
+            conn.execute(text(function_sql))
+    except Exception as ex:
+        logger.debug(
+            "Migration: skip agent_config precedence function: %s", ex
+        )
+        return
+
+    for table in present:
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    text(
+                        f'DROP TRIGGER IF EXISTS {_AGENT_CONFIG_TRIGGER} '
+                        f"ON {_qual(table)}"
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"CREATE TRIGGER {_AGENT_CONFIG_TRIGGER} "
+                        f"BEFORE INSERT OR UPDATE OF agent_config ON {_qual(table)} "
+                        "FOR EACH ROW EXECUTE FUNCTION "
+                        f"{_AGENT_CONFIG_PRECEDENCE_FUNCTION}()"
+                    )
+                )
+            logger.info(
+                f"Migration: agent_config precedence trigger installed on {table}"
+            )
+        except Exception as ex:
+            logger.debug(
+                "Migration: skip agent_config precedence trigger on %s: %s", table, ex
+            )
 
 
 def _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite) -> None:

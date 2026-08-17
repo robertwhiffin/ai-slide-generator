@@ -473,6 +473,33 @@ GET    /api/settings/identities/provider    # Returns current mode
 
 ---
 
+## Workspace Admin
+
+A tier above the per-resource permissions above, used for workspace-wide state rather than for a single deck or profile.
+
+**`require_admin` resolves group membership on-behalf-of the caller.** It asks Databricks, using the caller's own credentials, whether their groups include the workspace `admins` group. It is not a flag the application stores or trusts.
+
+**It fails closed.** A missing identity, non-membership, or a lookup error all return `403`. There is no ambiguous outcome that resolves to "allow".
+
+**In dev and test it short-circuits to allow.** When the environment is not production the check returns early, so **a local run is not evidence that the gate works** — a test asserting that `require_admin` *blocks* something will pass against code that does not gate at all. Production always evaluates membership.
+
+**The client-side guard is cosmetic.** `/admin` is wrapped in `<RequireAdmin>`, which redirects a non-admin away from the page. Tampering with browser state could reveal page chrome, but it cannot authorize a single API call — the server check is the control.
+
+**Verdicts are cached briefly**, so a principal removed from the `admins` group retains access for up to the cache window.
+
+### Where the admin tier applies
+
+| Surface | Why it is admin-only |
+|---|---|
+| Org default design system (`set-default`, `clear-default`) | Changes what **every** user gets by default. Authorship of the design system does not buy it |
+| System default slide style | Same reasoning |
+| Usage analytics endpoints | Workspace-wide activity data |
+| Google credentials management | App-wide OAuth configuration |
+
+**On design systems the tiers compose.** Reads are open (org-shared content), mutations are creator-or-admin, and the org default is admin-only *even for the row's creator* — and that check is made on the loaded row **before** the authorship comparison, so being the creator cannot bypass it. A row whose `created_by` is NULL or blank is admin-only to mutate, because an unattributed row must never become "anyone may manage this". See [Design System Library §5.1](design-system-library.md).
+
+---
+
 ## Identity Provider
 
 Users and groups are resolved via the Workspace SCIM API using the app's service principal. The service principal token is automatically provided by the Databricks Apps platform via `system.databricks_token` — no separate admin PATs are required.
