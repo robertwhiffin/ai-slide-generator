@@ -33,7 +33,7 @@ Scripts are stored directly on `Slide` objects. This ensures that when a slide i
 
 ```
 Slide {
-    html: str       # The <div class="slide">...</div> HTML
+    html: str       # The slide root's HTML, e.g. <div class="slide">...</div>
     slide_id: str   # Unique identifier like "slide_0"
     scripts: str    # JavaScript for this slide's charts
 }
@@ -48,7 +48,10 @@ def from_html_string(cls, html_content: str) -> 'SlideDeck':
     soup = BeautifulSoup(html_content, 'html.parser')
     
     # Phase 1: Parse slides and build canvas-to-slide index
-    slide_elements = soup.find_all('div', class_='slide')
+    # Slide roots are discovered by the `slide` CLASS TOKEN, independent of
+    # tag name - see "Slide root discovery" below. A <section class="slide">
+    # root is as valid as a <div class="slide"> one.
+    slide_elements = find_slide_roots(soup)
     slides = []
     canvas_to_slide: Dict[str, int] = {}  # canvas_id -> slide_index
     
@@ -161,6 +164,14 @@ def merge_css(existing_css: str, replacement_css: str) -> str:
 
 ---
 
+### 2b. Slide Root Discovery
+
+**A slide root is identified by the `slide` class token, independent of tag name** (`find_slide_roots`, `src/utils/html_utils.py`). Both `<div class="slide">` and `<section class="slide">` are valid roots — design-system templates use the latter — so any code that locates slides must go through the shared helper rather than matching on `div`.
+
+**Some wrappers are promoted through, but not all.** `_promote_through_slide_wrapper` resolves past an outer element only when it is a **sole-child semantic `section` or `article`**. A generic `div` wrapper, or any wrapper with more than one child, is **not** promoted. This matters because a wrapper commonly carries the deck background: mistaking one for the other yields a slide with no background, or a background element treated as a slide.
+
+**Breaking this contract does not raise.** A `div`-only match against a `<section>`-rooted deck simply finds **zero** slides, which surfaces as an empty deck rather than an error — so a parser change must be tested against a `<section>`-rooted deck specifically. See [Slide Host Frame Contract](slide-host-frame-contract.md).
+
 ### 3. Agent Parsing & Slide Replacement
 
 #### 3.1 Agent Response Parsing
@@ -170,16 +181,16 @@ def merge_css(existing_css: str, replacement_css: str) -> str:
 ```python
 def _parse_slide_replacements(self, llm_response: str, original_indices: list[int]) -> dict:
     soup = BeautifulSoup(llm_response, "html.parser")
-    slide_divs = soup.find_all("div", class_="slide")
+    slide_roots = find_slide_roots(soup)
     
     # Build slides and canvas-to-slide index
     replacement_slides: list[Slide] = []
     canvas_to_slide: dict[str, int] = {}
     
-    for idx, slide_div in enumerate(slide_divs):
-        slide = Slide(html=str(slide_div), slide_id=f"slide_{idx}")
+    for idx, slide_root in enumerate(slide_roots):
+        slide = Slide(html=str(slide_root), slide_id=f"slide_{idx}")
         replacement_slides.append(slide)
-        for canvas in slide_div.find_all("canvas"):
+        for canvas in slide_root.find_all("canvas"):
             canvas_id = canvas.get("id")
             if canvas_id:
                 canvas_to_slide[canvas_id] = idx
@@ -317,7 +328,7 @@ ${slideDeck.scripts}  // IIFE-wrapped, safe for shared scope
 3. **Consistent formatting** reconstructs CSS with uniform spacing after merge.
 
 #### 6.3 Slide Validation
-- Slides are identified by BeautifulSoup's `find_all("div", class_="slide")`, which correctly matches multi-class elements like `class="slide title-slide"`.
+- Slides are identified by the `slide` class token independent of tag name, via `find_slide_roots` (`src/utils/html_utils.py`). It matches multi-class elements like `class="slide title-slide"`, keeps only the outermost of any nested pair, and promotes a slide root outward through a sole-child `<section>`/`<article>` wrapper — never through a `<div>`, which could be a deck-level container.
 - Empty slide content is rejected with a descriptive error.
 
 ---

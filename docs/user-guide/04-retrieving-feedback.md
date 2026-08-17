@@ -23,7 +23,7 @@ The Admin page includes a Feedback Dashboard that displays aggregated survey met
 
 ### Step 01: Open the Admin Page
 
-Navigate to `/admin`. The Feedback tab is selected by default.
+Navigate to `/admin`, then select the **Feedback** tab. The Admin page opens on the Usage tab.
 
 ![Admin page with Feedback tab](images/04-retrieving-feedback/01-admin-feedback-tab.png)
 

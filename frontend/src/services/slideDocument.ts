@@ -12,6 +12,8 @@
 // <link rel="stylesheet"> that CSP blocks leaves the slide blank until a reflow
 // (the "black screen until you toggle fullscreen" bug). They are static,
 // well-known hosts and are not an exfiltration channel (connect-src stays 'none').
+import type { SlideDeck } from '../types/slide';
+
 export const SLIDE_CSP =
   "default-src 'none'; " +
   "script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; " +
@@ -36,6 +38,198 @@ export const KEY_BRIDGE_SCRIPT = `
     }, '*');
   }, true);
 </script>`;
+
+// Uniform root-slide reset shared by EVERY render/export surface (tile and
+// visual-editor previews, filmstrip, presentation, screenshot capture, PDF,
+// PPTX chart capture, records-walker composite, standalone HTML export; the
+// Python huashu / Google-Slides builder carries a byte-identical mirror,
+// parity-pinned by tests/unit/test_export_csp.py). The slide ROOT — the
+// direct child of <body> or of a surface's .slide-container wrapper — is
+// pinned to the frame origin and flattened: a PPTX canvas cannot render root
+// rounding or shadows, so preview/export parity is only achievable by
+// stripping them on every surface. Inner elements keep their radius/shadow.
+// The :not(#…) clause never matches (no such id is ever minted); it lifts
+// each arm to id-level specificity so the reset outguns deck-authored
+// !important card styling (".slide { margin: 40px auto !important }" and
+// friends) no matter where a surface injects it relative to deck CSS.
+export const SLIDE_ROOT_RESET_STYLE = `
+  body > :not(#tellr-root-reset-boost),
+  .slide-container > :not(#tellr-root-reset-boost) {
+    margin: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+`;
+
+/** The fixed 16:9 frame every preview surface renders a single slide into. */
+export const SLIDE_FRAME_W = 1280;
+export const SLIDE_FRAME_H = 720;
+
+/**
+ * The slide-host frame contract: give `hostSelector` the fixed frame and STRETCH
+ * ITS CHILD to fill it.
+ *
+ * Why the child, and not just the host. Design-system templates nest the slide
+ * two levels deep — a wrapper element (`<section>`) carries the deck background
+ * via a bare TYPE selector, and inside it `.slide` is `position: absolute;
+ * inset: 0`. Because the slide is out of flow, the wrapper has no in-flow
+ * content and collapses to `height: 0`. The collapsed element is the one
+ * carrying the background, so the deck background never paints and whatever is
+ * behind it (typically the deck's own dark `html,body` background) shows
+ * through. `color` and `font-family` still apply — they inherit — which is why
+ * the result is READABLE DARK-ON-DARK rather than an obviously blank slide.
+ * The absolute slide also escapes its static wrapper and resolves against the
+ * viewport, so the same surfaces lay content out against the wrong height.
+ *
+ * Sizing the ROOT does not fix this: the wrapper stays a static-flow child and
+ * still collapses. Only stretching the host's CHILD gives the
+ * background-carrying element area. Presentation mode was the one surface that
+ * already declared such a rule, which is the only reason it escaped the defect;
+ * this is that rule, promoted so every surface shares one mechanism.
+ *
+ * Every declaration is load-bearing (each was measured by removing it):
+ *  - host `position: relative` — else the absolute slide escapes to the viewport
+ *  - host width/height — else the frame collapses and nothing has area
+ *  - child `height: 100%` — the actual fix; a sized, positioned host is not enough
+ *  - child `box-sizing: border-box` — slide roots are content-box with a safe-area
+ *    padding, so a bare `width/height: 100%` overshoots the frame
+ *  - `overflow: hidden` — else a preview grows where an export clips
+ *
+ * WHAT THE `!important`s AND THE ID BOOST ACTUALLY BEAT — measured per
+ * declaration, because the honest answer is narrower than it looks.
+ *
+ * Against the real uploaded bundle they are INERT. Its CSS declares no position
+ * and no size on the wrapper (`section{background;color;overflow:hidden}`), so
+ * the nine affected archetypes still measure 1280x720 with every `!important`
+ * AND the `:not(#…)` clause removed. An authored `position: static` on the
+ * wrapper is beaten by SPECIFICITY alone — child (0,1,1) vs (0,0,1) — so it
+ * needs no importance either.
+ *
+ * Exactly ONE declaration class defeats the frame without them: an author
+ * `!important` SIZE on the host's direct child. With the contract's importance
+ * removed, `.slide.compact{width:640px!important;height:360px!important}`
+ * measures 640x360 and the page background paints around it — the very defect
+ * this contract exists to fix. The `:not(#tellr-host-frame-boost)` clause (which
+ * never matches; no such id is ever minted) lifts the arm to id-level so an
+ * id-scoped author rule — `#deck.slide{…!important}`, (1,1,0) — cannot outrank it
+ * either. That is the whole job of the importance and the boost.
+ *
+ * Model-authored `!important` on a slide root is a REAL input class, not a
+ * hypothetical: `src/utils/html_safety.py` records `.slide{margin:40px auto
+ * !important}` from real generator output, which is why the sibling root reset
+ * carries the same boost for the same reason.
+ *
+ * The set cannot be trimmed piecemeal. Keeping importance on `height` alone
+ * measures 640x720 — right height, wrong width — so these declarations hold the
+ * frame as a SET, or the authored size wins outright.
+ *
+ * NO SIZE OPT-OUT, DELIBERATELY. The canvas is a fixed 1280x720 16:9 frame
+ * product-wide, and the generator is instructed "Fixed slide size: 1280x720px
+ * per slide" (src/core/defaults.py), so a root smaller than the frame is not a
+ * supported configuration — it reopens the page-background-shows-through defect
+ * rather than expressing a layout. The platform agrees: every shipped
+ * `deck-stage.js` applies a byte-identical
+ * `position/inset/width/height/box-sizing` `!important` block to `::slotted(*)`
+ * from inside its shadow root, where inner-tree important declarations beat
+ * outer-tree important ones at ANY specificity — so a bundle cannot opt out of
+ * the stretch in a real deck-stage either. Honouring an opt-out here would make
+ * the preview disagree with the renderer these templates were authored against.
+ *
+ * `.slide-wrapper` is excluded deliberately: that is the per-slide block of the
+ * standalone MULTI-slide HTML export, where every block is meant to stay in flow
+ * and scroll. Stretching those to one frame would stack the whole deck into a
+ * single pile, so the contract is written to be incapable of it wherever it is
+ * injected.
+ */
+export function slideHostFrameStyle(hostSelector: string): string {
+  return `
+  ${hostSelector} {
+    position: relative !important;
+    width: ${SLIDE_FRAME_W}px !important;
+    height: ${SLIDE_FRAME_H}px !important;
+    overflow: hidden;
+  }
+  ${hostSelector} > :not(#tellr-host-frame-boost):not(.slide-wrapper) {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    box-sizing: border-box !important;
+    overflow: hidden;
+  }
+`;
+}
+
+/**
+ * The READ-SIDE counterpart of {@link slideHostFrameStyle}: the slide ROOT of a
+ * built single-slide document — the direct child of <body> that IS, or CONTAINS,
+ * the slide.
+ *
+ * Every html2canvas capture surface needs this, and none of them had it. They
+ * reached for `querySelector('.slide')`, which is NOT the slide root: on a
+ * design-system-pinned deck the root is a <section> wrapper and `.slide` is its
+ * absolutely positioned child, so `.slide` is the one element of the pair that is
+ * TRANSPARENT — the ground lives on the wrapper. Captured with
+ * `backgroundColor: null` that transparency survives into the artifact, where
+ * JPEG (no alpha channel) flattens it to BLACK and PNG keeps it transparent.
+ *
+ * The frame contract does NOT fix this on its own, measured on both surfaces:
+ * giving the wrapper area does not change WHICH element is captured, so the
+ * delivered PDF stayed rgb(0,0,0) at contrast 1.5450 and the screenshot PNG
+ * stayed rgba(0,0,0,0). The contract and this locator are independent.
+ *
+ * Walks UP from the slide rather than matching `body > :has(.slide)`, so no
+ * capture path depends on `:has()` support — `querySelector` THROWS on a selector
+ * the browser cannot parse, which would take a whole export down instead of
+ * degrading it.
+ *
+ * Falls back to <body>, as every previous locator did: a deck with no `.slide` has
+ * no wrapper to find, and <body> is itself the fixed frame with its child
+ * stretched to fill it.
+ */
+export function findSlideRoot(doc: Document): HTMLElement {
+  const slide = doc.querySelector('.slide');
+  if (!slide) return doc.body;
+  let el: Element = slide;
+  while (el.parentElement && el.parentElement !== doc.body) {
+    el = el.parentElement;
+  }
+  return (el.parentElement === doc.body ? el : doc.body) as HTMLElement;
+}
+
+// Layout reset for fixed-frame preview surfaces (slide tiles, visual editor).
+// The UA's default 8px body margin alone pushes 1280x720 content past the
+// frame and draws scrollbars inside the preview; these surfaces clip instead
+// (the filmstrip and presentation mode carry their own frame sizing). The
+// shared root reset pins the slide root to the frame origin instead of
+// truncating its bottom edge, and the frame contract gives a
+// background-carrying slide wrapper the area it needs to paint at all.
+//
+// NO UNIVERSAL `* { box-sizing: border-box }`, DELIBERATELY — and this is the
+// canonical statement of it for all four preview surfaces (the pop-out's
+// PREVIEW_RESET_STYLE, SlideSelection and PresentationMode point here).
+//
+// Slide content is CONTENT-box in Claude Design. The templates' own index.html
+// declares no `box-sizing` whatsoever, and their deck-stage.js (73,974 B,
+// byte-identical across all four families) declares it only SCOPED — on
+// `::slotted(*)`, from inside its shadow root, plus its own `.rail` chrome. So
+// the box model a template was authored against is the UA default, narrowed by
+// that one scoped rule, which `slideHostFrameStyle` below mirrors exactly.
+//
+// A universal reset was added here once, to make the four preview surfaces
+// agree with each other. It did that, and it cost ground-truth fidelity: the
+// pop-out measured against the template rendered by its own authentic
+// deck-stage.js went from 0 to 283,317 / 29,491,200 differing pixels on 7
+// slides, and GT-faithful surfaces went 3/5 -> 0/5. Removing it from all four —
+// including the two that had carried it all along, which were themselves
+// ~91,034 px from ground truth — returns every surface to 0 px vs GT AND keeps
+// them agreeing with each other. Cross-surface agreement is not the reference;
+// ground truth is. Pinned by tests/unit/test_preview_box_model_parity.py.
+export const SLIDE_PREVIEW_RESET_STYLE = `
+  html, body { margin: 0; padding: 0; overflow: hidden; }
+  ${SLIDE_ROOT_RESET_STYLE}
+  ${slideHostFrameStyle('body')}
+`;
 
 export interface SlideDocumentOptions {
   css?: string;
@@ -76,4 +270,138 @@ export function buildSlideDocument(
   ${bridge}
 </body>
 </html>`;
+}
+
+/**
+ * Standalone multi-slide HTML document for the "Save as HTML" export. Pure on
+ * the deck so the slide-surface-fidelity spec can pin its layout guarantees
+ * the same way it pins the pdf/pptx/screenshot documents.
+ */
+export function buildStandaloneDeckDocument(deck: SlideDeck): string {
+  const slidesHtml = deck.slides
+    .map((slide, index) => {
+      const slideScripts = slide.scripts || '';
+      return `
+    <div class="slide-wrapper" data-slide-index="${index}">
+      <div class="slide-container">
+        ${slide.html}
+      </div>
+      ${slideScripts ? `<script>
+        (function() {
+          ${slideScripts}
+        })();
+      </script>` : ''}
+    </div>`;
+    })
+    .join('\n');
+
+  // Multi-slide wrapper/reset layout for the standalone export document.
+  //
+  // SCOPED to the document shell, never universal — same shape as the preview
+  // resets (`html, body { margin: 0; … }`), for the same reason. A universal
+  // `* { margin: 0; padding: 0; box-sizing: border-box }` used to sit here, and
+  // it made SLIDE DESCENDANTS border-box in the export while the previews render
+  // them content-box, which is the box model Claude Design ground truth uses
+  // (see SLIDE_PREVIEW_RESET_STYLE). Measured on `.step-card`: UI content-box
+  // w=256 vs export border-box w=220 at identical padding — up to 72 px of
+  // component drift across 6 live slides. Zeroing margin/padding universally
+  // cost a further flat 15 px, because the previews leave UA element margins
+  // alone. Scoping both to `html, body` returns all 6 to 0.00 px.
+  //
+  // `box-sizing` is KEPT on the shell and only there: this document sizes the
+  // shell with `html, body { width: 100% }` and then pads `body`, which is
+  // 1600px wide under border-box and 1640 under content-box. Dropping it
+  // outright overflowed the page horizontally and shifted the slide card 20 px
+  // (measured: scrollWidth 1640 vs clientWidth 1600). box-sizing does not
+  // inherit, so pinning the shell leaves slide content on the UA default.
+  // Pinned by tests/unit/test_preview_box_model_parity.py and
+  // frontend/tests/e2e/slide-surface-fidelity.spec.ts.
+  const wrapperStyle = `
+    html, body {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      background: #f9fafb;
+    }
+    body {
+      padding: 40px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 40px;
+    }
+    .slide-wrapper {
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      page-break-after: always;
+    }
+    .slide-container {
+      width: 1280px;
+      height: 720px;
+      max-width: 100%;
+      max-height: calc(100vh - 80px);
+      position: relative;
+      background: #ffffff;
+      overflow: auto;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
+    }
+    .slide-container > * {
+      width: 100%;
+      min-height: 100%;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto;
+    }
+    ${SLIDE_ROOT_RESET_STYLE}`;
+
+  const bootstrapScripts = `
+    function waitForChartJs(callback, maxAttempts = 50) {
+      let attempts = 0;
+      const check = () => {
+        attempts++;
+        if (typeof Chart !== 'undefined') {
+          callback();
+        } else if (attempts < maxAttempts) {
+          setTimeout(check, 100);
+        } else {
+          console.error('Chart.js failed to load');
+        }
+      };
+      check();
+    }
+
+    function initializeCharts() {
+      try {
+        ${deck.scripts || ''}
+      } catch (err) {
+        console.error('Chart initialization error:', err);
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => {
+        waitForChartJs(initializeCharts);
+      });
+    } else {
+      waitForChartJs(initializeCharts);
+    }`;
+
+  return buildSlideDocument(
+    `<title>${deck.title || 'Presentation'}</title>\n${slidesHtml}`,
+    {
+      css: deck.css,
+      externalScripts: deck.external_scripts,
+      extraHeadStyle: wrapperStyle,
+      scripts: bootstrapScripts,
+    }
+  );
 }

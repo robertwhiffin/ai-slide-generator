@@ -1,0 +1,929 @@
+import { test, expect, Page } from '@playwright/test';
+import {
+  mockProfileSummaries,
+  mockDefaultAgentConfig,
+  mockAvailableTools,
+  mockDeckPrompts,
+  mockSlideStyles,
+  mockSessions,
+  mockDesignSystems,
+  mockDesignSystemDetail,
+  mockDesignSystemTemplatesWithLive,
+  mockDesignSystemTemplateSource,
+  mockDesignSystemTemplateSourceCustomElementHarness,
+  mockDesignSystemFiles,
+  mockDesignSystemFileContents,
+  TINY_PNG_BASE64,
+} from '../fixtures/mocks';
+
+/**
+ * Template card thumbnails — bundle preview vs live-rendered fallback.
+ *
+ * Synthetic bundles ship a preview screenshot; real Claude Design exports
+ * ship none. The cards must PREFER the shipped screenshot (unchanged
+ * behavior) and otherwise fetch the stored template sources (JSON) and
+ * live-render them as a scaled, clipped mini-card inside a FULLY-sandboxed
+ * iframe (sandbox="" — no scripts, no same-origin).
+ *
+ * All API responses are mocked; fixtures are SYNTHETIC ("Acme") only.
+ *
+ * Run: npx playwright test tests/e2e/template-cards.spec.ts
+ */
+
+async function setupShellMocks(page: Page) {
+  await page.route('**/api/setup/status', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ configured: true }) });
+  });
+  await page.route(/\/api\/profiles$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockProfileSummaries) });
+  });
+  await page.route('**/api/tools/available', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockAvailableTools) });
+  });
+  await page.route('http://127.0.0.1:8000/api/settings/deck-prompts', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDeckPrompts) });
+  });
+  await page.route('http://127.0.0.1:8000/api/settings/slide-styles', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSlideStyles) });
+  });
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    const url = request.url();
+    const method = request.method();
+    if (method === 'POST' || method === 'DELETE') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
+      return;
+    }
+    if (url.includes('/agent-config')) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDefaultAgentConfig) });
+      return;
+    }
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockSessions) });
+  });
+  await page.route('http://127.0.0.1:8000/api/genie/spaces', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ spaces: [], total: 0 }) });
+  });
+  await page.route('**/api/version**', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ version: '0.1.21', latest: '0.1.21' }) });
+  });
+  // Shell endpoints the app polls on every mount — mocked so the console-clean
+  // assertion sees only the preview surface, exactly like a served backend.
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ username: 'test@test.com', display_name: 'Test User' }),
+    });
+  });
+  await page.route('**/api/slides/versions**', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ versions: [], current_version: null }),
+    });
+  });
+}
+
+async function setupDesignSystemMocks(page: Page) {
+  await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+    if (request.method() === 'GET') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystems) });
+    } else {
+      route.continue();
+    }
+  });
+  await page.route(/\/api\/settings\/design-systems\/\d+$/, (route, request) => {
+    if (request.method() === 'GET') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemDetail) });
+      return;
+    }
+    route.continue();
+  });
+  await page.route(/\/api\/settings\/design-systems\/\d+\/files$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemFiles) });
+  });
+  // Single-file serving (the detail page fetches README.md for its docs pane) —
+  // the design-systems-ui suite's pattern, security posture included.
+  await page.route(/\/api\/settings\/design-systems\/\d+\/files\/.+$/, (route, request) => {
+    const rawPath = new URL(request.url()).pathname.split('/files/')[1] ?? '';
+    const filePath = rawPath.split('/').map(decodeURIComponent).join('/');
+    const body = mockDesignSystemFileContents[filePath];
+    if (body === undefined) {
+      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'File not found' }) });
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'text/plain; charset=utf-8',
+      headers: { 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff' },
+      body,
+    });
+  });
+
+  // Two templates: id 1 ships a screenshot, id 2 does not (live-render path).
+  await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplatesWithLive) });
+  });
+  await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/\d+\/thumbnail$/, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      headers: { 'X-Content-Type-Options': 'nosniff' },
+      body: Buffer.from(TINY_PNG_BASE64, 'base64'),
+    });
+  });
+  await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockDesignSystemTemplateSource) });
+  });
+}
+
+async function openAcmeDetail(page: Page) {
+  await page.goto('/design-systems');
+  await expect(page.getByRole('heading', { name: 'Design System Library' })).toBeVisible({ timeout: 10000 });
+  await page.locator('[data-testid="design-system-card"]').filter({ hasText: 'Acme Design System' }).click();
+  await expect(page.getByTestId('design-system-detail')).toBeVisible();
+}
+
+test.describe('Template cards — preview preference and live-render fallback', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupShellMocks(page);
+    await setupDesignSystemMocks(page);
+  });
+
+  test('card with a shipped screenshot keeps using the thumbnail image', async ({ page }) => {
+    await openAcmeDetail(page);
+    const coverCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Cover' });
+    await expect(coverCard.locator('img')).toHaveAttribute('src', /\/templates\/1\/thumbnail$/);
+    // The screenshot path never fetches template sources.
+    await expect(coverCard.locator('[data-testid="template-live-preview"]')).toHaveCount(0);
+  });
+
+  test('screenshot-less card live-renders the stored layout in a sandboxed iframe', async ({ page }) => {
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // Fully sandboxed: no scripts, no same-origin — user markup can never
+    // execute in the app origin.
+    await expect(frame).toHaveAttribute('sandbox', '');
+
+    // The srcdoc carries the stored layout with the token stylesheet
+    // injected so var(--...) references resolve.
+    const srcdoc = await frame.getAttribute('srcdoc');
+    expect(srcdoc).toContain('Acme Content Layout');
+    expect(srcdoc).toContain('--brand-core-primary: #123456;');
+
+    // Scaled+clipped mini-card: fixed 1280x720 frame, top-left scale.
+    await expect(frame).toHaveCSS('width', '1280px');
+    await expect(frame).toHaveCSS('height', '720px');
+    const transform = await frame.evaluate((el) => getComputedStyle(el).transform);
+    expect(transform).not.toBe('none');
+
+    // The rendered document actually painted the template content.
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Content Layout');
+  });
+
+  test('live preview blocks ALL external egress from uploaded template markup (CSP)', async ({ page }) => {
+    // sandbox="" blocks scripts/same-origin; the srcDoc CSP closes the
+    // passive channel: img/link tags and css url()/@import in uploaded
+    // template HTML/CSS must not trigger any external network fetch.
+    const externalRequests: string[] = [];
+    await page.route('https://external.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TINY_PNG_BASE64, 'base64') });
+    });
+
+    // Exfil-shaped template: external <img>, css url(), @import, <link>.
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head>' +
+            '<link rel="stylesheet" href="https://external.example/style.css">' +
+            '<style>@import url("https://external.example/import.css");' +
+            '.slide{width:1280px;height:720px;background-image:url("https://external.example/bg.png");}</style>' +
+            '</head><body><section class="slide"><h1>Acme Exfil Probe</h1>' +
+            '<img src="https://external.example/pixel.png" alt="">' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="" data-testid="legit-data-img">` +
+            '</section></body></html>',
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // The document rendered (content painted)…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Exfil Probe');
+    // …the srcDoc carries the CSP…
+    const srcdoc = await frame.getAttribute('srcdoc');
+    expect(srcdoc).toContain('Content-Security-Policy');
+    // …and give any (blocked) fetches a beat, then assert ZERO egress.
+    await page.waitForTimeout(500);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('malformed markup BEFORE <html> still renders behind the CSP (structurally-first guard)', async ({ page }) => {
+    // A fetch-capable tag ahead of the template's own <html>/<head> must not
+    // beat the policy: the preview wrapper is synthesized, so the CSP meta is
+    // the first fetch-capable byte no matter how mangled the upload is.
+    const externalRequests: string[] = [];
+    await page.route('https://external.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TINY_PNG_BASE64, 'base64') });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            // Malformed on purpose: resources declared BEFORE the html/head.
+            '<img src="https://external.example/pre.png">' +
+            '<link rel="stylesheet" href="https://external.example/pre.css">' +
+            '<html><head><style>.slide{width:1280px;height:720px;}</style></head>' +
+            '<body class="acme-body"><section class="slide"><h1>Acme Malformed Probe</h1>' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="">` +
+            '</section></body></html>',
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // Structural guarantee: the CSP meta precedes every uploaded byte.
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc.startsWith('<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy"')).toBe(true);
+    expect(srcdoc.indexOf('Content-Security-Policy')).toBeLessThan(srcdoc.indexOf('external.example'));
+
+    // The legit render still works (content painted, body attrs preserved)…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Malformed Probe');
+    await expect(inner.locator('body.acme-body')).toHaveCount(1);
+    // …and nothing left the frame.
+    await page.waitForTimeout(500);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('srcdoc arrives fully inline: data: URIs render, stray handles are neutralized, console stays clean', async ({ page }) => {
+    // The /source endpoint resolves {{ds-asset:ID}} handles to data: URIs at
+    // the response boundary (dsv2 F8). The BUILDER must still guarantee the
+    // srcdoc-level invariant against a version-skewed backend or a handle the
+    // resolver could not satisfy: nothing placeholder-shaped may enter the
+    // frame — inside the sandbox a raw handle resolves as a relative URL and
+    // the CSP refuses it (a failed-resource console error per occurrence,
+    // the ~174-error signature of the dsv2 battery). Stray handles degrade
+    // to the inert data:, placeholder instead.
+    const resourceErrors: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() !== 'error') return;
+      const text = msg.text();
+      if (/Refused to load|Failed to load resource|net::ERR/i.test(text)) {
+        resourceErrors.push(text);
+      }
+    });
+    page.on('requestfailed', (req) => resourceErrors.push(`requestfailed: ${req.url()}`));
+    page.on('response', (res) => {
+      if (res.status() >= 400) resourceErrors.push(`HTTP ${res.status()}: ${res.url()}`);
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head>' +
+            '<style>.slide{width:1280px;height:720px;}' +
+            '.hero{background-image:url("{{ds-asset:31}}");}</style>' +
+            '</head><body><section class="slide hero"><h1>Acme Inline Probe</h1>' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="resolved brand mark">` +
+            '<img src="{{ds-asset:99}}" alt="ghost">' +
+            '</section></body></html>',
+          token_css:
+            "@font-face { font-family: 'Acme Preview Sans'; " +
+            "src: url(data:font/woff2;base64,d29mZjItYnl0ZXM=) format('woff2'); }\n" +
+            ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // The legit inline content painted…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toHaveText('Acme Inline Probe');
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // …resolved data: URIs pass through untouched (img src AND @font-face)…
+    expect(srcdoc).toContain(`data:image/png;base64,${TINY_PNG_BASE64}`);
+    expect(srcdoc).toContain('data:font/woff2;base64,');
+    // …NOTHING placeholder-shaped survives (img src and CSS url() forms)…
+    expect(srcdoc).not.toContain('{{ds-asset');
+    expect(srcdoc).toContain('src="data:,"');
+    expect(srcdoc).toContain('url("data:,")');
+    // …the hardening is byte-identical: same sandbox, same CSP…
+    await expect(frame).toHaveAttribute('sandbox', '');
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    // …and the detail page produced ZERO failed-resource console errors.
+    await page.waitForTimeout(500);
+    expect(resourceErrors).toEqual([]);
+  });
+
+  test('custom-element deck harness renders instead of collapsing behind its own :not(:defined) guard', async ({ page }) => {
+    // Real Claude Design exports wrap their slide sections in a custom element
+    // (<deck-stage>) and guard the pre-upgrade flash with
+    // `deck-stage:not(:defined){visibility:hidden}`. A preview frame runs NO
+    // scripts, so the element is never registered: without the shim the guard
+    // is permanent, every slide inherits visibility:hidden, and the card is
+    // just the body background — the reported "dark rectangle".
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockDesignSystemTemplateSourceCustomElementHarness),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    await expect(contentCard.locator('[data-testid="template-live-preview"]')).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+
+    // The slide is genuinely PAINTED: toBeVisible() fails on both failure modes
+    // (inherited visibility:hidden AND a zero-size box).
+    await expect(inner.locator('h1')).toHaveText('Acme Harness Slide One');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    // The harness element is un-hidden and given a real stage box, so the
+    // absolutely-positioned slide has something to fill.
+    const stage = await inner.locator('deck-stage').evaluate((el) => ({
+      visibility: getComputedStyle(el).visibility,
+      display: getComputedStyle(el).display,
+      width: (el as HTMLElement).getBoundingClientRect().width,
+      height: (el as HTMLElement).getBoundingClientRect().height,
+    }));
+    expect(stage.visibility).toBe('visible');
+    expect(stage.display).toBe('block');
+    expect(stage.width).toBe(1280);
+    expect(stage.height).toBe(720);
+
+    // The slide box itself is the full 16:9 stage, not a collapsed sliver.
+    const slideBox = await inner.locator('.slide').evaluate(
+      (el) => (el as HTMLElement).getBoundingClientRect().height,
+    );
+    expect(slideBox).toBe(720);
+
+    // A card shows the FIRST slide. Sections are position:absolute; inset:0, so
+    // without per-slide isolation they stack and the LAST one would win.
+    await expect(inner.locator('h1')).toHaveCount(1);
+    await expect(inner.getByText('Acme Harness Slide Two')).toHaveCount(0);
+  });
+
+  test('custom-element harness does not weaken the sandbox: ZERO egress, no navigation', async ({ page }) => {
+    // The shim adds CSS only. The hardening must be byte-identical: sandbox=""
+    // exactly, the no-egress CSP still the FIRST fetch-capable byte, and no
+    // passive fetch or navigation out of an exfil-shaped harness template.
+    const externalRequests: string[] = [];
+    await page.route('https://external.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TINY_PNG_BASE64, 'base64') });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head>' +
+            // Navigation attempt + passive-fetch attempts, inside the harness.
+            '<meta http-equiv="refresh" content="0;url=https://external.example/go">' +
+            '<link rel="stylesheet" href="https://external.example/style.css">' +
+            '<style>html,body{margin:0;background:#123456;}' +
+            'deck-stage:not(:defined){visibility:hidden}' +
+            '.slide{position:absolute;inset:0;' +
+            'background-image:url("https://external.example/bg.png");}' +
+            '</style></head>' +
+            '<body><deck-stage width="1280" height="720">' +
+            '<section><div class="slide"><h1>Acme Harness Exfil Probe</h1>' +
+            '<img src="https://external.example/pixel.png" alt="">' +
+            `<img src="data:image/png;base64,${TINY_PNG_BASE64}" alt="">` +
+            '</div></section></deck-stage></body></html>',
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    // It rendered (so the assertion below is not vacuously true)…
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    // …the sandbox and CSP are unchanged, CSP still structurally first…
+    await expect(frame).toHaveAttribute('sandbox', '');
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc.startsWith('<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy"')).toBe(true);
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    expect(srcdoc.indexOf('Content-Security-Policy')).toBeLessThan(srcdoc.indexOf('external.example'));
+
+    // …and nothing left the frame, by fetch OR navigation.
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+    // Still showing our document: the meta refresh did not take it anywhere.
+    await expect(inner.locator('h1')).toHaveText('Acme Harness Exfil Probe');
+  });
+
+  test('an off-screen card pays nothing for its megabyte source until scrolled in', async ({ page }) => {
+    // Cards previously prefetched 200px beyond the viewport, so every template
+    // on the detail page downloaded its FULL source (megabytes each, brand
+    // assets and webfonts inlined as data: URIs) during page load. A card is
+    // worth that only when it is actually visible.
+    const sourceRequests: string[] = [];
+    page.on('request', (req) => {
+      const match = /\/templates\/(\d+)\/source$/.exec(req.url());
+      if (match) sourceRequests.push(match[1]);
+    });
+
+    // Four screenshot-less templates, so the grid runs past a short viewport.
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          templates: [2, 3, 4, 5].map((id) => ({
+            id,
+            name: `Acme Live ${id}`,
+            description: 'Screenshot-less template.',
+            entry_path: `templates/live-${id}/index.html`,
+            thumbnail_url: null,
+          })),
+          total: 4,
+        }),
+      });
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/\d+\/source$/, (route, request) => {
+      const id = /\/templates\/(\d+)\/source$/.exec(request.url())?.[1] ?? '0';
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: Number(id),
+          name: `Acme Live ${id}`,
+          layout_html:
+            '<!doctype html><html><head><style>.slide{position:absolute;inset:0;}</style></head>' +
+            `<body><deck-stage><section><div class="slide"><h1>Acme Live ${id}</h1></div></section></deck-stage></body></html>`,
+          token_css: ':root { --brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    // A viewport short enough that the template grid starts below the fold.
+    await page.setViewportSize({ width: 900, height: 400 });
+    await openAcmeDetail(page);
+    await expect(page.getByTestId('template-cards')).toHaveCount(1);
+    await page.waitForTimeout(700);
+
+    // Nothing off-screen has been paid for: zero source bytes on load.
+    expect(sourceRequests).toEqual([]);
+
+    // Scrolling the grid in is what triggers the fetches — the deferral is
+    // real, not a permanent drop.
+    await page.locator('[data-testid="template-card"]').first().scrollIntoViewIfNeeded();
+    await expect(page.locator('[data-testid="template-live-preview"]').first()).toBeVisible();
+    await expect.poll(() => new Set(sourceRequests).size).toBeGreaterThan(0);
+  });
+
+  test('expanding a card reuses the fetched source instead of downloading it again', async ({ page }) => {
+    const sourceRequests: string[] = [];
+    page.on('request', (req) => {
+      if (/\/templates\/\d+\/source$/.test(req.url())) sourceRequests.push(req.url());
+    });
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockDesignSystemTemplateSourceCustomElementHarness),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    await expect(contentCard.locator('[data-testid="template-live-preview"]')).toBeVisible();
+    await expect.poll(() => sourceRequests.length).toBe(1);
+
+    await contentCard.getByTestId('expand-template-button').click();
+    await expect(page.getByTestId('template-viewer-frame')).toBeVisible();
+    // The viewer renders from the card's payload — still exactly one download.
+    const viewer = page.frameLocator('[data-testid="template-viewer-frame"]');
+    await expect(viewer.locator('h1').first()).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(sourceRequests.length).toBe(1);
+  });
+
+  test('an external webfont @import is dropped, not left to raise a CSP violation per card', async ({ page }) => {
+    // Bundles @import a webfont family their own fonts/ directory does not ship.
+    // PREVIEW_CSP refuses it (style-src is 'unsafe-inline' and nothing else, so
+    // uploaded CSS gets no egress channel) — correct, but it logged a violation
+    // on every card. The rule is dropped instead, and the self-hosted fallback
+    // family in the same stack still renders.
+    const cspViolations: string[] = [];
+    page.on('console', (msg) => {
+      if (msg.type() === 'error' && /Refused to (load|apply)|Content Security Policy/i.test(msg.text())) {
+        cspViolations.push(msg.text());
+      }
+    });
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head><style>.slide{position:absolute;inset:0;}' +
+            'h1{font-family:var(--acme-font-display);}</style></head>' +
+            '<body><section><div class="slide"><h1>Acme Font Probe</h1></div></section></body></html>',
+          token_css:
+            // Semicolons INSIDE the url() — a naive `;`-terminated match mangles
+            // this and leaves half a rule behind.
+            "@import url('https://fonts.example/css2?family=Acme+Display:wght@400;500;700&display=swap');\n" +
+            // `style-src 'unsafe-inline'` refuses a data: stylesheet too, so this
+            // one is equally dead weight and must also go.
+            "@import url('data:text/css,.acme-inert{color:#123456}');\n" +
+            "@font-face { font-family: 'Acme Fallback Sans'; " +
+            "src: url(data:font/woff2;base64,d29mZjItYnl0ZXM=) format('woff2'); }\n" +
+            ":root { --acme-font-display: 'Acme Display', 'Acme Fallback Sans', system-ui; " +
+            '--brand-core-primary: #123456; }',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // The external import is gone whole — no orphaned fragment of it survives.
+    expect(srcdoc).not.toContain('fonts.example');
+    expect(srcdoc).not.toContain('display=swap');
+    expect(srcdoc).not.toContain('Acme+Display');
+    // NO @import survives — a data: one is refused by this CSP just the same…
+    expect(srcdoc).not.toContain('@import');
+    // …while the self-hosted @font-face (which font-src data: DOES allow) stays…
+    expect(srcdoc).toContain('data:font/woff2;base64,');
+    // …the fallback family still resolves for the heading…
+    const family = await inner.locator('h1').evaluate((el) => getComputedStyle(el).fontFamily);
+    expect(family).toContain('Acme Fallback Sans');
+    // …the CSP is unchanged (no host was allowed in)…
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    // …and the frame is quiet: no fetch attempt, no violation to log.
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+    expect(cspViolations).toEqual([]);
+  });
+
+  test('@import removal stays inside CSS — HTML text and CSS strings survive', async ({ page }) => {
+    // The rule to drop is an @import AT-RULE in a stylesheet. A text-level match
+    // over the whole document instead removes anything SHAPED like one, wherever
+    // it sits. All three shapes below are legitimate content a template may
+    // contain, and all three were destroyed:
+    //
+    //   valid_following_css   the rule after a commented-out @import was erased
+    //   legitimate_css_string content:"@import ..." collapsed to content:""
+    //   legitimate_html_text  VISIBLE PAGE TEXT showing CSS to the reader vanished
+    //
+    // The genuinely preview-only webfont @import must STILL go — that is the
+    // whole point of the removal — and the CSP must not be widened to admit it.
+    const STYLE_CSS =
+      '.slide{position:absolute;inset:0;width:1280px;height:720px;}' +
+      // A commented-out @import: the old matcher ran out of the comment and ate
+      // the rule that follows it. A DIFFERENT host from the token sheet's, so
+      // "no live font import survived" below can name a host unambiguously.
+      "/* @import url('https://inert.example/old.css') is disabled */\n" +
+      '.after{color:#123456;}\n' +
+      // An @import inside a CSS STRING LITERAL — this is DATA, not an at-rule.
+      'pre::before{content:"@import url(\'inert.css\');";}';
+    const HTML_TEXT = "@import url('theme.css'); keep this lesson text";
+
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            `<!doctype html><html><head><style>${STYLE_CSS}</style></head>` +
+            '<body><section><div class="slide">' +
+            '<h1 class="after">Acme Scope Probe</h1>' +
+            `<pre>${HTML_TEXT}</pre>` +
+            '</div></section></body></html>',
+          // Semicolons inside the url() — the rule has to be followed through its
+          // bracketing, not cut at the first `;`.
+          token_css:
+            "@import url('https://fonts.example/css2?family=Acme+Display:wght@400;500;600;700');\n" +
+            ':root{--brand-core-primary:#123456;}',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // The stylesheet came through untouched — every byte of it.
+    expect(srcdoc).toContain(STYLE_CSS);
+    // …and so did the visible page text.
+    expect(srcdoc).toContain(HTML_TEXT);
+    // The real, preview-only webfont @import is gone whole.
+    expect(srcdoc).not.toContain('fonts.example');
+    expect(srcdoc).not.toContain('Acme+Display');
+    expect(srcdoc).not.toContain('display=swap');
+
+    // Now the same three claims measured on the RENDERED document rather than on
+    // the markup, so this cannot pass on a string that never became CSS.
+    // 1. the rule after the commented-out @import still applies…
+    await expect(inner.locator('h1.after')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    // 2. …the CSS string literal still carries its content…
+    const pseudo = await inner
+      .locator('pre')
+      .evaluate((el) => getComputedStyle(el, '::before').content);
+    expect(pseudo).toContain("@import url('inert.css');");
+    // 3. …and the page text the reader is meant to see is intact.
+    await expect(inner.locator('pre')).toHaveText(HTML_TEXT);
+
+    // The sandbox is untouched: policy unchanged, no host admitted, nothing fetched.
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    await expect(frame).toHaveAttribute('sandbox', '');
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('@import is only an at-rule at a RULE position — a declaration value survives', async ({ page }) => {
+    // The scan was CSS-aware about strings and comments but not about CSS
+    // GRAMMAR: it treated the `@import` token as an at-rule wherever it sat,
+    // including inside a declaration VALUE, where CSS does not allow an at-rule
+    // at all. A custom property may legitimately hold that text, and removing it
+    // takes the `;` with it — so the declaration runs on into the NEXT one and
+    // EATS it:
+    //
+    //   in   :root{--lesson:@import url('inert.css');--after:#123456}
+    //   out  :root{--lesson:--after:#123456}
+    //
+    // `--after` is then never declared, `var(--after)` does not resolve, and the
+    // colour falls back to inherited black. Measured: rendered_color=rgb(0,0,0),
+    // after_value="".
+    //
+    // Both entry points are exercised, because they are separate calls: the
+    // layout's <style> elements, and the token stylesheet.
+    const STYLE_CSS =
+      '.slide{position:absolute;inset:0;width:1280px;height:720px;}' +
+      // The declaration value. NOT an at-rule — CSS permits none here.
+      ":root{--lesson:@import url('inert.css');--after:#123456}" +
+      '.ok{color:var(--after)}' +
+      // …while a RULE position inside a conditional group rule still IS one, so
+      // this @import must still go, and the rule after it must survive intact.
+      "@media screen{@import url('https://fonts.example/media.css');" +
+      '.also{color:var(--after)}}';
+    const TOKEN_CSS =
+      // A real webfont import at the top of the sheet: a rule position, still removed.
+      "@import url('https://fonts.example/css2?family=Acme+Display:wght@400;500;600;700');\n" +
+      ":root{--token-lesson:@import url('inert.css');--token-after:#123456}\n" +
+      '.token-ok{color:var(--token-after)}';
+
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            `<!doctype html><html><head><style>${STYLE_CSS}</style></head>` +
+            '<body><section><div class="slide">' +
+            '<h1 class="ok">Acme Declaration Probe</h1>' +
+            '<p class="also">Synthetic nested rule.</p>' +
+            '<p class="token-ok">Synthetic token rule.</p>' +
+            '</div></section></body></html>',
+          token_css: TOKEN_CSS,
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    // The declaration that used to be eaten is still declared, in both sheets.
+    expect(srcdoc).toContain('--after:#123456');
+    expect(srcdoc).toContain('--token-after:#123456');
+    // The real, preview-only webfont imports are still gone — whole, with no
+    // orphaned fragment. This is what keeps the fix from being "stop scanning".
+    expect(srcdoc).not.toContain('fonts.example');
+    expect(srcdoc).not.toContain('Acme+Display');
+    expect(srcdoc).not.toContain('media.css');
+
+    // Measured on the RENDERED document, so this cannot pass on a string that
+    // never became CSS: the eaten declaration resolves again…
+    await expect(inner.locator('h1.ok')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    await expect(inner.locator('p.token-ok')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    // …the custom property really is declared rather than merely present as text…
+    const afterValue = await inner
+      .locator('h1.ok')
+      .evaluate((el) => getComputedStyle(el).getPropertyValue('--after').trim());
+    expect(afterValue).toBe('#123456');
+    // …and the rule that followed the removed at-rule inside @media survives.
+    await expect(inner.locator('p.also')).toHaveCSS('color', 'rgb(18, 52, 86)');
+
+    // The sandbox is untouched: policy unchanged, no host admitted, nothing fetched.
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    await expect(frame).toHaveAttribute('sandbox', '');
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('an ESCAPED at-keyword survives the scan — CSP is the control, by design', async ({ page }) => {
+    // `@\69mport url(...)` is a valid spelling of the at-rule: CSS idents admit
+    // escapes, so a browser parses and honours it. The scanner does NOT recognise
+    // it, and this test pins that as a DELIBERATE limit rather than leaving it
+    // undocumented.
+    //
+    // Why accept it: the scanner is not a security control and never was. Egress
+    // is denied by PREVIEW_CSP (`style-src 'unsafe-inline'` and nothing else) and
+    // by `sandbox=""`, both of which apply to every spelling equally. All the
+    // scanner does is remove a rule that is already dead so it stops logging one
+    // console violation per card. An escaped keyword therefore costs exactly one
+    // console line and no egress — while teaching the scanner CSS ident escapes
+    // would widen the very machinery whose over-reach caused the declaration-value
+    // bug above. The narrow scan is the point.
+    //
+    // What this test guarantees is the part that matters: the escaped spelling
+    // fetches NOTHING and navigates nowhere.
+    const externalRequests: string[] = [];
+    await page.route('https://fonts.example/**', (route, request) => {
+      externalRequests.push(request.url());
+      route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+    });
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            '<!doctype html><html><head><style>' +
+            '.slide{position:absolute;inset:0;width:1280px;height:720px;}' +
+            "@\\69mport url('https://fonts.example/escaped.css');" +
+            '.ok{color:#123456}' +
+            '</style></head>' +
+            '<body><section><div class="slide"><h1 class="ok">Acme Escape Probe</h1></div></section></body></html>',
+          token_css: ':root{--brand-core-primary:#123456;}',
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+    const inner = page.frameLocator('[data-testid="template-live-preview"]');
+    await expect(inner.locator('h1')).toBeVisible();
+
+    // Documented limit: the escaped spelling is NOT removed…
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc).toContain('escaped.css');
+    // …the rule after it is unharmed either way…
+    await expect(inner.locator('h1.ok')).toHaveCSS('color', 'rgb(18, 52, 86)');
+    // …and the control that actually matters holds: no fetch, policy unchanged.
+    expect(srcdoc).toContain(
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+        "style-src 'unsafe-inline'; img-src data: blob:; font-src data:;\">",
+    );
+    await expect(frame).toHaveAttribute('sandbox', '');
+    await page.waitForTimeout(700);
+    expect(externalRequests).toEqual([]);
+  });
+
+  test('a template with no @import passes through byte-identically', async ({ page }) => {
+    // The removal must be inert when there is nothing to remove: no
+    // re-serialization, no entity rewriting, no whitespace normalization.
+    const STYLE_CSS =
+      '.slide{position:absolute;inset:0;width:1280px;height:720px;}\n' +
+      '/* Acme note: a > b && c < d */\n' +
+      'h1{color:#123456;content:"a;b"}\n' +
+      '@media screen{.after{color:#123456}}';
+    const TOKEN_CSS = ':root{--brand-core-primary:#123456;}\n/* no imports here */';
+
+    await page.route(/\/api\/settings\/design-systems\/\d+\/templates\/2\/source$/, (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 2,
+          name: 'Acme Content',
+          layout_html:
+            `<!doctype html><html><head><style>${STYLE_CSS}</style></head>` +
+            '<body><section><div class="slide"><h1>Acme Passthrough</h1></div></section></body></html>',
+          token_css: TOKEN_CSS,
+        }),
+      });
+    });
+
+    await openAcmeDetail(page);
+    const contentCard = page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' });
+    const frame = contentCard.locator('[data-testid="template-live-preview"]');
+    await expect(frame).toBeVisible();
+
+    const srcdoc = (await frame.getAttribute('srcdoc')) ?? '';
+    expect(srcdoc).toContain(STYLE_CSS);
+    expect(srcdoc).toContain(TOKEN_CSS);
+  });
+
+  test('source fetch fires only for screenshot-less templates', async ({ page }) => {
+    const sourceRequests: string[] = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/source')) sourceRequests.push(req.url());
+    });
+    await openAcmeDetail(page);
+    await expect(
+      page.locator('[data-testid="template-card"]').filter({ hasText: 'Acme Content' })
+        .locator('[data-testid="template-live-preview"]'),
+    ).toBeVisible();
+    expect(sourceRequests.some((u) => /\/templates\/2\/source$/.test(u))).toBe(true);
+    expect(sourceRequests.some((u) => /\/templates\/1\/source$/.test(u))).toBe(false);
+  });
+});

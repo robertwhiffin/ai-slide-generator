@@ -65,6 +65,20 @@ export async function setupMocks(page: Page) {
     });
   });
 
+  // Mock design systems list endpoint (AgentConfigBar loads this on mount).
+  // Defaults to empty; specs that need populated data register their own route after.
+  await page.route(/\/api\/settings\/design-systems(\?[^/]*)?$/, (route, request) => {
+    if (request.method() === 'GET') {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ design_systems: [], total: 0 }),
+      });
+    } else {
+      route.continue();
+    }
+  });
+
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();

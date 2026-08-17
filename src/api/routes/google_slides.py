@@ -291,11 +291,16 @@ async def start_google_slides_export(
     if not slide_deck or not slide_deck.get("slides"):
         raise HTTPException(status_code=404, detail="No slides available")
 
-    # Substitute {{image:ID}} placeholders with base64 data URIs
+    # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs.
+    # ds-asset resolution is scoped to the session's active design system.
+    from src.api.services.chat_service import resolve_active_design_system_id
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
     from src.core.database import get_db_session
+    ds_id = resolve_active_design_system_id(request_body.session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(slide_deck, db)
+        substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
 
     slides_data = slide_deck.get("slides", [])
     total = len(slides_data)
@@ -384,6 +389,12 @@ class GoogleSlidesFromRecordsRequest(BaseModel):
 class GoogleSlidesExportResponse(BaseModel):
     presentation_id: str
     presentation_url: str
+    # Per-slide export failures (huashu path). A non-empty list means the
+    # uploaded deck is missing those slides — the frontend must tell the
+    # user which ones instead of silently presenting a partial deck.
+    total_slides: int | None = None
+    succeeded: int | None = None
+    failures: list[dict] = []
 
 
 @router.post("/from-records", response_model=GoogleSlidesExportResponse)
@@ -524,11 +535,16 @@ async def export_google_slides_from_huashu(
 
     # Substitute {{image:ID}} placeholders with base64 data URIs (same as the
     # legacy /export route). Use a fresh session because the request's `db`
-    # is held by the route's transaction context.
+    # is held by the route's transaction context. ds-asset resolution is scoped
+    # to the session's active design system.
+    from src.api.services.chat_service import resolve_active_design_system_id
     from src.core.database import get_db_session
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
+    ds_id = resolve_active_design_system_id(request.session_id)
     with get_db_session() as imdb:
         substitute_deck_dict_images(slide_deck, imdb)
+        substitute_deck_dict_ds_assets(slide_deck, imdb, design_system_id=ds_id)
 
     title = slide_deck.get("title") or "Presentation"
     slides_data = slide_deck.get("slides") or []
@@ -606,4 +622,7 @@ async def export_google_slides_from_huashu(
     return GoogleSlidesExportResponse(
         presentation_id=presentation_id,
         presentation_url=url,
+        total_slides=len(slides_html),
+        succeeded=len(slides_html) - len(failures),
+        failures=failures,
     )

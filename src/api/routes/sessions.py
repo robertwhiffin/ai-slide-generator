@@ -53,13 +53,23 @@ class UpdateSessionRequest(BaseModel):
     slide_count: Optional[int] = Field(None, ge=0, description="Deck slide count")
 
 
-def _substitute_deck_images(deck_dict: dict) -> None:
-    """Substitute {{image:ID}} placeholders in a deck dict with base64 data URIs."""
+def _substitute_deck_images(deck_dict: dict, session_id: str) -> None:
+    """Substitute {{image:ID}} + {{ds-asset:ID}} placeholders in a deck dict with
+    base64 data URIs.
+
+    ds-asset resolution is scoped to the session's active design system so a
+    foreign ``{{ds-asset:ID}}`` handle in the deck cannot disclose another
+    system's asset bytes.
+    """
+    from src.api.services.chat_service import resolve_active_design_system_id
     from src.core.database import get_db_session
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
 
+    ds_id = resolve_active_design_system_id(session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(deck_dict, db)
+        substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
 
 
 @router.post("")
@@ -401,7 +411,7 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
 
         # Substitute {{image:ID}} placeholders with base64 before sending to client
         if slide_deck:
-            await asyncio.to_thread(_substitute_deck_images, slide_deck)
+            await asyncio.to_thread(_substitute_deck_images, slide_deck, session_id)
 
         return {
             **session,
@@ -717,7 +727,7 @@ async def get_session_slides(session_id: str):
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
         if deck:
-            await asyncio.to_thread(_substitute_deck_images, deck)
+            await asyncio.to_thread(_substitute_deck_images, deck, session_id)
 
         return {"session_id": session_id, "slide_deck": deck}
 
@@ -870,7 +880,7 @@ async def acquire_editing_lock(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
         logger.error(f"Failed to acquire editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Failed to acquire editing lock")
 
 
 @router.delete("/{session_id}/lock")
@@ -895,7 +905,7 @@ async def release_editing_lock(session_id: str):
         return {"status": "released"}
     except Exception as e:
         logger.error(f"Failed to release editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Failed to release editing lock")
 
 
 @router.get("/{session_id}/lock")
@@ -914,7 +924,7 @@ async def get_editing_lock_status(session_id: str):
         )
     except Exception as e:
         logger.error(f"Failed to check editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Failed to check editing lock")
 
 
 @router.put("/{session_id}/lock/heartbeat")
@@ -939,5 +949,4 @@ async def heartbeat_editing_lock(session_id: str):
         return {"renewed": ok}
     except Exception as e:
         logger.error(f"Failed to heartbeat editing lock: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
-
+        raise HTTPException(status_code=500, detail="Failed to heartbeat editing lock")

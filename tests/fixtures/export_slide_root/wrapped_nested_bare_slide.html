@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* Byte-for-byte the same rules as wrapped_bare_slide.html: this fixture
+         differs from it by the interposed <article> and nothing else, so any
+         difference between the two exports is attributable to the extra
+         wrapper level alone.
+
+         The backend promotes a slide root outward through EVERY consecutive
+         sole-child semantic wrapper, so for this shape it stores the outer
+         <section>. A locator that promotes only one level stops at the
+         <article>, fails to recognise it as a root, and falls through — the
+         slide then exports white while the app renders it correctly.
+
+         Only the outermost <section> paints a ground here, exactly as in
+         wrapped_bare_slide.html: the <article> and the .slide are both
+         transparent, so resolving to either of them reads no background and
+         emits white. That is what makes this fixture discriminating rather
+         than merely colour-blind. */
+      section { background: #123456; color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+  </head>
+  <body>
+    <section data-label="Acme Ground">
+      <article>
+        <div class="slide">
+          <h1>Acme Wrapper Ground</h1>
+          <p>Synthetic fixture slide.</p>
+        </div>
+      </article>
+    </section>
+  </body>
+</html>

@@ -14,13 +14,14 @@ import React, {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   useRef,
 } from 'react';
 import { useLocation } from 'react-router-dom';
-import { api } from '../services/api';
+import { api, ApiError } from '../services/api';
 import { configApi } from '../api/config';
 import { useToast } from './ToastContext';
-import type { AgentConfig, ToolEntry, ProfileSummary } from '../types/agentConfig';
+import type { AgentConfig, ToolEntry, ProfileSummary, StyleSource } from '../types/agentConfig';
 import { DEFAULT_AGENT_CONFIG } from '../types/agentConfig';
 
 // ---------------------------------------------------------------------------
@@ -29,17 +30,48 @@ import { DEFAULT_AGENT_CONFIG } from '../types/agentConfig';
 
 interface AgentConfigContextValue {
   agentConfig: AgentConfig;
-  updateConfig: (config: AgentConfig) => Promise<void>;
+  /**
+   * Apply a full config. Resolves true on success and false when the backend
+   * sync failed (the update is reverted and an error toast is shown here) —
+   * callers that report success themselves must check the flag.
+   */
+  updateConfig: (config: AgentConfig) => Promise<boolean>;
   addTool: (tool: ToolEntry) => Promise<void>;
   removeTool: (tool: ToolEntry) => Promise<void>;
   updateTool: (spaceId: string, updates: { description?: string }) => Promise<void>;
   updateToolEntry: (tool: ToolEntry) => Promise<void>;
   setStyle: (styleId: number | null) => Promise<void>;
+  setDesignSystem: (designSystemId: number | null) => Promise<void>;
+  /**
+   * Set (or, with `null`, release) the user's PERSONAL default design system —
+   * a browser-local preference; the org-wide default is an admin setting under
+   * /admin. Stores the preference AND applies it to the working config, so the
+   * effect is visible on the surface the user is standing on.
+   *
+   * `releaseSlotOnlyIfHolding` is for AUTOMATIC callers: the slot is released
+   * only if it currently holds that id, so a cleanup the user did not ask for
+   * cannot overwrite a selection they made deliberately. User-initiated clears
+   * omit it and always release.
+   */
+  setUserDefaultDesignSystem: (
+    designSystemId: number | null,
+    options?: { releaseSlotOnlyIfHolding?: number },
+  ) => Promise<void>;
+  setTemplate: (templateId: number | null) => Promise<void>;
   setDeckPrompt: (promptId: number | null) => Promise<void>;
   saveAsProfile: (name: string, description?: string) => Promise<void>;
   loadProfile: (profileId: number) => Promise<void>;
   refreshConfig: () => Promise<void>;
   isPreSession: boolean;
+  /**
+   * The session id the in-memory config is VALID FOR: the session it was
+   * loaded-for (its GET resolved) or explicitly edited-in. Null while a
+   * session's config load is still pending after a switch — in that window
+   * the in-memory config is another surface's leftovers and must never be
+   * sent (a chat request carrying it would overwrite the session's own
+   * persisted config server-side).
+   */
+  configOwnerSessionId: string | null;
 }
 
 const AgentConfigContext = createContext<AgentConfigContextValue | undefined>(undefined);
@@ -50,32 +82,340 @@ const AgentConfigContext = createContext<AgentConfigContextValue | undefined>(un
 
 const STORAGE_KEY = 'pendingAgentConfig';
 
+/**
+ * template_id is SESSION-SCOPED state: a template choice belongs to one
+ * session only, so it must never travel through cross-session stores (this
+ * localStorage mirror, profiles — the backend strips it there too). A new
+ * session therefore always starts with template = None, while everything
+ * else (design system, style, tools) carries over as configured.
+ */
+function withoutSessionScopedState(config: AgentConfig): AgentConfig {
+  if (config.template_id == null) return config;
+  return { ...config, template_id: null };
+}
+
+/**
+ * Does this config carry anything a person or a resolve could have put there?
+ *
+ * Used ONLY to decide whether the pre-session localStorage mirror may be WRITTEN
+ * yet. It is deliberately NOT used to decide whether a stored config is
+ * authoritative: an existing mirror always is (see `readStoredConfig`'s callers).
+ *
+ * That split is the fix for the legacy-config bug. There used to be one
+ * `isConfigResolved(config)` predicate answering both questions from CONTENT, and
+ * content cannot separate the two cases that matter: a config whose only edit was
+ * choosing "Design System: None" and the untouched first-paint placeholder are
+ * BYTE IDENTICAL when the user has no personal style/prompt preferences (no
+ * style_source, no ids, no tools). Treating that as "never resolved" discarded a
+ * deliberate None and seeded the org default over it — the very bug provenance
+ * was introduced to fix, arriving through another door.
+ *
+ * So EXISTENCE is now the marker for "authoritative", and this predicate only
+ * gates the write that creates it — a role where a false negative is harmless
+ * (the mirror is simply written a moment later, once anything is set).
+ */
+function isConfigMeaningful(config: AgentConfig): boolean {
+  return (
+    config.style_source != null ||
+    config.tools.length > 0 ||
+    config.design_system_id != null ||
+    config.slide_style_id != null ||
+    config.deck_prompt_id != null ||
+    config.system_prompt != null ||
+    config.slide_editing_instructions != null
+  );
+}
+
 function readStoredConfig(): AgentConfig | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as AgentConfig;
+    // Strip on read as well as write, so values stored before the
+    // session-scoped rule existed can never seed a new session.
+    return withoutSessionScopedState(JSON.parse(raw) as AgentConfig);
+  } catch {
+    return null;
+  }
+}
+
+/** The user's OWN explicit "make this my default style" preference, if any. */
+function userPreferredStyleId(): number | null {
+  const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+  return userStyleId ? Number(userStyleId) : null;
+}
+
+/**
+ * Storage key for the user's PERSONAL default design system.
+ *
+ * Deliberately BARE rather than namespaced per user, for consistency with the
+ * three preference keys that already exist (`userDefaultProfileId`,
+ * `userDefaultDeckPromptId`, `userDefaultSlideStyleId`). The consequence is
+ * accepted and documented: a browser profile shared by two people shares this
+ * preference too. It is a display/seeding preference only — it grants no
+ * access, and every server-side authorization check is unaffected by it.
+ */
+export const USER_DEFAULT_DESIGN_SYSTEM_KEY = 'userDefaultDesignSystemId';
+
+/** The user's OWN explicit "make this my default design system" preference. */
+function userPreferredDesignSystemId(): number | null {
+  const stored = localStorage.getItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+  return stored ? Number(stored) : null;
+}
+
+/**
+ * The value as a design-system id, or null when it cannot denote one.
+ *
+ * Everything that is not a finite number or a numeric string collapses to null —
+ * `null`, `undefined`, `''`, whitespace, `'abc'`, `NaN`, booleans, objects — and
+ * null never compares equal in {@link isSameDesignSystem}, so no such value can
+ * be mistaken for a real id OR for another junk value.
+ */
+function asDesignSystemId(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/**
+ * Do these two values denote the SAME design system, whatever their runtime
+ * representation? Compared by VALUE rather than by identity because ids are not
+ * reliably numbers at runtime.
+ *
+ * KNOWN OPEN (systemic): the config mirror is hydrated by an unchecked
+ * `JSON.parse(raw) as AgentConfig` in `readStoredConfig` (this file, ~:129) and
+ * session configs by a raw `response.json()` in `services/api.ts`
+ * (`getAgentConfig`, ~:1914), so `design_system_id` can arrive as `"999"` even
+ * though `types/agentConfig.ts:73` declares `number | null`. A strict `===`
+ * anywhere downstream is therefore a latent bug — it was one here, and skipping
+ * a slot release on a string id silently reinstated a wedged config. The real fix
+ * is coercing id fields once at hydration; that is a hot path every surface
+ * depends on and is deliberately deferred, so this comparison absorbs the hazard
+ * locally instead.
+ */
+function isSameDesignSystem(a: unknown, b: unknown): boolean {
+  const left = asDesignSystemId(a);
+  return left !== null && left === asDesignSystemId(b);
+}
+
+/**
+ * The slide style the SERVER seeds as its default — the id that
+ * `init_default_profile.py` writes into the default profile's
+ * `selected_slide_style_id`, and therefore the value that means "nobody chose
+ * this" rather than "a user picked this".
+ */
+async function seededDefaultStyleId(): Promise<number | null> {
+  try {
+    const { styles } = await configApi.listSlideStyles();
+    return pickSeededDefaultStyle(styles)?.id ?? null;
   } catch {
     return null;
   }
 }
 
 /**
- * Resolve the default slide style ID from user preference or system default.
- * Priority: user localStorage > server is_default > server is_system.
- * Returns null if no default can be determined (caller should leave style as-is).
+ * THE seeded-default rule, shared with the backend: the `is_default` row, else
+ * the `is_system` row — and when several rows tie, the LOWEST ID wins.
+ *
+ * The tie-break is the part that matters. The backend's fallback query
+ * (`settings_db.get_default_slide_style_id`) is an unordered `.first()`, while
+ * this side used `Array.find` over a list the API sorts by NAME — so with no
+ * `is_default` and several `is_system` rows the two could pick DIFFERENT styles,
+ * which is how the original "seeded style occupies the slot" bug could come back
+ * on one side only. Ordering by id is stable, is not affected by renaming a
+ * style, and is applied identically in both places.
  */
-async function resolveDefaultStyleId(): Promise<number | null> {
-  const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-  if (userStyleId) return Number(userStyleId);
+function pickSeededDefaultStyle<T extends { id: number; is_default?: boolean; is_system?: boolean }>(
+  styles: T[],
+): T | undefined {
+  const byId = [...styles].sort((a, b) => a.id - b.id);
+  return byId.find(s => s.is_default) ?? byId.find(s => s.is_system);
+}
 
+/** Author recorded on server-seeded rows (`init_default_profile.py`). */
+const SYSTEM_AUTHOR = 'system';
+
+/**
+ * Provenance to stamp on a config loaded from a PROFILE, which is the one place
+ * no provenance has ever been recorded and it must be established.
+ *
+ * A profile's style is a SEED only when the profile is the server's own
+ * (`created_by: 'system'`) AND its style is still what the server seeds. A
+ * human-authored profile, or a system profile someone has since re-pointed at a
+ * different style, expresses a deliberate choice and is stamped `'user'` so it
+ * is never re-resolved away.
+ *
+ * The id comparison here is deliberately NOT the one that kept failing. That one
+ * compared a USER'S STORED CONFIG against a live `is_default` flag, which
+ * (a) cannot tell a seeded value from a user picking that same value, and
+ * (b) silently reinterpreted stored configs whenever the flag changed. This
+ * compares two SERVER-OWNED values at a single instant — the profile the server
+ * seeded versus the style the server would seed — purely to establish provenance
+ * the first time. Once established it is persisted and read back verbatim; a
+ * user's own selection is stamped at selection time and never derived at all, so
+ * neither failure mode can recur.
+ */
+async function profileStyleSource(profile: ProfileSummary): Promise<StyleSource> {
+  if (profile.created_by !== SYSTEM_AUTHOR) return 'user';
+  const styleId = profile.agent_config?.slide_style_id ?? null;
+  // No style at all is simply an unfilled slot on a server profile, not a choice.
+  if (styleId == null) return 'seeded';
+  return styleId === (await seededDefaultStyleId()) ? 'seeded' : 'user';
+}
+
+/**
+ * Resolve the org-default DESIGN SYSTEM id, or null when none is configured.
+ *
+ * The design-system counterpart of {@link seededDefaultStyleId}. Design systems
+ * are org-shared with no per-user override, so there is no localStorage tier
+ * here — the server's `is_default` flag is the only source.
+ */
+async function resolveDefaultDesignSystemId(): Promise<number | null> {
   try {
-    const { styles } = await configApi.listSlideStyles();
-    const defaultStyle = styles.find(s => s.is_default) ?? styles.find(s => s.is_system);
-    return defaultStyle?.id ?? null;
+    const { design_systems } = await configApi.listDesignSystems();
+    return design_systems.find(ds => ds.is_default && ds.is_active)?.id ?? null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Fill in whichever style SOURCE a config is missing, honouring the product
+ * decision that an org-default design system OUTRANKS the default slide style —
+ * and, for the same reason, that a user's PERSONAL default design system
+ * outranks their personal default slide style.
+ *
+ * Mutates and returns a copy. Only ever fills a gap — with one deliberate
+ * exception: a slide-style id the SERVER SEEDED is treated as an unfilled gap,
+ * not as a choice.
+ *
+ * The case that MOTIVATES the exception is a stored config THIS FUNCTION wrote.
+ * Its last branch fills an empty slot with `seededDefaultStyleId()` and stamps
+ * `style_source: 'seeded'`, and that config is persisted to the localStorage
+ * mirror. If the org configures a default design system afterwards, the stored
+ * seeded style has to yield to it — so on the next load the mirror must re-enter
+ * resolution rather than return early, which is precisely what treating a seeded
+ * style id as a gap buys. Pinned by `design-system-selector.spec.ts`, "a
+ * SERVER-SEEDED style is still overridden by the org-default design system",
+ * which seeds a MIRROR (not a profile) stamped `'seeded'`.
+ *
+ * The seeded `default` PROFILE is NOT part of that story, contrary to what this
+ * comment claimed for several rounds, on two independent counts:
+ *
+ * - `init_default_profile.py` never writes `agent_config` at all. It writes
+ *   `config_prompts.selected_slide_style_id`. Only the startup backfill
+ *   (`migrate_profiles`) turns that into `agent_config.slide_style_id`, and it
+ *   selects rows with `IS NULL` — a predicate the column type broke for a while
+ *   by storing the JSON scalar `null` (see `src/database/types.py`). So "always
+ *   populates `slide_style_id`" was never true of the seeder, and was not even
+ *   true of the backfill throughout.
+ * - a real caller cannot load that profile anyway. `GET /api/profiles` filters
+ *   through `get_accessible_profile_ids`, and the seeded row — `created_by:
+ *   'system'`, no `global_permission`, no contributor rows — matches none of its
+ *   branches, so it never reaches the browser and `profileStyleSource` never runs
+ *   on it. (It is still visible to the UNFILTERED duplicate check in
+ *   `save-from-session`, which is why it can cause a 409 while being invisible.)
+ *
+ * "Seeded" is read from PERSISTED provenance (`style_source`), never inferred by
+ * comparing the id to the current default. Value equality cannot tell the two
+ * cases apart — a user who deliberately picks the style that happens to be the
+ * seeded default stores the very same id — and it had their choice silently
+ * discarded. Comparing against a LIVE default was doubly wrong: flipping
+ * `is_default` later retroactively reinterpreted configs already stored.
+ *
+ * A user's own choice therefore suppresses the design-system default (whether
+ * recorded as `style_source: 'user'` or as the personal
+ * `userDefaultSlideStyleId` preference), so a user who picked a style never gets
+ * a brand layered over it. Mirrors the backend's
+ * `_apply_org_default_style_source`, which covers MCP and the chat routes.
+ */
+async function withResolvedStyleSource(
+  config: AgentConfig,
+  { isNewSurface = false }: { isNewSurface?: boolean } = {},
+): Promise<AgentConfig> {
+  // A style source the USER decided is COMPLETE — including the decision to have
+  // NEITHER a style nor a design system. That is why provenance covers the slot
+  // rather than one field: "both ids null" is indistinguishable by value from
+  // "never resolved", so an explicit "Design System = None" was re-seeded from
+  // the org default on the next load.
+  if (config.style_source === 'user') return config;
+
+  // ABSENCE of provenance on an EXISTING stored config is USER-CHOSEN, never
+  // seedable. Such a config predates the marker, and the shape that matters most
+  // — an explicit "Design System: None" — carries no style_source, no ids and no
+  // tools, so nothing in its content distinguishes it from a fresh surface. Only
+  // a genuinely NEW surface (no stored config, no persisted session config) may
+  // be seeded, and its caller says so explicitly rather than it being inferred
+  // from values that cannot carry the distinction.
+  if (!isNewSurface && config.style_source == null) return config;
+
+  if (config.design_system_id != null) return config;
+
+  // The user's own PERSONAL DEFAULT DESIGN SYSTEM. This tier sits ABOVE the
+  // personal-style branch below, because a design system beats a slide style
+  // everywhere else in the product — the schema validator, the ORM types and a
+  // database trigger all enforce that a config carrying both resolves to the
+  // design system. Below the style branch it would be dead weight for exactly
+  // the users most likely to reach for it: anyone still holding an older
+  // `userDefaultSlideStyleId` would set a design-system default and see
+  // nothing change.
+  //
+  // KNOWN OPEN: the stored id is NOT validated here, so a design system deleted
+  // while this preference points at it stays in the seeded slot until the
+  // Design System Library is next opened, whose prune releases it
+  // (`DesignSystemLibrary.tsx`, the stale-preference effect). Validating on this
+  // path would mean fetching the design-system list on a branch that currently
+  // makes no request at all, and the first-paint seed below is synchronous and
+  // could not await it — so it is deliberately left to the prune. The SESSION
+  // path is already covered server-side: an unavailable design_system_id comes
+  // back cleared with `design_system_unavailable`, handled in the session GET.
+  const userPreferredDesignSystem = userPreferredDesignSystemId();
+  if (userPreferredDesignSystem != null) {
+    // Clear the style so the two sources never compete in one prompt — the
+    // mirror image of what the org-default branch does further down.
+    return {
+      ...config,
+      design_system_id: userPreferredDesignSystem,
+      slide_style_id: null,
+      style_source: 'user',
+    };
+  }
+
+  if (config.slide_style_id != null) {
+    // The user's own default-style preference outranks both the seed and the
+    // org-default design system, so it claims the slot as an explicit choice.
+    const userPreferred = userPreferredStyleId();
+    if (userPreferred != null) {
+      return { ...config, slide_style_id: userPreferred, style_source: 'user' };
+    }
+  }
+
+  const designSystemId = await resolveDefaultDesignSystemId();
+  if (designSystemId != null) {
+    // Clear the seeded style so the two sources never compete in one prompt.
+    // The cleared slot is the SERVER's doing, so provenance stays 'seeded'.
+    return {
+      ...config,
+      design_system_id: designSystemId,
+      slide_style_id: null,
+      style_source: 'seeded',
+    };
+  }
+  if (config.slide_style_id != null) return config;
+  // No org-default design system: fall back to a style. The user's OWN
+  // preference is a choice; the server's default is seeding — so the two carry
+  // different provenance even though they fill the same slot.
+  const preferred = userPreferredStyleId();
+  if (preferred != null) {
+    return { ...config, slide_style_id: preferred, style_source: 'user' };
+  }
+  return {
+    ...config,
+    slide_style_id: await seededDefaultStyleId(),
+    style_source: 'seeded',
+  };
 }
 
 /**
@@ -103,15 +443,26 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const urlSessionId = urlMatch ? urlMatch[1] : null;
   const isPreSession = !urlSessionId;
 
-  const [agentConfig, setAgentConfig] = useState<AgentConfig>(
+  // The RAW in-memory config. Consumers never read this directly — they read
+  // `agentConfig` below, which is gated on ownership. See the gate's comment for
+  // why that indirection is the whole fix for cross-session leakage.
+  const [rawAgentConfig, setAgentConfig] = useState<AgentConfig>(
     () => {
       const stored = readStoredConfig();
       if (stored) return stored;
-      // Apply user defaults synchronously so dropdowns show them immediately
+      // Apply user defaults synchronously so dropdowns show them immediately.
+      // A personal design-system default takes the style slot ahead of a
+      // personal style default — the same precedence `withResolvedStyleSource`
+      // applies — so the placeholder never shows both competing at once.
       const config = { ...DEFAULT_AGENT_CONFIG };
-      const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
-      if (userStyleId) {
-        config.slide_style_id = Number(userStyleId);
+      const userDesignSystemId = userPreferredDesignSystemId();
+      if (userDesignSystemId != null) {
+        config.design_system_id = userDesignSystemId;
+      } else {
+        const userStyleId = localStorage.getItem('userDefaultSlideStyleId');
+        if (userStyleId) {
+          config.slide_style_id = Number(userStyleId);
+        }
       }
       const userDeckPromptId = resolveDefaultDeckPromptId();
       if (userDeckPromptId) {
@@ -121,9 +472,127 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     },
   );
 
+  // Ownership: which session the in-memory config is valid for (loaded-for
+  // or explicitly edited-in). State drives consumers (ChatPanel gates what a
+  // chat request may carry); the ref mirror is for async closures.
+  const [configOwnerSessionId, setConfigOwnerSessionId] = useState<string | null>(null);
+  const configOwnerRef = useRef<string | null>(null);
+  const claimOwnership = useCallback((sessionId: string | null) => {
+    configOwnerRef.current = sessionId;
+    setConfigOwnerSessionId(sessionId);
+  }, []);
+
+  // ------------------------------------------------------------------
+  // THE cross-session isolation gate (structural).
+  //
+  // A config in memory belongs to exactly ONE surface: the session it was
+  // loaded for or explicitly edited in (`configOwnerSessionId`), or the
+  // pre-session surface. When the active surface is NOT that owner — the whole
+  // window between navigating into a session and its own GET resolving — the
+  // in-memory config is FOREIGN, and this gate replaces it wholesale with
+  // defaults for every consumer and every mutator.
+  //
+  // This is deliberately not another field-by-field strip. Entering a session
+  // used to strip only `template_id` from the previous session's config, which
+  // left design system, deck prompt and the TOOL LIST (private Genie space ids)
+  // both visible and writable — and since every mutator builds its PUT by
+  // spreading the current config, editing one field in session B persisted
+  // session A's private tool into B. Four rounds of point-fixes on this state
+  // machine all had the same shape, so the enumeration is gone: there is no list
+  // of protected fields to keep in sync, because NO inherited value survives the
+  // gate. A field added to AgentConfig tomorrow is covered automatically.
+  //
+  // Ownership is claimed by exactly two events, both of which mean "this config
+  // is genuinely this surface's": the session's own GET resolving, and an
+  // explicit user edit (which is intent FOR the visible session and is
+  // immediately persisted by its PUT).
+  const configIsOwnedByActiveSurface = isPreSession || configOwnerSessionId === urlSessionId;
+  const agentConfig = useMemo(
+    () => (configIsOwnedByActiveSurface ? rawAgentConfig : { ...DEFAULT_AGENT_CONFIG }),
+    [configIsOwnedByActiveSurface, rawAgentConfig],
+  );
+
+  // ------------------------------------------------------------------
+  // THE settle invariant (structural — every async continuation goes
+  // through here).
+  //
+  // Any async continuation in this context (GET resolve, PUT confirm,
+  // PUT catch, refresh resolve, profile-load resolve, pre-session default
+  // loads) captures the surface it was ISSUED FOR (a session id, or null
+  // for pre-session) and, at settle time, may mutate VISIBLE state
+  // (setAgentConfig / ownership / toasts) ONLY if that surface is still
+  // the active one. A continuation settling after the user moved on may
+  // at most update the per-session confirmed stash — which is keyed, so
+  // it is safe by construction. This closes the whole class of stale-
+  // closure holes (a late-failing B PUT poisoning C's screen, etc.), not
+  // individual instances.
+  // ------------------------------------------------------------------
+  const activeSurfaceRef = useRef<string | null>(urlSessionId);
+  // Render-time mirror: continuations settling between a navigation render
+  // and its effects must already compare against the NEW surface.
+  activeSurfaceRef.current = urlSessionId;
+
+  const settleForSurface = useCallback(
+    (issuedFor: string | null, mutateVisible: () => void): boolean => {
+      if (activeSurfaceRef.current !== issuedFor) return false;
+      mutateVisible();
+      return true;
+    },
+    [],
+  );
+
+  // Last SERVER-CONFIRMED config PER SESSION (a keyed map — one session's
+  // late-settling artifacts can never displace another's entry): updated
+  // whenever a session's GET resolves — INCLUDING when the snapshot is
+  // discarded because an in-flight edit claimed ownership, and including
+  // late settles after the user moved on — and whenever a PUT/profile-load
+  // confirms. Failure paths revert to THIS, never to pre-edit in-memory
+  // residue: 'edits win over the in-flight GET' only holds when the edit
+  // SUCCEEDS; a failed edit must restore the target session's OWN state.
+  //
+  // GENERATION axis (state moves FORWARD only). The surface guard stops a
+  // continuation from a DIFFERENT session touching the screen, but two ops
+  // for the SAME session can still settle out of issue order — a slow early
+  // GET returning stale server state can land AFTER a newer edit's PUT
+  // confirmed, and (repaint aside) regress the stash. So every stash-writing
+  // op captures the session's monotonic generation AT ISSUE TIME
+  // (``nextGeneration``); a settling write is accepted only if its
+  // issue-generation is not older than the entry's recorded generation.
+  // A confirmed PUT was issued after any GET/PUT before it, so it carries a
+  // higher generation — older ops settling later are outdated and rejected.
+  // The counter lives per session in the Map, so a B→C→B round trip keeps
+  // B's history and a pre-round-trip B GET can't regress the post-return
+  // stash.
+  const generationBySessionRef = useRef<Map<string, number>>(new Map());
+  const nextGeneration = useCallback((sessionId: string): number => {
+    const next = (generationBySessionRef.current.get(sessionId) ?? 0) + 1;
+    generationBySessionRef.current.set(sessionId, next);
+    return next;
+  }, []);
+  const lastConfirmedBySessionRef = useRef<
+    Map<string, { config: AgentConfig; generation: number }>
+  >(new Map());
+  const stashConfirmed = useCallback(
+    (sessionId: string, config: AgentConfig, generation: number): boolean => {
+      const existing = lastConfirmedBySessionRef.current.get(sessionId);
+      if (existing && generation < existing.generation) return false; // outdated
+      lastConfirmedBySessionRef.current.set(sessionId, { config, generation });
+      return true;
+    },
+    [],
+  );
+  // updateConfig (declared before refreshConfig) triggers a fresh fetch on
+  // the no-snapshot failure path via this forward ref.
+  const refreshConfigRef = useRef<(() => Promise<void>) | null>(null);
+
   // Track whether we've already loaded the default profile for pre-session mode
   // so we only do it once (on first mount with no stored config).
   const defaultProfileLoaded = useRef(false);
+
+  // Latches once this surface's config is real state rather than the untouched
+  // first-paint placeholder, so the localStorage mirror is written from then on
+  // (including for a config the user has since emptied back out).
+  const configEverResolvedRef = useRef(false);
 
   // ------------------------------------------------------------------
   // Pre-session: load default profile's config on first mount if no
@@ -136,15 +605,25 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     const storedConfig = readStoredConfig();
 
-    // If we have a stored config with tools already configured, it's a real
-    // user-modified config — keep it as-is and just fill in missing defaults.
-    if (storedConfig && storedConfig.tools.length > 0) {
-      if (storedConfig.slide_style_id == null || storedConfig.deck_prompt_id == null) {
-        resolveDefaultStyleId().then(styleId => {
-          const updated = { ...storedConfig };
-          if (updated.slide_style_id == null) updated.slide_style_id = styleId;
+    // ANY stored configuration is authoritative — it is this user's own state,
+    // mirrored here by the effect below. Its EXISTENCE is the marker: the
+    // untouched first-paint placeholder is never written (see the persistence
+    // effect's `configEverResolvedRef` gate), so a mirror being present means
+    // real state and `readStoredConfig` returning null is what still falls
+    // through to the profile load.
+    //
+    // Deciding this from CONTENT is what caused the legacy-config bug twice
+    // over — first `tools.length > 0`, then a value test on provenance/ids —
+    // because a config whose only edit was choosing "Design System: None" is
+    // byte-identical to the placeholder. See `isConfigMeaningful`.
+    if (storedConfig) {
+      if (storedConfig.design_system_id == null || storedConfig.deck_prompt_id == null) {
+        // NOT a new surface: this is the user's own stored state, so a missing
+        // provenance marker is read as their choice and never seeded over.
+        void withResolvedStyleSource(storedConfig).then(resolved => {
+          const updated = { ...resolved };
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();
-          setAgentConfig(updated);
+          settleForSurface(null, () => setAgentConfig(updated));
         });
       }
       return;
@@ -158,23 +637,31 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const defaultProfile = userProfileId
           ? profiles.find(p => p.id === Number(userProfileId)) ?? profiles.find(p => p.is_default)
           : profiles.find(p => p.is_default);
-        const config = defaultProfile?.agent_config
-          ? { ...defaultProfile.agent_config }
+        let config = defaultProfile?.agent_config
+          ? {
+              ...defaultProfile.agent_config,
+              // Provenance of a profile's style comes from WHO WROTE THE
+              // PROFILE, which the server records — not from comparing its
+              // style id to the current default. The seeded default profile is
+              // authored by "system" (`init_default_profile.py`), so its style
+              // is a seed; a profile a person built is that person's choice.
+              style_source: await profileStyleSource(defaultProfile),
+            }
           : { ...DEFAULT_AGENT_CONFIG };
 
-        if (config.slide_style_id == null) {
-          config.slide_style_id = await resolveDefaultStyleId();
-        }
+        // A genuinely NEW surface: there was no stored config at all, so this is
+        // the one place org-default seeding belongs.
+        config = await withResolvedStyleSource(config, { isNewSurface: true });
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
 
-        setAgentConfig(config);
+        settleForSurface(null, () => setAgentConfig(config));
       })
       .catch(err => {
         console.error('Failed to load default profile for pre-session config:', err);
       });
-  }, [isPreSession]);
+  }, [isPreSession, settleForSurface]);
 
   // ------------------------------------------------------------------
   // Reset default-profile flag when entering an active session so
@@ -193,13 +680,36 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   useEffect(() => {
     if (isPreSession) return;
 
-    let cancelled = false;
-    api.getAgentConfig(urlSessionId)
-      .then(async (config) => {
-        if (cancelled) return;
+    // Entering a session (New Deck / session switch): the PREVIOUS surface's
+    // config is still in memory until this session's GET resolves. Dropping
+    // ownership synchronously is what makes it invisible AND unsendable — the
+    // isolation gate above swaps the whole foreign config for defaults while the
+    // active surface is not its owner, so no value of another session's can be
+    // rendered or spread into a mutator's PUT.
+    //
+    // There is deliberately no per-field strip here any more. Stripping only
+    // `template_id` and trusting the rest was the CRITICAL leak: session A's
+    // design system, deck prompt and private Genie tool ids stayed live and got
+    // written into session B's stored config by any single-field edit.
+    //
+    // This session's own config arrives with the GET below (which claims
+    // ownership), and an explicit user edit in the meantime claims ownership for
+    // THIS session and wins over the later-arriving GET.
+    claimOwnership(null);
 
+    const issuedFor = urlSessionId;
+    const issueGen = issuedFor ? nextGeneration(issuedFor) : 0;
+    api.getAgentConfig(issuedFor)
+      .then(async (config) => {
         // If the session has no explicitly-saved config, load the default profile
         const isConfigured = (config as AgentConfig & { is_configured?: boolean }).is_configured ?? true;
+        // The server clears a design_system_id whose row no longer exists and
+        // says so out-of-band. Surface it ONCE, non-blocking: a dropdown that
+        // silently reads "None" looks like the user's own selection was lost for
+        // no reason. Generic copy — never the design system's name.
+        const designSystemUnavailable =
+          (config as AgentConfig & { design_system_unavailable?: boolean })
+            .design_system_unavailable === true;
 
         if (!isConfigured) {
           try {
@@ -214,32 +724,98 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           } catch {
             // Non-critical — continue with defaults
           }
+          // Default seeding is a NEW-SESSION default, so it applies only to a
+          // session that has never been configured. Resolving on EVERY GET
+          // meant a user who chose Design System = None, saved, and reloaded
+          // got the org default silently restored — and made an org-default
+          // change retroactive to old sessions instead of session-isolated.
+          //
+          // This branch is gated on `!isConfigured`, i.e. the server holds NO
+          // stored config for the session — genuine creation, so seeding applies.
+          config = await withResolvedStyleSource(config, { isNewSurface: true });
         }
 
-        if (config.slide_style_id == null) {
-          config.slide_style_id = await resolveDefaultStyleId();
-        }
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
-        setAgentConfig(config);
+        // The session's own loaded state — stash keyed by ITS id, but only
+        // if this GET is not OLDER than what's recorded (a newer edit's PUT
+        // may have already confirmed for this session). ``accepted`` gates
+        // the display apply too: a stash-rejected GET is stale server truth
+        // and must not repaint either.
+        const accepted = issuedFor
+          ? stashConfirmed(issuedFor, config, issueGen)
+          : true;
+        settleForSurface(issuedFor, () => {
+          if (!accepted) return; // superseded by a newer confirmed write
+          if (configOwnerRef.current === issuedFor) {
+            // The user explicitly edited config for this session while the
+            // GET was in flight: their intent is already persisted via the
+            // PUT — this snapshot is stale FOR DISPLAY (a still-accepted
+            // stash entry is the failure-revert target). Explicit edits win.
+            return;
+          }
+          setAgentConfig(config);
+          claimOwnership(issuedFor);
+          if (designSystemUnavailable) {
+            showToast(
+              'The design system this deck used is no longer available; selection cleared.',
+              'info',
+            );
+          }
+        });
       })
       .catch(err => {
-        console.error('Failed to load agent config for session:', err);
-        if (!cancelled) {
-          showToast('Failed to load agent configuration', 'error');
+        // 404 = this session has no persisted config because it does not exist
+        // on the server YET (a client-generated id for a deck that has not been
+        // sent). That is NOT a foreign config: the pre-session selections the
+        // user just made are their own intent for the deck they are starting, and
+        // carrying them in is the documented behaviour ("a NEW session starts
+        // with template = None, design system carries over"). So this surface
+        // ADOPTS the in-memory config and claims ownership, which lets the
+        // isolation gate expose it again.
+        //
+        // The session-scoped template pin is still dropped — it belongs to the
+        // session it was chosen in, never to a new one.
+        if (err instanceof ApiError && err.status === 404) {
+          settleForSurface(issuedFor, () => {
+            setAgentConfig(prev => withoutSessionScopedState(prev));
+            claimOwnership(issuedFor);
+          });
+          return;
         }
+        // A genuine failure (network, 500, 403): ownership stays unclaimed, so
+        // the gate keeps showing defaults rather than another session's values.
+        console.error('Failed to load agent config for session:', err);
+        settleForSurface(issuedFor, () => {
+          showToast('Failed to load agent configuration', 'error');
+        });
       });
-
-    return () => { cancelled = true; };
-  }, [urlSessionId, isPreSession, showToast]);
+  }, [urlSessionId, isPreSession, showToast, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   // ------------------------------------------------------------------
   // localStorage persistence for pre-session mode
   // ------------------------------------------------------------------
   useEffect(() => {
     if (isPreSession) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(agentConfig));
+      // Do NOT mirror the untouched first-paint placeholder. The mirror's mere
+      // EXISTENCE is what marks a config as real state (see the stored-config
+      // branch in the pre-session effect above),
+      // because content cannot tell a legacy explicit-"None" config apart from
+      // the placeholder — with no personal preferences set they are byte
+      // identical. Writing the placeholder would therefore let it masquerade as
+      // saved state on the next visit and suppress the default-profile load.
+      //
+      // The gate opens as soon as anything has resolved or the user has edited:
+      // provenance stamped, or any non-default selection present.
+      if (!configEverResolvedRef.current && !isConfigMeaningful(agentConfig)) {
+        return;
+      }
+      configEverResolvedRef.current = true;
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(withoutSessionScopedState(agentConfig)),
+      );
     } else {
       localStorage.removeItem(STORAGE_KEY);
     }
@@ -248,25 +824,72 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // ------------------------------------------------------------------
   // updateConfig — optimistic update with revert on failure
   // ------------------------------------------------------------------
-  const updateConfig = useCallback(async (config: AgentConfig) => {
-    const previous = agentConfig;
+  const updateConfig = useCallback(async (config: AgentConfig): Promise<boolean> => {
     setAgentConfig(config);
 
     if (!isPreSession && urlSessionId) {
-      console.log('[AgentConfigContext] Syncing to backend, session:', urlSessionId, 'tools:', config.tools.length);
+      const issuedFor = urlSessionId;
+      // Issued AFTER any GET/PUT before it for this session, so it carries a
+      // higher generation: when it confirms, older ops settling later are
+      // outdated and can't regress the stash.
+      const issueGen = nextGeneration(issuedFor);
+      // An explicit edit is intent FOR THIS SESSION: it claims ownership, so
+      // chat requests may carry the config again and a still-in-flight
+      // config GET for this session is treated as stale (edits win).
+      claimOwnership(issuedFor);
+      console.log('[AgentConfigContext] Syncing to backend, session:', issuedFor, 'tools:', config.tools.length);
       try {
-        const confirmed = await api.updateAgentConfig(urlSessionId, config);
+        const confirmed = await api.updateAgentConfig(issuedFor, config);
         console.log('[AgentConfigContext] Backend confirmed:', JSON.stringify(confirmed));
-        setAgentConfig(confirmed);
+        // ONE generation verdict gates BOTH effects. When a newer PUT for
+        // this session already confirmed, this older-issued confirm is
+        // outdated: its stash write is rejected AND its repaint is skipped —
+        // otherwise the visible state would regress to stale values even
+        // though the stash held the newer ones (same discipline the
+        // stash-rejected GET already follows).
+        const accepted = stashConfirmed(issuedFor, confirmed, issueGen);
+        settleForSurface(issuedFor, () => {
+          if (!accepted) return; // superseded by a newer confirmed write
+          setAgentConfig(confirmed);
+        });
+        return true;
       } catch (err) {
         console.error('[AgentConfigContext] Failed to update agent config:', err);
-        setAgentConfig(previous);
-        showToast('Failed to update configuration', 'error');
+        // 'Edits win' only holds for edits that SUCCEED. A failed edit must
+        // restore the target session's OWN state — never pre-edit in-memory
+        // residue — and a failure settling AFTER the user moved on must not
+        // touch the new surface at all (its own load already reset it).
+        const applied = settleForSurface(issuedFor, () => {
+          const ownConfirmed = lastConfirmedBySessionRef.current.get(issuedFor);
+          if (ownConfirmed) {
+            // The session's last server-confirmed state (its GET snapshot —
+            // including one discarded-as-stale mid-edit — or an earlier
+            // confirmed PUT), protected by the generation gate. It IS this
+            // session's state, so it stays owned.
+            setAgentConfig(ownConfirmed.config);
+            claimOwnership(issuedFor);
+          } else {
+            // The edit fired before any snapshot for this session ever
+            // existed: fall back to defaults with no owner (chat requests
+            // omit config) and fetch the session's real config fresh.
+            setAgentConfig({ ...DEFAULT_AGENT_CONFIG });
+            claimOwnership(null);
+            void refreshConfigRef.current?.();
+          }
+          showToast('Failed to update configuration', 'error');
+        });
+        if (!applied && configOwnerRef.current === issuedFor) {
+          // Defensive: never leave a stale claim for a session that is no
+          // longer active (a switch normally already dropped it).
+          claimOwnership(null);
+        }
+        return false;
       }
     } else {
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
+      return true;
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast]);
+  }, [isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   // ------------------------------------------------------------------
   // Convenience mutators
@@ -347,7 +970,118 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [agentConfig, updateConfig]);
 
   const setStyle = useCallback(async (styleId: number | null) => {
-    await updateConfig({ ...agentConfig, slide_style_id: styleId });
+    // Picking a style in the UI is the moment provenance is KNOWN, so it is
+    // recorded here rather than reconstructed later by comparing ids — which
+    // cannot distinguish this from the server seeding the same value.
+    //
+    // The two style sources are MUTUALLY EXCLUSIVE: a design system takes
+    // precedence in the prompt, so leaving `design_system_id` set here meant the
+    // style the user just picked had NO effect — silently. Choosing a style is
+    // therefore also a decision to stop using a design system, which clears its
+    // dependent template pin too.
+    const clearsDesignSystem = styleId != null && agentConfig.design_system_id != null;
+    await updateConfig({
+      ...agentConfig,
+      slide_style_id: styleId,
+      ...(clearsDesignSystem ? { design_system_id: null, template_id: null } : {}),
+      style_source: 'user',
+    });
+  }, [agentConfig, updateConfig]);
+
+  const setDesignSystem = useCallback(async (designSystemId: number | null) => {
+    // Templates belong to a design system: changing (or clearing) the design
+    // system invalidates a pinned template, so reset it to None.
+    const templateId =
+      designSystemId === agentConfig.design_system_id
+        ? agentConfig.template_id ?? null
+        : null;
+    // Choosing a design system — INCLUDING clearing it to None — is a decision
+    // about the style slot, so it stamps user provenance. Without this, "None"
+    // was indistinguishable from "never resolved" and the org default was
+    // re-seeded on the next load.
+    //
+    // The mirrored half of exclusivity: selecting a design system clears the
+    // slide style, so the two never compete in one prompt. Clearing the design
+    // system to None does NOT resurrect a style — "neither" is a valid choice.
+    await updateConfig({
+      ...agentConfig,
+      design_system_id: designSystemId,
+      template_id: templateId,
+      ...(designSystemId != null ? { slide_style_id: null } : {}),
+      style_source: 'user',
+    });
+  }, [agentConfig, updateConfig]);
+
+  /**
+   * The user's PERSONAL default design system: store the preference, and move
+   * the style slot with it.
+   *
+   * Applying one is just `setDesignSystem`, which already owns the exclusivity
+   * rule. RELEASING one has to do the same work in reverse, and that is the
+   * whole reason this lives here rather than in the settings page: the working
+   * config is mirrored to localStorage and that mirror is AUTHORITATIVE once
+   * present, while the resolver short-circuits on a `design_system_id` that is
+   * already set. A release that only dropped the preference key would therefore
+   * leave the already-resolved design system winning until some genuinely fresh
+   * surface came along — indistinguishable, to the user, from a control that
+   * does nothing. So the slot is handed back to the personal style default here
+   * and now, and the dependent template pin goes with the design system.
+   *
+   * `releaseSlotOnlyIfHolding` makes the release CONDITIONAL for callers that
+   * did not come from the user. A person clicking "Clear default" asked for
+   * exactly this, so that path passes nothing and always releases. The automatic
+   * stale-preference prune passes the id it is retiring: if the slot has since
+   * moved on to a different design system the user chose deliberately, the
+   * preference is still dropped but the slot is left completely alone. Releasing
+   * there would silently replace an explicit choice as a side effect of a
+   * cleanup nobody requested — automatic is not the same as requested, and only
+   * the automatic path has to earn its silence.
+   *
+   * The condition lives HERE rather than at the call site so that the key
+   * removal and the field writes each exist in exactly one place; the two
+   * callers differ only by the option they pass.
+   */
+  const setUserDefaultDesignSystem = useCallback(async (
+    designSystemId: number | null,
+    { releaseSlotOnlyIfHolding }: { releaseSlotOnlyIfHolding?: number } = {},
+  ) => {
+    if (designSystemId != null) {
+      localStorage.setItem(USER_DEFAULT_DESIGN_SYSTEM_KEY, String(designSystemId));
+      await setDesignSystem(designSystemId);
+      return;
+    }
+    // The release runs BEFORE the key is dropped, and the key is dropped only
+    // once the release has actually landed. Removing the key first meant any
+    // failure in between left the key gone while the slot was still held — and
+    // the Clear button is rendered FROM that key, so the only control that could
+    // release the slot disappeared with it. In this order both torn states are
+    // recoverable: a failed release keeps the preference, so the user still has
+    // Clear (and an automatic prune simply retries on the next visit), while a
+    // failure after a successful release has nothing left to undo. Nothing in the
+    // release depends on the removal that now follows it — it reads the STYLE
+    // preference, a different key, and writes `design_system_id: null` outright.
+    const slotHoldsThisPreference =
+      releaseSlotOnlyIfHolding == null ||
+      isSameDesignSystem(agentConfig.design_system_id, releaseSlotOnlyIfHolding);
+    if (slotHoldsThisPreference) {
+      const released = await updateConfig({
+        ...agentConfig,
+        design_system_id: null,
+        template_id: null,
+        slide_style_id: userPreferredStyleId(),
+        style_source: 'user',
+      });
+      // Keep the preference when the release did not stick, so the escape hatch
+      // survives and the next attempt can succeed.
+      if (!released) return;
+    }
+    // Either the slot was released, or it is empty / holds a design system the
+    // user chose for themselves — which this automatic caller must not touch.
+    localStorage.removeItem(USER_DEFAULT_DESIGN_SYSTEM_KEY);
+  }, [agentConfig, setDesignSystem, updateConfig]);
+
+  const setTemplate = useCallback(async (templateId: number | null) => {
+    await updateConfig({ ...agentConfig, template_id: templateId });
   }, [agentConfig, updateConfig]);
 
   const setDeckPrompt = useCallback(async (promptId: number | null) => {
@@ -375,13 +1109,24 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const refreshConfig = useCallback(async () => {
     if (isPreSession || !urlSessionId) return;
+    const issuedFor = urlSessionId;
+    const issueGen = nextGeneration(issuedFor);
     try {
-      const config = await api.getAgentConfig(urlSessionId);
-      setAgentConfig(config);
+      const config = await api.getAgentConfig(issuedFor);
+      const accepted = stashConfirmed(issuedFor, config, issueGen);
+      settleForSurface(issuedFor, () => {
+        if (!accepted) return; // superseded by a newer confirmed write
+        setAgentConfig(config);
+        claimOwnership(issuedFor); // freshly loaded FOR this session
+      });
     } catch (err) {
       console.error('[AgentConfigContext] Failed to refresh config:', err);
     }
-  }, [isPreSession, urlSessionId]);
+  }, [isPreSession, urlSessionId, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
+
+  useEffect(() => {
+    refreshConfigRef.current = refreshConfig;
+  }, [refreshConfig]);
 
   const loadProfile = useCallback(async (profileId: number) => {
     // If the session already has non-default config, confirm before overwriting
@@ -399,32 +1144,53 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
 
     if (!isPreSession && urlSessionId) {
+      const issuedFor = urlSessionId;
+      // A profile load is a server WRITE for this session — issued now, so
+      // it takes a fresh (higher) generation like a PUT.
+      const issueGen = nextGeneration(issuedFor);
       // Active session: call backend, then update local state
       try {
-        const result = await api.loadProfile(urlSessionId, profileId);
-        setAgentConfig(result.agent_config);
-        showToast('Profile loaded', 'success');
+        const result = await api.loadProfile(issuedFor, profileId);
+        // The profile DID apply to issuedFor server-side — stash reflects
+        // that unless a still-newer write landed; screen updates only if
+        // we're still there.
+        const accepted = stashConfirmed(issuedFor, result.agent_config, issueGen);
+        settleForSurface(issuedFor, () => {
+          if (!accepted) return;
+          setAgentConfig(result.agent_config);
+          claimOwnership(issuedFor); // explicitly set IN this session
+          showToast('Profile loaded', 'success');
+        });
       } catch (err) {
         console.error('Failed to load profile into session:', err);
-        showToast('Failed to load profile', 'error');
+        settleForSurface(issuedFor, () => {
+          showToast('Failed to load profile', 'error');
+        });
       }
     } else {
       // Pre-session: fetch profiles and apply the matching one locally
       try {
         const profiles = await api.listProfiles();
         const profile = profiles.find(p => p.id === profileId);
-        if (profile?.agent_config) {
-          setAgentConfig(profile.agent_config);
-          showToast('Profile loaded', 'success');
-        } else {
-          showToast('Profile not found or has no configuration', 'error');
-        }
+        settleForSurface(null, () => {
+          if (profile?.agent_config) {
+            // Deliberately loading a profile is a user decision about the style
+            // slot, so the applied config carries user provenance — a profile
+            // built around a specific style must not be re-resolved away.
+            setAgentConfig({ ...profile.agent_config, style_source: 'user' });
+            showToast('Profile loaded', 'success');
+          } else {
+            showToast('Profile not found or has no configuration', 'error');
+          }
+        });
       } catch (err) {
         console.error('Failed to load profile:', err);
-        showToast('Failed to load profile', 'error');
+        settleForSurface(null, () => {
+          showToast('Failed to load profile', 'error');
+        });
       }
     }
-  }, [agentConfig, isPreSession, urlSessionId, showToast]);
+  }, [agentConfig, isPreSession, urlSessionId, showToast, claimOwnership, stashConfirmed, settleForSurface, nextGeneration]);
 
   // ------------------------------------------------------------------
   // Render
@@ -438,11 +1204,15 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     updateTool,
     updateToolEntry,
     setStyle,
+    setDesignSystem,
+    setUserDefaultDesignSystem,
+    setTemplate,
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
     refreshConfig,
     isPreSession,
+    configOwnerSessionId,
   };
 
   return (
