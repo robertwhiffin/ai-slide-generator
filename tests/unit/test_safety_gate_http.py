@@ -126,7 +126,7 @@ def test_safety_rebuild_notice_message_has_timestamp():
              patch.object(service, "_ensure_user_experiment", return_value=(None, None)), \
              patch.object(service, "_hydrate_chat_history", return_value=0), \
              patch.object(service, "_substitute_images_for_response",
-                          side_effect=lambda d, h: (d, h)), \
+                          side_effect=lambda d, h=None, *, session_id: (d, h)), \
              patch("src.core.settings_db.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(profile_id=1, profile_name="test")
             result = service.send_message("s1", "create slides")

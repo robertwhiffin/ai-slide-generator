@@ -60,7 +60,9 @@ The presentation mode shows one slide at a time in an iframe, updating the ifram
 
 ### 1. Presentation Mode HTML Structure
 
-The presentation mode generates HTML for a single slide at a time. Each slide is wrapped in a `.slide-container` that maintains the 16:9 aspect ratio (1280×720px). **CSS ordering matters here** — the deck's own CSS (`slideDeck.css`) is injected before a final reset so deck styles can't squash the layout:
+The presentation mode generates HTML for a single slide at a time. Each slide is wrapped in a `.slide-container` that maintains the 16:9 aspect ratio (1280×720px). **CSS ordering matters here** — the deck's own CSS (`slideDeck.css`) is injected before a final reset so deck styles can't squash the layout.
+
+Two constraints apply to every surface that hosts a slide, not just this one: the frame must be occupied at the origin by both the slide root and any wrapper it sits in, and the box model must not be altered for slide content. See [Slide Host Frame Contract](slide-host-frame-contract.md).
 
 ```html
 <!DOCTYPE html>
@@ -70,8 +72,12 @@ The presentation mode generates HTML for a single slide at a time. Each slide is
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- external_scripts (Chart.js, etc.) -->
   <style>
-    * { box-sizing: border-box; }
+    /* Scoped to html, body - NOT a universal `* { box-sizing }` rule.
+       box-sizing does not inherit, so this normalises the document shell
+       while slide content keeps the browser default (content-box), which
+       is what ground truth uses. A universal rule here diverges from it. */
     html, body {
+      box-sizing: border-box;
       width: 100%;
       height: 100%;
       overflow: hidden;

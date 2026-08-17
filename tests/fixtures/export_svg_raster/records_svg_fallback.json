@@ -1,0 +1,34 @@
+{
+  "title": "P5 raw-SVG fallback (records)",
+  "font_mode": "universal",
+  "slides": [
+    {
+      "width": 1280,
+      "height": 720,
+      "records": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "w": 1280,
+          "h": 720,
+          "fill": "FFFFFF",
+          "stroke": null,
+          "strokeW": 0,
+          "radius": 0,
+          "_depth": 0
+        },
+        {
+          "kind": "image",
+          "x": 88,
+          "y": 72,
+          "w": 240,
+          "h": 80,
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNDAiIGhlaWdodD0iODAiIHZpZXdCb3g9IjAgMCAyNDAgODAiPjxyZWN0IHdpZHRoPSIyNDAiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjMEIzRDY2Ii8+PGNpcmNsZSBjeD0iNDAiIGN5PSI0MCIgcj0iMjIiIGZpbGw9IiNFODcyMkEiLz48dGV4dCB4PSI3NiIgeT0iNTIiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNGRkZGRkYiPkFDTUU8L3RleHQ+PC9zdmc+",
+          "_depth": 1
+        }
+      ],
+      "notes": "Raw SVG record - exercises the sidecar's unchanged svgBlip fallback."
+    }
+  ]
+}
