@@ -99,5 +99,6 @@ markers = [
     "integration: marks tests as integration tests (require Databricks connection)",
     "live: marks tests that require a live Databricks connection (excluded in CI with -m 'not live')",
     "slow: marks tests as slow running",
+    "postgres: marks tests that require a reachable PostgreSQL (they self-skip when none is)",
 ]
 

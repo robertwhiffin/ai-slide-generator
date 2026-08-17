@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.schemas.agent_config import (
     AgentConfig,
-    GenieTool,
     resolve_agent_config,
     sanitize_agent_config_for_persist,
 )
@@ -53,6 +52,28 @@ class UpdateProfileRequest(BaseModel):
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
+def _without_template_id(agent_config: Any) -> Optional[dict]:
+    """Return the config with ``template_id`` nulled.
+
+    Template selection is SESSION-SCOPED state (a per-session choice, like a
+    Genie ``conversation_id``): profiles are user-global snapshots and must
+    never carry it, or loading a profile would resurrect another session's
+    template pin. Applied on READ too, so legacy profile rows that stored a
+    ``template_id`` before this rule existed can never leak one.
+    """
+    if not isinstance(agent_config, dict):
+        return agent_config
+    if agent_config.get("template_id") is None and "template_id" in agent_config:
+        return agent_config
+    return {**agent_config, "template_id": None}
+
+
+def _sanitize_profile_config(raw: Optional[dict | AgentConfig]) -> Optional[dict]:
+    """Strip all session-scoped state before storing or comparing a profile."""
+    sanitized = sanitize_agent_config_for_persist(raw)
+    return _without_template_id(sanitized)
+
+
 def _profile_to_dict(profile: ConfigProfile) -> dict:
     """Serialize a profile to a dict, eagerly reading all fields."""
     return {
@@ -60,7 +81,7 @@ def _profile_to_dict(profile: ConfigProfile) -> dict:
         "name": profile.name,
         "description": profile.description,
         "is_default": profile.is_default,
-        "agent_config": profile.agent_config,
+        "agent_config": _without_template_id(profile.agent_config),
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "created_by": profile.created_by,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
@@ -73,7 +94,7 @@ def _normalized_config_for_compare(raw: Optional[dict | AgentConfig]) -> dict:
         resolved = raw
     else:
         resolved = resolve_agent_config(raw)
-    normalized = sanitize_agent_config_for_persist(resolved)
+    normalized = _sanitize_profile_config(resolved)
     return normalized if normalized is not None else AgentConfig().model_dump()
 
 
@@ -123,7 +144,7 @@ async def list_profiles():
 @router.post("", status_code=201)
 async def create_profile(body: CreateProfileRequest):
     """Create a profile directly from a provided agent_config (no session required)."""
-    config_dict = sanitize_agent_config_for_persist(body.agent_config)
+    config_dict = _sanitize_profile_config(body.agent_config)
 
     with get_db_session() as db:
         # Check for duplicate agent_config among non-deleted profiles
@@ -187,9 +208,9 @@ async def save_from_session(session_id: str, body: SaveProfileRequest):
 
     # Prefer client-side config (has resolved defaults) over session's stored config
     if body.agent_config:
-        config_dict = sanitize_agent_config_for_persist(body.agent_config)
+        config_dict = _sanitize_profile_config(body.agent_config)
     else:
-        config_dict = sanitize_agent_config_for_persist(
+        config_dict = _sanitize_profile_config(
             resolve_agent_config(session.get("agent_config"))
         )
 
@@ -245,6 +266,9 @@ async def load_profile_into_session(session_id: str, profile_id: int):
             raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
         config = resolve_agent_config(agent_config)
+        # Legacy profile rows may still carry a template_id from before the
+        # session-scoped rule; never let it enter the target session.
+        config.template_id = None
         session.agent_config = config.model_dump()
 
     return {"status": "loaded", "agent_config": config.model_dump()}

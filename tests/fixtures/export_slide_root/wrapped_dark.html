@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* A pinned template's slide-root rule: one declaration block that
+         paints the root and sets base ink + family for the whole subtree.
+         The dark variant paints the slide body the same ground, so this
+         deck's background is identical with or without the wrapper. */
+      section, .slide.dark { background: #123456; }
+      section, .slide { color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+  </head>
+  <body>
+    <section data-label="Acme Overview">
+      <div class="slide dark">
+        <h1>Acme Quarterly Overview</h1>
+        <p>Synthetic fixture slide.</p>
+      </div>
+    </section>
+  </body>
+</html>

@@ -338,3 +338,351 @@ class TestSvgContentImageExtraction:
         # Verify the saved file is valid PNG (not raw SVG bytes)
         saved_bytes = (tmp_path / filenames[0]).read_bytes()
         assert saved_bytes[:8] == b'\x89PNG\r\n\x1a\n', "SVG should be converted to PNG"
+
+
+class TestTruncateHtmlBudget:
+    """``_truncate_html`` must never hand the LLM more than its budget.
+
+    WF-01: the function preserved the WHOLE ``<style>`` block unconditionally, so
+    for a design-system deck (~358 KB of CSS against a 15,000-char budget)
+    ``body_max = max_length - len(style) - 500`` went NEGATIVE, the
+    ``if body_max > 0`` guard failed, and the body was never truncated — a function
+    named "truncate" returning a document 25x its budget. The oversized prompt came
+    back ``400 "Input is too long for requested model"``, was swallowed to None,
+    and every slide degraded to a bare "Slide N" placeholder while the route still
+    answered 200 with a valid .pptx.
+    """
+
+    MAX = 15000
+
+    def _doc(self, css: str, body: str) -> str:
+        return f"<html><head><style>{css}</style></head><body>{body}</body></html>"
+
+    def test_document_within_budget_is_returned_verbatim(self):
+        converter = _make_converter()
+        doc = self._doc("body{color:red}", "<p>short</p>")
+        assert converter._truncate_html(doc) == doc
+
+    def test_small_stylesheet_keeps_the_original_body_budget(self):
+        """The WORKING path's arithmetic is pinned byte-for-byte.
+
+        A DS-OFF deck goes through here and produces real content today, so the
+        reserve of 500 and the slice point must not drift — a different prompt is a
+        different deck.
+        """
+        converter = _make_converter()
+        css = "body{color:red}"
+        body_text = "x" * 40000
+        out = converter._truncate_html(self._doc(css, body_text))
+
+        style_content = f"<style>{css}</style>"
+        body_content = f"<body>{body_text}</body>"
+        body_max = self.MAX - len(style_content) - 500
+        expected = (
+            f"<html><head>{style_content}</head>"
+            f"{body_content[:body_max]}...</html>"
+        )
+        assert out == expected
+
+    def test_oversized_stylesheet_still_fits_the_budget(self):
+        converter = _make_converter()
+        css = ".rule-%d{color:#123456}" % 0 + "".join(
+            ".r%d{color:#abcdef;background:#fedcba}" % i for i in range(12000)
+        )
+        assert len(css) > 300000, "fixture must dwarf the budget"
+        out = converter._truncate_html(self._doc(css, "<p>real body text</p>" * 500))
+        assert len(out) <= self.MAX
+
+    def test_oversized_stylesheet_leaves_room_for_both_halves(self):
+        """Neither half may be starved: colours come from the CSS, structure from
+        the body, and the model needs both to build the slide."""
+        converter = _make_converter()
+        css = "".join(".r%d{color:#abcdef}" % i for i in range(20000))
+        body = "<p>UNIQUE-BODY-MARKER</p>" + ("<div>filler</div>" * 2000)
+        out = converter._truncate_html(self._doc(css, body))
+
+        assert len(out) <= self.MAX
+        # CSS survives, and it is syntactically closed markup (not a sliced tag).
+        assert "<style>" in out and "</style>" in out
+        assert "color:#abcdef" in out
+        # The body survives too.
+        assert "UNIQUE-BODY-MARKER" in out
+        head = out[out.index("<head>") : out.index("</head>")]
+        after_head = out[out.index("</head>") + len("</head>") :]
+        assert len(head) > 1000, "CSS must not be starved to nothing"
+        assert len(after_head) > 1000, "body must not be starved to nothing"
+
+    def test_a_single_enormous_css_rule_does_not_discard_the_whole_stylesheet(self):
+        """A brand stylesheet often opens with one huge base64 @font-face. Cutting
+        back to the last complete rule would then keep almost nothing, so the hard
+        clip wins instead."""
+        converter = _make_converter()
+        css = "@font-face{src:url(data:font/woff2;base64,%s)}" % ("A" * 200000)
+        css += "".join(".r%d{color:#abcdef}" % i for i in range(5000))
+        out = converter._truncate_html(self._doc(css, "<p>body</p>" * 400))
+
+        assert len(out) <= self.MAX
+        head = out[out.index("<head>") : out.index("</head>")]
+        # Most of the CSS budget is used, rather than collapsing to a few hundred
+        # chars because the first '}' sits 200 KB in.
+        assert len(head) > 3000, f"CSS budget collapsed to {len(head)} chars"
+
+
+class TestWholesaleCodegenFailureIsLoud:
+    """A deck of empty placeholders must never be presented as a successful export.
+
+    When codegen fails for EVERY slide the jail's per-slide fallback emits bare
+    "Slide N" placeholders and the route answers 200 with a valid .pptx — measured
+    live as 4 slides x 941 B, sole text "Slide 1".."Slide 4". That is silent content
+    loss, so it is now raised. A PARTIAL failure still falls back per slide: that is
+    the AST guard's defence-in-depth path, where one rejected snippet must not cost
+    the whole export.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_slides_failing_codegen_raises_instead_of_exporting(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        slides = ["<html><body>one</body></html>", "<html><body>two</body></html>"]
+
+        with patch.object(
+            converter, "_generate_all_codes", AsyncMock(return_value=[None, None])
+        ), patch.object(converter, "_run_pptx_conversion") as mock_run:
+            with pytest.raises(PPTXConversionError) as excinfo:
+                await converter.convert_slide_deck(slides, str(out_path))
+
+        assert "all 2 slide" in str(excinfo.value)
+        # It fails BEFORE the converter runs, so no placeholder file is produced.
+        mock_run.assert_not_called()
+        assert not out_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_a_partial_codegen_failure_still_exports(self, tmp_path):
+        """Non-vacuity: the guard is scoped to WHOLESALE failure."""
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        slides = ["<html><body>one</body></html>", "<html><body>two</body></html>"]
+
+        with patch.object(
+            converter,
+            "_generate_all_codes",
+            AsyncMock(return_value=[None, "slide = prs.slides.add_slide(layout)"]),
+        ), patch.object(converter, "_run_pptx_conversion") as mock_run:
+            result = await converter.convert_slide_deck(slides, str(out_path))
+
+        assert result == str(out_path)
+        mock_run.assert_called_once()
+
+
+class TestAllSlidesFailingDownstreamIsAlsoLoud:
+    """The loud check must read the FINAL outcome, not just codegen.
+
+    Refusing to export when the LLM returned NOTHING was only half the defect. A
+    non-empty snippet can still fail LATER — rejected by the AST import allowlist
+    when the job dir is built, or raising when it executes inside the jail — and
+    each of those falls back to a placeholder slide. When that happens for EVERY
+    slide the runner still saves a valid, content-free .pptx and the route answers
+    200: the same silent loss WF-01 exists to kill, reached by a different route.
+
+    These go through the REAL jail (a subprocess), because the whole point is that
+    the verdict now comes from the post-validation, post-execution result rather
+    than from inspecting the generated text.
+    """
+
+    _VALID_DEF = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    slide = prs.slides.add_slide(prs.slide_layouts[6])\n"
+    )
+    #: Case (a): a VALID definition, so codegen "succeeded", plus a disallowed
+    #: import — the AST allowlist rejects it and the manifest records has_code=False.
+    _AST_REJECTED = "import socket\n" + _VALID_DEF
+    #: Case (b): passes the allowlist, then raises when executed in the jail.
+    _RAISES_AT_RUNTIME = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    raise RuntimeError('conversion failed')\n"
+    )
+    _GOOD = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    from pptx.util import Inches\n"
+        "    slide = prs.slides.add_slide(prs.slide_layouts[6])\n"
+        "    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))\n"
+        "    box.text_frame.text = 'real content'\n"
+    )
+
+    @staticmethod
+    def _slides(n):
+        return [f"<html><body><div class='slide'>{i}</div></body></html>" for i in range(n)]
+
+    @pytest.mark.asyncio
+    async def test_every_snippet_rejected_by_the_ast_allowlist_raises(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._AST_REJECTED, self._AST_REJECTED]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            with pytest.raises(PPTXConversionError) as excinfo:
+                await converter.convert_slide_deck(self._slides(2), str(out_path))
+
+        assert "no slide" in str(excinfo.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_every_snippet_failing_execution_raises(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._RAISES_AT_RUNTIME, self._RAISES_AT_RUNTIME]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            with pytest.raises(PPTXConversionError) as excinfo:
+                await converter.convert_slide_deck(self._slides(2), str(out_path))
+
+        assert "no slide" in str(excinfo.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_outcome_still_exports(self, tmp_path):
+        """GUARDRAIL 1C — the boundary, pinned in both directions.
+
+        Some slides real, some fallen back is the AST guard's documented
+        defence-in-depth path: one rejected snippet must not cost the whole export.
+        ONLY an all-slides-failed outcome raises.
+        """
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._GOOD, self._RAISES_AT_RUNTIME, self._AST_REJECTED]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            result = await converter.convert_slide_deck(self._slides(3), str(out_path))
+
+        assert result == str(out_path)
+        assert out_path.exists()
+        from pptx import Presentation
+
+        # Every slide is present — the two failures degraded individually.
+        assert len(Presentation(str(out_path)).slides) == 3
+
+    @pytest.mark.asyncio
+    async def test_one_surviving_slide_is_enough_to_export(self, tmp_path):
+        """The narrowest mixed case: exactly one slide renders."""
+        converter = _make_converter()
+        out_path = tmp_path / "deck.pptx"
+        codes = [self._RAISES_AT_RUNTIME, self._GOOD]
+
+        with patch.object(converter, "_generate_all_codes", AsyncMock(return_value=codes)):
+            result = await converter.convert_slide_deck(self._slides(2), str(out_path))
+
+        assert result == str(out_path)
+
+
+class TestTruncatedDocumentIsWellFormed:
+    """The starved-budget arithmetic overshot by exactly the body marker's 3
+    characters, so the final hard slice cut into the closing tag and the model was
+    handed a document ending in a malformed `</ht`."""
+
+    MAX = 15000
+
+    def test_the_starved_path_ends_in_a_well_formed_closing_tag(self):
+        converter = _make_converter()
+        css = "".join(".r%d{color:#abcdef}" % i for i in range(20000))
+        doc = f"<html><head><style>{css}</style></head><body>{'<p>x</p>' * 4000}</body></html>"
+
+        out = converter._truncate_html(doc)
+
+        assert len(out) <= self.MAX
+        assert out.endswith("</html>"), out[-40:]
+
+    def test_the_budget_is_met_without_the_backstop_slice_biting(self):
+        """The clamp is a backstop, not part of the arithmetic: the reconstruction
+        must already fit, so nothing is ever cut mid-tag."""
+        converter = _make_converter()
+        css = "@font-face{src:url(data:font/woff2;base64,%s)}" % ("A" * 200000)
+        doc = f"<html><head><style>{css}</style></head><body>{'<p>y</p>' * 3000}</body></html>"
+
+        out = converter._truncate_html(doc)
+
+        assert len(out) <= self.MAX
+        assert out.endswith("</html>")
+
+
+class TestSlideOutcomeReportMustBeComplete:
+    """A non-empty but SHORT report must not be accepted as success.
+
+    The gate read `if result.slide_results and not any(result.slide_results)`, so a
+    worker that reported success for slide 0, said nothing about slides 1..N-1 and
+    exited 0 would pass: `(True,)` is non-empty and contains a True. Not reachable
+    in today's runner — it emits exactly once per manifest entry, and its early
+    exits surface as a nonzero return code — but that is a property of the current
+    loop, not an invariant, and the report is what certifies the deck has content.
+
+    The length is therefore checked against the manifest the runner was ASKED to
+    report on, read back from the job dir rather than recomputed, so the two cannot
+    drift. Same reasoning that justified closing WH-H05 while it was inert.
+
+    Both existing semantics are preserved exactly: an EMPTY report still means
+    "unknown" (an older worker cannot manufacture a failure), and a FULL report with
+    at least one True still exports (partial success, Guardrail 1C).
+    """
+
+    _VALID = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        "    slide = prs.slides.add_slide(prs.slide_layouts[6])\n"
+    )
+
+    def _convert(self, tmp_path, slide_count, slide_results):
+        from src.services.converter_jail.jail import JailResult
+
+        converter = _make_converter()
+        assets = tmp_path / "assets"
+        assets.mkdir(exist_ok=True)
+        slide_inputs = [("<p>x</p>", [], [], str(assets)) for _ in range(slide_count)]
+        codes = [self._VALID for _ in range(slide_count)]
+        fake = JailResult(
+            returncode=0, timed_out=False, slide_results=slide_results
+        )
+        with patch("src.services.converter_jail.run_pptx_jail", return_value=fake):
+            converter._run_pptx_conversion(
+                codes, slide_inputs, str(tmp_path / "out.pptx")
+            )
+
+    def test_a_short_report_is_not_accepted_as_success(self, tmp_path):
+        from src.services.html_to_pptx import PPTXConversionError
+
+        with pytest.raises(PPTXConversionError) as excinfo:
+            self._convert(tmp_path, 3, (True,))
+
+        message = str(excinfo.value)
+        assert "1 of 3" in message, message
+        # Distinguishable from the all-failed verdict, for log triage.
+        assert "incomplete" in message.lower()
+
+    def test_a_report_longer_than_the_manifest_is_not_accepted(self, tmp_path):
+        """The other direction of the same disagreement: extra reports must not be
+        able to dilute an all-failed verdict into a pass."""
+        from src.services.html_to_pptx import PPTXConversionError
+
+        with pytest.raises(PPTXConversionError) as excinfo:
+            self._convert(tmp_path, 2, (False, False, True))
+
+        assert "3 of 2" in str(excinfo.value)
+
+    def test_an_empty_report_is_still_unknown(self, tmp_path):
+        """UNCHANGED semantics: a worker with no result channel must not be read as
+        "all slides failed"."""
+        self._convert(tmp_path, 3, ())  # must not raise
+
+    def test_a_full_report_with_mixed_outcomes_still_exports(self, tmp_path):
+        """UNCHANGED semantics (Guardrail 1C): partial success is not failure."""
+        self._convert(tmp_path, 3, (True, False, False))  # must not raise
+
+    def test_a_full_report_of_only_placeholders_still_raises(self, tmp_path):
+        """Regression guard on the verdict this gate exists for."""
+        from src.services.html_to_pptx import PPTXConversionError
+
+        with pytest.raises(PPTXConversionError) as excinfo:
+            self._convert(tmp_path, 3, (False, False, False))
+
+        assert "no slide rendered" in str(excinfo.value).lower()

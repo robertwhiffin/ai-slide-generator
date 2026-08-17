@@ -187,11 +187,11 @@ This only affects the UI authentication. If you use a `.env` file, edit that ins
 
 ### "Genie space not found"
 
-**Problem:** Configured Genie space doesn't exist or you don't have access.
+**Problem:** Configured Genie agent doesn't exist or you don't have access.
 
 **Solution:**
 
-1. **Verify Genie space ID:**
+1. **Verify Genie agent ID:**
    ```bash
    # Check settings in database
    psql -d ai_slide_generator -c "SELECT space_id, space_name FROM config_genie_spaces;"
@@ -205,7 +205,7 @@ This only affects the UI authentication. If you use a `.env` file, edit that ins
 
 3. **Update space ID:**
    - Find correct space ID in Databricks workspace
-   - Update in web UI (Settings → Genie Spaces)
+   - Update in web UI (Settings → Genie Agents)
    - Or update database directly
 
 ---

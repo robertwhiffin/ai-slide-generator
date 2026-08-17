@@ -25,7 +25,7 @@ Navigate to the application URL. You'll land directly on the slide generator in 
 
 ### Step 02: Configure Tools (Optional)
 
-The AgentConfigBar at the top shows your current tools (Genie spaces, etc.). You can add data sources before or after generating slides. Without any Genie spaces, the agent runs in prompt-only mode.
+The AgentConfigBar at the top shows your current tools (Genie agents, etc.). You can add data sources before or after generating slides. Without any Genie agents, the agent runs in prompt-only mode.
 
 ![AgentConfigBar](images/01-generating-slides/02-generator-view.png)
 
