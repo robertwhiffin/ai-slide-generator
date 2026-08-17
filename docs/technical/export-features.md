@@ -4,10 +4,32 @@
 
 The AI Slide Generator supports exporting slide decks in three formats:
 - **PDF**: Client-side generation using browser APIs
-- **PPTX**: Server-side async generation using LLM-powered conversion with polling
-- **Google Slides**: Server-side export to a new Google Slides presentation via OAuth2
+- **PPTX**: Server-side render of the deck HTML via the huashu pipeline — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
+- **Google Slides**: Synchronous server-side export — the rendered PPTX is uploaded to Drive, which converts it to native editable Slides
 
 All export options are accessible through a unified dropdown menu in the slide panel.
+
+### The export routes, and which are live
+
+| Route | Status | Notes |
+|---|---|---|
+| `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML |
+| `POST /api/export/pptx/editable/from-records` | **Live — fallback** | DOM-walker records → pptxgenjs. Fires on a `503` **or** when the error text indicates the pipeline is unavailable or installing — not status-code-only |
+| `POST /api/export/google-slides/from-huashu` | **Live — primary** | Synchronous; uploads the rendered PPTX to Drive for conversion. Returns `presentation_id`, `presentation_url`, `total_slides`, `succeeded`, `failures` |
+| `POST /api/export/google-slides/from-records` | **Live — fallback** | The Google equivalent of the records fallback |
+| `POST /api/export/pptx/editable/from-images` | Live, unreachable | Rasterised path, reached only when `fontMode === 'screenshot'`, which no UI surface passes |
+| `POST /api/export/pptx` · `/pptx/async` | **Legacy** | LLM code-generation; superseded, and **no caller exists in this repository's frontend** |
+| `POST /api/export/google-slides` | **Legacy** | LLM code-generation twin; superseded, no caller in this repository's frontend |
+
+PDF export is client-side and is not a route.
+
+**Table fidelity differs by route.** The huashu path emits **positioned text boxes and no `<a:tbl>`** — its DOM walker produces no records for `<td>`/`<th>`, so cells are flattened into absolutely-positioned elements. The result is positionally faithful but not editable *as a table*. The legacy code-generation path prompts an LLM to write `python-pptx`, and its prompt uses `add_table`, so it *can* produce a native `<a:tbl>` — though being model-generated, that is not guaranteed per run. Treat the huashu flattening as current behaviour and a known limitation; nothing in the code establishes noneditable tables as a permanent product contract.
+
+**A deck's leading webfont `@import` must stay first in its stylesheet.** `@import` is only valid at the top of a stylesheet, so anything prepended to the deck's CSS discards it and the export silently falls back to a system font. The Python `build_slide_html` builder achieves this by emitting the deck's CSS in its **own** `<style>` element. `buildStandaloneDeckDocument` instead concatenates deck and wrapper CSS into a single `<style>`, and remains correct only because the deck's CSS is placed first within it.
+
+**No universal `* { box-sizing }` rule is applied** by either export builder, so slide content keeps the browser default. The resets that do exist are narrower than "scoped to `html, body`" — the Python builder's shell reset omits `box-sizing` entirely, and the preview host applies `box-sizing: border-box` to the host's direct child rather than to the document shell. See [Slide Host Frame Contract](slide-host-frame-contract.md).
+
+**Known export limitations.** Inline background pills (used for agenda badges) are centred against their resolved ancestor, so badges on a wide list can land away from their item. `<code>` chips do not receive their pill background. The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
 
 ## User Guide
 
@@ -27,18 +49,17 @@ All export options are accessible through a unified dropdown menu in the slide p
 
 3. **Export as PowerPoint**
    - Click "Export as PowerPoint"
-   - Charts are captured client-side before sending to server
-   - The export runs asynchronously on the server with real-time progress updates
-   - Progress displays "Processing slide X of Y..." during conversion
+   - The primary path sends only `session_id` to the **synchronous** huashu route and downloads the returned PPTX blob — there is no job/poll cycle
+   - If that pipeline is unavailable on the deployment (HTTP 503, or an error naming the pipeline as unavailable or still installing), the UI extracts DOM records client-side and retries through the records fallback
    - A PPTX file will be downloaded automatically when complete
    - Filename format: `{slide_deck_title}_{timestamp}.pptx`
 
 ### Export Status
 
-- The export button shows "Exporting PowerPoint: Processing slide X of Y..." during PPTX export
+- The export button shows "Generating PPTX…" while the primary path runs, and "Falling back to records pipeline (slower)…" if the fallback is taken
 - The dropdown menu closes automatically when an export starts
-- Progress updates every 2 seconds via polling
-- If an error occurs, an alert will display the error message
+- A **partial** export is reported loudly: a persistent error toast names each slide that failed, because the downloaded file is silently missing them
+- If an error occurs, the message is surfaced to the user
 
 ## Technical Details
 
@@ -81,7 +102,17 @@ All export options are accessible through a unified dropdown menu in the slide p
 - Requires modern browser with canvas support
 - Charts are rendered as images (not editable in PDF)
 
-### PPTX Export (Server-Side Async)
+### PPTX Export (Server-Side Async) — legacy
+
+> **Historical note.** The LLM code-generation path described in this section
+> (`src/services/html_to_pptx.py`, `POST /api/export/pptx` and its `/async`
+> twin, and the `export_job_queue` worker) is **superseded** by the huashu
+> render above and is no longer the route the UI calls: no caller exists in
+> this repository's checked-in frontend, though external direct callers cannot
+> be ruled out from here. It re-runs per-slide code generation on every request and is
+> therefore non-deterministic. The code still exists but should be treated as
+> legacy; the detail below is retained for readers working on that code and is
+> not a description of current export behaviour.
 
 **Location**: 
 - `src/api/routes/export.py` - API endpoints
@@ -183,7 +214,7 @@ All export options are accessible through a unified dropdown menu in the slide p
 
 **Location:**
 - `src/api/routes/google_slides.py` — API endpoints (auth + export)
-- `src/api/routes/settings/google_credentials.py` — Credential management endpoints
+- `src/api/routes/admin.py` — Google credential management endpoints (upload, status, delete)
 - `src/services/google_slides_auth.py` — OAuth2 flow and token management
 - `src/services/html_to_google_slides.py` — LLM-powered converter
 

@@ -43,7 +43,11 @@ from src.domain.slide import Slide, has_slide_wrapper
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_safety import scan_html_for_unsafe_patterns
-from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
+from src.utils.html_utils import (
+    extract_canvas_ids_from_script,
+    find_slide_roots,
+    split_script_by_canvas,
+)
 from src.utils.js_validator import validate_and_fix_javascript
 from src.utils.spotlight import spotlight
 from src.utils.text_caps import cap_tool_output
@@ -986,10 +990,10 @@ class SlideGeneratorAgent:
                     f"LLM returned conversational text instead of HTML: {pattern}",
                 )
 
-        # Check for at least one slide div
+        # Check for at least one slide root (any tag carrying the `slide` class)
         soup = BeautifulSoup(llm_response, "html.parser")
-        slide_divs = soup.find_all("div", class_="slide")
-        if not slide_divs:
+        slide_roots = find_slide_roots(soup)
+        if not slide_roots:
             return False, "No <div class='slide'> elements found in response"
 
         return True, ""
@@ -1089,10 +1093,10 @@ class SlideGeneratorAgent:
             raise AgentError("LLM response is empty; expected slide HTML output")
 
         soup = BeautifulSoup(llm_response, "html.parser")
-        slide_divs = soup.find_all("div", class_="slide")
+        slide_roots = find_slide_roots(soup)
         replacement_css = self._extract_css_from_response(soup)
 
-        if not slide_divs:
+        if not slide_roots:
             raise AgentError(
                 "No slide divs found in LLM response. Expected at least one "
                 "<div class='slide'>...</div> block."
@@ -1103,8 +1107,8 @@ class SlideGeneratorAgent:
         canvas_to_slide: dict[str, int] = {}
         canvas_ids: list[str] = []
 
-        for idx, slide_div in enumerate(slide_divs):
-            slide_html = str(slide_div)
+        for idx, slide_root in enumerate(slide_roots):
+            slide_html = str(slide_root)
             if not slide_html.strip():
                 raise AgentError(f"Slide {idx} is empty")
 
@@ -1112,7 +1116,7 @@ class SlideGeneratorAgent:
             replacement_slides.append(slide)
 
             # Index canvases in this slide
-            for canvas in slide_div.find_all("canvas"):
+            for canvas in slide_root.find_all("canvas"):
                 canvas_id = canvas.get("id")
                 if canvas_id:
                     canvas_to_slide[canvas_id] = idx

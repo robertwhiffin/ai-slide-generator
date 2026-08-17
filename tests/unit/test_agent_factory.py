@@ -273,6 +273,219 @@ def test_get_prompt_content_resolves_deck_prompt_id():
     assert "Quarterly review deck template" in result["system_prompt"]
 
 
+# ---------------------------------------------------------------------------
+# Design System wiring (Phase 2): design_system_id resolves compiled_style_content
+# through the SAME build_generation_system_prompt seam, with precedence
+# design_system_id -> slide_style_id -> default. The legacy slide_style_id path
+# must remain byte-for-byte unchanged when no design system is selected.
+# ---------------------------------------------------------------------------
+
+
+def _dispatching_db(*, design_system=None, slide_style=None, deck_prompt=None):
+    """MagicMock DB whose query(Model).filter_by(...).first() dispatches by model.
+
+    Lets a single test control what each of the DesignSystem / SlideStyleLibrary /
+    SlideDeckPromptLibrary lookups returns, so precedence can be asserted.
+    """
+    from src.database.models import (
+        DesignSystem,
+        SlideDeckPromptLibrary,
+        SlideStyleLibrary,
+    )
+
+    mapping = {
+        DesignSystem: design_system,
+        SlideStyleLibrary: slide_style,
+        SlideDeckPromptLibrary: deck_prompt,
+    }
+    queried_models = []
+    db = MagicMock()
+
+    def _query(model):
+        queried_models.append(model)
+        q = MagicMock()
+        q.filter_by.return_value.first.return_value = mapping.get(model)
+        return q
+
+    db.query.side_effect = _query
+    db.queried_models = queried_models
+    return db
+
+
+def _run_with_db(config, db, mode="generate"):
+    from src.services.agent_factory import _get_prompt_content
+
+    with patch("src.core.database.get_db_session") as mock_get_db:
+        mock_get_db.return_value.__enter__ = MagicMock(return_value=db)
+        mock_get_db.return_value.__exit__ = MagicMock(return_value=False)
+        return _get_prompt_content(config, mode=mode)
+
+
+def test_design_system_id_resolves_compiled_style_content():
+    """A selected design system's compiled_style_content reaches the pre-assembled
+    system prompt via the existing seam."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.services.design_system_compiler import (
+        _COMPILER_VERSION_MARKER,
+        _CURRENCY_SENTINEL,
+    )
+
+    config = AgentConfig(design_system_id=99)
+    ds = MagicMock()
+    # CURRENT artifact -> injected verbatim (stale-artifact recompute is covered by
+    # the state matrix in test_ds_generation_state_matrix.py).
+    #
+    # Shaped like real compiler output. v13: currency is proven by the leading
+    # structural sentinel, NOT by the header line — the header contains the
+    # user-controlled name by construction, and five successive header rules were
+    # each defeated through it. The human-readable marker still rides on the header
+    # in its fixed slot, so both are present here.
+    ds.compiled_style_content = (
+        _CURRENCY_SENTINEL
+        + "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " ACME-DS-COMPILED"
+        + "\n\n:root { --brand-core-primary: #123456; }"
+    )
+    db = _dispatching_db(design_system=ds)
+
+    result = _run_with_db(config, db)
+
+    assert result["pre_assembled"] is True
+    assert "ACME-DS-COMPILED" in result["system_prompt"]
+    assert "--brand-core-primary" in result["system_prompt"]
+
+
+def test_design_system_id_resolves_in_edit_mode():
+    """EDIT mode resolves a design system's compiled_style_content through the
+    editing-prompt seam, exactly as generation does — so on-brand styling applies
+    when refining an existing deck, not just when generating a new one."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.services.design_system_compiler import (
+        _COMPILER_VERSION_MARKER,
+        _CURRENCY_SENTINEL,
+    )
+
+    config = AgentConfig(design_system_id=99)
+    ds = MagicMock()
+    # v13: the leading structural sentinel is what makes this artifact CURRENT.
+    ds.compiled_style_content = (
+        _CURRENCY_SENTINEL
+        + "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " ACME-DS-EDIT-MARKER"
+        + "\n\n:root { --brand-core-primary: #123456; }"
+    )
+    db = _dispatching_db(design_system=ds)
+
+    result = _run_with_db(config, db, mode="edit")
+
+    assert result["pre_assembled"] is True
+    assert "ACME-DS-EDIT-MARKER" in result["system_prompt"]
+
+
+def test_design_system_takes_precedence_over_slide_style():
+    """When both are set, the design system wins and the slide style is not used."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.services.design_system_compiler import (
+        _COMPILER_VERSION_MARKER,
+        _CURRENCY_SENTINEL,
+    )
+
+    config = AgentConfig(design_system_id=99, slide_style_id=42)
+    ds = MagicMock()
+    # Real artifact shape (v13): a leading currency sentinel — which is what version
+    # detection reads — then the header line "HEADER: <marker> <name>". An artifact
+    # with no sentinel (any pre-v13 row) correctly recompiles.
+    ds.compiled_style_content = (
+        _CURRENCY_SENTINEL
+        + "SLIDE VISUAL STYLE: " + _COMPILER_VERSION_MARKER + " DS-MARKER\n\nbody"
+    )
+    style = MagicMock()
+    style.style_content = "LEGACY-STYLE-MARKER"
+    style.image_guidelines = None
+    db = _dispatching_db(design_system=ds, slide_style=style)
+
+    result = _run_with_db(config, db)
+
+    assert "DS-MARKER" in result["system_prompt"]
+    assert "LEGACY-STYLE-MARKER" not in result["system_prompt"]
+
+
+def test_design_system_missing_falls_back_to_default():
+    """A dangling design_system_id degrades to the default style, not a crash."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99)
+    db = _dispatching_db(design_system=None)
+
+    result = _run_with_db(config, db)
+
+    assert result["pre_assembled"] is True
+    # DEFAULT_SLIDE_STYLE marker present.
+    assert "Modern sans-serif font" in result["system_prompt"]
+
+
+def test_design_system_recompute_failure_falls_back_to_default():
+    """A design system with no compiled artifact triggers the lazy recompute; when
+    that recompute fails (here: a record whose token/file relationships cannot be
+    walked), resolution degrades to the default style rather than crashing.
+    Successful lazy recompute of real records is covered by the state matrix in
+    test_ds_generation_state_matrix.py."""
+    from src.api.schemas.agent_config import AgentConfig
+
+    config = AgentConfig(design_system_id=99)
+    ds = MagicMock()
+    ds.compiled_style_content = None  # stale/missing -> recompute path
+    # Make walking the relationships the thing that fails, which is what the
+    # docstring describes. (A bare MagicMock no longer suffices: the compiler
+    # sanitizes every interpolated value through ``str()``, so mock attributes
+    # serialize instead of raising.)
+    ds.tokens.__iter__.side_effect = RuntimeError("relationship cannot be walked")
+    db = _dispatching_db(design_system=ds)
+
+    result = _run_with_db(config, db)
+
+    assert "Modern sans-serif font" in result["system_prompt"]
+
+
+def test_slide_style_path_injects_identically_when_no_design_system():
+    """BACKWARD COMPAT: with only slide_style_id set, the resolved prompt is
+    byte-identical to feeding style_content straight into the seam — the design
+    system code path does not alter the legacy result at all."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.core.prompt_modules import build_generation_system_prompt
+
+    config = AgentConfig(slide_style_id=42)
+    style = MagicMock()
+    style.style_content = "LEGACY-STYLE-MARKER"
+    style.image_guidelines = "Use logo.png"
+    db = _dispatching_db(slide_style=style)
+
+    result = _run_with_db(config, db)
+
+    expected = build_generation_system_prompt(
+        slide_style="LEGACY-STYLE-MARKER",
+        deck_prompt=None,
+        image_guidelines="Use logo.png",
+    )
+    assert result["system_prompt"] == expected
+    assert result["pre_assembled"] is True
+
+
+def test_design_system_not_queried_when_unset():
+    """BACKWARD COMPAT: with design_system_id unset, DesignSystem is never queried
+    — the new branch cannot interfere with the legacy slide_style path."""
+    from src.api.schemas.agent_config import AgentConfig
+    from src.database.models import DesignSystem
+
+    config = AgentConfig(slide_style_id=42)
+    style = MagicMock()
+    style.style_content = "LEGACY-STYLE-MARKER"
+    style.image_guidelines = None
+    db = _dispatching_db(slide_style=style)
+
+    _run_with_db(config, db)
+
+    assert DesignSystem not in db.queried_models
+
+
 def test_multiple_genie_tools(default_prompts):
     """Multiple Genie tools in config each produce a tool (though only last wins name)."""
     from src.api.schemas.agent_config import AgentConfig, GenieTool
@@ -378,6 +591,62 @@ class TestBuildToolsNewTypes:
         assert any(t.name == "mcp_jira_search" for t in tools)
         mock_build.assert_called_once()
 
+
+class TestBrandAssetToolRegistration:
+    """Phase 2 reset: search_brand_assets is registered ONLY when an ACTIVE design
+    system is selected, bound to config.design_system_id; search_images is
+    unaffected.
+
+    These are WIRING tests, so the active-system lookup is stubbed. Its real
+    behaviour against real rows — active, tombstoned, unknown, and a lookup
+    failure — is covered by
+    ``TestBrandAssetToolRequiresAnActiveDesignSystem`` below.
+    """
+
+    @staticmethod
+    def _active():
+        return patch("src.services.agent_factory._design_system_is_active", return_value=True)
+
+    def test_no_design_system_no_brand_asset_tool(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        names = [t.name for t in _build_tools(AgentConfig(), {})]
+        assert "search_images" in names
+        assert "search_brand_assets" not in names
+
+    def test_design_system_set_adds_brand_asset_tool(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        with self._active():
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=7), {})]
+        assert "search_images" in names
+        assert "search_brand_assets" in names
+
+    def test_brand_asset_tool_bound_to_design_system_id(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services import agent_factory
+
+        with self._active(), patch(
+            "src.services.agent_factory.build_ds_asset_tool"
+        ) as mock_build:
+            marker = MagicMock()
+            marker.name = "search_brand_assets"
+            mock_build.return_value = marker
+            tools = agent_factory._build_tools(AgentConfig(design_system_id=99), {})
+
+        mock_build.assert_called_once_with(99)
+        assert marker in tools
+
+    def test_brand_asset_tool_not_built_without_design_system(self):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services import agent_factory
+
+        with patch("src.services.agent_factory.build_ds_asset_tool") as mock_build:
+            agent_factory._build_tools(AgentConfig(), {})
+        mock_build.assert_not_called()
+
     @patch("src.services.agent_factory.build_agent_bricks_tool")
     @patch("src.services.agent_factory.build_model_endpoint_tool")
     @patch("src.services.agent_factory.build_vector_tool")
@@ -405,3 +674,133 @@ class TestBuildToolsNewTypes:
         tools = _build_tools(config, {})
         # 1 image search + 5 tool types = 6
         assert len(tools) == 6
+
+
+class TestBrandAssetToolRequiresAnActiveDesignSystem:
+    """``search_brand_assets`` must be gated on the same resolved-ACTIVE design
+    system the PROMPT branch resolves.
+
+    The prompt branch filters ``is_active=True`` and, for a tombstone, degrades to
+    exactly the no-design-system prompt. Registration keyed on
+    ``design_system_id is not None`` alone, so a session pinned to a SOFT-DELETED
+    system got the tool anyway: measured live, an unfiltered call returned
+    "Found 2 brand asset(s)" for the dead system with ready-to-use handles, and the
+    model embedded one. That let NEW content be authored against a DELETED brand
+    while the prompt carried no brand instructions at all — the worst of both
+    states, and provably not the intent, since the prompt branch's own filter is
+    the statement of intent.
+
+    This is the GENERATION path only. The asset-serving and deck-render paths
+    deliberately keep resolving a tombstone's bytes (see the D7 ruling and
+    ``TestTombstonedDesignSystemStillResolvesStoredDeckAssets``) so historic decks
+    keep their fonts and images.
+    """
+
+    @staticmethod
+    def _db(session):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            yield session
+
+        return patch("src.core.database.get_db_session", _cm)
+
+    @staticmethod
+    def _make_ds(session, *, name, is_active):
+        from src.database.models.design_system import DesignSystem, DesignSystemAsset
+
+        ds = DesignSystem(name=name, is_active=is_active)
+        ds.assets.append(
+            DesignSystemAsset(
+                kind="illustration",
+                filename="probe-dot.png",
+                mime="image/png",
+                data=b"\x89PNG",
+                size_bytes=4,
+            )
+        )
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+        return ds
+
+    @pytest.fixture
+    def session(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+        from sqlalchemy.pool import StaticPool
+
+        import src.database.models  # noqa: F401 - register models with Base.metadata
+        from src.core.database import Base
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        with Session(engine) as s:
+            yield s
+        engine.dispose()
+
+    def test_active_design_system_registers_the_tool(self, session):
+        """Guards against over-fixing: the working path must stay working."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._make_ds(session, name="Live DS", is_active=True)
+        with self._db(session):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=ds.id), {})]
+        assert "search_brand_assets" in names
+        assert "search_images" in names
+
+    def test_tombstoned_design_system_does_not_register_the_tool(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._make_ds(session, name="Dead DS", is_active=False)
+        with self._db(session):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=ds.id), {})]
+        assert "search_brand_assets" not in names
+        # The legacy image tool is untouched — generation still has a way to
+        # find pictures, exactly as on the no-design-system path.
+        assert "search_images" in names
+
+    def test_soft_deleting_a_live_system_withdraws_the_tool(self, session):
+        """The transition itself, in one test: same id, same config, tool gone."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        ds = self._make_ds(session, name="Doomed DS", is_active=True)
+        config = AgentConfig(design_system_id=ds.id)
+        with self._db(session):
+            before = [t.name for t in _build_tools(config, {})]
+            ds.is_active = False
+            session.commit()
+            after = [t.name for t in _build_tools(config, {})]
+        assert "search_brand_assets" in before
+        assert "search_brand_assets" not in after
+
+    def test_unknown_design_system_id_does_not_register_the_tool(self, session):
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        with self._db(session):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=424242), {})]
+        assert "search_brand_assets" not in names
+
+    def test_a_lookup_failure_fails_closed(self, caplog):
+        """A DB failure must degrade the SAME way the prompt branch does — with no
+        brand material — rather than advertising a tool whose own lookup would
+        fail too."""
+        from src.api.schemas.agent_config import AgentConfig
+        from src.services.agent_factory import _build_tools
+
+        def _boom():
+            raise RuntimeError("database unreachable")
+
+        with patch("src.core.database.get_db_session", _boom):
+            names = [t.name for t in _build_tools(AgentConfig(design_system_id=7), {})]
+        assert "search_brand_assets" not in names
+        assert "search_images" in names
