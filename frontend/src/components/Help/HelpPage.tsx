@@ -78,7 +78,7 @@ const OverviewTab: React.FC<{
       <h2 className="text-lg font-semibold text-gray-800 mb-3">What is databricks tellr?</h2>
       <ul className="list-disc list-inside text-gray-600 space-y-2">
         <li>Creates presentation slides from natural language using AI</li>
-        <li>Pulls data from Databricks Genie spaces for data-driven presentations</li>
+        <li>Pulls data from Databricks Genie agents for data-driven presentations</li>
         <li>Supports iterative editing through conversational interface</li>
         <li>Programmatic API via MCP — call tellr from agents, CI, or other apps</li>
       </ul>
@@ -272,7 +272,7 @@ const VerificationTab: React.FC = () => (
           You can view the original Genie queries and data that were used to generate your slides:
         </p>
         <ul className="list-disc list-inside text-gray-700 space-y-2">
-          <li><strong>Genie Data button</strong> in the header — opens the Genie conversation in a new tab. If multiple Genie spaces are configured, a dropdown lets you choose which one to open.</li>
+          <li><strong>Genie Data button</strong> in the header — opens the Genie conversation in a new tab. If multiple Genie agents are configured, a dropdown lets you choose which one to open.</li>
           <li><strong>"View Source Data in Genie" link</strong> — available in the verification details popup</li>
         </ul>
         <p className="text-sm text-gray-500 mt-2">
@@ -370,14 +370,14 @@ const ProfilesTab: React.FC = () => (
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">What are Profiles?</h2>
       <p className="text-gray-600">
-        Profiles store your configuration for Genie space connections and custom prompts.
+        Profiles store your configuration for Genie agent connections and custom prompts.
       </p>
     </section>
 
     <section>
       <h2 className="text-lg font-semibold text-gray-800 mb-3">Profile Configuration Tabs</h2>
       <ul className="list-disc list-inside text-gray-600 space-y-2">
-        <li><span className="font-medium">Genie Spaces:</span> Connect to your Databricks Genie data source</li>
+        <li><span className="font-medium">Genie Agents:</span> Connect to your Databricks Genie data source</li>
         <li><span className="font-medium">Deck Prompt:</span> Select a presentation template from the library</li>
         <li><span className="font-medium">Slide Style:</span> Select a visual style for your slides</li>
         <li><span className="font-medium">Advanced:</span> System prompts for power users (rarely modified)</li>

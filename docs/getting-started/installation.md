@@ -4,7 +4,7 @@
 
 - Databricks workspace with Apps enabled
 - Permission to create a Lakebase (or create a schema in an existing one)
-- Genie space with your data (optional — tellr works in prompt-only mode without Genie)
+- Genie agent with your data (optional — tellr works in prompt-only mode without Genie)
 
 ## Install
 
