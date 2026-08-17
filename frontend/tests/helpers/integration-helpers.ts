@@ -172,7 +172,7 @@ export async function expandConfigBar(page: Page): Promise<void> {
 
 /**
  * Add a Genie space via the tool picker flow:
- *   1. Click "+ Genie Space" button → genie discovery dropdown appears
+ *   1. Click "+ Genie Agent" button → genie discovery dropdown appears
  *   2. Click the space name → genie-detail-panel appears
  *   3. Click "Save & Add" → panel hides
  */

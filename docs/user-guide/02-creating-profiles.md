@@ -5,7 +5,7 @@ This guide explains how to save and load configuration snapshots (profiles) in D
 ## Overview
 
 Each session carries its own agent configuration that controls:
-- **Tools** - Genie spaces and MCP servers for data queries
+- **Tools** - Genie agents and MCP servers for data queries
 - **Slide Style** - CSS styling for generated slides
 - **Deck Prompt** - Template that guides slide structure
 
@@ -20,11 +20,11 @@ You can save a session's configuration as a named **profile** for reuse, or load
 
 ### Step 01: Open the AgentConfigBar
 
-The AgentConfigBar at the top of the generator shows your current session's tools and settings. From here you can add Genie spaces, select a slide style, and choose a deck prompt.
+The AgentConfigBar at the top of the generator shows your current session's tools and settings. From here you can add Genie agents, select a slide style, and choose a deck prompt.
 
 ### Step 02: Add Data Sources
 
-Click the add button to browse available Genie spaces and MCP servers. Select one or more to add them to your session. Each Genie space appears as a chip in the toolbar.
+Click the add button to browse available Genie agents and MCP servers. Select one or more to add them to your session. Each Genie agent appears as a chip in the toolbar.
 
 ### Step 03: Select Style and Prompt
 
@@ -66,7 +66,7 @@ Remove profiles you no longer need. This does not affect sessions that previousl
 
 | Setting | Description | Stored In |
 |---------|-------------|-----------|
-| Tools | Genie spaces and MCP servers | `agent_config.tools` |
+| Tools | Genie agents and MCP servers | `agent_config.tools` |
 | Slide Style | Visual styling | `agent_config.slide_style_id` |
 | Deck Prompt | Generation template | `agent_config.deck_prompt_id` |
 | System Prompt | Custom system instructions (advanced) | `agent_config.system_prompt` |
@@ -75,7 +75,7 @@ Remove profiles you no longer need. This does not affect sessions that previousl
 
 - **Start without a profile**: Just open the app and start chatting -- configure tools as needed
 - **Save after tuning**: Once you find a good combination of tools and settings, save it as a profile
-- **Multiple Genie spaces**: A single session can query multiple Genie spaces simultaneously
+- **Multiple Genie agents**: A single session can query multiple Genie agents simultaneously
 - **Quick context switch**: Load different profiles to switch between reporting workflows
 
 ## Related Guides

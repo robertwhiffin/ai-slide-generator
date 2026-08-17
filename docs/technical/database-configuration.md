@@ -1,8 +1,5 @@
 # Database Configuration System
 
-**Status:** Complete - Configuration & Session Models  
-**Last Updated:** April 2, 2026
-
 ## Overview
 
 The AI Slide Generator uses a PostgreSQL database to manage configuration profiles. This replaces the previous YAML-based configuration system and enables:
@@ -16,7 +13,7 @@ The AI Slide Generator uses a PostgreSQL database to manage configuration profil
 
 ### Database Schema
 
-The database consists of configuration and session tables:
+The database holds **28 tables**, every `__tablename__` declared under `src/database/models`. A table added there without a line here makes this inventory wrong, and the fixtures that reset schema between tests are keyed off the same list.
 
 **Configuration Tables:**
 1. **`config_profiles`** - Named configuration snapshots with `agent_config` JSON, plus **`llm_judge_backend`** (`mlflow` \| `direct`) for slide verification (default `mlflow`; see [LLM as Judge](llm-as-judge-verification.md))
@@ -29,25 +26,34 @@ The database consists of configuration and session tables:
 8. **`google_oauth_tokens`** - Per-user encrypted Google OAuth tokens (unique on `user_identity` only)
 9. **`user_profile_preferences`** - Per-user default profile preferences
 
+**Design System Tables:** (all in `src/database/models/design_system.py`; see [Design System Library](design-system-library.md))
+10. **`design_system`** - Parent record: name, description, author, active/default flags, and `compiled_style_content`
+11. **`design_system_asset`** - Binary brand assets and webfonts, bucketed by `kind`
+12. **`design_system_token`** - Colour, type and spacing tokens, bucketed by `group`
+13. **`design_system_file`** - Verbatim bundle files, addressable by path; binary entries reference an asset row rather than re-storing bytes
+14. **`design_system_template`** - Named slide templates, with an optional `thumbnail_asset_id` (`ON DELETE SET NULL`)
+
 **Session Tables:**
-10. **`user_sessions`** - User conversation sessions with processing locks and contributor support
-11. **`session_messages`** - Chat messages with request_id for polling
-12. **`session_slide_decks`** - Slide deck state per session with editing locks and optimistic concurrency
-13. **`slide_deck_versions`** - Save point snapshots (up to 40 per session)
-14. **`chat_requests`** - Async chat request tracking for polling mode
-15. **`export_jobs`** - Async PPTX export job tracking
-16. **`deck_contributors`** - Deck sharing/collaboration permissions (user/group access)
+15. **`user_sessions`** - User conversation sessions with processing locks and contributor support
+16. **`session_messages`** - Chat messages with request_id for polling
+17. **`session_slide_decks`** - Slide deck state per session with editing locks and optimistic concurrency
+18. **`slide_deck_versions`** - Save point snapshots (up to 40 per session)
+19. **`chat_requests`** - Async chat request tracking for polling mode
+20. **`export_jobs`** - Async PPTX export job tracking
+21. **`deck_contributors`** - Deck sharing/collaboration permissions (user/group access)
 
 **Asset Tables:**
-17. **`image_assets`** - Uploaded images with binary data and thumbnails
+22. **`image_assets`** - Uploaded images with binary data and thumbnails
 
 **Feedback & Monitoring Tables:**
-18. **`feedback_conversations`** - AI-assisted feedback chat storage with structured summaries
-19. **`survey_responses`** - User satisfaction survey data
-20. **`request_logs`** - Per-request performance metrics
+23. **`feedback_conversations`** - AI-assisted feedback chat storage with structured summaries
+24. **`survey_responses`** - User satisfaction survey data
+25. **`request_logs`** - Per-request performance metrics
+26. **`usage_events`** - Durable login/deck activity log for admin analytics. Never pruned, and `session_id` is **not** a foreign key, which the column's own comment states is intentional so that events survive session deletion
 
-**Identity Tables:**
-21. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)
+**Identity & Key Tables:**
+27. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)
+28. **`encryption_keys`** - Single-row (`id = 1`) Fernet master key for Google OAuth credential and token encryption, held in the ACL-governed data schema rather than `app.yaml`
 
 ### Entity Relationships
 
@@ -240,6 +246,102 @@ class SlideStyleLibrary(Base):
 2. Each session can select one style via `agent_config.slide_style_id`
 3. When generating slides, the style content is included in the system prompt
 4. `is_system=True` styles (e.g., "System Default") are protected from user modification
+
+### DesignSystem
+
+Parent record for an uploaded brand bundle. Org-shared; see [Design System Library](design-system-library.md).
+
+```python
+class DesignSystem(Base):
+    id: int
+    name: str                        # Unique among active rows; a soft-deleted name is freed for re-import
+    description: str | None
+    created_by: str | None           # Author. NULLABLE - a NULL/blank row is ADMIN-ONLY to mutate
+    published: bool                  # Declarative only; not used as a query predicate anywhere
+    is_default: bool                 # The workspace org default. Settable only from /admin -> "Design System"
+    is_active: bool                  # False = soft-deleted (hidden, not gone - see below)
+    version: int
+    manifest_json: dict | None       # The parsed _ds_manifest.json (tokens[], templates[], cards[])
+    compiled_style_content: str|None # The flattened prompt artifact; stamped with COMPILER_VERSION
+    font_mapping_json: dict | None   # Font families -> weight/style variants, paths and token linkage
+    created_at: datetime
+    updated_by: str | None
+    updated_at: datetime
+```
+
+**Soft delete retains the bytes; it does not guarantee a stored deck still resolves them.** `is_active=False` hides the row and stops it being selected for new decks, and the asset route keeps serving its bytes. But resolving a `{{ds-asset:ID}}` handle also needs the deck's stored `design_system_id`, and reading a session's agent config **clears and persists** that pin when the referenced system is inactive. `?hard_delete=true` is the permanent verb. See [Design System Library §7](design-system-library.md) for the per-surface behaviour.
+
+**`compiled_style_content` currency is an exact version match.** A stored artifact is current only when its stamp equals the running `COMPILER_VERSION`, so **any change to compiler output must bump the version** or existing rows are never recompiled.
+
+### DesignSystemAsset
+
+Binary assets and webfonts. **Imported binary payloads live in database rows, but the database footprint is not the uploaded ZIP's size**: the archive is compressed while stored payloads are not, most ZIP entries are never stored, each asset's `design_system_file` row is a path-only reference that does not duplicate the bytes, and row metadata adds its own overhead.
+
+```python
+class DesignSystemAsset(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    kind: str                        # logo | icon | lockup | illustration | background | font | ...
+    filename: str
+    mime: str
+    data: bytes                      # attribute `data`, column name `bytes`
+    width: int | None
+    height: int | None
+    size_bytes: int
+```
+
+**Assets are resolved by `(asset_id, design_system_id)`, never by global id**, so a foreign handle cannot return another design system's bytes. `get_asset_base64` documents this as the confused-deputy guard and makes the scope a mandatory keyword argument; `design_system_id=None` is fail-closed, because the column is `NOT NULL` and the `IS NULL` filter matches no row.
+
+### DesignSystemToken
+
+Normalised colour, type and spacing tokens.
+
+```python
+class DesignSystemToken(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    group: str                       # Free text. Common values: core, accents, ink, tints, type, spacing, shadow
+    name: str                        # Normalised identifier - a leading `--` and a `brand-` namespace are stripped
+    value: str
+```
+
+**Identifiers are normalised before comparison**, so the manifest name `--brand-core-primary` and the CSS variable `primary` reduce to one identifier. **Deduplication is source-aware.** Manifest entries collide on `(group, canonical name)`, and a later manifest entry is dropped even when its value differs — so two entries sharing a canonical name in different groups both survive as semantic aliases. CSS restatements are compared by `(canonical name, value)`: a `:root` var that restates a manifest token collapses into it, while one sharing the name with a different value is a distinct row.
+
+### DesignSystemFile
+
+Verbatim bundle files, addressable by path.
+
+```python
+class DesignSystemFile(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    path: str                        # Path within the bundle
+    kind: str
+    mime: str
+    data: bytes | None               # NULL when the row points at an asset instead of holding bytes
+    size_bytes: int
+    asset_id: int | None             # FK -> design_system_asset.id; avoids storing the same bytes twice
+```
+
+**The importer populates either `data` or `asset_id`, not both** — so a file duplicating an already-imported asset does not double the storage. Note this is an **importer convention, not a database constraint**: both columns are nullable and there is no `CHECK`/XOR, so another writer could populate both or neither.
+
+### DesignSystemTemplate
+
+Named slide templates and their picker thumbnails.
+
+```python
+class DesignSystemTemplate(Base):
+    id: int
+    design_system_id: int            # FK -> design_system.id
+    name: str                        # Human-readable; what MCP's `template_name` matches
+    description: str | None
+    entry_path: str                  # Path of the template's entry file within the bundle
+    layout_html: str
+    token_css: str | None
+    thumbnail_asset_id: int | None   # Optional recognized preview asset; ON DELETE SET NULL
+```
+
+**A NULL `thumbnail_asset_id` has two causes:** the bundle shipped no recognised preview for that template (either `.thumbnail` or `preview.<ext>`), or the referenced asset was deleted — the FK is `ON DELETE SET NULL`. Either way the template still works, and the frontend can render a live preview from the template's own HTML instead. See [Design System Bundle Format](design-system-bundle-format.md).
 
 ### GoogleGlobalCredentials
 

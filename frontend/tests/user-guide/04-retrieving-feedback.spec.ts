@@ -70,15 +70,27 @@ test.describe('User Guide: Retrieving Feedback', () => {
     await setupFeedbackMocks(page);
     const capture = new UserGuideCapture(page, '04-retrieving-feedback');
 
-    // Step 01: Navigate to Admin page (Feedback tab is default)
+    // Step 01: Navigate to Admin page and open the Feedback tab.
+    //
+    // The Feedback tab used to be the default. The Usage tab (#214) now is
+    // (`AdminPage.tsx`: useState<TabId>('usage')), so the guide has to select
+    // Feedback explicitly — the comment here claimed a default that no longer
+    // existed, and the capture below documents the Feedback dashboard.
     await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Feedback' }).click();
     await expect(page.getByRole('heading', { name: 'Feedback Dashboard' })).toBeVisible();
     // Wait for stats to load
     await page.waitForTimeout(500);
     await capture.capture({
       step: '01',
       name: 'admin-feedback-tab',
-      description: 'Open the Admin page — the Feedback tab is selected by default',
+      // The generated prose must describe what the step ACTUALLY does. This claimed
+      // the Feedback tab was selected by default; #214 made Usage the default
+      // (`AdminPage.tsx`: useState<TabId>('usage')) and the step above now clicks
+      // Feedback explicitly, so the sentence documented a behaviour the reader would
+      // not see. ``description`` is the single source for both the ``### Step`` heading
+      // and the image alt text in `shared.ts: generateMarkdown`.
+      description: 'Open the Admin page and select the Feedback tab',
       highlightSelector: '#feedback-tab',
     });
 
@@ -98,16 +110,21 @@ test.describe('User Guide: Retrieving Feedback', () => {
       highlightSelector: 'text=Weekly Survey Stats',
     });
 
-    // Step 04: AI Feedback Summary
-    // Scroll down to make the summary visible
-    const summaryHeading = page.getByRole('heading', { name: 'AI Feedback Summary' });
+    // Step 04: AI Summary.
+    //
+    // #214 renamed this section to "AI Summary (optional)" and made it
+    // collapsed-by-default (`FeedbackDashboard.tsx`: summaryOpen starts false),
+    // so the guide must EXPAND it before capturing — under the old name it was
+    // never found and the capture never happened.
+    const summaryHeading = page.getByRole('heading', { name: 'AI Summary (optional)' });
     await summaryHeading.scrollIntoViewIfNeeded();
+    await summaryHeading.click();
     await page.waitForTimeout(300);
     await capture.capture({
       step: '04',
       name: 'ai-summary',
-      description: 'The AI Feedback Summary analyses recent feedback and highlights top themes and category breakdown',
-      highlightSelector: 'text=AI Feedback Summary',
+      description: 'The optional AI Summary analyses recent feedback and highlights top themes and category breakdown',
+      highlightSelector: 'text=AI Summary (optional)',
     });
 
     console.log('\n=== Generated Markdown for Retrieving Feedback ===\n');

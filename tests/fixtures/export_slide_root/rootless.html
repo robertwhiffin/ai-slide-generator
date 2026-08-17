@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; padding: 72px 88px; }
+      /* Genuinely rootless: body's element children are text tags only —
+         no .slide, no <div>, and no semantic wrapper. The 'no-root' path
+         must still be reachable and must still trigger here. */
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+  </head>
+  <body>
+    <h1>Acme Rootless</h1>
+    <p>Synthetic fixture slide with no slide root at all.</p>
+  </body>
+</html>
