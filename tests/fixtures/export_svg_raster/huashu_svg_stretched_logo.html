@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stretched footer logo (huashu)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 1280px;
+      height: 720px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #ffffff;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    /* The reported shape: a footer row whose logo cell is flex-stretched to
+       the full row width, so the box ends up FAR wider than the logo's own
+       3:1 aspect ratio. Slide 1 escapes the bug precisely because its logo
+       box is ratio-true (see huashu_svg.html). */
+    .footer {
+      position: absolute;
+      left: 88px;
+      bottom: 48px;
+      display: flex;
+      width: 1104px;
+      height: 80px;
+      align-items: stretch;
+    }
+    .footer-logo {
+      flex: 1 1 auto;
+      display: block;
+      width: 100%;
+      height: 80px;
+    }
+  </style>
+</head>
+<body>
+  <div class="slide" style="position:relative;width:1280px;height:720px;background:#ffffff;">
+    <h1 style="position:absolute;left:88px;top:72px;width:600px;font-size:40px;color:#0B3D66;">Footer Logo Slide</h1>
+    <div class="footer">
+      <!-- 240x80 (3:1) artwork in a 1104x80 (13.8:1) box: a stretch-fill
+           raster distorts it, a contain-fit raster letterboxes it. -->
+      <img class="footer-logo" alt="" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNDAiIGhlaWdodD0iODAiIHZpZXdCb3g9IjAgMCAyNDAgODAiPjxyZWN0IHdpZHRoPSIyNDAiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjMEIzRDY2Ii8+PGNpcmNsZSBjeD0iNDAiIGN5PSI0MCIgcj0iMjIiIGZpbGw9IiNFODcyMkEiLz48dGV4dCB4PSI3NiIgeT0iNTIiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNGRkZGRkYiPkFDTUU8L3RleHQ+PC9zdmc+">
+    </div>
+  </div>
+</body>
+</html>

@@ -8,6 +8,7 @@ import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
+import { DesignSystemLibrary } from '../config/DesignSystemLibrary';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
@@ -34,7 +35,7 @@ import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
 import { ConfirmDialog } from '../ConfirmDialog';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'images' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
 
 interface AppLayoutProps {
   initialView?: ViewMode;
@@ -692,12 +693,33 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
 
       setExportStatus('Exporting to Google Slides…');
-      const { presentation_url } = await api.exportToGoogleSlides(
+      const { presentation_url, totalSlides, succeeded, failures } = await api.exportToGoogleSlides(
         sessionId,
         slideDeck,
         (_progress, _total, status) => setExportStatus(status || 'Exporting…')
       );
       setExportStatus(null);
+
+      // Partial export must be loud: the uploaded deck is missing slides,
+      // so name exactly which ones failed (persistent, with the link so the
+      // user can still inspect what did make it).
+      if (failures.length > 0) {
+        console.warn('[google-slides] per-slide failures:', failures);
+        const failedSlideNumbers = failures
+          .map((f) => f.slide_index + 1)
+          .sort((a, b) => a - b)
+          .join(', ');
+        const firstError = failures[0]?.error?.split('\n')[0] || 'unknown error';
+        showToast(
+          `Google Slides incomplete: only ${succeeded ?? '?'} of ${totalSlides ?? '?'} slides uploaded. ` +
+            `Slide${failures.length > 1 ? 's' : ''} ${failedSlideNumbers} failed (${firstError}).`,
+          'error',
+          presentation_url
+            ? { link: { text: 'Open partial deck', url: presentation_url } }
+            : { persistent: true },
+        );
+        return;
+      }
 
       if (!presentation_url) {
         showToast('Slides ready (no URL returned)', 'success');
@@ -734,6 +756,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       if (view === 'help') navigate('/help');
       else if (view === 'profiles') navigate('/profiles');
       else if (view === 'deck_prompts') navigate('/deck-prompts');
+      else if (view === 'design_systems') navigate('/design-systems');
       else if (view === 'slide_styles') navigate('/slide-styles');
       else if (view === 'images') navigate('/images');
       else if (view === 'history') navigate('/history');
@@ -931,6 +954,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <DeckPromptList />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'design_systems' && (
+          <div className="flex h-full flex-col" data-tour="page-design-systems">
+            <div className="shrink-0">
+              <SimplePageHeader title="Design Systems" />
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-5xl px-4 py-8">
+                <DesignSystemLibrary />
               </div>
             </div>
           </div>

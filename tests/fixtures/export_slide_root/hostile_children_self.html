@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* The same shape and the same single ground as
+         wrapped_nested_bare_slide.html — section > article > div.slide, with
+         only the outermost <section> painting anything. The one difference is
+         the script below. So the export MUST come out identical to that
+         fixture's: any difference is attributable to the hostile script alone,
+         and resolving to no root (or to an inner level) emits white. */
+      section { background: #123456; color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+    <script>
+      // A HOSTILE REALM. Not a curiosity: SLIDE_CSP (src/utils/html_safety.py)
+      // carries `script-src 'unsafe-inline'`, so an inline script in a slide
+      // document DOES run in the export page, and it runs at load — before the
+      // preprocess pass is evaluated.
+      //
+      // Every accessor that answers "what is this element's sole element child"
+      // is a CONFIGURABLE accessor on Element.prototype, so page script can
+      // replace them all. Here each one reports the node ITSELF as its only
+      // element child, which turns any descent into an infinite loop: the walk
+      // never reaches a node without a sole element child, because every node is
+      // its own only child.
+      //
+      // All THREE are poisoned on purpose. Poisoning only `children` — the
+      // accessor the walk happened to use when this was reported — would let a
+      // fix pass by switching to firstElementChild while remaining just as
+      // subvertible. The threat is a realm that lies about structure however it
+      // is asked, so that is what the fixture is.
+      //
+      // The report is published on document.title so the test can prove the
+      // fixture is genuinely hostile rather than silently inert — a fixture whose
+      // poisoning was refused would make every assertion about it vacuous.
+      var report = { configurable: {}, redefineResult: 'ok' };
+      function poison(name, get) {
+        var descriptor = Object.getOwnPropertyDescriptor(Element.prototype, name);
+        report.configurable[name] = !!(descriptor && descriptor.configurable);
+        try {
+          Object.defineProperty(Element.prototype, name, { configurable: true, get: get });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poison('children', function () { return { length: 1, 0: this }; });
+      poison('firstElementChild', function () { return this; });
+      poison('nextElementSibling', function () { return null; });
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <section data-label="Acme Ground">
+      <article>
+        <div class="slide">
+          <h1>Acme Wrapper Ground</h1>
+          <p>Synthetic fixture slide.</p>
+        </div>
+      </article>
+    </section>
+  </body>
+</html>

@@ -1,6 +1,7 @@
 """Export endpoints for PDF and PPTX generation."""
 
 import logging
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -17,7 +18,11 @@ from src.api.routes._authz import (
 from src.api.services.chat_service import get_chat_service
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.html_to_pptx import HtmlToPptxConverterV3, PPTXConversionError
-from src.utils.html_safety import SLIDE_CSP_META, scan_html_for_unsafe_patterns
+from src.utils.html_safety import (
+    SLIDE_CSP_META,
+    SLIDE_ROOT_RESET_STYLE,
+    scan_html_for_unsafe_patterns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,33 @@ class ExportPPTXRequest(BaseModel):
     chart_images: Optional[list[list[ChartImage]]] = None  # Chart images per slide (client-side captured)
 
 
+# WF-03. `@import` is only valid before every other rule of ITS OWN STYLESHEET, and this
+# document used to inject `*{}` and `html,body{}` ahead of the deck's CSS in a SINGLE
+# `<style>` — so a deck whose CSS OPENS with a webfont `@import` had that rule silently
+# discarded. Measured: 0 font faces in the export against 35 in the UI, which was the whole
+# of the long-unexplained 38.25 px per-component residual on the DS-OFF deck.
+#
+# The fix is STRUCTURAL, and it is the reason there is no CSS parsing here. Two `<style>`
+# elements are two stylesheets, so the deck gets its OWN `<style>`: its leading `@import` is
+# then already first in its own sheet and valid with NO rewriting at all. Cascade order
+# between separate `<style>` elements is document order, so resets-then-deck-then-resets
+# keeps exactly the precedence the single combined sheet had.
+#
+# MEASURED IN CHROMIUM under the real SLIDE_CSP: combined -> 1 sheet, 0 font faces, import
+# dead; split -> 2 sheets, font faces registered, import applied; and with a reset and the
+# deck setting the same property at equal specificity, the DECK still wins on order.
+#
+# This REPLACES a hand-written leading-`@charset`/`@import` scanner that lived here. Three
+# rounds of review found four tokenizer defects in it (`str.isspace()` accepting NBSP, an
+# unescaped top-level `\)`, a lone `@charset` rewriting the document, an ASCII-only ident
+# guard) and then a fifth (`@layer name;` may legally precede `@import`, which it missed,
+# re-losing the font for ordinary modern CSS). Every one of those was a bug in DECIDING what
+# the deck's CSS means. Emitting the deck's CSS VERBATIM in its own sheet removes the need to
+# decide, so that entire class of defect is now unreachable rather than patched: NUL bytes,
+# top-level `<!--`, a lone CR inside a string, escaped at-keywords and `@layer` are all
+# simply the browser's business, exactly as they are in the deck's own stylesheet.
+
+
 def build_slide_html(slide: dict, slide_deck: dict) -> str:
     """Build complete HTML for a single slide.
     
@@ -52,12 +84,11 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     external_scripts = slide_deck.get("external_scripts", [])
     deck_css = slide_deck.get("css", "")
     deck_scripts = slide_deck.get("scripts", "")
-    
+
     # Clean up deck_scripts: remove any trailing extra IIFE closings
     # deck_scripts should be a series of (function() { ... })(); blocks
     # but sometimes there might be an extra })(); at the end
     if deck_scripts:
-        import re
         # Remove any trailing })(); that might be extra
         deck_scripts = deck_scripts.rstrip()
         # Count opening and closing IIFEs
@@ -98,8 +129,22 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
         }
     )
     
+    # NO `crossorigin` — deliberately, and it must stay that way (WM-02).
+    #
+    # `crossorigin="anonymous"` turns these into CORS requests. cdn.tailwindcss.com
+    # answers with a 302 and no CORS headers, so the request failed with
+    # net::ERR_FAILED and Tailwind's Preflight never landed — measured consequence
+    # on a DS-OFF deck: h3 rendered 22px/600 in the exported file against
+    # 16px/400 on screen, up to 38.25 px of per-component drift and a heading
+    # losing a line to re-wrap. The frontend surfaces emit the same tag WITHOUT the
+    # attribute (see buildSlideDocument in frontend/src/services/slideDocument.ts)
+    # and it loads, so dropping it is parity with what the user actually saw.
+    #
+    # Safe to drop on its own because there is NO `integrity` attribute here: with
+    # SRI present, removing `crossorigin` would block the script outright and turn
+    # a 38 px drift into no styling at all.
     scripts_html = "\n".join([
-        f'    <script src="{src}" crossorigin="anonymous"></script>'
+        f'    <script src="{src}"></script>'
         for src in external_scripts
     ])
 
@@ -120,6 +165,63 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
             extra={"slide_id": slide_id, "patterns": findings},
         )
 
+    # THE FIRST RESET SHEET BELOW IS SCOPED TO `html, body`, NEVER UNIVERSAL.
+    #
+    # A universal reset — border-box plus zeroed margin and padding, on every
+    # element — used to sit there. It laid slide DESCENDANTS out border-box and
+    # margin-free in the export while every preview surface lays them out
+    # content-box with UA margins, which is the box model Claude Design ground
+    # truth uses. That cost up to 69.87 px of per-component drift here, on the
+    # same 6 live slides the standalone builder diverged on by the same mechanism.
+    #
+    # This shell needs no box model of its own: it is a fixed 1280x720 document
+    # whose padding is zeroed both above and (after deck CSS) below, so the two
+    # box models are provably identical for html/body here. The standalone
+    # MULTI-slide builder does pad `body`, so it keeps `box-sizing` on its shell —
+    # see buildStandaloneDeckDocument in frontend/src/services/slideDocument.ts.
+    #
+    # Deliberately a `#` comment and NOT part of the f-string. Anything inside the
+    # f-string is EMITTED into every exported document, where it displaces useful
+    # deck CSS from the ~15,000-char budget `_truncate_html` hands the LLM — an
+    # oversize injected stylesheet driving that budget negative is what produced
+    # the all-placeholder export bug (WF-01). Keep every rendered comment to one
+    # short line and put the reasoning here instead.
+    #
+    # There is NO 2000-char sheet-role classifier, despite what this comment used
+    # to claim. Nothing in src/ or tests/ keys off a stylesheet's length; the tests
+    # identify sheets POSITIONALLY (`blocks[0..2]`, `len(blocks) == 3`) and by
+    # content (the deck's sheet is the one equal to the deck's CSS verbatim), so
+    # budgeting against that supposed cap would be budgeting against nothing. The
+    # real cost is the LLM budget above.
+    # Pinned by tests/unit/test_preview_box_model_parity.py.
+    #
+    # NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. A contract framing `body`
+    # and stretching its CHILD to `position: absolute !important; inset: 0
+    # !important; width/height: 100% !important` was injected into this sheet at
+    # 0.4.2.dev17 and is REVERTED, because on the huashu path it destroys tables.
+    #
+    # `services/pptx-emit-huashu/preprocess.mjs::flattenTables()` reads every
+    # `<td>/<th>`'s bounding rect and re-emits each cell as an absolutely
+    # positioned <div> carrying its own `left/top/width/height` as NON-important
+    # INLINE styles, then calls `document.body.appendChild(div)`. Every cell is
+    # therefore a DIRECT CHILD of `body` by the time the walker runs, so a
+    # stylesheet `!important` rule on `body > *` outranks each cell's inline
+    # position and collapses all of them onto one rect. Measured on a real
+    # 21-cell deck: distinct cell rects in ppt/slides/slide1.xml went 42 -> 11,
+    # with 12 shapes stacked at (12.0, 349.8) and 12 more at (0.0, 719.5).
+    #
+    # The document itself is unchanged by this — `body` has exactly one rendered
+    # child before scripts run — so a document-level geometry probe reads 0.00 px
+    # and is structurally blind to the defect. It is an EMIT-TIME regression; only
+    # diffing the emitted slide XML can see it.
+    #
+    # What the contract was for (a section-wrapped design-system deck whose ground
+    # never paints) is handled on the capture surfaces by aiming at the slide ROOT
+    # instead — see `findSlideRoot` in frontend/src/services/slideDocument.ts. That
+    # locator injects no CSS, so it cannot perturb huashu geometry. This path never
+    # needed the contract regardless: the sidecar reads
+    # `getComputedStyle(root).backgroundColor`, and a 1280x0 element still computes
+    # the right colour, so the .pptx was immune here BY CONSTRUCTION.
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -129,11 +231,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
   <title>{slide_deck.get("title", "Slide")} - Slide {slide.get("slide_id", "")}</title>
 {scripts_html}
   <style>
-    * {{
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }}
+    /* Shell-scoped, never universal: slide content stays content-box, as in every preview. */
     html, body {{
       width: 1280px;
       height: 720px;
@@ -143,7 +241,38 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       background: #ffffff;
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
-    {deck_css}
+  </style>
+  <style>{deck_css}</style>
+  <style>
+    /* After deck CSS: the fixed-frame document owns its OWN box (WM-01).
+       The html/body rule above is emitted BEFORE the deck, so a deck-authored
+       `body {{ padding: 48px 0; gap: 48px }}` — real generator output — used to win
+       on order and translate the WHOLE slide down: `.slide` measured at y=48, and
+       the .pptx carried that offset on every positioned component (dy 46-48 px)
+       including the background rectangle, whose bottom then sat at 768 inside a
+       720 frame. So: a 48 px unpainted band at the top of every exported slide and
+       48 px of content pushed past the clip.
+       Restated HERE, after the deck, exactly as the frontend preview surfaces
+       already do it (SLIDE_PREVIEW_RESET_STYLE is appended after the deck CSS in
+       buildSlideDocument), so the export agrees with what the user saw on screen.
+       Deliberately NOT added to the shared SLIDE_ROOT_RESET_STYLE: that constant is
+       also injected into the standalone MULTI-slide export, whose scrolling layout
+       depends on `body {{ padding: 40px 20px }}`.
+       No `!important`, matching the frontend rule: it wins by ORDER at equal
+       specificity, so both surfaces treat a deck's `!important` body padding the
+       same way and cannot drift apart. That ORDER now spans separate `<style>`
+       elements — the deck has a stylesheet of its own so its leading `@import`
+       stays valid (WF-03) — and the cascade orders separate sheets by DOCUMENT
+       ORDER, so this later sheet still wins exactly as it did inside one block. */
+    html, body {{
+      margin: 0;
+      padding: 0;
+    }}
+    /* After deck CSS: flatten the slide root (outer margin / radius / shadow) —
+       inside this fixed 1280x720 overflow:hidden document a root margin
+       shifts content past the clip and truncates the export's bottom edge
+       (same neutralization as every other surface). */
+    {SLIDE_ROOT_RESET_STYLE}
   </style>
 </head>
 <body>
@@ -413,12 +542,18 @@ async def export_to_pptx(request: ExportPPTXRequest):
         if not slide_deck or not slide_deck.get("slides"):
             raise HTTPException(status_code=404, detail="No slides available")
 
-        # Substitute {{image:ID}} placeholders with base64 data URIs
-        # so the PPTX converter can extract and embed the actual images
+        # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs
+        # so the PPTX converter can extract and embed the actual images/brand assets.
+        # ds-asset resolution is scoped to the session's active design system so a
+        # foreign handle cannot leak another system's bytes into the export.
+        from src.api.services.chat_service import resolve_active_design_system_id
+        from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
         from src.utils.image_utils import substitute_deck_dict_images
         from src.core.database import get_db_session
+        ds_id = resolve_active_design_system_id(request.session_id)
         with get_db_session() as db:
             substitute_deck_dict_images(slide_deck, db)
+            substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
         
         slide_count = len(slide_deck.get("slides", []))
         log_msg = (

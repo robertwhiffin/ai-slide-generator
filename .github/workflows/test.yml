@@ -476,20 +476,29 @@ jobs:
       fail-fast: false
       matrix:
         test:
+          - admin-route-gate
           - chat-ui
+          - css-bg-export
           - deck-integrity
           - deck-prompts-integration
           - deck-prompts-ui
+          - design-system-selector
+          - design-systems-ui
           - export-ui
           - help-ui
           - history-integration
           - history-ui
           - agent-config-integration
+          - presentation-mode
           - profiles-integration
           - profile-ui
           - slide-operations-ui
           - slide-styles-integration
           - slide-styles-ui
+          - slide-surface-fidelity
+          - svg-raster-export
+          - inline-svg-records-export
+          - template-cards
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:

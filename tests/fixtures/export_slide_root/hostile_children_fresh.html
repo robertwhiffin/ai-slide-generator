@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* Same shape, same single ground, same expected artifact as
+         wrapped_nested_bare_slide.html and hostile_children_self.html. */
+      section { background: #123456; color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+    <script>
+      // The same poisoning as hostile_children_self.html with ONE change: every
+      // read reports a BRAND-NEW detached <section> as the sole element child, so
+      // the walk never revisits a node.
+      //
+      // This fixture exists to keep one specific shortcut honest. "Remember the
+      // nodes already seen and stop on a repeat" terminates the self-cycle in
+      // hostile_children_self.html and looks like a complete fix — but it does
+      // nothing here, because there is never a repeat to detect. Only reading the
+      // REAL tree, or a hard iteration bound, ends this walk.
+      var report = { configurable: {}, redefineResult: 'ok' };
+      function poison(name, get) {
+        var descriptor = Object.getOwnPropertyDescriptor(Element.prototype, name);
+        report.configurable[name] = !!(descriptor && descriptor.configurable);
+        try {
+          Object.defineProperty(Element.prototype, name, { configurable: true, get: get });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poison('children', function () {
+        return { length: 1, 0: document.createElement('section') };
+      });
+      poison('firstElementChild', function () { return document.createElement('section'); });
+      poison('nextElementSibling', function () { return null; });
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <section data-label="Acme Ground">
+      <article>
+        <div class="slide">
+          <h1>Acme Wrapper Ground</h1>
+          <p>Synthetic fixture slide.</p>
+        </div>
+      </article>
+    </section>
+  </body>
+</html>

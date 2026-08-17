@@ -372,6 +372,42 @@ def require_admin() -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+def is_caller_admin() -> bool:
+    """Return the admin verdict for the current caller as a boolean.
+
+    UX-ONLY signal, for hiding admin surfaces the caller cannot use. This is
+    NOT authorization: every admin route keeps ``Depends(require_admin)`` and
+    those 403s remain the real protection. A caller who forges this flag
+    client-side gains nothing but a page whose every request 403s.
+
+    Deliberately implemented by *delegating to* ``require_admin`` and mapping
+    its 403 to ``False`` rather than re-deriving the verdict. The flag then
+    cannot drift from the gate it advertises, and there is exactly one
+    group-lookup, cache and fail-closed policy in the codebase.
+
+    Consequently the non-production bypass is inherited too: in local dev/test
+    this returns ``True`` for everyone, matching the routes that also allow
+    everyone there, so devloop testing of admin surfaces is not obstructed.
+    In production the verdict is real workspace ``admins`` group membership.
+
+    Never raises: unlike the dependency form, a caller asking "am I admin?"
+    must always get an answer, so any unexpected error degrades to ``False``
+    (fail closed) instead of failing the endpoint that embeds it.
+    """
+    try:
+        require_admin()
+        return True
+    except HTTPException:
+        return False
+    except Exception:
+        logger.warning(
+            "is_caller_admin: admin check raised unexpectedly; reporting "
+            "non-admin",
+            exc_info=True,
+        )
+        return False
+
+
 def reset_admin_cache() -> None:
     """Clear the admin-verdict cache (tests)."""
     _ADMIN_CACHE.clear()
