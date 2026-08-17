@@ -23,7 +23,7 @@ import { useSelection } from '../../contexts/SelectionContext';
 import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
 import { useToast } from '../../contexts/ToastContext';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildStandaloneDeckDocument } from '../../services/slideDocument';
 
 interface SlideContext {
   indices: number[];
@@ -301,12 +301,19 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       if (result.failures.length === 0) {
         showToast(`PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
       } else {
-        // Per-slide failures get logged for the developer; user sees a
-        // softer info toast so they know not all slides made it in.
+        // Partial export must be loud: the file is missing slides, so the
+        // user gets a persistent error naming exactly which ones failed.
         console.warn('[huashu] per-slide failures:', result.failures);
+        const failedSlideNumbers = result.failures
+          .map((f) => f.slide_index + 1)
+          .sort((a, b) => a - b)
+          .join(', ');
+        const firstError = result.failures[0]?.error?.split('\n')[0] || 'unknown error';
         showToast(
-          `PPTX: ${result.succeeded}/${result.totalSlides} slides exported (${result.failures.length} rejected — see console)`,
-          'info',
+          `PPTX incomplete: only ${result.succeeded} of ${result.totalSlides} slides exported. ` +
+            `Slide${result.failures.length > 1 ? 's' : ''} ${failedSlideNumbers} failed (${firstError}).`,
+          'error',
+          { persistent: true },
         );
       }
     } catch (error) {
@@ -352,113 +359,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
-    const slidesHtml = slideDeck.slides
-      .map((slide, index) => {
-        const slideScripts = slide.scripts || '';
-        return `
-    <div class="slide-wrapper" data-slide-index="${index}">
-      <div class="slide-container">
-        ${slide.html}
-      </div>
-      ${slideScripts ? `<script>
-        (function() {
-          ${slideScripts}
-        })();
-      </script>` : ''}
-    </div>`;
-      })
-      .join('\n');
-
-    // Multi-slide wrapper/reset layout for the standalone export document.
-    const wrapperStyle = `
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: auto;
-      background: #f9fafb;
-    }
-    body {
-      padding: 40px 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 40px;
-    }
-    .slide-wrapper {
-      width: 100%;
-      max-width: 1280px;
-      margin: 0 auto;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      page-break-after: always;
-    }
-    .slide-container {
-      width: 1280px;
-      height: 720px;
-      max-width: 100%;
-      max-height: calc(100vh - 80px);
-      position: relative;
-      background: #ffffff;
-      overflow: auto;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border-radius: 8px;
-    }
-    .slide-container > * {
-      width: 100%;
-      min-height: 100%;
-    }
-    canvas {
-      max-width: 100%;
-      height: auto;
-    }`;
-
-    const bootstrapScripts = `
-    function waitForChartJs(callback, maxAttempts = 50) {
-      let attempts = 0;
-      const check = () => {
-        attempts++;
-        if (typeof Chart !== 'undefined') {
-          callback();
-        } else if (attempts < maxAttempts) {
-          setTimeout(check, 100);
-        } else {
-          console.error('Chart.js failed to load');
-        }
-      };
-      check();
-    }
-
-    function initializeCharts() {
-      try {
-        ${slideDeck.scripts || ''}
-      } catch (err) {
-        console.error('Chart initialization error:', err);
-      }
-    }
-
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        waitForChartJs(initializeCharts);
-      });
-    } else {
-      waitForChartJs(initializeCharts);
-    }`;
-
-    const html = buildSlideDocument(
-      `<title>${slideDeck.title || 'Presentation'}</title>\n${slidesHtml}`,
-      {
-        css: slideDeck.css,
-        externalScripts: slideDeck.external_scripts,
-        extraHeadStyle: wrapperStyle,
-        scripts: bootstrapScripts,
-      }
-    );
+    const html = buildStandaloneDeckDocument(slideDeck);
 
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
@@ -567,13 +468,25 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       }
     });
 
-    await Promise.all(verificationPromises);
+    const verificationResults = await Promise.all(verificationPromises);
 
     if (sessionIdRef.current !== capturedSessionId) {
       console.log('[Auto-verify] Session changed, discarding stale results');
       setIsAutoVerifying(false);
       setVerifyingSlides(new Set());
       return;
+    }
+
+    // Failures already retried with backoff inside api.verifySlide (transient
+    // 5xx); whatever still failed gets a soft, actionable notice instead of
+    // dying silently in the console.
+    const failedVerifications = verificationResults.filter((r) => !r.success);
+    if (failedVerifications.length > 0) {
+      const failedNumbers = failedVerifications.map((r) => r.index + 1).join(', ');
+      showToast(
+        `Verification didn't complete for slide${failedVerifications.length > 1 ? 's' : ''} ${failedNumbers} — use the slide badge to retry.`,
+        'info',
+      );
     }
 
     try {
@@ -601,7 +514,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     console.log('[Auto-verify] Completed');
 
     onVerificationComplete?.();
-  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete]);
+  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete, showToast]);
 
   useEffect(() => {
     if (!slideDeck || !sessionId || isAutoVerifying) return;

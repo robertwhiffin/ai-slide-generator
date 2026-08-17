@@ -9,8 +9,10 @@ NOTE while PR-2 is in flight: this test is committed RED at the end of the
 serial gate and turns green as the per-router fan-out tasks land.
 """
 
+import ast
 import inspect
 import re
+import textwrap
 from typing import get_args
 
 from fastapi.routing import APIRoute
@@ -43,6 +45,15 @@ _PERMISSION_CALL_RE = re.compile(
     r"|_check_chat_permission"      # chat.py send/stream/async
     r"|_require_manage"             # deck_contributors.py
     r"|get_deck_permission"         # profiles.py / sessions.py inline checks
+    # design_systems.py PUT/DELETE: creator-or-admin (Option C), and ADMIN-ONLY
+    # while the row is the ORG DEFAULT. Verified enforcing — raises 403 unless
+    # the caller authored the row, else delegates to require_admin; blank/NULL
+    # created_by falls back to admin-only; a row with is_default set requires
+    # admin regardless of authorship. Behavior is covered per-endpoint by
+    # test_authz_design_systems_creator.py, and the exact permission LEVEL of all
+    # three mutations — including the is_default condition — is pinned by
+    # test_design_system_mutations_have_the_intended_permission_levels below.
+    r"|_require_creator_or_admin"
     r")\s*[(,]"
     # images.py PUT/DELETE enforce HIGH-1 owner-scoping with a bespoke inline
     # check rather than a deck-permission helper: `if image.uploaded_by !=
@@ -57,6 +68,7 @@ ADMIN_PATH_PREFIXES = (
     "/api/admin",                     # admin.py + admin_usage.py
     "/api/settings/deck-prompts",     # HIGH-3
     "/api/settings/slide-styles",     # HIGH-3
+    "/api/settings/design-systems",   # HIGH-3 (same org-shared library shape)
 )
 
 FEEDBACK_READ_PATHS = {
@@ -88,6 +100,29 @@ IDENTITIES_RATIONALE = (
 
 FEEDBACK_WRITE_RATIONALE = (
     "Feedback write endpoint: how regular users submit feedback; stays open."
+)
+
+DESIGN_SYSTEM_READ_RATIONALE = (
+    "Read-only library browse; the design-system prefix gates MUTATIONS only "
+    "(rename/delete = creator-or-admin, except admin-only while the row is the "
+    "org default; set-default = admin-only always), a "
+    "contribution-friendly variant of HIGH-3's deck-prompt and slide-style "
+    "pattern. Reads must stay open: any user picks "
+    "a design system for their own deck, and the generation/preview path reads "
+    "its templates, assets and files. Per-design-system scoping (a template or "
+    "asset is only served through its OWNING system) is enforced in the "
+    "handlers and covered by the cross-design-system disclosure tests."
+)
+
+DESIGN_SYSTEM_CONTRIBUTE_RATIONALE = (
+    "Deliberate product decision: ANY user may CONTRIBUTE a design system, so "
+    "create and import stay open — the same shape as the shared image "
+    "library's open upload. Contributing adds a NEW row owned by the caller; "
+    "it does not mutate another principal's design system or change what other "
+    "users get by default. Managing an EXISTING row is gated: rename/delete are "
+    "creator-or-admin (you manage what you uploaded) but become ADMIN-ONLY once "
+    "that row is the org default, and set-default — the one mutation with "
+    "org-wide blast radius — stays admin-only always."
 )
 
 # (method, path) -> rationale. Exemptions must be visible in review, not
@@ -143,6 +178,29 @@ ALLOWLIST = {
         "Read-only library browse; HIGH-3 admin-gates writes only.",
     ("GET", "/api/settings/slide-styles/{style_id}"):
         "Read-only library browse; HIGH-3 admin-gates writes only.",
+    # Design systems adapt the deck-prompt / slide-style library shape to
+    # user-contributed content: rename/delete are creator-or-admin and
+    # set-default is admin-only (see DESIGN_SYSTEM_MUTATION_LEVELS), so all
+    # three mutations are gated and absent here. Reads stay open — any user
+    # browses the library to pick a system, and the generation path needs its
+    # assets/templates/files.
+    ("GET", "/api/settings/design-systems"): DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}"): DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/templates"): DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/templates/{template_id}/thumbnail"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/templates/{template_id}/source"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/assets/{asset_id}"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/assets/{asset_id}/thumbnail"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("GET", "/api/settings/design-systems/{ds_id}/files"): DESIGN_SYSTEM_READ_RATIONALE,
+    # NOTE: APIRoute.path preserves the raw ":path" converter suffix.
+    ("GET", "/api/settings/design-systems/{ds_id}/files/{file_path:path}"):
+        DESIGN_SYSTEM_READ_RATIONALE,
+    ("POST", "/api/settings/design-systems/import"): DESIGN_SYSTEM_CONTRIBUTE_RATIONALE,
+    ("POST", "/api/settings/design-systems"): DESIGN_SYSTEM_CONTRIBUTE_RATIONALE,
     ("GET", "/api/tools/available"): TOOLS_DISCOVERY_RATIONALE,
     ("GET", "/api/tools/discover/genie"): TOOLS_DISCOVERY_RATIONALE,
     ("GET", "/api/tools/discover/vector"): TOOLS_DISCOVERY_RATIONALE,
@@ -265,6 +323,207 @@ def test_trigger_detection_recurses_into_body_models():
     assert "session_id" in _route_param_names(route)
 
 
+def _handler_source(route: APIRoute) -> str:
+    try:
+        return inspect.getsource(route.endpoint)
+    except (OSError, TypeError):
+        return ""
+
+
+def _has_creator_or_admin(route: APIRoute) -> bool:
+    """True if the handler invokes the creator-or-admin gate on its own row."""
+    return bool(re.search(r"_require_creator_or_admin\s*\(", _handler_source(route)))
+
+
+def _freezes_the_org_default(gate) -> bool:
+    """True if *gate* makes the org default admin-only, in the right ORDER.
+
+    Verified structurally (AST), not by grep: an ``if`` whose test reads
+    ``is_default`` must exist in the gate, must call ``require_admin`` on that
+    branch, and must appear BEFORE the authorship comparison. Ordering is part
+    of the requirement — an is_default branch placed after the creator branch
+    returns is dead code for exactly the caller the freeze exists to stop (the
+    row's author), so "the condition is present somewhere" is not sufficient.
+    """
+    if gate is None:
+        return False
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(gate)))
+    except (OSError, TypeError, SyntaxError):
+        return False
+
+    def _reads_is_default(node) -> bool:
+        return any(
+            isinstance(sub, ast.Attribute) and sub.attr == "is_default"
+            for sub in ast.walk(node)
+        )
+
+    def _calls_require_admin(node) -> bool:
+        return any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id == "require_admin"
+            for sub in ast.walk(node)
+        )
+
+    freeze_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and _reads_is_default(node.test)
+        and _calls_require_admin(node)
+    ]
+    if not freeze_lines:
+        return False
+
+    # The authorship comparison the freeze must precede. Located by the
+    # attribute read of ``created_by`` off the row, which is the gate's only
+    # authorship input.
+    authorship_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "created_by"
+    ]
+    if not authorship_lines:
+        # No authorship branch left at all — not the creator-or-admin gate this
+        # level describes; fail rather than pass by absence.
+        return False
+    return min(freeze_lines) < min(authorship_lines)
+
+
+def _gate_freezes_the_org_default(route: APIRoute) -> bool:
+    """True if the gate THIS route calls freezes the org default.
+
+    The gate is resolved from the route's OWN module rather than imported
+    directly, so rewiring one handler to a different helper that does not carry
+    the condition fails for that route specifically — per-route, not global.
+    """
+    module = inspect.getmodule(route.endpoint)
+    return _freezes_the_org_default(getattr(module, "_require_creator_or_admin", None))
+
+
+# The design-system mutation permission model (Option C + org-default freeze).
+# Design systems are org-shared, user-CONTRIBUTED content, so the intended level
+# differs per route and this table is the single place that says which is which:
+#
+#   "admin"            set-default — ORG-WIDE blast radius (changes what every
+#                      user gets by default), so authorship must not buy it.
+#                      ALWAYS admin, unconditionally.
+#   "creator_or_admin_except_org_default"
+#                      rename/delete — manage what YOU uploaded, EXCEPT while
+#                      that row is the org default, when it is ADMIN-ONLY.
+#                      Both halves are required: the creator-or-admin gate must
+#                      be called, AND its verdict must be conditioned on the
+#                      row's ``is_default``. Plain "creator_or_admin" is no
+#                      longer an accepted level for these two routes — a
+#                      non-admin CREATOR deleting the ACTIVE ORG DEFAULT
+#                      answered 204 and broke other users' sessions, so dropping
+#                      the condition is a REGRESSION, not a simplification.
+#   "open"             create/import — any user may CONTRIBUTE a new row.
+#
+# Asserting the exact LEVEL (not merely "is gated") is what makes this a real
+# tripwire: silently promoting rename/delete back to blanket admin-only,
+# demoting set-default to creator-or-admin, dropping either gate entirely, or
+# removing the is_default condition all fail here. Adding an ALLOWLIST entry
+# cannot silence it.
+DESIGN_SYSTEM_MUTATION_LEVELS = {
+    ("PUT", "/api/settings/design-systems/{ds_id}"):
+        "creator_or_admin_except_org_default",
+    ("DELETE", "/api/settings/design-systems/{ds_id}"):
+        "creator_or_admin_except_org_default",
+    ("POST", "/api/settings/design-systems/{ds_id}/set-default"): "admin",
+    # Removing the org default is the same ORG-WIDE state change as setting it:
+    # it decides what EVERY user gets by default, so authorship must not buy it.
+    ("POST", "/api/settings/design-systems/{ds_id}/clear-default"): "admin",
+    ("POST", "/api/settings/design-systems/import"): "open",
+    ("POST", "/api/settings/design-systems"): "open",
+}
+
+# Levels the assertion below knows how to check. A typo'd or newly-invented
+# level must not silently fall through to the permissive "open" branch.
+_KNOWN_MUTATION_LEVELS = frozenset(
+    {"admin", "creator_or_admin_except_org_default", "open"}
+)
+
+
+def test_design_system_mutations_have_the_intended_permission_levels():
+    """Self-test for the design-system prefix (the gap that let the missing
+    set-default gate through review), now level-aware.
+
+    The prefix's presence in ADMIN_PATH_PREFIXES only makes those routes
+    SENSITIVE — an ALLOWLIST entry would still silence them. This pins each
+    mutation to its INTENDED permission level, so no future entry can exempt one
+    and no refactor can quietly change which level a route enforces.
+    """
+    seen = set()
+    failures = []
+    for route in _api_routes():
+        for method in route.methods:
+            expected = DESIGN_SYSTEM_MUTATION_LEVELS.get((method, route.path))
+            if expected is None:
+                continue
+            seen.add((method, route.path))
+            admin = _has_require_admin(route)
+            creator = _has_creator_or_admin(route)
+            where = f"{method} {route.path}"
+            if expected == "admin":
+                # Must be admin-only: require_admin in the dependency tree, and
+                # NOT softened to the creator-or-admin gate.
+                if not admin:
+                    failures.append(
+                        f"{where} has ORG-WIDE blast radius and must carry "
+                        "Depends(require_admin)"
+                    )
+                if creator:
+                    failures.append(
+                        f"{where} must stay ADMIN-ONLY — it changes what every "
+                        "user gets by default; authorship must not grant it"
+                    )
+            elif expected == "creator_or_admin_except_org_default":
+                # Must be gated, but by the creator-or-admin gate specifically:
+                # neither wide open nor promoted back to blanket admin-only...
+                if not creator:
+                    failures.append(
+                        f"{where} mutates another principal's design system and "
+                        "must call _require_creator_or_admin(ds)"
+                    )
+                if admin:
+                    failures.append(
+                        f"{where} must be CREATOR-OR-ADMIN, not admin-only — a "
+                        "user must be able to manage the system they uploaded"
+                    )
+                # ...AND that gate's verdict must be conditioned on the row being
+                # the org default, checked BEFORE the authorship comparison.
+                # Without this half, a non-admin CREATOR deletes the ACTIVE ORG
+                # DEFAULT (204) and other users' sessions keep pointing at the
+                # dead id — the exact hole a cross-vendor review exploited.
+                if not _gate_freezes_the_org_default(route):
+                    failures.append(
+                        f"{where} must be ADMIN-ONLY while the row is the ORG "
+                        "DEFAULT: the gate it calls must branch on the loaded "
+                        "row's is_default to require_admin, BEFORE the "
+                        "authorship comparison"
+                    )
+            elif expected == "open":  # contributing is a deliberate decision
+                if admin or creator:
+                    failures.append(
+                        f"{where} must stay OPEN: any authenticated user may "
+                        "CONTRIBUTE a design system"
+                    )
+            else:
+                # An unrecognised level must never fall through to the most
+                # PERMISSIVE branch: a typo ("creator_or_admin", say, now that
+                # the level is conditional) would otherwise silently assert
+                # "open" and pass on a gated route.
+                failures.append(
+                    f"{where} declares unknown permission level {expected!r} — "
+                    f"expected one of {sorted(_KNOWN_MUTATION_LEVELS)}"
+                )
+    assert not failures, "Design-system permission model drift:\n  " + "\n  ".join(failures)
+    missing = set(DESIGN_SYSTEM_MUTATION_LEVELS) - seen
+    assert not missing, f"design-system mutation routes missing: {missing}"
+
+
 def test_permission_call_detection_matches_to_thread_form():
     """Self-test: gates invoked as `asyncio.to_thread(_gate, ...)` must count.
 
@@ -280,3 +539,90 @@ def test_permission_call_detection_matches_to_thread_form():
         if r.path == "/api/sessions/{session_id}/slides" and "GET" in r.methods
     )
     assert _has_permission_call(route)
+
+
+# The prefix every design-system route lives under. Derived from the entry the
+# ADMIN_PATH_PREFIXES list already carries, so the two cannot drift apart.
+_DESIGN_SYSTEM_PREFIX = "/api/settings/design-systems"
+
+
+def _design_system_mutation_routes() -> set[tuple[str, str]]:
+    """Every NON-GET design-system route currently mounted on the app.
+
+    HEAD/OPTIONS are framework-generated rather than product surface, so they are
+    not mutations and are excluded.
+    """
+    return {
+        (method, route.path)
+        for route in _api_routes()
+        if route.path == _DESIGN_SYSTEM_PREFIX
+        or route.path.startswith(f"{_DESIGN_SYSTEM_PREFIX}/")
+        for method in route.methods
+        if method not in ("GET", "HEAD", "OPTIONS")
+    }
+
+
+def test_every_design_system_mutation_route_is_explicitly_classified():
+    """The level table must be EXHAUSTIVE, not merely consistent.
+
+    ``test_design_system_mutations_have_the_intended_permission_levels`` iterates
+    the mapping and skips routes absent from it, so a NEW mutation route — say a
+    creator-gated PATCH — would sail through review while unclassified: nothing
+    forced anyone to state its intended level. Asserting set EQUALITY makes
+    classification mandatory, so adding any non-GET design-system route fails
+    here until its permission level is written down.
+    """
+    live = _design_system_mutation_routes()
+    mapped = set(DESIGN_SYSTEM_MUTATION_LEVELS)
+
+    unclassified = sorted(live - mapped)
+    assert not unclassified, (
+        "New design-system mutation route(s) are not classified in "
+        "DESIGN_SYSTEM_MUTATION_LEVELS — add each with its intended permission "
+        f"level ('admin', 'creator_or_admin' or 'open'): {unclassified}"
+    )
+    stale = sorted(mapped - live)
+    assert not stale, (
+        f"DESIGN_SYSTEM_MUTATION_LEVELS names route(s) that no longer exist: {stale}"
+    )
+
+
+def test_org_default_freeze_detection_requires_the_condition_before_authorship():
+    """Self-test for the freeze detector, including its ORDERING half.
+
+    The detector must not be satisfied by an is_default branch that sits AFTER
+    the creator branch has already returned — that placement is dead code for
+    the row's author, who is exactly the principal the freeze exists to stop. A
+    positive-only self-test would pass against a detector that ignored order, so
+    this drives the real gate AND two deliberately-wrong stand-ins through the
+    same AST predicate.
+    """
+    from src.api.routes.settings import design_systems as ds_routes
+
+    # The real gate, correctly ordered, reached the way the route check reaches it.
+    route = next(
+        r for r in _api_routes()
+        if r.path == "/api/settings/design-systems/{ds_id}" and "DELETE" in r.methods
+    )
+    assert _gate_freezes_the_org_default(route)
+    assert _freezes_the_org_default(ds_routes._require_creator_or_admin)
+
+    def _late_gate(ds):
+        created_by = ds.created_by  # authorship compared FIRST
+        if created_by == "someone":
+            return
+        if ds.is_default:  # ...freeze checked too late to bind the author
+            require_admin()  # noqa: F821 - stand-in source, never executed
+
+    def _no_condition_gate(ds):
+        if ds.created_by == "someone":
+            return
+        require_admin()  # noqa: F821 - stand-in source, never executed
+
+    assert not _freezes_the_org_default(_late_gate), (
+        "detector accepted a gate whose is_default condition comes too LATE"
+    )
+    assert not _freezes_the_org_default(_no_condition_gate), (
+        "detector accepted a gate with NO is_default condition"
+    )
+    assert not _freezes_the_org_default(None)

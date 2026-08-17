@@ -14,7 +14,7 @@ AI slide generators exist — but they can't touch your governed data without br
 
 **tellr** is an agentic application that generates data-driven presentations from your Databricks environment:
 
-- **Connected to your data** — Queries your Genie spaces for live, governed data
+- **Connected to your data** — Queries your Genie agents for live, governed data
 - **Respects permissions** — Uses Unity Catalog security out of the box
 - **Conversational editing** — Refine slides through natural language ("add a comparison to Q3", "make the EMEA section more prominent")
 - **Prompt-only mode** — Works without Genie for general-purpose slide generation
@@ -30,7 +30,7 @@ tellr is the third pillar in Databricks' AI/BI suite, completing the story along
 
 - Databricks workspace with Apps enabled
 - Permission to create a Lakebase (or create a schema in an existing one)
-- Genie space with your data (optional — tellr works in prompt-only mode without Genie)
+- Genie agent with your data (optional — tellr works in prompt-only mode without Genie)
 
 ### Install
 
@@ -90,9 +90,15 @@ Step-by-step instructions with screenshots:
 | [Generating Slides](docs/user-guide/01-generating-slides.md) | Create presentations through conversation |
 | [Creating Profiles](docs/user-guide/02-creating-profiles.md) | Configure data sources, styles, and templates |
 | [Advanced Configuration](docs/user-guide/03-advanced-configuration.md) | Customize deck prompts and slide styles |
+| [Retrieving Feedback](docs/user-guide/04-retrieving-feedback.md) | Review and export deck feedback |
+| [Creating Custom Styles](docs/user-guide/05-creating-custom-styles.md) | Build a slide style, and how defaults resolve |
+| [Uploading Images](docs/user-guide/06-uploading-images.md) | Add images and reference them in slides |
+| [Exporting to Google Slides](docs/user-guide/07-exporting-to-google-slides.md) | Authorize once, then export to Drive |
+| [Profile Sharing & Permissions](docs/user-guide/08-profile-sharing-permissions.md) | Share a profile and what each role can do |
+| [Design Systems](docs/user-guide/09-design-systems.md) | Upload a brand bundle, set your default, pin a template |
 
 **Quick start:**
-1. Select or create a profile (bundles your Genie space, slide style, and deck prompt)
+1. Select or create a profile (bundles your Genie agent, slide style, and deck prompt)
 2. Go to Generator
 3. Describe the presentation you want
 4. Send — watch slides stream in
@@ -127,13 +133,15 @@ Step-by-step instructions with screenshots:
 
 | Document | Description |
 |----------|-------------|
-| [Local Development](docs/local-development.md) | Run tellr locally for development |
+| [Local Development](docs/getting-started/local-development.md) | Run tellr locally for development |
 | [Backend Overview](docs/technical/backend-overview.md) | FastAPI, agent lifecycle, API contracts |
 | [Frontend Overview](docs/technical/frontend-overview.md) | React components, state management |
 | [Databricks Deployment](docs/technical/databricks-app-deployment.md) | Deployment CLI, environments |
 | [MCP Integration Guide](docs/technical/mcp-integration-guide.md) | How-to: wire tellr into your Databricks App or into an MCP client like Claude Code |
 | [MCP Server Reference](docs/technical/mcp-server.md) | Protocol, tool schemas, response payloads |
 | [Database Config](docs/technical/database-configuration.md) | PostgreSQL/Lakebase schema |
+| [Design System Library](docs/technical/design-system-library.md) | Brand bundles: default precedence, authorization, retention, the compiled artifact |
+| [Design System Bundle Format](docs/technical/design-system-bundle-format.md) | The bundle contract: folder allowlist, `.thumbnail`, tokens, import refusals |
 
 ### More Technical Docs
 
@@ -144,6 +152,8 @@ Step-by-step instructions with screenshots:
 | [Slide Editing](docs/technical/slide-editing-robustness-fixes.md) | Deck preservation, validation |
 | [Save Points](docs/technical/save-points-versioning.md) | Version snapshots, preview/restore |
 | [Google Slides](docs/technical/google-slides-integration.md) | OAuth2 flow, encrypted credentials, LLM export |
+| [Export Features](docs/technical/export-features.md) | The export routes, which are live, and per-route fidelity |
+| [Slide Host Frame Contract](docs/technical/slide-host-frame-contract.md) | Frame geometry, box model, and scoped resets across every surface |
 
 ---
 

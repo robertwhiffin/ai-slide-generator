@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session as DBSession
 
+from src.api.schemas.agent_config import normalize_style_source_exclusivity
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -31,7 +32,7 @@ from src.api.services.session_manager import SessionNotFoundError, get_session_m
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_slide_style_id
+from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.agent import UnsafeContentError
@@ -120,6 +121,50 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
     )
 
 
+def _apply_org_default_style_source(
+    agent_config_data: dict,
+    *,
+    client_set_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Fill in the org-default style SOURCE for a new session, in place.
+
+    Precedence (product decision): an org-default DESIGN SYSTEM outranks the
+    legacy default slide style. A design system is the richer, more specific
+    instruction, and seeding both would inject two competing style sources into
+    the same prompt — so when a default design system resolves, the slide-style
+    default is deliberately NOT applied.
+
+    Only ever fills a GAP, where "gap" means a field the CLIENT DID NOT SEND.
+    *client_set_fields* is the request's ``model_fields_set``, so an explicit
+    ``null`` is a choice ("no style source") and is left alone, while an omitted
+    key is seeded. Value inspection cannot tell those apart — both read as
+    ``None`` — which is why presence is passed in rather than inferred.
+    ``template_id`` is untouched: it is session-scoped and a session-creating
+    request never seeds a pin (see ``_without_template_pin``).
+    """
+    # An explicit style choice closes BOTH slots. A user who picked a slide style
+    # must not also get a brand layered over it, and one who explicitly cleared
+    # the style ("no style source") must not have a design system substituted for
+    # it — that was the original defect, in the other direction.
+    if "slide_style_id" in client_set_fields:
+        return
+    if agent_config_data.get("design_system_id") is not None:
+        return
+
+    # The DS slot may be closed BY CHOICE (explicit null) while the style slot is
+    # still unspecified; the DS default is then off the table but the legacy style
+    # default may still fill the slot the client never mentioned.
+    design_system_chosen = "design_system_id" in client_set_fields
+    if not design_system_chosen:
+        default_ds_id = get_default_design_system_id()
+        if default_ds_id is not None:
+            agent_config_data["design_system_id"] = default_ds_id
+            return
+    default_style_id = get_default_slide_style_id()
+    if default_style_id is not None:
+        agent_config_data["slide_style_id"] = default_style_id
+
+
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """Create a session if request.session_id is missing, or sync agent_config if provided.
 
@@ -128,18 +173,83 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """
     from src.api.schemas.agent_config import AgentConfig
 
-    # Parse explicit agent_config from request (None if not sent by client)
+    # Parse the client's agent_config, distinguishing three different things that
+    # truthiness conflates: NOT SENT (None), sent-but-empty, and sent with keys.
+    # ``if request.agent_config:`` treated ``{}`` as not-sent — so ``{}`` got the
+    # org default seeded while ``{"tools": []}``, which expresses exactly the same
+    # thing, did not. Presence is a property of the REQUEST, never of a value.
+    config_sent = request.agent_config is not None
     explicit_config = None
-    if request.agent_config:
+    # Which style keys the client GENUINELY SET. Pydantic's ``model_fields_set``
+    # records the keys present in the payload, so an explicit ``null`` counts as
+    # set while an omitted key does not — a distinction no inspection of the
+    # defaulted VALUE can make (both read as None).
+    client_set_fields: frozenset[str] = frozenset()
+    if config_sent:
         config = AgentConfig.model_validate(request.agent_config)
+        # ONE style authority, enforced by the SHARED chokepoint rather than a
+        # second copy of the rule here. Exclusivity used to be applied only on the
+        # agent-config PUT, so this path — which validates the client's config and
+        # then persists the DUMPED DICT directly, on both the create and the
+        # existing-session sync branch — happily stored BOTH slide_style_id and
+        # design_system_id while generation silently applied design-system
+        # precedence: a stored row that disagreed with the deck it produced. Now
+        # that MCP sets design_system_id, that is a real caller shape.
+        #
+        # Restating the rule locally is what keeps reopening this class, so this
+        # calls the same helper the PUT does and inherits its semantics:
+        # NORMALISE to design-system-wins, never 422 (a 422 would wedge legacy
+        # both-set rows on every save — the regression that already happened once).
+        #
+        # Applied to the parsed model BEFORE the dump, so every downstream branch
+        # (create, client-generated-id create, existing-session sync) writes an
+        # already-exclusive config; no branch can be added later that skips it.
+        # There is no reference validation on this path to order against — chat
+        # never clears a dangling pin — so the PUT's "validate first" ordering
+        # constraint does not apply here.
+        normalize_style_source_exclusivity(config, session_id=request.session_id)
         explicit_config = config.model_dump()
+        client_set_fields = frozenset(config.model_fields_set)
 
-    # Build full agent_config_data with defaults (used for session creation)
     agent_config_data = explicit_config or AgentConfig().model_dump()
-    if agent_config_data.get("slide_style_id") is None:
-        default_id = get_default_slide_style_id()
-        if default_id is not None:
-            agent_config_data["slide_style_id"] = default_id
+
+    def _seeded_for_new_session(config_data: dict) -> dict:
+        """The org-default style source, applied ONLY when creating a session.
+
+        Default seeding is a NEW-SESSION default. It used to run here for every
+        request, before the branch on ``request.session_id`` below, with two
+        consequences: an EXISTING session whose config was explicitly null got
+        rewritten to the org default and PERSISTED — silently discarding a saved
+        "Design System = None" — and an org-default change became retroactive to
+        old sessions instead of session-isolated.
+
+        Seeding is per-FIELD, not per-request: a style key the client actually
+        sent is that client's decision (including an explicit ``null``, i.e. "no
+        style source") and is never overwritten, while a key the client never
+        mentioned is a genuine gap the org default may fill. This is why a config
+        carrying only ``tools`` still gets a style source seeded — it expressed no
+        opinion about one — and why a config sending ``slide_style_id: null``
+        keeps that null.
+
+        See ``TestNewSessionSeedingTruthTable`` for the full documented table.
+        """
+        seeded = dict(config_data)
+        _apply_org_default_style_source(seeded, client_set_fields=client_set_fields)
+        return seeded
+
+    def _without_template_pin(config_data: dict) -> dict:
+        """Session-CREATING requests never seed a template pin.
+
+        template_id is session-scoped: a pin is chosen IN a session (via the
+        agent-config PUT, or a chat sync onto an EXISTING session). A pin
+        arriving on the request that CREATES the session can only be another
+        surface's in-memory carryover (the new-session race), so it is
+        dropped; the design system and everything else carries over as
+        configured.
+        """
+        if config_data.get("template_id") is None:
+            return config_data
+        return {**config_data, "template_id": None}
 
     if request.session_id:
         # Session ID provided — only sync if client explicitly sent agent_config
@@ -166,7 +276,9 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                 current_user = get_current_user()
                 session_manager.create_session(
                     session_id=request.session_id,
-                    agent_config=agent_config_data,
+                    agent_config=_without_template_pin(
+                        _seeded_for_new_session(agent_config_data)
+                    ),
                     created_by=current_user,
                 )
                 logger.info(
@@ -180,7 +292,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
 
     current_user = get_current_user()
     session = session_manager.create_session(
-        agent_config=agent_config_data,
+        agent_config=_without_template_pin(_seeded_for_new_session(agent_config_data)),
         created_by=current_user,
     )
     request.session_id = session["session_id"]

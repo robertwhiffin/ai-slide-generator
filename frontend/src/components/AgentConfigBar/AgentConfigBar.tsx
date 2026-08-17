@@ -14,7 +14,7 @@ import { X, Save, FolderOpen, Loader2, ChevronDown, ChevronUp, ExternalLink } fr
 import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
-import type { SlideStyle, DeckPrompt } from '../../api/config';
+import type { SlideStyle, DeckPrompt, DesignSystemSummary, DesignSystemTemplate } from '../../api/config';
 import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool } from '../../types/agentConfig';
 import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfig';
 import { api } from '../../services/api';
@@ -434,6 +434,8 @@ export const AgentConfigBar: React.FC = () => {
     updateTool,
     updateToolEntry,
     setStyle,
+    setDesignSystem,
+    setTemplate,
     setDeckPrompt,
     saveAsProfile,
     loadProfile,
@@ -456,13 +458,35 @@ export const AgentConfigBar: React.FC = () => {
   const [loadDialogOpen, setLoadDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Slide styles and deck prompts for selectors
+  // Slide styles, design systems and deck prompts for selectors
   const [slideStyles, setSlideStyles] = useState<SlideStyle[]>([]);
+  const [designSystems, setDesignSystems] = useState<DesignSystemSummary[]>([]);
   const [deckPrompts, setDeckPrompts] = useState<DeckPrompt[]>([]);
   const [stylesLoading, setStylesLoading] = useState(false);
+  const [designSystemsLoading, setDesignSystemsLoading] = useState(false);
   const [promptsLoading, setPromptsLoading] = useState(false);
 
-  // Fetch style/prompt options eagerly so the collapsed summary can show names
+  // Templates of the SELECTED design system (dependent selector)
+  const [templates, setTemplates] = useState<DesignSystemTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+
+  // Picker polish: filter the design-system options by name; keep the
+  // selected system's option visible even when it doesn't match the filter.
+  const [designSystemFilter, setDesignSystemFilter] = useState('');
+  const normalizedFilter = designSystemFilter.trim().toLowerCase();
+  const filteredDesignSystems = normalizedFilter
+    ? designSystems.filter(
+        (d) =>
+          d.name.toLowerCase().includes(normalizedFilter) ||
+          d.id === agentConfig.design_system_id,
+      )
+    : designSystems;
+  const selectedDesignSystem =
+    agentConfig.design_system_id != null
+      ? designSystems.find((d) => d.id === agentConfig.design_system_id) ?? null
+      : null;
+
+  // Fetch style/design-system/prompt options eagerly so the collapsed summary can show names
   useEffect(() => {
     let cancelled = false;
 
@@ -472,6 +496,12 @@ export const AgentConfigBar: React.FC = () => {
       .catch(err => console.error('Failed to load slide styles:', err))
       .finally(() => { if (!cancelled) setStylesLoading(false); });
 
+    setDesignSystemsLoading(true);
+    configApi.listDesignSystems()
+      .then(res => { if (!cancelled) setDesignSystems(res.design_systems); })
+      .catch(err => console.error('Failed to load design systems:', err))
+      .finally(() => { if (!cancelled) setDesignSystemsLoading(false); });
+
     setPromptsLoading(true);
     configApi.listDeckPrompts()
       .then(res => { if (!cancelled) setDeckPrompts(res.prompts); })
@@ -480,6 +510,26 @@ export const AgentConfigBar: React.FC = () => {
 
     return () => { cancelled = true; };
   }, []);
+
+  // Fetch the selected design system's templates for the dependent selector.
+  useEffect(() => {
+    const dsId = agentConfig.design_system_id;
+    if (dsId == null) {
+      setTemplates([]);
+      return;
+    }
+    let cancelled = false;
+    setTemplatesLoading(true);
+    configApi.listDesignSystemTemplates(dsId)
+      .then(res => { if (!cancelled) setTemplates(res.templates); })
+      .catch(err => {
+        console.error('Failed to load design system templates:', err);
+        if (!cancelled) setTemplates([]);
+      })
+      .finally(() => { if (!cancelled) setTemplatesLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [agentConfig.design_system_id]);
 
   // Handlers
   const handleSaveProfile = useCallback(async (name: string, description?: string) => {
@@ -502,6 +552,16 @@ export const AgentConfigBar: React.FC = () => {
     const value = e.target.value;
     await setStyle(value === '' ? null : Number(value));
   }, [setStyle]);
+
+  const handleDesignSystemChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = e.target.value;
+    await setDesignSystem(value === '' ? null : Number(value));
+  }, [setDesignSystem]);
+
+  const handleTemplateChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = e.target.value;
+    await setTemplate(value === '' ? null : Number(value));
+  }, [setTemplate]);
 
   const handleDeckPromptChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = e.target.value;
@@ -572,6 +632,7 @@ export const AgentConfigBar: React.FC = () => {
   // Summary line for collapsed state
   const toolCount = agentConfig.tools.length;
   const selectedStyleName = slideStyles.find(s => s.id === agentConfig.slide_style_id)?.name;
+  const selectedDesignSystemName = designSystems.find(d => d.id === agentConfig.design_system_id)?.name;
   const selectedPromptName = deckPrompts.find(p => p.id === agentConfig.deck_prompt_id)?.name;
 
   return (
@@ -591,6 +652,7 @@ export const AgentConfigBar: React.FC = () => {
           {!expanded && toolCount > 0 && (
             <span className="ml-2 normal-case tracking-normal text-gray-400">
               {toolCount} tool{toolCount !== 1 ? 's' : ''}
+              {selectedDesignSystemName && ` / ${selectedDesignSystemName}`}
               {selectedStyleName && ` / ${selectedStyleName}`}
               {selectedPromptName && ` / ${selectedPromptName}`}
             </span>
@@ -651,6 +713,82 @@ export const AgentConfigBar: React.FC = () => {
 
           {/* Selectors row */}
           <div className="flex flex-wrap gap-3" data-tour="agent-selectors">
+            {/* Design system selector — takes precedence over slide style when set */}
+            <div className="flex-1 min-w-[140px]" data-tour="agent-design-system-selector">
+              <label className="block text-xs font-medium text-gray-500 mb-1">Design System</label>
+              {designSystems.length > 5 && (
+                <input
+                  type="search"
+                  value={designSystemFilter}
+                  onChange={(e) => setDesignSystemFilter(e.target.value)}
+                  placeholder="Search design systems…"
+                  aria-label="Search design systems"
+                  data-testid="design-system-search"
+                  className="mb-1 w-full px-2 py-1 border border-gray-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+              <select
+                value={agentConfig.design_system_id ?? ''}
+                onChange={handleDesignSystemChange}
+                disabled={designSystemsLoading}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                data-testid="design-system-selector"
+              >
+                <option value="">{designSystemsLoading ? 'Loading design systems…' : 'None'}</option>
+                {filteredDesignSystems.map(d => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                ))}
+              </select>
+              {!designSystemsLoading && designSystems.length === 0 && (
+                <p className="mt-1 text-[11px] text-gray-400">
+                  No design systems yet — upload one in Settings.
+                </p>
+              )}
+              {selectedDesignSystem && (
+                <p className="mt-1 text-[11px] text-gray-400" data-testid="design-system-subtitle">
+                  {[
+                    selectedDesignSystem.font_families?.length
+                      ? selectedDesignSystem.font_families.join(', ')
+                      : null,
+                    `${selectedDesignSystem.template_count} template${selectedDesignSystem.template_count === 1 ? '' : 's'}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </p>
+              )}
+              {/* A design system and a slide style are mutually exclusive: picking
+                  either clears the other (AgentConfigContext.setStyle /
+                  setDesignSystem), so the old "design system takes precedence"
+                  hint is unreachable by selection. It is kept ONLY for a legacy
+                  stored config that still holds both, where it explains which
+                  one is actually in effect. */}
+              {agentConfig.design_system_id != null && agentConfig.slide_style_id != null && (
+                <p className="mt-1 text-[11px] text-gray-400" data-testid="style-precedence-note">
+                  Design system takes precedence over slide style.
+                </p>
+              )}
+            </div>
+
+            {/* Template selector — dependent on the selected design system;
+                hidden when no design system is selected or it has no templates */}
+            {agentConfig.design_system_id != null && (templatesLoading || templates.length > 0) && (
+              <div className="flex-1 min-w-[140px]" data-tour="agent-template-selector">
+                <label className="block text-xs font-medium text-gray-500 mb-1">Template</label>
+                <select
+                  value={agentConfig.template_id ?? ''}
+                  onChange={handleTemplateChange}
+                  disabled={templatesLoading}
+                  className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                  data-testid="template-selector"
+                >
+                  <option value="">{templatesLoading ? 'Loading templates…' : 'None'}</option>
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {/* Style selector */}
             <div className="flex-1 min-w-[140px]" data-tour="agent-style-selector">
               <label className="block text-xs font-medium text-gray-500 mb-1">Slide Style</label>

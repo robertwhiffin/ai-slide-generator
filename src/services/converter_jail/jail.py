@@ -43,6 +43,13 @@ class JailResult:
     returncode: int
     timed_out: bool
     stderr_tail: str = ""
+    #: Per-slide outcomes reported by the trusted runner, in the order received:
+    #: True when the slide's generated code produced its slide, False when the
+    #: deterministic placeholder fallback was used. EMPTY when the runner reported
+    #: nothing (a runner with no result channel, or one that died before emitting) —
+    #: callers must treat empty as "unknown", never as "all failed", so an absent
+    #: channel cannot manufacture a failure.
+    slide_results: tuple = ()
 
 
 @dataclass
@@ -177,8 +184,14 @@ def _spawn(
 
         assert proc.stdout is not None
 
+        slide_results: List[bool] = []
+
         def _drain_stdout():
             for line in proc.stdout:
+                result = protocol.decode_slide_result(line)
+                if result is not None:
+                    slide_results.append(result[1])
+                    continue
                 decoded = protocol.decode_progress(line)
                 if decoded and progress_cb:
                     try:
@@ -207,6 +220,7 @@ def _spawn(
             returncode=proc.returncode if proc.returncode is not None else -1,
             timed_out=timed_out,
             stderr_tail="".join(stderr_lines[-40:]),
+            slide_results=tuple(slide_results),
         )
     finally:
         shutil.rmtree(env["HOME"], ignore_errors=True)

@@ -34,6 +34,24 @@ SLIDE_CSP_META = (
     f'<meta http-equiv="Content-Security-Policy" content="{SLIDE_CSP}">'
 )
 
+# Uniform root-slide reset for server-built slide documents. MUST stay in sync
+# with the frontend builder's SLIDE_ROOT_RESET_STYLE
+# (frontend/src/services/slideDocument.ts): every render/export surface
+# flattens the slide ROOT — outer margin, border-radius, box-shadow — so
+# previews and exports agree; a PPTX canvas cannot render root rounding or
+# shadows. The :not(#…) clause never matches (no such id is ever minted); it
+# lifts each arm to id-level specificity so the reset outguns deck-authored
+# !important card styling (".slide { margin: 40px auto !important }").
+# tests/unit/test_export_csp.py asserts this equals the frontend constant.
+SLIDE_ROOT_RESET_STYLE = """
+  body > :not(#tellr-root-reset-boost),
+  .slide-container > :not(#tellr-root-reset-boost) {
+    margin: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+"""
+
 # Script sources allowed in slides (Chart.js + Tailwind Play CDN + Google Fonts).
 # Google Fonts <link>s are allowed by the slide CSP `style-src`/`font-src` at
 # runtime, so the scanner must not flag them as external resources.
