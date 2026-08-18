@@ -385,6 +385,28 @@ class TestDeckImagePlaceholderMigration:
         assert "{{image:1}}" not in deck, "rewrite skipped — stale shared-inspector reflection"
         assert f"{{{{image:{token}}}}}" in deck
 
+    def test_single_pass_one_update_per_column_not_per_image(self, sqlite_engine, session_factory):
+        # The rewrite must scan each column ONCE (a chained replace over all
+        # pairs), not once per image — looping every image ran ~6800 full-table
+        # scans and stalled startup on prod-scale data. With 3 images and 3 live
+        # columns, expect exactly 3 deck UPDATEs, not 9.
+        with session_factory() as s:
+            for img_id, tok in {1: "TOK1_a", 2: "TOK2_b", 3: "TOK3_c"}.items():
+                _make_image(s, img_id, tok)
+            _make_deck(
+                s, "sess-1",
+                json.dumps({"slides": [
+                    {"html": '<img src="{{image:1}}"><img src="{{image:2}}">'},
+                    {"html": '<img src="{{image:3}}">'},
+                ]}),
+            )
+            s.commit()
+
+        issued = _deck_updates_issued_by(
+            sqlite_engine, lambda: _run_placeholder_migration(sqlite_engine)
+        )
+        assert len(issued) == 3, f"expected 1 UPDATE per column (3), got {len(issued)}: {issued}"
+
     def test_full_run_migrations_rewrites_placeholders(self, sqlite_engine, session_factory):
         # End-to-end: the placeholder rewrite fires as part of the full
         # _run_migrations pipeline (correct placement, after the token backfill).

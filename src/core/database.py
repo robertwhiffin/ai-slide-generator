@@ -1161,6 +1161,31 @@ def _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite) -> 
     return False
 
 
+def _referenced_int_image_ids(conn, live_targets, _qual) -> set:
+    """Distinct integer ids referenced by ``{{image:<int>}}`` across the deck columns.
+
+    PostgreSQL/Lakebase only. Extraction happens IN THE DATABASE via
+    ``regexp_matches`` — only the small integer ids come back to Python, never the
+    deck blobs. This lets :func:`_migrate_rewrite_deck_image_placeholders` map just
+    the few hundred images decks actually reference instead of every image row (the
+    difference between a ~1-minute and an ~80-minute startup step on a real fork).
+    """
+    from sqlalchemy import text
+
+    ids: set = set()
+    for table_name, column_name in live_targets:
+        q = _qual(table_name)
+        result = conn.execute(
+            text(
+                f"SELECT DISTINCT (regexp_matches({column_name}, :cap, 'g'))[1] AS id "
+                f"FROM {q} WHERE {column_name} ~ :any_int"
+            ),
+            {"cap": r"\{\{image:([0-9]+)\}\}", "any_int": r"\{\{image:[0-9]+\}\}"},
+        ).fetchall()
+        ids.update(int(r[0]) for r in result)
+    return ids
+
+
 def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_sqlite) -> None:
     """Rewrite stored deck ``{{image:<int-id>}}`` placeholders to ``{{image:<token>}}`` (SDR-4437 F-TM-7).
 
@@ -1172,34 +1197,48 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     place, using the ``id -> token`` map that ``_migrate_image_assets_add_token``
     (which runs just before this) has guaranteed exists on every image row.
 
-    The string work stays IN THE DATABASE — Python only drives a per-``(id, token)``
-    loop of set-based ``replace()`` UPDATEs, exactly like the token backfill drives
-    its loop. Deck blobs are never pulled into the app to be regexed.
+    The string work stays IN THE DATABASE — Python only drives the id/token map and
+    builds the SQL. Deck blobs are never pulled into the app to be regexed.
 
-    Correctness / performance:
+    Scale matters: prod holds thousands of image rows and thousands of decks with
+    ~35 KB (up to ~430 KB) JSON blobs. The naive shape — a per-``(id, token)`` loop
+    of ``UPDATE ... WHERE col LIKE '%{{image:N}}%'`` — is O(images) unindexable
+    full-table scans per column and measured ~80 min on a real fork, which stalled
+    startup. Two changes make it a ~1-minute one-time step:
 
-    - **Per-image sequential loop, not a join.** A single
-      ``UPDATE ... FROM image_assets`` applies only ONE arbitrary matched row per
-      target row, so a deck referencing two images would be half-rewritten. The
-      sequential per-image ``replace()`` accumulates correctly across multi-image
-      decks. ``regexp_replace`` can't express it either — the replacement is a
-      per-match lookup into ``image_assets``, not a fixed template.
+    - **Only referenced ids.** On PostgreSQL/Lakebase the ids ACTUALLY referenced by
+      a deck are extracted IN THE DATABASE (:func:`_referenced_int_image_ids`, via
+      ``regexp_matches`` — only integers come back, never blobs); prod decks reuse a
+      few hundred of the thousands of images, so the rest are never considered. On
+      SQLite (tests, tiny data) there is no in-DB regex, so every image row is mapped
+      and a fast gate (:func:`_deck_columns_have_int_placeholder`) skips an
+      already-migrated DB.
+    - **One pass per column.** A single ``UPDATE`` per column applies a CHAINED
+      ``replace()`` over every ``(id -> token)`` pair, so each large-blob column is
+      scanned once rather than once per image.
+
+    Correctness:
+
+    - **Chained sequential replace, not a join.** ``replace(replace(col, id1, tok1),
+      id2, tok2)`` applies each substitution across the whole blob in turn, so a
+      multi-image deck is fully rewritten. A single ``UPDATE ... FROM image_assets``
+      would apply only ONE arbitrary matched row per target row (half-rewriting
+      multi-image decks); ``regexp_replace`` can't do the per-match id->token lookup.
     - **Prefix-safe.** The literal ``{{image:5}}`` (closing braces included) never
-      matches inside ``{{image:51}}``, so there is no id-prefix collision.
-    - **Idempotent + cheap on repeat.** This runs on EVERY worker at EVERY startup,
-      so a fast gate (:func:`_deck_columns_have_int_placeholder`) short-circuits the
-      whole thing once no int-style placeholder remains — turning steady-state boots
-      into a few read-only ``LIMIT 1`` scans instead of O(images) unindexable
-      leading-wildcard ``LIKE`` UPDATEs per column (that unconditional per-boot cost
-      stalled real multi-worker startup on prod-scale data). The per-UPDATE ``LIKE``
-      guard is the second layer: within a run it skips rows without this id, and
-      unreferenced or hard-deleted ids are never touched.
+      matches inside ``{{image:51}}``, and a token (``[A-Za-z0-9_-]``) has no braces,
+      so the order of the chained replaces is irrelevant — no id-prefix collision.
+    - **Idempotent.** The per-``UPDATE`` guard restricts the pass to rows that still
+      hold an int placeholder, so a re-run over token-only rows is a no-op; once the
+      mappable ids are rewritten, extraction/gate find nothing (only unmappable
+      ids), so no further passes run.
     - **No jsonb cast.** Every target column (:data:`_DECK_PLACEHOLDER_COLUMNS`) is
       ``TEXT`` on both backends, so ``replace()`` applies directly. Tokens are
       ``[A-Za-z0-9_-]`` (JSON-safe), so text-level replacement inside a JSON blob
       cannot corrupt its structure.
     - **Soft-deleted images included** (no ``is_active`` filter) — a deck may still
       reference an image that was later soft-deleted, and it must keep resolving.
+    - **Unknown/hard-deleted ids** referenced by a deck have no image row, so they
+      are not in the map and their placeholder is left unchanged.
 
     A no-op when ``image_assets`` (or its ``token`` column) or every target table is
     absent on a given deploy.
@@ -1237,43 +1276,61 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     if not live_targets:
         return
 
-    # Fast idempotency gate. This migration runs on EVERY worker at EVERY startup
-    # (init_db in the FastAPI lifespan), so once the one-time rewrite is done it must
-    # NOT re-issue the per-image UPDATEs: each is an unindexable leading-wildcard
-    # LIKE scan of a large-blob deck table, and O(images) of them per column across
-    # several concurrent workers stalls startup on prod-scale data. If no target
-    # column still holds an int-style {{image:<digits>}} placeholder, there is
-    # nothing to do — return before touching the image rows or the deck tables.
-    if not _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite):
-        return
-
-    rows = conn.execute(
-        text(f"SELECT id, token FROM {_qual('image_assets')} WHERE token IS NOT NULL")
-    ).fetchall()
+    # The (id -> token) pairs to rewrite. Only ids ACTUALLY referenced by a deck —
+    # see the docstring for why looping every image row is far too slow at prod
+    # scale.
+    q_images = _qual("image_assets")
+    if is_sqlite:
+        # No in-DB regex on SQLite; test data is tiny, so gate on any int
+        # placeholder (skips an already-migrated DB) and map every image row.
+        if not _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite):
+            return
+        rows = conn.execute(
+            text(f"SELECT id, token FROM {q_images} WHERE token IS NOT NULL")
+        ).fetchall()
+    else:
+        referenced = _referenced_int_image_ids(conn, live_targets, _qual)
+        if not referenced:
+            return
+        rows = conn.execute(
+            text(
+                f"SELECT id, token FROM {q_images} "
+                "WHERE token IS NOT NULL AND id = ANY(:ids)"
+            ),
+            {"ids": list(referenced)},
+        ).fetchall()
     if not rows:
         return
 
     logger.info(
         "Migration: rewriting {{image:<id>}} deck placeholders to tokens for "
-        "%d images across %d columns (SDR-4437 F-TM-7)",
+        "%d referenced images across %d columns (SDR-4437 F-TM-7)",
         len(rows),
         len(live_targets),
     )
-    for image_id, token in rows:
-        old = f"{{{{image:{image_id}}}}}"
-        new = f"{{{{image:{token}}}}}"
-        for table_name, column_name in live_targets:
-            q = _qual(table_name)
-            # Identifiers come from the hardcoded _DECK_PLACEHOLDER_COLUMNS; the
-            # placeholder literals are bound parameters. The LIKE guard makes rows
-            # without this id (and every row on a re-run) a no-op.
-            conn.execute(
-                text(
-                    f"UPDATE {q} SET {column_name} = replace({column_name}, :old, :new) "
-                    f"WHERE {column_name} LIKE :pattern"
-                ),
-                {"old": old, "new": new, "pattern": f"%{old}%"},
-            )
+
+    # One UPDATE per column: a single chained replace() over all (id -> token)
+    # pairs, so each large-blob column is scanned ONCE, not once per image. The
+    # WHERE guard limits the pass to rows that still hold an int placeholder, so a
+    # re-run over token-only rows is a no-op. Identifiers come from the hardcoded
+    # _DECK_PLACEHOLDER_COLUMNS; every placeholder literal is a bound parameter.
+    if is_sqlite:
+        guard_sql, guard_param = "LIKE :_guard", {"_guard": "%{{image:%"}
+    else:
+        guard_sql, guard_param = "~ :_guard", {"_guard": r"\{\{image:[0-9]+\}\}"}
+
+    for table_name, column_name in live_targets:
+        q = _qual(table_name)
+        expr = column_name
+        params: dict = {}
+        for i, (image_id, token) in enumerate(rows):
+            expr = f"replace({expr}, :o{i}, :n{i})"
+            params[f"o{i}"] = f"{{{{image:{image_id}}}}}"
+            params[f"n{i}"] = f"{{{{image:{token}}}}}"
+        conn.execute(
+            text(f"UPDATE {q} SET {column_name} = {expr} WHERE {column_name} {guard_sql}"),
+            {**params, **guard_param},
+        )
 
 
 #: The one place the precedence rule is written in SQL. ``$$``-quoted so the body
