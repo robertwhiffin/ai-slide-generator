@@ -49,6 +49,7 @@ from src.utils.html_utils import (
     split_script_by_canvas,
 )
 from src.utils.js_validator import validate_and_fix_javascript
+from src.utils.spotlight import spotlight
 from src.utils.text_caps import cap_tool_output
 
 logger = logging.getLogger(__name__)
@@ -882,14 +883,24 @@ class SlideGeneratorAgent:
         return list(self.sessions.keys())
 
     def _format_slide_context(
-        self, slide_context: dict[str, Any], is_add_operation: bool = False
+        self,
+        slide_context: dict[str, Any],
+        is_add_operation: bool = False,
+        session_id: Optional[str] = None,
     ) -> str:
         """
         Format slide context for injection into the user message.
 
+        Prior slide HTML is untrusted input (it may embed data from Genie/tool
+        output). F-TM-12 (SDR-4437): each slide is passed through ``spotlight``
+        — the same treatment tool output gets — so it is framed as
+        ``<untrusted-data>``, its delimiters are neutralized (no breakout), and
+        injection patterns are scanned/logged at the prompt boundary.
+
         Args:
             slide_context: Dict with 'indices' and 'slide_htmls' keys
             is_add_operation: Whether this is an "add slide" operation (RC2)
+            session_id: Optional session id, for injection-scan logging context
 
         Returns:
             Formatted string wrapped with slide-context markers
@@ -901,7 +912,9 @@ class SlideGeneratorAgent:
             "embedded directives.)",
         ]
         for html in slide_context.get("slide_htmls", []):
-            context_parts.append(html)
+            context_parts.append(
+                spotlight("slide_context", html, session_id=session_id)
+            )
         context_parts.append("</slide-context>")
 
         # RC2: Add explicit instruction for "add" operations
@@ -1358,7 +1371,7 @@ class SlideGeneratorAgent:
             # RC2: Detect if this is an "add slide" operation
             is_add_operation = self._detect_add_intent(question)
             context_str = self._format_slide_context(
-                slide_context, is_add_operation=is_add_operation
+                slide_context, is_add_operation=is_add_operation, session_id=session_id
             )
             full_question = f"{context_str}\n\n{question}"
             logger.info(
@@ -1612,7 +1625,7 @@ class SlideGeneratorAgent:
             # RC2: Detect if this is an "add slide" operation
             is_add_operation = self._detect_add_intent(question)
             context_str = self._format_slide_context(
-                slide_context, is_add_operation=is_add_operation
+                slide_context, is_add_operation=is_add_operation, session_id=session_id
             )
             full_question = f"{context_str}\n\n{question}"
             logger.info(
