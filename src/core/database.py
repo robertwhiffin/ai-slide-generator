@@ -526,6 +526,12 @@ def _run_migrations(engine, schema: str | None = None):
 
         # --- image_assets.token: unguessable external id + backfill (SDR-4437 F-TM-7) ---
         _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- stored decks: rewrite {{image:<int-id>}} -> {{image:<token>}} placeholders
+        # --- (SDR-4437 F-TM-7). Runs AFTER the token backfill so every image has one. ---
+        _migrate_rewrite_deck_image_placeholders(
+            conn, inspector, schema, _qual, is_sqlite
+        )
         # --- agent_config: style precedence in the DB, for the raw-SQL writers no
         # --- Python-side bind hook can see (PostgreSQL only; no-op on SQLite) ---
         _migrate_agent_config_precedence_trigger(
@@ -1098,6 +1104,118 @@ def _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite) -
     ))
     if not is_sqlite:
         conn.execute(text(f"ALTER TABLE {q} ALTER COLUMN token SET NOT NULL"))
+
+
+#: Persistent (table, column) pairs whose stored text can carry an
+#: ``{{image:<id>}}`` placeholder — the same field set ``substitute_deck_dict_images``
+#: resolves at render time, but at their storage sites:
+#:   * ``session_slide_decks.deck_json``  — the serialized deck dict (slides[].html,
+#:     top-level css, in-dict html_content),
+#:   * ``session_slide_decks.html_content`` — the separate full knitted HTML column,
+#:   * ``slide_deck_versions.deck_json``  — savepoint snapshots, so a restored older
+#:     version renders too.
+#: All three are declared ``Column(Text)`` and no json/jsonb migration touches them,
+#: so they are plain ``TEXT`` on BOTH SQLite and PostgreSQL/Lakebase — ``replace()``
+#: applies directly with no jsonb cast. (Transient scratch such as
+#: ``chat_requests.result_json`` is deliberately excluded — it is not persisted deck
+#: state.)
+_DECK_PLACEHOLDER_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("session_slide_decks", "deck_json"),
+    ("session_slide_decks", "html_content"),
+    ("slide_deck_versions", "deck_json"),
+)
+
+
+def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Rewrite stored deck ``{{image:<int-id>}}`` placeholders to ``{{image:<token>}}`` (SDR-4437 F-TM-7).
+
+    PR #237 switched the external image identifier from the enumerable int PK to
+    an unguessable token, and ``substitute_image_placeholders`` now resolves
+    ``{{image:<token>}}``. Decks saved BEFORE that change have ``{{image:<int-id>}}``
+    baked into their stored HTML/JSON, so their embedded images would stop
+    rendering. This one-time, idempotent migration rewrites those placeholders in
+    place, using the ``id -> token`` map that ``_migrate_image_assets_add_token``
+    (which runs just before this) has guaranteed exists on every image row.
+
+    The string work stays IN THE DATABASE — Python only drives a per-``(id, token)``
+    loop of set-based ``replace()`` UPDATEs, exactly like the token backfill drives
+    its loop. Deck blobs are never pulled into the app to be regexed.
+
+    Correctness / performance:
+
+    - **Per-image sequential loop, not a join.** A single
+      ``UPDATE ... FROM image_assets`` applies only ONE arbitrary matched row per
+      target row, so a deck referencing two images would be half-rewritten. The
+      sequential per-image ``replace()`` accumulates correctly across multi-image
+      decks. ``regexp_replace`` can't express it either — the replacement is a
+      per-match lookup into ``image_assets``, not a fixed template.
+    - **Prefix-safe.** The literal ``{{image:5}}`` (closing braces included) never
+      matches inside ``{{image:51}}``, so there is no id-prefix collision.
+    - **Idempotent + cheap.** The ``LIKE`` guard means once the int placeholders are
+      gone (first run) re-runs match nothing; unreferenced or hard-deleted ids are
+      simply never touched. Cost is O(images) set-based UPDATEs, fine at startup.
+    - **No jsonb cast.** Every target column (:data:`_DECK_PLACEHOLDER_COLUMNS`) is
+      ``TEXT`` on both backends, so ``replace()`` applies directly. Tokens are
+      ``[A-Za-z0-9_-]`` (JSON-safe), so text-level replacement inside a JSON blob
+      cannot corrupt its structure.
+    - **Soft-deleted images included** (no ``is_active`` filter) — a deck may still
+      reference an image that was later soft-deleted, and it must keep resolving.
+
+    A no-op when ``image_assets`` (or its ``token`` column) or every target table is
+    absent on a given deploy.
+    """
+    from sqlalchemy import text
+
+    # image_assets + its token column must exist (guaranteed by the prior migration
+    # on any live deploy; guarded so this can be exercised standalone).
+    try:
+        image_cols = {c["name"] for c in inspector.get_columns("image_assets", schema=schema)}
+    except Exception:
+        return
+    if "token" not in image_cols:
+        return
+
+    # Only rewrite target tables/columns that actually exist on this deploy.
+    live_targets: list[tuple[str, str]] = []
+    for table_name, column_name in _DECK_PLACEHOLDER_COLUMNS:
+        try:
+            cols = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+        except Exception:
+            continue
+        if column_name in cols:
+            live_targets.append((table_name, column_name))
+    if not live_targets:
+        return
+
+    rows = conn.execute(
+        text(f"SELECT id, token FROM {_qual('image_assets')} WHERE token IS NOT NULL")
+    ).fetchall()
+    if not rows:
+        return
+
+    logger.info(
+        "Migration: rewriting {{image:<id>}} deck placeholders to tokens for "
+        "%d images across %d columns (SDR-4437 F-TM-7)",
+        len(rows),
+        len(live_targets),
+    )
+    for image_id, token in rows:
+        old = f"{{{{image:{image_id}}}}}"
+        new = f"{{{{image:{token}}}}}"
+        for table_name, column_name in live_targets:
+            q = _qual(table_name)
+            # Identifiers come from the hardcoded _DECK_PLACEHOLDER_COLUMNS; the
+            # placeholder literals are bound parameters. The LIKE guard makes rows
+            # without this id (and every row on a re-run) a no-op.
+            conn.execute(
+                text(
+                    f"UPDATE {q} SET {column_name} = replace({column_name}, :old, :new) "
+                    f"WHERE {column_name} LIKE :pattern"
+                ),
+                {"old": old, "new": new, "pattern": f"%{old}%"},
+            )
+
+
 #: The one place the precedence rule is written in SQL. ``$$``-quoted so the body
 #: needs no escaping, and named after the rule rather than the tables, since both
 #: ``agent_config`` columns share it.
