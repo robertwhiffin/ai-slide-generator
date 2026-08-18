@@ -12,7 +12,7 @@ import tempfile
 from datetime import datetime
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -111,6 +111,30 @@ def _run_placeholder_migration(engine) -> None:
         _migrate_rewrite_deck_image_placeholders(
             conn, inspect(conn), None, _qual, is_sqlite=True
         )
+
+
+def _deck_updates_issued_by(engine, fn) -> list[str]:
+    """Run ``fn`` and return the UPDATE statements it issued against deck tables.
+
+    The migration runs on EVERY worker at EVERY startup, so once the one-time
+    rewrite is done it must not re-issue the expensive per-image UPDATEs.
+    """
+    seen: list[str] = []
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _before)
+    try:
+        fn()
+    finally:
+        event.remove(engine, "before_cursor_execute", _before)
+
+    return [
+        s for s in seen
+        if s.lstrip().upper().startswith("UPDATE")
+        and ("session_slide_decks" in s or "slide_deck_versions" in s)
+    ]
 
 
 def _deck_json(engine, deck_id: int) -> str:
@@ -279,6 +303,27 @@ class TestDeckImagePlaceholderMigration:
         result = _version_json(sqlite_engine, ver_id)
         assert "{{image:1}}" not in result
         assert f"{{{{image:{token}}}}}" in result
+
+    def test_no_deck_updates_when_nothing_to_rewrite(self, sqlite_engine, session_factory):
+        # The app runs this migration on EVERY worker on EVERY boot. Once the
+        # one-time rewrite is done (decks hold only token placeholders), the
+        # migration must short-circuit and issue NO per-image UPDATEs — otherwise
+        # every worker re-scans every deck table 3x per image on each startup,
+        # which stalled real multi-worker startup on prod-scale data.
+        with session_factory() as s:
+            # Token deliberately does NOT start with a digit, so it is not an
+            # int-style placeholder on any backend.
+            _make_image(s, 1, "TOKnondigit_aa")
+            _make_deck(
+                s, "sess-1",
+                json.dumps({"slides": [{"html": '<img src="{{image:TOKnondigit_aa}}">'}]}),
+            )
+            s.commit()
+
+        issued = _deck_updates_issued_by(
+            sqlite_engine, lambda: _run_placeholder_migration(sqlite_engine)
+        )
+        assert issued == [], f"expected no deck UPDATEs on an already-migrated DB, got: {issued}"
 
     def test_full_run_migrations_rewrites_placeholders(self, sqlite_engine, session_factory):
         # End-to-end: the placeholder rewrite fires as part of the full

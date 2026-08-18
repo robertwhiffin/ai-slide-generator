@@ -1126,6 +1126,41 @@ _DECK_PLACEHOLDER_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite) -> bool:
+    """Does any target column still hold an int-style ``{{image:<digits>}}`` placeholder?
+
+    The cheap gate that keeps :func:`_migrate_rewrite_deck_image_placeholders` a
+    near no-op on every startup after its one-time rewrite. Read-only and
+    short-circuiting (``LIMIT 1``), so it never takes a write lock and stops at the
+    first match.
+
+    - PostgreSQL / Lakebase (the real target): a POSIX regex, ``{{image:`` + one or
+      more digits + ``}}``. Precise — a token placeholder is
+      ``{{image:<token>}}`` where the token is ``secrets.token_urlsafe(32)`` (43
+      chars of ``[A-Za-z0-9_-]``), which cannot be all digits, so only genuine
+      legacy int placeholders match.
+    - SQLite (tests only): ``GLOB`` has no ``+`` quantifier, so the pattern matches
+      ``{{image:`` followed by a single digit. Deliberately BROAD — it can also
+      match a token placeholder that happens to start with a digit, which at worst
+      makes the idempotent rewrite loop run when it strictly need not. It never
+      misses a real int placeholder, so correctness is preserved; SQLite is not a
+      deployment target and its data is tiny.
+    """
+    from sqlalchemy import text
+
+    for table_name, column_name in live_targets:
+        q = _qual(table_name)
+        if is_sqlite:
+            stmt = text(f"SELECT 1 FROM {q} WHERE {column_name} GLOB :pat LIMIT 1")
+            params = {"pat": "*{{image:[0-9]*"}
+        else:
+            stmt = text(f"SELECT 1 FROM {q} WHERE {column_name} ~ :pat LIMIT 1")
+            params = {"pat": r"\{\{image:[0-9]+\}\}"}
+        if conn.execute(stmt, params).first() is not None:
+            return True
+    return False
+
+
 def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_sqlite) -> None:
     """Rewrite stored deck ``{{image:<int-id>}}`` placeholders to ``{{image:<token>}}`` (SDR-4437 F-TM-7).
 
@@ -1151,9 +1186,14 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
       per-match lookup into ``image_assets``, not a fixed template.
     - **Prefix-safe.** The literal ``{{image:5}}`` (closing braces included) never
       matches inside ``{{image:51}}``, so there is no id-prefix collision.
-    - **Idempotent + cheap.** The ``LIKE`` guard means once the int placeholders are
-      gone (first run) re-runs match nothing; unreferenced or hard-deleted ids are
-      simply never touched. Cost is O(images) set-based UPDATEs, fine at startup.
+    - **Idempotent + cheap on repeat.** This runs on EVERY worker at EVERY startup,
+      so a fast gate (:func:`_deck_columns_have_int_placeholder`) short-circuits the
+      whole thing once no int-style placeholder remains — turning steady-state boots
+      into a few read-only ``LIMIT 1`` scans instead of O(images) unindexable
+      leading-wildcard ``LIKE`` UPDATEs per column (that unconditional per-boot cost
+      stalled real multi-worker startup on prod-scale data). The per-UPDATE ``LIKE``
+      guard is the second layer: within a run it skips rows without this id, and
+      unreferenced or hard-deleted ids are never touched.
     - **No jsonb cast.** Every target column (:data:`_DECK_PLACEHOLDER_COLUMNS`) is
       ``TEXT`` on both backends, so ``replace()`` applies directly. Tokens are
       ``[A-Za-z0-9_-]`` (JSON-safe), so text-level replacement inside a JSON blob
@@ -1185,6 +1225,16 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
         if column_name in cols:
             live_targets.append((table_name, column_name))
     if not live_targets:
+        return
+
+    # Fast idempotency gate. This migration runs on EVERY worker at EVERY startup
+    # (init_db in the FastAPI lifespan), so once the one-time rewrite is done it must
+    # NOT re-issue the per-image UPDATEs: each is an unindexable leading-wildcard
+    # LIKE scan of a large-blob deck table, and O(images) of them per column across
+    # several concurrent workers stalls startup on prod-scale data. If no target
+    # column still holds an int-style {{image:<digits>}} placeholder, there is
+    # nothing to do — return before touching the image rows or the deck tables.
+    if not _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite):
         return
 
     rows = conn.execute(
