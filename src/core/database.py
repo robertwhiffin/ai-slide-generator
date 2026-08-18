@@ -524,6 +524,14 @@ def _run_migrations(engine, schema: str | None = None):
         # --- image_assets.tags: json → jsonb (PostgreSQL) for native @> queries ---
         _migrate_image_assets_tags_json_to_jsonb(conn, schema, _qual, is_sqlite)
 
+        # --- image_assets.token: unguessable external id + backfill (SDR-4437 F-TM-7) ---
+        _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- stored decks: rewrite {{image:<int-id>}} -> {{image:<token>}} placeholders
+        # --- (SDR-4437 F-TM-7). Runs AFTER the token backfill so every image has one. ---
+        _migrate_rewrite_deck_image_placeholders(
+            conn, inspector, schema, _qual, is_sqlite
+        )
         # --- agent_config: style precedence in the DB, for the raw-SQL writers no
         # --- Python-side bind hook can see (PostgreSQL only; no-op on SQLite) ---
         _migrate_agent_config_precedence_trigger(
@@ -1055,6 +1063,273 @@ def _ensure_llm_judge_backend_default(
     except Exception as ex:
         logger.debug(
             "Migration: skip llm_judge_backend server default alter: %s", ex
+        )
+
+
+def _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add the unguessable ``token`` column to image_assets and backfill (SDR-4437 F-TM-7).
+
+    The int PK is enumerable, so image reads now key on an opaque token. Fresh
+    installs get the column via create_all(); existing tables need this ALTER +
+    per-row backfill. Idempotent: gated on the column's absence.
+    """
+    import secrets
+
+    from sqlalchemy import text
+
+    table = "image_assets"
+    try:
+        cols = {c["name"] for c in inspector.get_columns(table, schema=schema)}
+    except Exception:
+        return
+    if not cols or "token" in cols:
+        return
+
+    q = _qual(table)
+    logger.info(f"Migration: adding token column to {table} (SDR-4437 F-TM-7)")
+    # Add nullable first so the ALTER succeeds on a populated table.
+    conn.execute(text(f"ALTER TABLE {q} ADD COLUMN token VARCHAR(64)"))
+
+    # Backfill every existing row with a distinct unguessable token.
+    row_ids = [r[0] for r in conn.execute(text(f"SELECT id FROM {q} WHERE token IS NULL")).fetchall()]
+    for row_id in row_ids:
+        conn.execute(
+            text(f"UPDATE {q} SET token = :tok WHERE id = :id"),
+            {"tok": secrets.token_urlsafe(32), "id": row_id},
+        )
+
+    # Enforce uniqueness (and non-null on PostgreSQL, now that every row has a token).
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS ix_image_assets_token ON {q} (token)"
+    ))
+    if not is_sqlite:
+        conn.execute(text(f"ALTER TABLE {q} ALTER COLUMN token SET NOT NULL"))
+
+
+#: Persistent (table, column) pairs whose stored text can carry an
+#: ``{{image:<id>}}`` placeholder — the same field set ``substitute_deck_dict_images``
+#: resolves at render time, but at their storage sites:
+#:   * ``session_slide_decks.deck_json``  — the serialized deck dict (slides[].html,
+#:     top-level css, in-dict html_content),
+#:   * ``session_slide_decks.html_content`` — the separate full knitted HTML column,
+#:   * ``slide_deck_versions.deck_json``  — savepoint snapshots, so a restored older
+#:     version renders too.
+#: All three are declared ``Column(Text)`` and no json/jsonb migration touches them,
+#: so they are plain ``TEXT`` on BOTH SQLite and PostgreSQL/Lakebase — ``replace()``
+#: applies directly with no jsonb cast. (Transient scratch such as
+#: ``chat_requests.result_json`` is deliberately excluded — it is not persisted deck
+#: state.)
+_DECK_PLACEHOLDER_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("session_slide_decks", "deck_json"),
+    ("session_slide_decks", "html_content"),
+    ("slide_deck_versions", "deck_json"),
+)
+
+
+def _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite) -> bool:
+    """Does any target column still hold an int-style ``{{image:<digits>}}`` placeholder?
+
+    The cheap gate that keeps :func:`_migrate_rewrite_deck_image_placeholders` a
+    near no-op on every startup after its one-time rewrite. Read-only and
+    short-circuiting (``LIMIT 1``), so it never takes a write lock and stops at the
+    first match.
+
+    - PostgreSQL / Lakebase (the real target): a POSIX regex, ``{{image:`` + one or
+      more digits + ``}}``. Precise — a token placeholder is
+      ``{{image:<token>}}`` where the token is ``secrets.token_urlsafe(32)`` (43
+      chars of ``[A-Za-z0-9_-]``), which cannot be all digits, so only genuine
+      legacy int placeholders match.
+    - SQLite (tests only): ``GLOB`` has no ``+`` quantifier, so the pattern matches
+      ``{{image:`` followed by a single digit. Deliberately BROAD — it can also
+      match a token placeholder that happens to start with a digit, which at worst
+      makes the idempotent rewrite loop run when it strictly need not. It never
+      misses a real int placeholder, so correctness is preserved; SQLite is not a
+      deployment target and its data is tiny.
+    """
+    from sqlalchemy import text
+
+    for table_name, column_name in live_targets:
+        q = _qual(table_name)
+        if is_sqlite:
+            stmt = text(f"SELECT 1 FROM {q} WHERE {column_name} GLOB :pat LIMIT 1")
+            params = {"pat": "*{{image:[0-9]*"}
+        else:
+            stmt = text(f"SELECT 1 FROM {q} WHERE {column_name} ~ :pat LIMIT 1")
+            params = {"pat": r"\{\{image:[0-9]+\}\}"}
+        if conn.execute(stmt, params).first() is not None:
+            return True
+    return False
+
+
+def _referenced_int_image_ids(conn, live_targets, _qual) -> set:
+    """Distinct integer ids referenced by ``{{image:<int>}}`` across the deck columns.
+
+    PostgreSQL/Lakebase only. Extraction happens IN THE DATABASE via
+    ``regexp_matches`` — only the small integer ids come back to Python, never the
+    deck blobs. This lets :func:`_migrate_rewrite_deck_image_placeholders` map just
+    the few hundred images decks actually reference instead of every image row (the
+    difference between a ~1-minute and an ~80-minute startup step on a real fork).
+    """
+    from sqlalchemy import text
+
+    ids: set = set()
+    for table_name, column_name in live_targets:
+        q = _qual(table_name)
+        result = conn.execute(
+            text(
+                f"SELECT DISTINCT (regexp_matches({column_name}, :cap, 'g'))[1] AS id "
+                f"FROM {q} WHERE {column_name} ~ :any_int"
+            ),
+            {"cap": r"\{\{image:([0-9]+)\}\}", "any_int": r"\{\{image:[0-9]+\}\}"},
+        ).fetchall()
+        ids.update(int(r[0]) for r in result)
+    return ids
+
+
+def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Rewrite stored deck ``{{image:<int-id>}}`` placeholders to ``{{image:<token>}}`` (SDR-4437 F-TM-7).
+
+    PR #237 switched the external image identifier from the enumerable int PK to
+    an unguessable token, and ``substitute_image_placeholders`` now resolves
+    ``{{image:<token>}}``. Decks saved BEFORE that change have ``{{image:<int-id>}}``
+    baked into their stored HTML/JSON, so their embedded images would stop
+    rendering. This one-time, idempotent migration rewrites those placeholders in
+    place, using the ``id -> token`` map that ``_migrate_image_assets_add_token``
+    (which runs just before this) has guaranteed exists on every image row.
+
+    The string work stays IN THE DATABASE — Python only drives the id/token map and
+    builds the SQL. Deck blobs are never pulled into the app to be regexed.
+
+    Scale matters: prod holds thousands of image rows and thousands of decks with
+    ~35 KB (up to ~430 KB) JSON blobs. The naive shape — a per-``(id, token)`` loop
+    of ``UPDATE ... WHERE col LIKE '%{{image:N}}%'`` — is O(images) unindexable
+    full-table scans per column and measured ~80 min on a real fork, which stalled
+    startup. Two changes make it a ~1-minute one-time step:
+
+    - **Only referenced ids.** On PostgreSQL/Lakebase the ids ACTUALLY referenced by
+      a deck are extracted IN THE DATABASE (:func:`_referenced_int_image_ids`, via
+      ``regexp_matches`` — only integers come back, never blobs); prod decks reuse a
+      few hundred of the thousands of images, so the rest are never considered. On
+      SQLite (tests, tiny data) there is no in-DB regex, so every image row is mapped
+      and a fast gate (:func:`_deck_columns_have_int_placeholder`) skips an
+      already-migrated DB.
+    - **One pass per column.** A single ``UPDATE`` per column applies a CHAINED
+      ``replace()`` over every ``(id -> token)`` pair, so each large-blob column is
+      scanned once rather than once per image.
+
+    Correctness:
+
+    - **Chained sequential replace, not a join.** ``replace(replace(col, id1, tok1),
+      id2, tok2)`` applies each substitution across the whole blob in turn, so a
+      multi-image deck is fully rewritten. A single ``UPDATE ... FROM image_assets``
+      would apply only ONE arbitrary matched row per target row (half-rewriting
+      multi-image decks); ``regexp_replace`` can't do the per-match id->token lookup.
+    - **Prefix-safe.** The literal ``{{image:5}}`` (closing braces included) never
+      matches inside ``{{image:51}}``, and a token (``[A-Za-z0-9_-]``) has no braces,
+      so the order of the chained replaces is irrelevant — no id-prefix collision.
+    - **Idempotent.** The per-``UPDATE`` guard restricts the pass to rows that still
+      hold an int placeholder, so a re-run over token-only rows is a no-op; once the
+      mappable ids are rewritten, extraction/gate find nothing (only unmappable
+      ids), so no further passes run.
+    - **No jsonb cast.** Every target column (:data:`_DECK_PLACEHOLDER_COLUMNS`) is
+      ``TEXT`` on both backends, so ``replace()`` applies directly. Tokens are
+      ``[A-Za-z0-9_-]`` (JSON-safe), so text-level replacement inside a JSON blob
+      cannot corrupt its structure.
+    - **Soft-deleted images included** (no ``is_active`` filter) — a deck may still
+      reference an image that was later soft-deleted, and it must keep resolving.
+    - **Unknown/hard-deleted ids** referenced by a deck have no image row, so they
+      are not in the map and their placeholder is left unchanged.
+
+    A no-op when ``image_assets`` (or its ``token`` column) or every target table is
+    absent on a given deploy.
+    """
+    from sqlalchemy import inspect, text
+
+    # Reflect the LIVE schema with a FRESH inspector, NOT the shared one that
+    # _run_migrations threads through. _migrate_image_assets_add_token adds the
+    # token column in this SAME transaction, and the shared inspector's reflection
+    # cache predates that ALTER — so a cached read reports "no token column" and
+    # this migration would return early, silently skipping the rewrite on every
+    # fresh DB and every prod fork (where the column is added during this run).
+    # This is the same reflection-cache staleness the design-system migrations in
+    # this file avoid the same way (see _migrate_uncap_brand_text_columns).
+    insp = inspect(conn)
+
+    # image_assets + its token column must exist (guaranteed by the prior migration
+    # on any live deploy; guarded so this can be exercised standalone).
+    try:
+        image_cols = {c["name"] for c in insp.get_columns("image_assets", schema=schema)}
+    except Exception:
+        return
+    if "token" not in image_cols:
+        return
+
+    # Only rewrite target tables/columns that actually exist on this deploy.
+    live_targets: list[tuple[str, str]] = []
+    for table_name, column_name in _DECK_PLACEHOLDER_COLUMNS:
+        try:
+            cols = {c["name"] for c in insp.get_columns(table_name, schema=schema)}
+        except Exception:
+            continue
+        if column_name in cols:
+            live_targets.append((table_name, column_name))
+    if not live_targets:
+        return
+
+    # The (id -> token) pairs to rewrite. Only ids ACTUALLY referenced by a deck —
+    # see the docstring for why looping every image row is far too slow at prod
+    # scale.
+    q_images = _qual("image_assets")
+    if is_sqlite:
+        # No in-DB regex on SQLite; test data is tiny, so gate on any int
+        # placeholder (skips an already-migrated DB) and map every image row.
+        if not _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite):
+            return
+        rows = conn.execute(
+            text(f"SELECT id, token FROM {q_images} WHERE token IS NOT NULL")
+        ).fetchall()
+    else:
+        referenced = _referenced_int_image_ids(conn, live_targets, _qual)
+        if not referenced:
+            return
+        rows = conn.execute(
+            text(
+                f"SELECT id, token FROM {q_images} "
+                "WHERE token IS NOT NULL AND id = ANY(:ids)"
+            ),
+            {"ids": list(referenced)},
+        ).fetchall()
+    if not rows:
+        return
+
+    logger.info(
+        "Migration: rewriting {{image:<id>}} deck placeholders to tokens for "
+        "%d referenced images across %d columns (SDR-4437 F-TM-7)",
+        len(rows),
+        len(live_targets),
+    )
+
+    # One UPDATE per column: a single chained replace() over all (id -> token)
+    # pairs, so each large-blob column is scanned ONCE, not once per image. The
+    # WHERE guard limits the pass to rows that still hold an int placeholder, so a
+    # re-run over token-only rows is a no-op. Identifiers come from the hardcoded
+    # _DECK_PLACEHOLDER_COLUMNS; every placeholder literal is a bound parameter.
+    if is_sqlite:
+        guard_sql, guard_param = "LIKE :_guard", {"_guard": "%{{image:%"}
+    else:
+        guard_sql, guard_param = "~ :_guard", {"_guard": r"\{\{image:[0-9]+\}\}"}
+
+    for table_name, column_name in live_targets:
+        q = _qual(table_name)
+        expr = column_name
+        params: dict = {}
+        for i, (image_id, token) in enumerate(rows):
+            expr = f"replace({expr}, :o{i}, :n{i})"
+            params[f"o{i}"] = f"{{{{image:{image_id}}}}}"
+            params[f"n{i}"] = f"{{{{image:{token}}}}}"
+        conn.execute(
+            text(f"UPDATE {q} SET {column_name} = {expr} WHERE {column_name} {guard_sql}"),
+            {**params, **guard_param},
         )
 
 

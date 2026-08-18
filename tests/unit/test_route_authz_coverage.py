@@ -78,14 +78,13 @@ FEEDBACK_READ_PATHS = {
 }
 
 IMAGE_READ_ACCEPTED_RISK = (
-    "Explicitly accepted cross-user IDOR risk — accepted because images are a "
-    "shared library with no per-deck binding to authorize against. Image IDs "
-    "are sequential integers, so any authenticated workspace user can "
-    "enumerate IDs and retrieve every user's image metadata (uploaded_by, "
-    "tags, description) and raw bytes. Reads stay open so a CAN_EDIT "
-    "collaborator opening the HTML editor on a shared deck can fetch the "
-    "author's images. Revisit if per-deck image binding lands; a cheaper "
-    "interim hardening is a random-UUID public identifier."
+    "Library-image reads stay open by design; enumeration is closed (SDR-4437 "
+    "F-TM-7 remediated). The enumerable int PK is no longer exposed — reads key "
+    "on an unguessable per-image token (secrets.token_urlsafe), and chat-pasted "
+    "'ephemeral' images are additionally owner-scoped (404 for non-owners). "
+    "Non-ephemeral library images remain open-read to any caller holding the "
+    "token so a CAN_EDIT collaborator opening the HTML editor on a shared deck "
+    "can fetch the author's images."
 )
 
 TOOLS_DISCOVERY_RATIONALE = (
@@ -135,8 +134,8 @@ ALLOWLIST = {
     ("GET", "/api/export/google-slides/auth/callback"):
         "OAuth callback (GET, popup flow); state-nonce binding lands in PR-4 "
         "(MEDIUM-3).",
-    ("GET", "/api/images/{image_id}"): IMAGE_READ_ACCEPTED_RISK,
-    ("GET", "/api/images/{image_id}/data"): IMAGE_READ_ACCEPTED_RISK,
+    ("GET", "/api/images/{token}"): IMAGE_READ_ACCEPTED_RISK,
+    ("GET", "/api/images/{token}/data"): IMAGE_READ_ACCEPTED_RISK,
     ("POST", "/api/images/upload"):
         "Shared image library: any authenticated user may upload; writes to "
         "existing images are owner-scoped (SDR-4437 HIGH-1).",

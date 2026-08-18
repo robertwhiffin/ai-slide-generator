@@ -74,9 +74,9 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional context containing the slides to edit",
     )
-    image_ids: Optional[list[int]] = Field(
+    image_ids: Optional[list[str]] = Field(
         default=None,
-        description="IDs of images attached to this message (from upload or paste)",
+        description="Opaque tokens of images attached to this message (SDR-4437 F-TM-7)",
     )
     agent_config: Optional[dict] = Field(
         default=None,

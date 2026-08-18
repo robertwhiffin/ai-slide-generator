@@ -142,12 +142,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setLoadingMessage('');
   };
 
-  const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | number[], maybeImageIds?: number[]) => {
+  const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | string[], maybeImageIds?: string[]) => {
     // Support two calling conventions:
     // 1. From ChatInput: (content, imageIds)
     // 2. From imperative ref: (content, slideContext)
     let explicitSlideContext: SlideContext | undefined;
-    let imageIds: number[] | undefined;
+    let imageIds: string[] | undefined;
 
     if (Array.isArray(explicitSlideContextOrImageIds)) {
       imageIds = explicitSlideContextOrImageIds;

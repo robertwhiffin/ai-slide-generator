@@ -55,7 +55,7 @@ class TestSubstituteImagePlaceholders:
         html = '<img src="{{image:1}}" /><img src="{{image:2}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
             def side_effect(db, image_id):
-                if image_id == 1:
+                if image_id == "1":
                     return ("DATA_1", "image/png")
                 return ("DATA_2", "image/jpeg")
             mock_svc.get_image_base64.side_effect = side_effect
@@ -89,11 +89,21 @@ class TestSubstituteImagePlaceholders:
     def test_handles_empty_string(self, db_session):
         assert substitute_image_placeholders("", db_session) == ""
 
+    def test_substitutes_alphanumeric_token_placeholder(self, db_session):
+        """Placeholders now carry opaque tokens ([A-Za-z0-9_-]), not just digits."""
+        html = '<img src="{{image:aB3_x-9Zq}}" />'
+        with patch("src.utils.image_utils.image_service") as mock_svc:
+            mock_svc.get_image_base64.return_value = ("DATA", "image/png")
+            result = substitute_image_placeholders(html, db_session)
+
+        assert result == '<img src="data:image/png;base64,DATA" />'
+        mock_svc.get_image_base64.assert_called_once_with(db_session, "aB3_x-9Zq")
+
     def test_mixed_resolved_and_unresolved(self, db_session):
         html = '<img src="{{image:1}}" /><img src="{{image:999}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
             def side_effect(db, image_id):
-                if image_id == 1:
+                if image_id == "1":
                     return ("OK_DATA", "image/png")
                 raise ValueError("not found")
             mock_svc.get_image_base64.side_effect = side_effect
