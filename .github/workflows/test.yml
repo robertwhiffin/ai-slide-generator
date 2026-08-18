@@ -613,6 +613,18 @@ jobs:
                   print(f'Created test session (id={session.session_id})')
               else:
                   print('Test session already exists')
+
+          # Populate agent_config on the seeded profiles, exactly as the app used
+          # to on startup. Migrations now run once pre-fork in
+          # run.py::init_database, never in the uvicorn workers this job launches,
+          # so the seed step must run migrate_profiles itself — otherwise the
+          # seeded 'default' profile keeps a NULL agent_config and collides with
+          # save-from-session's duplicate-config check.
+          from src.core.database import get_session_local
+          from src.core.migrate_profiles_to_agent_config import migrate_profiles, backfill_sessions
+          migrated = migrate_profiles(get_session_local())
+          backfill_sessions(get_session_local())
+          print(f'Migrated {migrated} profiles to agent_config')
           "
 
       - name: Verify database seeding
