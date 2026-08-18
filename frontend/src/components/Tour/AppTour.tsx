@@ -175,7 +175,7 @@ const TOUR_STEPS: Step[] = [
     target: '[data-tour="agent-tools"]',
     title: 'Tools',
     content:
-      'Tools give the AI extra capabilities beyond text generation. Add Genie spaces to query your data, vector search indexes to reference documents, MCP connections, or model endpoints. Each tool appears as a chip — click it to edit, or click the X to remove.',
+      'Tools give the AI extra capabilities beyond text generation. Add Genie agents to query your data, vector search indexes to reference documents, MCP connections, or model endpoints. Each tool appears as a chip — click it to edit, or click the X to remove.',
     placement: 'bottom',
     skipBeacon: true,
   },

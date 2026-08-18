@@ -55,7 +55,7 @@ class TestSubstituteImagePlaceholders:
         html = '<img src="{{image:1}}" /><img src="{{image:2}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
             def side_effect(db, image_id):
-                if image_id == 1:
+                if image_id == "1":
                     return ("DATA_1", "image/png")
                 return ("DATA_2", "image/jpeg")
             mock_svc.get_image_base64.side_effect = side_effect
@@ -89,11 +89,21 @@ class TestSubstituteImagePlaceholders:
     def test_handles_empty_string(self, db_session):
         assert substitute_image_placeholders("", db_session) == ""
 
+    def test_substitutes_alphanumeric_token_placeholder(self, db_session):
+        """Placeholders now carry opaque tokens ([A-Za-z0-9_-]), not just digits."""
+        html = '<img src="{{image:aB3_x-9Zq}}" />'
+        with patch("src.utils.image_utils.image_service") as mock_svc:
+            mock_svc.get_image_base64.return_value = ("DATA", "image/png")
+            result = substitute_image_placeholders(html, db_session)
+
+        assert result == '<img src="data:image/png;base64,DATA" />'
+        mock_svc.get_image_base64.assert_called_once_with(db_session, "aB3_x-9Zq")
+
     def test_mixed_resolved_and_unresolved(self, db_session):
         html = '<img src="{{image:1}}" /><img src="{{image:999}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
             def side_effect(db, image_id):
-                if image_id == 1:
+                if image_id == "1":
                     return ("OK_DATA", "image/png")
                 raise ValueError("not found")
             mock_svc.get_image_base64.side_effect = side_effect
@@ -186,3 +196,66 @@ class TestSlideContextBase64Stripping:
         assert agent_ctx is not None
         assert "{{image:42}}" in agent_ctx["slide_htmls"][0]
         assert "base64" not in agent_ctx["slide_htmls"][0]
+
+
+class TestDeckDictImageSubstitution:
+    """``substitute_deck_dict_images`` must cover every placeholder-bearing
+    deck field — parity with ``substitute_deck_dict_ds_assets``, whose
+    top-level-``css`` fix this mirrors."""
+
+    def test_substitutes_deck_top_level_css(self, db_session):
+        deck = {
+            "slides": [{"html": "<p>no placeholder</p>"}],
+            "css": ".hero{background-image:url('{{image:7}}')}",
+        }
+        with patch("src.utils.image_utils.image_service") as mock_svc:
+            mock_svc.get_image_base64.return_value = ("CSSDATA", "image/png")
+            from src.utils.image_utils import substitute_deck_dict_images
+
+            out = substitute_deck_dict_images(deck, db_session)
+
+        assert "data:image/png;base64,CSSDATA" in out["css"]
+        assert "{{image:" not in out["css"]
+        assert out["slides"][0]["html"] == "<p>no placeholder</p>"
+
+    def test_css_resolves_even_without_slides(self, db_session):
+        deck = {"slides": [], "css": "body{background:url('{{image:9}}')}"}
+        with patch("src.utils.image_utils.image_service") as mock_svc:
+            mock_svc.get_image_base64.return_value = ("NOSLIDES", "image/png")
+            from src.utils.image_utils import substitute_deck_dict_images
+
+            out = substitute_deck_dict_images(deck, db_session)
+
+        assert "data:image/png;base64,NOSLIDES" in out["css"]
+
+
+class TestChatServiceImageCssCallerGate:
+    """Caller-level gate parity: ``_substitute_images_for_response`` must
+    invoke the image resolver when the ONLY ``{{image:ID}}`` reference is in
+    the deck's top-level ``css`` — the same caller-gate gap already fixed for
+    ``{{ds-asset:ID}}``."""
+
+    def test_resolves_image_when_only_in_deck_css(self, db_session):
+        from contextlib import contextmanager
+
+        deck = {
+            "slides": [{"html": "<p>x</p>"}],  # no placeholder in slide html
+            "css": ".hero{background:url('{{image:11}}')}",
+        }
+
+        @contextmanager
+        def _fake_db():
+            yield db_session
+
+        service = ChatService()
+        with patch("src.core.database.get_db_session", _fake_db), \
+             patch("src.utils.image_utils.image_service") as mock_svc:
+            mock_svc.get_image_base64.return_value = ("GATEDATA", "image/png")
+            # No {{ds-asset:ID}} handle here, so scope resolution is never
+            # reached; session_id is still required by the signature.
+            out_deck, _ = service._substitute_images_for_response(
+                deck, session_id="sess-1"
+            )
+
+        assert "data:image/png;base64,GATEDATA" in out_deck["css"]
+        assert "{{image:" not in out_deck["css"]

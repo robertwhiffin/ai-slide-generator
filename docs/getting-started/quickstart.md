@@ -2,7 +2,7 @@
 
 **Quick start:**
 1. Open the app -- you land directly on the generator
-2. Optionally add Genie spaces via the AgentConfigBar for data-driven slides
+2. Optionally add Genie agents via the AgentConfigBar for data-driven slides
 3. Describe the presentation you want
 4. Send -- watch slides stream in
 5. Refine through conversation

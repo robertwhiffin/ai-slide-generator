@@ -11,9 +11,11 @@ class TestSearchImagesTool:
     """Tests for the agent's search_images tool function."""
 
     def _make_mock_image(self, id=1, filename="logo.png", description="Company logo",
-                         tags=None, category="branding", mime_type="image/png"):
+                         tags=None, category="branding", mime_type="image/png",
+                         token="tok-1"):
         mock = MagicMock()
         mock.id = id
+        mock.token = token
         mock.original_filename = filename
         mock.description = description
         mock.tags = tags or ["branding"]
@@ -34,11 +36,12 @@ class TestSearchImagesTool:
 
         parsed = json.loads(result)
         assert len(parsed["images"]) == 1
-        assert parsed["images"][0]["id"] == 1
+        # External identifier is the opaque token, never the int PK (SDR-4437 F-TM-7).
+        assert parsed["images"][0]["id"] == "tok-1"
         assert parsed["images"][0]["filename"] == "logo.png"
 
     def test_returns_usage_hint_with_placeholder(self):
-        mock_image = self._make_mock_image(id=42, description="Logo")
+        mock_image = self._make_mock_image(id=42, description="Logo", token="tok-42")
 
         with patch("src.services.image_tools.get_db_session") as mock_ctx, \
              patch("src.services.image_tools.image_service") as mock_svc:
@@ -49,7 +52,8 @@ class TestSearchImagesTool:
             result = search_images()
 
         parsed = json.loads(result)
-        assert "{{image:42}}" in parsed["images"][0]["usage"]
+        # Placeholder carries the opaque token, not the int PK (SDR-4437 F-TM-7).
+        assert "{{image:tok-42}}" in parsed["images"][0]["usage"]
 
     def test_does_not_include_base64(self):
         mock_image = self._make_mock_image(description="", tags=[])

@@ -204,13 +204,13 @@ class TestGetImageBase64:
 
     def test_encodes_image_data_to_base64(self, db_session, png_1x1):
         image = create_test_image(db_session, image_data=png_1x1)
-        b64, mime = image_service.get_image_base64(db_session, image.id)
+        b64, mime = image_service.get_image_base64(db_session, image.token)
         assert b64 == base64.b64encode(png_1x1).decode("utf-8")
         assert mime == "image/png"
 
     def test_raises_for_nonexistent_image(self, db_session):
         with pytest.raises(ValueError, match="not found"):
-            image_service.get_image_base64(db_session, 99999)
+            image_service.get_image_base64(db_session, "nonexistent-token")
 
     def test_raises_for_inactive_image(self, db_session):
         image = create_test_image(db_session, is_active=False)
@@ -343,25 +343,25 @@ class TestDeleteImage:
 
     def test_sets_inactive(self, db_session):
         image = create_test_image(db_session)
-        image_service.delete_image(db_session, image.id, "admin")
+        image_service.delete_image(db_session, image.token, "admin")
 
         refreshed = db_session.get(ImageAsset, image.id)
         assert refreshed.is_active is False
 
     def test_sets_updated_by(self, db_session):
         image = create_test_image(db_session)
-        image_service.delete_image(db_session, image.id, "admin@example.com")
+        image_service.delete_image(db_session, image.token, "admin@example.com")
 
         refreshed = db_session.get(ImageAsset, image.id)
         assert refreshed.updated_by == "admin@example.com"
 
     def test_raises_for_nonexistent(self, db_session):
         with pytest.raises(ValueError, match="not found"):
-            image_service.delete_image(db_session, 99999, "admin")
+            image_service.delete_image(db_session, "nonexistent-token", "admin")
 
     def test_image_data_preserved_after_soft_delete(self, db_session, png_1x1):
         image = create_test_image(db_session, image_data=png_1x1)
-        image_service.delete_image(db_session, image.id, "admin")
+        image_service.delete_image(db_session, image.token, "admin")
 
         refreshed = db_session.get(ImageAsset, image.id)
         assert refreshed.image_data == png_1x1
@@ -388,7 +388,7 @@ class TestDuplicateNamePrevention:
             db=db_session, file_content=png_1x1,
             original_filename="logo.png", mime_type="image/png", user="test",
         )
-        image_service.delete_image(db_session, first.id, "test")
+        image_service.delete_image(db_session, first.token, "test")
         # Should succeed — original is soft-deleted
         second = image_service.upload_image(
             db=db_session, file_content=png_1x1,

@@ -43,7 +43,7 @@ export const GenieDiscovery: React.FC<GenieDiscoveryProps> = ({
       // Only show Genie-type tools in this panel
       setAllTools(result.filter(t => t.type === 'genie'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load Genie spaces');
+      setError(err instanceof Error ? err.message : 'Failed to load Genie agents');
     } finally {
       setLoading(false);
     }
@@ -67,7 +67,7 @@ export const GenieDiscovery: React.FC<GenieDiscoveryProps> = ({
   }, [onClose]);
 
   const displayName = (tool: AvailableTool): string =>
-    tool.space_name ?? tool.space_id ?? 'Genie Space';
+    tool.space_name ?? tool.space_id ?? 'Genie Agent';
 
   // Client-side filter
   const lowerQuery = query.toLowerCase();
@@ -86,7 +86,7 @@ export const GenieDiscovery: React.FC<GenieDiscoveryProps> = ({
       {/* Header with search */}
       <div className="px-3 pt-3 pb-2">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-gray-700">Add Genie Space</span>
+          <span className="text-sm font-medium text-gray-700">Add Genie Agent</span>
           <button
             onClick={onClose}
             className="p-0.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
@@ -100,7 +100,7 @@ export const GenieDiscovery: React.FC<GenieDiscoveryProps> = ({
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search Genie spaces..."
+            placeholder="Search Genie agents..."
             value={query}
             onChange={e => setQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
@@ -132,7 +132,7 @@ export const GenieDiscovery: React.FC<GenieDiscoveryProps> = ({
 
         {!loading && !error && filtered.length === 0 && (
           <p className="text-sm text-gray-500 py-4 text-center">
-            {query ? 'No matching Genie spaces.' : 'No Genie spaces available.'}
+            {query ? 'No matching Genie agents.' : 'No Genie agents available.'}
           </p>
         )}
 

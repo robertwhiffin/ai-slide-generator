@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* The BENIGN twin of hostile_collection_passes.html: identical but for
+         that fixture's <script>.
+
+         Its shape is deliberately NOT the wrapper shape. body's only child
+         carries the slide class, so the slide-root locator resolves on its very
+         first lookup and never reaches the wrapper collection — which is what
+         drives the pass on into the collection consumers DOWNSTREAM of the
+         locator, the ones a hardened locator cannot help:
+
+           .code            a monospace panel with two child <div>s, which is
+                            the only shape that reads element.children (an
+                            HTMLCollection) and then the panel's childNodes.
+           div.prose        bare inline content in a <div>, which is what makes
+                            wrapInlineRunsIn read that div's childNodes. Every
+                            deck reaches this one.
+           <svg>            an inline svg, collected with querySelectorAll.
+           <img> data: svg  an svg data-URI image, collected the same way.
+
+         All four grounds are the slide's own, so the artifact stays a one-colour
+         assertion while exercising four separate collection reads. */
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; background: #123456;
+               color: #ffffff; font-family: Arial, sans-serif; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+      .prose { font-size: 24px; }
+      .code { font-family: monospace; font-size: 20px; }
+    </style>
+    <script>
+      // The same poisoning as hostile_wrapper_iterator.html — an endless
+      // [Symbol.iterator] on NodeList.prototype and HTMLCollection.prototype —
+      // aimed at the collection reads DOWNSTREAM of the slide-root locator.
+      //
+      // This fixture's shape resolves the slide root on the locator's first
+      // lookup, so the locator is not what is under test here: the monospace
+      // panel's children, every div's childNodes, and the querySelectorAll()
+      // results for <svg> and <img> are. Those run on EVERY deck, which makes
+      // them the more reachable half of the same defect.
+      //
+      // See that fixture for why both interfaces are poisoned and why the
+      // yielded node is shared rather than freshly created.
+      var yielded = document.createElement('article');
+      var report = { configurable: {}, direct: {}, redefineResult: 'ok' };
+      function poisonIterator(name, proto) {
+        var descriptor = Object.getOwnPropertyDescriptor(proto, Symbol.iterator);
+        report.direct[name] = !!descriptor;
+        report.configurable[name] = descriptor ? !!descriptor.configurable : true;
+        try {
+          Object.defineProperty(proto, Symbol.iterator, {
+            configurable: true,
+            value: function () {
+              return { next: function () { return { done: false, value: yielded }; } };
+            },
+          });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poisonIterator('NodeList', NodeList.prototype);
+      poisonIterator('HTMLCollection', HTMLCollection.prototype);
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <div class="slide">
+      <h1>Acme Collection Passes</h1>
+      <div class="prose">Synthetic fixture slide.</div>
+      <div class="code">
+        <div>SELECT one</div>
+        <div>FROM acme</div>
+      </div>
+      <svg width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" fill="#ffffff"></rect></svg>
+      <img width="40" height="40" alt="" src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='40'%20height='40'%3E%3Ccircle%20cx='20'%20cy='20'%20r='18'%20fill='%23ffffff'/%3E%3C/svg%3E" />
+    </div>
+  </body>
+</html>

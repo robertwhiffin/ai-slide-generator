@@ -172,6 +172,24 @@ export async function setupUserGuideMocks(page: Page): Promise<void> {
     mockSessions
   } = await import('../fixtures/mocks');
 
+  // Identity (GET /api/user/current) — the /admin route is gated on `is_admin`
+  // from this endpoint (`App.tsx` via `hooks/useCurrentUser.ts`). Without it the
+  // gate resolves to non-admin and redirects to /, so every guide step that
+  // captures the admin page rendered nothing. The guide documents the ADMIN
+  // experience, so these captures are taken as an admin; the gate's own
+  // behaviour is covered by `e2e/admin-route-gate.spec.ts`.
+  await page.route('**/api/user/current', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        username: 'admin@test.com',
+        display_name: 'admin@test.com',
+        is_admin: true
+      })
+    });
+  });
+
   // New profiles API (GET /api/profiles) — used by AgentConfigContext
   await page.route(/\/api\/profiles$/, (route) => {
     route.fulfill({

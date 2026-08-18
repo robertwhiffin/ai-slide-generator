@@ -14,7 +14,7 @@ const FEATURES = [
   {
     icon: Wrench,
     title: 'Smart Tool Integration',
-    description: 'Connect Genie spaces, vector search, MCP tools, and model endpoints to build data-driven presentations.',
+    description: 'Connect Genie agents, vector search, MCP tools, and model endpoints to build data-driven presentations.',
     color: 'text-purple-600 bg-purple-50',
   },
   {
@@ -121,7 +121,7 @@ export function WelcomeModal() {
               <div className="space-y-3">
                 {[
                   { label: 'Chat-based generation', desc: 'Describe your deck in plain language — the AI handles structure, content, and design.' },
-                  { label: 'Configurable AI agent', desc: 'Attach tools like Genie spaces for live data, vector search for documents, and custom model endpoints.' },
+                  { label: 'Configurable AI agent', desc: 'Attach tools like Genie agents for live data, vector search for documents, and custom model endpoints.' },
                   { label: 'Slide styles & prompts', desc: 'Define visual themes and system prompts that standardize how decks look and feel.' },
                   { label: 'Agent profiles', desc: 'Save combinations of tools, styles, and prompts as profiles for instant reuse.' },
                   { label: 'Direct editing', desc: 'Click any slide to edit HTML inline. Drag to reorder. Duplicate, delete, or refine with AI.' },

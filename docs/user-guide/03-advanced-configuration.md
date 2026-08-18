@@ -7,6 +7,7 @@ This guide covers creating and managing Deck Prompts and Slide Styles in Databri
 Advanced configuration lets you customize:
 - **Deck Prompts** - Templates that guide how slides are structured and what content to include
 - **Slide Styles** - CSS styling that controls the visual appearance of generated slides
+- **Design Systems** - a full brand bundle (tokens, webfonts, brand imagery, named templates) uploaded as a zip. A design system supersedes a slide style when both are available; see [Design Systems](./09-design-systems.md)
 
 ## Prerequisites
 

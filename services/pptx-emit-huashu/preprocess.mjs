@@ -19,8 +19,11 @@
 // LLM prompt change affects every future deck and requires re-validating
 // all existing slide-style outputs.
 
+// The IIFE is async (rasterizeSvgDataUriImages awaits image decodes), so the
+// source expression evaluates to a Promise — page.evaluate() awaits promise
+// results, string-expression or not (html2pptx.js:1026 needs no change).
 export const PREPROCESS_SOURCE = `
-(function () {
+(async function () {
   // ─── Monospace code blocks → single text frame ─────────────────────
   // Tellr renders SQL/code as: parent <div style="font-family: monospace">
   // containing N child <div>s (one per code line) and <br>s between
@@ -34,12 +37,12 @@ export const PREPROCESS_SOURCE = `
   // and the breakLine fix in parseInlineFormatting).
   function flattenMonospaceCodeBlocks() {
     let count = 0;
-    document.querySelectorAll('div').forEach((panel) => {
+    queryAll('div').forEach((panel) => {
       const cs = window.getComputedStyle(panel);
       const fam = (cs.fontFamily || '').toLowerCase();
       const isMono = /\\bmono(space)?\\b|courier|consolas|menlo|monaco/i.test(fam);
       if (!isMono) return;
-      const childDivs = Array.from(panel.children).filter((c) => c.tagName === 'DIV');
+      const childDivs = elementChildrenOf(panel).filter((c) => c.tagName === 'DIV');
       if (childDivs.length < 2) return;
 
       // Collect inline content from each child div + a <br> after, plus
@@ -47,13 +50,13 @@ export const PREPROCESS_SOURCE = `
       // the source).
       const fragment = document.createDocumentFragment();
       let lastWasBr = false;
-      Array.from(panel.childNodes).forEach((child) => {
+      childNodesOf(panel).forEach((child) => {
         if (child.nodeType === 1 && child.tagName === 'DIV') {
           // Replace leading runs of regular spaces in text-node descendants
           // with NBSP so huashu's whitespace-collapse doesn't eat the
           // indent. Only at the start of the line; mid-line spaces stay
           // single (matches monospace rendering of "  prod_catalog").
-          const inlineChildren = Array.from(child.childNodes);
+          const inlineChildren = childNodesOf(child);
           for (let i = 0; i < inlineChildren.length; i++) {
             const n = inlineChildren[i];
             if (n.nodeType === 3 /* TEXT_NODE */) {
@@ -134,7 +137,7 @@ export const PREPROCESS_SOURCE = `
   }
   function wrapInlineRunsIn(parent) {
     let count = 0;
-    const children = Array.from(parent.childNodes);
+    const children = childNodesOf(parent);
     let i = 0;
     // Snapshot parent's computed font props so the new <p> doesn't get
     // subjected to existing <p> CSS rules. Example: a deck CSS
@@ -174,7 +177,7 @@ export const PREPROCESS_SOURCE = `
     let wrapped = 0;
     // Also walk <pre> and <code> so SQL/code blocks survive (they're
     // BLOCK_TAGS, but we want to wrap their inline children too).
-    document.querySelectorAll('div, pre, code').forEach((parent) => {
+    queryAll('div, pre, code').forEach((parent) => {
       wrapped += wrapInlineRunsIn(parent);
     });
     return wrapped;
@@ -245,9 +248,418 @@ export const PREPROCESS_SOURCE = `
     }
   }
 
+  // ─── locate the slide root ─────────────────────────────────────────
+  // The slide root is the outermost element standing for the whole slide.
+  // Two shapes reach us:
+  //
+  //   * wrapperless (unpinned DS decks, no-DS decks) — body's direct child
+  //     either carries the slide class or is a bare <div>. Both are resolved
+  //     exactly as before, so those decks are untouched.
+  //   * pinned template — the model emits the template's own structure, one
+  //     or more semantic <section>/<article> levels around the div.slide
+  //     body. Those wrappers carry no class and are not divs, so neither
+  //     lookup below used to match and the transfer silently stopped. The
+  //     OUTERMOST wrapper is the root: a pinned bundle's sole
+  //     "section { ... }" rule is what paints the slide, and the .slide
+  //     inside it often carries no ground of its own.
+  //
+  // Promotion has to agree with the backend's _promote_through_slide_wrapper()
+  // (src/utils/html_utils.py), which walks outward through EVERY consecutive
+  // sole-child semantic wrapper. The backend serialises the root it chose as
+  // the slide's HTML, so whatever it promoted to is exactly what arrives here
+  // as body's direct child. Stopping after a single level therefore left a
+  // section > article > div.slide deck rootless here — exported white — while
+  // the app rendered it correctly: the two surfaces disagreeing about one
+  // deck, which is the whole class of bug this locator exists to prevent.
+  //
+  // The walk stays deliberately narrow, matching the count the backend takes
+  // from find_all(recursive=False): each level must hold exactly one ELEMENT
+  // child. So a wrapper holding several slides stays a container, and an
+  // <h2>/<style>/<script>/SVG sibling stops the walk, while comments,
+  // whitespace and text never block it. A <div> is never promoted at any
+  // depth — it is neither a candidate wrapper nor a link in the chain — since
+  // it would risk swallowing a deck-level container holding one slide.
+  // Exactly one element is ever returned, so a wrapper and its inner .slide
+  // can never both count as roots.
+  const SLIDE_WRAPPER_TAGS = new Set(['SECTION', 'ARTICLE']);
+
+  // Hard stop on the descent below. NOT the promotion cap this walk deliberately
+  // does not have: Chromium caps a PARSED document's tree depth at 512 (measured
+  // — a 520-wrapper chain arrives 512 deep), so the longest sole-child chain any
+  // slide document can present is under 512 and the deepest that resolves is 509.
+  // 4096 is eight times the browser's own ceiling: no parsed input can reach it,
+  // so it cannot move where a legitimate chain resolves. It exists only for the
+  // case below where the realm is lying about the tree and the walk therefore
+  // isn't descending a real one.
+  const WALK_STEP_LIMIT = 4096;
+
+  // The same guarantee for BREADTH, where the argument above does not reach: a
+  // collection's LENGTH has no browser ceiling to sit eight times above, so this
+  // is not a claim about how wide a slide can be. A slide document holding a
+  // million nodes could not render at 1280x720, so no real deck approaches this
+  // and it cannot truncate one. What it does is stop a realm that lies about a
+  // collection from making the reads below run forever.
+  const COLLECTION_ITEM_LIMIT = 1000000;
+
+  // ─── reading the tree, in a realm that may be hostile ──────────────────
+  // The descent's termination argument is about the DOM: each step moves to a
+  // sole ELEMENT CHILD, and a parent → child chain is finite and acyclic. True of
+  // the DOM — and not true of the JS realm the pass runs in.
+  // Element.prototype.children / firstElementChild are CONFIGURABLE accessors, so
+  // page script can replace them with ones reporting the node itself (or a fresh
+  // node every read) as the sole child, and the descent then never ends.
+  //
+  // That is reachable, not theoretical: SLIDE_CSP (src/utils/html_safety.py)
+  // carries script-src 'unsafe-inline', so inline script in a slide document runs
+  // in the export page, at load, before this pass is evaluated. A malicious or
+  // merely broken uploaded template could hang the export worker.
+  //
+  // The fix reads the tree through primitives taken from a realm no page script
+  // has ever run in: a src-less iframe. Its intrinsics are separate objects from
+  // this realm's, and a native DOM accessor invoked with an explicit receiver
+  // works across realms, so the walk sees the real tree whatever this realm's
+  // prototypes now say. (An about:blank frame is not a fetch, so
+  // default-src 'none' does not block it — measured under the real SLIDE_CSP.)
+  //
+  // This is best-effort by nature and says so: page script runs first, so the
+  // means of reaching a pristine realm are themselves replaceable. What is NOT
+  // best-effort is TERMINATION — that is guaranteed by WALK_STEP_LIMIT, whatever
+  // the realm does. Correct in a hostile realm where it can be; terminating
+  // always.
+  function capturePristineElementAccess() {
+    let frame = null;
+    try {
+      frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      // documentElement, not body: nothing here may perturb body's child list,
+      // which the selectors in findSlideRoot() read.
+      document.documentElement.appendChild(frame);
+      const realm = frame.contentWindow;
+      // A replaced createElement/contentWindow could hand back THIS realm, whose
+      // accessors are the poisoned ones. Distinct intrinsics is the check.
+      if (!realm || realm === window || realm.Element === window.Element) return null;
+      const describe = realm.Object.getOwnPropertyDescriptor;
+      const firstChild = describe(realm.Element.prototype, 'firstElementChild');
+      const nextSibling = describe(realm.Element.prototype, 'nextElementSibling');
+      const tag = describe(realm.Element.prototype, 'tagName');
+      const matches = realm.Element.prototype.matches;
+      // Node-level siblings for the child NODE lists the passes below read (text
+      // and comment nodes included, which the element accessors skip), and
+      // NodeList's own length for the static lists there is no tree to walk.
+      const firstNode = describe(realm.Node.prototype, 'firstChild');
+      const nextNode = describe(realm.Node.prototype, 'nextSibling');
+      const listLength = describe(realm.NodeList.prototype, 'length');
+      // The lookups themselves, which every pass below starts from. These are
+      // plain methods rather than accessors, and Document's copies are DISTINCT
+      // function objects from Element's — a Document querySelectorAll invoked on
+      // an element throws Illegal invocation — so both are captured and each call
+      // site says which receiver it means. Capturing only one would leave the
+      // other exactly as replaceable as it is now.
+      const docQuery = realm.Document.prototype.querySelector;
+      const docQueryAll = realm.Document.prototype.querySelectorAll;
+      const elQuery = realm.Element.prototype.querySelector;
+      const elQueryAll = realm.Element.prototype.querySelectorAll;
+      if (typeof firstChild.get !== 'function' ||
+          typeof nextSibling.get !== 'function' ||
+          typeof tag.get !== 'function' ||
+          typeof matches !== 'function' ||
+          typeof firstNode.get !== 'function' ||
+          typeof nextNode.get !== 'function' ||
+          typeof listLength.get !== 'function' ||
+          typeof docQuery !== 'function' ||
+          typeof docQueryAll !== 'function' ||
+          typeof elQuery !== 'function' ||
+          typeof elQueryAll !== 'function') return null;
+      return {
+        pristine: true,
+        firstElementChild: (el) => firstChild.get.call(el),
+        nextElementSibling: (el) => nextSibling.get.call(el),
+        tagName: (el) => tag.get.call(el),
+        matches: (el, selector) => matches.call(el, selector),
+        firstChild: (node) => firstNode.get.call(node),
+        nextSibling: (node) => nextNode.get.call(node),
+        nodeListLength: (list) => listLength.get.call(list),
+        // The receiver stays this realm's document, which is the same trust this
+        // function already places in the global (it reaches the pristine realm
+        // through document.createElement). A native lookup invoked with an
+        // explicit receiver works across realms, so the result is this document's
+        // real elements, read through a function no page script has touched.
+        documentQuerySelector: (selector) => docQuery.call(document, selector),
+        documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
+        elementQuerySelector: (el, selector) => elQuery.call(el, selector),
+        elementQuerySelectorAll: (el, selector) => elQueryAll.call(el, selector),
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      // The captured accessors keep working once the frame is gone (measured), so
+      // the pristine realm never outlives the capture and the export DOM never
+      // contains the iframe.
+      if (frame) {
+        try { frame.remove(); } catch (e) { /* already detached — nothing to undo */ }
+      }
+    }
+  }
+
+  // Fallback when the capture above could not be trusted. Ordinary property
+  // access: correct in a clean realm, subvertible in a hostile one — which is
+  // what WALK_STEP_LIMIT is for.
+  const OWN_ELEMENT_ACCESS = {
+    pristine: false,
+    firstElementChild: (el) => el.firstElementChild,
+    nextElementSibling: (el) => el.nextElementSibling,
+    tagName: (el) => el.tagName,
+    matches: (el, selector) => el.matches(selector),
+    firstChild: (node) => node.firstChild,
+    nextSibling: (node) => node.nextSibling,
+    nodeListLength: (list) => list.length,
+    documentQuerySelector: (selector) => document.querySelector(selector),
+    documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
+    elementQuerySelector: (el, selector) => el.querySelector(selector),
+    elementQuerySelectorAll: (el, selector) => el.querySelectorAll(selector),
+  };
+
+  // ─── consuming a live DOM collection ───────────────────────────────────
+  // Array.from(), spread and for...of all read the collection's
+  // [Symbol.iterator], and that property is CONFIGURABLE on both
+  // NodeList.prototype and HTMLCollection.prototype. Page script can replace it
+  // with an iterator that never reports done, on the same route and with the
+  // same reachability as the poisoned child accessors above — and with two
+  // measured outcomes, neither survivable: the consumer spins, or (for a tight
+  // Array.from, which allocates instead of doing per-item work) it grows its
+  // result past the maximum array length and throws RangeError: Invalid array
+  // length out of the whole pass.
+  //
+  // So none of the reads below go through the iterator. They walk the sibling
+  // chain, or index the collection directly — indexed access needs no hardening
+  // of its own, because a live collection's indices are OWN properties of the
+  // platform object and a poisoned prototype cannot shadow them below the real
+  // length. Both are bounded, so a lying realm costs termination nothing.
+  //
+  // One capture per page, made on first use: every deck reaches at least one of
+  // these, and re-entering the iframe per call would put a DOM mutation in the
+  // middle of every pass.
+  let domAccessCache = null;
+  function domAccess() {
+    if (!domAccessCache) {
+      domAccessCache = capturePristineElementAccess() || OWN_ELEMENT_ACCESS;
+    }
+    return domAccessCache;
+  }
+
+  // ─── a bound that is reached is a bug, so say so ───────────────────────
+  // COLLECTION_ITEM_LIMIT was measured unreachable: the widest real deck presents
+  // about 33 items against a bound of a million, some 30,000x of headroom. That is
+  // the reason it must not truncate in SILENCE. Reaching it means either a realm
+  // lying about a collection or an input nobody has ever seen, and in both cases
+  // the items past the bound are missing from the exported deck — the same
+  // surfaces-disagree failure as a lost background, and just as unexplainable from
+  // the artifact. So the bound stays where it is (lowering it would invent a real
+  // truncation risk) and announces itself if it is ever met.
+  //
+  // The line carries the [preprocess] prefix deliberately: html2pptx.js routes
+  // exactly that prefix to console.error, and stderr is the only stream
+  // pptx_from_html_huashu.py echoes into the app log. A stdout line would be
+  // discarded, which is indistinguishable from staying silent.
+  //
+  // Once per pass, not once per item: the bound is met INSIDE loops, so a line per
+  // occurrence would bury the log under a million copies of itself.
+  let collectionLossReported = false;
+  function reportCollectionLoss(what, where) {
+    if (collectionLossReported) return;
+    collectionLossReported = true;
+    console.warn(
+      '[preprocess] collection ' + what + ' in ' + where + ': content past that ' +
+      'point is NOT in the exported deck. This bound is unreachable for real slide ' +
+      'content, so meeting it means the document presented an implausible ' +
+      'collection or the realm is lying about one.'
+    );
+  }
+
+  // Every child NODE, in order: the Array.from(node.childNodes) replacement.
+  // Text and comment nodes included, so callers switching on nodeType see exactly
+  // the sequence they saw before.
+  function childNodesOf(node) {
+    const dom = domAccess();
+    const nodes = [];
+    let child = dom.firstChild(node);
+    while (child && nodes.length < COLLECTION_ITEM_LIMIT) {
+      nodes.push(child);
+      child = dom.nextSibling(child);
+    }
+    // A surviving child is exactly the bound being met: the loop's other exit is a
+    // falsy one. No extra read, so this cannot itself run long.
+    if (child) reportCollectionLoss('truncated at ' + COLLECTION_ITEM_LIMIT + ' items', 'childNodesOf');
+    return nodes;
+  }
+
+  // Element children only: the Array.from(element.children) replacement.
+  function elementChildrenOf(element) {
+    const dom = domAccess();
+    const elements = [];
+    let child = dom.firstElementChild(element);
+    while (child && elements.length < COLLECTION_ITEM_LIMIT) {
+      elements.push(child);
+      child = dom.nextElementSibling(child);
+    }
+    if (child) reportCollectionLoss('truncated at ' + COLLECTION_ITEM_LIMIT + ' items', 'elementChildrenOf');
+    return elements;
+  }
+
+  // A static NodeList (querySelectorAll) — the one case with no sibling chain to
+  // walk, so it is an index loop over the pristine length. A length that is not a
+  // number makes Math.min NaN and the loop empty, which is a lost pass rather
+  // than an endless one.
+  function nodeListToArray(list) {
+    const reported = domAccess().nodeListLength(list);
+    const length = Math.min(reported, COLLECTION_ITEM_LIMIT);
+    const nodes = [];
+    for (let index = 0; index < length; index++) nodes.push(list[index]);
+    if (reported > COLLECTION_ITEM_LIMIT) {
+      reportCollectionLoss('truncated at ' + COLLECTION_ITEM_LIMIT + ' of ' + reported + ' items', 'nodeListToArray');
+    } else if (!(reported >= 0)) {
+      // The lost-pass case the bound cannot describe: a length that is not a
+      // number makes Math.min NaN and the loop empty. Terminating, but an empty
+      // result is content loss too, and it must not be quieter than truncation.
+      reportCollectionLoss('dropped entirely, length read as ' + String(reported), 'nodeListToArray');
+    }
+    return nodes;
+  }
+
+  // ─── the lookups every pass starts from ────────────────────────────────
+  // document.querySelector / querySelectorAll are CONFIGURABLE own properties of
+  // Document.prototype, on the same route and with the same reachability as the
+  // poisoned child accessors above: page script can point them at a decoy, or
+  // return something that is not a NodeList at all. Neither shows up as a hang —
+  // the pass returns, having read a document that does not exist.
+  //
+  // Going through the pristine copy also settles the OTHER half of the read.
+  // querySelectorAll's result was being consumed with NodeList.prototype.forEach,
+  // which is its OWN configurable property, separate from [Symbol.iterator] and
+  // untouched by the work that closed that: an endless forEach hangs the pass, and
+  // a no-op one makes every sub-pass silently do nothing. Returning a plain Array
+  // from the index loop above is what takes the realm out of that path — callers
+  // then iterate a snapshot with Array.prototype, exactly as the childNodesOf and
+  // elementChildrenOf callers already do.
+  function queryAll(selector) {
+    return nodeListToArray(domAccess().documentQuerySelectorAll(selector));
+  }
+
+  // The same, scoped to an element: a DISTINCT function object from the document's,
+  // so it needs its own capture and its own call.
+  function queryAllWithin(element, selector) {
+    return nodeListToArray(domAccess().elementQuerySelectorAll(element, selector));
+  }
+
+  function queryOne(selector) {
+    return domAccess().documentQuerySelector(selector);
+  }
+
+  function findSlideRoot() {
+    const direct = queryOne('body > [class*="slide"]');
+    if (direct) return direct;
+    const wrappers = queryAll('body > section, body > article');
+    const walks = [];
+    // Still gated on there being a chain to walk — not to avoid the capture, which
+    // the snapshot above has already made, but because a null dom is how
+    // reportNoSlideRoot is told no wrapper was ever read. A deck with no wrappers
+    // therefore reports exactly the diagnostic it reported before.
+    const dom = wrappers.length ? domAccess() : null;
+    for (let index = 0; index < wrappers.length; index++) {
+      const walk = walkToSlideBody(wrappers[index], dom);
+      if (walk.matched) return wrappers[index];
+      walks.push(walk);
+    }
+    const fallback = queryOne('body > div');
+    if (!fallback) reportNoSlideRoot(walks, dom);
+    return fallback;
+  }
+
+  // Why the no-root case is REPORTED and not merely returned. It is reachable on
+  // input that is nobody's bug: past 509 wrapper levels Chromium's parser stops
+  // nesting and reparents the overflow, so a 510-level chain arrives as an
+  // innermost wrapper holding the remaining wrappers AND the .slide as SIBLINGS
+  // (measured: 3 element children at 510, 13 at 520). The chain the backend
+  // promoted through — BeautifulSoup has no such limit, so it serialises the
+  // outermost wrapper as the slide's HTML — is simply not present in the DOM that
+  // arrives here, and this locator correctly reports it cannot find a root.
+  //
+  // That is deliberately NOT chased. Matching it would mean promoting a wrapper
+  // with several element children, which is exactly what the backend refuses
+  // (find_all(recursive=False) length 1) and what TestPromotionBlockers pins as
+  // must-block. So the reparsed shape is not resolvable without contradicting the
+  // spec the sidecar exists to conform to; a 510-deep chain of sole-child
+  // semantic wrappers is also a shape no real bundle produces (deepest observed
+  // in a real bundle: two).
+  //
+  // What it must never do is fail SILENTLY, since a rootless deck and a broken
+  // locator both export white. The line below is what tells those apart: it
+  // names the shape the walk actually saw, so "the deck was pathological" is
+  // distinguishable from "our locator regressed". html2pptx.js routes
+  // [preprocess] console lines to stderr, which is the stream
+  // pptx_from_html_huashu.py echoes into the app log.
+  function reportNoSlideRoot(walks, dom) {
+    const access = dom || OWN_ELEMENT_ACCESS;
+    const bodyTags = [];
+    // Bounded: in a hostile realm the sibling accessor is itself a loop risk.
+    let sibling = access.firstElementChild(document.body);
+    while (sibling && bodyTags.length < 8) {
+      bodyTags.push(access.tagName(sibling));
+      sibling = access.nextElementSibling(sibling);
+    }
+    const candidates = walks.map(
+      (walk) => walk.stoppedAt + ' after ' + walk.steps + ' level(s): ' + walk.reason
+    );
+    console.warn(
+      '[preprocess] no slide root: body children [' + bodyTags.join(', ') + ']' +
+      '; wrapper candidates ' + (candidates.length ? candidates.join(' | ') : '(none)') +
+      '; tree reads ' + (access.pristine ? 'pristine' : 'this-realm') +
+      '. A chain over 509 levels deep is reparsed by Chromium into siblings and ' +
+      'is not resolvable here by design.'
+    );
+  }
+
+  // Whether this wrapper stands for a whole slide: following its sole-element-
+  // child chain down through consecutive semantic wrappers lands on the slide
+  // body. Only ELEMENT children are looked at, which is what makes comments,
+  // whitespace and text nodes transparent to the walk — firstElementChild with a
+  // null nextElementSibling is exactly the old children.length === 1 test, read
+  // through accessors that can be taken from a clean realm.
+  //
+  // The descent carries NO PROMOTION cap, matching the backend's unbounded
+  // _promote_through_slide_wrapper(): a number there is a silent wrong-output
+  // boundary, because the backend promotes past it and serialises that root as
+  // body's direct child, so the deck arrives here unrecognisable and exports
+  // WHITE — the same surfaces-disagree defect this locator exists to prevent,
+  // just relocated to the cap. What it does carry is WALK_STEP_LIMIT, which is a
+  // different thing: not a belief about how deep decks go, but a guarantee that a
+  // realm lying about the tree cannot make this loop run forever. It sits eight
+  // times above the depth Chromium can even parse, so no legitimate chain reaches
+  // it.
+  //
+  // Returns the walk as data rather than a boolean so the no-root diagnostic can
+  // report where each candidate stopped without walking anything twice.
+  function walkToSlideBody(wrapper, dom) {
+    let node = wrapper;
+    for (let steps = 0; steps < WALK_STEP_LIMIT; steps++) {
+      const child = dom.firstElementChild(node);
+      if (!child) {
+        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'no element children' };
+      }
+      if (dom.nextElementSibling(child)) {
+        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'several element children' };
+      }
+      if (dom.matches(child, '[class*="slide"]')) return { matched: true, steps: steps + 1 };
+      if (!SLIDE_WRAPPER_TAGS.has(dom.tagName(child))) {
+        return { matched: false, steps: steps + 1, stoppedAt: dom.tagName(child), reason: 'not a promotable wrapper' };
+      }
+      node = child;
+    }
+    return { matched: false, steps: WALK_STEP_LIMIT, stoppedAt: '(unread)', reason: 'iteration limit reached' };
+  }
+
   function transferSlideRootBackground() {
-    const root = document.querySelector('body > [class*="slide"]')
-                 || document.querySelector('body > div');
+    const root = findSlideRoot();
     if (!root) return 'no-root';
     const cs = window.getComputedStyle(root);
     const bgImage = cs.backgroundImage;
@@ -284,7 +696,7 @@ export const PREPROCESS_SOURCE = `
   // absolutely-positioned <img> at full container size, prepend it as
   // the div's first child so existing content paints on top.
   function replaceBackgroundImageWithImg() {
-    const divs = document.querySelectorAll('div');
+    const divs = queryAll('div');
     let replaced = 0;
     divs.forEach((div) => {
       const cs = window.getComputedStyle(div);
@@ -321,7 +733,7 @@ export const PREPROCESS_SOURCE = `
     const textTags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
     let peeled = 0;
     textTags.forEach((tag) => {
-      document.querySelectorAll(tag).forEach((el) => {
+      queryAll(tag).forEach((el) => {
         const cs = window.getComputedStyle(el);
         const hasBg = cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
         const hasBorder = parseFloat(cs.borderTopWidth) > 0 ||
@@ -362,8 +774,8 @@ export const PREPROCESS_SOURCE = `
   // hide the original <table> so the walker ignores it.
   function flattenTables() {
     let cellCount = 0;
-    document.querySelectorAll('table').forEach((table) => {
-      const cells = table.querySelectorAll('th, td');
+    queryAll('table').forEach((table) => {
+      const cells = queryAllWithin(table, 'th, td');
       if (!cells.length) return;
       const bodyRect = document.body.getBoundingClientRect();
       cells.forEach((cell) => {
@@ -451,7 +863,7 @@ export const PREPROCESS_SOURCE = `
   function emitInlineBackgrounds() {
     let count = 0;
     const SELECTOR = 'span, mark, kbd';
-    document.querySelectorAll(SELECTOR).forEach((el) => {
+    queryAll(SELECTOR).forEach((el) => {
       const cs = window.getComputedStyle(el);
       const bg = cs.backgroundColor;
       if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') return;
@@ -571,7 +983,7 @@ export const PREPROCESS_SOURCE = `
   // upstream images) throw on toDataURL — skip those silently.
   function rasterizeCanvases() {
     let count = 0;
-    document.querySelectorAll('canvas').forEach((canvas) => {
+    queryAll('canvas').forEach((canvas) => {
       try {
         // Skip canvases that are still 0×0 (chart never initialized).
         if (!canvas.width || !canvas.height) return;
@@ -596,20 +1008,178 @@ export const PREPROCESS_SOURCE = `
     return count;
   }
 
+  // ─── SVG data-URI <img> → rasterized PNG ───────────────────────────
+  // pptxgenjs in Node writes data:image/svg+xml images with a hardcoded
+  // broken-image placeholder PNG as the primary <a:blip>; the real vector
+  // survives only in the <asvg:svgBlip> extension, which PowerPoint reads
+  // but Google Slides' Drive conversion and LibreOffice ignore. This page
+  // already rendered the SVG, so draw it to a canvas at 2x the layout box
+  // (crispness) and swap the src to a PNG data URI. The decode() await
+  // covers the <img>s replaceBackgroundImageWithImg minted moments ago —
+  // those may not have finished loading. Per-image try/catch: an
+  // undecodable SVG keeps its raw src, which is exactly the pre-existing
+  // pipeline behavior.
+  // Destination rect for drawing a srcW x srcH image into a w x h canvas
+  // WITHOUT distorting it: scale by the smaller axis ratio and center the
+  // result (letterbox, i.e. CSS object-fit: contain). The stretch-fill this
+  // replaces baked distortion into the PNG whenever the layout box's aspect
+  // ratio differed from the artwork's — the reported symptom was a footer
+  // logo box flex-stretched to the full row width, which smeared a 3:1 logo
+  // across ~14:1. A ratio-true box (slide 1's logo) is unaffected: the
+  // computed scale is then identical on both axes and the offsets are 0.
+  function containFitRect(srcW, srcH, w, h) {
+    if (!srcW || !srcH) return { dx: 0, dy: 0, dw: w, dh: h };
+    const scale = Math.min(w / srcW, h / srcH);
+    const dw = srcW * scale;
+    const dh = srcH * scale;
+    return { dx: (w - dw) / 2, dy: (h - dh) / 2, dw: dw, dh: dh };
+  }
+
+  // Source rect for object-fit: cover — fill the destination box by
+  // CROPPING the overflowing axis, centered — never by stretching (a
+  // background minted with background-size:cover carries this intent).
+  function coverFitSourceRect(srcW, srcH, w, h) {
+    if (!srcW || !srcH) return { sx: 0, sy: 0, sw: srcW, sh: srcH };
+    const scale = Math.max(w / srcW, h / srcH);
+    const sw = Math.min(srcW, w / scale);
+    const sh = Math.min(srcH, h / scale);
+    return { sx: (srcW - sw) / 2, sy: (srcH - sh) / 2, sw: sw, sh: sh };
+  }
+
+  async function rasterizeSvgDataUriImages() {
+    let count = 0;
+    const imgs = queryAll('img').filter((img) =>
+      /^data:image\\/svg\\+xml/i.test(img.src || '')
+    );
+    for (const img of imgs) {
+      try {
+        await img.decode();
+        const rect = img.getBoundingClientRect();
+        const w = Math.max(1, Math.round((rect.width || img.naturalWidth || 1) * 2));
+        const h = Math.max(1, Math.round((rect.height || img.naturalHeight || 1) * 2));
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d');
+        // Honour the image's own fit intent, but NEVER by stretching:
+        // cover fills the box by center-cropping the overflowing axis,
+        // anything else letterboxes. The canvas keeps the BOX size so
+        // downstream placement is unchanged — only the drawn geometry inside
+        // it is corrected. replaceBackgroundImageWithImg mints its
+        // <img>s with an explicit object-fit, so a background-size:cover
+        // layer still fills its box.
+        const objectFit = window.getComputedStyle(img).objectFit;
+        if (objectFit === 'cover') {
+          const src = coverFitSourceRect(img.naturalWidth, img.naturalHeight, w, h);
+          ctx.drawImage(img, src.sx, src.sy, src.sw, src.sh, 0, 0, w, h);
+        } else {
+          const fit = containFitRect(img.naturalWidth, img.naturalHeight, w, h);
+          ctx.drawImage(img, fit.dx, fit.dy, fit.dw, fit.dh);
+        }
+        const dataUrl = c.toDataURL('image/png');
+        // Pin the rendered size before the swap: an <img> sized by its
+        // intrinsic dimensions would otherwise reflow when the 2x PNG
+        // lands. Same-value inline px for explicitly-sized images.
+        if (rect.width && rect.height) {
+          img.style.width = rect.width + 'px';
+          img.style.height = rect.height + 'px';
+        }
+        img.src = dataUrl;
+        count++;
+      } catch (e) {
+        // decode/raster failed — keep the raw SVG src (pre-existing behavior)
+      }
+    }
+    return count;
+  }
+
+  // ─── Inline <svg> → rasterized PNG <img> ───────────────────────────
+  // huashu's walker has no svg handler: inline icons produce nothing, and
+  // (pre-guard) the walker's string-assumed el.className even threw on
+  // SVGAnimatedString, dropping the whole slide. Serialize each top-level
+  // inline <svg>, decode it as an image, draw to a canvas at 2x the layout
+  // box (crispness), and swap in a same-size PNG <img> at the svg's DOM
+  // position so paint order and flow layout are preserved. Per-svg
+  // try/catch: a failed raster leaves the svg in place — the walker now
+  // ignores it (className guard), so the slide exports without the icon
+  // instead of vanishing.
+  async function rasterizeInlineSvgs() {
+    let count = 0;
+    const svgs = queryAll('svg').filter(
+      (svg) => !(svg.parentElement && svg.parentElement.closest('svg'))
+    );
+    for (const svg of svgs) {
+      try {
+        const cs = window.getComputedStyle(svg);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width || !rect.height) continue;
+
+        const clone = svg.cloneNode(true);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        // CSS-sized svgs serialize without intrinsic dimensions; pin the
+        // rendered box so the standalone document decodes at a real size.
+        clone.setAttribute('width', String(rect.width));
+        clone.setAttribute('height', String(rect.height));
+        // currentColor resolves against the element's own color in the
+        // standalone doc — pin the computed inherited color.
+        clone.style.color = cs.color;
+        const xml = new XMLSerializer().serializeToString(clone);
+        const probe = new Image();
+        probe.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+        await probe.decode();
+
+        const w = Math.max(1, Math.round(rect.width * 2));
+        const h = Math.max(1, Math.round(rect.height * 2));
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        c.getContext('2d').drawImage(probe, 0, 0, w, h);
+        const dataUrl = c.toDataURL('image/png');
+
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        // Occupy the svg's exact slot: same box for in-flow svgs, same
+        // resolved offsets for positioned ones, so neither siblings nor
+        // the svg's own paint position move.
+        img.style.display = 'block';
+        img.style.width = rect.width + 'px';
+        img.style.height = rect.height + 'px';
+        img.style.margin = cs.margin;
+        if (cs.position === 'absolute' || cs.position === 'fixed') {
+          img.style.position = cs.position;
+          img.style.left = cs.left;
+          img.style.top = cs.top;
+          if (cs.transform && cs.transform !== 'none') img.style.transform = cs.transform;
+        }
+        svg.parentNode.insertBefore(img, svg);
+        svg.style.display = 'none';
+        count++;
+      } catch (e) {
+        console.warn('[preprocess] inline svg raster failed — exporting slide without it: ' + (e && e.message));
+      }
+    }
+    return count;
+  }
+
   // ─── orchestrator ──────────────────────────────────────────────────
   // Order matters: bg transfer first (cheap, mutates body only); flatten
   // code blocks BEFORE wrapBareTextInDivs (so the per-line <div>s become
   // a single <p> with <br>s before the inline-content wrapper sees them);
-  // other structural mutations next; canvas raster + inline-bg LAST so
-  // they read final post-mutation positions.
+  // SVG raster right after replaceBackgroundImageWithImg so it covers the
+  // <img>s that pass just minted from CSS backgrounds; other structural
+  // mutations next; canvas raster + inline-bg LAST so they read final
+  // post-mutation positions.
   const bgTransferred = transferSlideRootBackground();
   const codeBlocks = flattenMonospaceCodeBlocks();
   const wrapped = wrapBareTextInDivs();
   const replacedImgs = replaceBackgroundImageWithImg();
+  const svgImgsRasterized = await rasterizeSvgDataUriImages();
+  const inlineSvgsRasterized = await rasterizeInlineSvgs();
   const peeledTextTags = peelBackgroundsOffTextTags();
   const tableCells = flattenTables();
   const canvasImgs = rasterizeCanvases();
   const inlineBgs = emitInlineBackgrounds();
-  return { bgTransferred, codeBlocks, wrapped, replacedImgs, peeledTextTags, tableCells, canvasImgs, inlineBgs };
+  return { bgTransferred, codeBlocks, wrapped, replacedImgs, svgImgsRasterized, inlineSvgsRasterized, peeledTextTags, tableCells, canvasImgs, inlineBgs };
 })();
 `;

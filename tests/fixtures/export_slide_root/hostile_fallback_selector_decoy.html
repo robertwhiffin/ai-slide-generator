@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* The BENIGN twin of hostile_fallback_selector_decoy.html: identical but
+         for that fixture's <script>.
+
+         This shape exists to reach the slide-root locator's LAST lookup, which
+         no other fixture here does. The locator tries three things in order:
+
+           body > [class*="slide"]        misses: nothing here carries that class
+           body > section, body > article misses: there is no semantic wrapper
+           body > div                     MATCHES — the fallback, and the only
+                                          site this shape exercises
+
+         So the ground below is reached through the fallback lookup alone, which
+         is what lets that one site be attributed on its own. The class is
+         deliberately "panel" and not anything containing "slide", since a
+         substring match on "slide" would resolve at the first lookup instead and
+         the fallback would never run.
+
+         Synthetic colours only (#123456 ground), and the only name is Acme. */
+      .panel { width: 1280px; height: 720px; padding: 72px 88px; background: #123456;
+               color: #ffffff; font-family: Arial, sans-serif; }
+      h1 { font-size: 48px; }
+      p { font-size: 24px; }
+    </style>
+    <script>
+      // Poisoned Document.prototype.querySelector -> a detached decoy.
+      //
+      // The slide-root locator's two direct lookups (`body > [class*="slide"]`
+      // and the `body > div` fallback) go through this accessor, which is a
+      // CONFIGURABLE own property like every other. A decoy answering them is
+      // not a hang and not a throw: the pass returns 'solid' and transfers the
+      // DECOY's ground, so the deck exports a colour that appears nowhere in it.
+      // The decoy's #654321 is deliberately not the slide's #123456 so the body
+      // background says which element actually answered.
+      // Reported on document.title so the suite can prove the poisoning TOOK
+      // before asserting anything else — a poisoning the browser refused would
+      // make every expectation vacuous.
+      var decoy = document.createElement('div');
+      decoy.className = 'slide';
+      decoy.style.background = '#654321';
+      var report = { configurable: {}, direct: {}, redefineResult: 'ok' };
+      function poisonQuerySelector(name, proto) {
+        var descriptor = Object.getOwnPropertyDescriptor(proto, 'querySelector');
+        report.direct[name] = !!descriptor;
+        report.configurable[name] = descriptor ? !!descriptor.configurable : true;
+        try {
+          Object.defineProperty(proto, 'querySelector', {
+            configurable: true,
+            value: function () { return decoy; },
+          });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poisonQuerySelector('Document', Document.prototype);
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Acme Fallback Ground</h1>
+      <p>Synthetic fixture slide.</p>
+    </div>
+  </body>
+</html>

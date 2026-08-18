@@ -399,6 +399,260 @@ export const mockDeleteSystemStyleError = {
 };
 
 // ============================================
+// Design System Library Mocks (Phase 4)
+// ============================================
+//
+// Everything here is SYNTHETIC — a fake "Acme" brand, dummy hex, and placeholder
+// assets — mirroring the backend's tests/unit/conftest_design_system.py fixture,
+// per the public-repo hygiene rule (no real brand content ever ships).
+
+// GET /api/settings/design-systems -> { design_systems: [...], total: n }
+export const mockDesignSystems = {
+  design_systems: [
+    {
+      id: 1,
+      name: "Acme Design System",
+      description: "Synthetic fixture brand — not a real design system.",
+      created_by: "system",
+      published: true,
+      is_default: true,
+      is_active: true,
+      version: 1,
+      token_count: 3,
+      asset_count: 3,
+      template_count: 2,
+      created_at: "2026-02-01T10:00:00.000000",
+      updated_at: "2026-02-01T10:00:00.000000",
+    },
+    {
+      id: 2,
+      name: "Nimbus Theme",
+      description: "A second synthetic design system for list rendering.",
+      created_by: "system",
+      published: false,
+      is_default: false,
+      is_active: true,
+      version: 2,
+      token_count: 1,
+      asset_count: 1,
+      template_count: 0,
+      created_at: "2026-02-02T10:00:00.000000",
+      updated_at: "2026-02-02T10:00:00.000000",
+    },
+  ],
+  total: 2,
+};
+
+// GET /api/settings/design-systems/{id} -> DesignSystemDetail
+export const mockDesignSystemDetail = {
+  id: 1,
+  name: "Acme Design System",
+  description: "Synthetic fixture brand — not a real design system.",
+  created_by: "system",
+  published: true,
+  is_default: true,
+  is_active: true,
+  version: 1,
+  token_count: 3,
+  asset_count: 3,
+  template_count: 2,
+  created_at: "2026-02-01T10:00:00.000000",
+  updated_at: "2026-02-01T10:00:00.000000",
+  manifest_json: {
+    name: "Acme Design System",
+    description: "Synthetic fixture brand — not a real design system.",
+    version: "1.0.0",
+    templates: [
+      { name: "Title Slide", description: "Centered hero with logo lockup." },
+      { name: "Two Column", description: "Left text, right chart." },
+    ],
+    cards: [{ name: "Stat Card", description: "Big number + label." }],
+  },
+  compiled_style_content: ":root {\n  --brand-core-primary: #123456;\n}",
+  tokens: [
+    { id: 1, group: "core", name: "primary", value: "#123456" },
+    { id: 2, group: "accents", name: "lava", value: "#EB4A34" },
+    { id: 3, group: "spacing", name: "md", value: "16px" },
+  ],
+  assets: [
+    {
+      id: 10,
+      kind: "logo",
+      filename: "logo.svg",
+      mime: "image/svg+xml",
+      size_bytes: 120,
+      width: 120,
+      height: 40,
+      url: "/api/settings/design-systems/1/assets/10",
+      thumbnail_url: null,
+    },
+    {
+      id: 11,
+      kind: "background",
+      filename: "hero-bg.png",
+      mime: "image/png",
+      size_bytes: 512,
+      width: 16,
+      height: 16,
+      url: "/api/settings/design-systems/1/assets/11",
+      thumbnail_url: "/api/settings/design-systems/1/assets/11/thumbnail",
+    },
+    {
+      id: 12,
+      kind: "font",
+      filename: "acme-sans.woff2",
+      mime: "font/woff2",
+      size_bytes: 2048,
+      width: null,
+      height: null,
+      url: "/api/settings/design-systems/1/assets/12",
+      thumbnail_url: null,
+    },
+  ],
+};
+
+// POST /api/settings/design-systems/import (success) -> DesignSystemDetail (201)
+export const mockDesignSystemImportResponse = {
+  ...mockDesignSystemDetail,
+  id: 99,
+  name: "Imported Design System",
+  description: "Freshly imported synthetic bundle.",
+  published: false,
+  is_default: false,
+};
+
+// POST /api/settings/design-systems/import (validation failure) -> 400
+export const mockDesignSystemImportError = {
+  detail: "Bundle is missing its manifest (_ds_manifest.json).",
+};
+
+// POST /api/settings/design-systems/{id}/set-default -> DesignSystemDetail
+export const mockDesignSystemSetDefaultResponse = {
+  ...mockDesignSystemDetail,
+  id: 2,
+  name: "Nimbus Theme",
+  is_default: true,
+};
+
+// GET /api/settings/design-systems/{id}/templates -> addressable templates (Phase 4)
+export const mockDesignSystemTemplates = {
+  templates: [
+    {
+      id: 1,
+      name: "Acme Cover",
+      description: "Centered hero with logo lockup.",
+      entry_path: "templates/cover/index.html",
+      thumbnail_url: "/api/settings/design-systems/1/templates/1/thumbnail",
+    },
+  ],
+  total: 1,
+};
+
+// Template set with a screenshot-less entry (real Claude Design exports ship
+// no preview images): id 2 exercises the live-render mini-card fallback.
+export const mockDesignSystemTemplatesWithLive = {
+  templates: [
+    {
+      id: 1,
+      name: "Acme Cover",
+      description: "Centered hero with logo lockup.",
+      entry_path: "templates/cover/index.html",
+      thumbnail_url: "/api/settings/design-systems/1/templates/1/thumbnail",
+    },
+    {
+      id: 2,
+      name: "Acme Content",
+      description: "Body layout without a shipped screenshot.",
+      entry_path: "templates/content/index.html",
+      thumbnail_url: null,
+    },
+  ],
+  total: 2,
+};
+
+// GET /api/settings/design-systems/{id}/templates/2/source -> stored sources
+// for the sandboxed live preview (JSON; synthetic Acme only).
+export const mockDesignSystemTemplateSource = {
+  id: 2,
+  name: "Acme Content",
+  layout_html:
+    '<!doctype html><html><head><style>.slide{width:1280px;height:720px;background:var(--brand-core-primary);color:#ffffff;}</style></head>' +
+    '<body><section class="slide"><h1>Acme Content Layout</h1></section></body></html>',
+  token_css: ":root { --brand-core-primary: #123456; }",
+};
+
+// A MULTI-SLIDE template source: the expanded viewer paginates one slide
+// section at a time, so it needs a layout with several `.slide` roots.
+// Each section is identifiable by its own heading text. Synthetic Acme only.
+export const mockDesignSystemTemplateSourceMultiSlide = {
+  id: 2,
+  name: "Acme Content",
+  layout_html:
+    '<!doctype html><html><head><style>.slide{width:1280px;height:720px;background:var(--brand-core-primary);color:#ffffff;}</style></head>' +
+    '<body>' +
+    '<section class="slide"><h1>Acme Slide One</h1></section>' +
+    '<section class="slide"><h1>Acme Slide Two</h1></section>' +
+    '<section class="slide"><h1>Acme Slide Three</h1></section>' +
+    '</body></html>',
+  token_css: ":root { --brand-core-primary: #123456; }",
+};
+
+// A template whose slide sections are wrapped in a CUSTOM ELEMENT harness, the
+// shape real Claude Design exports ship: `<deck-stage>` plus the author's own
+// pre-upgrade guard `deck-stage:not(:defined){visibility:hidden}`.
+//
+// A preview frame runs NO scripts (sandbox="" and a CSP with no script-src), so
+// that element can never be registered: it stays permanently :not(:defined),
+// the guard hides every slide for good, and all that is left to see is the body
+// background. Slides are `position:absolute; inset:0` exactly as the real
+// templates are, so this also pins the "cards must show the FIRST slide, not
+// the last one stacked on top" behavior. Synthetic Acme only.
+export const mockDesignSystemTemplateSourceCustomElementHarness = {
+  id: 2,
+  name: "Acme Content",
+  layout_html:
+    "<!doctype html><html><head><style>" +
+    "html,body{margin:0;background:#123456;}" +
+    "deck-stage:not(:defined){visibility:hidden}" +
+    ".slide{position:absolute;inset:0;display:flex;flex-direction:column;}" +
+    "</style></head>" +
+    '<body><deck-stage width="1280" height="720">' +
+    '<section data-label="One"><div class="slide"><h1>Acme Harness Slide One</h1></div></section>' +
+    '<section data-label="Two"><div class="slide"><h1>Acme Harness Slide Two</h1></div></section>' +
+    "</deck-stage></body></html>",
+  token_css: ":root { --brand-core-primary: #123456; }",
+};
+
+// GET /api/settings/design-systems/{id}/files -> retained source-file tree (Phase 6)
+export const mockDesignSystemFiles = {
+  files: [
+    { path: "README.md", kind: "readme", mime: "text/markdown", size_bytes: 62 },
+    { path: "SKILL.md", kind: "skill", mime: "text/markdown", size_bytes: 48 },
+    { path: "assets/backgrounds/hero-bg.png", kind: "asset", mime: "image/png", size_bytes: 512 },
+    { path: "assets/logo.svg", kind: "asset", mime: "image/svg+xml", size_bytes: 120 },
+    { path: "colors_and_type.css", kind: "css", mime: "text/css", size_bytes: 96 },
+    { path: "fonts/acme-sans.woff2", kind: "font", mime: "font/woff2", size_bytes: 2048 },
+    { path: "templates/cover/index.html", kind: "template", mime: "text/html", size_bytes: 84 },
+    { path: "templates/cover/preview.png", kind: "asset", mime: "image/png", size_bytes: 256 },
+  ],
+  total: 8,
+};
+
+// GET /api/settings/design-systems/{id}/files/{path} -> text/plain source bodies.
+// Keys are the un-encoded stored paths; all content is SYNTHETIC (fake Acme).
+export const mockDesignSystemFileContents: Record<string, string> = {
+  "README.md": "# Acme Design System\n\nSynthetic readme for tests. Not a real brand.",
+  "SKILL.md": "---\nname: acme-design\n---\n\nSynthetic SKILL doc for tests.",
+  "colors_and_type.css": ":root {\n  --brand-core-primary: #123456;\n}",
+  "templates/cover/index.html":
+    "<!doctype html><html><body><section>Acme synthetic layout</section></body></html>",
+};
+
+// A 1x1 transparent PNG for thumbnail responses (synthetic placeholder art).
+export const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+// ============================================
 // Deck Prompt Operation Mocks
 // ============================================
 

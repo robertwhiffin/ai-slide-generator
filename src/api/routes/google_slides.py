@@ -10,9 +10,10 @@ user tokens are stored per-user in the ``google_oauth_tokens`` table.
 import json
 import logging
 import os
+import secrets
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -32,6 +33,12 @@ from src.services.pptx_from_records import EmitError, build_pptx
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/export/google-slides", tags=["google-slides"])
+
+# F-CR-3 (SDR-4437): the OAuth "state" carries an unguessable nonce that is also
+# stored in this short-lived cookie; the callback requires them to match before
+# exchanging the authorization code (anti-CSRF / anti-login-CSRF double-submit).
+_OAUTH_STATE_COOKIE = "g_oauth_state"
+_OAUTH_COOKIE_PATH = "/api/export/google-slides"
 
 
 # -------------------------------------------------------------------------
@@ -98,32 +105,76 @@ class AuthUrlResponse(BaseModel):
 # -------------------------------------------------------------------------
 
 
-def _build_redirect_uri(request: Request) -> str:
-    """Build the OAuth callback redirect URI from the current request.
-
-    Google requires redirect URIs to match *exactly* what's registered in GCP,
-    with no query parameters.
+def _build_app_origin(request: Request) -> str:
+    """Return the public origin (``scheme://host``) serving the app.
 
     Behind a reverse proxy (e.g. Databricks Apps), ``request.base_url``
     returns the internal address (``http://localhost:8000``).  We use the
     ``X-Forwarded-Host`` / ``X-Forwarded-Proto`` headers set by the proxy
-    to reconstruct the public URL instead.
-
-    For localhost, Google only allows ``http``.
+    to reconstruct the public URL instead. For localhost, force ``http``.
     """
     forwarded_host = request.headers.get("x-forwarded-host")
     forwarded_proto = request.headers.get("x-forwarded-proto")
 
     if forwarded_host:
         scheme = forwarded_proto or "https"
-        base = f"{scheme}://{forwarded_host.split(',')[0].strip()}"
-    else:
-        base = str(request.base_url).rstrip("/")
-        # Force http for localhost (Google rejects https://localhost)
-        if "://localhost" in base or "://127.0.0.1" in base:
-            base = base.replace("https://", "http://")
+        return f"{scheme}://{forwarded_host.split(',')[0].strip()}"
 
-    return f"{base}/api/export/google-slides/auth/callback"
+    base = str(request.base_url).rstrip("/")
+    if "://localhost" in base or "://127.0.0.1" in base:
+        base = base.replace("https://", "http://")
+    return base
+
+
+def _build_redirect_uri(request: Request) -> str:
+    """Build the OAuth callback redirect URI from the current request.
+
+    Google requires redirect URIs to match *exactly* what's registered in GCP,
+    with no query parameters.
+    """
+    return f"{_build_app_origin(request)}/api/export/google-slides/auth/callback"
+
+
+# Callback page template. The JS object braces are intentionally literal; the
+# %TOKENS% are substituted below so the postMessage targets the explicit app
+# origin (F-CR-3) instead of the wildcard '*'.
+_CALLBACK_TEMPLATE = """
+<html><body>
+    <h2>%TITLE%</h2>
+    <p>%MESSAGE%</p>
+    <script>
+        if (window.opener) {
+            window.opener.postMessage({ type: 'google-slides-auth', success: %SUCCESS% }, %ORIGIN%);
+        }
+        setTimeout(() => window.close(), %DELAY%);
+    </script>
+</body></html>
+"""
+
+
+def _callback_response(app_origin: str, *, success: bool) -> HTMLResponse:
+    """Render the popup callback page and clear the anti-CSRF state cookie.
+
+    ``postMessage`` targets ``app_origin`` explicitly (F-CR-3); ``json.dumps``
+    yields a safely-quoted JS string literal for the origin.
+    """
+    if success:
+        title, message, delay = "Authorization Successful", "You can close this window.", "1500"
+    else:
+        title = "Authorization Failed"
+        message = "Authorization could not be completed. Please close this window and try again."
+        delay = "3000"
+    body = (
+        _CALLBACK_TEMPLATE
+        .replace("%TITLE%", title)
+        .replace("%MESSAGE%", message)
+        .replace("%SUCCESS%", "true" if success else "false")
+        .replace("%ORIGIN%", json.dumps(app_origin))
+        .replace("%DELAY%", delay)
+    )
+    resp = HTMLResponse(content=body, status_code=200)
+    resp.delete_cookie(_OAUTH_STATE_COOKIE, path=_OAUTH_COOKIE_PATH)
+    return resp
 
 
 @router.get("/auth/status", response_model=AuthStatusResponse)
@@ -141,6 +192,7 @@ async def auth_status(db: Session = Depends(get_db)):
 @router.get("/auth/url", response_model=AuthUrlResponse)
 async def auth_url(
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     """Generate the Google OAuth consent URL.
@@ -149,13 +201,26 @@ async def auth_url(
     passed via the OAuth ``state`` parameter so the callback can persist the
     token for the correct user — the redirect URI itself stays clean
     (no query params) to satisfy Google's exact-match requirement.
+
+    F-CR-3: an unguessable nonce is bound into both the ``state`` and a
+    short-lived cookie; the callback requires them to match.
     """
     try:
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
-        state = json.dumps({"user": _get_user_identity()})
+        nonce = secrets.token_urlsafe(32)
+        state = json.dumps({"user": _get_user_identity(), "nonce": nonce})
         url = auth.get_auth_url(redirect_uri=redirect_uri, state=state)
 
+        response.set_cookie(
+            key=_OAUTH_STATE_COOKIE,
+            value=nonce,
+            max_age=600,
+            httponly=True,
+            secure=True,
+            samesite="lax",  # sent on Google's top-level redirect back to us
+            path=_OAUTH_COOKIE_PATH,
+        )
         return AuthUrlResponse(url=url)
     except GoogleSlidesAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -184,11 +249,21 @@ async def auth_callback(
     them in the ``google_oauth_tokens`` table.  Returns a small HTML page
     that notifies the opener window and closes itself.
     """
+    app_origin = _build_app_origin(request)
+    cookie_nonce = request.cookies.get(_OAUTH_STATE_COOKIE)
     try:
         state_data = json.loads(state) if state else {}
         user = state_data.get("user")
         if not user:
             raise ValueError("Missing user in OAuth state")
+
+        # F-CR-3: verify the anti-CSRF nonce BEFORE exchanging the code. The
+        # state nonce must match the cookie set when the auth URL was issued.
+        state_nonce = state_data.get("nonce")
+        if not cookie_nonce or not state_nonce or not secrets.compare_digest(
+            str(cookie_nonce), str(state_nonce)
+        ):
+            raise ValueError("OAuth state nonce mismatch")
 
         auth = _get_auth(db)
         redirect_uri = _build_redirect_uri(request)
@@ -198,39 +273,13 @@ async def auth_callback(
             "Google Slides OAuth callback successful",
             extra={"user": _get_user_identity()},
         )
-    except Exception as exc:
+    except Exception:
+        # F-CR-2 (SDR-4437): never reflect the raw exception into the HTML page —
+        # it is logged server-side above. Show a static, generic failure message.
         logger.error("OAuth callback failed", exc_info=True)
-        return HTMLResponse(
-            content=f"""
-            <html><body>
-                <h2>Authorization Failed</h2>
-                <p>{exc}</p>
-                <script>
-                    if (window.opener) {{
-                        window.opener.postMessage({{ type: 'google-slides-auth', success: false }}, '*');
-                    }}
-                    setTimeout(() => window.close(), 3000);
-                </script>
-            </body></html>
-            """,
-            status_code=200,
-        )
+        return _callback_response(app_origin, success=False)
 
-    return HTMLResponse(
-        content="""
-        <html><body>
-            <h2>Authorization Successful</h2>
-            <p>You can close this window.</p>
-            <script>
-                if (window.opener) {
-                    window.opener.postMessage({ type: 'google-slides-auth', success: true }, '*');
-                }
-                setTimeout(() => window.close(), 1500);
-            </script>
-        </body></html>
-        """,
-        status_code=200,
-    )
+    return _callback_response(app_origin, success=True)
 
 
 # -------------------------------------------------------------------------
@@ -284,16 +333,21 @@ async def start_google_slides_export(
         slide_deck = chat_service.get_slides(request_body.session_id)
     except Exception as exc:
         logger.error("Failed to fetch slides", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch slides: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Failed to fetch slides") from exc
 
     if not slide_deck or not slide_deck.get("slides"):
         raise HTTPException(status_code=404, detail="No slides available")
 
-    # Substitute {{image:ID}} placeholders with base64 data URIs
+    # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs.
+    # ds-asset resolution is scoped to the session's active design system.
+    from src.api.services.chat_service import resolve_active_design_system_id
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
     from src.core.database import get_db_session
+    ds_id = resolve_active_design_system_id(request_body.session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(slide_deck, db)
+        substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
 
     slides_data = slide_deck.get("slides", [])
     total = len(slides_data)
@@ -382,6 +436,12 @@ class GoogleSlidesFromRecordsRequest(BaseModel):
 class GoogleSlidesExportResponse(BaseModel):
     presentation_id: str
     presentation_url: str
+    # Per-slide export failures (huashu path). A non-empty list means the
+    # uploaded deck is missing those slides — the frontend must tell the
+    # user which ones instead of silently presenting a partial deck.
+    total_slides: int | None = None
+    succeeded: int | None = None
+    failures: list[dict] = []
 
 
 @router.post("/from-records", response_model=GoogleSlidesExportResponse)
@@ -437,7 +497,7 @@ async def export_google_slides_from_records(
             )
     except Exception as exc:
         logger.error("Drive upload failed", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Drive upload failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
 
     session_manager.set_google_slides_info(
         session_id=request.session_id,
@@ -522,11 +582,16 @@ async def export_google_slides_from_huashu(
 
     # Substitute {{image:ID}} placeholders with base64 data URIs (same as the
     # legacy /export route). Use a fresh session because the request's `db`
-    # is held by the route's transaction context.
+    # is held by the route's transaction context. ds-asset resolution is scoped
+    # to the session's active design system.
+    from src.api.services.chat_service import resolve_active_design_system_id
     from src.core.database import get_db_session
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
+    ds_id = resolve_active_design_system_id(request.session_id)
     with get_db_session() as imdb:
         substitute_deck_dict_images(slide_deck, imdb)
+        substitute_deck_dict_ds_assets(slide_deck, imdb, design_system_id=ds_id)
 
     title = slide_deck.get("title") or "Presentation"
     slides_data = slide_deck.get("slides") or []
@@ -582,7 +647,7 @@ async def export_google_slides_from_huashu(
         logger.error("Drive upload failed (huashu path)", exc_info=True)
         raise HTTPException(
             status_code=502,
-            detail=f"Drive upload failed: {exc}",
+            detail="Drive upload failed",
         ) from exc
 
     session_manager.set_google_slides_info(
@@ -604,4 +669,7 @@ async def export_google_slides_from_huashu(
     return GoogleSlidesExportResponse(
         presentation_id=presentation_id,
         presentation_url=url,
+        total_slides=len(slides_html),
+        succeeded=len(slides_html) - len(failures),
+        failures=failures,
     )

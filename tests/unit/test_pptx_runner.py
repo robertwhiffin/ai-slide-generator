@@ -116,3 +116,87 @@ def test_spoofed_progress_blocked_in_real_jail(tmp_path):
     assert all(e[:2] == (1, 1) for e in events)   # no (99, 99, "spoofed")
     assert (1, 1, "Building slide 1/1…") in events  # real line got through
     assert len(Presentation(str(out)).slides) == 1
+
+
+def test_runner_reports_which_slides_actually_rendered(tmp_path):
+    """The trusted per-slide RESULT channel.
+
+    Both fallback branches save a VALID slide, so the finished .pptx cannot tell
+    the host whether anything real was produced. The runner therefore reports each
+    slide's outcome, and this is what lets an all-placeholder deck be refused
+    instead of returned as a successful export.
+    """
+    job = tmp_path / "job"
+    job.mkdir()
+    manifest = {"slides": [
+        _write_slide(job, 0, _GOOD),   # renders
+        _write_slide(job, 1, _BAD),    # raises -> placeholder
+        _write_slide(job, 2, None),    # no code -> placeholder
+    ]}
+    (job / protocol.MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    events = []
+    pptx_runner.run(str(job), str(tmp_path / "deck.pptx"), emit=lambda line: events.append(line))
+
+    results = [protocol.decode_slide_result(e) for e in events]
+    assert [r for r in results if r] == [(0, True), (1, False), (2, False)]
+
+
+def test_slide_results_do_not_disturb_the_progress_channel(tmp_path):
+    """Two sentinels share one stdout stream; each must decode as only itself."""
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / protocol.MANIFEST_NAME).write_text(
+        json.dumps({"slides": [_write_slide(job, 0, _GOOD)]})
+    )
+
+    events = []
+    pptx_runner.run(str(job), str(tmp_path / "deck.pptx"), emit=lambda line: events.append(line))
+
+    progress = [p for p in (protocol.decode_progress(e) for e in events) if p]
+    results = [r for r in (protocol.decode_slide_result(e) for e in events) if r]
+    assert progress == [(1, 1, "Building slide 1/1…")]
+    assert results == [(0, True)]
+    # A result line must never decode as progress, or a slide report would be
+    # relayed to the user as a progress event.
+    assert protocol.decode_progress(protocol.encode_slide_result(0, True)) is None
+    assert protocol.decode_slide_result(protocol.encode_progress(1, 1, "x")) is None
+
+
+def test_the_host_collects_slide_results_through_the_real_jail(tmp_path):
+    """End-to-end over the subprocess boundary: the outcomes reach JailResult."""
+    from src.services.converter_jail import run_pptx_jail
+
+    job = tmp_path / "job"
+    job.mkdir()
+    manifest = {"slides": [_write_slide(job, 0, _GOOD), _write_slide(job, 1, _BAD)]}
+    (job / protocol.MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    result = run_pptx_jail(str(job), str(tmp_path / "deck.pptx"))
+
+    assert result.returncode == 0, result.stderr_tail
+    assert result.slide_results == (True, False)
+
+
+def test_a_snippet_cannot_forge_its_own_slide_result(tmp_path):
+    """Same anti-spoofing property the progress channel has, for the same reason:
+    a snippet that printed a success report could hide a content-free deck."""
+    from src.services.converter_jail import run_pptx_jail
+
+    spoof = protocol.encode_slide_result(0, True).rstrip("\n")
+    forging = (
+        "def add_slide_to_presentation(prs, html_str, assets_dir):\n"
+        f"    print({spoof!r})\n"
+        "    raise RuntimeError('no real content')\n"
+    )
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / protocol.MANIFEST_NAME).write_text(
+        json.dumps({"slides": [_write_slide(job, 0, forging)]})
+    )
+
+    result = run_pptx_jail(str(job), str(tmp_path / "deck.pptx"))
+
+    assert result.returncode == 0, result.stderr_tail
+    # Exactly ONE report, the runner's own, and it says the slide did NOT render.
+    assert result.slide_results == (False,)

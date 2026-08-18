@@ -53,13 +53,13 @@ def search_images(
         # Must build results inside session scope to avoid DetachedInstanceError
         results = [
             {
-                "id": img.id,
+                "id": img.token,  # Opaque token (SDR-4437 F-TM-7), never the int PK.
                 "filename": img.original_filename,
                 "description": img.description,
                 "tags": img.tags,
                 "category": img.category,
                 "mime_type": img.mime_type,
-                "usage": f'<img src="{{{{image:{img.id}}}}}" alt="{img.description or img.original_filename}" />',
+                "usage": f'<img src="{{{{image:{img.token}}}}}" alt="{img.description or img.original_filename}" />',
             }
             for img in images
         ]

@@ -3,7 +3,7 @@ import type { SlideDeck, Slide } from '../../types/slide';
 import type { EditableNode } from './visualEditor.types';
 import { buildEditableTree, applyTextChange, getDefaultExpandedIds } from './treeParser';
 import { ElementTreeView } from './ElementTreeView';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildSlideDocument, SLIDE_PREVIEW_RESET_STYLE } from '../../services/slideDocument';
 
 interface VisualEditorPanelProps {
   html: string;
@@ -41,6 +41,7 @@ export const VisualEditorPanel: React.FC<VisualEditorPanelProps> = ({
       css: slideDeck.css,
       externalScripts: slideDeck.external_scripts,
       scripts: slide.scripts,
+      extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE,
     }),
     [html, slideDeck.css, slideDeck.external_scripts, slide.scripts]
   );
@@ -139,6 +140,7 @@ export const VisualEditorPanel: React.FC<VisualEditorPanelProps> = ({
               title="Slide Preview"
               className="absolute top-0 left-0 border-0"
               sandbox="allow-scripts"
+              scrolling="no"
               style={{
                 width: `${SLIDE_WIDTH}px`,
                 height: `${SLIDE_HEIGHT}px`,

@@ -40,9 +40,44 @@ export type ToolType = 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'ag
 
 export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool;
 
+/**
+ * Where a config's style source CAME FROM — persisted, never inferred.
+ *
+ * `'seeded'`  the server put it there (the seeded default profile's
+ *             `slide_style_id`), meaning "nobody chose this".
+ * `'user'`    a person picked it in the UI, or loaded a profile built around it.
+ * `undefined` a LEGACY config stored before provenance existed.
+ *
+ * Provenance cannot be recovered by comparing the stored id to the current
+ * default: the two are equal both when the server seeded the default AND when a
+ * user deliberately selected that same style, and flipping `is_default` later
+ * would silently reinterpret configs already stored. So it is recorded at the
+ * moment it is known and read back verbatim.
+ */
+export type StyleSource = 'seeded' | 'user';
+
 export interface AgentConfig {
   tools: ToolEntry[];
   slide_style_id: number | null;
+  /**
+   * Provenance of `slide_style_id` — see {@link StyleSource}. Optional so
+   * configs stored before this field existed still parse; those are treated as
+   * `'seeded'` (what they in fact were).
+   */
+  style_source?: StyleSource;
+  /**
+   * Selected design system. When set, it compiles to prompt text and takes
+   * precedence over slide_style_id (backend precedence:
+   * design_system_id -> slide_style_id -> default).
+   */
+  design_system_id: number | null;
+  /**
+   * Optional pinned template of the selected design system. Only meaningful
+   * alongside design_system_id; changing the design system resets it. The
+   * backend ignores (with a log) a pin that no longer resolves, so a stale
+   * value degrades to no-template behavior.
+   */
+  template_id: number | null;
   deck_prompt_id: number | null;
   system_prompt: string | null;
   slide_editing_instructions: string | null;
@@ -94,13 +129,15 @@ export interface ProfileSummary {
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   tools: [],
   slide_style_id: null,
+  design_system_id: null,
+  template_id: null,
   deck_prompt_id: null,
   system_prompt: null,
   slide_editing_instructions: null,
 };
 
 export const TOOL_TYPE_LABELS: Record<ToolType, string> = {
-  genie: 'Genie Space',
+  genie: 'Genie Agent',
   mcp: 'MCP Server',
   vector_index: 'Vector Index',
   model_endpoint: 'Model Endpoint',

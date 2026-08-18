@@ -116,7 +116,12 @@ async function main() {
     console.error('__HUASHU_RESULT__ ' + JSON.stringify({
       totalSlides: slides.length, succeeded: 0, failed, tmpDir,
     }));
-    process.exit(5);
+    // Set the code and return rather than process.exit(): stderr to a pipe is
+    // async, and exiting discards the undrained write, which truncates the
+    // sentinel above mid-JSON. The wrapper then parses nothing and reports the
+    // export as a hard failure instead of the per-slide errors it just printed.
+    process.exitCode = 5;
+    return;
   }
 
   await pres.writeFile({ fileName: outArg });
@@ -131,5 +136,7 @@ main().catch((e) => {
   console.error('__HUASHU_RESULT__ ' + JSON.stringify({
     totalSlides: 0, succeeded: 0, failed: [{ slide_index: -1, error: String(e.message || e) }],
   }));
-  process.exit(99);
+  // Same reason as the all-failed path above — let node exit naturally so the
+  // sentinel drains. This is the last statement, so there is nothing to skip.
+  process.exitCode = 99;
 });

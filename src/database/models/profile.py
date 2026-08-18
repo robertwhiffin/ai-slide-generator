@@ -1,10 +1,11 @@
 """Configuration profile model."""
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from src.core.database import Base
+from src.database.types import NormalizedAgentConfig
 
 
 class ConfigProfile(Base):
@@ -24,8 +25,10 @@ class ConfigProfile(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     updated_by = Column(String(255))
 
-    # Agent configuration override (tools, style, prompts) — stored as JSON blob
-    agent_config = Column(JSON, nullable=True, default=None)
+    # Agent configuration override (tools, style, prompts) — stored as JSON blob.
+    # The column type enforces style-authority exclusivity on EVERY write, so no
+    # writer has to remember to (see NormalizedAgentConfig).
+    agent_config = Column(NormalizedAgentConfig, nullable=True, default=None)
 
     # LLM-as-judge backend for slide verification (admin: default profile row)
     llm_judge_backend = Column(String(32), nullable=False, default="mlflow")

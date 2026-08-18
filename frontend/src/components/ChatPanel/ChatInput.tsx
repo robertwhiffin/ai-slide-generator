@@ -5,14 +5,14 @@ import { PromptEditorModal } from './PromptEditorModal';
 import { api } from '../../services/api';
 
 interface ChatInputProps {
-  onSend: (message: string, imageIds?: number[]) => void;
+  onSend: (message: string, imageIds?: string[]) => void;
   disabled: boolean;
   placeholder?: string;
   badge?: React.ReactNode;
 }
 
 interface AttachedImage {
-  id: number;
+  id: string; // Opaque image token (SDR-4437 F-TM-7).
   previewUrl?: string;
 }
 
@@ -33,11 +33,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const addUploadedImage = useCallback((id: number, previewUrl?: string) => {
+  const addUploadedImage = useCallback((id: string, previewUrl?: string) => {
     setAttachedImages((prev) => (prev.some((a) => a.id === id) ? prev : [...prev, { id, previewUrl }]));
   }, []);
 
-  const removeAttachment = useCallback((id: number) => {
+  const removeAttachment = useCallback((id: string) => {
     setAttachedImages((prev) => prev.filter((a) => a.id !== id));
   }, []);
 

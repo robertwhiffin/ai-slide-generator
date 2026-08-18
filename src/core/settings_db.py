@@ -72,18 +72,26 @@ def get_default_slide_style_id() -> Optional[int]:
     Used by both the browser chat flow and the MCP ``create_deck`` tool so new
     sessions pick up the user-configured default when no explicit
     ``slide_style_id`` is supplied.
+
+    BOTH queries order by id, so when several rows tie the LOWEST id wins. That
+    is not cosmetic: the frontend applies exactly this rule
+    (``AgentConfigContext.pickSeededDefaultStyle`` sorts by id), and an unordered
+    ``.first()`` has no defined row order — so with more than one candidate the
+    two sides could resolve DIFFERENT styles, non-deterministically. Ordering by
+    id is stable and unaffected by renaming a style.
     """
     from src.database.models import SlideStyleLibrary
 
     try:
         with get_db_session() as db:
-            # Primary: explicit default
+            # Primary: explicit default (lowest id among ties)
             style = (
                 db.query(SlideStyleLibrary.id)
                 .filter(
                     SlideStyleLibrary.is_default == True,  # noqa: E712
                     SlideStyleLibrary.is_active == True,  # noqa: E712
                 )
+                .order_by(SlideStyleLibrary.id)
                 .first()
             )
             if style:
@@ -96,11 +104,47 @@ def get_default_slide_style_id() -> Optional[int]:
                     SlideStyleLibrary.is_system == True,  # noqa: E712
                     SlideStyleLibrary.is_active == True,  # noqa: E712
                 )
+                .order_by(SlideStyleLibrary.id)
                 .first()
             )
             return style.id if style else None
     except Exception:
         # Column may not exist yet (pre-migration)
+        return None
+
+
+def get_default_design_system_id() -> Optional[int]:
+    """Return the ID of the org-default design system, or ``None``.
+
+    The design-system counterpart of :func:`get_default_slide_style_id`:
+    resolves the ``is_default=True`` row from ``design_system``, restricted to
+    ACTIVE (non-soft-deleted) rows so a deleted default never resolves. Used by
+    both the browser chat flow and the MCP ``create_deck`` tool so new sessions
+    pick up the configured org default when no explicit ``design_system_id`` is
+    supplied.
+
+    There is deliberately no ``is_system`` fallback (the slide-style helper's
+    mid-migration safety net): design systems are all user-uploaded, so "no
+    default configured" is a normal state that must resolve to ``None`` rather
+    than to an arbitrary bundle. Swallows errors for pre-migration databases
+    where the column may not exist yet, matching the slide-style helper.
+    """
+    from src.database.models import DesignSystem
+
+    try:
+        with get_db_session() as db:
+            row = (
+                db.query(DesignSystem.id)
+                .filter(
+                    DesignSystem.is_default == True,  # noqa: E712
+                    DesignSystem.is_active == True,  # noqa: E712
+                )
+                .order_by(DesignSystem.id)
+                .first()
+            )
+            return row.id if row else None
+    except Exception:
+        # Column/table may not exist yet (pre-migration)
         return None
 
 

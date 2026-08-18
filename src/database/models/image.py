@@ -1,4 +1,5 @@
 """Image asset model — metadata and binary data stored together in Lakebase."""
+import secrets
 from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, LargeBinary, String, Text
@@ -8,6 +9,17 @@ from src.core.database import Base
 
 # JSON on SQLite (tests); JSONB on PostgreSQL/Lakebase for proper @> containment on tags.
 _TagsColumn = JSON().with_variant(JSONB(), "postgresql")
+
+
+def _new_image_token() -> str:
+    """Unguessable external identifier (SDR-4437 F-TM-7).
+
+    The autoincrement int PK is enumerable, so it is never exposed. This
+    opaque token is the only identifier that leaves the server — it is what
+    the API returns, what chat sends in ``image_ids``, and what goes in
+    ``{{image:...}}`` slide placeholders.
+    """
+    return secrets.token_urlsafe(32)
 
 
 class ImageAsset(Base):
@@ -20,7 +32,9 @@ class ImageAsset(Base):
 
     __tablename__ = "image_assets"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True)  # Internal only — never serialized.
+    # Unguessable external identifier (SDR-4437 F-TM-7). token_urlsafe(32) → 43 chars.
+    token = Column(String(64), unique=True, nullable=False, index=True, default=_new_image_token)
     filename = Column(String(255), nullable=False)           # Generated: {uuid}.{ext}
     original_filename = Column(String(255), nullable=False)  # User's original filename
     mime_type = Column(String(50), nullable=False)           # image/png, image/jpeg, image/gif, image/svg+xml

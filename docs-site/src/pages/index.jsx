@@ -46,7 +46,7 @@ function TellrFeatures() {
     {
       title: 'Connected to Your Data',
       icon: '🔗',
-      description: 'Queries your Genie spaces for live, governed data while respecting Unity Catalog permissions.',
+      description: 'Queries your Genie agents for live, governed data while respecting Unity Catalog permissions.',
     },
     {
       title: 'Conversational Editing',

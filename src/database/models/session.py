@@ -13,13 +13,13 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
 )
 from sqlalchemy.orm import backref, relationship
 
 from src.core.database import Base
+from src.database.types import NormalizedAgentConfig
 
 
 class ChatRequest(Base):
@@ -129,8 +129,10 @@ class UserSession(Base):
     google_slides_presentation_id = Column(String(255), nullable=True)
     google_slides_url = Column(String(512), nullable=True)
 
-    # Agent configuration override (tools, style, prompts) — stored as JSON blob
-    agent_config = Column(JSON, nullable=True, default=None)
+    # Agent configuration override (tools, style, prompts) — stored as JSON blob.
+    # The column type enforces style-authority exclusivity on EVERY write, so no
+    # writer has to remember to (see NormalizedAgentConfig).
+    agent_config = Column(NormalizedAgentConfig, nullable=True, default=None)
 
     # Processing lock for concurrent request handling
     is_processing = Column(Boolean, default=False, nullable=False)

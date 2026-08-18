@@ -46,7 +46,8 @@ Frontend (SlidePanel → "Export to Google Slides")   ← the export
   │                            the rendered DOM → pptxgenjs assembles one .pptx
   │      └─ upload_pptx_as_slides()  → Drive upload, mimeType=…google-apps.presentation
   │                          → Google auto-converts PPTX → native Slides
-  │      └─ returns { presentation_id, presentation_url }   (synchronous, no polling)
+  │      └─ returns { presentation_id, presentation_url,
+  │                   total_slides, succeeded, failures }   (synchronous, no polling)
   │
   └─ POST /api/export/google-slides/from-records    (fallback, only on 503)
          └─ client-side DOM walker (domWalker.ts) → records → pptxgenjs → same Drive upload
@@ -154,7 +155,7 @@ All export routes live in `src/api/routes/google_slides.py`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Backend fetches the deck HTML from session storage, renders it to a PPTX via the huashu (Playwright + Chromium) pipeline, and uploads it to Drive. Synchronous — returns `{presentation_id, presentation_url}` directly. |
+| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Backend fetches the deck HTML from session storage, renders it to a PPTX via the huashu (Playwright + Chromium) pipeline, and uploads it to Drive. Synchronous — returns `{presentation_id, presentation_url, total_slides, succeeded, failures}` directly. |
 | `POST` | `/api/export/google-slides/from-records` | **Fallback** (frontend uses it only when `/from-huashu` returns 503). Accepts DOM-walker records extracted client-side, builds a PPTX with pptxgenjs, and uploads it the same way. |
 | `POST` | `/api/export/google-slides` | **Legacy** async LLM-batchUpdate job. Returns `{job_id, status, total_slides}`. Not called by the current UI — see the historical note in §1. |
 | `GET` | `/api/export/google-slides/poll/{job_id}` | **Legacy** poll for the async job above. |
@@ -185,9 +186,14 @@ No client-side images or records are needed — the backend assembles complete s
 ```json
 {
   "presentation_id": "1A2B3C...",
-  "presentation_url": "https://docs.google.com/presentation/d/1A2B3C.../edit"
+  "presentation_url": "https://docs.google.com/presentation/d/1A2B3C.../edit",
+  "total_slides": 12,
+  "succeeded": 12,
+  "failures": []
 }
 ```
+
+`total_slides` and `succeeded` are `int | None` and `failures` defaults to `[]`, so the count fields may be `null` on the records path. The huashu path populates all five. **A non-empty `failures` list means the uploaded deck is missing those slides** — the caller must surface which ones rather than presenting a partial deck as complete.
 
 Auth uses global credentials and the user-scoped token.
 
@@ -236,6 +242,21 @@ in their cell. It now branches on `position` — author-positioned
 (`absolute`/`fixed`) pills keep their measured position (fixing corner
 "eyebrow"/"cadence" tags that used to drift to the slide center on export),
 while normal-flow badges are still centered.
+
+**Known limitation — normal-flow badges on a wide container.** Centering a
+normal-flow pill uses the resolved positioned ancestor's width. Inside a table
+cell that is correct. Inside a wide list — a numbered agenda, for example — the
+centre of the *list* is not the position of the *item*, so every badge resolves
+to roughly the same x and they overlap. It is layout-dependent rather than
+intermittent: the same markup fails the same way every time, and a narrow
+single-column list looks fine while a wide or two-column one does not.
+Affects the exported artifact only; the on-screen deck is unaffected.
+
+**Tables are not native tables.** The huashu emitter produces no records for
+`<td>`/`<th>`, so cells are flattened to absolutely-positioned text boxes: the
+layout is faithful but the result is not editable *as a table* in PowerPoint or
+Slides. This is current behaviour of the flattening approach rather than a
+stated product contract. See [Export Features](./export-features.md).
 
 ### Records PPTX pipeline (`src/services/pptx_from_records.py`)
 

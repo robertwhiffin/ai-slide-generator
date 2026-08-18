@@ -51,6 +51,52 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to initialize database tables: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Data migrations/backfills that used to run in the FastAPI lifespan now run
+    # HERE, once, before the server forks its workers — the uvicorn workers must
+    # never execute migration code (4 of them racing the migration chain on boot
+    # wedged startup). init_db() above runs the schema/data migrations; these two
+    # convert legacy profile/session rows to the agent_config shape.
+    logger.info("Migrating profiles/sessions to agent_config...")
+    try:
+        from src.core.database import get_session_local
+        from src.core.migrate_profiles_to_agent_config import (
+            backfill_sessions,
+            migrate_profiles,
+        )
+        migrated = migrate_profiles(get_session_local())
+        if migrated:
+            logger.info(f"Migrated {migrated} profiles to agent_config")
+        backfilled = backfill_sessions(get_session_local())
+        if backfilled:
+            logger.info(f"Backfilled {backfilled} sessions with agent_config")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to migrate profiles/sessions to agent_config: {e}\n{tb}")
+        raise SystemExit(1) from e
+
+    # Row-per-slide (PR1): migrate historical deck_json blobs into session_slides
+    # rows. Runs HERE, pre-fork, for the same reason as the two migrations above —
+    # the uvicorn workers must never execute migration code. It originally lived in
+    # the FastAPI lifespan; main moved migrations out of the lifespan while this
+    # branch was in flight, so it was relocated on merge rather than dropped.
+    #
+    # Guarded by a per-deck NOT EXISTS anti-join over session_slides (index-only
+    # against its composite PK), so it is a no-op scan once every deck has rows.
+    # A deck whose blob will not parse is logged and skipped, never raised — one
+    # bad row must not abort startup.
+    logger.info("Backfilling session_slides rows...")
+    try:
+        from src.core.database import get_session_local
+        from src.core.backfill_session_slides_startup import backfill_unmigrated_decks
+
+        slide_decks = backfill_unmigrated_decks(get_session_local())
+        if slide_decks:
+            logger.info(f"Backfilled {slide_decks} deck(s) into session_slides rows")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to backfill session_slides rows: {e}\n{tb}")
+        raise SystemExit(1) from e
+
     # Seed default content
     logger.info(f"Seeding defaults (include_databricks={seed_databricks_defaults})...")
     try:

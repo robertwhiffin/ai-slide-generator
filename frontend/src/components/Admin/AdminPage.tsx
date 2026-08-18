@@ -1,11 +1,18 @@
 import React, { useState } from 'react';
 import { FeedbackDashboard } from '../Feedback/FeedbackDashboard';
 import { GoogleSlidesAuthForm } from '../config/GoogleSlidesAuthForm';
+import { AdminDesignSystemDefault } from './AdminDesignSystemDefault';
 import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
 import { UsageDashboard } from './UsageDashboard';
 
-type TabId = 'usage' | 'feedback' | 'google_slides' | 'slide_style' | 'judge';
+type TabId =
+  | 'usage'
+  | 'feedback'
+  | 'google_slides'
+  | 'design_system'
+  | 'slide_style'
+  | 'judge';
 
 export const AdminPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('usage');
@@ -16,7 +23,8 @@ export const AdminPage: React.FC = () => {
         <header className="mb-6">
           <h1 className="text-2xl font-bold text-gray-900">Admin</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Usage analytics, feedback reports, Google Slides, slide style defaults, and LLM judge backend.
+            Usage analytics, feedback reports, Google Slides, design system and slide style
+            defaults, and LLM judge backend.
           </p>
         </header>
 
@@ -65,6 +73,20 @@ export const AdminPage: React.FC = () => {
             }`}
           >
             Google Slides
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'design_system'}
+            aria-controls="design-system-panel"
+            id="design-system-tab"
+            onClick={() => setActiveTab('design_system')}
+            className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors -mb-px ${
+              activeTab === 'design_system'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            Design System
           </button>
           <button
             role="tab"
@@ -124,6 +146,16 @@ export const AdminPage: React.FC = () => {
           className={activeTab !== 'google_slides' ? 'sr-only' : ''}
         >
           <GoogleSlidesAuthForm />
+        </div>
+
+        <div
+          role="tabpanel"
+          id="design-system-panel"
+          aria-labelledby="design-system-tab"
+          hidden={activeTab !== 'design_system'}
+          className={activeTab !== 'design_system' ? 'sr-only' : ''}
+        >
+          <AdminDesignSystemDefault />
         </div>
 
         <div

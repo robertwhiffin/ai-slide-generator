@@ -104,3 +104,11 @@ token.json
 .openskills/
 AGENTS.md
 prpm.lock
+
+# Agent scratch notes. These are working notes from an automated review round —
+# never part of the product — and this is a PUBLIC repo, so a stray one lands in a
+# PR diff for everyone to read. Two had already been committed. Anchored with a
+# leading slash so it ignores exactly the two places they have appeared without
+# hiding a legitimately-named file deeper in the tree.
+/findings.md
+/frontend/findings.md

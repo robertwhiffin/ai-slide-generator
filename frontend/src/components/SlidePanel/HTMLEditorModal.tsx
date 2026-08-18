@@ -37,7 +37,7 @@ export const HTMLEditorModal: React.FC<HTMLEditorModalProps> = ({
     }
   };
 
-  const handleImageSelect = async (image: { id: number; original_filename: string; description: string | null }) => {
+  const handleImageSelect = async (image: { id: string; original_filename: string; description: string | null }) => {
     setInsertingImage(true);
     setError(null);
     try {

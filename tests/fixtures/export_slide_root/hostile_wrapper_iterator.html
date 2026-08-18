@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 1280px; height: 720px; }
+      /* The same shape and the same single ground as
+         wrapped_nested_bare_slide.html — section > article > div.slide, with
+         only the outermost <section> painting anything. The one difference is
+         the script below, so the export MUST come out identical to that
+         fixture's and any difference is attributable to the hostile script
+         alone. */
+      section { background: #123456; color: #ffffff; font-family: Arial, sans-serif; }
+      .slide { width: 1280px; height: 720px; padding: 72px 88px; }
+      h1 { font-size: 64px; }
+      p { font-size: 24px; }
+    </style>
+    <script>
+      // A HOSTILE REALM, poisoning the OTHER way a collection is consumed.
+      //
+      // hostile_children_self.html and hostile_children_fresh.html lie about
+      // an element's children. This one lets every accessor tell the truth and
+      // lies about ITERATION instead: `for...of` over a NodeList, and
+      // `Array.from()` over a NodeList or an HTMLCollection, all go through the
+      // collection's [Symbol.iterator], which is a CONFIGURABLE property on
+      // NodeList.prototype and HTMLCollection.prototype. An iterator that never
+      // reports `done` makes the consumer loop forever.
+      //
+      // Reachable on the same route as the sibling fixtures: SLIDE_CSP
+      // (src/utils/html_safety.py) carries `script-src 'unsafe-inline'`, so this
+      // script runs in the export page at load, before the preprocess pass.
+      //
+      // BOTH interfaces are poisoned, because the pass consumes both:
+      // node.childNodes and querySelectorAll() are NodeLists, element.children
+      // is an HTMLCollection. Poisoning only the one the walk happens to reach
+      // first would let a fix pass while leaving equivalent hangs behind it.
+      //
+      // The yielded element is a real, childless <article>: a walk that reads the
+      // REAL tree evaluates it, rejects it, and asks for the next one — which is
+      // what makes this a test of the ITERATION and not of the descent. It is
+      // created once and shared, so the hang is a tight loop rather than an
+      // allocation storm that would crash the tab instead of hanging it.
+      var yielded = document.createElement('article');
+      var report = { configurable: {}, direct: {}, redefineResult: 'ok' };
+      function poisonIterator(name, proto) {
+        var descriptor = proto
+          ? Object.getOwnPropertyDescriptor(proto, Symbol.iterator)
+          : null;
+        // No own [Symbol.iterator] does not mean not poisonable — an own
+        // property defined here shadows whatever was inherited — so
+        // configurability is only reported when there is a direct one to report.
+        report.direct[name] = !!descriptor;
+        report.configurable[name] = descriptor ? !!descriptor.configurable : true;
+        try {
+          Object.defineProperty(proto, Symbol.iterator, {
+            configurable: true,
+            value: function () {
+              return { next: function () { return { done: false, value: yielded }; } };
+            },
+          });
+        } catch (error) {
+          report.redefineResult = 'refused ' + name + ': ' + error.message;
+        }
+      }
+      poisonIterator('NodeList', NodeList.prototype);
+      poisonIterator('HTMLCollection', HTMLCollection.prototype);
+      document.title = JSON.stringify(report);
+    </script>
+  </head>
+  <body>
+    <section data-label="Acme Ground">
+      <article>
+        <div class="slide">
+          <h1>Acme Wrapper Ground</h1>
+          <p>Synthetic fixture slide.</p>
+        </div>
+      </article>
+    </section>
+  </body>
+</html>

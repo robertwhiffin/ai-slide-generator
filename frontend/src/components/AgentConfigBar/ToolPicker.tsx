@@ -19,7 +19,7 @@ import { AgentBricksDiscovery } from './tools/AgentBricksDiscovery';
 // ---------------------------------------------------------------------------
 
 const TOOL_CATEGORIES: { type: ToolType; label: string }[] = [
-  { type: 'genie', label: '+ Genie Space' },
+  { type: 'genie', label: '+ Genie Agent' },
   { type: 'agent_bricks', label: '+ Agent Bricks' },
   { type: 'vector_index', label: '+ Vector Index' },
   { type: 'mcp', label: '+ MCP Server' },

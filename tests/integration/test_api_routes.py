@@ -969,42 +969,8 @@ class TestSessionEndpoints:
         assert data["status"] == "completed"
         assert data["deleted_count"] == 5
 
-    def test_export_session_success(self, client, mock_session_manager, tmp_path):
-        """POST /api/sessions/{id}/export exports session data."""
-        mock_session_manager.get_session.return_value = {
-            "id": 1,
-            "session_id": "test-123",
-            "created_by": "test@local.dev",
-            "title": "Test",
-            "is_contributor_session": False,
-            "parent_session_internal_id": None,
-        }
-        mock_session_manager.get_messages.return_value = [
-            {"role": "user", "content": "Hello"}
-        ]
-        mock_session_manager.get_slide_deck.return_value = {
-            "slides": [],
-            "slide_count": 0
-        }
-
-        # Mock Path to use temp directory
-        with patch("src.api.routes.sessions.Path") as mock_path:
-            mock_path.return_value.mkdir.return_value = None
-            mock_path.return_value.__truediv__ = lambda self, x: tmp_path / x
-
-            response = client.post("/api/sessions/test-123/export")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "exported"
-
-    def test_export_session_not_found(self, client, mock_session_manager):
-        """POST /api/sessions/{id}/export returns 404 for missing session."""
-        from src.api.services.session_manager import SessionNotFoundError
-        mock_session_manager.get_session.side_effect = SessionNotFoundError("nonexistent")
-
-        response = client.post("/api/sessions/nonexistent/export")
-        assert response.status_code == 404
+    # (POST /api/sessions/{id}/export tests removed — endpoint deleted as unused
+    #  dead code in SDR-4437 F-CR-10.)
 
 
 # ============================================

@@ -28,7 +28,7 @@ from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_slide_style_id
+from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
 
@@ -292,6 +292,106 @@ def _request_from_context(ctx: Context) -> Request:
     return req
 
 
+def _template_names_and_ids(design_system_id: int) -> list[tuple[str, int]]:
+    """The ACTIVE design system's ``(template name, template id)`` pairs.
+
+    Eagerly materialized to PLAIN values while the DB session is still OPEN.
+    This replaces a helper that returned the ``DesignSystem`` ORM instance
+    itself: ``get_db_session()`` commits and closes on exit, and the
+    sessionmaker uses SQLAlchemy's default ``expire_on_commit=True``, so that
+    instance was detached with its ``templates`` relationship expired. Reading
+    it raised ``DetachedInstanceError``, which the resolver caught and reported
+    as "name matched nothing" — silently ignoring every valid production
+    ``template_name``. Returning plain values makes that class of bug
+    unavailable rather than merely fixed.
+
+    Returns an empty list when the design system is missing or inactive, so the
+    caller's "no match -> no pin" path is unchanged. Scoped to the ONE design
+    system, so a name can never pin another system's template.
+    """
+    from src.core.database import get_db_session
+    from src.database.models import DesignSystem
+    from src.services.design_system_templates import materialize_templates
+
+    with get_db_session() as db:
+        design_system = (
+            db.query(DesignSystem)
+            .filter_by(id=design_system_id, is_active=True)
+            .first()
+        )
+        if design_system is None:
+            return []
+        # Same idempotent derivation the generation path uses, for systems
+        # imported before the templates table existed.
+        materialize_templates(design_system)
+        db.flush()  # newly materialized rows need ids before we read them
+        return [
+            (str(getattr(template, "name", None) or ""), int(template.id))
+            for template in (getattr(design_system, "templates", None) or [])
+            if getattr(template, "id", None) is not None
+        ]
+
+
+def _normalized_template_name(value: Optional[str]) -> str:
+    """The comparison key for template-name matching: casefolded, with all
+    whitespace runs collapsed to a single space.
+
+    Applied to BOTH sides so the notion of "the same name" is defined in exactly
+    one place — which is also what makes ambiguity detectable rather than
+    order-dependent.
+    """
+    return " ".join((value or "").split()).casefold()
+
+
+def _resolve_template_name(design_system_id: int, template_name: str) -> Optional[int]:
+    """Resolve a template NAME to its id within *design_system_id*.
+
+    MCP callers have no template ids — they see names (the compiler injects
+    the name+description catalog as soft-pick guidance), so a caller that
+    wants a specific layout pins it by name. Matching is case- and
+    whitespace-insensitive.
+
+    Because matching is insensitive, two DISTINCT rows can both match one query
+    ("Two Column" and "two column"). That is AMBIGUOUS, and returning the first
+    hit made the winner depend on relationship load order — a caller could
+    silently get the other layout, and which one could change between requests.
+    An ambiguous name is therefore UNRESOLVED: treated exactly like a name that
+    matches nothing, and logged so the duplicate rows are discoverable.
+
+    Returns ``None`` — never raises — when the design system is missing, the
+    name matches nothing, the name is ambiguous, or the lookup fails. An
+    unresolvable name must degrade to "no pin" (the model then soft-picks as
+    usual), never a 500.
+    """
+    wanted = _normalized_template_name(template_name)
+    if not wanted:
+        return None
+    try:
+        matches = [
+            template_id
+            for name, template_id in _template_names_and_ids(design_system_id)
+            if _normalized_template_name(name) == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            logger.warning(
+                "MCP template_name %r is ambiguous in design system %s: it matches "
+                "%d templates (ids %s). Ignoring the pin — the model soft-picks a "
+                "layout instead. Rename the duplicates to make the name unique.",
+                template_name,
+                design_system_id,
+                len(matches),
+                ", ".join(str(template_id) for template_id in sorted(matches)),
+            )
+    except Exception:
+        logger.exception(
+            "Failed to resolve MCP template_name against design system %s",
+            design_system_id,
+        )
+    return None
+
+
 @mcp.tool(
     name="create_deck",
     description=(
@@ -301,7 +401,10 @@ def _request_from_context(ctx: Context) -> Request:
         "appears in their tellr UI. v1 runs prompt-only: the agent does not "
         "invoke Genie, Vector Search, or other tools. Callers that want data-"
         "backed decks should gather the data themselves and include it in the "
-        "prompt."
+        "prompt. The deck uses the org-default design system unless "
+        "design_system_id or slide_style_id says otherwise; pass template_name "
+        "to pin one of that design system's named templates (otherwise the "
+        "model picks the best-matching one)."
     ),
 )
 async def create_deck(
@@ -309,6 +412,8 @@ async def create_deck(
     prompt: str,
     num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
+    design_system_id: Optional[int] = None,
+    template_name: Optional[str] = None,
     deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
@@ -317,6 +422,8 @@ async def create_deck(
         prompt=prompt,
         num_slides=num_slides,
         slide_style_id=slide_style_id,
+        design_system_id=design_system_id,
+        template_name=template_name,
         deck_prompt_id=deck_prompt_id,
         correlation_id=correlation_id,
     )
@@ -327,6 +434,8 @@ async def _create_deck_impl(
     prompt: str,
     num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
+    design_system_id: Optional[int] = None,
+    template_name: Optional[str] = None,
     deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
@@ -352,16 +461,48 @@ async def _create_deck_impl(
     try:
         with mcp_auth_scope(request) as identity:
             agent_config: dict[str, Any] = {"tools": []}
-            # Mirror the browser chat flow: if the caller didn't specify a
-            # style, fall back to the tellr-configured default
-            # (slide_style_library.is_default=True) rather than the
-            # hardcoded DEFAULT_SLIDE_STYLE constant that agent_factory
-            # uses when agent_config.slide_style_id is absent.
-            effective_style_id = slide_style_id
-            if effective_style_id is None:
-                effective_style_id = get_default_slide_style_id()
-            if effective_style_id is not None:
-                agent_config["slide_style_id"] = effective_style_id
+            # Resolve the style SOURCE exactly as the browser chat flow does
+            # (see routes/chat.py::_apply_org_default_style_source): a design
+            # system outranks a slide style, an explicit choice always wins,
+            # and only ONE source is ever seeded so the prompt never carries
+            # two competing style authorities. Before this, MCP decks could not
+            # reach a design system at all — only slide_style_id was ever set,
+            # so they always got the default slide style.
+            effective_ds_id = design_system_id
+            if effective_ds_id is None and slide_style_id is None:
+                effective_ds_id = get_default_design_system_id()
+
+            if effective_ds_id is not None:
+                agent_config["design_system_id"] = effective_ds_id
+                # Templates belong to a design system, so a name is only
+                # meaningful here. Unresolvable -> no pin (logged), and the
+                # model soft-picks from the catalog the compiler injects.
+                if template_name and template_name.strip():
+                    template_id = _resolve_template_name(effective_ds_id, template_name)
+                    if template_id is not None:
+                        agent_config["template_id"] = template_id
+                    else:
+                        logger.warning(
+                            "MCP create_deck: template_name %r matched no template "
+                            "on design system %s; generating without a pin",
+                            template_name,
+                            effective_ds_id,
+                        )
+            else:
+                # No design system in play: fall back to the tellr-configured
+                # default slide style rather than the hardcoded
+                # DEFAULT_SLIDE_STYLE constant agent_factory would otherwise use.
+                effective_style_id = slide_style_id
+                if effective_style_id is None:
+                    effective_style_id = get_default_slide_style_id()
+                if effective_style_id is not None:
+                    agent_config["slide_style_id"] = effective_style_id
+                if template_name and template_name.strip():
+                    logger.warning(
+                        "MCP create_deck: template_name %r ignored — templates "
+                        "require a design system and none is selected",
+                        template_name,
+                    )
             if deck_prompt_id is not None:
                 agent_config["deck_prompt_id"] = deck_prompt_id
             if num_slides is not None:
@@ -445,10 +586,30 @@ def _render_deck_response(
         base_url: Public app URL prefix for building deck URLs. Empty
             string yields relative URLs.
 
-    ``SlideDeck.from_dict`` rebuilds the deck from the stored snapshot,
+    Image and design-system asset placeholders are substituted at this shared
+    response boundary so both MCP deck-returning tools emit standalone data
+    without expanding the persisted snapshot. Design-system assets are scoped
+    to the session's active design system and fail closed when it has none.
+
+    ``SlideDeck.from_dict`` rebuilds the deck from the substituted snapshot,
     including per-slide scripts/metadata and head metadata.
     """
     deck_dict = deck_dict or {}
+    session_id = session["session_id"]
+
+    from src.api.services.chat_service import resolve_active_design_system_id
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
+    from src.utils.image_utils import substitute_deck_dict_images
+
+    design_system_id = resolve_active_design_system_id(session_id)
+    with get_db_session() as db:
+        substitute_deck_dict_images(deck_dict, db)
+        substitute_deck_dict_ds_assets(
+            deck_dict,
+            db,
+            design_system_id=design_system_id,
+        )
+
     if deck_dict:
         deck = SlideDeck.from_dict(
             deck_dict,
@@ -457,7 +618,6 @@ def _render_deck_response(
     else:
         deck = SlideDeck(title=session.get("title"))
 
-    session_id = session["session_id"]
     deck_url = (
         f"{base_url}/sessions/{session_id}/edit"
         if base_url
@@ -489,7 +649,10 @@ def _render_deck_response(
         "Poll the status of a deck generation or edit job. Returns "
         "lightweight status while pending/running; when ready, returns the "
         "complete deck as structured slide data, a standalone HTML "
-        "document, and URLs into tellr's full editor and view-only surfaces."
+        "document, and URLs into tellr's full editor and view-only surfaces. "
+        "A ready turn is not always an applied change: when "
+        "metadata.clarification_needed is true the deck was left UNCHANGED and "
+        "metadata.clarification carries the question to answer before retrying."
     ),
 )
 async def get_deck_status(
@@ -635,6 +798,34 @@ async def _get_deck_status_impl(
                 for m in db_messages
             ]
 
+            # WG2-01. An edit instruction that names no slide is DELIBERATELY not
+            # applied: chat_service asks which slide instead (its RC10 twins, plus the
+            # ambiguous add-vs-replace pair) and attaches ``clarification_needed`` to
+            # the COMPLETE event, which ``job_queue.process_chat_request`` copies
+            # verbatim into ``result["metadata"]``.
+            #
+            # Such a turn completes normally, so "ready" is the honest status and
+            # ``replacement_info`` is None — which is indistinguishable from an edit
+            # that applied but replaced nothing. Rebuilding ``metadata`` from
+            # hand-picked keys DROPPED the flag, so an automated caller reading
+            # ``status`` concluded the edit had landed when the deck was untouched; the
+            # only remaining trace was a ``message_type == "clarification"`` row in the
+            # transcript. Surfaced ADDITIVELY, and ``status`` keeps its existing meaning
+            # for clients already reading it.
+            clarification_needed = bool(result_metadata.get("clarification_needed"))
+            clarification = None
+            if clarification_needed:
+                # The question itself, so a caller can act on it without re-filtering
+                # the transcript. Last one wins: it is the turn's most recent ask.
+                clarification = next(
+                    (
+                        message.get("content")
+                        for message in reversed(messages)
+                        if message.get("message_type") == "clarification"
+                    ),
+                    None,
+                )
+
             return {
                 "session_id": session_id,
                 "request_id": request_id,
@@ -648,6 +839,8 @@ async def _get_deck_status_impl(
                     or result_metadata.get("latency_seconds"),
                     "experiment_url": result.get("experiment_url"),
                     "session_title": result.get("session_title"),
+                    "clarification_needed": clarification_needed,
+                    "clarification": clarification,
                 },
             }
     except MCPToolError:
@@ -691,7 +884,11 @@ def _check_contiguous(indices: list[int]) -> None:
         "The edit is applied in-place; the session_id and deck_url stay "
         "stable across edits. Returns a request_id; the caller polls "
         "get_deck_status for completion and receives the updated deck "
-        "plus replacement_info summarizing what changed."
+        "plus replacement_info summarizing what changed. An instruction that "
+        "identifies no slide — neither via slide_indices nor by naming one in "
+        "the text — is answered with a clarifying question INSTEAD of an edit: "
+        "get_deck_status then reports metadata.clarification_needed with the "
+        "deck unchanged."
     ),
 )
 async def edit_deck(

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from src.utils.css_utils import merge_css
-from src.utils.html_utils import split_script_by_canvas
+from src.utils.html_utils import find_slide_roots, split_script_by_canvas
 
 from .slide import Slide
 
@@ -203,7 +203,7 @@ class SlideDeck:
             external_scripts.append(script_tag['src'])
 
         # Phase 2: Parse slides and build canvas-to-slide index
-        slide_elements = soup.find_all('div', class_='slide')
+        slide_elements = find_slide_roots(soup)
         slides: List[Slide] = []
         canvas_to_slide: Dict[str, int] = {}  # canvas_id -> slide_index
 

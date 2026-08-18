@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
+  <meta charset="UTF-8">
+  <title>Inline SVG banner</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 1280px;
+      height: 720px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #ffffff;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div class="slide" style="position:relative;width:1280px;height:720px;background:#ffffff;">
+    <svg width="200" height="100" viewBox="0 0 200 100" style="position:absolute;left:88px;top:72px;">
+      <rect width="200" height="100" rx="10" fill="#E8722A"/>
+      <rect x="20" y="30" width="160" height="14" rx="7" fill="#FFFFFF"/>
+      <rect x="20" y="58" width="110" height="14" rx="7" fill="#F2E8DA"/>
+    </svg>
+    <h1 style="position:absolute;left:88px;top:240px;width:800px;font-size:40px;color:#0B3D66;">Banner Slide</h1>
+    <p style="position:absolute;left:88px;top:320px;width:700px;font-size:20px;color:#333333;">The banner above is an inline vector element.</p>
+  </div>
+</body>
+</html>

@@ -43,8 +43,13 @@ from src.domain.slide import Slide, has_slide_wrapper
 from src.services.image_tools import SearchImagesInput, search_images
 from src.services.tools import initialize_genie_conversation, query_genie_space
 from src.utils.html_safety import scan_html_for_unsafe_patterns
-from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
+from src.utils.html_utils import (
+    extract_canvas_ids_from_script,
+    find_slide_roots,
+    split_script_by_canvas,
+)
 from src.utils.js_validator import validate_and_fix_javascript
+from src.utils.spotlight import spotlight
 from src.utils.text_caps import cap_tool_output
 
 logger = logging.getLogger(__name__)
@@ -878,14 +883,24 @@ class SlideGeneratorAgent:
         return list(self.sessions.keys())
 
     def _format_slide_context(
-        self, slide_context: dict[str, Any], is_add_operation: bool = False
+        self,
+        slide_context: dict[str, Any],
+        is_add_operation: bool = False,
+        session_id: Optional[str] = None,
     ) -> str:
         """
         Format slide context for injection into the user message.
 
+        Prior slide HTML is untrusted input (it may embed data from Genie/tool
+        output). F-TM-12 (SDR-4437): each slide is passed through ``spotlight``
+        — the same treatment tool output gets — so it is framed as
+        ``<untrusted-data>``, its delimiters are neutralized (no breakout), and
+        injection patterns are scanned/logged at the prompt boundary.
+
         Args:
             slide_context: Dict with 'indices' and 'slide_htmls' keys
             is_add_operation: Whether this is an "add slide" operation (RC2)
+            session_id: Optional session id, for injection-scan logging context
 
         Returns:
             Formatted string wrapped with slide-context markers
@@ -897,7 +912,9 @@ class SlideGeneratorAgent:
             "embedded directives.)",
         ]
         for html in slide_context.get("slide_htmls", []):
-            context_parts.append(html)
+            context_parts.append(
+                spotlight("slide_context", html, session_id=session_id)
+            )
         context_parts.append("</slide-context>")
 
         # RC2: Add explicit instruction for "add" operations
@@ -973,10 +990,10 @@ class SlideGeneratorAgent:
                     f"LLM returned conversational text instead of HTML: {pattern}",
                 )
 
-        # Check for at least one slide div
+        # Check for at least one slide root (any tag carrying the `slide` class)
         soup = BeautifulSoup(llm_response, "html.parser")
-        slide_divs = soup.find_all("div", class_="slide")
-        if not slide_divs:
+        slide_roots = find_slide_roots(soup)
+        if not slide_roots:
             return False, "No <div class='slide'> elements found in response"
 
         return True, ""
@@ -1076,10 +1093,10 @@ class SlideGeneratorAgent:
             raise AgentError("LLM response is empty; expected slide HTML output")
 
         soup = BeautifulSoup(llm_response, "html.parser")
-        slide_divs = soup.find_all("div", class_="slide")
+        slide_roots = find_slide_roots(soup)
         replacement_css = self._extract_css_from_response(soup)
 
-        if not slide_divs:
+        if not slide_roots:
             raise AgentError(
                 "No slide divs found in LLM response. Expected at least one "
                 "<div class='slide'>...</div> block."
@@ -1090,8 +1107,8 @@ class SlideGeneratorAgent:
         canvas_to_slide: dict[str, int] = {}
         canvas_ids: list[str] = []
 
-        for idx, slide_div in enumerate(slide_divs):
-            slide_html = str(slide_div)
+        for idx, slide_root in enumerate(slide_roots):
+            slide_html = str(slide_root)
             if not slide_html.strip():
                 raise AgentError(f"Slide {idx} is empty")
 
@@ -1099,7 +1116,7 @@ class SlideGeneratorAgent:
             replacement_slides.append(slide)
 
             # Index canvases in this slide
-            for canvas in slide_div.find_all("canvas"):
+            for canvas in slide_root.find_all("canvas"):
                 canvas_id = canvas.get("id")
                 if canvas_id:
                     canvas_to_slide[canvas_id] = idx
@@ -1354,7 +1371,7 @@ class SlideGeneratorAgent:
             # RC2: Detect if this is an "add slide" operation
             is_add_operation = self._detect_add_intent(question)
             context_str = self._format_slide_context(
-                slide_context, is_add_operation=is_add_operation
+                slide_context, is_add_operation=is_add_operation, session_id=session_id
             )
             full_question = f"{context_str}\n\n{question}"
             logger.info(
@@ -1608,7 +1625,7 @@ class SlideGeneratorAgent:
             # RC2: Detect if this is an "add slide" operation
             is_add_operation = self._detect_add_intent(question)
             context_str = self._format_slide_context(
-                slide_context, is_add_operation=is_add_operation
+                slide_context, is_add_operation=is_add_operation, session_id=session_id
             )
             full_question = f"{context_str}\n\n{question}"
             logger.info(

@@ -14,6 +14,10 @@ everything it does not mention stands as the parent spec states it.
 Nine questions were resolved (A–I). Two of them (H, I) were unresolved *defects* found
 while reading the spec against the code, not gaps the spec knew it had.
 
+**§L was added on 2026-08-18** after main's Design System Library was merged into this
+branch. It revises §E1 and §H1 and corrects §E2's mechanism — read it alongside them, not
+as an appendix.
+
 ---
 
 ## 0. Environment: the probe evidence is now current
@@ -262,8 +266,14 @@ clean rebuild. The right question is how customisation works *forwards*.
 | Axis | Means | Status |
 |---|---|---|
 | Deck prompts (`SlideDeckPromptLibrary`) | *what* the deck says | exists, has UI |
-| Slide styles (`slide_style_library` + `image_guidelines`) | *how* it looks | exists, has UI |
+| **Design system** (`design_system` + 4 tables), else slide style (`slide_style_library`) | *how* it looks | **design systems landed on main after this decision** — see §L |
 | Tone / communication guideline | *how* it reads | **new** — PR3 ships the consumption hook + an in-repo default; authoring UI is a later PR (§10) |
+
+**Corrected after merging main (§L).** The "how it looks" axis is no longer slide styles. A
+**design system** — an org-shared brand bundle — supersedes them: the two are mutually
+exclusive, enforced in three independent places, and a selected design system *clears* the
+style. Template pinning is a further sub-choice inside a design system. The axis count is
+unchanged at three; what the middle axis *is* changed.
 
 The seven agent skills are **never user-editable**. If something a custom `system_prompt`
 used to do cannot be expressed in one of the three axes, that is evidence a fourth axis is
@@ -305,9 +315,14 @@ or profile creation raises after the drop. The two paths that matter most are ea
 `profile_service.clone_profile` (`:490`) copies both values from the source profile, and
 `scripts/init_database.py` (`:218`) is a separate entry point from the app lifespan.
 
-Because migrations run inside the FastAPI lifespan and **re-raise** on failure
-(`main.py:105-125`), a migration that outruns its callers aborts startup entirely. Sequence
-the code change ahead of the migration in the same PR; this is a hard requirement, not a
+Migrations no longer run in the FastAPI lifespan. Since main's
+`fix(startup): run migrations once pre-fork, never in the uvicorn workers`, the chain runs
+**once before the server forks**, in
+`packages/databricks-tellr-app/databricks_tellr_app/run.py::init_database`, and each step
+`raise SystemExit(1)` on failure. The ordering hazard is unchanged in substance — that file
+calls `init_db()` (schema + data migrations) **before** `seed_defaults()` — but a migration
+that outruns its callers now kills the boot command rather than the lifespan. Sequence the
+code change ahead of the migration in the same PR; this is a hard requirement, not a
 tidiness preference.
 
 Custom values are inventoried and logged before the drop so anything real is visible rather
@@ -523,8 +538,233 @@ Recorded so the divergences are deliberate rather than drift.
 | plan (F4) | set `recursion_limit` explicitly; default is 25 | default is **10007** on 1.2.10; the plan's ~50 would lower it (§0) |
 | kickoff brief | `SessionManager.get_deck_spec` / `write_deck_spec` are the only persistence path | **those methods do not exist.** They appear only in the PR1 *plan*. What landed is the `deck_spec_json` column on both tables, the migration, save-point snapshot/restore, and a per-slide `deck_spec_slide` parameter on `write_slide`. PR3 owns the deck-level accessor. |
 | kickoff brief | 19 pre-existing failures in four files | 17 in three files, post-upgrade (§0) |
+| spec §4.1 | design contract = "the CSS/style contract" | a design system compiles to a **prompt artifact**, not a stylesheet; the spec stores a reference (§L1, §L3) |
+| spec §5.2.3 | builders receive "the style sheet (the CSS contract)" | they receive the resolved `compiled_style_content` **or** `style_content` — a branch, not a ladder — already carrying the frame rules (§L1, §L5) |
+| spec §5.2.8 | the foreman is sole CSS writer | a second, **measured** deck-CSS write is now required post-commit (`ensure_deck_token_css`), or pinned-template decks ship washed out (§L2) |
+| spec §4.6 | design-contract change = `slide_style_id` | three fields plus template pinning; setting a design system clears the style (§L4) |
+| plan Phase 9.2 | delete or reduce `agent_factory` | it now owns design-system resolution, template blocks and `search_brand_assets` gating — move, do not delete (§L6) |
+| this doc §E2 (pre-merge) | migrations run in the lifespan and re-raise | they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` (§L8) |
+| `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they go in `run.py::init_database` (§L8) |
 
 ---
+
+---
+
+## L. Design System Library — merged from main, 2026-08-18
+
+Main landed a **Design System Library** after the decisions above were taken, and merged it
+into `feat/langgraph-core` on 2026-08-18. It is the single largest change to PR3's
+integration surface since the parent spec was written, because it **replaces the CSS
+contract with a prompt artifact** and adds a deck-CSS write the graph path would bypass.
+
+What it is: org-shared brand bundles (colour/type tokens, webfonts, brand imagery, named
+slide templates) uploaded as a zip, compiled once into `compiled_style_content`, and
+resolved onto a deck through six per-entry-path decision trees. Five tables, 15 routes,
+admin-governed org default, per-user personal defaults. Reference:
+`docs/technical/design-system-library.md`, `-bundle-format.md`, `-library-spec.md`.
+
+### L1. The CSS contract is now a prompt artifact, resolved as a branch
+
+`agent_factory` resolves the visual style as a **branch, not a ladder**:
+
+```python
+if config.design_system_id is not None:   # design-system branch
+    ...
+elif config.slide_style_id is not None:    # legacy slide-style branch
+```
+
+Consequences PR3 must respect:
+
+- **The two are mutually exclusive**, enforced in three independent places — the model
+  serializer, the column bind (`NormalizedAgentConfig`, now the type of
+  `UserSession.agent_config`), and a database `BEFORE INSERT OR UPDATE` trigger. A caller
+  cannot construct a deck carrying both.
+- **An inactive `design_system_id` does not fall through to the style.** The branch is
+  chosen on the id being *present*, so a soft-deleted design system logs a warning and
+  leaves generation on the `DEFAULT_SLIDE_STYLE` constant. The `elif` is never evaluated.
+- **`compiled_style_content` has a currency contract.** It is stamped with
+  `COMPILER_VERSION` and currency is an **exact match, not a comparison**; a stale row is
+  lazily recompiled on read via `ensure_compiled_style_content_current`. Any change to
+  compiler output must bump the version or it never reaches existing rows.
+
+### L2. §H1 revised — two deck-level writes per turn, and a second measured defect
+
+§H found that nobody writes deck-level CSS on the graph path. The design system adds a
+**second, independent instance of the same class**, and this one is measured rather than
+inferred.
+
+`chat_service._ensure_pinned_template_token_css` runs `ensure_deck_token_css` **right before
+every deck save** (`chat_service.py:670`, `:1469`). Its docstring records why prompt prose
+was insufficient: a pinned deck "referenced 57 `var(--…)` tokens while defining none,
+washing out preview and both PPTX export paths. Prompt prose is not a guarantee; this is."
+
+**Both call sites are in the flows PR3 deletes.** PR3's reviewers write *rows* via
+`SlideWriter`, which is not a deck save, so on the graph path the backstop never fires and a
+pinned-template deck ships washed out in preview and both exports.
+
+**Resolution — two deck-level writes per turn:**
+
+| When | Writes | Why there |
+|---|---|---|
+| Before the fan-out | CSS contract + title | so incrementally-released slides render styled (§6.2's payoff) |
+| After all positions commit, before the deck-review trigger | `ensure_deck_token_css(deck.css, token_css)` | the backstop **compares emitted deck CSS** against the token stylesheet, so it cannot run before builders have emitted any |
+
+Two `version` bumps per turn, both deck-level, neither per-slide — so the no-contention
+property holds. `ensure_deck_token_css` is idempotent and prepends (deck CSS stays later in
+the cascade, so anything the model authored still wins), and it never raises: a failed
+guarantee must not block the save.
+
+This revives the two-write sequencing dropped when §H2 was cancelled, for a different and
+now-measured reason.
+
+### L3. The deck spec's `design_contract` holds a reference, not content
+
+§4.1 lists "design contract: the CSS/style contract" as a deck-level spec field. It stores
+**which brand**, not the compiled text:
+
+```
+design_contract: { design_system_id, template_id, slide_style_id }
+```
+
+The compiled content is resolved at build time through `agent_factory`'s logic. Storing a
+copy is wrong by construction: `compiled_style_content` currency is an exact version match,
+so a snapshot in the spec is stale the moment `COMPILER_VERSION` moves, and the spec would
+silently drive builds from a superseded artifact.
+
+### L4. §4.6's design-contract trigger widens
+
+The parent spec names `slide_style_id` as the design-contract field behind
+confirm-then-rebuild-all. It is now three fields, and **pinning or unpinning a template is
+also a design-contract change** because pinning is what supplies the template's own CSS
+(unpinned decks get only a name/description catalog with no CSS). Setting
+`design_system_id` additionally *clears* `slide_style_id`, so one user action mutates two
+fields.
+
+### L5. Reusable, already-measured prompt material for §A
+
+Three blocks exist that the builder skill should consume rather than reinvent:
+
+- **`_SLIDE_FRAME_CONSTRAINTS`** (`design_system_compiler.py:545`) — fixed 1280×720 frame,
+  clip-not-scroll, left/right clearance **MUST** be ≥88px, vertical **TARGET** 72px and
+  never below 56px, root carries no outer margin, decorative imagery never overlaps text.
+  The source comments record the measurement that set each wording: across 6 unpinned runs /
+  18 slides the horizontal 88px held on 313/314 ink boxes, while `padding-top` hit the
+  brand's 72px on only 3 of 18 — so the horizontal became a MUST and the vertical an
+  imperative floor. **Do not re-derive or reword these numbers.**
+- **`DESIGN_SYSTEM_PRECEDENCE`** (`prompt_modules.py:191`) — asserts the design system is
+  authoritative over generic styling guidance. Include only when a design system is active.
+- **The `{{ds-asset:ID}}` contract** — a distinct namespace from `{{image:ID}}` (independent
+  id sequences, so reusing `{{image:ID}}` resolves to an unrelated image). Brand images are
+  **not** enumerated in the prompt; the model fetches them via `search_brand_assets`.
+
+**The frame rules arrive with the style content on both paths** — the compiler emits them
+for a design-system deck (which bypasses `DEFAULT_SLIDE_STYLE`), and `DEFAULT_SLIDE_STYLE`
+carries its own for the legacy path. So the builder skill **must not hardcode them**, or a
+design-system deck gets two conflicting copies.
+
+### L6. What PR3 must preserve rather than delete
+
+The plan's Phase 9.2 says `agent_factory` should be deleted or "reduced to graph config
+assembly". That is no longer safe — it is now the only home for:
+
+- the design-system resolution branch and `compiled_style_content` currency check;
+- pinned-template block assembly (`build_selected_template_block`,
+  `get_template_for_generation`);
+- **`search_brand_assets` tool gating** — the tool is added *only* when
+  `config.design_system_id is not None`. This is a live input to the architect's tool
+  manifest (§5.2.1) and the analyst's tool grants.
+
+`chat_service` likewise gained design-system responsibilities that must survive its
+rewrite: `resolve_active_design_system_id`, `{{ds-asset:ID}}` substitution inside
+`_substitute_images_for_response(..., session_id=)` (note the new keyword-only argument),
+`_resolve_pinned_template_token_css` and `_ensure_pinned_template_token_css`.
+
+### L7. The slide-root contract changed
+
+`SlideDeck.from_html` no longer looks for `div.slide`. It calls
+`find_slide_roots(soup)` (`src/utils/html_utils.py:46`): the outermost element carrying the
+`slide` class token, **whatever its tag**, promoted outward through any semantic sectioning
+wrapper whose sole element child is the slide root. A `<div>` is never promoted.
+
+The reason is design-system templates: a pinned template makes the model emit the template's
+own `<section>` wrapper around the `div.slide` body, and every `<style>` block is copied
+verbatim into deck CSS — so dropping the wrapper keeps rules like
+`section { background; color; font-family }` while deleting the only element they could
+match.
+
+Affects PR3 in three places: what the builder is told to emit, how canvas dedup locates
+slides, and any reviewer check that assumes a slide root is a `div`.
+
+**And it sharpens the build reviewer's overflow criterion (§A2).** Every preview surface now
+clips at the true 1280×720 frame, so overflow is visible to the user while editing rather
+than absorbed by a growing tile (§L8). That makes "content overflows its frame" a defect the
+reviewer must catch *before* the slide is shown — it is on the objective-heavy initial
+criteria list for exactly this reason, and the frame numbers it judges against come from
+`_SLIDE_FRAME_CONSTRAINTS` (§L5), not from the reviewer's own invention.
+
+### L8. Merge integration — the `main.py` trap
+
+Main's `fix(startup): run migrations once pre-fork, never in the uvicorn workers` deleted the
+lifespan block that PR1 had extended, because "4 workers racing the migration chain on boot
+wedged startup." Five files conflicted; two were traps.
+
+- **`src/api/main.py`** — resolved to main's side (no migration code in the lifespan), and
+  PR1's `backfill_unmigrated_decks` **relocated into `run.py::init_database`** alongside
+  `migrate_profiles` / `backfill_sessions`. Keeping our side would have put four workers
+  back into the race main just fixed; taking main's side alone would have dropped the
+  backfill entirely, so migrated decks would never acquire rows.
+  **This supersedes the `migrations-run-at-startup` convention: new migrations and backfills
+  go in `run.py::init_database`, pre-fork, not the lifespan.**
+- **`src/core/database.py`** — both sides appended to the same migration list; kept both.
+  `_migrate_row_per_slide_schema` must stay **after**
+  `_migrate_rewrite_deck_image_placeholders`, and a comment now pins why:
+  that rewrite targets `_DECK_PLACEHOLDER_COLUMNS` only (`session_slide_decks.deck_json`,
+  `.html_content`, `slide_deck_versions.deck_json`) and **not** `session_slides.html`, which
+  did not exist when it was written. Row data is backfilled later still, so rows are always
+  built from `deck_json` that has already been rewritten to `{{image:<token>}}` form.
+  Reordering these would backfill rows from int-id placeholders that nothing subsequently
+  rewrites, silently breaking images on every migrated deck.
+- **`SlidePanel.tsx`** resolved to our side (ws6 extracted export/verification into hooks),
+  but main's *behaviour* was ported into those hooks rather than discarded: the louder
+  partial-PPTX-export toast (persistent, naming the failed slide numbers and first error),
+  the previously-absent auto-verification failure notice, and the inline "Save as HTML"
+  document builder replaced by main's extracted `buildStandaloneDeckDocument`. That last one
+  matters because three suites pin that helper (`slide-surface-fidelity.spec.ts`,
+  `slide-host-frame.spec.ts`, `tests/unit/test_preview_box_model_parity.py`); leaving a
+  duplicate inline would have left those specs guarding a function the real export never
+  calls.
+- **`SlideSelection.tsx`** stays deleted (checkbox selection is retired per PRD §3). Two
+  tests referenced it as an exemplar and were repointed at surviving surfaces:
+  `test_preview_box_model_parity.py` now pins **three** preview surfaces, and
+  `test_export_csp.py`'s non-vacuity guard uses `PresentationMode.tsx`.
+- **`SlideTile.tsx` — resolved to MAIN's side, reversing an initial mistake worth recording.**
+  Taking `--ours` here resurrected code main had deliberately deleted, and the failing
+  `test_the_preview_reset_has_exactly_two_consumers` was correctly reporting it.
+  The history: SlideTile's postMessage height-reporter and grow-to-fit behaviour came from
+  `d75eda88` (2026-02-18, "v0 polish" — "card height adapts to slide content … to avoid
+  inner scrollbar"), and `48fe0fa1` (2026-07-06, design-system frame guardrails Phase 3)
+  **removed it on purpose**: *"SlideTile now clips at the true 1280x720 frame like the
+  presentation viewer / export … instead of growing to fit tall content, so overflow is
+  visible while editing. Removes the now-unused height reporter + grow machinery."* That
+  commit is on main and **not** on this branch, so our side merely predated the removal —
+  it was never a ws6 feature and never a design disagreement.
+  A growing tile actively hides the defect: `48fe0fa1` names the production symptom it fixed
+  as the *"cut off" / "massive long slide"* problem, where a design-system deck bypassed
+  `DEFAULT_SLIDE_STYLE` (the only place the frame limits lived) and export clipped the
+  overflow. Resolution: main's `SlideTile`, with this branch's only genuine change to that
+  file re-applied — removal of the selection affordance (`useSelection`, `isSelected`, the
+  `ring-2 ring-blue-500` class, the `MessageSquare` "Add to chat context" button).
+  **Lesson for the remaining merge work: when a conflict looks like "our refactor vs their
+  change", check `git log -S` on the specific behaviour before choosing a side.** The shape
+  of a conflict does not tell you which side is intentional.
+
+### L9. Unaffected, verified
+
+- **`{{image:ID}}` prompt contract is unchanged.** SDR-4437 made the id an opaque token
+  rather than an enumerable int; the placeholder syntax the builder emits is the same.
+- **No conflict on `deck_spec_json`.** Main does not touch `SessionSlideDeck`.
+- **§I's placeholder mechanism is unaffected** — `commit_placeholder` and
+  `is_placeholder_record` are PR1 code that main never saw.
 
 ## K. What this document does not decide
 
@@ -536,3 +776,12 @@ Recorded so the divergences are deliberate rather than drift.
   MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
 - The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
   scheduled next via `writing-plans`, informed by these decisions.
+- **How the architect converses about brand.** §L makes the design system a first-class deck
+  property with an org default, personal defaults and template pinning. Whether the architect
+  can *change* it conversationally ("use the Acme brand", "pin the section-divider
+  template"), or whether it is read-only context the user sets in Agent Config, is not
+  decided here. §L4 covers what happens *when* it changes, not who may change it.
+- **Whether design-system templates inform the deck spec's slide briefs.** A pinned template
+  supplies layout; a `SlideSpec` supplies purpose and content. Whether the architect should
+  select a template *per slide* from the catalog is a genuine design question §L does not
+  answer.

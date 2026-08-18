@@ -15,9 +15,10 @@ Two SDK-specific gotchas to keep in mind when reading these tests:
    unset (since ``StreamableHTTPSessionManager.run()`` can only be
    entered once per instance, and unit-test suites repeatedly
    instantiate the lifespan). Integration tests therefore pop the
-   env var during TestClient setup so the real guarded code runs,
-   and patch ``init_db`` + migration helpers to no-ops so no DB is
-   touched during lifespan.
+   env var during TestClient setup so the real guarded code runs.
+   The lifespan itself no longer runs any migration code (migrations
+   run once pre-fork in run.py::init_database), so no DB is touched
+   during lifespan startup and nothing needs patching out.
 
 2. The ``normalize_mcp_path`` middleware in ``src/api/main.py`` rewrites
    ``POST /mcp`` to ``POST /mcp/`` in the ASGI scope so both forms reach
@@ -263,22 +264,10 @@ def client():
     """
     from src.api.main import app
 
-    # Patch namespaces MUST match main.py's imports: ``init_db`` and
-    # ``get_session_local`` are imported at module load
-    # (``from src.core.database import init_db, get_session_local, ...``),
-    # so both are bound into ``src.api.main``'s namespace. Same for
-    # the migration helpers ``migrate_profiles`` and ``backfill_sessions``
-    # which come from ``src.core.migrate_profiles_to_agent_config``.
-    #
-    # Note: ``migrate_profiles(get_session_local())`` evaluates its
-    # argument first, so patching only ``migrate_profiles`` still lets
-    # ``get_session_local()`` call into the real DB engine. We patch
-    # both to keep the lifespan DB-free.
-    with patch("src.api.main.init_db"), \
-         patch("src.api.main.get_session_local", return_value=MagicMock()), \
-         patch("src.api.main.migrate_profiles", return_value=0), \
-         patch("src.api.main.backfill_sessions", return_value=0), \
-         _pytest_env_var_context(), \
+    # The FastAPI lifespan no longer runs any migration code — migrations run once
+    # pre-fork in run.py::init_database, never in the workers — so the lifespan is
+    # DB-free on startup and needs no init_db/migration patching here.
+    with _pytest_env_var_context(), \
          TestClient(app) as c:
         yield c
 

@@ -12,7 +12,7 @@ and what they do with it.
 - **Frontend:** `frontend/src/components/Admin/UsageDashboard.tsx` rendered as the default tab of `frontend/src/components/Admin/AdminPage.tsx`
 - **Charts:** `recharts` (frontend dependency)
 - **Storage:** PostgreSQL table `usage_events` (never pruned), plus read-only aggregation over `user_sessions`, `session_slide_decks`, `app_identities`, and `request_logs`
-- **No auth guards:** like the rest of `/admin`, the endpoints are hidden-URL only (deliberate, recorded in the design spec)
+- **Admin-gated:** the endpoints carry `require_admin`, which resolves the caller's workspace group membership on-behalf-of and fails closed — a missing identity, non-membership, or a lookup error all return `403`. The `/admin` route itself is additionally wrapped in `<RequireAdmin>` client-side, but that guard is cosmetic; the server check is the control. **In dev and test the gate short-circuits to allow** (`_is_production()` is false), so a local run is not evidence that the gate works — production always evaluates membership. See [Permissions Model](permissions-model.md)
 
 ---
 

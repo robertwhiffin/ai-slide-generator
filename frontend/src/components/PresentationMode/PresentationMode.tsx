@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SlideDeck } from '../../types/slide';
-import { buildSlideDocument } from '../../services/slideDocument';
+import {
+  buildSlideDocument,
+  slideHostFrameStyle,
+  SLIDE_ROOT_RESET_STYLE,
+} from '../../services/slideDocument';
 
 interface PresentationModeProps {
   slideDeck: SlideDeck;
@@ -38,14 +42,27 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
 
     // Layout/reset CSS that wraps the deck CSS. Passed as extraHeadStyle so it
     // is appended after deck.css inside the builder's <style> block.
+    //
+    // Deliberately no universal `* { box-sizing: border-box }`. This surface DID
+    // declare one for a long time, and it was measured ~91,034 px away from the
+    // Claude Design ground truth for exactly that reason — it was never the
+    // reference rendering it was once assumed to be. The only box-sizing a
+    // preview may impose is the SCOPED one in slideHostFrameStyle, which mirrors
+    // deck-stage.js's `::slotted(*)`. Full reasoning and numbers live on
+    // SLIDE_PREVIEW_RESET_STYLE in services/slideDocument.ts.
     const extraHeadStyle = `
-    * {
-      box-sizing: border-box;
-    }
     html, body {
       width: 100%;
       height: 100%;
       overflow: hidden;
+    }
+    /* Default canvas for decks that paint no background of their own. Zero
+       specificity (:where) so any deck-authored html/body background wins the
+       cascade even though this block is appended after deck CSS — both
+       Claude-Design template families put the brand background on body and
+       layer transparent slide roots over it, and overriding it here presented
+       those decks as washed-out white. */
+    :where(html) {
       background: #ffffff;
     }
     /* Chart canvas scaling */
@@ -64,23 +81,19 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       margin: 0 !important;
     }
     .slide-container {
-      width: 1280px;
-      height: 720px;
       flex-shrink: 0;
       flex-grow: 0;
-      position: relative;
-      background: #ffffff;
-      overflow: hidden;
+      /* Transparent on purpose: the deck's own body/html background (or the
+         :where(html) white default above) is the canvas. Painting white here
+         killed deck-level backgrounds behind transparent slide roots. */
       margin: 0;
     }
-    .slide-container > * {
-      width: 100%;
-      height: 100%;
-      /* Zero any margin a deck CSS may add to its slide root — margins push
-         the slide inside the 720px clipping container and cause bottom-edge
-         truncation (e.g. ".slide { margin: 40px auto }" preview-mode styles). */
-      margin: 0 !important;
-    }`;
+    ${SLIDE_ROOT_RESET_STYLE}
+    /* The frame and the child-stretch rule this surface used to declare on its
+       own. It was the ONLY surface that stretched the slide's wrapper to the
+       frame, and therefore the only one that escaped the dark-on-dark defect;
+       the rule now lives in one shared place so every surface gets it. */
+    ${slideHostFrameStyle('.slide-container')}`;
 
     const bootstrapScripts = `
     // Wait for Chart.js to be available before running scripts
