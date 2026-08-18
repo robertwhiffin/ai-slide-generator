@@ -226,6 +226,15 @@ def test_init_database_invokes_encryption_boot_hook(monkeypatch):
     run = _load_run_module()
     calls = []
     monkeypatch.setattr("src.core.database.init_db", lambda: None)
+    # init_database now also runs the profile/session migrations pre-fork; stub
+    # them (and the session factory) so this stays a DB-free unit test.
+    monkeypatch.setattr("src.core.database.get_session_local", lambda: None)
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.migrate_profiles", lambda sf: 0
+    )
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.backfill_sessions", lambda sf: 0
+    )
     monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults",
         lambda include_databricks: None,
@@ -241,6 +250,15 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     """A key load/seed failure must abort the set -e boot command."""
     run = _load_run_module()
     monkeypatch.setattr("src.core.database.init_db", lambda: None)
+    # Stub the pre-fork profile/session migrations so this test exercises the
+    # encryption-key failure path specifically, not a DB connection.
+    monkeypatch.setattr("src.core.database.get_session_local", lambda: None)
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.migrate_profiles", lambda sf: 0
+    )
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.backfill_sessions", lambda sf: 0
+    )
     monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults",
         lambda include_databricks: None,
