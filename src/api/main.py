@@ -337,14 +337,12 @@ async def user_auth_middleware(request: Request, call_next):
     user_name = None
 
     if token:
-        # Diagnostic logging: check if token is service principal ID (debug to avoid log spam on every request/poll)
-        token_prefix = token[:20] if len(token) > 20 else token
+        # Diagnostic logging: flag SP-vs-user tokens. F-CR-9 (SDR-4437): never log
+        # any part of the bearer token (no prefix, no length) — only derived booleans.
         is_sp_token = client_id and token.startswith(client_id)
         logger.debug(
             "OBO auth: extracted token from header",
             extra={
-                "token_prefix": token_prefix,
-                "token_length": len(token),
                 "is_service_principal": is_sp_token,
                 "header_present": True,
             },
