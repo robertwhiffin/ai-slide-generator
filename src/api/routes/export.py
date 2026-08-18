@@ -754,13 +754,13 @@ async def export_to_pptx(request: ExportPPTXRequest):
                     temp_dir.rmdir()
             except Exception:
                 pass
-            raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+            raise HTTPException(status_code=500, detail="Export failed")
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error("PPTX export failed", exc_info=True, extra={"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Export failed")
 
 
 # =============================================================================
@@ -893,7 +893,7 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     except Exception as e:
         total_time = time.time() - start_time
         logger.error(f"Failed to start async export after {total_time:.2f}s: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to start export")
 
 
 @router.get("/pptx/poll/{job_id}", response_model=ExportJobResponse)
@@ -1038,7 +1038,7 @@ async def export_pptx_editable_from_records(request: ExportPPTXFromRecordsReques
         pptx_bytes = build_pptx(title, request.slides, font_mode=font_mode)
     except Exception as e:
         logger.exception(f"Editable PPTX emission failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Editable PPTX export failed")
 
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title).strip("_") or "slides"
     from fastapi.responses import Response
