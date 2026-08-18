@@ -34,13 +34,10 @@ from src.api.routes.settings import (
 from src.api.services.export_job_queue import start_export_worker
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.core.database import (
-    get_session_local,
-    init_db,
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
 )
-from src.core.migrate_profiles_to_agent_config import migrate_profiles, backfill_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +89,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Pytest detected: skipping MCP session manager startup")
 
-    # Start Lakebase token refresh if running in Databricks Apps
-    # Must happen before init_db() so OAuth token is ready for database connections
+    # Start Lakebase token refresh if running in Databricks Apps. Workers serve
+    # DB-backed requests, so they need fresh OAuth tokens.
     if is_lakebase_environment():
         try:
             await start_token_refresh()
@@ -102,24 +99,11 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to start Lakebase token refresh: {e}")
             raise
 
-    # Initialize database tables (idempotent - only creates tables that don't exist)
-    is_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
-    if not is_pytest:
-        try:
-            init_db()
-            logger.info("Database tables initialized")
-
-            migrated = migrate_profiles(get_session_local())
-            if migrated:
-                logger.info(f"Migrated {migrated} profiles to agent_config")
-            backfilled = backfill_sessions(get_session_local())
-            if backfilled:
-                logger.info(f"Backfilled {backfilled} sessions with agent_config")
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            raise
-    else:
-        logger.info("Pytest detected: skipping database initialization")
+    # NOTE: database migrations run ONCE before the server starts, in
+    # run.py::init_database (invoked as its own step by the Databricks Apps boot
+    # command, and by scripts/init_database.py locally) — NOT here. This lifespan
+    # runs in every uvicorn worker, and having 4 workers race the migration chain
+    # on boot wedged startup. Workers must never run migration code.
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")

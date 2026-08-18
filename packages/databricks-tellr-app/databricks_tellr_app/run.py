@@ -51,6 +51,29 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to initialize database tables: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Data migrations/backfills that used to run in the FastAPI lifespan now run
+    # HERE, once, before the server forks its workers — the uvicorn workers must
+    # never execute migration code (4 of them racing the migration chain on boot
+    # wedged startup). init_db() above runs the schema/data migrations; these two
+    # convert legacy profile/session rows to the agent_config shape.
+    logger.info("Migrating profiles/sessions to agent_config...")
+    try:
+        from src.core.database import get_session_local
+        from src.core.migrate_profiles_to_agent_config import (
+            backfill_sessions,
+            migrate_profiles,
+        )
+        migrated = migrate_profiles(get_session_local())
+        if migrated:
+            logger.info(f"Migrated {migrated} profiles to agent_config")
+        backfilled = backfill_sessions(get_session_local())
+        if backfilled:
+            logger.info(f"Backfilled {backfilled} sessions with agent_config")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to migrate profiles/sessions to agent_config: {e}\n{tb}")
+        raise SystemExit(1) from e
+
     # Seed default content
     logger.info(f"Seeding defaults (include_databricks={seed_databricks_defaults})...")
     try:

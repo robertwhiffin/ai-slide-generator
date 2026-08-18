@@ -87,12 +87,19 @@ def test_list_images_filters_by_caller(client, caller, db_returning, monkeypatch
     assert search.call_args.kwargs["uploaded_by"] == "alice@test.com"
 
 
-def test_get_image_data_stays_open(client, caller, monkeypatch, db_returning):
-    """Accepted-risk open read: collaborator editor flow depends on it."""
-    db_returning(None)
-    monkeypatch.setattr(
-        "src.api.routes.images.image_service.get_image_base64",
-        MagicMock(return_value=("aGk=", "image/png")),
+def test_get_image_data_stays_open(client, caller, db_returning):
+    """Accepted-risk open read for library images: collaborator editor flow depends on it.
+
+    A non-ephemeral (library) image is readable by any caller who knows its token
+    (SDR-4437 F-TM-7 keeps this open; only ephemeral/chat-pasted images are scoped).
+    """
+    from src.database.models.image import ImageAsset
+
+    library_image = ImageAsset(
+        token="tok-open", filename="f.png", original_filename="o.png",
+        mime_type="image/png", size_bytes=2, image_data=b"hi",
+        category="content", uploaded_by="bob@test.com", is_active=True,
     )
-    resp = client.get("/api/images/1/data")
+    db_returning(library_image)
+    resp = client.get("/api/images/tok-open/data")
     assert resp.status_code == 200
