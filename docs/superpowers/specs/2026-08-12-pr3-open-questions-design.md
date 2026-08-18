@@ -14,9 +14,10 @@ everything it does not mention stands as the parent spec states it.
 Nine questions were resolved (A–I). Two of them (H, I) were unresolved *defects* found
 while reading the spec against the code, not gaps the spec knew it had.
 
-**§L was added on 2026-08-18** after main's Design System Library was merged into this
-branch. It revises §E1 and §H1 and corrects §E2's mechanism — read it alongside them, not
-as an appendix.
+**§L and §M were added on 2026-08-18** after main's Design System Library was merged into
+this branch. §L revises §E1 and §H1 and corrects §E2's mechanism — read it alongside them,
+not as an appendix. §M then settles how the agentic core consumes brands and templates, and
+adds two fields to the deck spec.
 
 ---
 
@@ -543,6 +544,10 @@ Recorded so the divergences are deliberate rather than drift.
 | spec §5.2.8 | the foreman is sole CSS writer | a second, **measured** deck-CSS write is now required post-commit (`ensure_deck_token_css`), or pinned-template decks ship washed out (§L2) |
 | spec §4.6 | design-contract change = `slide_style_id` | three fields plus template pinning; setting a design system clears the style (§L4) |
 | plan Phase 9.2 | delete or reduce `agent_factory` | it now owns design-system resolution, template blocks and `search_brand_assets` gating — move, do not delete (§L6) |
+| spec §5.2.1 | tool manifest comes from `AgentConfig.tools` | it must also carry the design-system library, or the architect cannot offer a brand it cannot see (§M1) |
+| spec §4.1 slide level | `SlideSpec` fields are purpose / brief / assumes / hands-off / data refs | plus a **template section assignment** (§M3) |
+| `design-system-library.md` §9 | a first-request template pin is stripped | fixed on the **graph path** only; the browser path is unchanged (§M2) |
+| current pinned-template prompt block | injects the whole layout for the whole deck | per-slide **section extraction**; the layout never goes to a builder whole (§M3–§M5) |
 | this doc §E2 (pre-merge) | migrations run in the lifespan and re-raise | they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` (§L8) |
 | `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they go in `run.py::init_database` (§L8) |
 
@@ -630,6 +635,12 @@ The compiled content is resolved at build time through `agent_factory`'s logic. 
 copy is wrong by construction: `compiled_style_content` currency is an exact version match,
 so a snapshot in the spec is stale the moment `COMPILER_VERSION` moves, and the spec would
 silently drive builds from a superseded artifact.
+
+**§M3 adds a per-slide companion.** `SlideSpec` gains a section assignment — which of the
+template's slide roots this position builds from. It is an **index or class reference, never
+extracted markup**, for the same reason: the spec stores *which*, and deterministic code
+resolves *what* at build time. A spec carrying layout bytes would go stale against its
+template and would put brand markup on the LLM's rewrite path.
 
 ### L4. §4.6's design-contract trigger widens
 
@@ -766,6 +777,161 @@ wedged startup." Five files conflicted; two were traps.
 - **§I's placeholder mechanism is unaffected** — `commit_placeholder` and
   `is_placeholder_record` are PR1 code that main never saw.
 
+---
+
+## M. Brand and templates in the agentic core
+
+Resolved 2026-08-18, after §L, closing the two items §K left open. This section replaces
+§K's "not decided here" entries for brand and templates.
+
+### M1. Brand is conversationally changeable, always confirming before a rebuild
+
+The architect may set both `design_system_id` and `template_id` through conversation ("use
+the Acme brand", "pin the data-slide template"). This follows the system's own principle: in
+a conversational agentic system, anything the user can configure they should be able to ask
+for.
+
+Because changing either restyles every slide, it routes through §4.6's
+**confirm-then-rebuild-all** path — the architect states what it is about to do and waits.
+That path already exists for exactly this case; nothing new is needed to gate it.
+
+Two consequences:
+
+- **The architect's tool manifest must include the design-system library** — system names and
+  descriptions, plus each system's template catalog. §5.2.1 derives the manifest from
+  `AgentConfig.tools`; it now also needs the brand inventory, or the architect cannot offer
+  what it cannot see.
+- **One conversational act mutates two fields.** Setting `design_system_id` *clears*
+  `slide_style_id` at the column bind (§L1), so the confirmation must say the deck's slide
+  style is being dropped, not silently drop it.
+
+### M2. First-turn pinning is fixed on the graph path
+
+Today a template pin submitted on the request that *creates* a session is **stripped**,
+because a pin arriving at session-creation cannot be distinguished from another browser
+surface's carry-over (`design-system-library.md` §9). The documented workaround is "send your
+first message, then pin".
+
+A conversational pin hits this immediately — "build me an Acme-branded deck" is a first turn.
+**PR3 fixes it for the graph path only.** The ambiguity that motivated the strip is a
+*browser-surface* ambiguity; a pin the architect derives from the user's message is
+unambiguous architect intent, so the graph path can honour it without reintroducing the
+carry-over problem for the pre-session browser path. The browser path's behaviour is
+unchanged.
+
+### M3. Grain-agnosticism: the architect assigns, deterministic code extracts
+
+The bundle format permits a template to be **either** a single slide layout **or** a whole
+deck skeleton whose sections the model trims or repeats, and it does not record which. The
+agent core therefore must not assume either — it must work for both, including bundles that
+mix them.
+
+**The division of labour, and the line that must not be crossed:**
+
+| Job | Who | Why |
+|---|---|---|
+| "Slide 3 plays the section-divider role → use that section" | **architect** (LLM) | intent and assignment; model-appropriate |
+| Extract that section's HTML and CSS, byte-for-byte | **deterministic code** | brand bytes must NEVER pass through a model |
+
+**The architect never rewrites layout HTML or CSS.** That is not a stylistic preference: it
+is the failure `ensure_deck_token_css` was built to catch. A model dropped 57 `var(--…)`
+definitions and washed out preview and both PPTX export paths (§L2). An architect retyping or
+summarising layout chunks would reproduce that defect with more steps and no backstop.
+
+**Grain is measured, not assumed.** Extraction requires parsing the layout, and the parse
+reveals the grain: `find_slide_roots(BeautifulSoup(layout_html))` returns **1** root for a
+per-slide template and **N** for a deck skeleton. Probed on both shapes:
+
+```
+deck skeleton  -> 3 slide root(s); tags=['section','section','section']
+                  classes=[['slide','title'], ['slide','divider'], ['slide','data']]
+single slide   -> 1 slide root(s); tags=['div']
+section extracted verbatim: <section class="slide divider"><h2>Section</h2></section>
+```
+
+This reuses existing tested code — the same function `SlideDeck.from_html` calls, which main
+hardened for precisely this case (a template emits `<section class="slide">` where generation
+emits `<div class="slide">`; `src/services/design_system_templates.py:444`
+`_detect_slide_root_tags` relies on the same convention).
+
+**Note the promotion rule.** `SLIDE_WRAPPER_TAGS` is `{"section", "article"}` only — a
+`<div>` is deliberately excluded, and so is `<main>`. A template that wraps its slides in a
+non-promoting tag keeps that wrapper's styles *outside* the extracted section. This is the
+first probe below.
+
+**The resulting behaviour, per grain, with no grain detection in the graph:**
+
+| Sections in layout | Architect assigns | Builder receives |
+|---|---|---|
+| N | section *i* per slide | one section |
+| 1 | that section for every slide | the same section |
+| fewer than the slide count | reuses sections, varying which | its assigned section |
+
+The last row is already the shipped instruction — *"vary which slide sections you reuse
+rather than repeating one"* — which was written for a monolith emitting a whole deck and
+becomes a per-slide assignment here.
+
+### M4. The architect assigns from a deterministic section inventory
+
+To assign well the architect needs to know what the sections *are*, not just their template's
+name. It is given a **section inventory** derived from the same parse:
+
+per section — its index, tag, class list, a short text snippet (first heading or leading
+text), and its structural affordances (does it contain a canvas, an image, a table).
+
+The inventory is deterministic, a few hundred bytes per section, and sufficient for
+assignment. It is **not** the raw layout: a real Claude-Design template measures **24–47 KB**
+(`design_system_templates.py:59`), and the architect holds the only durable conversation in
+the system (§5.3), so injecting the full layout into it every turn would be both expensive
+and contrary to §7.2's compaction story. The inventory is per-turn context, never accumulated
+into the transcript.
+
+### M5. CSS travels whole with every section — never pruned
+
+Each extracted section is paired with the template's **full `<style>` block and its
+`token_css`**, unpruned.
+
+Selector pruning was rejected. CSS is small next to markup, so pruning buys little; and
+under-including is exactly the known defect — undefined `var(--…)` references washing out
+preview and both export paths. `ensure_deck_token_css` backstops *custom properties and
+`@font-face` families*, not arbitrary dropped rules, so a pruner's mistakes would land
+outside what the safety net covers.
+
+### M6. What this fixes about the earlier draft
+
+An earlier version of this section handed **every builder the full template layout** and
+proposed grouping builders by template so the identical prefix would be cacheable. That was
+worse on two counts, and is recorded so it is not revisited:
+
+- **Cost.** 15 builders × ~35 KB ≈ 130k tokens of duplicated layout per build turn, before
+  any content — against PRD §14's named cost-per-deck risk. Per-section extraction reduces
+  this to a fraction.
+- **It leaned on an unverified assumption**, that the gateway supports prompt caching.
+  Gateway abstraction is workstream 2 and deferred, so the mitigation was not available to
+  depend on.
+
+The chunking approach also restores consistency with the deck spec's own design: `SlideSpec`
+already carries `content_brief`, `assumes`, `hands off` and `data_references` precisely so a
+builder receives only its slice. Handing over the design contract wholesale was the one place
+that pattern had been broken.
+
+### M7. Probes required before building this
+
+Both are empirical, not design questions:
+
+1. **Does an extracted section render standalone?** A section may depend on an ancestor's
+   styles — including a non-promoting `<main>` or `<div>` wrapper that `find_slide_roots`
+   leaves behind (§M3). Render an extracted section against its template's full CSS and
+   compare with the same section rendered in situ. If wrappers matter, extraction must carry
+   the ancestor chain (or its computed contribution) rather than the bare root.
+2. **Does the section inventory support good assignment?** Give the architect an inventory
+   from a real multi-section bundle and check its assignments are sensible — that a title
+   slide gets the title section rather than the data section. If names and snippets prove
+   insufficient, the inventory grows (thumbnails already exist per template, though not per
+   section).
+
+Neither blocks the design; both size the implementation.
+
 ## K. What this document does not decide
 
 - The **content** of the seven prompts. A1 fixes the process; the prompts are written in the
@@ -776,12 +942,8 @@ wedged startup." Five files conflicted; two were traps.
   MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
 - The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
   scheduled next via `writing-plans`, informed by these decisions.
-- **How the architect converses about brand.** §L makes the design system a first-class deck
-  property with an org default, personal defaults and template pinning. Whether the architect
-  can *change* it conversationally ("use the Acme brand", "pin the section-divider
-  template"), or whether it is read-only context the user sets in Agent Config, is not
-  decided here. §L4 covers what happens *when* it changes, not who may change it.
-- **Whether design-system templates inform the deck spec's slide briefs.** A pinned template
-  supplies layout; a `SlideSpec` supplies purpose and content. Whether the architect should
-  select a template *per slide* from the catalog is a genuine design question §L does not
-  answer.
+- ~~How the architect converses about brand~~ — **resolved in §M1/§M2.**
+- ~~Whether design-system templates inform the deck spec's slide briefs~~ — **resolved in
+  §M3–§M5.**
+- **The two probes §M7 names.** They size the extraction implementation; neither changes the
+  design.
