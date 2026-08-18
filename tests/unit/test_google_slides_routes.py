@@ -255,6 +255,78 @@ class TestAuthCallback:
 
 
 # ---------------------------------------------------------------------------
+# OAuth CSRF (F-CR-3): state-nonce binding + explicit postMessage origin
+# ---------------------------------------------------------------------------
+
+class TestOAuthCsrf:
+    def _state_from_url(self, url: str) -> dict:
+        import urllib.parse
+
+        query = urllib.parse.urlparse(url).query
+        raw_state = urllib.parse.parse_qs(query)["state"][0]
+        return json.loads(raw_state)
+
+    def test_auth_url_sets_nonce_cookie_matching_state(self, test_client, session_factory):
+        """auth_url must bind an unguessable nonce into both state and a cookie."""
+        _seed_global_credentials(session_factory)
+        resp = test_client.get("/api/export/google-slides/auth/url")
+        assert resp.status_code == 200
+        state = self._state_from_url(resp.json()["url"])
+        assert len(state.get("nonce", "")) >= 20
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "g_oauth_state=" in set_cookie
+        assert state["nonce"] in set_cookie
+        low = set_cookie.lower()
+        assert "httponly" in low
+        assert "samesite=lax" in low
+        test_client.cookies.clear()
+
+    def test_callback_rejects_nonce_mismatch_without_token_exchange(self, test_client, monkeypatch):
+        """A callback whose state nonce does not match the cookie must be rejected
+        BEFORE any token exchange (login-CSRF defense)."""
+        fake_get_auth = MagicMock()
+        monkeypatch.setattr("src.api.routes.google_slides._get_auth", fake_get_auth)
+        test_client.cookies.clear()
+        state = json.dumps({"user": "local_dev", "nonce": "STATE_NONCE_BBBBBBBBBBBB"})
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "x", "state": state},
+            headers={"Cookie": "g_oauth_state=COOKIE_NONCE_AAAAAAAAAAAA"},
+        )
+        assert resp.status_code == 200
+        assert "Authorization Failed" in resp.text
+        assert fake_get_auth.call_count == 0  # token exchange never reached
+
+    def test_callback_accepts_matching_nonce(self, test_client, monkeypatch):
+        """Matching state nonce + cookie proceeds to the token exchange."""
+        fake_auth = MagicMock()
+        monkeypatch.setattr("src.api.routes.google_slides._get_auth", lambda db: fake_auth)
+        test_client.cookies.clear()
+        nonce = "NONCE_MATCH_1234567890AB"
+        state = json.dumps({"user": "local_dev", "nonce": nonce})
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "x", "state": state},
+            headers={"Cookie": f"g_oauth_state={nonce}"},
+        )
+        assert resp.status_code == 200
+        assert "Authorization Successful" in resp.text
+        fake_auth.authorize.assert_called_once()
+
+    def test_callback_postmessage_targets_app_origin_not_wildcard(self, test_client):
+        """postMessage must target the explicit app origin, never '*'."""
+        test_client.cookies.clear()
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "x", "state": json.dumps({"user": "local_dev", "nonce": "z"})},
+            headers={"x-forwarded-host": "myapp.example.com", "x-forwarded-proto": "https"},
+        )
+        assert "postMessage" in resp.text
+        assert "https://myapp.example.com" in resp.text
+        assert "'*'" not in resp.text
+
+
+# ---------------------------------------------------------------------------
 # Export endpoint
 # ---------------------------------------------------------------------------
 
