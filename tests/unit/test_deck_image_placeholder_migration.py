@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 import src.database.models  # noqa: F401 - register models with Base
 from src.core.database import (
     Base,
+    _migrate_image_assets_add_token,
     _migrate_rewrite_deck_image_placeholders,
     _run_migrations,
 )
@@ -47,6 +48,24 @@ def sqlite_engine():
 @pytest.fixture
 def session_factory(sqlite_engine):
     return sessionmaker(bind=sqlite_engine, autoflush=False, expire_on_commit=False)
+
+
+@pytest.fixture
+def bare_sqlite_engine():
+    """A SQLite engine with NO schema created — for building a legacy layout by hand."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    engine = create_engine(
+        f"sqlite:///{path}",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    yield engine
+    engine.dispose()
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _qual(t: str) -> str:
@@ -324,6 +343,47 @@ class TestDeckImagePlaceholderMigration:
             sqlite_engine, lambda: _run_placeholder_migration(sqlite_engine)
         )
         assert issued == [], f"expected no deck UPDATEs on an already-migrated DB, got: {issued}"
+
+    def test_rewrite_runs_when_token_added_in_same_run_with_shared_inspector(
+        self, bare_sqlite_engine
+    ):
+        # Reproduces the fresh-DB/fork skip: _migrate_image_assets_add_token adds
+        # the token column in the SAME migration transaction, so the shared
+        # inspector _run_migrations threads through has a cached reflection with no
+        # 'token'. The rewrite must reflect the LIVE schema (fresh inspector), or it
+        # returns early and silently skips the rewrite on every fresh DB/fork.
+        with bare_sqlite_engine.begin() as conn:
+            # Legacy image_assets: NO token column yet.
+            conn.execute(text(
+                "CREATE TABLE image_assets (id INTEGER PRIMARY KEY, filename TEXT)"
+            ))
+            conn.execute(text(
+                "CREATE TABLE session_slide_decks "
+                "(id INTEGER PRIMARY KEY, deck_json TEXT, html_content TEXT)"
+            ))
+            conn.execute(text(
+                "CREATE TABLE slide_deck_versions (id INTEGER PRIMARY KEY, deck_json TEXT)"
+            ))
+            conn.execute(text("INSERT INTO image_assets (id, filename) VALUES (1, 'a.png')"))
+            conn.execute(
+                text("INSERT INTO session_slide_decks (id, deck_json) VALUES (1, :d)"),
+                {"d": json.dumps({"slides": [{"html": '<img src="{{image:1}}">'}]})},
+            )
+
+        with bare_sqlite_engine.begin() as conn:
+            shared = inspect(conn)  # ONE inspector, exactly as _run_migrations uses
+            _migrate_image_assets_add_token(conn, shared, None, _qual, is_sqlite=True)
+            _migrate_rewrite_deck_image_placeholders(conn, shared, None, _qual, is_sqlite=True)
+
+        with bare_sqlite_engine.connect() as conn:
+            token = conn.execute(text("SELECT token FROM image_assets WHERE id=1")).scalar()
+            deck = conn.execute(
+                text("SELECT deck_json FROM session_slide_decks WHERE id=1")
+            ).scalar()
+
+        assert token  # token was backfilled
+        assert "{{image:1}}" not in deck, "rewrite skipped — stale shared-inspector reflection"
+        assert f"{{{{image:{token}}}}}" in deck
 
     def test_full_run_migrations_rewrites_placeholders(self, sqlite_engine, session_factory):
         # End-to-end: the placeholder rewrite fires as part of the full

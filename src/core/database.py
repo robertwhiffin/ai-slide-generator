@@ -1204,12 +1204,22 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     A no-op when ``image_assets`` (or its ``token`` column) or every target table is
     absent on a given deploy.
     """
-    from sqlalchemy import text
+    from sqlalchemy import inspect, text
+
+    # Reflect the LIVE schema with a FRESH inspector, NOT the shared one that
+    # _run_migrations threads through. _migrate_image_assets_add_token adds the
+    # token column in this SAME transaction, and the shared inspector's reflection
+    # cache predates that ALTER — so a cached read reports "no token column" and
+    # this migration would return early, silently skipping the rewrite on every
+    # fresh DB and every prod fork (where the column is added during this run).
+    # This is the same reflection-cache staleness the design-system migrations in
+    # this file avoid the same way (see _migrate_uncap_brand_text_columns).
+    insp = inspect(conn)
 
     # image_assets + its token column must exist (guaranteed by the prior migration
     # on any live deploy; guarded so this can be exercised standalone).
     try:
-        image_cols = {c["name"] for c in inspector.get_columns("image_assets", schema=schema)}
+        image_cols = {c["name"] for c in insp.get_columns("image_assets", schema=schema)}
     except Exception:
         return
     if "token" not in image_cols:
@@ -1219,7 +1229,7 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     live_targets: list[tuple[str, str]] = []
     for table_name, column_name in _DECK_PLACEHOLDER_COLUMNS:
         try:
-            cols = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+            cols = {c["name"] for c in insp.get_columns(table_name, schema=schema)}
         except Exception:
             continue
         if column_name in cols:
