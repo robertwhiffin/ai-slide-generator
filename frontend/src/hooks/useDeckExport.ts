@@ -3,7 +3,7 @@ import type { SlideDeck } from '../types/slide';
 import { api } from '../services/api';
 import { exportSlideDeckToPDF } from '../services/pdf_client';
 import { useToast } from '../contexts/ToastContext';
-import { buildSlideDocument } from '../services/slideDocument';
+import { buildStandaloneDeckDocument } from '../services/slideDocument';
 
 interface UseDeckExportOptions {
   slideDeck: SlideDeck | null;
@@ -83,12 +83,21 @@ export function useDeckExport({
       if (result.failures.length === 0) {
         showToast(`PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
       } else {
-        // Per-slide failures get logged for the developer; user sees a
-        // softer info toast so they know not all slides made it in.
+        // Partial export must be LOUD: the file is missing slides, so the user
+        // gets a persistent error naming exactly which ones failed rather than a
+        // soft "see console" notice they will not act on. (Ported from main's
+        // pre-refactor SlidePanel; ws6 extracted this into the hook.)
         console.warn('[huashu] per-slide failures:', result.failures);
+        const failedSlideNumbers = result.failures
+          .map((f) => f.slide_index + 1)
+          .sort((a, b) => a - b)
+          .join(', ');
+        const firstError = result.failures[0]?.error?.split('\n')[0] || 'unknown error';
         showToast(
-          `PPTX: ${result.succeeded}/${result.totalSlides} slides exported (${result.failures.length} rejected — see console)`,
-          'info',
+          `PPTX incomplete: only ${result.succeeded} of ${result.totalSlides} slides exported. ` +
+            `Slide${result.failures.length > 1 ? 's' : ''} ${failedSlideNumbers} failed (${firstError}).`,
+          'error',
+          { persistent: true },
         );
       }
     } catch (error) {
@@ -134,113 +143,13 @@ export function useDeckExport({
   const handleSaveAsHTML = () => {
     if (!slideDeck) return;
 
-    const slidesHtml = slideDeck.slides
-      .map((slide, index) => {
-        const slideScripts = slide.scripts || '';
-        return `
-    <div class="slide-wrapper" data-slide-index="${index}">
-      <div class="slide-container">
-        ${slide.html}
-      </div>
-      ${slideScripts ? `<script>
-        (function() {
-          ${slideScripts}
-        })();
-      </script>` : ''}
-    </div>`;
-      })
-      .join('\n');
-
-    // Multi-slide wrapper/reset layout for the standalone export document.
-    const wrapperStyle = `
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: auto;
-      background: #f9fafb;
-    }
-    body {
-      padding: 40px 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 40px;
-    }
-    .slide-wrapper {
-      width: 100%;
-      max-width: 1280px;
-      margin: 0 auto;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      page-break-after: always;
-    }
-    .slide-container {
-      width: 1280px;
-      height: 720px;
-      max-width: 100%;
-      max-height: calc(100vh - 80px);
-      position: relative;
-      background: #ffffff;
-      overflow: auto;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border-radius: 8px;
-    }
-    .slide-container > * {
-      width: 100%;
-      min-height: 100%;
-    }
-    canvas {
-      max-width: 100%;
-      height: auto;
-    }`;
-
-    const bootstrapScripts = `
-    function waitForChartJs(callback, maxAttempts = 50) {
-      let attempts = 0;
-      const check = () => {
-        attempts++;
-        if (typeof Chart !== 'undefined') {
-          callback();
-        } else if (attempts < maxAttempts) {
-          setTimeout(check, 100);
-        } else {
-          console.error('Chart.js failed to load');
-        }
-      };
-      check();
-    }
-
-    function initializeCharts() {
-      try {
-        ${slideDeck.scripts || ''}
-      } catch (err) {
-        console.error('Chart initialization error:', err);
-      }
-    }
-
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        waitForChartJs(initializeCharts);
-      });
-    } else {
-      waitForChartJs(initializeCharts);
-    }`;
-
-    const html = buildSlideDocument(
-      `<title>${slideDeck.title || 'Presentation'}</title>\n${slidesHtml}`,
-      {
-        css: slideDeck.css,
-        externalScripts: slideDeck.external_scripts,
-        extraHeadStyle: wrapperStyle,
-        scripts: bootstrapScripts,
-      }
-    );
+    // Delegate to the pure, TESTED builder in slideDocument.ts rather than
+    // rebuilding the document inline. main extracted this helper precisely so the
+    // layout guarantees could be pinned, and three suites now do pin it
+    // (slide-surface-fidelity.spec.ts, slide-host-frame.spec.ts and
+    // tests/unit/test_preview_box_model_parity.py). A duplicate here would leave
+    // those specs guarding a function the real "Save as HTML" never calls.
+    const html = buildStandaloneDeckDocument(slideDeck);
 
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);

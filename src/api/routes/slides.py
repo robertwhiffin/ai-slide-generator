@@ -105,7 +105,7 @@ async def get_slides(
         raise
     except Exception as e:
         logger.error(f"Failed to get slides: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.put("/reorder")
@@ -167,7 +167,7 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to reorder slides: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -235,7 +235,7 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to update slide: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -303,7 +303,7 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to duplicate slide: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -377,7 +377,7 @@ async def delete_slide(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to delete slide: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,
@@ -476,7 +476,7 @@ async def update_slide_verification(index: int, request: UpdateVerificationReque
         raise
     except Exception as e:
         logger.error(f"Failed to update slide verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -546,7 +546,7 @@ async def create_version(request: CreateVersionRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to create version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.patch("/versions/{version_number}/verification")
@@ -595,7 +595,7 @@ async def update_version_verification(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to update version verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class SyncVerificationRequest(BaseModel):
@@ -663,7 +663,7 @@ async def sync_latest_version_verification(request: SyncVerificationRequest):
 
     except Exception as e:
         logger.error(f"Failed to sync version verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/versions")
@@ -701,7 +701,7 @@ async def list_versions(session_id: str = Query(..., description="Session ID")):
         return {"versions": [], "current_version": None}
     except Exception as e:
         logger.error(f"Failed to list versions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # NOTE: must be registered BEFORE the parameterized "/versions/{version_number}"
@@ -738,7 +738,7 @@ async def get_current_version(session_id: str = Query(..., description="Session 
         return {"current_version": None}
     except Exception as e:
         logger.error(f"Failed to get current version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/versions/{version_number}")
@@ -789,7 +789,7 @@ async def preview_version(
         raise
     except Exception as e:
         logger.error(f"Failed to preview version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/versions/{version_number}/restore")
@@ -859,7 +859,7 @@ async def restore_version(version_number: int, request: RestoreVersionRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to restore version: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await asyncio.to_thread(
             session_manager.release_session_lock,

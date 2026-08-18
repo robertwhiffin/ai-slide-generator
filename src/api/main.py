@@ -27,20 +27,17 @@ from src.core.permission_context import (
 from src.api.routes.settings import (
     contributors_router,
     deck_prompts_router,
+    design_systems_router,
     identities_router,
     slide_styles_router,
 )
 from src.api.services.export_job_queue import start_export_worker
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.core.database import (
-    get_session_local,
-    init_db,
     is_lakebase_environment,
     start_token_refresh,
     stop_token_refresh,
 )
-from src.core.migrate_profiles_to_agent_config import migrate_profiles, backfill_sessions
-from src.core.backfill_session_slides_startup import backfill_unmigrated_decks
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +89,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Pytest detected: skipping MCP session manager startup")
 
-    # Start Lakebase token refresh if running in Databricks Apps
-    # Must happen before init_db() so OAuth token is ready for database connections
+    # Start Lakebase token refresh if running in Databricks Apps. Workers serve
+    # DB-backed requests, so they need fresh OAuth tokens.
     if is_lakebase_environment():
         try:
             await start_token_refresh()
@@ -102,34 +99,11 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to start Lakebase token refresh: {e}")
             raise
 
-    # Initialize database tables (idempotent - only creates tables that don't exist)
-    is_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
-    if not is_pytest:
-        try:
-            init_db()
-            logger.info("Database tables initialized")
-
-            migrated = migrate_profiles(get_session_local())
-            if migrated:
-                logger.info(f"Migrated {migrated} profiles to agent_config")
-            backfilled = backfill_sessions(get_session_local())
-            if backfilled:
-                logger.info(f"Backfilled {backfilled} sessions with agent_config")
-
-            # Row-per-slide: migrate historical deck_json blobs into session_slides
-            # rows. Guarded by a NOT EXISTS anti-join, so this is a no-op scan once
-            # every deck has rows. Runs here rather than as a manual script so an
-            # upgrade cannot leave decks half-migrated (a deck edited before a
-            # hand-run backfill acquires rows without its verdicts, and the
-            # idempotency guard then skips it permanently).
-            slide_decks = backfill_unmigrated_decks(get_session_local())
-            if slide_decks:
-                logger.info(f"Backfilled {slide_decks} deck(s) into session_slides rows")
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            raise
-    else:
-        logger.info("Pytest detected: skipping database initialization")
+    # NOTE: database migrations run ONCE before the server starts, in
+    # run.py::init_database (invoked as its own step by the Databricks Apps boot
+    # command, and by scripts/init_database.py locally) — NOT here. This lifespan
+    # runs in every uvicorn worker, and having 4 workers race the migration chain
+    # on boot wedged startup. Workers must never run migration code.
 
     if IS_PRODUCTION:
         logger.info("Production mode: serving frontend from package assets")
@@ -347,14 +321,12 @@ async def user_auth_middleware(request: Request, call_next):
     user_name = None
 
     if token:
-        # Diagnostic logging: check if token is service principal ID (debug to avoid log spam on every request/poll)
-        token_prefix = token[:20] if len(token) > 20 else token
+        # Diagnostic logging: flag SP-vs-user tokens. F-CR-9 (SDR-4437): never log
+        # any part of the bearer token (no prefix, no length) — only derived booleans.
         is_sp_token = client_id and token.startswith(client_id)
         logger.debug(
             "OBO auth: extracted token from header",
             extra={
-                "token_prefix": token_prefix,
-                "token_length": len(token),
                 "is_service_principal": is_sp_token,
                 "header_present": True,
             },
@@ -495,6 +467,7 @@ app.include_router(contributors_router, prefix="/api/settings", tags=["settings"
 app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(identities_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
+app.include_router(design_systems_router, prefix="/api/settings", tags=["settings"])
 
 # MCP server — mount the FastMCP streamable-HTTP ASGI app at /mcp.
 # Must be registered before the SPA catch-all (which is added lazily by
@@ -535,16 +508,27 @@ async def get_current_user():
     
     Also includes the user's Databricks ID and group IDs from the permission
     context, which are used for profile permission checks.
+
+    ``is_admin`` is a UX-only signal so the frontend can hide admin surfaces
+    the caller cannot use; it is NOT authorization. Every admin route keeps
+    ``Depends(require_admin)`` and those 403s remain the real protection. It
+    is derived from that same primitive (``is_caller_admin``), so it cannot
+    advertise access the server would refuse, and it fails closed.
     """
+    from src.api.routes._authz import is_caller_admin
     from src.core.permission_context import get_permission_context
-    
+
     ctx_user = get_ctx_user()
     perm_ctx = get_permission_context()
-    
+
+    # Never raises (fails closed to False), so it cannot break identity resolution.
+    is_admin = is_caller_admin()
+
     if ctx_user:
         result = {
             "username": ctx_user,
             "display_name": ctx_user,
+            "is_admin": is_admin,
         }
         # Include permission context info if available
         if perm_ctx:
@@ -562,12 +546,14 @@ async def get_current_user():
             "username": user.user_name,
             "display_name": user.display_name or user.user_name,
             "user_id": user.id,
+            "is_admin": is_admin,
         }
     except Exception as e:
         logger.warning(f"Failed to get current user: {e}")
         return {
             "username": "user",
             "display_name": "User",
+            "is_admin": is_admin,
         }
 
 

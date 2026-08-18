@@ -10,6 +10,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { SlideDeck } from '../types/slide';
 import { api } from '../services/api';
+import { useToast } from '../contexts/ToastContext';
 
 interface UseAutoVerificationOptions {
   slideDeck: SlideDeck | null;
@@ -46,6 +47,7 @@ export function useAutoVerification({
   onSlideChange,
   deckEditCounterRef: externalEditCounterRef,
 }: UseAutoVerificationOptions): UseAutoVerificationReturn {
+  const { showToast } = useToast();
   const [isAutoVerifying, setIsAutoVerifying] = useState(false);
   const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
 
@@ -92,7 +94,7 @@ export function useAutoVerification({
         }
       });
 
-      await Promise.all(verificationPromises);
+      const verificationResults = await Promise.all(verificationPromises);
 
       // Discard results if the session changed while we were running.
       if (sessionIdRef.current !== capturedSessionId) {
@@ -100,6 +102,19 @@ export function useAutoVerification({
         setIsAutoVerifying(false);
         setVerifyingSlides(new Set());
         return;
+      }
+
+      // Failures were already retried with backoff inside api.verifySlide
+      // (transient 5xx); whatever still failed gets a soft, actionable notice
+      // instead of dying silently in the console. Ported from main's
+      // pre-refactor SlidePanel when ws6's hook extraction was merged.
+      const failedVerifications = verificationResults.filter((r) => !r.success);
+      if (failedVerifications.length > 0) {
+        const failedNumbers = failedVerifications.map((r) => r.index + 1).join(', ');
+        showToast(
+          `Verification didn't complete for slide${failedVerifications.length > 1 ? 's' : ''} ${failedNumbers} — use the slide badge to retry.`,
+          'info',
+        );
       }
 
       try {
@@ -134,7 +149,7 @@ export function useAutoVerification({
     // stale-closure captures — it is read via its state setter only. The session /
     // callback refs are stable. deckEditCounterRef is a stable ref object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId, onSlideChange, onVerificationComplete],
+    [sessionId, onSlideChange, onVerificationComplete, showToast],
   );
 
   // Trigger auto-verify whenever the deck changes and there are unverified slides.

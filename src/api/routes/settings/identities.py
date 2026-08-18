@@ -109,7 +109,7 @@ def list_users(
         logger.error(f"Failed to list users: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list users: {e}",
+            detail="Failed to list users",
         )
 
 
@@ -149,7 +149,7 @@ def list_groups(
         logger.error(f"Failed to list groups: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list groups: {e}",
+            detail="Failed to list groups",
         )
 
 
@@ -203,5 +203,5 @@ def search_identities(
         logger.error(f"Failed to search identities: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to search identities: {e}",
+            detail="Failed to search identities",
         )

@@ -52,7 +52,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const navigate = useNavigate();
   const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
-  const { agentConfig, refreshConfig } = useAgentConfig();
+  const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
   // React discards the intermediate render and immediately re-renders with empty messages,
@@ -131,12 +131,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setLoadingMessage('');
   };
 
-  const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | number[], maybeImageIds?: number[]) => {
+  const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | string[], maybeImageIds?: string[]) => {
     // Support two calling conventions:
     // 1. From ChatInput: (content, imageIds)
     // 2. From imperative ref: (content, slideContext)
     let explicitSlideContext: SlideContext | undefined;
-    let imageIds: number[] | undefined;
+    let imageIds: string[] | undefined;
 
     if (Array.isArray(explicitSlideContextOrImageIds)) {
       imageIds = explicitSlideContextOrImageIds;
@@ -290,11 +290,24 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             setLastReplacement({ sync_error: event.metadata.sync_error });
           }
 
-          // Refresh agent config to pick up updated conversation_ids from Genie tools
+          // Refresh agent config to pick up updated conversation_ids from
+          // Genie tools. DS + template selections are SESSION-SCOPED STICKY:
+          // they persist across every prompt/generation in this session until
+          // the user changes them (no after-generation reset).
           refreshConfig();
           break;
       }
     };
+
+    // A chat request may only carry config that was LOADED-FOR or
+    // EXPLICITLY-SET-IN the session it targets (ownership) — otherwise the
+    // backend sync would overwrite this session's persisted config with
+    // another surface's leftovers (the switch-race data loss). While a
+    // session's config load is still pending, the request omits agent_config
+    // entirely and the backend keeps the session's own persisted config.
+    // Pre-session sends always carry it: that config seeds the new session.
+    const configIsForThisSession =
+      isPreSession || (configOwnerSessionId != null && configOwnerSessionId === sessionId);
 
     // Start streaming (automatically uses SSE or polling based on environment)
     cancelStreamRef.current = api.sendChatMessage(
@@ -310,7 +323,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setIsGenerating(false);
       },
       imageIds,
-      agentConfig,  // Always pass config — backend uses it for session creation and config sync
+      configIsForThisSession ? agentConfig : undefined,
     );
   };
 

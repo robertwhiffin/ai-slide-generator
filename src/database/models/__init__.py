@@ -1,6 +1,13 @@
 """Database models."""
 
 from src.database.models.deck_contributor import DeckContributor
+from src.database.models.design_system import (
+    DesignSystem,
+    DesignSystemAsset,
+    DesignSystemFile,
+    DesignSystemTemplate,
+    DesignSystemToken,
+)
 from src.database.models.encryption_key import EncryptionKey
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
@@ -39,6 +46,11 @@ __all__ = [
     "ConfigProfile",
     "ConfigProfileContributor",
     "ConfigPrompts",
+    "DesignSystem",
+    "DesignSystemAsset",
+    "DesignSystemFile",
+    "DesignSystemTemplate",
+    "DesignSystemToken",
     "ExportJob",
     "FeedbackConversation",
     "GoogleGlobalCredentials",
@@ -58,4 +70,3 @@ __all__ = [
     "UserProfilePreference",
     "UserSession",
 ]
-

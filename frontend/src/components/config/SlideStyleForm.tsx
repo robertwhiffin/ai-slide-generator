@@ -105,7 +105,7 @@ export const SlideStyleForm: React.FC<SlideStyleFormProps> = ({
     }
   };
 
-  const handleInsertImageRef = (image: { id: number; original_filename: string }) => {
+  const handleInsertImageRef = (image: { id: string; original_filename: string }) => {
     const textToInsert = `{{image:${image.id}}}  /* ${image.original_filename} */`;
 
     const editor = imageGuidelinesEditorRef.current;
