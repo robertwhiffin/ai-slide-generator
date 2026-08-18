@@ -198,17 +198,19 @@ async def auth_callback(
             "Google Slides OAuth callback successful",
             extra={"user": _get_user_identity()},
         )
-    except Exception as exc:
+    except Exception:
+        # F-CR-2 (SDR-4437): never reflect the raw exception into the HTML page —
+        # it is logged server-side above. Show a static, generic failure message.
         logger.error("OAuth callback failed", exc_info=True)
         return HTMLResponse(
-            content=f"""
+            content="""
             <html><body>
                 <h2>Authorization Failed</h2>
-                <p>{exc}</p>
+                <p>Authorization could not be completed. Please close this window and try again.</p>
                 <script>
-                    if (window.opener) {{
-                        window.opener.postMessage({{ type: 'google-slides-auth', success: false }}, '*');
-                    }}
+                    if (window.opener) {
+                        window.opener.postMessage({ type: 'google-slides-auth', success: false }, '*');
+                    }
                     setTimeout(() => window.close(), 3000);
                 </script>
             </body></html>
@@ -284,7 +286,7 @@ async def start_google_slides_export(
         slide_deck = chat_service.get_slides(request_body.session_id)
     except Exception as exc:
         logger.error("Failed to fetch slides", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch slides: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Failed to fetch slides") from exc
 
     if not slide_deck or not slide_deck.get("slides"):
         raise HTTPException(status_code=404, detail="No slides available")
@@ -448,7 +450,7 @@ async def export_google_slides_from_records(
             )
     except Exception as exc:
         logger.error("Drive upload failed", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Drive upload failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
 
     session_manager.set_google_slides_info(
         session_id=request.session_id,
@@ -598,7 +600,7 @@ async def export_google_slides_from_huashu(
         logger.error("Drive upload failed (huashu path)", exc_info=True)
         raise HTTPException(
             status_code=502,
-            detail=f"Drive upload failed: {exc}",
+            detail="Drive upload failed",
         ) from exc
 
     session_manager.set_google_slides_info(

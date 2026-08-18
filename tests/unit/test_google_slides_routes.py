@@ -236,6 +236,23 @@ class TestAuthCallback:
         assert resp.status_code == 200
         assert "Authorization Failed" in resp.text
 
+    def test_callback_does_not_reflect_exception_text(self, test_client, monkeypatch):
+        """F-CR-2: the failure page must NOT echo raw exception text to the client."""
+        marker = "SUPER_SECRET_INTERNAL_abc123"
+
+        def _boom(db):
+            raise Exception(marker)
+
+        monkeypatch.setattr("src.api.routes.google_slides._get_auth", _boom)
+        state = json.dumps({"user": "local_dev"})
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "fake-code", "state": state},
+        )
+        assert resp.status_code == 200
+        assert "Authorization Failed" in resp.text
+        assert marker not in resp.text
+
 
 # ---------------------------------------------------------------------------
 # Export endpoint

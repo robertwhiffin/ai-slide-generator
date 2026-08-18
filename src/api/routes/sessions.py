@@ -553,7 +553,7 @@ async def duplicate_session(
         logger.error(f"Failed to duplicate session: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to duplicate session: {str(e)}",
+            detail="Failed to duplicate session",
         ) from e
 
 

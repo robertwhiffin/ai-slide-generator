@@ -384,7 +384,7 @@ async def send_message(
         logger.error(f"Chat request failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to process message: {str(e)}",
+            detail="Failed to process message",
         ) from e
     finally:
         await asyncio.to_thread(
@@ -662,7 +662,7 @@ async def submit_chat_async(
             session_manager.release_session_lock, request.session_id
         )
         logger.error(f"Failed to submit async chat: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/chat/poll/{request_id}")
