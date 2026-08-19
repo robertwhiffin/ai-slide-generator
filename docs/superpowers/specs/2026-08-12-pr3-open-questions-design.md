@@ -11,8 +11,9 @@ This document records the decisions needed before
 **addendum**: where it and the parent spec disagree, this document is newer and wins;
 everything it does not mention stands as the parent spec states it.
 
-Nine questions were resolved (A–I). Two of them (H, I) were unresolved *defects* found
-while reading the spec against the code, not gaps the spec knew it had.
+Nine questions were resolved first (A–I); §L and §M were added later, so the document now
+runs **A–M**. Two of the original nine (H, I) were unresolved *defects* found while reading
+the spec against the code, not gaps the spec knew it had.
 
 **§L and §M were added on 2026-08-18** after main's Design System Library was merged into
 this branch. §L revises §E1 and §H1 and corrects §E2's mechanism — read it alongside them,
@@ -64,28 +65,39 @@ It is an implementation option for stall detection (§I), not a design change.
 Recorded before and after the upgrade, because a dependency change is exactly what mutates
 a failure *cause* while preserving its count.
 
-| | Pre-upgrade | Post-upgrade |
-|---|---|---|
-| Result | 20 failed / 2003 passed / 8 skipped | **17 failed / 2006 passed / 8 skipped** |
+| | Pre-upgrade | Post-upgrade | After the local env was installed to spec |
+|---|---|---|---|
+| Result | 20 failed / 2003 passed / 8 skipped | 17 failed / 2006 passed / 8 skipped | **3 failed / 4177 passed / 8 skipped** (4188 collected, `pytest tests/ -n auto`, 2026-08-19) |
 
-**The baseline for PR3 is 17 failures across 3 causes:**
+**The baseline for PR3 is 3 failures across 2 causes:**
 
 | Cause | Files | Count |
 |---|---|---|
-| `ModuleNotFoundError: No module named 'svgpathtools'` | `test_html_to_pptx.py`, `test_google_slides_converter.py` | 14 |
-| deploy-autoscaling assertion mismatch (`assert 'provisioned' == 'autoscaling'`) | `test_deploy_autoscaling.py` | 2 |
+| deploy-autoscaling assertion mismatch (`assert 'provisioned' == 'autoscaling'`) | `tests/unit/test_deploy_autoscaling.py` | 2 |
 | `GenieToolError: Failed to query Genie space after 3 attempts` (live Databricks) | `tests/integration/test_genie_integration.py` | 1 |
 
-The upgrade **resolved** the third pre-existing cause (3 mlflow `trace_location` failures,
-caused by mlflow 3.6.0 running tests written for 3.14.0). No new cause appeared; the passed
-count rose by exactly those 3.
+**Corrected 2026-08-19 — the 14 `svgpathtools` failures were never a repo baseline.** They
+were a **local environment not installed to spec**: `svgpathtools>=1.6.0` is a declared
+*root runtime dependency* (`pyproject.toml:52`, and the app wheel declares it too at
+`packages/databricks-tellr-app/pyproject.toml:53`), and every CI job installs it via
+`pip install -e ".[dev]"`. It was simply absent from the pyenv the probe used. With it
+installed, `tests/unit/test_html_to_pptx.py` and `tests/unit/test_google_slides_converter.py`
+pass (71 passed, measured). Treating them as a baseline would have parked the two suites
+covering the **PPTX and Google-Slides emitters** permanently red — the exact export surface
+§L2 says a pinned-template deck washes out — and `tests/unit/test_app_wheel_dependencies.py`
+documents this same package as a measured HIGH defect class. **Fix the environment before
+recording a baseline.**
+
+The upgrade also **resolved** a third pre-existing cause (3 mlflow `trace_location` failures,
+caused by mlflow 3.6.0 running tests written for 3.14.0). No new cause appeared.
 
 Two corrections to the brief carried into this session: it described 19 failures in four
-files. The real set is 17 in **three** files — `test_mlflow_tracing.py` is now green, and
-`test_genie_integration.py` was missing from the list. The SVG family's cause is a missing
-`svgpathtools` module, not Cairo.
+files, and named Cairo as the SVG family's cause. Neither was right.
 
-**Any 18th failure, or any change to one of those three causes, is a regression PR3 caused.**
+Note the earlier rows' "2003/2006 passed" reflect a narrower selection than `pytest tests/`
+(4188 collected), which is precisely why this section's rule is **by cause, never by count**.
+
+**Any 4th failure, or any change to one of those two causes, is a regression PR3 caused.**
 
 ---
 
@@ -94,10 +106,14 @@ files. The real set is 17 in **three** files — `test_mlflow_tracing.py` is now
 Zero of the seven exist; the substance of plan Phases 2–3 is `[To be filled in Phase 2]`.
 This is the single largest gap and it is **content, not code**.
 
-**Reusable material:** `src/core/prompt_modules.py` holds ~10KB across 11 named blocks.
-`CHART_JS_RULES` (1470 chars), `EDITING_RULES` (3731), `SLIDE_GUIDELINES` (708),
-`IMAGE_SUPPORT` (908) and `HTML_OUTPUT_FORMAT` (982) are directly reusable by the builder
-and fixer. The architect and all four reviewers are net-new writing.
+**Reusable material:** `src/core/prompt_modules.py` holds **11,189 chars across 12 named
+blocks** (measured 2026-08-19). `CHART_JS_RULES` (1470 chars), `EDITING_RULES` (3731),
+`SLIDE_GUIDELINES` (708), `IMAGE_SUPPORT` (908) and `HTML_OUTPUT_FORMAT` (982) are directly
+reusable by the builder and fixer. Two more are load-bearing rather than optional:
+`DESIGN_SYSTEM_PRECEDENCE` (472) — the 12th block, added by main's design-system work and
+the one §L5 depends on — and **`UNTRUSTED_DATA_NOTICE` (516)**, which every skill that
+receives tool output or prior slide HTML needs (see §D on the two safety controls that die
+with `agent.py`). The architect and all four reviewers are net-new writing.
 
 ### A1. Authoring: draft-then-review, one skill at a time
 
@@ -140,8 +156,10 @@ grow and expensive to reverse.
 §4.5 claims provenance needs no stored flag because "origin is known from the code path."
 My first reading called this broken for five of §4.4's seven triggers, on the grounds that
 the graph will also reorder, duplicate, delete and restore slides through the same service
-code a human uses (`chat_service.reorder_slides` at `:2520`, `update_slide` `:2605`,
-`duplicate_slide` `:2684`, `delete_slide` `:2755`).
+code a human uses (`src/api/services/chat_service.py` — note the path: it is **not** under
+`src/services/` — `reorder_slides` at `:2686`, `update_slide` `:2771`, `duplicate_slide`
+`:2850`, `delete_slide` `:2921`; all §A–§I line numbers were re-verified against the
+post-merge tree on 2026-08-19).
 
 **That overstated it.** The rebuild cycle can only close if an *agent-caused HTML change*
 fires the spec-update trigger. Of the seven triggers, only two touch slide HTML: the human
@@ -184,14 +202,30 @@ WYSIWYG session pays for repeated LLM arc reviews. 180s is the concrete value; i
 tunable constant, not a contract.
 
 The dirty marker lives in the database, not in-process, so whichever uvicorn worker picks it
-up sees it. Driven from the existing job queue rather than a new scheduler.
+up sees it.
+
+**Mechanism — corrected 2026-08-19. It cannot ride `enqueue_job`.**
+`src/api/services/job_queue.py` is an in-process `asyncio.Queue` (`:21`) plus an in-memory
+`jobs` dict (`:20`), drained FIFO by a per-worker `worker()` loop (`:214-239`). It has **no
+delay/at-time primitive**, so a 180 s coalescing window has nothing to hang off. What is
+reusable is the **sweeper pattern**, not the queue: `mark_timed_out_jobs_loop` (`:342-352`)
+with `TIMEOUT_SWEEP_INTERVAL_SECONDS = 60` (`:33`) — a periodic loop that reads DB state and
+acts on whatever is due. So: a periodic sweeper reads the dirty marker and runs the arc
+review once the marker is older than the window.
+
+**A claim step is required.** `run.py:128` defaults to `UVICORN_WORKERS=4`, and the sweeper
+runs in every worker, so four loops would race one DB dirty marker with no lease — the same
+multi-worker race class main just fixed for migrations (§L8). The sweeper must claim the
+marker atomically (conditional `UPDATE … WHERE claimed_at IS NULL RETURNING`, or equivalent)
+before running the review, or a WYSIWYG session pays for up to four identical LLM arc
+reviews per window — the exact cost the debounce exists to avoid.
 
 ### B3. A version restore cancels any pending spec review
 
 On restore, discard the dirty marker without running the review. Two reasons: the deck those
 pending edits described no longer exists, and `SlideDeckVersion` carries its own
-`deck_spec_json` snapshot (`session.py:356`), which PR1 already restores
-(`session_manager.py:2221`). The restored spec is authoritative.
+`deck_spec_json` snapshot (`src/database/models/session.py:358`), which PR1 already restores
+(`session_manager.py:2222,2240`). The restored spec is authoritative.
 
 This also closes B0's remaining edge: a restore never triggers a spec update, so an
 agent-driven restore cannot start hop two.
@@ -199,7 +233,8 @@ agent-driven restore cannot start hop two.
 ### B4. New scope: insert slide
 
 Tellr has **no insert-slide capability**. `SlideDeck.insert_slide(slide, position)` exists
-(`src/domain/slide_deck.py:251`) and is used at seven internal call sites, but there is no
+(`src/domain/slide_deck.py:251`) and is used at **six** internal call sites (all in
+`src/api/services/chat_service.py`), but there is no
 service method and no route — the mutating routes are only reorder, patch, duplicate,
 delete, verification and versions. A user can only obtain a new slide by asking the agent or
 duplicating an existing one.
@@ -222,8 +257,9 @@ architect ("add a slide after slide 3").
 ## C. Frontend test runner
 
 There is none: `frontend/package.json`'s only test script is `playwright test`, there is no
-vitest or jest, no `@testing-library`, and zero `*.test.tsx` files. 31 Playwright E2E specs
-exist.
+vitest or jest, no `@testing-library`, and zero `*.test.tsx` files. **32** Playwright specs
+live under `frontend/tests/e2e/` (49 `*.spec.ts` tracked in the repo overall, counting
+`frontend/tests/` and `frontend/tests/user-guide/`) — measured 2026-08-19.
 
 **Add both:** `vitest` + `@testing-library/react` for isolated component tests, and
 Playwright specs for flows. PR3's frontend surface (spec-view toggle, drawer wiring,
@@ -253,6 +289,36 @@ The graph must be correct at merge. Two things follow, and the plan must reflect
 
 Consistent with PRD §10's "many small PRs, big-bang release" and §13's "deliberately not
 offered: a toggle back to the old viewer or the old selection model."
+
+### D1. Deleting `agent.py` deletes two shipped security controls — re-home both
+
+**Added 2026-08-19.** `src/services/agent.py` is not only the monolith; it is the only home
+of two controls that landed as security work and have no equivalent on the graph path
+(verified: no other module implements either):
+
+| Control | Where | Pinned by |
+|---|---|---|
+| **Output safety gate** — `_run_output_safety_gate` + `SAFETY_RETRY_NOTICE` (`agent.py:96-118`, call sites `:1488`, `:1746`): scans model HTML for disallowed external network/resource access, regenerates once with a corrective instruction, raises if still unsafe (AISEC-248 PR1) | generation *and* streaming paths | `tests/unit/test_agent_safety_gate.py`, `tests/unit/test_safety_gate_http.py` |
+| **Slide-context spotlight** — `spotlight("slide_context", html, session_id=…)` (`agent.py:894-916`): prior slide HTML is untrusted input, so it is framed as `<untrusted-data>`, delimiters neutralised, injection patterns scanned/logged at the prompt boundary (SDR-4437 F-TM-12) | edit/add operations that inject prior slides | `tests/unit/test_slide_context_injection.py` |
+
+Neither is optional and neither is a monolith artifact: the graph's builder and fixer emit
+HTML from a model, and its fixer/reviewers receive prior slide HTML as input, so both
+threats survive the rewrite unchanged. `src/api/routes/export.py:159` runs the same scanner
+at *export* time and `src/services/streaming_callback.py:90` suppresses unsafe streamed
+text, but neither replaces the generate-time gate-and-retry.
+
+**PR3 must therefore:**
+
+1. Move the gate to the graph's HTML-emitting boundary (builder and fixer output), keeping
+   the retry-once-then-fail shape and the generic user-facing notice.
+2. Route every prior-slide-HTML injection through `spotlight` on the graph path, and use
+   `UNTRUSTED_DATA_NOTICE` (§A) in the skills that receive it.
+3. Repoint both test files (and the other 11 test files importing `src.services.agent` —
+   13 in total) at the new homes rather than deleting them.
+
+**Why this is called out here:** under §0's baseline rule a deleted test is invisible — the
+failure count does not rise when a suite stops existing. These two are security controls, so
+their tests must be re-pointed and seen to pass, not merely absent from the failure list.
 
 ---
 
