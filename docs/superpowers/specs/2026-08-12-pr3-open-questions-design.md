@@ -742,6 +742,39 @@ Recorded so the divergences are deliberate rather than drift.
 
 ---
 
+---
+
+## K. What this document does not decide
+
+- The **content** of the seven prompts. A1 fixes the process; the prompts are written in the
+  next session.
+- The **specific initial reviewer criteria list**. A2 fixes the posture (minimal,
+  objective-heavy); the list is drafted with `build_reviewer`.
+- Anything the parent spec §10 excludes: WYSIWYG (ws8), gateway abstraction (ws2), the
+  MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
+- The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
+  scheduled next via `writing-plans`, informed by these decisions.
+Two items that stood here were later resolved by §M below, and are listed so the change of
+status is visible rather than silently dropped:
+
+- ~~How the architect converses about brand~~ → **resolved in §M1/§M2.**
+- ~~Whether design-system templates inform the deck spec's slide briefs~~ → **resolved in
+  §M3–§M5.**
+
+Still open, and deliberately so:
+
+- **The two probes §M7 names.** They size the extraction implementation; neither changes the
+  design.
+- **Which deterministic CSS the pre-fan-out write persists**, if any (§L2a). The candidate is
+  the pinned template's `token_css` plus its own `<style>` block; this document does not yet
+  take that decision.
+- **How `merge_css` is extended to survive at-rules** (§L2a) — carry at-rules through, or
+  dedupe by exact block text. Either is small; both need an at-rule survival test.
+- **The tone-vs-BRAND-MANUAL precedence rule** (§E1). The collision is named; which artifact
+  wins is not settled.
+
+---
+
 ## L. Design System Library — merged from main, 2026-08-18
 
 Main landed a **Design System Library** after the decisions above were taken, and merged it
@@ -1011,6 +1044,10 @@ wedged startup." Five files conflicted; two were traps.
   backfill entirely, so migrated decks would never acquire rows.
   **This supersedes the `migrations-run-at-startup` convention: new migrations and backfills
   go in `run.py::init_database`, pre-fork, not the lifespan.**
+  **Two source docstrings still describe the old placement** and will mislead a reader who
+  trusts them: `src/core/backfill_session_slides_startup.py:4` ("from its FastAPI lifespan on
+  every boot") and `:239` ("Called from the FastAPI lifespan alongside `migrate_profiles`").
+  The code is correct; only the prose is stale. Worth fixing in PR3 while that file is open.
 - **`src/core/database.py`** — both sides appended to the same migration list; kept both.
   `_migrate_row_per_slide_schema` must stay **after**
   `_migrate_rewrite_deck_image_placeholders`, and a comment now pins why:
@@ -1139,6 +1176,13 @@ hardened for precisely this case (a template emits `<section class="slide">` whe
 emits `<div class="slide">`; `src/services/design_system_templates.py:444`
 `_detect_slide_root_tags` relies on the same convention).
 
+**Extraction must read the layout through the normalizing accessor, not the raw column.**
+`normalize_root_tag_selectors` (`src/services/design_system_templates.py:527`, applied at
+`:703` on self-heal and `:773` on materialize) is what makes a template's *tag-keyed* CSS
+(`section { … }`) also match the `div.slide` roots generation emits. Reading
+`template.layout_html` directly bypasses that pass, so an extracted section would carry CSS
+whose selectors match nothing in the built slide — a silent, whole-section styling loss.
+
 **Note the promotion rule.** `SLIDE_WRAPPER_TAGS` is `{"section", "article"}` only — a
 `<div>` is deliberately excluded, and so is `<main>`. A template that wraps its slides in a
 non-promoting tag keeps that wrapper's styles *outside* the extracted section. This is the
@@ -1216,19 +1260,3 @@ Both are empirical, not design questions:
    section).
 
 Neither blocks the design; both size the implementation.
-
-## K. What this document does not decide
-
-- The **content** of the seven prompts. A1 fixes the process; the prompts are written in the
-  next session.
-- The **specific initial reviewer criteria list**. A2 fixes the posture (minimal,
-  objective-heavy); the list is drafted with `build_reviewer`.
-- Anything the parent spec §10 excludes: WYSIWYG (ws8), gateway abstraction (ws2), the
-  MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
-- The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
-  scheduled next via `writing-plans`, informed by these decisions.
-- ~~How the architect converses about brand~~ — **resolved in §M1/§M2.**
-- ~~Whether design-system templates inform the deck spec's slide briefs~~ — **resolved in
-  §M3–§M5.**
-- **The two probes §M7 names.** They size the extraction implementation; neither changes the
-  design.
