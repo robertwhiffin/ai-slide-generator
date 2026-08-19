@@ -16,19 +16,22 @@ Accepts three identity sources, evaluated in priority order:
    identity headers. The receiving app (tellr) trusts those headers
    because the same proxy sets them, strips any caller-supplied versions,
    and cannot be bypassed by external traffic. This path has no user
-   token, so downstream Databricks API calls use tellr's own service
-   principal credentials; attribution (``created_by`` on decks, etc.)
-   remains the real user via ``user_name``.
+   token, so the user-client ContextVar is left **unset**: agent tools
+   that resolve their client via ``get_user_client()`` fail closed rather
+   than silently running as tellr's service principal (SDR-4437 / F-CR-3).
+   Code that legitimately needs SP credentials on this path must call
+   ``get_system_client()`` explicitly. Attribution (``created_by`` on
+   decks, etc.) remains the real user via ``user_name``.
 
 The priority-3 path is gated on ``TELLR_TRUST_FORWARDED_IDENTITY=true``
 so the behaviour is explicit at deploy time. Production Databricks Apps
 deployments enable it; local dev does not.
 
 The resolved identity is bound into the same request-scoped ContextVars
-the browser flow uses (``set_current_user``, ``set_user_client``,
-``set_permission_context``), so downstream services (session manager,
-permission service, MLflow, Google OAuth) see the caller's identity
-without any MCP-specific plumbing.
+the browser flow uses (``set_current_user``, ``set_permission_context``,
+and — only when a user token is present — ``set_user_client``), so
+downstream services (session manager, permission service, MLflow, Google
+OAuth) see the caller's identity without any MCP-specific plumbing.
 """
 
 from __future__ import annotations
@@ -43,7 +46,6 @@ from fastapi import Request
 
 from src.core.databricks_client import (
     get_or_create_user_client,
-    get_system_client,
     set_user_client,
 )
 from src.core.permission_context import (
@@ -150,27 +152,23 @@ def extract_mcp_identity(request: Request) -> MCPIdentity:
 def mcp_auth_scope(request: Request) -> Iterator[MCPIdentity]:
     """Authenticate an MCP request and bind identity ContextVars for the block.
 
-    On entry: resolves identity, binds ``current_user``, ``user_client``,
-    and ``permission_context``.
+    On entry: resolves identity and binds ``current_user`` and
+    ``permission_context``. The ``user_client`` ContextVar is bound only when
+    a real user token is present (priority 1/2); on the token-less priority-3
+    app-to-app path it is deliberately left unset.
 
     On exit: clears all three ContextVars, even if the wrapped block raised.
 
-    When the identity was resolved via priority 3 (no user token), the
-    bound ``user_client`` is tellr's service-principal client — downstream
-    services still function, but any SDK calls are made with SP credentials
-    rather than the user's own. Attribution (``created_by``) is unaffected:
-    it uses ``user_name`` from the forwarded identity headers, which the
-    proxy attests.
+    Leaving ``user_client`` unset on priority 3 makes it true by construction
+    that agent tools (which resolve their client via ``get_user_client()``)
+    can never execute as tellr's service principal on the app-to-app path —
+    they fail closed with ``UserClientRequiredError`` in production
+    (SDR-4437 / F-CR-3). Code that legitimately needs SP credentials must call
+    ``get_system_client()`` explicitly. Attribution (``created_by``) is
+    unaffected: it uses ``user_name`` from the forwarded identity headers,
+    which the proxy attests.
     """
     identity = extract_mcp_identity(request)
-
-    if identity.token is not None:
-        user_client = get_or_create_user_client(identity.token)
-    else:
-        # Priority-3 path: no user token, so downstream Databricks API
-        # calls use tellr's service principal. Safe because the app-to-app
-        # model explicitly delegates credentialing to the receiving app.
-        user_client = get_system_client()
 
     permission_ctx = build_permission_context(
         user_id=identity.user_id,
@@ -179,8 +177,21 @@ def mcp_auth_scope(request: Request) -> Iterator[MCPIdentity]:
     )
 
     set_current_user(identity.user_name)
-    set_user_client(user_client)
     set_permission_context(permission_ctx)
+
+    if identity.token is not None:
+        # Priority 1/2: a real user token is present. Bind the OBO client so
+        # downstream services (agent tools included) act as the user.
+        set_user_client(get_or_create_user_client(identity.token))
+    else:
+        # Priority-3 (app-to-app) path: no user token is available. Do NOT
+        # bind any client into the user-client ContextVar. Leaving it unset
+        # makes it true by construction that agent tools — which resolve their
+        # client via get_user_client() — can never run as the app service
+        # principal on this path: they fail closed with UserClientRequiredError
+        # in production (SDR-4437 / F-CR-3). Anything that legitimately needs
+        # the SP here must call get_system_client() explicitly.
+        set_user_client(None)
 
     logger.debug(
         "MCP auth scope entered",
