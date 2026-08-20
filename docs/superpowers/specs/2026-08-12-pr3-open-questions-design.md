@@ -1152,10 +1152,6 @@ Recorded so the divergences are deliberate rather than drift.
 
 ---
 
----
-
----
-
 ## K. What this document does not decide
 
 - The **content** of the seven prompts. A1 fixes the process; the prompts are written in the
@@ -1166,6 +1162,7 @@ Recorded so the divergences are deliberate rather than drift.
   MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
 - The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
   scheduled next via `writing-plans`, informed by these decisions.
+
 Two items that stood here were later resolved by §M below, and are listed so the change of
 status is visible rather than silently dropped:
 
@@ -1175,7 +1172,7 @@ status is visible rather than silently dropped:
 
 Still open, and deliberately so:
 
-- **The two probes §M7 names.** They size the extraction implementation; neither changes the
+- **The three probes §M7 names.** They size the extraction implementation; none changes the
   design.
 - **Which deterministic CSS the pre-fan-out write persists**, if any (§L2a). The candidate is
   the pinned template's `token_css` plus its own `<style>` block; this document does not yet
@@ -1771,17 +1768,26 @@ that pattern had been broken.
 
 ### M7. Probes required before building this
 
-Both are empirical, not design questions:
+All three are empirical, not design questions:
 
 1. **Does an extracted section render standalone?** A section may depend on an ancestor's
    styles — including a non-promoting `<main>` or `<div>` wrapper that `find_slide_roots`
    leaves behind (§M3). Render an extracted section against its template's full CSS and
    compare with the same section rendered in situ. If wrappers matter, extraction must carry
    the ancestor chain (or its computed contribution) rather than the bare root.
-2. **Does the section inventory support good assignment?** Give the architect an inventory
+2. **Is CSS actually small next to markup?** §M5 rejects pruning partly on the grounds that
+   "CSS is small next to markup, so pruning buys little", and §M6 credits per-section
+   extraction with most of its saving on the same assumption. **Neither is measured** — there
+   is no design-system bundle fixture in this repo to measure against. If a template's
+   `<style>` block dominates its 24–47 KB, then handing every builder the full stylesheet
+   (§M5) gives back most of what §M6 claims to save, and the cost argument needs restating.
+   Measure `len(style_block)` against `len(layout_html)` on a real imported bundle. This does
+   **not** reopen §M5's decision — under-including CSS is the known washout defect either way
+   — it tests the *cost* claim the two sections lean on.
+3. **Does the section inventory support good assignment?** Give the architect an inventory
    from a real multi-section bundle and check its assignments are sensible — that a title
    slide gets the title section rather than the data section. If names and snippets prove
    insufficient, the inventory grows (thumbnails already exist per template, though not per
    section).
 
-Neither blocks the design; both size the implementation.
+None blocks the design; all three size the implementation.
