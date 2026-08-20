@@ -103,12 +103,15 @@ encryption_secret_key: str = "tellr-encryption-key"
 Presence of `encryption_secret_scope` selects secret mode. In legacy mode
 `encryption_secret_key` is ignored. The default key name is hyphenated because
 secret scope names are documented as *"alphanumeric characters, dashes,
-underscores, `@`, and periods"* with no spaces, and key names go through the
-same validator in practice; confirm with one API call during implementation.
+underscores, and periods"* (no `@` — `@` is not a valid character in scope or
+key names), and key names go through the same validator in practice.
 
-`config_yaml_path` and `config/deployment.yaml` accept the same two keys,
-following the `mlflow_tracing` precedent already in `deploy.py` — YAML values
-apply first, an explicit argument overrides.
+**`create()` only:** `config_yaml_path` and `config/deployment.yaml` accept the
+same two keys, following the `mlflow_tracing` precedent already in `deploy.py` —
+YAML values apply first, an explicit argument overrides. The `update()` entry point
+takes no `config_yaml_path` parameter; values from deployment YAML are not loaded
+on update (per its docstring). Arguments or environment variables are required to
+specify secret-mode credentials on an update/relocate.
 
 ### Scope preflight
 
@@ -121,6 +124,13 @@ half-done:
 2. Absent → `ws.secrets.create_scope(scope)` with `initial_manage_principal`
    **omitted**, making the creator sole manager. Explicitly not `"users"`,
    which would grant every workspace user MANAGE on the scope holding the key.
+   **Deliberate trade-off:** Only the scope creator can run subsequent deploys
+   and rotate the key. If another human or CI needs to run `update()` later,
+   they will need MANAGE permission granted by the creator (or the scope must
+   be pre-created by someone who grants MANAGE to the intended operators/CI).
+   This is the least-privilege choice; a future enhancement could extend step 2
+   to accept an optional `initial_manage_principal` parameter to grant MANAGE
+   to a named group.
 3. Creation failures map to actionable messages rather than a raw API error:
    - permission denied → name the `databricks secrets create-scope <scope>`
      command to hand to an admin, and the MANAGE grant needed back.
@@ -132,18 +142,23 @@ half-done:
    read through Key Vault, not this API.
 
 The `put_secret` → read-back round trip that follows doubles as the write and
-read permission check, so no separate probe is needed.
+read permission check, so no separate probe is needed. **Error handling:** both
+`get_secret` and `create_scope` throw distinct error codes
+(`RESOURCE_DOES_NOT_EXIST` vs `PERMISSION_DENIED`); the code must distinguish
+them and avoid treating a permission denial as "secret absent", which would
+fall through to creating a new secret and clobbering the live key.
 
 ### `create()`
 
 Key resolution runs before the app exists:
 
-- Secret already present at `(scope, key)` → read it, validate as Fernet,
-  **reuse it**, and print that it is being reused. Never overwrite: an existing
-  secret may already protect ciphertext from a previous install pointed at the
-  same place.
+- Secret already present at `(scope, key)` → read it with `get_secret()`,
+  base64-decode the returned value (the Databricks Secrets API returns values
+  as base64 in JSON), validate as Fernet, **reuse it**, and print that it is
+  being reused. Never overwrite: an existing secret may already protect
+  ciphertext from a previous install pointed at the same place.
 - Otherwise `Fernet.generate_key()` → `put_secret(scope, key, string_value=...)`
-  → read back, compare, validate.
+  → read back with `get_secret()`, base64-decode, compare, validate.
 
 `_create_app` then builds `resources` as today's `AppResourceDatabase`
 (provisioned Lakebase only) **plus**:
@@ -155,6 +170,10 @@ AppResource(
                              permission=AppResourceSecretSecretPermission.READ),
 )
 ```
+
+**Note:** `_create_app` builds `app_resources = []` for autoscaling Lakebase
+and tries autoscaling first; the secret resource must be appended in both
+the provisioned and autoscaling branches.
 
 Immediately after `create_and_wait`, and unconditionally,
 `ws.secrets.put_acl(scope, principal=<sp_client_id>, permission=READ)`. The
@@ -168,16 +187,20 @@ Schema setup and deploy are unchanged. `_write_app_yaml` is untouched.
 
 Key resolution is a ladder; first hit wins:
 
-1. A valid Fernet key already at `(scope, key)` → authoritative, do not
-   overwrite. This is what makes re-runs idempotent.
+1. A valid Fernet key already at `(scope, key)` → read it, validate as Fernet,
+   and reuse it **only if it matches the key currently in encryption_keys**
+   (if a row exists). A mismatch is a hard error: reusing a mismatched key
+   would orphan ciphertext encrypted under the other key, exactly as
+   `_migrate_encryption_key_to_lakebase` guards against (`deploy.py:834-842`).
+   This is what makes re-runs idempotent.
 2. An `encryption_keys` row in Lakebase → this is the key being relocated.
 3. `GOOGLE_OAUTH_ENCRYPTION_KEY` still present in the deployed `app.yaml`
    (never-migrated install) → `_read_existing_encryption_key`
    (`deploy.py:757`) already reads exactly this.
 4. Nothing anywhere → generate a fresh key.
 
-Cases 2–4 `put_secret` then read back and compare before anything else
-happens. In secret mode `_migrate_encryption_key_to_lakebase`
+Cases 2–4 `put_secret` then read back (with `get_secret()`, base64-decode),
+and compare before anything else happens. In secret mode `_migrate_encryption_key_to_lakebase`
 (`deploy.py:791`) is skipped entirely: case 3 relocates to the secret, not to
 Lakebase.
 
@@ -203,11 +226,24 @@ verify the secret  ->  attach the resource  ->  deploy_and_wait
                    ->  DELETE FROM <schema>.encryption_keys WHERE id = 1
 ```
 
+The row is deleted **unconditionally** after every successful secret-mode deploy,
+not just on the first run (when the ladder resolves to case 2 or 3). This means
+every secret-mode `update()` requires a Postgres connection to delete the row.
+For branching deploys (dev forks), which must avoid human Postgres logins, the
+DELETE is omitted: a fork never has a pre-existing row, so no delete is needed.
 The row is removed only once code that prefers the injected variable is
 actually live, and only once the secret has been read back and confirmed. If
 the DELETE itself fails, print a loud warning with the exact SQL rather than
 failing the deploy — by that point the deploy has succeeded and the key is
 safely in the secret.
+
+**Minimum app version:** Deploying old app code with secret mode, or rolling
+back to an earlier app version after the DELETE, leaves the app running code
+that ignores `TELLR_ENCRYPTION_KEY` and finds no row, so it mints a fresh key
+and orphans stored credentials. Either refuse secret mode when `app_version` is
+below the minimum version that carries the secret-path boot code (once that
+version is released), or require an explicit `app_version` parameter to pin the
+deployed version before the DELETE.
 
 ### `update()` in legacy mode against a secret-mode app
 
@@ -223,22 +259,32 @@ being retained — so nobody concludes the app quietly reverted.
 `--encryption-secret-key`, and `config/deployment.yaml` gains the same two keys
 per environment, documented in `config/deployment.example.yaml`. The
 duplicated migration block at `scripts/deploy_local.py:700` needs the same
-secret-mode branch as `update()`.
+secret-mode branch as `update()` — but **NOT a DELETE**: the branching path must
+not call `_get_lakebase_connection` because that connects as the deploying human
+(breaking SP-only dev-loop deploys). A fork never has a pre-existing `encryption_keys`
+row (it is a fresh branch), so no delete is needed — the secret resource is
+attached, the deploy runs, and on boot the new app finds the secret and creates
+its own row.
 
 The fork path needs explicit handling. `_check_branching_preconditions`
 (`scripts/deploy_local.py:282`) currently refuses to fork when the source
-`app.yaml` still carries a legacy key, because forks inherit the key through
-copy-on-write of `encryption_keys`. In secret mode there is no row to inherit —
-but the fork **does** inherit the source's ciphertext via CoW. A fork of a
-secret-mode app that is not given the same secret boots, finds no environment
-variable, finds no row, and mints a fresh key against inherited ciphertext.
+`app.yaml` still carries a legacy key. The refusal is not about CoW inheritance
+(after migration the row is gone); it is because the fork cannot write to the
+source app's `app.yaml`, and seeding the fork's own `encryption_keys` table
+requires a human Postgres login (breaking SP-only dev-loop deploys). In secret
+mode there is no Lakebase row to seed — but the fork **does** inherit the
+source's ciphertext via CoW. A fork of a secret-mode app that is not given the
+same secret boots, finds no environment variable, finds no row, and mints a
+fresh key against inherited ciphertext.
 Harmless to production, but it silently destroys the fork's test data and
 presents as a bug in whatever was being tested.
 
 So: detect secret mode on the source app by fetching its resources, have the
 fork **inherit the same scope and key automatically** rather than requiring the
 operator to retype them, and refuse to fork if they cannot be determined. This
-mirrors the existing precondition's intent.
+is the only source of truth for the fork's credentials; the `--encryption-secret-scope`
+CLI flag does not override detected resources (it applies only to non-branching
+deploys). This mirrors the existing precondition's intent.
 
 ## Accepted risks
 
@@ -303,6 +349,16 @@ Assert that secret mode adds nothing to the generated `app.yaml` and that no
 key material appears in it — a regression guard against ever putting the key
 back in the template.
 
+**Note on open question 2's fallback:** If the variable does not appear from the
+resource declaration alone, the fallback adds a `valueFrom:` entry to the
+template. This is larger than "a single entry": it requires a new placeholder
+in `app.yaml.template`, a new parameter on `_write_app_yaml` to conditionally
+include it (only in secret mode), and threading that parameter through all four
+call sites (`deploy.py:413`, `deploy.py:573`, `deploy_local.py:476`, `deploy_local.py:768`).
+The entry must be conditional so legacy-mode apps (no secret mode) do not carry
+an unconditional reference to a non-existent resource. This is the implementation
+cost if question 2 is answered "no".
+
 ### Live verification
 
 This repo has learned repeatedly that runtime behaviour is only provable on a
@@ -312,33 +368,57 @@ Publish a dev build (`gh workflow run publish-dev.yml`) and deploy with
 requires an OAuth (U2M) profile — `databricks apps logs <app> -p <oauth-profile>`
 refuses PAT auth.
 
-Each of the first two has a defined fallback, so neither blocks implementation:
+### Open questions (blocking implementation)
 
-1. Is an uppercase-underscore resource key accepted? The existing resource is
+The first is a critical blocker; the second and third have defined fallbacks
+and do not block; the remainder are verification steps on deployed apps.
+
+1. **CRITICAL: Can `ws.secrets.get_secret()` be called from the deploy tool
+   (a normal user outside a notebook)?** The SDK's docstring states
+   *"This API can only be called from the DBUtils interface"* and
+   *"Throws `BAD_REQUEST` if normal user calls get secret outside of a
+   notebook."* The design's read-back verification, case-1 reuse, and
+   ladder-case-1 comparison all depend on this call succeeding. If it fails,
+   we cannot verify the written value, cannot safely reuse existing secrets,
+   and cannot guard against mismatches. If it is unavailable, the fallback
+   is presence-only detection (via `list_secrets()`) plus a required explicit
+   `--force` flag to proceed with an overwrite when the secret cannot be
+   verified.
+2. Is an uppercase-underscore resource key accepted? The existing resource is
    `app_database` and the documented default resource key is `secret`. If not,
    name the resource `tellr_encryption_key` and read that variable instead.
-2. Does the variable appear from the resource declaration alone? One sentence
+3. Does the variable appear from the resource declaration alone? One sentence
    in the docs — *"each one becomes a separate environment variable when
    referenced in `valueFrom`"* — leaves room for doubt. If it does not appear,
    add a single `- name: TELLR_ENCRYPTION_KEY` / `valueFrom: "TELLR_ENCRYPTION_KEY"`
    entry to the template. The boot code is identical either way.
-3. Was `put_acl` necessary, and in which principal form does it accept the app
+
+### Verification steps (live testing on deployed app)
+
+1. Was `put_acl` necessary, and in which principal form does it accept the app
    service principal?
-4. Full lifecycle on a legacy app holding real ciphertext: `update(scope=...)`
+2. Full lifecycle on a legacy app holding real ciphertext: `update(scope=...)`
    → boot log shows the secret path → the previously-stored Google credential
    still decrypts → `encryption_keys` is empty.
-5. Detach the resource once and restart, to observe accepted risk 2 rather than
+3. Detach the resource once and restart, to observe accepted risk 2 rather than
    assume it.
 
 ## Docs and version
 
 - `docs/technical/databricks-app-deployment.md` — argument reference plus a
-  secret-backed-key section.
+  secret-backed-key section (also update `296`, `505` which still document
+  `GOOGLE_OAUTH_ENCRYPTION_KEY` as the production key source — now stale).
 - `docs/technical/database-configuration.md`,
   `docs/technical/google-slides-integration.md` — where the key lives, now two
-  options.
+  options (also update `115`, `120`, `344` in google-slides-integration.md which
+  still document the old source).
 - `docs/technical/dev-deploy.md`, `.claude/skills/deploy-tellr-dev/SKILL.md` —
   the dev flags.
+- `docs/technical/export-features.md:251` — still documents
+  `GOOGLE_OAUTH_ENCRYPTION_KEY` as the production key source (now stale after
+  Lakebase migration); update to current state.
+- `docs/user-guide/07-exporting-to-google-slides.md:110,114` — similar stale
+  references; update to current state.
 - `config/deployment.example.yaml`, and the `create`/`update` snippets in
   `README.md`.
 - `src/core/encryption.py` module docstring — rewrite for two paths.
