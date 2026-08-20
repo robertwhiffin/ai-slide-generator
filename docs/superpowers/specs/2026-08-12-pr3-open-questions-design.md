@@ -92,10 +92,56 @@ to `./.venv/bin/python` will "reproduce" a baseline this document has already re
 
 **The baseline for PR3 is 3 failures across 2 causes:**
 
-| Cause | Files | Count |
+| Cause | Files | Count | Reproduces anywhere? |
+|---|---|---|---|
+| deploy-autoscaling: `_get_or_create_lakebase` never returns the autoscaling result. **Two distinct assertion strings** — `:124` `AssertionError: assert 'provisioned' == 'autoscaling'` and `:152` `AssertionError: Expected '_get_or_create_lakebase_provisioned' to have been called once. Called 0 times.` | `tests/unit/test_deploy_autoscaling.py` (`TestGetOrCreateLakebase::test_returns_autoscaling_when_available`, `::test_falls_back_when_autoscaling_creation_fails`) | 2 | **yes** — environment-free |
+| `GenieToolError: Failed to query Genie space after 3 attempts` | `tests/integration/test_genie_integration.py::test_genie_conversation_continuation` | 1 | **no** — depends on local `.env` + a stale stored Genie space id; see below |
+
+**Match on the cause, not on one quoted string — added 2026-08-20.** An earlier draft of this
+table labelled the deploy-autoscaling cause with `assert 'provisioned' == 'autoscaling'`
+alone. Re-measured: that is the failure at
+`tests/unit/test_deploy_autoscaling.py:124`; the second failure in the same file, at `:152`,
+raises a completely different message (`Expected '_get_or_create_lakebase_provisioned' to have
+been called once. Called 0 times.`). An executor grepping the quoted string would count **1**
+where the table says **2** and conclude a failure had been fixed. Both are the same underlying
+cause — the orchestrator's autoscaling branch — which is exactly why the *cause* column has to
+carry the mechanism and not a copied traceback line. Measured 2026-08-20:
+`pytest tests/unit/test_deploy_autoscaling.py` → `2 failed, 37 passed`.
+
+**The third failure is environment-dependent, but NOT in the way a first measurement
+suggested — corrected 2026-08-20.** `tests/integration/test_genie_integration.py` is
+`pytestmark = [pytest.mark.integration, pytest.mark.live]` (`:17`) behind two module-scoped
+fixtures that `pytest.skip` when `DATABRICKS_HOST`/`DATABRICKS_TOKEN` are falsy or the Genie
+space is unconfigured (`check_databricks_connection` `:20-43`; `check_genie_config` `:46-66`).
+
+An earlier revision of this section reported "clear the credentials and it skips — so on any
+other machine the baseline is 2 failures / 1 cause." **That conclusion is wrong**, and the way
+it is wrong is worth recording because it is a trap for anyone re-deriving this baseline. Two
+measurements, both reproducible, that disagree:
+
+| Method | Result | Why |
 |---|---|---|
-| deploy-autoscaling assertion mismatch (`assert 'provisioned' == 'autoscaling'`) | `tests/unit/test_deploy_autoscaling.py` | 2 |
-| `GenieToolError: Failed to query Genie space after 3 attempts` (live Databricks) | `tests/integration/test_genie_integration.py` | 1 |
+| `DATABRICKS_HOST= DATABRICKS_TOKEN= pytest …` (assign empty) | `2 skipped` | the empty var **exists**, so `load_dotenv()` — `override=False` by default — declines to replace it; `os.getenv` is falsy; both fixtures skip |
+| `env -u DATABRICKS_HOST -u DATABRICKS_TOKEN pytest …` (fully unset) | **`1 failed, 1 skipped`** | the var is **absent**, so `load_dotenv()` at `src/core/database.py:28` supplies it from the gitignored `.env`; the fixtures proceed and the real Genie call fails |
+
+`load_dotenv()` runs unconditionally at import of `src/core/database.py`, so **clearing the
+shell environment does not clear the credentials** on any machine that has a `.env` — which is
+the ordinary dev setup here.
+
+**And credentials are not the actual cause.** The failing call resolves its Genie space from
+the **database**, not the environment: `check_genie_config` reads
+`get_settings().genie.space_id` (`:52-59`), which on this machine is
+`01effebcc2781b6bbb749077a55d31e3` — a space that no longer exists, hence
+`Space with id … not found`. So the cause is **a stale Genie space id in local database
+settings**, and it would persist even with perfectly valid credentials.
+
+**What this means for the gate.** The 2-failure cause (deploy-autoscaling) is environment-free
+and reproduces anywhere. The 3rd is local-state-dependent: an executor on a machine with no
+`.env` *and* no stored Genie space sees **2 failures / 1 cause**; one with this machine's
+`.env` and stale stored space sees **3 / 2**. Read the gate as **"no NEW cause, and no change
+to the deploy-autoscaling cause"** rather than as an absolute count — which is what "by cause,
+never by count" meant in the first place. Fixing or clearing the stored Genie space id would
+remove the third failure legitimately, and that is not a regression.
 
 **Corrected 2026-08-19 — the 14 `svgpathtools` failures were never a repo baseline.** They
 were a **local environment not installed to spec**: `svgpathtools>=1.6.0` is a declared
@@ -118,7 +164,11 @@ files, and named Cairo as the SVG family's cause. Neither was right.
 Note the earlier rows' "2003/2006 passed" reflect a narrower selection than `pytest tests/`
 (4188 collected), which is precisely why this section's rule is **by cause, never by count**.
 
-**Any 4th failure, or any change to one of those two causes, is a regression PR3 caused.**
+**The gate, stated so it survives a change of machine:** with live credentials bound,
+**any 4th failure, or any change to one of those two causes, is a regression PR3 caused**;
+without them, the baseline is **2 failures / 1 cause** (deploy-autoscaling only) and any 3rd
+is the regression. Record which of the two you measured alongside the number, or the count is
+not comparable to anyone else's.
 
 ---
 
@@ -234,6 +284,21 @@ graph does not use it. No stored flag, no `origin=` parameter to forget, no Cont
 leak. The failure mode requires actively wiring a new route call, not merely forgetting a
 parameter.
 
+**`tour.py` is named above but the justification does not reach it — added 2026-08-20, and
+this is a sub-decision PR3 must take rather than a settled one.** The rule's whole warrant is
+"a human authored this". `src/api/routes/tour.py` authors nothing: `_phase2_add_slides` loads
+a **canned fixture** (`_load_fixture()`, reading `src/api/fixtures/tour_demo_deck.json`) and
+saves it via `sm.save_slide_deck` at `:82`. It is deck *creation* from fixed bytes, not an
+edit, and the bytes are identical on every tour. Firing `mark_dirty` there schedules an LLM
+narrative-arc re-description of the same demo deck for every user who takes the tour, for no
+user value and at §B2's per-window cost. Two admissible resolutions, and the plan must pick
+one explicitly rather than inherit the list above: **exclude `tour.py`** from the trigger
+sites (the honest reading of the rule), or ship the arc description **inside the fixture** so
+the tour deck has a spec without an LLM call. Recorded in §K as unsettled.
+
+**And one deck-content route this section does not consider at all:
+`POST /sessions/{session_id}/duplicate`.** See §B5.
+
 Rejected: an `origin='human'|'agent'` parameter (a caller that forgets it silently rebuilds
 a user's manual edit — the "actively hostile" outcome §4.5 names); a ContextVar (probed to
 survive `Send` fan-out, but invisible coupling and a missed reset leaks origin into the next
@@ -264,6 +329,34 @@ multi-worker race class main just fixed for migrations (§L8). The sweeper must 
 marker atomically (conditional `UPDATE … WHERE claimed_at IS NULL RETURNING`, or equivalent)
 before running the review, or a WYSIWYG session pays for up to four identical LLM arc
 reviews per window — the exact cost the debounce exists to avoid.
+
+**Two dependencies the sweeper needs and this document does not supply — added 2026-08-20.**
+Both are PR3 work and neither is listed in §K, so both are named here.
+
+1. **Storage.** "The dirty marker lives in the database" and the claim step wants
+   `claimed_at`, but **no table or column is nominated anywhere.** §H1b's eight-column
+   deck-level enumeration does not include it (correctly — it is not deck presentation state),
+   and §E2's migration discussion is about *dropping* columns, not adding them. So PR3 owes a
+   schema decision (a column pair on `session_slide_decks` — `spec_dirty_at` + `claimed_at` —
+   or a small dedicated table if a marker should outlive the deck row), **plus a new
+   `_migrate_*` step**. Under §L8 that step goes in the pre-fork chain reached from
+   `run.py::init_database`, not the FastAPI lifespan, and it must be sequenced against the
+   §E2 drop in the same `_run_migrations()` list. None of that is assigned today.
+2. **Identity.** A sweeper tick has no request, and Tellr's identity primitives are
+   request-scoped. `get_current_user()` returns `None` outside a request
+   (`src/core/user_context.py:21-23`), and `get_user_client()` **fails closed in production** —
+   `UserClientRequiredError` at `src/core/databricks_client.py:492`, raised at `:536`, with
+   `:511-515` recording that SDR-4437 HIGH-6 removed the SP fallback for everything except
+   non-prod. The
+   LLM call itself is fine (`agent_factory.py:56` uses `get_system_client()`, which is
+   SP-scoped by design), but three things around it are not: **`modified_by` stamping** (the
+   deck writer takes it as a parameter, `session_manager.py:1259`, and the arc review's write
+   would have nothing to pass), **deck permission checks** (`_require_deck_permission` at
+   `:733-748` resolves through the request-scoped permission context), and **usage/cost
+   attribution**, which is the one thing PRD §8.1 requires be visible from day one. §B2 is
+   silent on all three. PR3 must decide what identity a sweeper-driven write carries — the
+   marker's own recorded author, an explicit system identity, or a captured OBO token — and
+   whether an arc review may run at all without one.
 
 ### B3. A version restore cancels any pending spec review
 
@@ -298,6 +391,37 @@ PR3 adds the **backend and spec halves**:
 where slide-stage affordances live. The capability is fully usable via the API and via the
 architect ("add a slide after slide 3").
 
+### B5. New scope: `duplicate_session` drops the deck spec
+
+**Added 2026-08-20 — a gap in every other section, not a correction to one.** §H1b enumerates
+`deck_spec_json`'s two touchers in `session_manager.py` (the `create_version` snapshot at
+`:1939-1951` and the `restore_version` copy-back at `:2240`) and is right about both, but
+there is a **third** place a `SessionSlideDeck` row is constructed and it is not one of them.
+`duplicate_session` builds a fresh row at `src/api/services/session_manager.py:1014-1026`
+passing `session_id`, `title`, `html_content`, `scripts_content`, `slide_count`, `deck_json`,
+`verification_map`, `version=1`, `modified_by`, `locked_by`, `locked_at` — and **not
+`deck_spec_json`**.
+
+Why the other deck-level columns survive and this one does not: the duplicate creates **no
+`session_slides` rows**, so the new deck reads through the `deck_json` blob fallback
+(`session_manager.py:1572`), and `css`, `external_scripts`, `head_meta` and `scripts` all
+live inside that blob. `deck_spec_json` does not — it is a sibling column, deliberately, and
+§H1b's own row-read `deck_dict` (`:1538-1564`) confirms no deck spec is carried in the deck
+dict either. So `POST /sessions/{session_id}/duplicate` (`src/api/routes/sessions.py:492`)
+yields a deck whose spec is **gone, permanently, with no self-heal** — precisely the state
+§H1b names the cost of ("turn *n+1*'s architect starts blind"), reached by the one lifecycle
+point the document had not enumerated.
+
+**PR3 must carry `deck_spec_json` across the duplicate.** It is a one-line addition to the
+`SessionSlideDeck(...)` construction, plus the `version_number is not None` branch
+(`:967-984`), which reads its deck bytes from a `SlideDeckVersion` and must therefore take
+that version's `deck_spec_json` snapshot rather than the live deck's.
+
+Note this is a **copy, not a trigger**: the duplicated deck's spec is already correct for the
+HTML it carries, so §B1's `mark_dirty` must *not* fire here. That is also why the route is not
+in §B1's list — but its absence there was silence, not a decision, which is what made the
+column drop invisible.
+
 ---
 
 ## C. Frontend test runner
@@ -320,7 +444,7 @@ alongside the existing Playwright job" implies.** The `e2e-tests` job is an **ex
 matrix allowlist of 23 spec names** (`.github/workflows/test.yml:479-501`) against **32**
 specs on disk, so a spec runs in CI only after a matrix edit. **PR3's frontend surface has
 zero CI coverage today:** `slide-viewer` — the only spec exercising the feedback drawer and
-findings (`frontend/tests/e2e/slide-viewer.spec.ts:302-360`) — is absent from the matrix,
+findings (`frontend/tests/e2e/slide-viewer.spec.ts:304-360`) — is absent from the matrix,
 as are `slide-host-frame` and `template-viewer`; `frontend/tests/viewer-readonly.spec.ts`
 sits outside `tests/e2e/` entirely and so is unreachable by that job's naming scheme.
 Adding the existing specs to the matrix is PR3 work, not a follow-up: without it, every new
@@ -468,13 +592,29 @@ in two different places, and one drop migration cannot retire both:
 | **`config_prompts` columns** | `ConfigPrompts.system_prompt` / `.slide_editing_instructions`, `Column(Text, nullable=False)` (`src/database/models/prompts.py:39-40`) | real columns — the only thing the `_migrate_*` drop below can target |
 | **keys inside the `agent_config` JSON column** | `AgentConfig.system_prompt` / `.slide_editing_instructions` (`src/api/schemas/agent_config.py:97-98`, with a `field_validator` at `:100-104`), persisted through `Column(NormalizedAgentConfig, …)` on **both** `UserSession` (`src/database/models/session.py:135`) and `ConfigProfile` (`src/database/models/profile.py:31`) | JSON keys — no column to drop |
 
-The JSON half needs its **own data migration** (strip the keys from stored blobs) plus a
-change to `NormalizedAgentConfig` — the same bind hook that enforces
-design-system↔slide-style exclusivity (`src/database/types.py:145-155`), backed by the
-`BEFORE INSERT OR UPDATE` trigger installed at `src/core/database.py:1465-1466`. Editing
-that type is therefore not free: §L1's exclusivity guarantee depends on it.
+The JSON half needs its **own data migration** (strip the keys from stored blobs) plus
+removal of the two fields from the `AgentConfig` pydantic model
+(`src/api/schemas/agent_config.py:97-98` and the `field_validator` at `:100-104`).
 **`agent_factory.py:250` branches on the JSON field, not the column** (`_get_prompt_content`
 takes an `AgentConfig`, `:78-80`), and every frontend row below is the JSON shape.
+
+**`NormalizedAgentConfig` needs NO change — corrected 2026-08-20 (a round-2 error).** A
+previous round said the JSON half required "a change to `NormalizedAgentConfig` … Editing
+that type is therefore not free: §L1's exclusivity guarantee depends on it." That is wrong on
+both halves, and it points the executor at the one file whose documented invariant is *do not
+generalise this*. The type only ever inspects `slide_style_id` and `design_system_id`
+(`_normalize_mapping`, `src/database/types.py:139-156`); every other byte is passed through
+untouched, and its own docstring says why (`:64-70`):
+
+> *Deliberately SURGICAL. It would be tempting to route each blob through `AgentConfig` and
+> store the result, but that round trip is LOSSY in both directions: the model ignores
+> unknown keys, so a value a newer writer stored would be silently destroyed, and it fills in
+> every default, so a lean `{"tools": []}` would inflate into the full field set. So only the
+> one contradiction is repaired and every other byte is passed through[, on a COPY].*
+
+A bind hook that stripped prompt keys would be exactly that generalisation. The prompt keys
+therefore come out by a **one-off data migration over stored blobs**, and the column type is
+left alone.
 
 The full consumer set, verified:
 
@@ -485,10 +625,12 @@ The full consumer set, verified:
 | `src/services/profile_service.py:409-413` | **`ConfigPrompts` insert** — create-with-config path |
 | `src/services/profile_service.py:490-494` | **`ConfigPrompts` insert** — clone profile, copies both values |
 | `scripts/init_database.py:218-222` | **`ConfigPrompts` insert** — DB init script |
-| `src/core/migrate_profiles_to_agent_config.py:15,44,51-52,76` | reads them at startup — **pre-fork, in `run.py::init_database` (`packages/databricks-tellr-app/databricks_tellr_app/run.py:66`), not `main.py`'s lifespan** (see the closing paragraph below; the only `main.py:112` caller left is the stale `packages/databricks-tellr-app/build/lib/` copy) |
+| `scripts/run_e2e_local.sh:160-165` | **`ConfigPrompts` insert** — inline Python inside the local E2E bootstrap script |
+| `.github/workflows/test.yml:589-594` | **`ConfigPrompts` insert** — the `e2e-tests` job's "Seed database with default data" step, inline Python in the workflow |
+| `src/core/migrate_profiles_to_agent_config.py:15,17,44-45,51-52,54,76-77` | reads them at startup — **pre-fork, in `run.py::init_database` (`packages/databricks-tellr-app/databricks_tellr_app/run.py:66`), not `main.py`'s lifespan** (see the closing paragraph below; the only `main.py` callers left are the two stale build copies, both at `main.py:111` — `packages/databricks-tellr-app/build/lib/src/api/main.py:111` and `build/lib/src/api/main.py:111`. The live `src/api/main.py` no longer mentions `migrate_profiles` at all.) Line list corrected 2026-08-20: the earlier `:15,44,51-52,76` cited only the `system_prompt` line of each pair and dropped its `slide_editing_instructions` sibling (`:17`, `:45`, `:54`, `:77`) |
 | `src/services/agent_factory.py:250-263` (also logged at `:504-505`) | consumes at runtime; branches on `system_prompt is not None` |
 | `src/core/config_loader.py:130` | config key |
-| `src/api/schemas/settings/responses.py:53-54` | **`PromptsConfig` response — `system_prompt: str` / `slide_editing_instructions: str`, required and non-`Optional`, `from_attributes=True` (`:47`).** Unpopulatable the moment the ORM attributes go; this one fails at *response validation*, not at insert |
+| `src/api/schemas/settings/responses.py:53-54` | `PromptsConfig` — `system_prompt: str` / `slide_editing_instructions: str`, required and non-`Optional`, `from_attributes=True` (`:47`). Unpopulatable once the ORM attributes go, but **dead code**: its only referrer is `ProfileDetail` (`:59`, field at `:74`), which no route declares as a `response_model`. Update or delete it; nothing breaks at runtime either way (see below) |
 | `src/core/settings_db.py:386-387` | reads both ORM attributes into the `AppSettings` payload |
 | `src/services/config_service.py:69-75` | **assigns both columns** — the concrete write behind `PUT /agent-config` |
 | `src/api/schemas/settings/requests.py:35-36`, `:133-134` | request models (`PromptsCreateInline`, `PromptsConfigUpdate`), including a `field_validator` on `system_prompt` (`:136-141`) |
@@ -503,18 +645,47 @@ All of these change together, and the physical columns are dropped via a `_migra
 helper wired into `_run_migrations()` (this repo has no Alembic — see
 `migrations-run-at-startup`).
 
-**Ordering constraint — there are five insert sites, not one.** Every `ConfigPrompts(...)`
-constructor that passes these columns must stop doing so *before* the drop migration runs,
-or profile creation raises after the drop. The two paths that matter most are easy to miss:
-`profile_service.clone_profile` (`:490`) copies both values from the source profile, and
-`scripts/init_database.py` (`:218`) is a separate entry point from the app lifespan.
+**Ordering constraint — there are seven insert sites, not one. Corrected 2026-08-20; an
+earlier draft said five and missed the two that are not application code.** Every
+`ConfigPrompts(...)` constructor that passes these columns must stop doing so *before* the
+drop migration runs, or profile creation raises after the drop. Measured — the full set in
+the working tree (excluding `tests/`, `build/lib/` and worktrees) is
+`init_default_profile.py:408`, `profile_service.py:204`, `:409`, `:490`,
+`scripts/init_database.py:218`, `scripts/run_e2e_local.sh:160` and
+`.github/workflows/test.yml:589`. Three are easy to miss and one of them is CI:
 
-**And one *read* site that fails independently of insert ordering.**
-`responses.py:53-54` declares both fields **required and non-`Optional`** on a
-`from_attributes=True` model, so every `GET` that serialises a `ConfigPrompts` row raises a
-`ValidationError` as soon as the attributes are gone — no ordering discipline helps. That
-schema (and `settings_db.py:386-387`, which feeds it) must change in the same PR as the
-drop, not merely before the migration.
+- `profile_service.clone_profile` (`:490`) copies both values from the source profile;
+- `scripts/init_database.py` (`:218`) is a separate entry point from the app boot chain;
+- **`scripts/run_e2e_local.sh:160` and `.github/workflows/test.yml:589` are inline Python,
+  not importable modules**, so no grep of `src/` finds them and no type checker or import
+  analysis will either. The `test.yml` one is the `e2e-tests` job's *"Seed database with
+  default data"* step, which every matrix entry runs, so a drop that lands without editing it
+  fails **all 23 matrix jobs at seeding**, before a single spec executes. §C already has PR3
+  editing that same file for the matrix allowlist, so it is open anyway — edit both in the
+  same pass.
+
+Four `ConfigPrompts(...)` constructors also exist under `tests/`
+(`tests/unit/config/test_models.py:87`, `:137`, `tests/unit/test_settings_db.py:69`,
+`tests/unit/test_unset_agent_config_is_sql_null.py:126`). Those fail as *test* failures
+rather than as a broken product, but under §0's cause-based baseline they must be repointed,
+not left red.
+
+**And two *read* sites that fail independently of insert ordering.**
+`src/core/settings_db.py:386-387` reads both ORM attributes into the `AppSettings` payload
+and `src/services/config_service.py:69-75` assigns both columns behind `PUT /agent-config`;
+both must change in the same PR as the drop, not merely before the migration.
+
+**`responses.py:53-54` is NOT one of them — corrected 2026-08-20 (a round-2 error).** A
+previous round elevated it to a hard same-PR requirement on the grounds that "every `GET`
+that serialises a `ConfigPrompts` row raises a `ValidationError`". No `GET` does.
+`PromptsConfig` (`src/api/schemas/settings/responses.py:44`) is referenced only by
+`ProfileDetail` (`:59`, field at `:74`), and `ProfileDetail` is **dead code**: no route in
+`profiles.py` or `settings/*` declares it as a `response_model`, and the only other mentions
+anywhere in `src/` are the two lines of the `schemas/settings/__init__.py` re-export
+(measured: three hits total for `ProfileDetail` across `src/`). It still carries two
+`str`-typed, non-`Optional`, `from_attributes=True` fields that become unpopulatable, so it
+is on the change list — but as **dead schema to update or delete**, not as a live response
+that breaks.
 
 Migrations no longer run in the FastAPI lifespan. Since main's
 `fix(startup): run migrations once pre-fork, never in the uvicorn workers`, the chain runs
@@ -551,7 +722,7 @@ its schema versioned as one identifiable artifact. `finding.ts` is currently fix
 **cheap but not free** (corrected 2026-08-19): besides `FeedbackDrawer.tsx` and
 `SlideViewer.tsx`, the type also governs `frontend/tests/fixtures/findings.ts` — where
 `id`/`slideIndex` *are* populated — and about ten assertions in
-`frontend/tests/e2e/slide-viewer.spec.ts:302-360` keyed on the ids `f1`/`f2`
+`frontend/tests/e2e/slide-viewer.spec.ts:314-359` keyed on the ids `f1`/`f2`
 (`finding-f1`, `finding-dismiss-f1`, `finding-apply-f2`, …). Renaming `message` to
 `description` or re-keying the ids means editing the fixture and those assertions in the
 same PR. Note that spec is not in the CI matrix (§C), so nothing would have caught it.
@@ -560,14 +731,53 @@ A conformance test asserts a real reviewer payload deserialises into `SlideFindi
 loss. The reviewer emits a stable per-finding `id` (so drawer callbacks have something to
 key on) and `slide_index`.
 
-**Two fields the mapping must also settle — added 2026-08-20.**
+**Three fields the mapping must also settle.** Two were added on 2026-08-20; the third
+field below, and the correction to the `seen` bullet, were added by the review round after it.
 
 - **`seen: boolean` is `SlideFinding`'s fifth field**, commented *"initial value only;
   lifecycle owned client-side"* (`frontend/src/types/finding.ts`), with the lifecycle in
-  `frontend/src/components/SlideViewer/seenState.ts`. So the reviewer schema must supply an
-  initial value (or the mapping must default it) and must **not** re-assert it afterwards — a
-  backend that re-sends `seen` on every poll would reset the user's read state. This is the
-  one field where backend-is-canonical (§F1) does **not** hold end-to-end.
+  `frontend/src/components/SlideViewer/seenState.ts`. The reviewer schema must supply an
+  initial value (or the mapping must default it).
+
+  **The hazard an earlier round named here does not exist, and the real constraint is a
+  different one.** That round claimed *"a backend that re-sends `seen` on every poll would
+  reset the user's read state. This is the one field where backend-is-canonical does not hold
+  end-to-end."* Measured: **the payload's `seen` field is never read by the viewer.**
+  `SlideViewer.tsx:95` and `:153` both initialise seen-state from `loadSeen(deckKey)`
+  (localStorage), `:203` computes the unseen set as `!seen.has(f.id)` and `:525` computes
+  `hasUnseen` the same way. The only place `seen:` is populated at all is
+  `frontend/tests/fixtures/findings.ts`. A backend re-sending it would be ignored, so it
+  cannot reset anything, and §F1's backend-is-canonical rule holds with no exception.
+
+  **What the mapping actually has to settle is `id` stability**, because seen-state is
+  persisted in `localStorage` keyed by `(deckKey, finding.id)`
+  (`SEEN_STORAGE_KEY = 'tellr-viewer-seen-findings'`, store shape `deckKey -> finding ids`,
+  `seenState.ts`). Two consequences pull against each other and the reviewer schema must
+  choose: ids that are **not** stable across re-reviews make every carried-over finding
+  re-highlight as unseen on every turn (the review-fatigue failure PRD §14 names), while ids
+  that **are** stable make a finding legitimately re-raised after an edit read as
+  already-seen. §F1 currently justifies the stable id only as something "drawer callbacks
+  have … to key on" — that is the smaller of its two jobs. Recorded in §K as unsettled: a
+  content-derived id, a `(criterion, slide content hash)` composite, or an explicit
+  re-raise counter that changes the id are all admissible; picking one is a §F1 decision.
+- **A findings state field — `SlideFinding` has no way to express §F2's "already fixed".**
+  The type has exactly five fields (`id`, `slideIndex`, `category`, `message`, `seen`) and
+  none distinguishes an *actionable* finding from a *resolved* one, while
+  `frontend/src/components/SlideViewer/FeedbackDrawer.tsx:128-160` renders **Apply / Dismiss /
+  Discuss on every finding unconditionally** — asserted as current behaviour at
+  `frontend/tests/e2e/slide-viewer.spec.ts:353-360`. §F2 requires auto-fixed findings to
+  render as a read-only "we fixed this" list, so §F2 is **unimplementable against §F1 as
+  drawn**: an executor who mirrors the reviewer schema into `finding.ts` to the letter, then
+  turns to §F2, has no field to branch on and no drawer branch to render.
+
+  Two things must therefore land together with the schema: (a) a state field
+  (`status: 'open' | 'fixed'`, or equivalent — note `auto_fixable` in the plan's schema is a
+  **predicate**, "could a fixer handle this", not a **state**, "a fixer did", so it does not
+  cover this); and (b) the drawer branch that suppresses the three action buttons for the
+  fixed state. And it settles the `hasUnseen` interaction, which is a third question the two
+  answers do not decide on their own: **a fixed finding must not count toward `hasUnseen`**
+  (`SlideViewer.tsx:525`), or the unseen badge nags the user about work already done — the
+  exact review-fatigue symptom §F2's read-only presentation exists to avoid.
 - **`category` is a closed union**, `'content' | 'design' | 'narrative'`, consumed by an
   **exhaustive** `CATEGORY_LABEL: Record<SlideFinding['category'], string>`
   (`frontend/src/components/SlideViewer/FeedbackDrawer.tsx:13`). A `Record` keyed on the union
@@ -592,6 +802,16 @@ fixed before the user sees the slide, and PRD §3 requires that "what was fixed 
 Read-only presentation satisfies the second without asking the user to act on resolved
 items, and keeps the actionable surface small enough to respect PRD §14's review-fatigue
 risk.
+
+**This section has two hard dependencies on §F1, and §F1 must carry them — added 2026-08-20.**
+"Read-only" is not a presentation choice the frontend can make on its own: `SlideFinding` has
+no field that distinguishes actionable from resolved, and `FeedbackDrawer.tsx:128-160` renders
+Apply / Dismiss / Discuss on **every** finding unconditionally (current behaviour asserted at
+`frontend/tests/e2e/slide-viewer.spec.ts:353-360`). So §F2 requires (a) a **state** field on
+the reviewer schema and its `finding.ts` mirror, and (b) a drawer branch keyed on it, plus the
+`hasUnseen` rule that a fixed finding does not count as unseen. All three are now listed
+in §F1's "Three fields the mapping must also settle" — implement §F1 without them and §F2
+becomes unbuildable.
 
 ### F3. Findings live in `verification_record`
 
@@ -724,8 +944,11 @@ and never touches `css`, `title` or `deck_json` — verified. The parent spec ca
 "the sole writer of deck-level CSS" (§5.2.8, §5.5), but the foreman is a set of pure
 functions over graph state with **no database access at all**.
 
-As drawn, **every graph-built deck would knit with an empty `<style>` block** — an unstyled
-deck. Review finding F9, unresolved until now.
+As drawn, **every graph-built deck would knit with no `<style>` element at all** — an
+unstyled deck. Review finding F9, unresolved until now. (Wording corrected 2026-08-20: an
+earlier draft said "an empty `<style>` block". `knit()` guards the block with `if self.css:`
+(`src/domain/slide_deck.py:370`), so an empty `css` emits *nothing*, not an empty element.
+Substance unaffected.)
 
 ### H1. One deck-level write per turn, before the fan-out
 
@@ -783,7 +1006,7 @@ missing head_meta reverts a custom viewport to `SlideDeck.knit()`'s hardcoded de
 |---|---|---|
 | `css` | unstyled deck — the §H defect | no |
 | `title` | untitled deck and untitled session row | no |
-| `external_scripts_json` | Chart.js CDN missing from every export | **yes** — `SlideDeck._ensure_default_external_scripts` (`src/domain/slide_deck.py:74`) re-adds the defaults in `__init__` and `knit` |
+| `external_scripts_json` | Chart.js CDN missing from every export | **no** — see the correction below |
 | `head_meta_json` | custom viewport and every other `<meta>` silently reverts | no |
 | `scripts_content` | deck-level JS lost from the row-read path | no |
 | `slide_count` | **the session list renders `0 slides`** for every graph-built deck (`src/api/routes/sessions.py:233`, `session_manager.py:836` — it is a *column*, not derived; only `get_slide_deck`'s own dict derives it from `len(slides_list)`) | no |
@@ -791,10 +1014,29 @@ missing head_meta reverts a custom viewport to `SlideDeck.knit()`'s hardcoded de
 | `deck_spec_json` | **the deck spec is never persisted** — spec §7.1's "view spec" toggle has no data, and turn *n+1*'s architect starts blind | no |
 
 `slide_count` and `html_content` are only knowable **after** the fan-out, so they belong to
-§L2's second (post-commit) write, not the pre-fan-out one. `css`, `title`, `head_meta_json`,
-`scripts_content` and `deck_spec_json` are decidable up front. The two writes together must
-cover **all eight**; neither alone does — 5 decidable up front, 2 post-fan-out, 1
-self-healing.
+§L2's second (post-commit) write, not the pre-fan-out one. `css`, `title`,
+`external_scripts_json`, `head_meta_json`, `scripts_content` and `deck_spec_json` are
+decidable up front. The two writes together must cover **all eight**; neither alone does —
+**6 decidable up front, 2 post-fan-out, and nothing self-heals.**
+
+**`external_scripts_json` does NOT self-heal — corrected 2026-08-20, and this was the one
+entry an executor could have skipped in good faith.** An earlier draft of this table marked
+it "self-healing" on the strength of `SlideDeck._ensure_default_external_scripts`
+(`src/domain/slide_deck.py:74`). That helper runs only inside `SlideDeck.__init__`, `knit()`
+(`:329`) and `render_slide()` (`:416`) — i.e. only when somebody builds a **domain object**.
+Nothing on the export or preview path does. `chat_service.get_slide_deck_dict`
+(`chat_service.py:2661`) returns the raw dict, `src/api/routes/export.py:84` reads
+`slide_deck.get("external_scripts", [])` off that dict and `:148` builds the `<script src>`
+tags straight from it; the five frontend consumers
+(`PresentationMode.tsx:140`, `ThumbnailRibbon.tsx:185`, `SlideViewer.tsx:520`,
+`VisualEditorPanel.tsx:42`, `SlideTile.tsx:144`) likewise read `slideDeck.external_scripts`.
+The row-read path emits `json.loads(deck.external_scripts_json or "[]")`
+(`session_manager.py:1541`), so an unwritten column is `[]` at every one of those sites. The
+model's own comment states the consequence (`src/database/models/session.py:283-287`):
+*"If the row path returns [] instead, EVERY export silently loses Chart.js and all charts
+render blank — the PRD §3 no-regression gate, failing invisibly."*
+So the graph must write this column like the other seven, and the failure if it does not is
+**silent**: no exception, no empty-`<style>` symptom, just blank charts.
 
 **`deck_spec_json` added 2026-08-20 — it is the column PR3 exists to write, and it was
 missing from this enumeration.** It is also the only deck-level column with a *reader* gap
@@ -806,6 +1048,10 @@ html_content, and no deck spec. So the deck-level accessor §J assigns to PR3 is
 a write**, not just a write; without the read, spec §7.1's "view spec" toggle has no data
 path at all. It belongs to the **pre-fan-out** write, because §H1's trigger *is* "the
 architect commits the deck spec".
+
+**There is a third toucher this enumeration also missed, and it is a *dropper*, not a
+writer: `duplicate_session`.** See §B5 — a duplicated deck loses its spec permanently,
+because the column is a sibling of `deck_json` rather than a key inside it.
 
 ### H2. `deck_json` is deliberately left stale — no write-through
 
@@ -902,7 +1148,7 @@ Recorded so the divergences are deliberate rather than drift.
 | current pinned-template prompt block | injects the whole layout for the whole deck | per-slide **section extraction**; the layout never goes to a builder whole (§M3–§M5) |
 | `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` on failure (§L8). §E2 is corrected in place; the still-stale *source* docstrings are named in §L8 |
 | PRD §14 (big-bang-release mitigation) | "Workstreams merge continuously **behind flags**; **dogfood the integration branch** internally well before release" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`) | **both named mitigations are dropped** (§D). The flag is removed entirely and there is no dogfooding period with both engines live. Deliberate: a `false`-default flag would select a path plan Phase 9.2 deletes, so the flag cannot exist in the form PRD §14 assumes. Substituted mitigations: the four-layer test suite with a real-LLM agentic layer (§G) and a `deploy-tellr-dev` devloop deploy as the pre-merge gate (§D). The residual risk — no both-engines-live comparison, and the graph must be correct at merge — is **accepted**; recorded here because §J documents every other divergence |
-| PRD §14 (review-fatigue mitigation) | "Objective defects are fixed silently, **not reported**" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:695`) | auto-fixed findings **are** reported, as a read-only "we fixed this" list in the drawer (§F2). Deliberate: PRD §3 (`:121-122`) requires "what was fixed is visible", and PRD §7.3 (`:379-380`) already says "the *list of what was auto-fixed* is shown in chat for transparency, along with the iteration count" — so the PRD contradicts itself and §F2 picks the visible branch. §F2 also moves that list from **chat** to the **drawer**, read-only; §14's fatigue concern is answered by read-only presentation rather than by silence |
+| PRD §14 (review-fatigue mitigation) | "Objective defects are fixed silently, **not reported**" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:695`) | auto-fixed findings **are** reported, as a read-only "we fixed this" list in the drawer (§F2). Deliberate: PRD §3 (`:120-122`) requires "what was fixed is visible", and PRD §7.3 (`:379-380`) already says "the *list of what was auto-fixed* is shown in chat for transparency, along with the iteration count" — so the PRD contradicts itself and §F2 picks the visible branch. §F2 also moves that list from **chat** to the **drawer**, read-only; §14's fatigue concern is answered by read-only presentation rather than by silence |
 
 ---
 
@@ -941,6 +1187,19 @@ Still open, and deliberately so:
 - **Where deck-level reviewer findings live** (§F3). `verification_record` is per-row and
   hash-keyed, so it cannot hold a deck-level verdict; chat-transcript message vs. a
   deck-level verdict column is not settled. §F resolves the slide-level half only.
+- **Whether `tour.py` fires the §4.4 trigger at all** (§B1). §B1 names it as a trigger site,
+  but the route saves a canned fixture, so the rule's "a human authored this" warrant does not
+  reach it. Exclude the route, or ship the arc description inside the fixture — not decided.
+- **The dirty marker's storage** (§B2). §B2 says it "lives in the database" and wants a
+  `claimed_at` lease, but no table, column or `_migrate_*` step is nominated, and none of
+  §H1b's or §E2's schema work covers it.
+- **What identity a sweeper-driven arc review runs as** (§B2). `get_current_user()` is `None`
+  outside a request and `get_user_client()` fails closed in production, so `modified_by`,
+  deck permission checks and usage attribution have no source. Not decided.
+- **How reviewer finding `id`s behave across re-reviews** (§F1). Seen-state is persisted in
+  `localStorage` keyed by `(deckKey, finding.id)`, so stability across turns and
+  re-raise-after-edit pull in opposite directions. The schema must pick; §F1 only requires the
+  id be stable *enough to key callbacks on*.
 
 ---
 
@@ -969,13 +1228,34 @@ elif config.slide_style_id is not None:    # legacy slide-style branch
 
 Consequences PR3 must respect:
 
-- **The two are mutually exclusive**, enforced in three independent places — the model
-  serializer, the column bind (`NormalizedAgentConfig`, now the type of
-  `UserSession.agent_config`), and a database `BEFORE INSERT OR UPDATE` trigger. A caller
-  cannot construct a deck carrying both.
+- **The two are mutually exclusive at every PERSISTENCE boundary**, enforced in three
+  independent places — the `AgentConfig` model *serializer*
+  (`_one_style_authority`, `src/api/schemas/agent_config.py:128-129`), the column bind
+  (`NormalizedAgentConfig`, now the type of `UserSession.agent_config`), and a database
+  `BEFORE INSERT OR UPDATE` trigger. **No stored row can carry both.**
+
+  **But an in-memory `AgentConfig` deliberately CAN — corrected 2026-08-20.** An earlier
+  draft said "a caller cannot construct a deck carrying both", which reads as an
+  object-construction guarantee and is the opposite of what the code documents. All three
+  enforcement points above are *persistence* boundaries; the first is a `@model_serializer`,
+  not a validator, and its docstring says why (`:157-165`):
+
+  > *Normalization stays at SERIALIZATION rather than moving to a model validator,
+  > **deliberately**. `put_agent_config` must validate DB references BEFORE making the
+  > sources exclusive, because a DANGLING design system can only be detected with a lookup;
+  > if the object could not hold both transiently, a user holding a dead pin AND a real slide
+  > style would be left with NEITHER.*
+
+  This matters for the next bullet, not just for accuracy: `_get_prompt_content(config:
+  AgentConfig)` (`agent_factory.py:78-80`) branches on the **in-memory object**
+  (`if config.design_system_id is not None:` at `:139`), so the both-set state is reachable at
+  exactly the site the branch is read. The outcome is unchanged — the design system wins
+  either way — but "both can be set here" is the reason the `elif` deserves a sentence at all.
 - **An inactive `design_system_id` does not fall through to the style.** The branch is
   chosen on the id being *present*, so a soft-deleted design system logs a warning and
-  leaves generation on the `DEFAULT_SLIDE_STYLE` constant. The `elif` is never evaluated.
+  leaves generation on the `DEFAULT_SLIDE_STYLE` constant. The `elif` (`:204`) is never
+  evaluated once `design_system_id` is set — which is a real statement precisely because a
+  transiently both-set config can reach it.
 - **`compiled_style_content` has a currency contract.** It is stamped with
   `COMPILER_VERSION` and currency is an **exact match, not a comparison**; a stale row is
   lazily recompiled on read via `ensure_compiled_style_content_current`. Any change to
@@ -1011,7 +1291,7 @@ pinned-template deck ships washed out in preview and both exports.
 
 | When | Writes | Why there |
 |---|---|---|
-| Before the fan-out | title, `head_meta_json`, `scripts_content`, `deck_spec_json`, and whatever deterministic CSS exists up front (§L2a) | so incrementally-released slides render styled (§6.2's payoff); the spec is exactly what the architect just committed (§H1b) |
+| Before the fan-out | title, `external_scripts_json`, `head_meta_json`, `scripts_content`, `deck_spec_json`, and whatever deterministic CSS exists up front (§L2a) | so incrementally-released slides render styled (§6.2's payoff); the spec is exactly what the architect just committed (§H1b). `external_scripts_json` added 2026-08-20 — §H1b previously marked it self-healing, which it is not, so it needs an explicit write and belongs here (the Chart.js default is known before any builder runs) |
 | After all positions commit, before the deck-review trigger | aggregated builder CSS (§L2a), `slide_count`, `html_content`, then `ensure_deck_token_css(deck.css, token_css)` | the backstop **compares emitted deck CSS** against the token stylesheet, so it cannot run before builders have emitted any; `slide_count`/`html_content` are only knowable after the fan-out (§H1b) |
 
 Two `version` bumps per turn, both deck-level, neither per-slide — so the no-contention
@@ -1029,8 +1309,10 @@ CSS-shaped* to persist. On the design-system path there is not, and after the fa
 collects what the builders emit. Two facts:
 
 - **`deck.css` is populated today by exactly two mechanisms, both monolith-path** —
-  premise corrected 2026-08-20. (1) `SlideDeck.from_html` walks `soup.find_all('style')` and
-  joins the blocks (`src/domain/slide_deck.py:193-198`). (2) **`SlideDeck.update_css`**
+  premise corrected 2026-08-20. (1) **`SlideDeck.from_html_string`**
+  (`src/domain/slide_deck.py:162`) walks `soup.find_all('style')` and joins the blocks
+  (`:193-198`); `from_html` (`:142`) reaches it only by delegating at `:159`, so the walk is
+  not in `from_html` itself. (2) **`SlideDeck.update_css`**
   (`src/domain/slide_deck.py:97`) does `self.css = merge_css(self.css, replacement_css)`
   (`:108`), called live from `src/api/services/chat_service.py:2631` on the
   slide-replacement edit path — its only caller in `src/`. The graph calls neither:
@@ -1098,8 +1380,13 @@ design_contract: { design_system_id, template_id, slide_style_id }
 It is not a separate stored field and it is not dropped: `image_guidelines` is a column on
 `slide_style_library` (`src/database/models/slide_style_library.py:35`), resolved **only on
 the legacy slide-style branch** (`agent_factory.py:217`). The design-system branch leaves it
-`None` (`:310`), so a design-system deck has no image guidelines at all. `slide_style_id` *is*
-the image-guidelines reference; nothing further needs storing in the spec.
+at the function's **untouched initializer** — `image_guidelines: Optional[str] = None` at
+`agent_factory.py:123` — so a design-system deck has no image guidelines at all.
+(Mechanism corrected 2026-08-20: an earlier draft cited `:310`. That line is
+`"image_guidelines": None` inside the **pre-assembled return dict**, which nulls the key on
+*both* branches because the resolved value has already been baked into the assembled prompt at
+`:300`. It is not what makes the design-system branch empty.) `slide_style_id` *is* the
+image-guidelines reference; nothing further needs storing in the spec.
 
 The compiled content is resolved at build time through `agent_factory`'s logic. Storing a
 copy is wrong by construction: `compiled_style_content` currency is an exact version match,
@@ -1188,7 +1475,8 @@ assembly". That is no longer safe — it is now the only home for:
   heading sizes when the scale was stated only early;
 - **`search_brand_assets` tool gating.** **Corrected 2026-08-19:** the gate is *not* "only
   when `config.design_system_id is not None`" — that is an outdated docstring
-  (`agent_factory.py:359-360`) which an earlier draft of this section repeated. The code is
+  (`agent_factory.py:359-360`, inside `_build_tools`' docstring) which an earlier draft of
+  this section repeated. The code is
   `if config.design_system_id is not None and _design_system_is_active(config.design_system_id)`
   (`:404-406`), and the comment above it records the measured defect the second half fixes: a
   session keeps its pin after the design system is soft-deleted, and on the id alone
@@ -1216,8 +1504,9 @@ rewrite: `resolve_active_design_system_id`, `{{ds-asset:ID}}` substitution insid
 
 ### L7. The slide-root contract changed
 
-`SlideDeck.from_html` no longer looks for `div.slide`. It calls
-`find_slide_roots(soup)` (`src/utils/html_utils.py:46`): the outermost element carrying the
+`SlideDeck` parsing no longer looks for `div.slide`. `from_html_string`
+(`src/domain/slide_deck.py:162`) calls `find_slide_roots(soup)` at `:206`
+(`src/utils/html_utils.py:46`): the outermost element carrying the
 `slide` class token, **whatever its tag**, promoted outward through any semantic sectioning
 wrapper whose sole element child is the slide root. A `<div>` is never promoted.
 
