@@ -65,6 +65,27 @@ It is an implementation option for stall detection (§I), not a design change.
 Recorded before and after the upgrade, because a dependency change is exactly what mutates
 a failure *cause* while preserving its count.
 
+**Which interpreter — added 2026-08-20. Every number in this section is the shared pyenv's,
+and the in-tree `.venv` is NOT it.**
+
+| Interpreter | langgraph | mlflow | svgpathtools | `DEFAULT_RECURSION_LIMIT` | `Send(timeout=)` |
+|---|---|---|---|---|---|
+| `~/.pyenv/versions/3.11.0/bin/python` — **what this section measures** | 1.2.10 | 3.14.0 | 1.7.2 | **10007** | **present** |
+| `<repo>/.venv` — **stale; do not use** | 1.0.3 | 3.6.0 | **absent** | 25 | absent |
+
+`CLAUDE.md` states the environment fact this rests on: the Python env is a **shared pyenv
+site-packages**, not a per-repo venv (and never `pip install` into it from an agent — it
+corrupts parallel agents' runs). The repo nevertheless still contains a gitignored `.venv/`
+(`.gitignore:20`) left over from earlier work, and it is exactly the
+not-installed-to-spec environment this section was written to warn about. In it, both causes
+below reproduce (measured 2026-08-20: 17 failed across `test_html_to_pptx.py`,
+`test_google_slides_converter.py` and `test_mlflow_tracing.py` — 14 `svgpathtools` + 3
+mlflow `trace_location`), the `recursion_limit` inversion above is **false** (the default is
+25 there), and §I's `Send(timeout=)` option **does not exist**. Run the baseline, and every
+probe in this document, with `~/.pyenv/versions/3.11.0/bin/python -m pytest …`. **Do not
+delete or modify `.venv`** — just never reach for it; an executor or subagent that defaults
+to `./.venv/bin/python` will "reproduce" a baseline this document has already retracted.
+
 | | Pre-upgrade | Post-upgrade | After the local env was installed to spec |
 |---|---|---|---|
 | Result | 20 failed / 2003 passed / 8 skipped | 17 failed / 2006 passed / 8 skipped | **3 failed / 4177 passed / 8 skipped** (4188 collected, `pytest tests/ -n auto`, 2026-08-19) |
@@ -103,8 +124,20 @@ Note the earlier rows' "2003/2006 passed" reflect a narrower selection than `pyt
 
 ## A. The seven skill prompts
 
-Zero of the seven exist; the substance of plan Phases 2–3 is `[To be filled in Phase 2]`.
-This is the single largest gap and it is **content, not code**.
+Zero of the seven exist. **Corrected 2026-08-20 — the marker an executor should grep for is
+not `[To be filled in Phase 2]`.** That string occurs twice in
+`docs/superpowers/plans/2026-08-09-pr3-langgraph-core.md` and neither occurrence is in Phases
+2–3: `:417`, inside a **Phase 1** stub-file example, and `:3465`, in the plan's own
+placeholder-scan note. Phases 2–3 (`:680-:1282`) are substantial; what is hollow inside them
+is the prompt bodies, marked `"[full prompt from spec §5.2.1]"` (`:700`),
+`"""...[full prompt]..."""` (`:763`) and `"[prompt from spec §5.2.2]"` (`:810`).
+
+Those placeholders name spec §5.2.1/§5.2.2 as the source of "the full prompt", and **those
+sections hold behavioural description, not prompt text** — §5.2.1 describes the architect's
+job, its data awareness, its tone hook and its two output types; it contains no prompt. That
+is exactly the trap §A1 exists to close: an executor who follows the placeholder to its cited
+source finds a role description and invents the prompt. The gap is **content, not code**, and
+it is the single largest one.
 
 **Reusable material:** `src/core/prompt_modules.py` holds **11,189 chars across 12 named
 blocks** (measured 2026-08-19). `CHART_JS_RULES` (1470 chars), `EDITING_RULES` (3731),
@@ -172,19 +205,31 @@ narrative-arc re-description, which is correct and terminating whoever caused it
 So the real defect is smaller and different in kind:
 
 - **Cost, not correctness.** Agent-driven restructures fire a redundant arc review.
-- **One genuine edge:** version restore replaces whole-deck HTML, so an agent-driven
-  restore *would* be an agent-originated HTML change arriving on a human route. Resolved by
-  B3 below.
+- **One genuine edge — restated 2026-08-20.** An earlier draft called it "an agent-caused
+  HTML change arriving on a human route". Per B1 that cannot happen: the graph calls
+  `session_manager.restore_version` directly and never routes, so an agent-driven restore
+  fires no trigger at all. The real edge is a **stale-marker** edge and it does not depend on
+  who restores: a restore replaces whole-deck HTML, so any dirty marker the pre-restore
+  deck's edits left behind now describes a deck that no longer exists. Resolved by B3 below,
+  which earns its place on that ground (and on the `deck_spec_json` snapshot) rather than on
+  origin attribution.
 
 ### B1. The trigger call lives in the route handler, never in the service method
 
-`spec_sync.mark_dirty(session_id)` is called from the **route handlers** in
-`src/api/routes/slides.py` and `src/api/routes/tour.py`. The service methods in
-`chat_service.py` do **not** call it. The graph calls those service methods directly and so
-never fires the trigger.
+**This is a decision about code PR3 will write, not a description of code that exists —
+corrected 2026-08-20.** An earlier draft stated it in the present tense. Verified: **neither
+`spec_sync` nor `mark_dirty` exists anywhere in the repo** (the only `mark_dirty*` hits are
+matplotlib's `mark_dirty_rectangle` in site-packages). PR3 builds both, and the placement
+rule below is the design constraint on that build.
 
-This makes §4.5's claim true by construction rather than by convention: "arrived via the
-route" *means* "a human did this", because the route is the only human entry point and the
+`spec_sync.mark_dirty(session_id)` **is to be called from the route handlers** in
+`src/api/routes/slides.py` and `src/api/routes/tour.py` — never from the service methods in
+`chat_service.py`. The graph calls those service methods directly, so it never fires the
+trigger.
+
+Placed that way, §4.5's claim becomes true by construction rather than by convention:
+"arrived via the route" *means* "a human did this", because the route is the only human
+entry point and the
 graph does not use it. No stored flag, no `origin=` parameter to forget, no ContextVar to
 leak. The failure mode requires actively wiring a new route call, not merely forgetting a
 parameter.
@@ -227,8 +272,9 @@ pending edits described no longer exists, and `SlideDeckVersion` carries its own
 `deck_spec_json` snapshot (`src/database/models/session.py:358`), which PR1 already restores
 (`session_manager.py:2222,2240`). The restored spec is authoritative.
 
-This also closes B0's remaining edge: a restore never triggers a spec update, so an
-agent-driven restore cannot start hop two.
+This also closes B0's remaining edge: the discarded marker cannot drive an arc review
+against a deck that no longer exists, and — since a restore never triggers a spec update —
+nothing can start hop two.
 
 ### B4. New scope: insert slide
 
@@ -256,8 +302,10 @@ architect ("add a slide after slide 3").
 
 ## C. Frontend test runner
 
-There is none: `frontend/package.json`'s only test script is `playwright test`, there is no
-vitest or jest, no `@testing-library`, and zero `*.test.tsx` files. **32** Playwright specs
+There is none: every test script in `frontend/package.json` is a Playwright variant — `test`,
+`test:report`, `test:ui`, `test:headed`, `test:debug`, five in all, each invoking
+`playwright test` — there is no vitest or jest, no `@testing-library`, and zero `*.test.tsx`
+files. **32** Playwright specs
 live under `frontend/tests/e2e/` (49 `*.spec.ts` tracked in the repo overall, counting
 `frontend/tests/` and `frontend/tests/user-guide/`) — measured 2026-08-19.
 
@@ -307,7 +355,7 @@ of two controls that landed as security work and have no equivalent on the graph
 | Control | Where | Pinned by |
 |---|---|---|
 | **Output safety gate** — `_run_output_safety_gate` + `SAFETY_RETRY_NOTICE` (`agent.py:96-118`, call sites `:1488`, `:1746`): scans model HTML for disallowed external network/resource access, regenerates once with a corrective instruction, raises if still unsafe (AISEC-248 PR1) | generation *and* streaming paths | `tests/unit/test_agent_safety_gate.py`, `tests/unit/test_safety_gate_http.py` |
-| **Slide-context spotlight** — `spotlight("slide_context", html, session_id=…)` (`agent.py:894-916`): prior slide HTML is untrusted input, so it is framed as `<untrusted-data>`, delimiters neutralised, injection patterns scanned/logged at the prompt boundary (SDR-4437 F-TM-12) | edit/add operations that inject prior slides | `tests/unit/test_slide_context_injection.py` |
+| **Slide-context spotlight** — `spotlight("slide_context", html, session_id=…)` (`agent.py:885-916`): prior slide HTML is untrusted input, so it is framed as `<untrusted-data>`, delimiters neutralised, injection patterns scanned/logged at the prompt boundary (SDR-4437 F-TM-12) | edit/add operations that inject prior slides | `tests/unit/test_slide_context_injection.py` |
 
 Neither is optional and neither is a monolith artifact: the graph's builder and fixer emit
 HTML from a model, and its fixer/reviewers receive prior slide HTML as input, so both
@@ -321,12 +369,50 @@ text, but neither replaces the generate-time gate-and-retry.
    the retry-once-then-fail shape and the generic user-facing notice.
 2. Route every prior-slide-HTML injection through `spotlight` on the graph path, and use
    `UNTRUSTED_DATA_NOTICE` (§A) in the skills that receive it.
-3. Repoint both test files (and the other 11 test files importing `src.services.agent` —
-   13 in total) at the new homes rather than deleting them.
+3. Repoint **all three** named test files (`test_agent_safety_gate.py`,
+   `test_safety_gate_http.py`, `test_slide_context_injection.py`) **and the other 10** test
+   files referencing `src.services.agent` — **13 in total**, re-counted 2026-08-20 (an
+   earlier draft said "both … and the other 11", which named three files and summed to 14) —
+   at the new homes rather than deleting them.
 
 **Why this is called out here:** under §0's baseline rule a deleted test is invisible — the
 failure count does not rise when a suite stops existing. These two are security controls, so
 their tests must be re-pointed and seen to pass, not merely absent from the failure list.
+
+### D2. The MCP surface is a third caller this document had not accounted for
+
+**Added 2026-08-20.** `src/api/mcp_server.py` exposes four tools — `create_deck` (`:410`),
+`get_deck_status` (`:658`), `edit_deck` (`:894`), `get_deck` (`:1034`) — and parent spec §6.4
+asserts their "`create_deck` / `edit_deck` contracts are unchanged, so the TAP builder, DAIS
+agenda curator and KPMG pricing skills need no coordinated change". Three decisions above
+land on that surface and none of them said so. None of the three reopens a decision; each
+adds work its section must carry.
+
+1. **§D's deletion breaks a documented MCP internal contract.** `_edit_deck_impl` (`:910`)
+   bundles `slide_indices` into "the `slide_context` dict the agent's `_format_slide_context`
+   helper expects (`{"indices": [...], "slide_htmls": [...]}`)" — and `_format_slide_context`
+   is `src/services/agent.py:885`, in the file §D deletes. Spec §6.4's "contracts are
+   unchanged" is true of the *tool signature* and false of the payload shape behind it. So
+   PR3 must either accept that same `slide_context` shape at the graph's edit entry point, or
+   repoint `_edit_deck_impl` in the same PR. Note this is also §D1's second control's
+   territory: the slide HTMLs `_edit_deck_impl` pulls via `SessionManager.get_slide_deck` are
+   exactly the prior-slide HTML that must go through `spotlight`.
+2. **§I's placeholder is invisible to an MCP caller.** §I hands a failed position back as a
+   `slide-placeholder-error` slide whose failure is legible **only** via
+   `is_placeholder_record`, and no MCP response field exposes it. `get_deck_status`
+   (`:815-842`) returns `status: "ready"` plus `replacement_info` and
+   `metadata.clarification_needed`, so a deck containing placeholders reads as fully ready —
+   recreating the measured defect that `clarification_needed` was added to fix ("hand-picked
+   keys DROPPED the flag, so an automated caller reading `status` concluded the edit had
+   landed when the deck was untouched", `:810-815`). PR3 must surface the failed positions
+   (or a placeholder count) on `get_deck_status`, **additively**, keeping `status`'s existing
+   meaning — the same pattern that field already established.
+3. **§F's channel split has no MCP channel.** §F2/§F3 route findings to the drawer and to
+   chat, both browser surfaces. Spec §6.4's one-shot turn "returns the deck plus a review
+   summary", and nothing in §F says what that summary is or where it lands in an MCP
+   response. It needs a field on `get_deck_status`/`get_deck`, decided together with the
+   reviewer schema (§F1), or the one-shot caller pays for the review and receives none of its
+   output.
 
 ---
 
@@ -374,9 +460,23 @@ rejected as premature — nobody has asked for it.
 
 ### E2. Drop the retired columns in this PR
 
-`ConfigPrompts.system_prompt` and `ConfigPrompts.slide_editing_instructions` are
-`Column(Text, nullable=False)` (`src/database/models/prompts.py:39-40`) and are live. The
-full consumer set, verified:
+**Two physical storages, not one — corrected 2026-08-20.** The same two field *names* live
+in two different places, and one drop migration cannot retire both:
+
+| Storage | Where | Shape |
+|---|---|---|
+| **`config_prompts` columns** | `ConfigPrompts.system_prompt` / `.slide_editing_instructions`, `Column(Text, nullable=False)` (`src/database/models/prompts.py:39-40`) | real columns — the only thing the `_migrate_*` drop below can target |
+| **keys inside the `agent_config` JSON column** | `AgentConfig.system_prompt` / `.slide_editing_instructions` (`src/api/schemas/agent_config.py:97-98`, with a `field_validator` at `:100-104`), persisted through `Column(NormalizedAgentConfig, …)` on **both** `UserSession` (`src/database/models/session.py:135`) and `ConfigProfile` (`src/database/models/profile.py:31`) | JSON keys — no column to drop |
+
+The JSON half needs its **own data migration** (strip the keys from stored blobs) plus a
+change to `NormalizedAgentConfig` — the same bind hook that enforces
+design-system↔slide-style exclusivity (`src/database/types.py:145-155`), backed by the
+`BEFORE INSERT OR UPDATE` trigger installed at `src/core/database.py:1465-1466`. Editing
+that type is therefore not free: §L1's exclusivity guarantee depends on it.
+**`agent_factory.py:250` branches on the JSON field, not the column** (`_get_prompt_content`
+takes an `AgentConfig`, `:78-80`), and every frontend row below is the JSON shape.
+
+The full consumer set, verified:
 
 | Site | Role |
 |---|---|
@@ -388,6 +488,12 @@ full consumer set, verified:
 | `src/core/migrate_profiles_to_agent_config.py:15,44,51-52,76` | reads them at startup — **pre-fork, in `run.py::init_database` (`packages/databricks-tellr-app/databricks_tellr_app/run.py:66`), not `main.py`'s lifespan** (see the closing paragraph below; the only `main.py:112` caller left is the stale `packages/databricks-tellr-app/build/lib/` copy) |
 | `src/services/agent_factory.py:250-263` (also logged at `:504-505`) | consumes at runtime; branches on `system_prompt is not None` |
 | `src/core/config_loader.py:130` | config key |
+| `src/api/schemas/settings/responses.py:53-54` | **`PromptsConfig` response — `system_prompt: str` / `slide_editing_instructions: str`, required and non-`Optional`, `from_attributes=True` (`:47`).** Unpopulatable the moment the ORM attributes go; this one fails at *response validation*, not at insert |
+| `src/core/settings_db.py:386-387` | reads both ORM attributes into the `AppSettings` payload |
+| `src/services/config_service.py:69-75` | **assigns both columns** — the concrete write behind `PUT /agent-config` |
+| `src/api/schemas/settings/requests.py:35-36`, `:133-134` | request models (`PromptsCreateInline`, `PromptsConfigUpdate`), including a `field_validator` on `system_prompt` (`:136-141`) |
+| `src/core/defaults.py:41`, `:150` | `DEFAULT_CONFIG["prompts"]` carries both default bodies |
+| `src/services/validator.py:39` | `validate_prompts(system_prompt=…)` |
 | `src/services/agent.py:250-252,617,624-625` | dies with the monolith |
 | `frontend/src/types/agentConfig.ts:82-83,135-136` | typed and defaulted |
 | `frontend/src/contexts/AgentConfigContext.tsx:124-125,1137-1138` | read for a "has custom config" check (**two** call sites, not one) |
@@ -402,6 +508,13 @@ constructor that passes these columns must stop doing so *before* the drop migra
 or profile creation raises after the drop. The two paths that matter most are easy to miss:
 `profile_service.clone_profile` (`:490`) copies both values from the source profile, and
 `scripts/init_database.py` (`:218`) is a separate entry point from the app lifespan.
+
+**And one *read* site that fails independently of insert ordering.**
+`responses.py:53-54` declares both fields **required and non-`Optional`** on a
+`from_attributes=True` model, so every `GET` that serialises a `ConfigPrompts` row raises a
+`ValidationError` as soon as the attributes are gone — no ordering discipline helps. That
+schema (and `settings_db.py:386-387`, which feeds it) must change in the same PR as the
+drop, not merely before the migration.
 
 Migrations no longer run in the FastAPI lifespan. Since main's
 `fix(startup): run migrations once pre-fork, never in the uvicorn workers`, the chain runs
@@ -424,9 +537,10 @@ They currently disagree. `frontend/src/types/finding.ts` declares
 `{id, slideIndex, category, message, seen}`; the plan's reviewer schema produces
 `{category, severity, description, auto_fixable}`. `message` vs `description` is a rename;
 `severity` and `auto_fixable` have no frontend home; `id` and `slideIndex` are never
-populated. The drawer's callbacks are wired to `console.info` against a `testFindings`
-fixture (`frontend/src/components/Layout/AppLayout.tsx:762, 988-990`), so nothing real
-consumes it yet.
+populated. The drawer's callbacks are wired to `console.info` against test-injected
+findings (`frontend/src/components/Layout/AppLayout.tsx:762, 988-990` — `testFindings` is an
+AppLayout state variable filled from `window.__TELLR_TEST_FINDINGS__`; production renders an
+empty list), so nothing real consumes it yet.
 
 ### F1. The backend reviewer schema is canonical
 
@@ -445,6 +559,28 @@ same PR. Note that spec is not in the CI matrix (§C), so nothing would have cau
 A conformance test asserts a real reviewer payload deserialises into `SlideFinding` with no
 loss. The reviewer emits a stable per-finding `id` (so drawer callbacks have something to
 key on) and `slide_index`.
+
+**Two fields the mapping must also settle — added 2026-08-20.**
+
+- **`seen: boolean` is `SlideFinding`'s fifth field**, commented *"initial value only;
+  lifecycle owned client-side"* (`frontend/src/types/finding.ts`), with the lifecycle in
+  `frontend/src/components/SlideViewer/seenState.ts`. So the reviewer schema must supply an
+  initial value (or the mapping must default it) and must **not** re-assert it afterwards — a
+  backend that re-sends `seen` on every poll would reset the user's read state. This is the
+  one field where backend-is-canonical (§F1) does **not** hold end-to-end.
+- **`category` is a closed union**, `'content' | 'design' | 'narrative'`, consumed by an
+  **exhaustive** `CATEGORY_LABEL: Record<SlideFinding['category'], string>`
+  (`frontend/src/components/SlideViewer/FeedbackDrawer.tsx:13`). A `Record` keyed on the union
+  fails to **compile** the moment a fourth value appears. So §A2's initial criteria —
+  overflow, contrast failure, rogue colour outside the contract, stretched/distorted image,
+  source-contradicting figure — must map into those three values, or the union and the
+  `Record` widen in the same PR. That is a compile-time constraint on the reviewer schema, not
+  a presentation preference.
+
+Fixture detail for the re-key above: the export is **`mockFindings`**
+(`frontend/tests/fixtures/findings.ts`) and it carries **three** findings — `f1`/`f2` on
+`slideIndex: 1` and **`f3` on `slideIndex: 3`** — so a rename or re-key touches three ids,
+not the two the e2e assertions name.
 
 ### F2. Auto-fixed findings surface, marked as already fixed
 
@@ -467,6 +603,21 @@ and save-point restore, each of which PR1 already got right once (and one of whi
 as a defect during 0a before being caught).
 
 Note the non-obvious property to preserve: **a record belongs to a slide, not a position.**
+
+**§F3 answers the slide-level half only — added 2026-08-20.** PRD §3
+(`2026-07-30-tellr-agentic-rebuild-prd-design.md:123-124`) routes findings by grain:
+"Subjective findings surface in the right channel (**deck-level → chat**, slide-level →
+drawer)." `deck_reviewer` is one of the seven skills, and spec §5.2.7 says its findings
+"route to the main chat (deck-level) per PRD §6.3". `verification_record` cannot hold them:
+it is a **per-row** column (`src/database/models/session.py:412`) keyed by slide content
+hash, and a deck-level verdict has no slide content hash to key on — which is §F3's own
+closing property read the other way. So PRD §12.1 is answered for slide-level findings and
+**still open for deck-level ones**: no column is nominated here, and §H1b's deck-level
+enumeration adds none. Recorded in §K as still-open, with the two candidate homes — ride the
+chat transcript as a message (what spec §5.2.7's routing implies; no new column, but the
+verdict gets no queryable identity, which cuts against PRD §7.1's MLflow-assessment goal),
+or a deck-level verdict column alongside `deck_spec_json` (queryable, but a new column plus
+a save-point/restore obligation).
 
 **Two hard constraints on the reviewer verdict schema — added 2026-08-19.**
 
@@ -620,11 +771,11 @@ enforces the optimistic lock, and touches **no `session_slides` rows**. It reuse
 `:1321` for the bump) — which is also why the *existing* method cannot be called per slide,
 and why `SlideWriter` deliberately does not use it — but not its dual-write body.
 
-#### H1b. The write must enumerate five deck-level columns, not two
+#### H1b. The write must enumerate eight deck-level columns, not two
 
 **Added 2026-08-19.** The row-read path reconstructs the deck from deck-level columns, not
-from `deck_json` (`session_manager.py:1538-1552`), so a column the graph never writes is a
-column the deck never has. `save_slide_deck`'s own comment (`:1360-1365`) names the cost:
+from `deck_json` (the `deck_dict` literal is `session_manager.py:1538-1564`), so a column
+the graph never writes is a column the deck never has. `save_slide_deck`'s own comment (`:1360-1365`) names the cost:
 *"Missing css/external_scripts costs every export its stylesheet and the Chart.js CDN;
 missing head_meta reverts a custom viewport to `SlideDeck.knit()`'s hardcoded default (F5)."*
 
@@ -637,11 +788,24 @@ missing head_meta reverts a custom viewport to `SlideDeck.knit()`'s hardcoded de
 | `scripts_content` | deck-level JS lost from the row-read path | no |
 | `slide_count` | **the session list renders `0 slides`** for every graph-built deck (`src/api/routes/sessions.py:233`, `session_manager.py:836` — it is a *column*, not derived; only `get_slide_deck`'s own dict derives it from `len(slides_list)`) | no |
 | `html_content` | raw-HTML debug view empty; `save_slide_deck` treats it as required | no |
+| `deck_spec_json` | **the deck spec is never persisted** — spec §7.1's "view spec" toggle has no data, and turn *n+1*'s architect starts blind | no |
 
 `slide_count` and `html_content` are only knowable **after** the fan-out, so they belong to
-§L2's second (post-commit) write, not the pre-fan-out one. `css`, `title`, `head_meta_json`
-and `scripts_content` are decidable up front. The two writes together must cover all seven;
-neither alone does.
+§L2's second (post-commit) write, not the pre-fan-out one. `css`, `title`, `head_meta_json`,
+`scripts_content` and `deck_spec_json` are decidable up front. The two writes together must
+cover **all eight**; neither alone does — 5 decidable up front, 2 post-fan-out, 1
+self-healing.
+
+**`deck_spec_json` added 2026-08-20 — it is the column PR3 exists to write, and it was
+missing from this enumeration.** It is also the only deck-level column with a *reader* gap
+as well as a writer gap. Today it has exactly two touchers in `session_manager.py`: the
+`create_version` snapshot (`:1939-1951`) and the `restore_version` copy-back (`:2240`).
+**Nothing serves it to a caller** — the row-read `deck_dict` (`:1538-1564`) emits title,
+slide_count, css, external_scripts, head_meta, scripts, slides, authorship, version and
+html_content, and no deck spec. So the deck-level accessor §J assigns to PR3 is a **read and
+a write**, not just a write; without the read, spec §7.1's "view spec" toggle has no data
+path at all. It belongs to the **pre-fan-out** write, because §H1's trigger *is* "the
+architect commits the deck spec".
 
 ### H2. `deck_json` is deliberately left stale — no write-through
 
@@ -725,17 +889,19 @@ Recorded so the divergences are deliberate rather than drift.
 | PRD §10.2 | must write through to `deck_json` or document the loss | the rollback scenario cannot occur; no write-through (§H2) |
 | plan (F4) | set `recursion_limit` explicitly; default is 25 | default is **10007** on 1.2.10; the plan's ~50 would lower it (§0) |
 | kickoff brief | `SessionManager.get_deck_spec` / `write_deck_spec` are the only persistence path | **those methods do not exist.** They appear only in the PR1 *plan*. What landed is the `deck_spec_json` column on both tables, the migration, save-point snapshot/restore, and a per-slide `deck_spec_slide` parameter on `write_slide`. PR3 owns the deck-level accessor. |
-| kickoff brief | 19 pre-existing failures in four files | 17 in three files, post-upgrade (§0) |
-| spec §4.1 | design contract = "the CSS/style contract" | a design system compiles to a **prompt artifact**, not a stylesheet; the spec stores a reference (§L1, §L3) |
+| kickoff brief | 19 pre-existing failures in four files | **3 failures / 2 causes / 2 files** — §0's current baseline. (Row corrected 2026-08-20: it previously said "17 in three files, post-upgrade", which was both stale and miscounted. The intermediate post-upgrade figure was 17 across **four** files — 14 `svgpathtools` in `test_html_to_pptx.py` + `test_google_slides_converter.py`, 2 deploy-autoscaling, 1 genie — and §0 has since retracted the `svgpathtools` and mlflow causes as a local-environment defect, not a repo baseline.) |
+| spec §4.1 | design contract = "the CSS/style contract **+ image guidelines**" | a design system compiles to a **prompt artifact**, not a stylesheet; the spec stores a reference (§L1, §L3). The image-guidelines half is reached through the *same* reference — it is a `slide_style_library` column, resolved only on the legacy branch (§L3) |
 | spec §5.2.3 | builders receive "the style sheet (the CSS contract)" | they receive the resolved `compiled_style_content` **or** `style_content` — a branch, not a ladder — already carrying the frame rules (§L1, §L5) |
 | spec §5.2.8 | the foreman is sole CSS writer | a second, **measured** deck-CSS write is now required post-commit (`ensure_deck_token_css`), or pinned-template decks ship washed out (§L2) |
 | spec §4.6 | design-contract change = `slide_style_id` | three fields plus template pinning; setting a design system clears the style (§L4) |
 | plan Phase 9.2 | delete or reduce `agent_factory` | it now owns design-system resolution, template blocks and `search_brand_assets` gating — move, do not delete (§L6) |
+| spec §6.4 | "`create_deck` / `edit_deck` contracts are unchanged, so the TAP builder, DAIS agenda curator and KPMG pricing skills need no coordinated change" | true of the tool *signatures*, not of what is behind them: `_edit_deck_impl` targets `agent.py`'s `_format_slide_context` shape (deleted by §D), `get_deck_status` has no field that exposes §I's placeholders, and §F routes findings only to browser surfaces (§D2) |
 | spec §5.2.1 | tool manifest comes from `AgentConfig.tools` | it must also carry the design-system library, or the architect cannot offer a brand it cannot see (§M1) |
-| spec §4.1 slide level | `SlideSpec` fields are purpose / brief / assumes / hands-off / data refs | plus a **template section assignment** (§M3) |
+| spec §4.1 slide level | `SlideSpec` fields are **position** / purpose / brief / assumes / hands-off / data refs | plus a **template section assignment** (§M3) |
 | `design-system-library.md` §9 | a first-request template pin is stripped | fixed on the **graph path** only; the browser path is unchanged (§M2) |
 | current pinned-template prompt block | injects the whole layout for the whole deck | per-slide **section extraction**; the layout never goes to a builder whole (§M3–§M5) |
 | `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` on failure (§L8). §E2 is corrected in place; the still-stale *source* docstrings are named in §L8 |
+| PRD §14 (big-bang-release mitigation) | "Workstreams merge continuously **behind flags**; **dogfood the integration branch** internally well before release" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`) | **both named mitigations are dropped** (§D). The flag is removed entirely and there is no dogfooding period with both engines live. Deliberate: a `false`-default flag would select a path plan Phase 9.2 deletes, so the flag cannot exist in the form PRD §14 assumes. Substituted mitigations: the four-layer test suite with a real-LLM agentic layer (§G) and a `deploy-tellr-dev` devloop deploy as the pre-merge gate (§D). The residual risk — no both-engines-live comparison, and the graph must be correct at merge — is **accepted**; recorded here because §J documents every other divergence |
 | PRD §14 (review-fatigue mitigation) | "Objective defects are fixed silently, **not reported**" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:695`) | auto-fixed findings **are** reported, as a read-only "we fixed this" list in the drawer (§F2). Deliberate: PRD §3 (`:121-122`) requires "what was fixed is visible", and PRD §7.3 (`:379-380`) already says "the *list of what was auto-fixed* is shown in chat for transparency, along with the iteration count" — so the PRD contradicts itself and §F2 picks the visible branch. §F2 also moves that list from **chat** to the **drawer**, read-only; §14's fatigue concern is answered by read-only presentation rather than by silence |
 
 ---
@@ -772,6 +938,9 @@ Still open, and deliberately so:
   dedupe by exact block text. Either is small; both need an at-rule survival test.
 - **The tone-vs-BRAND-MANUAL precedence rule** (§E1). The collision is named; which artifact
   wins is not settled.
+- **Where deck-level reviewer findings live** (§F3). `verification_record` is per-row and
+  hash-keyed, so it cannot hold a deck-level verdict; chat-transcript message vs. a
+  deck-level verdict column is not settled. §F resolves the slide-level half only.
 
 ---
 
@@ -828,7 +997,9 @@ both PPTX export paths. Prompt prose is not a guarantee; this is."
 **two of the seven** `save_slide_deck` call sites. `reorder_slides` (`:2742`), `update_slide`
 (`:2822`), `duplicate_slide` (`:2888`), `delete_slide` (`:2952`) and `tour.py:82` all save
 without it, and `restore_version` writes the deck-level columns directly
-(`session_manager.py:2229-2246`) without it either. The backstop is a *generation-path*
+(`session_manager.py:2229-2253` — `css` at `:2246`, `scripts_content` at `:2250`,
+`head_meta_json` at `:2253`; the range was cited as `2229-2246` and cut the last two off)
+without it either. The backstop is a *generation-path*
 guarantee, not a save-path invariant — which makes the conclusion below stronger, not weaker,
 because the graph path replaces exactly the two flows that have it.
 
@@ -840,7 +1011,7 @@ pinned-template deck ships washed out in preview and both exports.
 
 | When | Writes | Why there |
 |---|---|---|
-| Before the fan-out | title, `head_meta_json`, `scripts_content`, and whatever deterministic CSS exists up front (§L2a) | so incrementally-released slides render styled (§6.2's payoff) |
+| Before the fan-out | title, `head_meta_json`, `scripts_content`, `deck_spec_json`, and whatever deterministic CSS exists up front (§L2a) | so incrementally-released slides render styled (§6.2's payoff); the spec is exactly what the architect just committed (§H1b) |
 | After all positions commit, before the deck-review trigger | aggregated builder CSS (§L2a), `slide_count`, `html_content`, then `ensure_deck_token_css(deck.css, token_css)` | the backstop **compares emitted deck CSS** against the token stylesheet, so it cannot run before builders have emitted any; `slide_count`/`html_content` are only knowable after the fan-out (§H1b) |
 
 Two `version` bumps per turn, both deck-level, neither per-slide — so the no-contention
@@ -857,10 +1028,13 @@ now-measured reason.
 CSS-shaped* to persist. On the design-system path there is not, and after the fan-out nobody
 collects what the builders emit. Two facts:
 
-- **`deck.css` is populated today by exactly one mechanism**, and it is a monolith
-  mechanism: `SlideDeck.from_html` walks `soup.find_all('style')` and joins the blocks
-  (`src/domain/slide_deck.py:193-198`). The graph never calls it — `SlideWriter` writes
-  per-row `html` only.
+- **`deck.css` is populated today by exactly two mechanisms, both monolith-path** —
+  premise corrected 2026-08-20. (1) `SlideDeck.from_html` walks `soup.find_all('style')` and
+  joins the blocks (`src/domain/slide_deck.py:193-198`). (2) **`SlideDeck.update_css`**
+  (`src/domain/slide_deck.py:97`) does `self.css = merge_css(self.css, replacement_css)`
+  (`:108`), called live from `src/api/services/chat_service.py:2631` on the
+  slide-replacement edit path — its only caller in `src/`. The graph calls neither:
+  `SlideWriter` writes per-row `html` only.
 - **The design contract is no longer a stylesheet** (§L1/§L3): it is a prompt artifact plus a
   `{design_system_id, template_id, slide_style_id}` reference. So "persist the CSS contract"
   has no referent on the design-system path.
@@ -892,6 +1066,21 @@ stylesheet containing `:root`, `@font-face`, `section.slide`, `@media print` and
 `@media` and `@keyframes` rules would be lost permanently — outside what the safety net
 covers, which is precisely the failure mode §M5 rejects pruning to avoid.
 
+**This is a shipped defect on the edit path today, not only a hazard for a new step — added
+2026-08-20.** Because `update_css` is already a live `deck.css` populator (above), every
+slide-replacement edit already runs the whole deck stylesheet through `merge_css` and
+already drops its `@media` and `@keyframes` blocks (and `@font-face`, until
+`ensure_deck_token_css` re-emits it). The at-rule loss is therefore reachable on the current
+monolith edit path, not confined to PR3's hypothetical aggregation step. Two consequences:
+
+- **Priority.** Fixing `merge_css` is a bug fix with a user-visible symptom — a branded deck
+  loses its print rules and animations after one slide edit — not speculative hardening for
+  code PR3 has not written yet. It stands on its own even if PR3's aggregation choice moves.
+- **Regression test.** The at-rule survival test must cover the **existing** path
+  (`SlideDeck.update_css` on a sheet carrying `@font-face`, `@media print` and
+  `@keyframes`) as well as PR3's aggregation. A test written only against the new aggregator
+  ships green over the live defect.
+
 **So the aggregation step is PR3 work with one open choice:** extend `merge_css` to carry
 at-rules through, or dedupe by exact block text rather than by selector. Either is small and
 testable; both need an at-rule survival test. Do **not** adopt `merge_css` as-is.
@@ -904,6 +1093,13 @@ testable; both need an at-rule survival test. Do **not** adopt `merge_css` as-is
 ```
 design_contract: { design_system_id, template_id, slide_style_id }
 ```
+
+**§4.1's second half — "+ image guidelines" — rides the same reference, added 2026-08-20.**
+It is not a separate stored field and it is not dropped: `image_guidelines` is a column on
+`slide_style_library` (`src/database/models/slide_style_library.py:35`), resolved **only on
+the legacy slide-style branch** (`agent_factory.py:217`). The design-system branch leaves it
+`None` (`:310`), so a design-system deck has no image guidelines at all. `slide_style_id` *is*
+the image-guidelines reference; nothing further needs storing in the spec.
 
 The compiled content is resolved at build time through `agent_factory`'s logic. Storing a
 copy is wrong by construction: `compiled_style_content` currency is an exact version match,
@@ -964,6 +1160,16 @@ belongs where the style is resolved, next to the branch at `agent_factory.py:134
 the skill. The reviewer and the builder must be handed the same numbers or §L7's criterion is
 unfair by construction.
 
+**Inject the constant, never a retyped copy of the numbers — added 2026-08-20.**
+`_SLIDE_FRAME_CONSTRAINTS` is module-private (`design_system_compiler.py:545`) and is emitted
+into `compiled_style_content` at `:2535`, where `COMPILER_VERSION = 20` (`:281`) governs
+currency by **exact match** (`:317`). Prompt assembly must **import that same constant** —
+promoting it out of `_`-private, or exposing an accessor — so both sites read one set of bytes
+at request time. Restating the numbers in assembly code instead would create exactly the
+divergence class the currency contract exists to prevent. Importing does not: the injected
+value is never persisted, so it cannot go stale against `COMPILER_VERSION` the way a compiled
+artifact row can.
+
 ### L6. What PR3 must preserve rather than delete
 
 The plan's Phase 9.2 says `agent_factory` should be deleted or "reduced to graph config
@@ -982,7 +1188,7 @@ assembly". That is no longer safe — it is now the only home for:
   heading sizes when the scale was stated only early;
 - **`search_brand_assets` tool gating.** **Corrected 2026-08-19:** the gate is *not* "only
   when `config.design_system_id is not None`" — that is an outdated docstring
-  (`agent_factory.py:357-358`) which an earlier draft of this section repeated. The code is
+  (`agent_factory.py:359-360`) which an earlier draft of this section repeated. The code is
   `if config.design_system_id is not None and _design_system_is_active(config.design_system_id)`
   (`:404-406`), and the comment above it records the measured defect the second half fixes: a
   session keeps its pin after the design system is soft-deleted, and on the id alone
@@ -1078,9 +1284,12 @@ wedged startup." Five files conflicted; two were traps.
   inner scrollbar"), and `48fe0fa1` (2026-07-06, design-system frame guardrails Phase 3)
   **removed it on purpose**: *"SlideTile now clips at the true 1280x720 frame like the
   presentation viewer / export … instead of growing to fit tall content, so overflow is
-  visible while editing. Removes the now-unused height reporter + grow machinery."* That
-  commit is on main and **not** on this branch, so our side merely predated the removal —
-  it was never a ws6 feature and never a design disagreement.
+  visible while editing. Removes the now-unused height reporter + grow machinery."* At
+  conflict-resolution time that commit was on main and **not yet** on this branch, so our side
+  merely predated the removal — it was never a ws6 feature and never a design disagreement.
+  (Tense corrected 2026-08-20: post-merge, `48fe0fa1` **is** an ancestor of `HEAD` as well as
+  `origin/main`, via the merge at `b54c5cc4`. The resolution stands; only the sentence was
+  stale.)
   A growing tile actively hides the defect: `48fe0fa1` names the production symptom it fixed
   as the *"cut off" / "massive long slide"* problem, where a design-system deck bypassed
   `DEFAULT_SLIDE_STYLE` (the only place the frame limits lived) and export clipped the
@@ -1131,8 +1340,9 @@ Two consequences:
 
 Today a template pin submitted on the request that *creates* a session is **stripped**,
 because a pin arriving at session-creation cannot be distinguished from another browser
-surface's carry-over (`design-system-library.md` §9). The documented workaround is "send your
-first message, then pin".
+surface's carry-over (`design-system-library.md` §9, and `:283`: "Pinning works on an
+existing session, and over MCP via `template_name`"). The documented workaround is "send
+your first message, then pin".
 
 A conversational pin hits this immediately — "build me an Acme-branded deck" is a first turn.
 **PR3 fixes it for the graph path only.** The ambiguity that motivated the strip is a
@@ -1140,6 +1350,25 @@ A conversational pin hits this immediately — "build me an Acme-branded deck" i
 unambiguous architect intent, so the graph path can honour it without reintroducing the
 carry-over problem for the pre-session browser path. The browser path's behaviour is
 unchanged.
+
+**Where the strip actually is — added 2026-08-20, so the fix has a location.**
+`_without_template_pin` is a local helper inside the **chat route**:
+`src/api/routes/chat.py:240`, applied at `:279` (a client-generated session id that was never
+persisted) and `:295` (no session id at all) — the route's two session-creating branches,
+both of which run **before any agent or graph is constructed**. There is no graph-path site
+upstream of it, and the very turn this section describes arrives through that route. So
+"fixed for the graph path only" is a statement about *provenance at that one call site*, not
+about a second code path: a pin the architect derived from the user's message is honoured
+there, while a `template_id` merely present in the inbound `agent_config` blob is still
+stripped. The browser carry-over behaviour is unchanged, exactly as stated above.
+
+**And the non-browser first-request-pin precedent already exists.** MCP `create_deck`
+resolves `template_name` to a `template_id` pin **on the session-creating request**, and it
+is not stripped — `src/api/mcp_server.py:480-483` sets `agent_config["template_id"]`, and
+`_without_template_pin` is local to `chat.py` so no MCP path passes through it
+(`design-system-library.md` §4.6, `:148-151`). Honouring a first-request pin from a
+non-browser caller is therefore established behaviour rather than a new exception, which
+narrows what PR3 has to justify.
 
 ### M3. Grain-agnosticism: the architect assigns, deterministic code extracts
 
@@ -1176,12 +1405,19 @@ hardened for precisely this case (a template emits `<section class="slide">` whe
 emits `<div class="slide">`; `src/services/design_system_templates.py:444`
 `_detect_slide_root_tags` relies on the same convention).
 
-**Extraction must read the layout through the normalizing accessor, not the raw column.**
-`normalize_root_tag_selectors` (`src/services/design_system_templates.py:527`, applied at
-`:703` on self-heal and `:773` on materialize) is what makes a template's *tag-keyed* CSS
-(`section { … }`) also match the `div.slide` roots generation emits. Reading
-`template.layout_html` directly bypasses that pass, so an extracted section would carry CSS
-whose selectors match nothing in the built slide — a silent, whole-section styling loss.
+**Extraction must resolve the template through the materialize/self-heal path first — there
+is no "normalizing accessor" to read through.** Corrected 2026-08-20: an earlier draft named
+one. `normalize_root_tag_selectors` (`src/services/design_system_templates.py:527`) is a
+**plain function**, and its two callers **persist** its output — `materialize_templates`
+(`:682`) self-heals existing rows by assigning `template.layout_html = normalized` (`:703`),
+and normalizes freshly derived rows on the way in (`:773`). It is what makes a template's
+*tag-keyed* CSS (`section { … }`) also match the `div.slide` roots generation emits. So the
+instruction is not "call an accessor"; it is **resolve the template via
+`get_template_for_generation` (`:849`, which calls `materialize_templates` at `:859`) and only
+then read `template.layout_html`** — by that point the bytes are already normalized.
+Extracting from a row that has not been through that pass yields a section whose CSS
+selectors match nothing in the built slide — a silent, whole-section styling loss. The pass is
+idempotent, so routing through it costs nothing on an already-healed row.
 
 **Note the promotion rule.** `SLIDE_WRAPPER_TAGS` is `{"section", "article"}` only — a
 `<div>` is deliberately excluded, and so is `<main>`. A template that wraps its slides in a
@@ -1210,7 +1446,7 @@ text), and its structural affordances (does it contain a canvas, an image, a tab
 
 The inventory is deterministic, a few hundred bytes per section, and sufficient for
 assignment. It is **not** the raw layout: a real Claude-Design template measures **24–47 KB**
-(`design_system_templates.py:59`), and the architect holds the only durable conversation in
+(`design_system_templates.py:60`), and the architect holds the only durable conversation in
 the system (§5.3), so injecting the full layout into it every turn would be both expensive
 and contrary to §7.2's compaction story. The inventory is per-turn context, never accumulated
 into the transcript.
