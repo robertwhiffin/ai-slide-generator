@@ -35,21 +35,65 @@ Databricks Apps secret resources. Per
 > resource key that you defined when you added the secret.
 
 So the deploy tool declares an `AppResourceSecret` with resource key
-`TELLR_ENCRYPTION_KEY`, and the platform injects `TELLR_ENCRYPTION_KEY` into
-the container environment at deploy time. Nothing about the key appears in the
-generated `app.yaml` — the resource declaration is the entire configuration.
+`TELLR_ENCRYPTION_KEY`. **The declaration alone injects nothing** — verified on a
+live app (see Spike results). The generated `app.yaml` must also carry an `env:`
+entry mapping the resource into the environment:
+
+```yaml
+  - name: TELLR_ENCRYPTION_KEY
+    valueFrom: "TELLR_ENCRYPTION_KEY"
+```
+
+That entry is the only key-related content in `app.yaml` and it holds no key
+material — only a resource reference. It must be written in secret mode and
+omitted in legacy mode, where it would point at a resource the app does not
+have. Consequently `_write_app_yaml` gains a parameter and the template gains a
+conditional block; `Template.substitute` is strict, so the placeholder must be
+supplied (as an empty string) on every one of its four call sites.
 
 The alternative considered was to write the scope and key *names* into `app.yaml`
 and have the app fetch the value at runtime with `secrets.get_secret`. That is
-what the docs' own best-practices section recommends, and it keeps the key out
-of the container environment entirely. This alternative is **not available** if
-the CRITICAL BLOCKER (open question 1) resolves "no" — the SDK restricts
-`get_secret` to calls from DBUtils inside notebooks, and the deploy tool is a
-normal user outside a notebook. If the blocker resolves "yes" (the call works),
-the choice to use env injection instead is a trade-off for simplicity: no
-runtime workspace API call on the boot path, and the app's secret access is
-declared on the app where it can be audited. The residual exposure is recorded
-under Accepted risks below.
+what the docs' own best-practices section recommends, and it keeps the key out of
+the container environment entirely. The spike confirmed the alternative **is**
+available — `get_secret` works from a plain shell — so this is a genuine
+trade-off, chosen for simplicity: no runtime workspace API call on the boot path,
+and the app's secret access is declared on the app where it can be audited. The
+residual exposure is recorded under Accepted risks below.
+
+## Spike results (verified live, 2026-08-21)
+
+Run against a disposable app (`db-tellr-fernet-spike`) and secret scope in the
+tellr-dev workspace, both since deleted. These supersede the corresponding open
+questions.
+
+| Question | Answer |
+| --- | --- |
+| `get_secret` from a plain shell, outside a notebook? | **Works.** The SDK docstring's "only from the DBUtils interface" / `BAD_REQUEST` warning did not reproduce. |
+| Encoding of `GetSecretResponse.value`? | **base64.** `b64decode(value) == original`; `Fernet(raw)` raises `ValueError`, so a missed decode fails loudly rather than silently. |
+| Spaces in a secret *key* name? | **Accepted.** `"Tellr encryption key"` was written successfully. The documented charset rule does not apply to key names, so the hyphenated default is a style choice, not a constraint. |
+| Uppercase-underscore resource key? | **Accepted.** `TELLR_ENCRYPTION_KEY` created without complaint. |
+| Does attaching the resource auto-grant the app SP `READ`? | **Yes.** The SP's `READ` ACL appeared on the scope with no `put_acl` call. |
+| Does the resource declaration alone inject the env var? | **No.** With the resource attached and no `env:` entry, no `TELLR_*` variable existed in the container. |
+| Does `valueFrom` inject it? | **Yes.** With the `env:` entry, `TELLR_ENCRYPTION_KEY` was present, length 44 — the raw Fernet key, already decoded. No base64 handling needed in the app. |
+| `apps.update` with a GET-fetched `App`? | **Fails:** `InvalidParameterValue: Compute size updates are not supported in this update API.` |
+| Correct `apps.update` construction? | Build a fresh `App(name=..., resources=..., description=..., user_api_scopes=..., default_source_code_path=...)` and **omit `compute_size`**. Omitted fields are wiped — `description` became `''` and `user_api_scopes` became `None` — so every mutable field must be carried explicitly. |
+| Can the deploying human `SELECT`/`DELETE` on `encryption_keys`? | **Yes here, but not for the reason assumed.** It works because the deployer is a member of `databricks_superuser`, which holds explicit privileges on every table in the schema — not because of table ownership. |
+
+Two consequences worth stating plainly. First, the auto-grant removes `put_acl`
+from the design entirely, which in turn removes the MANAGE requirement that made
+fork creation problematic: a fork only needs the resource declaration copied.
+Second, the `apps.update` result means the "round-trip the fetched object"
+prescription was wrong and must be replaced with explicit field-carrying.
+
+On the Lakebase privilege question, the shared-owner model does behave as the
+review claimed — in `app_data_prod`, 30 of 31 tables are owned by
+`tellr_app_owners` (which the human is not an inheriting member of), and only
+`encryption_keys` is human-owned, because the legacy migration created it with
+`CREATE TABLE IF NOT EXISTS` as the human. The relocate therefore works for an
+admin deployer via `databricks_superuser`, and would fail for a deployer without
+it. That makes a `has_table_privilege` preflight probe the right resolution
+rather than an accepted risk: it is one query, and it converts a silent
+data-loss path into an actionable preflight error.
 
 ## Boot resolution
 
@@ -169,13 +213,18 @@ deployed would leave an orphaned or partially-configured Lakebase instance.
    and reads it back for verification; Key Vault-backed scopes are written and
    read through Key Vault, not this API.
 
-The `put_secret` → read-back round trip tests write and read permission, but
-**`put_acl` requires MANAGE permission** (not covered by the round trip). Before
-or after `put_secret`, probe MANAGE permission with `get_acl(scope, principal=me)`
-or make `put_acl` failure non-fatal with guidance to the user to request MANAGE
-from the scope creator. This closes the window where an operator holding only
-WRITE+READ passes preflight, writes the secret successfully, then fails at
-`put_acl` after the app is created.
+The `put_secret` → read-back round trip tests write and read permission. The
+spike removed the MANAGE concern that used to live here: attaching the resource
+auto-grants the app SP `READ`, so the design makes no `put_acl` call and the
+operator needs only WRITE+READ on the scope.
+
+Preflight must additionally probe the Lakebase privilege the relocate depends
+on, before any key material is written:
+`SELECT has_table_privilege(current_user, '<schema>.encryption_keys', 'SELECT')`
+and the same for `DELETE`. On installs where the app SP created the table and
+`REASSIGN OWNED` re-homed it to `tellr_app_owners`, a deployer outside
+`databricks_superuser` has neither, and the relocate would otherwise read the
+denial as "no row" and mint a fresh key. Abort preflight instead.
 
 **Error handling:** `get_secret` throws `RESOURCE_DOES_NOT_EXIST` (secret not
 found) and `PERMISSION_DENIED` (caller lacks READ); the code must distinguish
@@ -215,18 +264,14 @@ AppResource(
 and tries autoscaling first; the secret resource must be appended in both
 the provisioned and autoscaling branches.
 
-Immediately after `create_and_wait`, and unconditionally,
-`ws.secrets.put_acl(scope, principal=<sp_client_id>, permission=READ)`. The
-call is idempotent and cheap, and it removes the open question of whether
-declaring the resource auto-grants the app's service principal — we do not
-need to know either way.
+No `put_acl` call is needed: the spike confirmed that attaching the resource
+auto-grants the app's service principal `READ` on the scope. Do not add one —
+it is the only call that would require MANAGE, and requiring MANAGE is what
+made fork creation unworkable.
 
-**In `scripts/deploy_local.py`:** The `create_local` function calls `_create_app`
-(line 430 in `_create_databricks`; `_create_app` internally calls
-`ws.apps.create_and_wait` at deploy.py:1533), so the ACL grant must also run
-in `create_local`. Add the same `put_acl` call unconditionally after the returned
-`app` object, before the schema setup and deployment (mirroring the deploy.py
-flow).
+**In `scripts/deploy_local.py`:** `create_local` calls `_create_app` on its own
+path, so the secret resource must be appended there too — but no ACL grant is
+required in either place, per the auto-grant finding above.
 
 For the **non-branching path in `update_local`** (when `branch_from_env` is
 `None`): the secret-mode key ladder, resource attachment, and DELETE must also
@@ -264,15 +309,31 @@ and compare before anything else happens. In secret mode `_migrate_encryption_ke
 (`deploy.py:791`) is skipped entirely: case 3 relocates to the secret, not to
 Lakebase.
 
-Attaching the resource must not clobber the rest of the app.
-`ws.apps.update(name, app)` takes a whole `App` and replaces `resources`
-wholesale, so the update reads the current app with `ws.apps.get`, mutates
-**only** `resources` on that object — adding or replacing the
-`TELLR_ENCRYPTION_KEY` entry while carrying `app_database` through — and
-passes that object back. `compute_size`, `description`,
-`default_source_code_path` and `user_api_scopes` all come from the fetched app
-rather than being re-derived, so nothing is silently reset. Then the same
-idempotent `put_acl`.
+Attaching the resource must not clobber the rest of the app, and the obvious
+approach does not work. Passing a GET-fetched `App` straight back to
+`ws.apps.update` fails with `InvalidParameterValue: Compute size updates are not
+supported in this update API` (verified). `update` is also a full replace on the
+fields it does accept: omitting `description` blanked it to `''` and omitting
+`user_api_scopes` blanked it to `None`.
+
+So the update reads the current app with `ws.apps.get` and builds a **fresh**
+`App`, carrying every mutable field across explicitly and omitting
+`compute_size`:
+
+```python
+cur = ws.apps.get(name=app_name)
+ws.apps.update(name=app_name, app=App(
+    name=app_name,
+    description=cur.description,
+    default_source_code_path=cur.default_source_code_path,
+    user_api_scopes=cur.user_api_scopes,
+    resources=<cur.resources with TELLR_ENCRYPTION_KEY added or replaced>,
+    # compute_size deliberately omitted — passing it is rejected
+))
+```
+
+`app_database` is carried through as part of `cur.resources`. No `put_acl`
+follows.
 
 **Ordering of the DELETE is load-bearing.** The obvious order — delete the
 row, attach the resource, deploy — is wrong. Between the delete and a
@@ -502,27 +563,15 @@ refuses PAT auth.
 
 ### Blocking implementation
 
-**CRITICAL BLOCKER:**
-
-1. **Can `ws.secrets.get_secret()` be called from the deploy tool
-   (a normal user outside a notebook)?** The SDK's docstring states
-   *"This API can only be called from the DBUtils interface"* and
-   *"Throws `BAD_REQUEST` if normal user calls get secret outside of a
-   notebook."* The design's read-back verification, case-1 reuse, and
-   ladder-case-1 comparison all depend on this call succeeding. If it fails,
-   we cannot verify the written value, cannot safely reuse existing secrets,
-   and cannot guard against mismatches. If it is unavailable, the fallback
-   must refuse to overwrite a present secret (case 1's guard: "an existing
-   secret may already protect ciphertext from a previous install"). Instead,
-   require the operator to pass the key value explicitly via a new parameter
-   or environment variable, so we know the value and can compare it to the
-   resource declaration. Presence-only detection via `list_secrets()` alone
-   is insufficient — `--force` would convert the single guard against
-   clobbering a live key into an opt-in.
+**RESOLVED by the spike — no longer blocking:** `ws.secrets.get_secret()` works
+from the deploy tool outside a notebook. Read-back verification, case-1 reuse and
+the ladder-case-1 comparison are all available as designed, and the
+presence-only/`--force` fallback is dropped: it is unnecessary, and it would have
+converted the one guard against clobbering a live key into an opt-in.
 
 **DATA-LOSS GUARD CHOICE (blocks implementation):**
 
-2. **Minimum app version:** Deploying old app code with secret mode, or rolling
+1. **Minimum app version:** Deploying old app code with secret mode, or rolling
    back after the DELETE, leaves the app running code that ignores
    `TELLR_ENCRYPTION_KEY` and mints a fresh key, orphaning stored credentials.
    Choose one approach: (a) refuse secret mode when `app_version` is below the
@@ -534,30 +583,28 @@ refuses PAT auth.
    so the guard must be enforceable on that path too, or documented as an
    exception with explicit risk acceptance.
 
-### Open questions (defined fallbacks, non-blocking)
+### Open questions — both closed by the spike
 
-1. Is an uppercase-underscore resource key accepted? The existing resource is
-   `app_database` and the documented default resource key is `secret`. If not,
-   name the resource `tellr_encryption_key` and read that variable instead.
-   **Scope of change if answered "no":** The resource name and environment variable
-   name are used throughout: the dispatch at L59, the `_validated` secret-mode
-   message (L76), the test assertions in `test_encryption.py` (L363-373), and
-   the `monkeypatch.delenv` name (L371). The boot code itself is identical
-   either way; only the names change.
-2. Does the variable appear from the resource declaration alone? One sentence
-   in the docs — *"each one becomes a separate environment variable when
-   referenced in `valueFrom`"* — leaves room for doubt. If it does not appear,
-   add a single `- name: TELLR_ENCRYPTION_KEY` / `valueFrom: "TELLR_ENCRYPTION_KEY"`
-   entry to the template. The boot code is identical either way.
+1. **Uppercase-underscore resource key accepted?** Yes. `TELLR_ENCRYPTION_KEY`
+   was accepted as a resource key, so no rename cascade is needed.
+2. **Does the variable appear from the resource declaration alone?** No — the
+   `valueFrom` entry is required. This is now part of the design rather than a
+   fallback; see Mechanism, and the `_write_app_yaml` parameter it implies.
+
+One question the spike did **not** answer, worth knowing before implementation
+because it bears on accepted risk 2: what happens when `app.yaml` carries a
+`valueFrom` entry for a resource that is *not* attached. If the deploy rejects
+it, the "someone detached the resource" case becomes a loud deploy failure
+instead of a silent revert to Lakebase, which would partly close that risk for
+free. The reverse case (resource attached, no `valueFrom`) was tested and simply
+yields no variable.
 
 ### Verification steps (live testing on deployed app)
 
-1. Was `put_acl` necessary, and in which principal form does it accept the app
-   service principal?
-2. Full lifecycle on a legacy app holding real ciphertext: `update(scope=...)`
+1. Full lifecycle on a legacy app holding real ciphertext: `update(scope=...)`
    → boot log shows the secret path → the previously-stored Google credential
    still decrypts → `encryption_keys` is empty.
-3. Detach the resource once and restart, to observe accepted risk 2 rather than
+2. Detach the resource once and restart, to observe accepted risk 2 rather than
    assume it.
 
 ## Docs and version
