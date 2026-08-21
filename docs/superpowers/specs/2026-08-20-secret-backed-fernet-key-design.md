@@ -39,14 +39,17 @@ So the deploy tool declares an `AppResourceSecret` with resource key
 the container environment at deploy time. Nothing about the key appears in the
 generated `app.yaml` — the resource declaration is the entire configuration.
 
-The alternative considered and rejected was to write the scope and key *names*
-into `app.yaml` and have the app fetch the value at runtime with
-`secrets.get_secret`. That is what the docs' own best-practices section
-recommends, and it keeps the key out of the container environment entirely. It
-was rejected in favour of env injection for simplicity: no runtime workspace
-API call on the boot path, and the app's secret access is declared on the app
-where it can be audited. The residual exposure is recorded under Accepted
-risks below.
+The alternative considered was to write the scope and key *names* into `app.yaml`
+and have the app fetch the value at runtime with `secrets.get_secret`. That is
+what the docs' own best-practices section recommends, and it keeps the key out
+of the container environment entirely. This alternative is **not available** if
+the CRITICAL BLOCKER (open question 1) resolves "no" — the SDK restricts
+`get_secret` to calls from DBUtils inside notebooks, and the deploy tool is a
+normal user outside a notebook. If the blocker resolves "yes" (the call works),
+the choice to use env injection instead is a trade-off for simplicity: no
+runtime workspace API call on the boot path, and the app's secret access is
+declared on the app where it can be audited. The residual exposure is recorded
+under Accepted risks below.
 
 ## Boot resolution
 
@@ -107,23 +110,41 @@ underscores, and periods"* (no `@` — `@` is not a valid character in scope or
 key names), and key names go through the same validator in practice.
 
 **`create()` only:** `config_yaml_path` and `config/deployment.yaml` accept the
-same two keys, following the `mlflow_tracing` precedent already in `deploy.py` —
-YAML values apply first, an explicit argument overrides. The `update()` entry point
-takes no `config_yaml_path` parameter; values from deployment YAML are not loaded
-on update (per its docstring). For `update()` and `relocate()`, secret-mode
-credentials are specified via arguments (no YAML loading on update). If
-environment-variable fallback is desired, add layering after argument parsing
-(similar to the MLflow precedent, which accepts `TELLR_DEPLOY_MLFLOW_*` variables)
-— name the variables explicitly in `deploy.py` around the argument handling,
-and document them alongside the argument reference.
+same two keys (`encryption_secret_scope`, `encryption_secret_key`), following
+the `mlflow_tracing` precedent already in `deploy.py` — YAML values apply
+first, an explicit argument overrides.
+
+To implement: extend `deploy.py::_load_deployment_config` (currently line 850)
+and `scripts/deploy_local.py::load_deployment_config` (currently line 81) to
+read and return the new keys from the environment's YAML section. Both loaders
+return a flat dict; add the new keys there. The `mlflow_tracing` precedent
+(`_mlflow_flat_from_env_section` + substitutions) is app.yaml-placeholder-shaped
+and not directly reusable — instead, add the keys directly to each loader's
+return dict, mirroring how `lakebase_name`, `schema_name`, and `app_name` are
+returned.
+
+The `update()` entry point takes no `config_yaml_path` parameter; values from
+deployment YAML are not loaded on update (per its docstring). For `update()`,
+secret-mode credentials are specified via arguments only (no YAML loading on
+update). If environment-variable fallback is desired, add layering after
+argument parsing (similar to the MLflow precedent, which accepts
+`TELLR_DEPLOY_MLFLOW_*` variables) — name the variables explicitly in `deploy.py`
+around the argument handling, and document them alongside the argument reference.
+
+Note: `_create_databricks`'s mutual-exclusion check is `if any([lakebase_name,
+schema_name, app_name, app_file_workspace_path])`, so the two new arguments are
+silently permitted alongside `config_yaml_path` while the four core ones are
+not. This is intentional (argument overrides YAML) and safe, but worth noting
+as consistent with the design's rule that arguments override YAML.
 
 ### Scope preflight
 
-`_preflight_encryption_scope(ws, scope)` must run **at the very start of
-`_create_databricks` and `_update_databricks`, before `_get_or_create_lakebase`**
-and before any key material is generated or the app is touched. This placement
-ensures that a scope preflight failure aborts before any infrastructure is
-created or modified. Failing after a Lakebase is created but before the app is
+`_preflight_encryption_scope(ws, scope)` must run **after argument and YAML
+config resolution (so the scope value is known), but before `_get_or_create_lakebase`,
+and before any key material is generated or the app is touched**. In
+`_create_databricks`, this is after lines 367-378 (YAML loading) but before
+`_get_or_create_lakebase`. This placement ensures that a scope preflight failure
+aborts before any infrastructure is created or modified. Failing after a Lakebase is created but before the app is
 deployed would leave an orphaned or partially-configured Lakebase instance.
 
 1. Already in `ws.secrets.list_scopes()` → confirm it is Databricks-backed,
@@ -148,12 +169,18 @@ deployed would leave an orphaned or partially-configured Lakebase instance.
    and reads it back for verification; Key Vault-backed scopes are written and
    read through Key Vault, not this API.
 
-The `put_secret` → read-back round trip that follows doubles as the write and
-read permission check, so no separate probe is needed. **Error handling:**
-`get_secret` throws `RESOURCE_DOES_NOT_EXIST` (secret not found) and
-`PERMISSION_DENIED` (caller lacks READ); the code must distinguish them and
-avoid treating a permission denial as "secret absent", which would fall through
-to creating a new secret and clobbering the live key. `create_scope` throws
+The `put_secret` → read-back round trip tests write and read permission, but
+**`put_acl` requires MANAGE permission** (not covered by the round trip). Before
+or after `put_secret`, probe MANAGE permission with `get_acl(scope, principal=me)`
+or make `put_acl` failure non-fatal with guidance to the user to request MANAGE
+from the scope creator. This closes the window where an operator holding only
+WRITE+READ passes preflight, writes the secret successfully, then fails at
+`put_acl` after the app is created.
+
+**Error handling:** `get_secret` throws `RESOURCE_DOES_NOT_EXIST` (secret not
+found) and `PERMISSION_DENIED` (caller lacks READ); the code must distinguish
+them and avoid treating a permission denial as "secret absent", which would
+fall through to creating a new secret and clobbering the live key. `create_scope` throws
 different errors: `RESOURCE_ALREADY_EXISTS`, `RESOURCE_LIMIT_EXCEEDED`,
 `INVALID_PARAMETER_VALUE`, `BAD_REQUEST` (e.g., invalid name), `CUSTOMER_UNAUTHORIZED`,
 or `UNAUTHENTICATED` — not `PERMISSION_DENIED`. Handle creation failures by
@@ -195,9 +222,20 @@ declaring the resource auto-grants the app's service principal — we do not
 need to know either way.
 
 **In `scripts/deploy_local.py`:** The `create_local` function calls `_create_app`
-(same as `deploy.py:1533`), so the ACL grant must also run there. Add the same
-`put_acl` call unconditionally after the returned `app` object, before the
-schema setup and deployment (mirroring the deploy.py flow).
+(line 430 in `_create_databricks`; `_create_app` internally calls
+`ws.apps.create_and_wait` at deploy.py:1533), so the ACL grant must also run
+in `create_local`. Add the same `put_acl` call unconditionally after the returned
+`app` object, before the schema setup and deployment (mirroring the deploy.py
+flow).
+
+For the **non-branching path in `update_local`** (when `branch_from_env` is
+`None`): the secret-mode key ladder, resource attachment, and DELETE must also
+run in `update_local` — not just in `_update_databricks`. Currently `update_local`
+reimplements the flow with its own `_read_existing_encryption_key` +
+`_migrate_encryption_key_to_lakebase` (lines 700-712), so apply the same
+secret-mode changes here: if `encryption_secret_scope` is set, run the ladder
+to resolve or generate the key, read it back, attach the resource, deploy, then
+DELETE (or skip DELETE if branching).
 
 Schema setup and deploy are unchanged. `_write_app_yaml` is untouched.
 
@@ -212,6 +250,10 @@ Key resolution is a ladder; first hit wins:
    `_migrate_encryption_key_to_lakebase` guards against (`deploy.py:834-842`).
    This is what makes re-runs idempotent.
 2. An `encryption_keys` row in Lakebase → this is the key being relocated.
+   **Must fail closed on read errors:** any error other than
+   `RESOURCE_DOES_NOT_EXIST` (table/row genuinely absent) aborts. Fresh-era
+   installs see `PERMISSION_DENIED` because the human deployer lacks SELECT on
+   the app-owned schema; this must not fall through to case 3 as "no row".
 3. `GOOGLE_OAUTH_ENCRYPTION_KEY` still present in the deployed `app.yaml`
    (never-migrated install) → `_read_existing_encryption_key`
    (`deploy.py:757`) already reads exactly this.
@@ -274,11 +316,23 @@ deployed version before the DELETE.
 
 ### `update()` in legacy mode against a secret-mode app
 
-Nothing harmful happens: `_read_existing_encryption_key` returns `None` on a
-keyless `app.yaml`, no Lakebase migration runs, and `apps.update` is never
-called, so the resource survives. Add a detection line — if the fetched app
-already carries a `TELLR_ENCRYPTION_KEY` resource, print that secret mode is
-being retained — so nobody concludes the app quietly reverted.
+When `update()` is called without `encryption_secret_scope` on an app that
+already carries the `TELLR_ENCRYPTION_KEY` resource:
+
+- If `encryption_key` parameter is `None` (the default): nothing harmful happens.
+  `_read_existing_encryption_key` returns `None` on a keyless `app.yaml`, no
+  Lakebase migration runs, and `apps.update` is never called, so the resource
+  survives. Add a detection line — if the fetched app already carries a
+  `TELLR_ENCRYPTION_KEY` resource, print that secret mode is being retained — so
+  nobody concludes the app quietly reverted.
+- If `encryption_key` parameter is **not** `None` (explicitly passed): **refuse
+  the operation**. Passing a legacy key value would run `_migrate_encryption_key_to_lakebase`,
+  recreating the row this design exists to delete. If the passed value differs
+  from the secret, it creates a mismatch that silently orphans ciphertext on
+  boot. Add a guard: if the fetched app carries the `TELLR_ENCRYPTION_KEY`
+  resource, raise an error refusing `encryption_key` and directing the user to
+  use `update(encryption_secret_scope=...)` instead if they need to rotate the
+  key in the secret.
 
 ## Dev deploy and the devloop fork
 
@@ -286,9 +340,16 @@ Both `scripts/deploy_local.py` and `scripts/deploy_local.sh` gain
 `--encryption-secret-scope` and `--encryption-secret-key`. `config/deployment.yaml`
 gains the same two keys per environment, documented in `config/deployment.example.yaml`.
 
-`deploy_local.sh` has a fixed argument allowlist (lines 103-107); add the new flags
-there so they pass through to the Python script. Without this, the flags will be
-rejected as "Unknown argument" at line 104. 
+`deploy_local.sh` needs two edits:
+- Add `case` arms for `--encryption-secret-scope` and `--encryption-secret-key`
+  *before* the `*)` catch-all (around line 103), alongside `--instance` at 96-99.
+  Without this, the flags are rejected as "Unknown argument".
+- Add pass-through for the new flags to the Python invocation: construct
+  `ENCRYPTION_SECRET_SCOPE_ARG` and `ENCRYPTION_SECRET_KEY_ARG` arrays (similar
+  to `FROM_PYPI_ARG` and `INSTANCE_ARG` at lines 215-222) and include them in
+  the `python -m scripts.deploy_local` call (lines 223-230). Without the
+  pass-through, the flags are accepted and silently dropped — a worse failure
+  than rejection, because the deploy appears to succeed in legacy mode. 
 
 Secret-mode handling must be added to the branching path (`scripts/deploy_local.py:631-693`)
 **within** `_check_branching_preconditions` or immediately after it returns successfully.
@@ -299,8 +360,9 @@ to the secret. A fork never needs a DELETE: it is a fresh branch with no pre-exi
 to clean up.
 
 The fork path needs explicit handling. `_check_branching_preconditions`
-(`scripts/deploy_local.py:282`) currently refuses to fork when the source
-`app.yaml` still carries a legacy key. The refusal is not about CoW inheritance
+(`scripts/deploy_local.py:260`; the `_read_existing_encryption_key` call is at
+line 282 inside it) currently refuses to fork when the source `app.yaml` still
+carries a legacy key. The refusal is not about CoW inheritance
 (after the legacy-key migration, the source app's row in the encryption_keys
 table is present and inherited by the fork via copy-on-write); it is because
 the fork cannot write to the source app's `app.yaml`, and seeding the fork's
@@ -321,10 +383,13 @@ credentials; the `--encryption-secret-scope` CLI flag does not override detected
 resources (it applies only to non-branching deploys). This mirrors the existing
 precondition's intent.
 
-**Implementation note:** The source app's name must be derived from the
-`branch_from_workspace_path` (suffix rules from `_resolve_target`, reversing
-the `--instance` logic) so `ws.apps.get(name=source_app_name)` can fetch the
-source app and read its resources. This derivation logic is new and must be added.
+**Implementation note:** The source app's name is available directly as
+`environments[branch_from]["app_name"]` (already loaded in the config dict).
+Pass it through `_load_branch_source_config`'s return dict alongside the
+existing `workspace_path`, `schema`, and `database_name` keys, so
+`ws.apps.get(name=source_app_name)` can fetch the source app and read its
+resources. The `workspace_path` carries no recoverable suffix rule; the app
+name is arbitrary config that cannot be derived from the path.
 
 ## Accepted risks
 
@@ -372,13 +437,25 @@ source app and read its resources. This derivation logic is new and must be adde
   fixture, alongside the `GOOGLE_OAUTH_ENCRYPTION_KEY` delenv already there for
   exactly this hermeticity reason.
 
+### Unit — `tests/unit/test_deploy_local_preflight.py` (existing tests affected)
+
+Existing assertions in `test_deploy_local_preflight.py:25-35` assert
+`_check_branching_preconditions(mock_ws, good_config) is None` (no return value).
+If the secret-mode detection moves inside `_check_branching_preconditions` or
+immediately after (L293-295), the return contract may change. Additionally, new
+`ws.apps.get` calls on mock objects require proper setup — `MagicMock().resources`
+must be iterable by default or mocked. Update these tests alongside the
+implementation.
+
 ### Unit — new `tests/unit/test_deploy_secret_encryption_key.py`
 
 - Preflight: missing scope is created; creation denied yields the actionable
-  error; non-Databricks-backed scope is refused.
+  error; non-Databricks-backed scope is refused. MANAGE permission probe
+  (or non-fatal `put_acl` error) is tested.
 - `create`: an existing secret is reused and not overwritten; an absent one is
   generated, written, and read back.
-- The `update` ladder in all four branches.
+- The `update` ladder in all four branches, including ladder case 2 read errors
+  (PERMISSION_DENIED vs. RESOURCE_DOES_NOT_EXIST distinction).
 - Read-back mismatch aborts **and the row is not deleted**.
 - Resource rebuild preserves `app_database` and `user_api_scopes`.
 - The DELETE happens only after a successful deploy, asserted by call ordering
@@ -388,15 +465,19 @@ source app and read its resources. This derivation logic is new and must be adde
   Existing tests in `tests/unit/test_deploy_encryption_key_migration.py` cover
   the legacy path; they should be untouched (run only when no secret scope is
   configured).
+- Fork path: source app's secret mode is detected via `ws.apps.get().resources`,
+  source app name is passed through config dict, and fork inherits scope/key
+  automatically. Fork creation does **not** run DELETE (fresh branch, no row).
 
 ### Unit — `tests/unit/test_deploy_app_yaml.py`
 
 Assert that secret mode adds nothing to the generated `app.yaml` (when the
 resource declaration alone is sufficient to inject the variable) and that no
 key material appears in it — a regression guard against ever putting the key
-back in the template. The test at line 37-38 asserts that `"encryption_key"` is
-not a parameter to `_write_app_yaml`; this remains true as long as the resource
-declaration is sufficient.
+back in the template. The test at line 37-38 asserts that `"encryption_key"`
+is not a literal parameter name in `sig.parameters`; this remains true as long
+as the resource declaration is sufficient (exact-key membership check, not
+substring matching).
 
 **Note on open question 2's fallback:** If the variable does not appear from the
 resource declaration alone, the fallback adds a `valueFrom:` entry to the
@@ -404,11 +485,11 @@ template. This requires: (1) a new placeholder in `app.yaml.template`; (2) a
 new parameter on `_write_app_yaml` to conditionally include it (only in secret
 mode); (3) threading that parameter through all four call sites
 (`deploy.py:413`, `deploy.py:573`, `deploy_local.py:476`, `deploy_local.py:768`);
-(4) updating the test at `test_deploy_app_yaml.py:37-38` to exclude the new
-parameter name from the substring check (or rename the parameter to avoid
-collision with the "encryption_key" substring). The entry must be conditional
-so legacy-mode apps (no secret mode) do not carry an unconditional reference to
-a non-existent resource. This is the implementation cost if question 2 is answered "no".
+(4) ensuring any new parameter name does not break the invariant that
+`"encryption_key"` is not a parameter (exact membership check). The entry must
+be conditional so legacy-mode apps (no secret mode) do not carry an
+unconditional reference to a non-existent resource. This is the implementation
+cost if question 2 is answered "no".
 
 ### Live verification
 
@@ -431,9 +512,13 @@ refuses PAT auth.
    ladder-case-1 comparison all depend on this call succeeding. If it fails,
    we cannot verify the written value, cannot safely reuse existing secrets,
    and cannot guard against mismatches. If it is unavailable, the fallback
-   is presence-only detection (via `list_secrets()`) plus a required explicit
-   `--force` flag to proceed with an overwrite when the secret cannot be
-   verified.
+   must refuse to overwrite a present secret (case 1's guard: "an existing
+   secret may already protect ciphertext from a previous install"). Instead,
+   require the operator to pass the key value explicitly via a new parameter
+   or environment variable, so we know the value and can compare it to the
+   resource declaration. Presence-only detection via `list_secrets()` alone
+   is insufficient — `--force` would convert the single guard against
+   clobbering a live key into an opt-in.
 
 **DATA-LOSS GUARD CHOICE (blocks implementation):**
 
@@ -451,14 +536,15 @@ refuses PAT auth.
 
 ### Open questions (defined fallbacks, non-blocking)
 
-2. Is an uppercase-underscore resource key accepted? The existing resource is
+1. Is an uppercase-underscore resource key accepted? The existing resource is
    `app_database` and the documented default resource key is `secret`. If not,
    name the resource `tellr_encryption_key` and read that variable instead.
    **Scope of change if answered "no":** The resource name and environment variable
    name are used throughout: the dispatch at L59, the `_validated` secret-mode
-   message (L76), all four test assertions (L323-332), and the `monkeypatch.delenv`
-   name (L330). The boot code itself is identical either way; only the names change.
-3. Does the variable appear from the resource declaration alone? One sentence
+   message (L76), the test assertions in `test_encryption.py` (L363-373), and
+   the `monkeypatch.delenv` name (L371). The boot code itself is identical
+   either way; only the names change.
+2. Does the variable appear from the resource declaration alone? One sentence
    in the docs — *"each one becomes a separate environment variable when
    referenced in `valueFrom`"* — leaves room for doubt. If it does not appear,
    add a single `- name: TELLR_ENCRYPTION_KEY` / `valueFrom: "TELLR_ENCRYPTION_KEY"`
