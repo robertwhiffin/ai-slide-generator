@@ -366,4 +366,4 @@ def test_delete_lakebase_key_row_issues_the_delete():
     cur = MagicMock()
     secret_key.delete_lakebase_key_row(cur, "app_data")
     sql = cur.execute.call_args[0][0]
-    assert "DELETE FROM" in sql and "encryption_keys" in sql
+    assert "DELETE FROM" in sql and "encryption_keys" in sql and "WHERE id = 1" in sql
