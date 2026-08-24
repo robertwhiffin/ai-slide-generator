@@ -1231,7 +1231,7 @@ branch instead:
 
 ```bash
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_finding_conformance.py -q
-cd frontend && npx tsc --noEmit
+cd frontend && npm run typecheck
 ```
 Expected: conformance PASS (5 tests); `tsc` PASS. A `tsc` error naming `CATEGORY_LABEL` means a
 category was added without widening the `Record` — that is the compile-time constraint working.
@@ -1484,7 +1484,7 @@ At `:525`, in the `FeedbackDrawer` props:
 - [ ] **Step 6: Run the unit tests and the type check**
 
 ```bash
-cd frontend && npm run test:unit && npx tsc --noEmit
+cd frontend && npm run test:unit && npm run typecheck
 ```
 Expected: 4 tests PASS; `tsc` clean.
 
@@ -2751,7 +2751,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         if self._session_factory is None:
             from src.core.database import get_session_local
 
-            return get_session_local()
+            return get_session_local()()  # Call it TWICE: get_session_local returns sessionmaker, () instantiates
         return self._session_factory()
 
     @staticmethod
@@ -3753,7 +3753,7 @@ Repoint, never delete — a deleted test is invisible to the baseline gate.
 
 ```bash
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_retired_prompt_columns.py -q
-cd frontend && npx tsc --noEmit && cd ..
+cd frontend && npm run typecheck && cd ..
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q > /tmp/after_task24.log 2>&1
 diff <(grep -E '^(FAILED|ERROR)' /tmp/pr3_baseline.log | sort) \
      <(grep -E '^(FAILED|ERROR)' /tmp/after_task24.log | sort)
@@ -5245,8 +5245,12 @@ def test_turn_two_starts_with_nothing_landed_against_a_real_checkpointer():
     t1 = app.invoke({"session_id": "s", "turn_id": "t1"}, config=cfg)
     assert scoped_vals(t1, "landed_positions") == {0, 1, 2}
     t2 = app.invoke({"session_id": "s", "turn_id": "t2"}, config=cfg)
-    assert scoped_vals(t2, "landed_positions") == {0, 1, 2}   # rebuilt within t2, not inherited
-    assert scoped_vals(t2, "landed_positions") is not None
+    # WITHOUT turn-scoping, t2 would inherit t1's [0,1,2] and the conditional_edge would return END
+    # on the first pass. With turn-scoping, t2 starts fresh and re-lands them: [0,1,2].
+    # The assertion is: within t2, we LANDED them (not inherited). Verify the wrapper's turn is t2:
+    assert scoped_vals(t2, "landed_positions") == {0, 1, 2}
+    t2_wrapper = t2.get("landed_positions", {})
+    assert t2_wrapper.get("turn") == "t2", "landed_positions must be re-wrapped in turn 2"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -5292,6 +5296,10 @@ def scoped_vals(state: Dict[str, Any], key: str):
     wrapper = (state or {}).get(key)
     if not isinstance(wrapper, dict):
         return set() if key.endswith(("_positions", "positions")) else {}
+    # CRITICAL: if the wrapper's turn doesn't match the current turn, it's stale—discard it.
+    # Without this, turn 2 inherits turn 1's landed positions and the graph skips building.
+    if state and wrapper.get("turn") != state.get("turn_id"):
+        return set() if key.endswith("positions") else {}
     return wrapper.get("vals", set() if key.endswith("positions") else {})
 
 
@@ -5346,6 +5354,28 @@ class GraphState(TypedDict, total=False):
     error_state: Optional[dict]
     #: Position currently in the fixer. Written by fixer_node only.
     fix_target: Optional[int]
+    #: Intent from architect: "build" | "discuss" | "edit". Router reads this to decide flow.
+    architect_intent: Optional[str]
+    #: Conversational message from architect for the chat stream.
+    architect_message: Optional[str]
+    #: Positions to rebuild (multi-target edit). None means all slides in the spec.
+    target_positions: Optional[list[int]]
+    #: CSS from template extraction (§K4). Written pre-fan-out by architect_node.
+    token_css: Optional[str]
+    #: HTML from aggregated slides, written post-commit by deck_reviewer_node (§L2).
+    knitted_html: Optional[str]
+    #: Username for deck-write attribution. From session or MCP request.
+    modified_by: Optional[str]
+    #: Deterministic CSS from template pinning. Written pre-fan-out by architect_node (§K4).
+    deterministic_css: Optional[str]
+    #: External script URLs from template. Written pre-fan-out by architect_node (§L2).
+    external_scripts: Optional[list[str]]
+    #: Head <meta> tags from template. Written pre-fan-out by architect_node (§L2).
+    head_meta: Optional[dict]
+    #: Inline <script> content from template. Written pre-fan-out by architect_node (§L2).
+    scripts_content: Optional[str]
+    #: Foreman wake-ups for layer-1 test assertions. Recorded by foreman_node.
+    foreman_wakes: Optional[list[list[int]]]
 
     # --- FAN-IN KEYS. Every key written by more than one concurrent branch MUST carry a
     # reducer, or the runtime raises:
@@ -5392,9 +5422,12 @@ def has_pending_fix(state: Dict[str, Any]) -> bool:
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_graph_state.py -q
 # Expected: PASS (14 tests)
 
-# Sabotage 1: drop turn-scoping from landed_positions -> the turn-2 test must go red.
-# In state.py, change: landed_positions: Annotated[dict, turn_scoped_union]
-#                  to: landed_positions: Annotated[dict, turn_scoped_merge]
+# Sabotage 1: drop the turn-id check from scoped_vals -> the turn-2 test must go red.
+# In state.py, comment out or delete the turn-check lines:
+#     # CRITICAL: if the wrapper's turn doesn't match the current turn, it's stale—discard it.
+#     if state and wrapper.get("turn") != state.get("turn_id"):
+#         return set() if key.endswith("positions") else {}
+# Then turn 2 will inherit turn 1's landed_positions and fail the turn_id assertion.
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_graph_state.py -q -k turn_two
 # Sabotage 2: make has_pending_fix truthiness-based -> the tombstone test must go red.
 #     return bool(scoped_vals(state, "fix_map"))
@@ -6181,6 +6214,26 @@ def fix_reviewer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def foreman_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic orchestration: decide what to build next.
+
+    This node serves as a checkpoint before the foreman_router conditional edge. It records
+    each wake-up for layer-1 test assertions about the superstep barrier (spec §4).
+
+    Returns empty state; all the orchestration logic is in foreman_router, which reads state
+    and returns Send objects or a node name.
+    """
+    from src.services.foreman_service import next_dispatch_batch
+    from src.services.graph.state import scoped
+
+    turn_id = state["turn_id"]
+    # Record a wake-up: which positions are being dispatched in this batch. Used only by tests.
+    wakes = scoped_vals(state, "foreman_wakes") or []
+    batch = next_dispatch_batch(state)
+    wakes.append(batch)
+    return {"foreman_wakes": scoped(turn_id, wakes)} if batch else {}
+
+
 def placeholder_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Commit a stalled or twice-failed position as a visibly-marked placeholder (§I).
 
@@ -6286,6 +6339,20 @@ def architect_node(state: Dict[str, Any]) -> Dict[str, Any]:
         modified_by=state.get("modified_by"),
     )
     return update
+
+
+def data_analyst_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Enrich the deck spec with resolved data (spec §6.1). Thin call_skill wrapper.
+
+    Returns to architect_node for another pass, potentially with an updated spec.
+    """
+    from src.core.skills import call_skill
+
+    out = call_skill("data_analyst", state)
+    return {
+        "architect_message": out.message,
+        "deck_spec": out.deck_spec if out.deck_spec else state.get("deck_spec"),
+    }
 ```
 
 - [ ] **Step 4: Assemble the graph**
@@ -8100,7 +8167,7 @@ context.
 
 ```bash
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_slide_ready_event.py -q
-cd frontend && npx tsc --noEmit && cd ..
+cd frontend && npm run typecheck && cd ..
 git add src/api/schemas/streaming.py src/api/routes/chat.py \
         src/api/services/session_manager.py src/services/streaming_callback.py \
         frontend/src/services/api.ts tests/unit/test_slide_ready_event.py
@@ -8904,7 +8971,7 @@ about it reaches the architect's intent parsing**.
 - [ ] **Step 3: Add the e2e spec and run**
 
 ```bash
-cd frontend && npm run test:unit && npx tsc --noEmit
+cd frontend && npm run test:unit && npm run typecheck
 npx playwright test tests/e2e/spec-view.spec.ts
 cd .. && git add frontend/src/components/SpecView frontend/src/components/Layout/AppLayout.tsx \
         frontend/src/services/api.ts frontend/tests/e2e/spec-view.spec.ts
@@ -8950,7 +9017,7 @@ they are the reason the id rule had to be settled in Phase 1 rather than left op
 - [ ] **Step 2: Implement, run, commit**
 
 ```bash
-cd frontend && npm run test:unit && npx tsc --noEmit && cd ..
+cd frontend && npm run test:unit && npm run typecheck && cd ..
 git add frontend/src/components/Layout/AppLayout.tsx frontend/src/components/SlideViewer/
 git commit -m "feat(frontend): wire the feedback drawer to real per-slide findings"
 ```
