@@ -193,6 +193,66 @@ def resolve_key_for_create(ws: Any, scope: str, key: str) -> str:
     return generated
 
 
+def read_lakebase_key(cur: Any, schema_name: str) -> str | None:
+    """Read the existing Fernet key row, failing closed on anything but absence.
+
+    Only a genuinely missing table or row yields None. A permission error must
+    abort: on installs where the app SP owns the table, a deployer outside
+    ``databricks_superuser`` gets denied, and treating that as "no row" would walk
+    the ladder to case 4 and mint a fresh key over live ciphertext.
+    """
+    try:
+        cur.execute(
+            f'SELECT key_value FROM "{schema_name}".encryption_keys WHERE id = 1'
+        )
+    except Exception as exc:  # noqa: BLE001
+        text = str(exc).lower()
+        if "does not exist" in text and "relation" in text:
+            return None
+        raise SecretKeyError(
+            f"Could not read the existing key from {schema_name}.encryption_keys: "
+            f"{exc}. This is not a missing-table error, so it is most likely a "
+            f"permission problem. Refusing to continue — proceeding could generate "
+            f"a fresh key and orphan every stored Google credential."
+        ) from exc
+    row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def resolve_key_for_update(
+    ws: Any,
+    scope: str,
+    key: str,
+    lakebase_key: str | None,
+    app_yaml_key: str | None,
+) -> tuple[str, bool]:
+    """Decide which key secret mode should hold. Returns (value, wrote_secret).
+
+    First hit wins:
+      1. A valid key already in the secret — authoritative, and hard-fails if it
+         disagrees with an existing Lakebase row (mirrors the guard in
+         ``_migrate_encryption_key_to_lakebase``).
+      2. The existing Lakebase row — the relocate case.
+      3. A legacy ``GOOGLE_OAUTH_ENCRYPTION_KEY`` still in the deployed app.yaml.
+      4. Nothing anywhere — generate fresh.
+    """
+    existing = read_secret_key(ws, scope, key)
+    if existing:
+        if lakebase_key and lakebase_key != existing:
+            raise SecretKeyError(
+                f"Secret {scope}/{key} holds a different key from "
+                f"encryption_keys. Refusing to continue: attaching the secret and "
+                f"deleting the row would orphan every credential encrypted under "
+                f"the other key. Resolve which key is correct, then re-run."
+            )
+        logger.info("Secret %s/%s already holds the key — reusing", scope, key)
+        return existing, False
+
+    value = lakebase_key or app_yaml_key or Fernet.generate_key().decode()
+    write_and_verify_secret_key(ws, scope, key, value)
+    return value, True
+
+
 def app_reports_secret_source(
     ws: Any, app_url: str, attempts: int = 10, delay: float = 6.0
 ) -> bool:

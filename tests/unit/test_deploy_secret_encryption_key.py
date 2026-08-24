@@ -232,3 +232,93 @@ def test_resolve_key_for_create_generates_when_absent():
     result = secret_key.resolve_key_for_create(ws, "tellr", "k")
     assert result == generated["v"]
     assert Fernet(result.encode())
+
+
+# ---------------------------------------------------------------------------
+# Task 8 tests: read_lakebase_key, resolve_key_for_update
+# ---------------------------------------------------------------------------
+
+
+def test_read_lakebase_key_returns_row_value():
+    cur = MagicMock()
+    cur.fetchone.return_value = ("abc",)
+    assert secret_key.read_lakebase_key(cur, "app_data") == "abc"
+
+
+def test_read_lakebase_key_returns_none_when_table_absent():
+    cur = MagicMock()
+    cur.execute.side_effect = Exception('relation "app_data.encryption_keys" does not exist')
+    assert secret_key.read_lakebase_key(cur, "app_data") is None
+
+
+def test_read_lakebase_key_fails_closed_on_permission_error():
+    """A denied SELECT must abort, never look like 'no row'."""
+    cur = MagicMock()
+    cur.execute.side_effect = Exception("permission denied for table encryption_keys")
+    with pytest.raises(SecretKeyError, match="permission"):
+        secret_key.read_lakebase_key(cur, "app_data")
+
+
+def test_ladder_case1_reuses_matching_secret():
+    k = Fernet.generate_key().decode()
+    ws = _secret_ws(value=k)
+    value, wrote = secret_key.resolve_key_for_update(ws, "s", "k", k, None)
+    assert (value, wrote) == (k, False)
+    ws.secrets.put_secret.assert_not_called()
+
+
+def test_ladder_case1_hard_fails_on_mismatch():
+    """Reusing a mismatched secret would orphan ciphertext under the other key."""
+    ws = _secret_ws(value=Fernet.generate_key().decode())
+    with pytest.raises(SecretKeyError, match="different key"):
+        secret_key.resolve_key_for_update(
+            ws, "s", "k", Fernet.generate_key().decode(), None
+        )
+
+
+def test_ladder_case2_relocates_lakebase_key():
+    row_key = Fernet.generate_key().decode()
+    ws = MagicMock()
+    ws.secrets.get_secret.side_effect = Exception("RESOURCE_DOES_NOT_EXIST")
+
+    def capture(scope, key, string_value):
+        ws.secrets.get_secret.side_effect = None
+        ws.secrets.get_secret.return_value = GetSecretResponse(
+            key=key, value=base64.b64encode(string_value.encode()).decode()
+        )
+
+    ws.secrets.put_secret.side_effect = capture
+    value, wrote = secret_key.resolve_key_for_update(ws, "s", "k", row_key, None)
+    assert (value, wrote) == (row_key, True)
+
+
+def test_ladder_case3_relocates_app_yaml_key():
+    legacy = Fernet.generate_key().decode()
+    ws = MagicMock()
+    ws.secrets.get_secret.side_effect = Exception("RESOURCE_DOES_NOT_EXIST")
+
+    def capture(scope, key, string_value):
+        ws.secrets.get_secret.side_effect = None
+        ws.secrets.get_secret.return_value = GetSecretResponse(
+            key=key, value=base64.b64encode(string_value.encode()).decode()
+        )
+
+    ws.secrets.put_secret.side_effect = capture
+    value, wrote = secret_key.resolve_key_for_update(ws, "s", "k", None, legacy)
+    assert (value, wrote) == (legacy, True)
+
+
+def test_ladder_case4_generates_when_nothing_exists():
+    ws = MagicMock()
+    ws.secrets.get_secret.side_effect = Exception("RESOURCE_DOES_NOT_EXIST")
+
+    def capture(scope, key, string_value):
+        ws.secrets.get_secret.side_effect = None
+        ws.secrets.get_secret.return_value = GetSecretResponse(
+            key=key, value=base64.b64encode(string_value.encode()).decode()
+        )
+
+    ws.secrets.put_secret.side_effect = capture
+    value, wrote = secret_key.resolve_key_for_update(ws, "s", "k", None, None)
+    assert wrote is True
+    assert Fernet(value.encode())
