@@ -839,8 +839,12 @@ def delete_local(
     return result
 
 
-def main() -> None:
-    """CLI entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the deploy_local CLI argument parser.
+
+    Extracted from main() with no behaviour change so tests (and secret-mode
+    plumbing) can construct the parser directly.
+    """
     parser = argparse.ArgumentParser(
         description="Deploy AI Slide Generator to Databricks Apps using local wheels"
     )
@@ -926,6 +930,13 @@ def main() -> None:
             "workspace path. Required for concurrent dev-loop deploys."
         ),
     )
+
+    return parser
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = build_parser()
 
     args = parser.parse_args()
 
