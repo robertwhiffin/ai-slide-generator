@@ -78,6 +78,10 @@ environments:
       database_name: "ai-slide-generator-db"
       schema: "app_data"
       capacity: "CU_1"  # Options: CU_1, CU_2, CU_4, CU_8
+    # Optional: store the Google-credential Fernet key in a Databricks secret
+    # instead of the Lakebase encryption_keys table. Omit for the default path.
+    # encryption_secret_scope: "tellr"
+    # encryption_secret_key: "tellr-encryption-key"
 
   devloop:
     # Per-instance dev loop. Like staging, devloop deploys against an ephemeral

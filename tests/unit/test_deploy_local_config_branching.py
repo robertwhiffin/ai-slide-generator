@@ -49,13 +49,13 @@ FIXTURE_YAML = {
 @pytest.fixture
 def config_path(tmp_path, monkeypatch):
     """Write FIXTURE_YAML to tmp and point load_deployment_config at it."""
-    cfg = tmp_path / "deployment.yaml"
-    cfg.write_text(yaml.safe_dump(FIXTURE_YAML))
-    # load_deployment_config resolves PROJECT_ROOT / "config" / "deployment.yaml"
-    # Patch PROJECT_ROOT to tmp_path, and put the yaml at tmp_path/config/deployment.yaml
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
-    (cfg_dir / "deployment.yaml").write_text(yaml.safe_dump(FIXTURE_YAML))
+    cfg_file = cfg_dir / "deployment.yaml"
+    cfg_file.write_text(yaml.safe_dump(FIXTURE_YAML))
+    # Patch both CONFIG_PATH (used by load_deployment_config and
+    # _load_branch_source_config) and PROJECT_ROOT (kept for build_parser).
+    monkeypatch.setattr("scripts.deploy_local.CONFIG_PATH", cfg_file)
     monkeypatch.setattr("scripts.deploy_local.PROJECT_ROOT", tmp_path)
     return tmp_path
 
