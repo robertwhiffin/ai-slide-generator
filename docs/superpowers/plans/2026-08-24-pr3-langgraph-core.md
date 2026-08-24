@@ -279,6 +279,15 @@ def releasable_positions(state) -> list[int]: ...
 def stalled_positions(state, now: float, timeout_s: int = RELEASE_TIMEOUT_S) -> list[int]: ...
 def all_positions_committed(state) -> bool: ...
 
+# src/core/skills/__init__.py                  (Task 4.5)
+def call_skill(name: str, payload: dict) -> BaseModel: ...  # invoke + parse against schema
+
+# src/services/agent_resolution.py            (Task 4.5)
+def assemble_skill_prompt(skill: Skill, payload: dict) -> str: ...
+    # Conditionally inject _SLIDE_FRAME_CONSTRAINTS and DESIGN_SYSTEM_PRECEDENCE
+def get_structured_model(schema: type) -> LanguageModel: ...
+    # Create ChatDatabricks model bound to schema
+
 # src/services/template_sections.py            (Task 5.3)
 def section_inventory(layout_html: str) -> list[dict]: ...
 def extract_section(layout_html: str, index: int) -> str: ...
@@ -2350,6 +2359,67 @@ stopped existing, which is equally a problem.
 ```bash
 git add tests/unit/test_skill_schema_smoke.py tests/fixtures/skill_payloads/
 git commit -m "test(schema): CI schema smoke tests for all seven skills"
+```
+
+---
+
+### Task 1.7: Shared test fixtures (`tests/unit/conftest.py`)
+
+**Rationale:** Phase 2 onward uses 21 shared fixtures for the database layer, graph state, sessions, and users. These are created here as a single reusable module, not inline in individual test files. This closes the "fixture not found" gap that has stalled multiple tasks.
+
+**Files:**
+- Create: `tests/unit/conftest.py`
+
+**Interfaces:**
+- Produces: 21 fixtures with specified contracts (methods called on each):
+
+| Fixture | Methods/attributes called | Meaning |
+|---|---|---|
+| `sqlite_engine_with_decks` | `execute()`, `session()` | SQLAlchemy engine with the full ORM schema initialized, with existing deck rows for testing deck_reviews |
+| `sqlite_engine_with_prompts` | `execute()`, `session()` | SQLAlchemy engine with ConfigPrompts seeded |
+| `deck_fixture` | `session_id`, `deck_row()`, `prune_all_versions()` | A session with one SessionSlideDeck row; deck_row() fetches it; prune_all_versions() deletes all SlideDeckVersion rows for that deck |
+| `deck_with_three_rows` | `session_id`, `deck_row()`, `slides`, `prune_all_versions()` | Session with deck + 3 slide rows already written |
+| `deck_with_spec` | `session_id`, `deck_row()`, `spec_dirty_at`, `set_marker(age_seconds=)` | Session with deck + spec_dirty_marker set but no slides |
+| `deck_with_spec_but_no_rows` | `session_id`, `deck_row()` | Session with deck + spec (via write_deck_level_columns) but zero slide rows |
+| `deck_with_marker` | `session_id`, `deck_row()`, `set_marker(age_seconds=)`, `set_claim()` | Session with deck where the spec_dirty_marker is set; set_marker(age_seconds=N) sets dirty_at to N seconds ago |
+| `deck_with_verdicts` | `session_id`, `deck_row()`, `verdict_for_html_at(position)` | Session with deck + verified (finding-judged) slides; verdict_for_html_at(pos) returns the verification record |
+| `partial_deck` | `session_id`, `landed_positions`, `reviewed_positions` | Session where only positions 0,1 landed and 0 was reviewed; position 2 never built |
+| `released_deck` | `session_id`, `deck_state` | Session with all positions built, reviewed, released; used for deck_reviews testing |
+| `stub_writer` | `written_positions` list, `commit_placeholder()` record | Monkeypatch for SlideWriter that records (position, html) writes and placeholder commits |
+| `graph_session` | `session_id`, `thread_id` | A UserSession + thread_id for graph invocation tests |
+| `monolith_session` | `session_id` | A UserSession for testing the existing monolith path (non-graph) |
+| `session_with_messages` | `session_id`, `messages` list | Session with existing transcript (ChatMessage rows) |
+| `empty_session` | `session_id` | Session with no deck, no messages |
+| `mcp_created_session` | `session_id` | Session created via MCP (for testing MCP behavior in graph mode) |
+| `as_user(username)` | context manager yielding UserContext | Context manager that sets get_current_user() to the given username for duration |
+| `other_user` | `session_id`, `username` | A second user (different from as_user("alice")) for testing permission checks |
+| `contributor_session_with_spec` | `session_id`, `deck_row()` | Session owned by contributor but with edit permissions granted; deck has spec_dirty_marker |
+| `session_with_spec_and_messages` | `session_id`, `messages`, `deck_row()` | Session with both transcript and spec_dirty marker set |
+| `fake_queue` | `put()`, `get()`, `task_done()` | Mock job_queue.task_queue for testing sweeper enqueue/dequeue (with timeout semantics) |
+
+- [ ] **Step 1: Build the fixture module**
+
+Create `tests/unit/conftest.py` with all 21 fixtures. Each fixture must follow its contract exactly:
+- Deck fixtures call the actual SlideWriter/SessionManager methods to set up realistic state
+- User fixtures use real UserContext / identity functions, not mocks
+- `as_user` is a context manager that patches get_current_user() and get_user_client() via monkeypatch
+- `sqlite_engine_*` fixtures use create_all() + seed data via ORM, not raw SQL inserts
+- All fixtures are **session-scoped** for speed, except those needing isolation (mark as function-scoped in your judgment)
+
+Do **not** inline spec/prompt/CSS fixtures here — they already live in `conftest_design_system.py` and `conftest_images.py`. Import and reuse them.
+
+- [ ] **Step 2: Run tests to verify the fixtures resolve**
+
+```bash
+~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/ -k "marker" -q
+# EXPECT: tests that reference deck_with_marker pass (or skip if test logic not yet written)
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/unit/conftest.py
+git commit -m "test(fixtures): shared deck, session, and user fixtures for graph/database tests"
 ```
 
 ---
@@ -6811,19 +6881,216 @@ git commit -m "test(graph): layer-1 orchestration suite against the compiled gra
 
 ---
 
+### Task 4.5: Skill invocation infrastructure (`call_skill`, prompt assembly, model binding)
+
+**Rationale:** Phase 4 tasks 4.3 and 4.4 import and use `call_skill` before Phase 5 creates the skill loader. This task provides the **invocation**, **prompt assembly**, and **model binding** only — no skill implementations. Task 5.1 adds the seven skill files and completes the loader.
+
+**Files:**
+- Modify: `src/core/skills/__init__.py` (created as minimal infrastructure)
+- Modify: `src/services/agent_resolution.py` (add two new functions)
+- Create: `tests/unit/test_call_skill_infrastructure.py`
+
+**Interfaces:**
+- Consumes: `Skill` (from `src.domain.skill_io`, Task 1.5), `prompt_modules`, `agent_factory`'s functions, `get_system_client()`.
+- Produces: `call_skill(name, payload) -> BaseModel`, `assemble_skill_prompt(skill, payload) -> str`, `get_structured_model(schema) -> LanguageModel`.
+
+The **split between Task 4.5 and Task 5.1:**
+- Task 4.5: `call_skill`, `assemble_skill_prompt`, `get_structured_model`, `load_skill` (minimal), `list_skills` (minimal), schema registry (empty).
+- Task 5.1: Seven skill implementations, full skill loader with all skills registered.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/unit/test_call_skill_infrastructure.py
+"""Skill invocation, prompt assembly, and model binding. No actual skills in these tests."""
+import pytest
+from pydantic import BaseModel
+
+from src.core.skills import call_skill, load_skill, list_skills
+
+
+class DummyOutput(BaseModel):
+    content: str
+
+
+def test_call_skill_can_be_imported():
+    """Infrastructure exists before Task 5.1's skill implementations."""
+    assert callable(call_skill)
+
+
+def test_load_skill_returns_registered_skill():
+    """Skill registration is populated by Task 5.1; this test uses a stub or skips."""
+    pytest.skip("Skill registration is populated in Task 5.1")
+
+
+def test_list_skills_returns_all_registered():
+    """At this point, none are registered."""
+    assert list_skills() == []
+```
+
+- [ ] **Step 2: Add the two new functions to `src/services/agent_resolution.py`**
+
+```python
+# src/services/agent_resolution.py — ADD at the end of the file
+
+def assemble_skill_prompt(skill: 'Skill', payload: dict) -> str:
+    """Assemble the final prompt for a skill invocation.
+
+    Handles two conditional injections:
+    1. _SLIDE_FRAME_CONSTRAINTS: only when the resolved style in the payload lacks it (§L5's third case)
+    2. DESIGN_SYSTEM_PRECEDENCE: only when a design system is active in the payload
+
+    The skill's base prompt + these conditionals become the request to the LLM.
+    """
+    from src.core.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+    from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
+
+    prompt = skill.prompt_body or ""
+
+    # Conditional 1: inject _SLIDE_FRAME_CONSTRAINTS only if the resolved style lacks it
+    if _SLIDE_FRAME_CONSTRAINTS and _SLIDE_FRAME_CONSTRAINTS not in prompt:
+        # Check if it's already in the resolved style from payload
+        resolved_style = payload.get("resolved_style", "")
+        if _SLIDE_FRAME_CONSTRAINTS not in resolved_style:
+            prompt += f"\n\n{_SLIDE_FRAME_CONSTRAINTS}"
+
+    # Conditional 2: include DESIGN_SYSTEM_PRECEDENCE only when a design system is active
+    if payload.get("design_system_id") is not None:
+        if DESIGN_SYSTEM_PRECEDENCE and DESIGN_SYSTEM_PRECEDENCE not in prompt:
+            prompt += f"\n\n{DESIGN_SYSTEM_PRECEDENCE}"
+
+    return prompt
+
+
+def get_structured_model(schema: type):
+    """Create a LangChain ChatModel bound to a structured output schema.
+
+    Follows the same pattern as agent_factory's model creation:
+    1. Use get_system_client() to get a workspace client
+    2. Create a ChatDatabricks model with the standard endpoint/temperature/max_tokens
+    3. Bind the schema using with_structured_output() for LangChain 0.2+ compatibility
+
+    Returns a LanguageModel that when invoked produces output matching the schema.
+    """
+    from databricks_langchain import ChatDatabricks
+
+    from src.core.databricks_client import get_system_client
+    from src.services.agent_factory import DEFAULT_CONFIG
+
+    llm_config = DEFAULT_CONFIG["llm"]
+    system_client = get_system_client()
+
+    model = ChatDatabricks(
+        endpoint=llm_config["endpoint"],
+        temperature=llm_config["temperature"],
+        max_tokens=llm_config["max_tokens"],
+        top_p=0.95,
+        workspace_client=system_client,
+    )
+
+    # Bind the schema for structured output
+    return model.with_structured_output(schema)
+```
+
+- [ ] **Step 3: Update `src/core/skills/__init__.py` with minimal infrastructure**
+
+```python
+# src/core/skills/__init__.py
+"""Skill invocation infrastructure. Full skill implementations added in Task 5.1."""
+import logging
+from typing import Any, Dict
+
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+# Placeholder registry — populated by Task 5.1
+_REGISTRY: Dict[str, 'Skill'] = {}
+
+
+class Skill(BaseModel):
+    """A versioned skill: instructions + output schema + tool grants."""
+    name: str
+    prompt_body: str
+    output_schema: type
+
+
+def load_skill(name: str) -> Skill:
+    """Load a skill from the registry. Full implementations added in Task 5.1."""
+    if name not in _REGISTRY:
+        raise KeyError(f"Skill {name!r} not found. Registered: {sorted(_REGISTRY.keys())}")
+    return _REGISTRY[name]
+
+
+def list_skills() -> list[str]:
+    """List all registered skill names. Populated in Task 5.1."""
+    return sorted(_REGISTRY.keys())
+
+
+def call_skill(name: str, payload: Dict[str, Any]) -> BaseModel:
+    """Invoke a skill with structured output, and parse against its schema.
+
+    Prompt ASSEMBLY happens here, not in the skill body, because two things must be decided at
+    request time from the resolved style: whether to inject ``_SLIDE_FRAME_CONSTRAINTS``
+    (§L5's third case) and whether to include ``DESIGN_SYSTEM_PRECEDENCE`` (only when a design
+    system is active).
+    """
+    from src.services.agent_resolution import assemble_skill_prompt, get_structured_model
+
+    skill = load_skill(name)
+    prompt = assemble_skill_prompt(skill, payload)
+    model = get_structured_model(skill.output_schema)
+    raw = model.invoke(prompt)
+    # Parsing against the schema is the contract. A prompt edit that breaks its own output
+    # schema fails HERE rather than shipping green (§G3 covers the same seam in CI).
+    return skill.output_schema.model_validate(
+        raw if isinstance(raw, dict) else raw.model_dump()
+    )
+
+
+def _register_skill(skill: Skill) -> None:
+    """Register a skill. Called by task 5.1 skill implementations."""
+    _REGISTRY[skill.name] = skill
+```
+
+- [ ] **Step 4: Run tests to verify the infrastructure exists**
+
+```bash
+~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_call_skill_infrastructure.py -v
+# EXPECT: test_call_skill_can_be_imported passes
+#         test_load_skill_returns_registered_skill skipped
+#         test_list_skills_returns_all_registered passes (returns [])
+```
+
+- [ ] **Step 5: Verify Phase 4 nodes can now import call_skill**
+
+```bash
+cd /tmp && python -c "from src.core.skills import call_skill; print('✓ call_skill imported')"
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/core/skills/__init__.py src/services/agent_resolution.py tests/unit/test_call_skill_infrastructure.py
+git commit -m "feat(skills): call_skill infrastructure — invocation, prompt assembly, model binding"
+```
+
+---
+
 ## Phase 5 — Skills, brand and the security controls
 
 ---
 
-### Task 5.1: Skill loader and seven skill artifacts with placeholder prompts
+### Task 5.1: Seven skill implementations (architect, analyst, builder, reviewers, fixer, deck reviewer)
 
 **Files:**
-- Create: `src/core/skills/__init__.py`, `src/core/skills/<name>_skill.py` × 7
+- Modify: `src/core/skills/__init__.py` (register the seven skills; the file structure was created in Task 4.5)
+- Create: `src/core/skills/<name>_skill.py` × 7
 - Create: `tests/unit/test_skills_loading.py`
 
 **Interfaces:**
-- Consumes: `OUTPUT_SCHEMAS` (Task 1.5), `prompt_modules`, `agent_factory`'s resolution.
-- Produces: `load_skill(name) -> Skill`, `list_skills()`, `call_skill(name, payload)`.
+- Consumes: `OUTPUT_SCHEMAS` (Task 1.5), `prompt_modules`, `agent_factory`'s resolution, `call_skill` (Task 4.5).
+- Produces: Seven registered skills: `load_skill(name)` now returns any of them, `list_skills()` includes all seven.
 
 **§A1 governs this task.** A skill is a versioned bundle of **instructions + output schema + tool
 grants**, and only the middle one is load-bearing for code. The build proceeds on **basic generated
@@ -8708,10 +8975,13 @@ def claim_due_marker(now: datetime) -> Optional[tuple]:
     A marker with no recorded author is NOT claimed: with no identity there is no ``modified_by``,
     no permission provenance and no PRD §8.1 cost attribution, and §K8 chose the marker's author
     over inventing a system identity.
+
+    Returns the STRING session_id from user_sessions, not the Integer FK from session_slide_decks.
     """
     from sqlalchemy import text
 
     from src.core.database import get_db_session
+    from src.database.models import UserSession
 
     due_before = now - timedelta(seconds=DEBOUNCE_SECONDS)
     claim_expired = now - timedelta(seconds=CLAIM_TTL_SECONDS)
@@ -8732,7 +9002,13 @@ def claim_due_marker(now: datetime) -> Optional[tuple]:
             RETURNING session_id, spec_dirty_by
         """), {"now": now, "due_before": due_before, "claim_expired": claim_expired}).first()
         db.commit()
-    return (row.session_id, row.spec_dirty_by) if row else None
+    # The returned session_id is the Integer FK. Join to user_sessions to get the STRING session_id.
+    if row:
+        with get_db_session() as db:
+            us = db.query(UserSession).filter_by(id=row.session_id).first()
+            if us:
+                return (us.session_id, row.spec_dirty_by)
+    return None
 
 
 def run_arc_review(session_id: str, author: str) -> None:
@@ -9673,15 +9949,18 @@ assigned to a task.
 ### Placeholder scan
 
 No `TBD`, `TODO`, `[To be filled]`, "implement later", "add appropriate error handling", or "similar
-to Task N" appears in this plan. Every code step carries a code block. **Three places name a
-follow-up rather than a value, each deliberately and each with a check that surfaces it:**
+to Task N" appears in this plan. **Code blocks are comprehensive EXCEPT Task 1.7** (shared test fixtures),
+which specifies contracts (methods called on each fixture) rather than implementation code — executors
+build the fixtures to their specified contracts. **Four places name a follow-up rather than a value,
+each deliberately and each with a check that surfaces it:**
 
-1. `_get_deck_owner_session(db, session: UserSession)` at `session_manager.py:709` — already
+1. Task 1.7 — 21 shared fixtures: `tests/unit/conftest.py` specifies contracts; executors build fixtures matching them.
+2. `_get_deck_owner_session(db, session: UserSession)` at `session_manager.py:709` — already
    integrated at call sites (Tasks 2.2, 3.2). Callers must fetch the UserSession first via
    `_get_session_or_raise(db, session_id)` before passing it in.
-2. `extract_template_style_block` / `resolve_template_token_css` — reuse the existing style-block
+3. `extract_template_style_block` / `resolve_template_token_css` — reuse the existing style-block
    walk and `chat_service._resolve_pinned_template_token_css` rather than reimplementing (Task 5.3).
-3. Task 0.2's outcome branches Task 5.4's `extract_section` between bare-root and re-parenting. The
+4. Task 0.2's outcome branches Task 5.4's `extract_section` between bare-root and re-parenting. The
    branch and both consequences are written out; only the measurement is pending.
 
 ### Type consistency
