@@ -1,34 +1,16 @@
 """Fernet symmetric encryption for sensitive data (OAuth credentials, tokens).
 
 Uses AES-128-CBC with HMAC-SHA256 authentication via the ``cryptography``
-library. The master key lives in the ``encryption_keys`` table of the
-application database (SDR-4437 CRITICAL-3): dynamic, persistent across
-restarts/restores, unique per deployment, zero operator setup.
+library. The master key comes from one of two places, selected at boot:
 
-Resolution is SELECT-first, then race-safe INSERT-if-absent:
-
-1. ``SELECT key_value FROM encryption_keys WHERE id = 1`` — read-first is
-   load-bearing: on upgraded installs the table is created by the *deployer*
-   role and the app SP holds an explicit SELECT, INSERT grant; reading first
-   means INSERT privilege is never exercised when the row already exists.
-2. If absent, seed from the ``GOOGLE_OAUTH_ENCRYPTION_KEY`` env var (the
-   UI-button upgrade net — see below), else a legacy ``.encryption_key`` file
-   in the project root (local dev — keeps pre-existing dev ciphertext
-   decryptable), else generate a fresh key. See ``_seed_value``.
-3. ``INSERT ... ON CONFLICT (id) DO NOTHING`` + read-back, so concurrent
-   workers/replicas converge on one key.
-
-The supported upgrade path is ``tellr.update`` / ``deploy_local``, which — run
-as the deploying human — reads the legacy ``GOOGLE_OAUTH_ENCRYPTION_KEY`` from
-the existing app.yaml, seeds it into this table, and writes a keyless app.yaml
-(SDR-4437 remediation, PR-3). As a safety net for a stray Databricks Apps UI
-"Deploy" button upgrade — which bypasses the tool and reuses the old,
-still-key-bearing app.yaml — ``_seed_value`` reads that same
-``GOOGLE_OAUTH_ENCRYPTION_KEY`` env var (Apps injects every app.yaml ``env:``
-entry into the process environment) so the booting app re-seeds the table from
-the injected key instead of fresh-generating one and orphaning existing
-ciphertext. Because resolution is SELECT-first, the env var is consulted only
-while the table is empty; after any successful migration the stored row wins.
+1. **Secret-backed (opt-in).** When the deploy tool has attached a Databricks
+   Apps secret resource, the platform injects ``TELLR_ENCRYPTION_KEY`` into the
+   environment and that value is the key. This path never touches the database.
+   See docs/superpowers/specs/2026-08-20-secret-backed-fernet-key-design.md.
+2. **Lakebase-backed (default, unchanged).** The key lives in the
+   ``encryption_keys`` table of the application database (SDR-4437 CRITICAL-3):
+   dynamic, persistent across restarts/restores, unique per deployment, zero
+   operator setup.
 """
 
 import logging
@@ -100,8 +82,38 @@ def _seed_value() -> bytes:
     return Fernet.generate_key()
 
 
-@lru_cache(maxsize=1)
-def get_encryption_key() -> bytes:
+_SECRET_ENV_VAR = "TELLR_ENCRYPTION_KEY"
+
+
+def key_source() -> str:
+    """Report where the master key comes from, without reading the key itself.
+
+    Consumed by /api/health so the deploy tool can confirm a relocated app is
+    actually reading the secret before it deletes the Lakebase row.
+    """
+    return "secret" if os.getenv(_SECRET_ENV_VAR, "").strip() else "lakebase"
+
+
+def _from_secret() -> bytes:
+    """Return the Fernet key injected by the Apps secret resource.
+
+    Deliberately touches no database: a secret-mode app's encryption_keys table
+    is empty by construction, and writing to it would defeat the whole point.
+    """
+    raw = os.getenv(_SECRET_ENV_VAR, "").strip()
+    try:
+        Fernet(raw.encode())
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(
+            f"{_SECRET_ENV_VAR} is not a valid Fernet key — refusing to start. "
+            f"Check the value stored in the secret backing the "
+            f"{_SECRET_ENV_VAR} app resource."
+        ) from exc
+    logger.info("Encryption key loaded from the %s secret resource", _SECRET_ENV_VAR)
+    return raw.encode()
+
+
+def _from_lakebase() -> bytes:
     """Return the Fernet master key from the encryption_keys table (id=1)."""
     from src.core.database import get_db_session
 
@@ -123,6 +135,14 @@ def get_encryption_key() -> bytes:
             "Check the app's SELECT, INSERT grants on the data schema."
         )
     return _validated(row[0].encode())
+
+
+@lru_cache(maxsize=1)
+def get_encryption_key() -> bytes:
+    """Return the Fernet master key, from the secret resource or Lakebase."""
+    if os.getenv(_SECRET_ENV_VAR, "").strip():
+        return _from_secret()
+    return _from_lakebase()
 
 
 def ensure_encryption_key() -> None:
