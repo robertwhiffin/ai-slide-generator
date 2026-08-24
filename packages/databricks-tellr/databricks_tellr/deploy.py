@@ -30,6 +30,7 @@ from databricks.sdk.service.apps import (
 from databricks.sdk.service.database import DatabaseInstance
 from databricks.sdk.service.workspace import ImportFormat
 
+from databricks_tellr import secret_key
 from databricks_tellr.identifiers import validate_client_id, validate_schema_name
 
 # Autoscaling imports (Lakebase next-gen)
@@ -198,6 +199,8 @@ def create(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
 
@@ -232,6 +235,11 @@ def create(
             ``config_yaml_path``, YAML ``mlflow_tracing`` applies first; non-empty
             entries here override. Empty slots can be filled from deploy-time env
             vars ``TELLR_DEPLOY_MLFLOW_*``.
+        encryption_secret_scope: Opt in to the secret-backed Fernet key. When set,
+            the key is stored in this Databricks secret scope and attached to the
+            app as a secret resource instead of living in the encryption_keys
+            Lakebase table. When omitted, the Lakebase-backed path is used.
+        encryption_secret_key: Secret key name within that scope.
 
     Returns:
         Dictionary with deployment info:
@@ -259,6 +267,8 @@ def create(
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
         mlflow_tracing=mlflow_tracing,
+        encryption_secret_scope=encryption_secret_scope,
+        encryption_secret_key=encryption_secret_key,
     )
 
 
@@ -334,6 +344,8 @@ def _create_databricks(
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
     
@@ -363,9 +375,6 @@ def _create_databricks(
     """
     ws = _get_workspace_client(client, profile)
 
-    # Task 7 will replace this stub with the real resource key.
-    encryption_secret_resource_key = None
-
     deployment_flat_for_mlflow: dict[str, Any] = {}
 
     # Handle YAML config loading
@@ -380,6 +389,25 @@ def _create_databricks(
         app_file_workspace_path = config.get("app_file_workspace_path")
         lakebase_compute = config.get("lakebase_compute", lakebase_compute)
         app_compute = config.get("app_compute", app_compute)
+        encryption_secret_scope = encryption_secret_scope or config.get(
+            "encryption_secret_scope"
+        )
+        encryption_secret_key = (
+            config.get("encryption_secret_key") or encryption_secret_key
+        )
+
+    # Preflight before anything is created, so a failure leaves nothing behind.
+    resolved_key: str | None = None
+    if encryption_secret_scope:
+        print(f"Secret-backed encryption key: {encryption_secret_scope}/{encryption_secret_key}")
+        secret_key.preflight_scope(ws, encryption_secret_scope)
+        resolved_key = secret_key.resolve_key_for_create(
+            ws, encryption_secret_scope, encryption_secret_key
+        )
+
+    encryption_secret_resource_key = (
+        secret_key.RESOURCE_KEY if encryption_secret_scope else None
+    )
 
     mlflow_subs = _mlflow_substitutions_for_app_yaml(
         deployment_flat=deployment_flat_for_mlflow,
@@ -439,6 +467,8 @@ def _create_databricks(
             compute_size=app_compute,
             lakebase_name=lakebase_name,
             lakebase_type=lakebase_type,
+            encryption_secret_scope=encryption_secret_scope,
+            encryption_secret_key=encryption_secret_key,
         )
         print("   App registered")
         print()
@@ -896,6 +926,8 @@ def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
         "lakebase_name": lakebase_config.get("database_name"),
         "schema_name": lakebase_config.get("schema"),
         "lakebase_compute": lakebase_config.get("capacity"),
+        "encryption_secret_scope": env_config.get("encryption_secret_scope"),
+        "encryption_secret_key": env_config.get("encryption_secret_key"),
         **ml_flat,
     }
 
@@ -1509,6 +1541,8 @@ def _create_app(
     compute_size: str,
     lakebase_name: str,
     lakebase_type: str = "provisioned",
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str | None = None,
 ) -> App:
     """Create Databricks App with database resource (without deploying).
 
@@ -1537,6 +1571,15 @@ def _create_app(
         # Autoscaling: no AppResourceDatabase, connection via env vars
         app_resources = []
         logger.info("Autoscaling mode: skipping AppResourceDatabase (using env vars)")
+
+    # Both branches: autoscaling builds an empty resource list, so appending
+    # after the branch covers provisioned and autoscaling alike.
+    if encryption_secret_scope:
+        app_resources.append(
+            secret_key.build_secret_resource(
+                encryption_secret_scope, encryption_secret_key
+            )
+        )
 
     app = App(
         name=app_name,

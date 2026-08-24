@@ -194,3 +194,41 @@ def test_health_gate_sends_workspace_credentials(monkeypatch):
     secret_key.app_reports_secret_source(_poll_ws(), "https://app/", attempts=1, delay=0)
     assert seen["url"] == "https://app/api/health"
     assert seen["headers"]["Authorization"] == "Bearer t"
+
+
+# ---------------------------------------------------------------------------
+# Task 7 tests: build_secret_resource, resolve_key_for_create
+# ---------------------------------------------------------------------------
+
+
+def test_build_secret_resource_shape():
+    r = secret_key.build_secret_resource("tellr", "tellr-encryption-key")
+    assert r.name == "TELLR_ENCRYPTION_KEY"
+    assert r.secret.scope == "tellr"
+    assert r.secret.key == "tellr-encryption-key"
+    assert r.secret.permission.value.upper() == "READ"
+
+
+def test_resolve_key_for_create_reuses_existing_secret():
+    """An existing secret may already protect ciphertext — never overwrite it."""
+    existing = Fernet.generate_key().decode()
+    ws = _secret_ws(value=existing)
+    assert secret_key.resolve_key_for_create(ws, "tellr", "k") == existing
+    ws.secrets.put_secret.assert_not_called()
+
+
+def test_resolve_key_for_create_generates_when_absent():
+    ws = MagicMock()
+    ws.secrets.get_secret.side_effect = Exception("RESOURCE_DOES_NOT_EXIST")
+    generated = {}
+
+    def capture(scope, key, string_value):
+        generated["v"] = string_value
+        encoded = base64.b64encode(string_value.encode()).decode()
+        ws.secrets.get_secret.side_effect = None
+        ws.secrets.get_secret.return_value = GetSecretResponse(key=key, value=encoded)
+
+    ws.secrets.put_secret.side_effect = capture
+    result = secret_key.resolve_key_for_create(ws, "tellr", "k")
+    assert result == generated["v"]
+    assert Fernet(result.encode())
