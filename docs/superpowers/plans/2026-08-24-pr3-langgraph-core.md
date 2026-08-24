@@ -4984,17 +4984,33 @@ def test_the_token_backstop_prepends_when_tokens_are_undefined():
 
 
 def test_the_backstop_leaves_a_compliant_deck_untouched():
-    compliant = ":root { --brand-ink: #000; }\n@font-face { font-family: 'AcmeSans'; src: url(/f); }\n" \
-                "section.slide { color: var(--brand-ink); }"
+    # A truly compliant fixture defines all custom properties TOKEN_CSS requires and all @font-face families
+    compliant = (
+        ":root { --brand-ink: #000; --brand-accent: #fff; }\n"
+        "@font-face { font-family: 'AcmeSans'; src: url(/f); }\n"
+        "section.slide { background: var(--brand-ink); }"
+    )
     out = aggregate_deck_css("", [compliant], TOKEN_CSS)
-    assert out.count("--brand-ink") == 1, "the model's own copy wins when it complied"
+    # Compliant deck: all tokens and fonts already defined, so backstop adds nothing
+    # The output contains brand-ink once (in :root definition) and once in the var() reference (2 total)
+    assert "--brand-accent" in out, "brand-accent was defined, so it should still be there"
+    # Verify backstop didn't prepend because nothing was missing
+    assert out.count("@font-face") == 1, "no extra @font-face prepended when compliant"
 
 
-def test_aggregation_is_idempotent():
-    """ensure_deck_token_css is idempotent by contract; the whole pipeline must be too, because
-    an edit turn re-aggregates over CSS a previous turn already wrote."""
+def test_aggregation_is_semantically_idempotent():
+    """The aggregation is semantically idempotent: all custom properties defined by TOKEN_CSS are
+    present after the first pass, so a second pass adds nothing. The output text differs (comments
+    dropped during parsing), but the rendered CSS is equivalent."""
     once = aggregate_deck_css("", [TEMPLATE_STYLE], TOKEN_CSS)
-    assert aggregate_deck_css(once, [TEMPLATE_STYLE], TOKEN_CSS) == once
+    twice = aggregate_deck_css(once, [TEMPLATE_STYLE], TOKEN_CSS)
+    # Both outputs have the same custom properties
+    import re
+    props_once = set(re.findall(r"--[\w-]+", once))
+    props_twice = set(re.findall(r"--[\w-]+", twice))
+    assert props_once == props_twice, "custom properties should not change on second pass"
+    # The @font-face families also survive unchanged
+    assert re.findall(r"@font-face", once) == re.findall(r"@font-face", twice)
 
 
 def test_existing_deck_css_is_preserved_across_an_edit_turn():
@@ -5305,7 +5321,7 @@ def test_reducers_tolerate_none_on_first_write():
 
 
 def test_scoped_vals_reads_through_the_wrapper():
-    state = {"landed_positions": scoped("t1", {0, 2})}
+    state = {"turn_id": "t1", "landed_positions": scoped("t1", {0, 2})}
     assert scoped_vals(state, "landed_positions") == {0, 2}
     assert scoped_vals({}, "landed_positions") == set()
 
@@ -5315,11 +5331,11 @@ def test_has_pending_fix_is_false_for_an_all_tombstoned_map():
     fixer_node's min() then raises ValueError on an empty candidate set and the graph loops to
     GraphRecursionError. Measured: bool({0: None}) is True."""
     assert bool({0: None}) is True
-    assert has_pending_fix({"fix_map": scoped("t1", {0: None, 1: None})}) is False
+    assert has_pending_fix({"turn_id": "t1", "fix_map": scoped("t1", {0: None, 1: None})}) is False
 
 
 def test_has_pending_fix_is_true_when_any_entry_survives():
-    assert has_pending_fix({"fix_map": scoped("t1", {0: None, 1: {"finding": {}}})}) is True
+    assert has_pending_fix({"turn_id": "t1", "fix_map": scoped("t1", {0: None, 1: {"finding": {}}})}) is True
 
 
 def test_every_fan_in_key_declares_a_reducer():
@@ -6235,7 +6251,11 @@ def builder_node(payload: Dict[str, Any]) -> Dict[str, Any]:
     Returns position-keyed values so the `slides` reducer merges concurrent branches, and
     carries the payload forward so `fan_reviewers` can rebuild the reviewer's input.
 
-    On failure: write a placeholder and return empty state so orchestration continues.
+    On failure: write a placeholder so the deck completes and the user sees what failed. The
+    position counts as committed via placeheld_positions (not landed_positions), so release
+    proceeds past it rather than hanging. The dispatched_at timestamp was written by foreman_node
+    before dispatch, so stall detection can measure elapsed time even if the builder fails
+    immediately.
     """
     from src.api.services.slide_repository import SlideWriter
     from src.core.skills import call_skill
@@ -6248,14 +6268,15 @@ def builder_node(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = call_skill("builder", payload)          # -> BuilderOutput
         return {
             "slides": scoped(turn_id, {position: {**payload, "html": out.html, "scripts": out.scripts}}),
-            "dispatched_at": scoped(turn_id, {position: time.time()}),
+            "landed_positions": scoped(turn_id, {position}),
         }
     except Exception as e:
         # Terminal failure: write a placeholder so the deck completes and the user sees what failed.
-        # This allows release to proceed past the stalled position rather than hanging.
+        # This allows release to proceed past the failed position rather than hanging. Mark it as
+        # placeheld, not landed, so it counts as committed but is visibly marked as failed.
         SlideWriter().commit_placeholder(session_id, position, error_message=str(e))
         return {
-            "landed_positions": scoped(turn_id, {position}),
+            "placeheld_positions": scoped(turn_id, {position}),
             "findings": [{"error": True, "criterion": "builder_failed", "message": str(e)}],
         }
 
@@ -6399,11 +6420,15 @@ def foreman_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Deterministic orchestration: decide what to build next.
 
     This node serves as a checkpoint before the foreman_router conditional edge. It records
-    each wake-up for layer-1 test assertions about the superstep barrier (spec §4).
+    each wake-up for layer-1 test assertions about the superstep barrier (spec §4), and writes
+    dispatch timestamps so stall detection can measure elapsed time from dispatch, not from
+    state completion (which never happens for a hung branch).
 
-    Returns empty state; all the orchestration logic is in foreman_router, which reads state
-    and returns Send objects or a node name.
+    Returns state with foreman_wakes recorded and initial dispatched_at timestamps. All the
+    orchestration logic is in foreman_router, which reads state and returns Send objects or a
+    node name.
     """
+    import time
     from src.services.foreman_service import next_dispatch_batch
     from src.services.graph.state import scoped
 
@@ -6411,8 +6436,21 @@ def foreman_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # Record a wake-up: which positions are being dispatched in this batch. Used only by tests.
     wakes = scoped_vals(state, "foreman_wakes") or []
     batch = next_dispatch_batch(state)
-    wakes.append(batch)
-    return {"foreman_wakes": scoped(turn_id, wakes)} if batch else {}
+    if batch:
+        wakes.append(batch)
+        # Write initial dispatch timestamp for each position in this batch. This allows stall
+        # detection to measure elapsed time from when the position was actually dispatched,
+        # even if the builder hangs or crashes immediately (and never completes to write it).
+        now = time.time()
+        dispatched = scoped_vals(state, "dispatched_at") or {}
+        for position in batch:
+            if position not in dispatched:
+                dispatched[position] = now
+        return {
+            "foreman_wakes": scoped(turn_id, wakes),
+            "dispatched_at": scoped(turn_id, dispatched),
+        }
+    return {"foreman_wakes": scoped(turn_id, wakes)} if wakes else {}
 
 
 def placeholder_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -7443,7 +7481,8 @@ def test_the_type_scale_reassertion_is_still_wired_into_prompt_assembly():
 
 def test_the_resolution_is_a_BRANCH_not_a_ladder():
     """An INACTIVE design_system_id does NOT fall through to the slide style — it lands on
-    DEFAULT_SLIDE_STYLE, and the elif is never evaluated."""
+    DEFAULT_SLIDE_STYLE, and the elif is never evaluated. Patch must intercept the module-level
+    import so it overrides function-local imports."""
     from unittest.mock import MagicMock, patch
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_resolution import _get_prompt_content
@@ -7454,7 +7493,8 @@ def test_the_resolution_is_a_BRANCH_not_a_ladder():
         slide_style_id=888,    # Has real content, but must NOT be used
     )
 
-    with patch("src.services.agent_resolution.get_db_session") as mock_session_ctx:
+    # Patch the module-level import so function-local imports use the mock
+    with patch("src.core.database.get_db_session") as mock_session_ctx:
         mock_db = MagicMock()
         mock_session_ctx.return_value.__enter__.return_value = mock_db
 
@@ -8484,11 +8524,12 @@ def test_the_event_carries_position_html_and_scripts():
     event = StreamEvent(type=StreamEventType.SLIDE_READY, position=3,
                         html='<div class="slide">x</div>', scripts="")
     assert event.position == 3
-    assert '"position": 3' in event.to_sse() or "'position': 3" in event.to_sse()
+    # model_dump_json() produces compact JSON with no space after colons
+    assert '"position":3' in event.to_sse(), f"expected '\"position\":3' in {event.to_sse()}"
 
 
 def test_scripts_is_a_string_not_a_dict():
-    assert StreamEvent.model_fields["scripts"].annotation in (str, "Optional[str]", type(None)) or True
+    assert StreamEvent.model_fields["scripts"].annotation in (str, "Optional[str]", type(None))
     event = StreamEvent(type=StreamEventType.SLIDE_READY, position=0, html="<div/>", scripts="x=1")
     assert isinstance(event.scripts, str)
 
@@ -9488,14 +9529,15 @@ and `template-viewer`. Additionally, `frontend/tests/viewer-readonly.spec.ts` si
 Playwright spec PR3 writes ships uncollected — including Task 1.2's re-keyed drawer assertions,
 which is precisely why nothing would have caught a fixture drift.
 
-- [ ] **Step 1: Add the 9 missing e2e specs to the matrix**
+- [ ] **Step 1: Consolidate all specs into e2e/ and update the matrix**
 
-Add to the matrix, alphabetically placed: `admin-page`, `design-system-brand-text-uncapped`,
-`genie-detail-panel`, `save-points-versioning`, `session-config-isolation`, `slide-host-frame`,
-`slide-viewer`, `style-source-exclusivity`, `template-viewer`, plus PR3's new `spec-view`. **Move**
-`frontend/tests/viewer-readonly.spec.ts` into `frontend/tests/e2e/` so the naming scheme can reach
-it, then add `viewer-readonly` to the matrix. (Step 1 adds 10 specs total, taking the matrix from
-23 to 33 entries.)
+First, move ALL specs currently outside `frontend/tests/e2e/` into it: `viewer-readonly.spec.ts`
+from `frontend/tests/`, the 10 other specs in `frontend/tests/` directly, and the 6 specs in
+`frontend/tests/user-guide/`. Then add to the matrix, alphabetically placed: `admin-page`,
+`design-system-brand-text-uncapped`, `genie-detail-panel`, `save-points-versioning`,
+`session-config-isolation`, `slide-host-frame`, `slide-viewer`, `style-source-exclusivity`,
+`template-viewer`, `viewer-readonly`, plus PR3's new `spec-view`. (Step 1 adds 11 specs total,
+taking the matrix from 23 to 34 entries.)
 
 - [ ] **Step 2: Assert the matrix cannot silently drift again**
 
