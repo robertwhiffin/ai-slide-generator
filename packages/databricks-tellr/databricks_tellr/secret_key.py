@@ -102,3 +102,58 @@ def preflight_lakebase_privileges(cur: Any, schema_name: str) -> None:
             f"privileges (or run the deploy as an identity in databricks_superuser) "
             f"and re-run. Nothing has been changed."
         )
+
+
+def _looks_absent(exc: Exception) -> bool:
+    return "RESOURCE_DOES_NOT_EXIST" in str(exc).upper()
+
+
+def read_secret_key(ws: Any, scope: str, key: str) -> str | None:
+    """Return the Fernet key stored at *(scope, key)*, or None if truly absent.
+
+    ``GetSecretResponse.value`` is base64 (the API returns the value "in its byte
+    representation"), so it must be decoded. Any error other than a genuine
+    not-found is raised: treating a permission denial as absence would let the
+    caller overwrite a secret that is already protecting live ciphertext.
+    """
+    try:
+        resp = ws.secrets.get_secret(scope=scope, key=key)
+    except Exception as exc:  # noqa: BLE001
+        if _looks_absent(exc):
+            return None
+        raise SecretKeyError(
+            f"Could not read secret {scope}/{key}: {exc}. This is not a "
+            f"'not found' error, so it is most likely a permission problem — "
+            f"refusing to continue rather than risk overwriting a key that may "
+            f"already protect stored credentials."
+        ) from exc
+
+    if resp is None or not resp.value:
+        return None
+    value = base64.b64decode(resp.value).decode()
+    try:
+        Fernet(value.encode())
+    except (ValueError, TypeError) as exc:
+        raise SecretKeyError(
+            f"Secret {scope}/{key} exists but is not a valid Fernet key. Refusing "
+            f"to use or overwrite it — inspect it manually and resolve."
+        ) from exc
+    return value
+
+
+def write_and_verify_secret_key(ws: Any, scope: str, key: str, value: str) -> None:
+    """Write *value* to *(scope, key)* and confirm it reads back identically.
+
+    The read-back is the gate that later permits deleting the Lakebase row: no
+    key material is removed from Lakebase until the secret has been proven
+    present and correct.
+    """
+    ws.secrets.put_secret(scope=scope, key=key, string_value=value)
+    stored = read_secret_key(ws, scope, key)
+    if stored != value:
+        raise SecretKeyError(
+            f"Secret {scope}/{key} failed read-back verification after write. "
+            f"The Lakebase key row has NOT been touched. Resolve the secret "
+            f"store problem and re-run."
+        )
+    logger.info("Secret %s/%s written and verified", scope, key)
