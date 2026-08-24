@@ -325,3 +325,12 @@ def delete_lakebase_key_row(cur: Any, schema_name: str) -> None:
     """Remove the relocated key row. Only ever called behind the health gate."""
     cur.execute(f'DELETE FROM "{schema_name}".encryption_keys WHERE id = 1')
     logger.info("Deleted the relocated key row from %s.encryption_keys", schema_name)
+
+
+def app_is_secret_mode(ws: Any, app_name: str) -> bool:
+    """True when the app already carries the encryption-key secret resource."""
+    try:
+        app = ws.apps.get(name=app_name)
+    except Exception:  # noqa: BLE001 — absence is not secret mode
+        return False
+    return any(r.name == RESOURCE_KEY for r in (app.resources or []))

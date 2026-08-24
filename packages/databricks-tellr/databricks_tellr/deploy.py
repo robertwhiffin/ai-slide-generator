@@ -569,6 +569,17 @@ def _update_databricks(
 
     ws = _get_workspace_client(client, profile)
 
+    if not encryption_secret_scope and secret_key.app_is_secret_mode(ws, app_name):
+        if encryption_key:
+            raise DeploymentError(
+                f"App {app_name} uses a secret-backed encryption key, so passing "
+                f"encryption_key would recreate the Lakebase key row this app was "
+                f"migrated off — and a mismatched value would silently orphan "
+                f"stored credentials. Re-run with "
+                f"encryption_secret_scope=... instead."
+            )
+        print("   Secret-backed encryption key retained (app resource unchanged)")
+
     encryption_secret_resource_key = (
         secret_key.RESOURCE_KEY if encryption_secret_scope else None
     )

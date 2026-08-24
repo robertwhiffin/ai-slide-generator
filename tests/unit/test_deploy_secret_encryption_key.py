@@ -367,3 +367,35 @@ def test_delete_lakebase_key_row_issues_the_delete():
     secret_key.delete_lakebase_key_row(cur, "app_data")
     sql = cur.execute.call_args[0][0]
     assert "DELETE FROM" in sql and "encryption_keys" in sql and "WHERE id = 1" in sql
+
+
+# ---------------------------------------------------------------------------
+# Task 10 tests: app_is_secret_mode, guard in _update_databricks
+# ---------------------------------------------------------------------------
+
+
+def test_app_is_secret_mode_detects_the_resource():
+    ws = MagicMock()
+    ws.apps.get.return_value = App(
+        name="app", resources=[secret_key.build_secret_resource("s", "k")]
+    )
+    assert secret_key.app_is_secret_mode(ws, "app") is True
+
+
+def test_app_is_secret_mode_false_without_the_resource():
+    ws = MagicMock()
+    ws.apps.get.return_value = App(name="app", resources=[])
+    assert secret_key.app_is_secret_mode(ws, "app") is False
+
+
+def test_update_refuses_legacy_encryption_key_against_secret_mode_app(monkeypatch):
+    """Passing a legacy key would recreate the row this design deletes."""
+    from databricks_tellr import deploy
+
+    monkeypatch.setattr(secret_key, "app_is_secret_mode", lambda ws, name: True)
+    monkeypatch.setattr(deploy, "_get_workspace_client", lambda c, p: MagicMock())
+    with pytest.raises(deploy.DeploymentError, match="encryption_secret_scope"):
+        deploy._update_databricks(
+            app_name="app", app_file_workspace_path="/ws", lakebase_name="lb",
+            schema_name="s", encryption_key="Zm9vYmFyYmF6cXV1eA==",
+        )
