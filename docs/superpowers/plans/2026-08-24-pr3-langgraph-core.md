@@ -215,6 +215,7 @@ improvise.
 | `src/api/routes/chat.py` | `slide_ready` relay; slide cursor; clear-context preserving the mode marker |
 | `src/api/schemas/streaming.py` | `SLIDE_READY` on the **enum**; `agent`, `position`, `html`, `scripts`, `slide_cursor` fields |
 | `src/api/schemas/agent_config.py` | Remove `system_prompt` / `slide_editing_instructions` + validator (§E2); add `tone_guideline` |
+| `src/database/models/prompts.py` | Remove `system_prompt` and `slide_editing_instructions` column declarations from `ConfigPrompts` ORM model (§E2, Task 2.5) |
 | `src/services/agent_factory.py` | **MOVE** the resolution logic, do not delete (§L6); third frame-rules case (§L5) |
 | `src/services/design_system_compiler.py` | Promote `_SLIDE_FRAME_CONSTRAINTS` to importable (§L5) |
 | `src/api/fixtures/tour_demo_deck.json` | Gains a hand-authored deck-spec field (§B1) |
@@ -2740,7 +2741,7 @@ def _migrate_graph_checkpoints(conn, inspector, schema, _qual, is_sqlite):
     if "graph_checkpoints" not in existing:
         logger.info("Migration: creating graph_checkpoints")
         conn.execute(text(f"""
-            CREATE TABLE {_qual('graph_checkpoints')} (
+            CREATE TABLE graph_checkpoints (
                 thread_id            VARCHAR(128) NOT NULL,
                 checkpoint_ns        VARCHAR(255) NOT NULL DEFAULT '',
                 checkpoint_id        VARCHAR(128) NOT NULL,
@@ -2755,13 +2756,13 @@ def _migrate_graph_checkpoints(conn, inspector, schema, _qual, is_sqlite):
         """))
         conn.execute(text(
             f"CREATE INDEX ix_graph_checkpoints_thread_created "
-            f"ON {_qual('graph_checkpoints')} (thread_id, checkpoint_ns, created_at)"
+            f"ON graph_checkpoints (thread_id, checkpoint_ns, created_at)"
         ))
 
     if "graph_checkpoint_writes" not in existing:
         logger.info("Migration: creating graph_checkpoint_writes")
         conn.execute(text(f"""
-            CREATE TABLE {_qual('graph_checkpoint_writes')} (
+            CREATE TABLE graph_checkpoint_writes (
                 thread_id     VARCHAR(128) NOT NULL,
                 checkpoint_ns VARCHAR(255) NOT NULL DEFAULT '',
                 checkpoint_id VARCHAR(128) NOT NULL,
@@ -2850,13 +2851,6 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
             return get_session_local()()  # Call it TWICE: get_session_local returns sessionmaker, () instantiates
         return self._session_factory()
 
-    @staticmethod
-    def _qual(table_name: str) -> str:
-        """Qualify a table name with the Lakebase schema. init_db sets search_path once on
-        a throwaway connection, not per pooled connection, so raw table names silently fail
-        when the session's search_path is not set. Use this for all raw SQL."""
-        from src.core.database import LAKEBASE_SCHEMA
-        return f"{LAKEBASE_SCHEMA}.{table_name}"
 
     @staticmethod
     def _keys(config) -> tuple[str, str, Optional[str]]:
@@ -2888,13 +2882,13 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
             if checkpoint_id:
                 row = db.execute(text(
                     f"SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, "
-                    f"checkpoint_blob, metadata_type, metadata_blob FROM {self._qual('graph_checkpoints')} "
+                    f"checkpoint_blob, metadata_type, metadata_blob FROM graph_checkpoints "
                     f"WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :cid"
                 ), {"t": thread_id, "ns": ns, "cid": checkpoint_id}).first()
             else:
                 row = db.execute(text(
                     f"SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, "
-                    f"checkpoint_blob, metadata_type, metadata_blob FROM {self._qual('graph_checkpoints')} "
+                    f"checkpoint_blob, metadata_type, metadata_blob FROM graph_checkpoints "
                     f"WHERE thread_id = :t AND checkpoint_ns = :ns "
                     f"ORDER BY created_at DESC, checkpoint_id DESC LIMIT 1"
                 ), {"t": thread_id, "ns": ns}).first()
@@ -2914,7 +2908,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
             _, _, before_id = self._keys(before)
             if before_id:
                 sql += (
-                    f" AND created_at < (SELECT created_at FROM {self._qual('graph_checkpoints')} "
+                    f" AND created_at < (SELECT created_at FROM graph_checkpoints "
                     f"WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :bid)"
                 )
                 params["bid"] = before_id
@@ -2930,7 +2924,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         checkpoint = self.serde.loads_typed((row.checkpoint_type, row.checkpoint_blob))
         metadata = self.serde.loads_typed((row.metadata_type, row.metadata_blob))
         writes = db.execute(text(
-            f"SELECT task_id, channel, value_type, value_blob FROM {self._qual('graph_checkpoint_writes')} "
+            f"SELECT task_id, channel, value_type, value_blob FROM graph_checkpoint_writes "
             f"WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :cid "
             f"ORDER BY task_id, idx"
         ), {"t": thread_id, "ns": ns, "cid": row.checkpoint_id}).fetchall()
@@ -2958,11 +2952,11 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         meta_type, meta_blob = self.serde.dumps_typed(dict(metadata))
         with self._session() as db:
             db.execute(text(
-                f"DELETE FROM {self._qual('graph_checkpoints')} WHERE thread_id = :t AND checkpoint_ns = :ns "
+                f"DELETE FROM graph_checkpoints WHERE thread_id = :t AND checkpoint_ns = :ns "
                 f"AND checkpoint_id = :cid"
             ), {"t": thread_id, "ns": ns, "cid": checkpoint_id})
             db.execute(text(
-                f"INSERT INTO {self._qual('graph_checkpoints')} (thread_id, checkpoint_ns, checkpoint_id, "
+                f"INSERT INTO graph_checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
                 f"parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_type, "
                 f"metadata_blob, created_at) VALUES (:t, :ns, :cid, :pid, :ct, :cb, :mt, :mb, :ts)"
             ), {
@@ -2981,11 +2975,11 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
             for idx, (channel, value) in enumerate(writes):
                 value_type, value_blob = self.serde.dumps_typed(value)
                 db.execute(text(
-                    f"DELETE FROM {self._qual('graph_checkpoint_writes')} WHERE thread_id = :t AND "
+                    f"DELETE FROM graph_checkpoint_writes WHERE thread_id = :t AND "
                     f"checkpoint_ns = :ns AND checkpoint_id = :cid AND task_id = :tid AND idx = :i"
                 ), {"t": thread_id, "ns": ns, "cid": checkpoint_id, "tid": task_id, "i": idx})
                 db.execute(text(
-                    f"INSERT INTO {self._qual('graph_checkpoint_writes')} (thread_id, checkpoint_ns, "
+                    f"INSERT INTO graph_checkpoint_writes (thread_id, checkpoint_ns, "
                     f"checkpoint_id, task_id, idx, task_path, channel, value_type, value_blob, "
                     f"created_at) VALUES (:t, :ns, :cid, :tid, :i, :tp, :ch, :vt, :vb, :ts)"
                 ), {
@@ -3291,10 +3285,10 @@ def _migrate_deck_reviews(conn, inspector, schema, _qual, is_sqlite):
     fk = (
         ""
         if is_sqlite
-        else f", FOREIGN KEY (deck_id) REFERENCES {_qual('session_slide_decks')}(id) ON DELETE CASCADE"
+        else ", FOREIGN KEY (deck_id) REFERENCES session_slide_decks(id) ON DELETE CASCADE"
     )
     conn.execute(text(f"""
-        CREATE TABLE {_qual('deck_reviews')} (
+        CREATE TABLE deck_reviews (
             id             {'INTEGER PRIMARY KEY AUTOINCREMENT' if is_sqlite else 'SERIAL PRIMARY KEY'},
             deck_id        INTEGER      NOT NULL,
             deck_digest    VARCHAR(64)  NOT NULL,
@@ -3306,7 +3300,7 @@ def _migrate_deck_reviews(conn, inspector, schema, _qual, is_sqlite):
         )
     """))
     conn.execute(text(
-        f"CREATE INDEX ix_deck_reviews_deck_id ON {_qual('deck_reviews')} (deck_id)"
+        "CREATE INDEX ix_deck_reviews_deck_id ON deck_reviews (deck_id)"
     ))
 ```
 
@@ -3577,13 +3571,13 @@ def _migrate_spec_dirty_marker(conn, inspector, schema, _qual, is_sqlite):
     ):
         if column not in existing:
             logger.info(f"Migration: adding {column} column to {table}")
-            conn.execute(text(f"ALTER TABLE {_qual(table)} ADD COLUMN {column} {ddl}"))
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
     # Partial index so the sweeper's "is anything due?" query is index-only on a table where
     # almost every row has a NULL marker. Postgres only — sqlite ignores the predicate form.
     if not is_sqlite:
         conn.execute(text(
             f"CREATE INDEX IF NOT EXISTS ix_session_slide_decks_spec_dirty "
-            f"ON {_qual(table)} (spec_dirty_at) WHERE spec_dirty_at IS NOT NULL"
+            f"ON {table} (spec_dirty_at) WHERE spec_dirty_at IS NOT NULL"
         ))
 ```
 
@@ -3601,6 +3595,10 @@ git commit -m "feat(spec): dirty-marker columns with an author and a claim lease
 ---
 
 ### Task 2.4: Stop every writer and reader of the retired prompt columns
+
+**⚠️ GATED on decision:** May the executor delete tests that asserted §E2's removed feature, or
+must they be repointed? This decision blocks dispatch — do not start this task until the ruling is
+on PENDING list status: "DECIDED: [delete|repoint]".
 
 §E2 retires `ConfigPrompts.system_prompt` and `.slide_editing_instructions`. **This task changes
 code only — the drop migration is Task 2.5**, and the order is a hard requirement: a drop that
@@ -3861,7 +3859,16 @@ prompts = ConfigPrompts(
 Leave `model_config` absent, so `extra='ignore'` keeps dropping a legacy key silently — which is
 the desired forward behaviour for a stored blob that has not been migrated yet.
 
-**4c — `agent_factory.py:78-314`.** DO NOT apply the inline diff shown in the superseded plan.
+**4c — `src/database/models/prompts.py:39-40`.** Remove the `system_prompt` and `slide_editing_instructions` column declarations from the `ConfigPrompts` ORM model. These must be removed before Task 2.5's migration drops the columns from the database, or every subsequent query of `ConfigPrompts` will raise `UndefinedColumn` (Postgres) or `no such column` (SQLite).
+
+```python
+# Before (src/database/models/prompts.py:39-40)
+    system_prompt = Column(Text, nullable=False)
+    slide_editing_instructions = Column(Text, nullable=False)
+# After — delete both lines entirely
+```
+
+**4d — `agent_factory.py:78-314`.** DO NOT apply the inline diff shown in the superseded plan.
 The real function `_get_prompt_content(config: AgentConfig, mode: str = "generate")` spans 237 lines
 and returns `dict[str, Optional[str]]` with six keys (`system_prompt`, `slide_editing_instructions`,
 `deck_prompt`, `slide_style`, `image_guidelines`, `pre_assembled`). It carries the entire design-system
@@ -4056,7 +4063,7 @@ def _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlit
             logger.info(f"Migration: dropping {column} from {table}")
             # SQLite gained DROP COLUMN in 3.35; the repo's other helpers already assume a
             # modern sqlite for ALTER, so no table rebuild is needed.
-            conn.execute(text(f"ALTER TABLE {_qual(table)} DROP COLUMN {column}"))
+            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
 ```
 
 Wire it in **after** `_migrate_spec_dirty_marker`, with the comment stating why it is last.
@@ -4717,8 +4724,18 @@ def write_deck_level_columns(
             raise ValueError(f"no session {session_id}")
         deck_owner = manager._get_deck_owner_session(db, session)
         if deck_owner is None or deck_owner.slide_deck is None:
-            raise ValueError(f"no slide deck for session {session_id}")
-        deck = deck_owner.slide_deck
+            # First write of a new session (pre-fan-out from architect_node): create the row.
+            # This mirrors save_slide_deck's pattern (session_manager.py:1310+).
+            from src.database.models.session import SessionSlideDeck
+            deck = SessionSlideDeck(session_id=session.id)
+            db.add(deck)
+            db.flush()  # Get the auto-generated id before continuing
+            if deck_owner is None:
+                db.add(session)
+            else:
+                deck_owner.slide_deck = deck
+        else:
+            deck = deck_owner.slide_deck
 
         # Same optimistic-lock shape as save_slide_deck (session_manager.py:1309-1314).
         if expected_version is not None and deck.version != expected_version:
@@ -6511,24 +6528,26 @@ def deck_reviewer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     from src.api.services.deck_level_writer import write_deck_level_columns
     from src.api.services.session_manager import SessionManager
     from src.core.skills import call_skill
+    from src.domain.slide_deck import SlideDeck
     from src.services.deck_css_aggregator import aggregate_deck_css
     from src.services.deck_review_store import compute_deck_digest, save_deck_review
 
     session_id, turn_id = state["session_id"], state["turn_id"]
-    deck = SessionManager().get_slide_deck(session_id)
-    if deck is None:
+    deck_dict = SessionManager().get_slide_deck(session_id)
+    if deck_dict is None:
         # Specless or discuss-only turn; no deck to review. Non-fatal.
         logger.warning("deck_reviewer_node: no deck found for session %s; skipping", session_id)
         return {"error_state": {"deck_review": "no_deck"}}
-    slides = deck.get("slides", [])
+    slides = deck_dict.get("slides", [])
     htmls = [s.get("html", "") for s in slides]
 
     # Knit the complete HTML document from all committed slides, and stitch in the aggregated CSS
     # and template-derived scripts/metadata (§L2, §H1).
+    deck = SlideDeck.from_dict(deck_dict)
     knitted_html = deck.knit()
 
     css = aggregate_deck_css(
-        deck.get("css", ""),
+        deck_dict.get("css", ""),
         list(scoped_vals(state, "emitted_style_blocks") or []),
         state.get("token_css"),
     )
@@ -6579,25 +6598,23 @@ def architect_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # §H1/§L2 write 1 of 2. Six columns decidable up front. Before the fan-out so an
     # incrementally-released slide renders STYLED (§6.2's payoff) — which is why §K4 persists
     # the pinned template's token_css + style block here rather than nothing.
-    # Write the template-derived values to state before persisting to DB, so downstream nodes
-    # can read them. The skill output carries these from template extraction.
-    deterministic_css = out.deterministic_css or state.get("deterministic_css")
-    token_css = out.token_css or state.get("token_css")
-    external_scripts = out.external_scripts or state.get("external_scripts", ["https://cdn.jsdelivr.net/npm/chart.js"])
-    head_meta = out.head_meta or state.get("head_meta", {})
-    scripts_content = out.scripts_content or state.get("scripts_content", "")
-    
-    # Extract the template's <style> block once here (one deck pins one template), then write it
-    # to emitted_style_blocks so the post-commit CSS aggregator (Task 3.4) can collect it.
-    # The template style block is extracted deterministically and travels whole (§M5); all slides
-    # built from this one template get the same block, so dedupe is automatic in the merge.
+    # Brand bytes never pass through a model (§M3, §K4): extract from resolve_template_bytes
+    # (deterministic) and from SlideDeck, never from ArchitectOutput.
+    token_css = ""
+    deterministic_css = ""
+    external_scripts = state.get("external_scripts", ["https://cdn.jsdelivr.net/npm/chart.js"])
+    head_meta = state.get("head_meta", {})
+    scripts_content = state.get("scripts_content", "")
     template_style_block = ""
+    
     if out.deck_spec.design_contract:
         try:
             design_contract = out.deck_spec.design_contract
-            layout_html, template_style_block, _ = resolve_template_bytes(
+            layout_html, template_style_block, token_css = resolve_template_bytes(
                 design_contract.design_system_id, design_contract.template_id
             )
+            # deterministic_css is the template's <style> block (used pre-fan-out for styling)
+            deterministic_css = template_style_block
         except Exception:
             logger.warning("template extraction failed; proceeding with empty style block",
                           exc_info=True)
@@ -6634,8 +6651,7 @@ def data_analyst_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     out = call_skill("data_analyst", state)
     return {
-        "architect_message": out.message,
-        "deck_spec": out.deck_spec if out.deck_spec else state.get("deck_spec"),
+        "architect_message": out.synthesis,
     }
 ```
 
@@ -6772,6 +6788,7 @@ class SkillRecorder:
         self.fail_positions: set[int] = set()
         self.slow_positions: set[int] = set()
         self.objective_findings_at: set[int] = set()
+        self.slide_count: int = 3  # Default, overridden by tests via _run()
 
     def counts(self, skill: str) -> int:
         return sum(1 for name, _ in self.calls if name == skill)
@@ -6815,7 +6832,7 @@ def stub_skills(monkeypatch):
             if name == "deck_reviewer":
                 return DeckReviewOutput(findings=[])
             if name == "architect":
-                n = payload.get("_stub_slide_count", 3)
+                n = rec.slide_count
                 return ArchitectOutput(intent="build", message="building", deck_spec=DeckSpec(
                     audience="a", purpose="p", argument="g", call_to_action="c",
                     slides=[SlideSpec(position=i, purpose="x", content_brief="b")
@@ -6844,18 +6861,18 @@ from src.services.graph.state import scoped_vals
 pytest_plugins = ["tests.integration.conftest_stub_skills"]
 
 
-def _run(slide_count: int, thread: str = "orch", **initial):
+def _run(slide_count: int, stub_skills, thread: str = "orch", **initial):
+    stub_skills.slide_count = slide_count
     app = build_graph().compile(checkpointer=InMemorySaver())
     import uuid
     return app.invoke(
-        {"session_id": "sess-1", "turn_id": uuid.uuid4().hex,
-         "_stub_slide_count": slide_count, **initial},
+        {"session_id": "sess-1", "turn_id": uuid.uuid4().hex, **initial},
         config={"configurable": {"thread_id": thread}, "max_concurrency": 15},
     )
 
 
 def test_a_three_slide_deck_builds_every_position(stub_skills, stub_writer):
-    out = _run(3)
+    out = _run(3, stub_skills)
     assert scoped_vals(out, "landed_positions") == {0, 1, 2}
     assert stub_skills.counts("builder") == 3
 
@@ -6864,24 +6881,24 @@ def test_one_reviewer_invocation_PER_SLIDE_not_per_batch(stub_skills, stub_write
     """The re-fan's whole purpose. A static edge would give ONE reviewer call for the batch,
     breaking the one-reviewer-writes-one-row no-contention invariant and the n-not-3n cost
     model — and build_reviewer_node's payload["position"] would raise KeyError."""
-    _run(6)
+    _run(6, stub_skills)
     assert stub_skills.counts("build_reviewer") == 6
     assert sorted(stub_skills.positions("build_reviewer")) == [0, 1, 2, 3, 4, 5]
 
 
 def test_the_cap_holds_at_fifteen_over_forty_positions(stub_skills, stub_writer):
-    _run(40, thread="cap")
+    _run(40, stub_skills, thread="cap")
     assert stub_skills.peak_concurrent <= 15
 
 
 def test_dispatch_is_ascending_and_the_first_batch_is_0_to_14(stub_skills, stub_writer):
-    _run(31, thread="asc")
+    _run(31, stub_skills, thread="asc")
     assert stub_skills.positions("builder")[:15] == list(range(15))
 
 
 def test_no_higher_position_is_dispatched_while_a_lower_one_is_outstanding(stub_skills, stub_writer):
     stub_skills.slow_positions = {1}
-    _run(20, thread="slow")
+    _run(20, stub_skills, thread="slow")
     dispatched = stub_skills.positions("builder")
     assert dispatched.index(1) < dispatched.index(15)
 
@@ -6890,14 +6907,14 @@ def test_release_order_is_strictly_ascending_even_with_a_slow_position(stub_skil
     """§7.4's no-flapping guarantee: a slide never appears and then silently changes under the
     user, and nothing ever slots in late."""
     stub_skills.slow_positions = {1}
-    _run(6, thread="release")
+    _run(6, stub_skills, thread="release")
     assert stub_writer.written_positions == sorted(stub_writer.written_positions)
 
 
 def test_the_orchestrator_wakes_once_per_COMPLETED_BATCH(stub_skills, stub_writer):
     """Acknowledges the barrier rather than fighting it, so a future change that assumes
     per-completion wakeups fails loudly here instead of degrading silently."""
-    out = _run(5, thread="barrier")
+    out = _run(5, stub_skills, thread="barrier")
     assert out.get("foreman_wakes"), "foreman_node must record its wakes for this assertion"
     # foreman_wakes is turn-scoped: extract via scoped_vals to get the actual list
     wakes = scoped_vals(out, "foreman_wakes")
@@ -6910,7 +6927,7 @@ def test_exactly_one_fix_round_per_position(stub_skills, stub_writer):
     minimum is re-fixed on the next foreman pass — measured as each position entering the
     fixer twice and deck review firing twice."""
     stub_skills.objective_findings_at = {1, 3}
-    _run(5, thread="fix")
+    _run(5, stub_skills, thread="fix")
     assert sorted(stub_skills.positions("fixer")) == [1, 3]
     assert stub_skills.counts("fixer") == 2
     assert stub_skills.counts("deck_reviewer") == 1
@@ -6918,20 +6935,20 @@ def test_exactly_one_fix_round_per_position(stub_skills, stub_writer):
 
 def test_a_surviving_defect_becomes_a_surfaced_finding_not_a_retry(stub_skills, stub_writer):
     stub_skills.objective_findings_at = {2}
-    out = _run(4, thread="survive")
+    out = _run(4, stub_skills, thread="survive")
     assert stub_skills.counts("fixer") == 1
     assert scoped_vals(out, "landed_positions") == {0, 1, 2, 3}
 
 
 def test_a_terminal_failure_becomes_a_placeholder_and_release_proceeds_past_it(stub_skills, stub_writer):
     stub_skills.fail_positions = {7}
-    out = _run(10, thread="fail")
+    out = _run(10, stub_skills, thread="fail")
     assert 7 in scoped_vals(out, "placeheld_positions")
     assert stub_skills.counts("deck_reviewer") == 1, "a placeholder must count as committed"
 
 
 def test_deck_review_fires_exactly_once_after_everything_commits(stub_skills, stub_writer):
-    _run(8, thread="deckrev")
+    _run(8, stub_skills, thread="deckrev")
     assert stub_skills.counts("deck_reviewer") == 1
 
 
@@ -6940,9 +6957,11 @@ def test_turn_two_builds_rather_than_going_straight_to_deck_review(stub_skills, 
     app = build_graph().compile(checkpointer=InMemorySaver())
     cfg = {"configurable": {"thread_id": "two-turns"}, "max_concurrency": 15}
     import uuid
-    app.invoke({"session_id": "s", "turn_id": uuid.uuid4().hex, "_stub_slide_count": 3}, config=cfg)
+    stub_skills.slide_count = 3
+    app.invoke({"session_id": "s", "turn_id": uuid.uuid4().hex}, config=cfg)
     before = stub_skills.counts("builder")
-    app.invoke({"session_id": "s", "turn_id": uuid.uuid4().hex, "_stub_slide_count": 3}, config=cfg)
+    stub_skills.slide_count = 3
+    app.invoke({"session_id": "s", "turn_id": uuid.uuid4().hex}, config=cfg)
     assert stub_skills.counts("builder") == before + 3, "turn 2 built nothing"
 ```
 
@@ -7035,18 +7054,21 @@ def test_list_skills_returns_all_registered():
 # src/services/agent_resolution.py — ADD at the end of the file
 
 def assemble_skill_prompt(skill: 'Skill', payload: dict) -> str:
-    """Assemble the final prompt for a skill invocation.
+    """Assemble the final prompt for a skill invocation with full context.
 
     Handles two conditional injections:
     1. _SLIDE_FRAME_CONSTRAINTS: only when the resolved style in the payload lacks it (§L5's third case)
     2. DESIGN_SYSTEM_PRECEDENCE: only when a design system is active in the payload
 
-    The skill's base prompt + these conditionals become the request to the LLM.
+    The skill's instructions + payload + these conditionals become the request to the LLM.
+    The payload is ALWAYS included in JSON format so the model receives complete context
+    (builder gets slide brief, reviewer gets HTML/findings, etc.).
     """
+    import json
     from src.core.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
     from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
 
-    prompt = skill.prompt_body or ""
+    prompt = skill.instructions or ""
 
     # Conditional 1: inject _SLIDE_FRAME_CONSTRAINTS only if the resolved style lacks it
     if _SLIDE_FRAME_CONSTRAINTS and _SLIDE_FRAME_CONSTRAINTS not in prompt:
@@ -7059,6 +7081,9 @@ def assemble_skill_prompt(skill: 'Skill', payload: dict) -> str:
     if payload.get("design_system_id") is not None:
         if DESIGN_SYSTEM_PRECEDENCE and DESIGN_SYSTEM_PRECEDENCE not in prompt:
             prompt += f"\n\n{DESIGN_SYSTEM_PRECEDENCE}"
+
+    # Include the payload in JSON format so the model has all context for this invocation
+    prompt += f"\n\nPayload:\n{json.dumps(payload, default=str, indent=2)}"
 
     return prompt
 
@@ -7097,35 +7122,68 @@ def get_structured_model(schema: type):
 
 ```python
 # src/core/skills/__init__.py
-"""Skill invocation infrastructure. Full skill implementations added in Task 5.1."""
+"""In-repo, versioned agent skills (spec §5.1).
+
+A skill is instructions + output schema + tool grants, reviewed in PRs and tested in CI. Not a
+single system prompt, for a structural reason: ``AgentConfig`` is SINGULAR — one prompt, one
+editing instruction, one style, one tool list — and with seven roles it cannot express per-role
+behaviour.
+
+§A1: the prose is METADATA and the schema is a CONTRACT. The graph binds only to the schema, so
+these ship with generated placeholder instructions and real authoring is a separate track. The
+authoring order is a dependency: architect -> builder -> fixer -> build_reviewer -> fix_reviewer
+-> deck_reviewer -> data_analyst.
+
+**Skills are never user-editable (§E1).** Per-skill append-only overrides were rejected: a user
+appending text to a reviewer could soften the bar it enforces, and spec §5.1 requires review
+independence to be STRUCTURAL, not nominal.
+"""
 import logging
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Type
 
 from pydantic import BaseModel
 
+from src.domain.skill_io import OUTPUT_SCHEMAS
+
 logger = logging.getLogger(__name__)
 
-# Placeholder registry — populated by Task 5.1
-_REGISTRY: Dict[str, 'Skill'] = {}
 
-
-class Skill(BaseModel):
-    """A versioned skill: instructions + output schema + tool grants."""
+@dataclass(frozen=True)
+class Skill:
     name: str
-    prompt_body: str
-    output_schema: type
+    version: int
+    instructions: str
+    output_schema: Type[BaseModel]
+    tool_grants: List[str] = field(default_factory=list)
+
+
+_REGISTRY: Dict[str, Skill] = {}
+
+
+def _register(skill: Skill) -> None:
+    _REGISTRY[skill.name] = skill
+
+
+def _load_all() -> None:
+    if _REGISTRY:
+        return
+    from src.core.skills import (  # noqa: F401  (import registers each skill)
+        architect_skill, build_reviewer_skill, builder_skill, data_analyst_skill,
+        deck_reviewer_skill, fix_reviewer_skill, fixer_skill,
+    )
+
+
+def list_skills() -> List[str]:
+    _load_all()
+    return sorted(_REGISTRY)
 
 
 def load_skill(name: str) -> Skill:
-    """Load a skill from the registry. Full implementations added in Task 5.1."""
+    _load_all()
     if name not in _REGISTRY:
-        raise KeyError(f"Skill {name!r} not found. Registered: {sorted(_REGISTRY.keys())}")
+        raise KeyError(f"unknown skill {name!r}; known: {sorted(_REGISTRY)}")
     return _REGISTRY[name]
-
-
-def list_skills() -> list[str]:
-    """List all registered skill names. Populated in Task 5.1."""
-    return sorted(_REGISTRY.keys())
 
 
 def call_skill(name: str, payload: Dict[str, Any]) -> BaseModel:
@@ -7147,11 +7205,6 @@ def call_skill(name: str, payload: Dict[str, Any]) -> BaseModel:
     return skill.output_schema.model_validate(
         raw if isinstance(raw, dict) else raw.model_dump()
     )
-
-
-def _register_skill(skill: Skill) -> None:
-    """Register a skill. Called by task 5.1 skill implementations."""
-    _REGISTRY[skill.name] = skill
 ```
 
 - [ ] **Step 4: Run tests to verify the infrastructure exists**
@@ -7183,6 +7236,8 @@ git commit -m "feat(skills): call_skill infrastructure — invocation, prompt as
 ---
 
 ### Task 5.1: Seven skill implementations (architect, analyst, builder, reviewers, fixer, deck reviewer)
+
+**⚠️ GATED on decision:** `test_no_skill_hardcodes_the_frame_numbers` cannot ship until resolved: does the fixer_skill composition strip the "1280x720" line from `src/core/prompt_modules.py::EDITING_RULES` (§L5), or does shipped prose get edited, or does the test narrow to exclude that line? The test is written below and will RED on day 1 without a ruling. Decision is already on PENDING.
 
 **Files:**
 - Modify: `src/core/skills/__init__.py` (register the seven skills; the file structure was created in Task 4.5)
@@ -9114,17 +9169,17 @@ def claim_due_marker(now: datetime) -> Optional[tuple]:
     """
     from sqlalchemy import text
 
-    from src.core.database import get_db_session, LAKEBASE_SCHEMA
+    from src.core.database import get_db_session
     from src.database.models import UserSession
 
     due_before = now - timedelta(seconds=DEBOUNCE_SECONDS)
     claim_expired = now - timedelta(seconds=CLAIM_TTL_SECONDS)
     with get_db_session() as db:
         row = db.execute(text(f"""
-            UPDATE {LAKEBASE_SCHEMA}.session_slide_decks
+            UPDATE session_slide_decks
                SET spec_dirty_claimed_at = :now
              WHERE id = (
-                   SELECT d.id FROM {LAKEBASE_SCHEMA}.session_slide_decks d
+                   SELECT d.id FROM session_slide_decks d
                     WHERE d.spec_dirty_at IS NOT NULL
                       AND d.spec_dirty_at <= :due_before
                       AND d.spec_dirty_by IS NOT NULL
