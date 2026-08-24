@@ -1144,7 +1144,7 @@ Recorded so the divergences are deliberate rather than drift.
 | spec §6.4 | "`create_deck` / `edit_deck` contracts are unchanged, so the TAP builder, DAIS agenda curator and KPMG pricing skills need no coordinated change" | true of the tool *signatures*, not of what is behind them: `_edit_deck_impl` targets `agent.py`'s `_format_slide_context` shape (deleted by §D), `get_deck_status` has no field that exposes §I's placeholders, and §F routes findings only to browser surfaces (§D2) |
 | spec §5.2.1 | tool manifest comes from `AgentConfig.tools` | it must also carry the design-system library, or the architect cannot offer a brand it cannot see (§M1) |
 | spec §4.1 slide level | `SlideSpec` fields are **position** / purpose / brief / assumes / hands-off / data refs | plus a **template section assignment** (§M3) |
-| `design-system-library.md` §9 | a first-request template pin is stripped | fixed on the **graph path** only; the browser path is unchanged (§M2) |
+| `design-system-library.md` §9 | a first-request template pin is stripped | **no change** — the strip is correct and stays. An earlier revision of this document promised a graph-path fix; withdrawn, because the strip runs before any agent exists and §M1 covers the user story a turn later (§M2) |
 | current pinned-template prompt block | injects the whole layout for the whole deck | per-slide **section extraction**; the layout never goes to a builder whole (§M3–§M5) |
 | `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` on failure (§L8). §E2 is corrected in place; the still-stale *source* docstrings are named in §L8 |
 | PRD §14 (big-bang-release mitigation) | "Workstreams merge continuously **behind flags**; **dogfood the integration branch** internally well before release" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`) | **both named mitigations are dropped** (§D). The flag is removed entirely and there is no dogfooding period with both engines live. Deliberate: a `false`-default flag would select a path plan Phase 9.2 deletes, so the flag cannot exist in the form PRD §14 assumes. Substituted mitigations: the four-layer test suite with a real-LLM agentic layer (§G) and a `deploy-tellr-dev` devloop deploy as the pre-merge gate (§D). The residual risk — no both-engines-live comparison, and the graph must be correct at merge — is **accepted**; recorded here because §J documents every other divergence |
@@ -1166,7 +1166,8 @@ Recorded so the divergences are deliberate rather than drift.
 Two items that stood here were later resolved by §M below, and are listed so the change of
 status is visible rather than silently dropped:
 
-- ~~How the architect converses about brand~~ → **resolved in §M1/§M2.**
+- ~~How the architect converses about brand~~ → **resolved in §M1.** (§M2's first-turn-pinning
+  half was withdrawn as a non-issue — see §M2.)
 - ~~Whether design-system templates inform the deck spec's slide briefs~~ → **resolved in
   §M3–§M5.**
 
@@ -1622,39 +1623,46 @@ Two consequences:
   `slide_style_id` at the column bind (§L1), so the confirmation must say the deck's slide
   style is being dropped, not silently drop it.
 
-### M2. First-turn pinning is fixed on the graph path
+### M2. First-turn template pinning — withdrawn as a non-issue
 
-Today a template pin submitted on the request that *creates* a session is **stripped**,
-because a pin arriving at session-creation cannot be distinguished from another browser
-surface's carry-over (`design-system-library.md` §9, and `:283`: "Pinning works on an
-existing session, and over MCP via `template_name`"). The documented workaround is "send
-your first message, then pin".
+**This section previously instructed PR3 to "fix first-turn pinning on the graph path".
+Withdrawn 2026-08-24; it asked for work that has nowhere to happen and no longer needs
+doing.** Kept as a record so the question is not re-opened from the parent doc's limitation
+list.
 
-A conversational pin hits this immediately — "build me an Acme-branded deck" is a first turn.
-**PR3 fixes it for the graph path only.** The ambiguity that motivated the strip is a
-*browser-surface* ambiguity; a pin the architect derives from the user's message is
-unambiguous architect intent, so the graph path can honour it without reintroducing the
-carry-over problem for the pre-session browser path. The browser path's behaviour is
-unchanged.
+**The limitation is real.** A template pin submitted on the request that *creates* a session
+is dropped by `_without_template_pin` (`src/api/routes/chat.py:240`, applied at `:279` and
+`:295`). Its docstring gives the reason: a pin arriving at session-creation "can only be
+another surface's in-memory carryover (the new-session race)" — a `localStorage` pin from a
+different deck riding along on the new session's request. `design-system-library.md` §9
+documents the workaround as "send your first message, then pin".
 
-**Where the strip actually is — added 2026-08-20, so the fix has a location.**
-`_without_template_pin` is a local helper inside the **chat route**:
-`src/api/routes/chat.py:240`, applied at `:279` (a client-generated session id that was never
-persisted) and `:295` (no session id at all) — the route's two session-creating branches,
-both of which run **before any agent or graph is constructed**. There is no graph-path site
-upstream of it, and the very turn this section describes arrives through that route. So
-"fixed for the graph path only" is a statement about *provenance at that one call site*, not
-about a second code path: a pin the architect derived from the user's message is honoured
-there, while a `template_id` merely present in the inbound `agent_config` blob is still
-stripped. The browser carry-over behaviour is unchanged, exactly as stated above.
+**Why "fix it on the graph path" cannot be executed.** The strip runs *inside*
+`_maybe_create_session`, which the route awaits at `chat.py:339` / `:443` / `:602` — strictly
+**before** `chat_service.send_message_streaming` (`:480`) and before `enqueue_job` (`:641`).
+So no agent or graph exists yet at the moment the pin is discarded. There is no
+architect-derived pin to preserve at that point; the only thing present is a `template_id` in
+the inbound `agent_config` blob, which is exactly the carry-over case the strip exists to
+reject. A fix would therefore have to change the **browser** path — the one this section
+promised to leave unchanged — and would reopen the race.
 
-**And the non-browser first-request-pin precedent already exists.** MCP `create_deck`
-resolves `template_name` to a `template_id` pin **on the session-creating request**, and it
-is not stripped — `src/api/mcp_server.py:480-483` sets `agent_config["template_id"]`, and
-`_without_template_pin` is local to `chat.py` so no MCP path passes through it
-(`design-system-library.md` §4.6, `:148-151`). Honouring a first-request pin from a
-non-browser caller is therefore established behaviour rather than a new exception, which
-narrows what PR3 has to justify.
+**And the user story is already served, by §M1.** "Build me an Acme-branded deck" resolves in
+the ordinary sequence: the session is created (any stale pin correctly stripped), the
+architect then runs, reads the brand intent, and sets `design_system_id`/`template_id` on an
+**existing** session — the path that already works. The cost is one turn, and §M1 requires a
+confirmation before restyling anyway, so that turn was always going to happen.
+
+**The precedent §M2 wanted to establish already exists.** MCP `create_deck` resolves
+`template_name` into `agent_config["template_id"]` **on the session-creating request** and it
+is *not* stripped, because `_without_template_pin` is local to `chat.py`
+(`src/api/mcp_server.py:480-483`; `design-system-library.md` §4.6, `:148-151`). A non-browser
+caller pinning on first request is therefore established behaviour, not a new exception.
+
+**Net effect on PR3: no work.** The pre-session browser behaviour is unchanged and deliberate;
+first-turn brand intent is §M1's job. If a future change genuinely needs a first-request pin
+honoured from the browser, it needs a way to distinguish "the user just chose this" from
+carry-over — a marker on the request, not a graph-path condition — and that is a separate
+design question outside PR3.
 
 ### M3. Grain-agnosticism: the architect assigns, deterministic code extracts
 
