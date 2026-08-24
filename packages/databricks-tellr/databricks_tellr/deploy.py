@@ -671,10 +671,11 @@ def _update_databricks(
                 print("   WARNING: no app URL — cannot confirm the key source; "
                       "leaving the Lakebase key row in place")
             elif secret_key.app_reports_secret_source(ws, app.url):
-                del_conn, _ = _get_lakebase_connection(
-                    ws, lakebase_name, lakebase_result=lakebase_result
-                )
+                del_conn = None
                 try:
+                    del_conn, _ = _get_lakebase_connection(
+                        ws, lakebase_name, lakebase_result=lakebase_result
+                    )
                     with del_conn.cursor() as cur:
                         if secret_key.read_lakebase_key(cur, schema_name):
                             secret_key.delete_lakebase_key_row(cur, schema_name)
@@ -687,7 +688,8 @@ def _update_databricks(
                     print(f'   Run manually: DELETE FROM "{schema_name}".'
                           f"encryption_keys WHERE id = 1;")
                 finally:
-                    del_conn.close()
+                    if del_conn is not None:
+                        del_conn.close()
             else:
                 print("   WARNING: the deployed app does not report the secret as "
                       "its key source. Leaving the Lakebase key row in place. This "
