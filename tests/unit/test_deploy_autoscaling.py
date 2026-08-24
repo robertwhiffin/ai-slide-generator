@@ -520,7 +520,7 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test")
+        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
 
         _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -543,7 +543,7 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test")
+        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
 
         _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -568,7 +568,7 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.PROVISIONED_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test")
+        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
 
         _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -593,7 +593,7 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test")
+        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
 
         result = _update_databricks(
             app_name="app", app_file_workspace_path="/path",
