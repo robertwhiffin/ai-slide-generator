@@ -246,7 +246,7 @@ class Finding(BaseModel):
 def make_finding_id(criterion: str, slide_content_hash: str) -> str: ...
 CRITERIA: dict[str, FindingCriterion]          # criterion name -> definition
 
-# src/domain/deck_spec.py                      (Task 1.5)
+# src/domain/deck_spec.py                      (Task 1.4)
 class DesignContractRef(BaseModel):
     design_system_id: int | None; template_id: int | None; slide_style_id: int | None
 class SlideSpec(BaseModel):
@@ -279,7 +279,7 @@ def releasable_positions(state) -> list[int]: ...
 def stalled_positions(state, now: float, timeout_s: int = RELEASE_TIMEOUT_S) -> list[int]: ...
 def all_positions_committed(state) -> bool: ...
 
-# src/services/template_sections.py            (Task 5.4)
+# src/services/template_sections.py            (Task 5.3)
 def section_inventory(layout_html: str) -> list[dict]: ...
 def extract_section(layout_html: str, index: int) -> str: ...
 def resolve_template_bytes(design_system_id: int, template_id: int) -> tuple[str, str, str]:
@@ -306,7 +306,7 @@ def get_checkpointer() -> SqlAlchemyCheckpointSaver: ...
 def get_compiled_graph(): ...                  # process-wide, compiled once
 def invoke_graph(session_id: str, turn_id: str, initial: dict) -> dict: ...
 
-# src/utils/graph_safety.py                    (Task 5.5)
+# src/utils/graph_safety.py                    (Task 5.4)
 def gate_emitted_html(html: str, regenerate, session_id: str, on_retry=None) -> tuple[str, bool]: ...
 def spotlight_prior_slides(htmls: list[str], session_id: str) -> str: ...
 
@@ -423,7 +423,7 @@ shipped a defect straight from the plan's own inline code without this list.
 13. Never hand-roll an `<untrusted-data>` f-string. Use
     `src/utils/spotlight.py::spotlight(source, text, *, scan=True, session_id=None)` — it
     neutralises embedded delimiters and applies `cap_tool_output`.
-14. `llm_judge.py` has a live consumer (`src/services/evaluation/verification.py:18,221`). It
+14. `llm_judge.py` has a live consumer (`src/api/routes/verification.py:18`). It
     stays. So does `agent.py` and `agent_factory.py`.
 15. `AgentConfig` declares no `model_config`, so Pydantic's default `extra='ignore'` applies and
     an undeclared key is silently dropped by `sanitize_agent_config_for_persist`. Do not try to
@@ -997,7 +997,7 @@ def findings_from_record(
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_finding_schema.py -q`
-Expected: PASS (16 tests)
+Expected: PASS (15 tests)
 
 - [ ] **Step 5: Sabotage-verify the two constraint tests**
 
@@ -1798,7 +1798,7 @@ class DeckSpec(BaseModel):
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `~/.pyenv/versions/3.11.0/bin/python -m pytest tests/unit/test_deck_spec.py -q`
-Expected: PASS (11 tests)
+Expected: PASS (10 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -2491,7 +2491,7 @@ def test_threads_are_isolated(sqlite_saver):
 
 
 def test_delete_thread_clears_checkpoints_and_writes(sqlite_saver):
-    """delete_thread already exists on BaseCheckpointSaver — context clearing (Task 6.x) uses
+    """delete_thread already exists on BaseCheckpointSaver — context clearing (Task 6) uses
     it rather than inventing a separate function."""
     cfg = sqlite_saver.put(_cfg("del"), _checkpoint(), CheckpointMetadata(), {})
     sqlite_saver.put_writes(cfg, [("slides", {})], task_id="t")
@@ -2722,7 +2722,7 @@ call ``astream``.** If a future caller needs it, implement ``aget_tuple`` / ``al
 A consequence worth recording: because the graph is sync, ``Send(node, arg, timeout=...)`` is
 unusable. Probed on 1.2.10: ``ValueError: Node timeouts are only supported for async nodes
 because sync Python execution cannot be safely cancelled in-process.`` Stall detection therefore
-uses the state-recorded ``dispatched_at`` check (Task 4.5), and that is the only option.
+uses the state-recorded ``dispatched_at`` check (Task 4.2), and that is the only option.
 """
 import logging
 from datetime import datetime
@@ -3547,10 +3547,27 @@ cannot retire both:
 | `src/core/config_loader.py:130` | config key |
 | `src/services/validator.py:39` | `validate_prompts(system_prompt=…)` |
 | `src/core/migrate_profiles_to_agent_config.py:15,17,44-45,51-52,54,76-77` | reads both at startup — **pre-fork, from `run.py::init_database:66`**, not `main.py`'s lifespan. (`main.py:111` hits are the two stale `build/lib/` copies only.) Note each line is a **pair**: an earlier draft cited only the `system_prompt` half |
-| `src/services/agent_factory.py:250-263`, logged `:504-505` | branches on `system_prompt is not None`, reading the **JSON field**, not the column |
-| `src/services/agent.py:250-252,617,624-625` | monolith — **it survives this PR (§D)**, so these must keep compiling. Replace the branch with the in-repo default rather than deleting the code path |
+| `src/services/agent_factory.py:250-268`, logged `:504-505` | branches on `system_prompt is not None`, reading the **JSON field**, not the column |
+| `src/services/agent.py:250-252,617,624-625` | monolith — **it survives this PR (§D)**, so these must keep compiling. These lines read from the `prompts` dict parameter, not the retired AgentConfig field. Once agent_factory.py deletes the override branch, it always returns `pre_assembled=True`, making the legacy concatenation path (lines 620-640) unreachable but still compilable. Keep the code as-is for monolith compatibility. |
 | `frontend/src/types/agentConfig.ts:82-83,135-136` | typed and defaulted |
 | `frontend/src/contexts/AgentConfigContext.tsx:124-125,1137-1138` | "has custom config" check — **two** call sites |
+
+**Plus test files with references to the retired fields:**
+
+| Test File | Refs | Note |
+|---|---|---|
+| `tests/unit/test_agent_factory.py` | 41 | Includes `test_custom_system_prompt_overrides_default`, `test_custom_slide_editing_instructions_overrides_default` — these **assert the feature §E2 removes** |
+| `tests/unit/test_prompt_precedence_fixes.py` | 40 | Tests priority/resolution of retired fields |
+| `tests/unit/test_design_system_compiler.py` | 17 | References in design system context |
+| `tests/unit/test_ds_generation_state_matrix.py` | 14 | State matrix tests |
+| `tests/unit/test_migration.py` | 12 | Migration/upgrade tests |
+| `tests/unit/test_agent_config_schema.py` | 8 | Schema validator tests at `:13`, `:88-91` (the validator), `:332`, `:339` |
+
+**Frontend consumers (additional to plan list):**
+- `frontend/src/api/config.ts:83,92` — `system_prompt: string;` field definitions
+- `frontend/src/components/config/ProfileList.tsx:34,59` — `hasCustomSystemPrompt` check, a **third** "has custom config" site beyond the two in `AgentConfigContext.tsx`
+
+> **Policy decision required:** Tests asserting the removed feature (e.g. `test_custom_system_prompt_overrides_default`) must either be **deleted** or **repointed to test new behavior**. §E1's premise ("editing these is highly unlikely in practice") enables breaking the tests; without custom values in production, their deletion does not hide a user's data loss. **Do not leave these tests red.** The standing rule ("repoint and see them pass; never delete") assumes tests assert something that survives; these assert a removed feature. This plan needs a JUDGMENT ruling before Task 2.4 dispatches: may the executor delete tests that asserted §E2's removed feature, or must they be repointed?
 
 **Plus four `ConfigPrompts(...)` constructors under `tests/`** —
 `tests/unit/config/test_models.py:87`, `:137`, `tests/unit/test_settings_db.py:69`,
@@ -4655,10 +4672,9 @@ def read_deck_spec(session_id: str) -> Optional[Dict[str, Any]]:
         return None
 ```
 
-> `resolve_deck_owner` may not exist under that name — `SessionManager` resolves the deck owner
-> inline in `save_slide_deck` and `get_slide_deck` for contributor sessions. Extract that lookup
-> into one public method (the same one Task 2.2 needs) rather than duplicating the query, and
-> record the real name in `.pr3-PLAN-CORRECTIONS.md`.
+> `_get_deck_owner_session(db, session: UserSession)` at `session_manager.py:709` resolves the deck owner
+> and is already integrated at the call sites. The method takes a `UserSession` object rather than
+> a `session_id` string, so callers must first fetch the session using `_get_session_or_raise(db, session_id)`.
 
 - [ ] **Step 4: Run, then sabotage-verify the no-truncation test**
 
@@ -6782,7 +6798,7 @@ blocks. Directly reusable by builder and fixer: `CHART_JS_RULES`, `EDITING_RULES
 `SLIDE_GUIDELINES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT`. Two are **load-bearing rather than
 optional**: `DESIGN_SYSTEM_PRECEDENCE` (include only when a design system is active) and
 **`UNTRUSTED_DATA_NOTICE`**, which every skill receiving tool output or prior slide HTML needs
-(Task 5.5). The architect and all four reviewers are net-new writing.
+(Task 5.1). The architect and all four reviewers are net-new writing.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7289,7 +7305,7 @@ root for a per-slide template and **N** for a deck skeleton — probed on both s
 **Extraction must resolve the template through the materialize/self-heal path first.** There is no
 "normalizing accessor": `normalize_root_tag_selectors` (`design_system_templates.py:527`) is a plain
 function, and its two callers **persist** its output — `materialize_templates` (`:682`) self-heals
-existing rows by assigning `template.layout_html = normalized` (`:703`) and normalizes freshly
+existing rows by assigning `template.layout_html = normalized` (`:705`) and normalizes freshly
 derived rows on the way in (`:773`). So resolve via `get_template_for_generation` (`:849`, which
 calls `materialize_templates` at `:859`) and only **then** read `template.layout_html`. Extracting
 from a row that has not been through that pass yields a section whose CSS selectors match nothing
@@ -8100,8 +8116,8 @@ git commit -m "feat(engine): route a graph-mode turn through the compiled graph"
 
 **Spec §6.2, and §3.1's binding constraint:** `slides` is carried only on the terminal `COMPLETE`
 event, so per-slide delivery changes **both** transports. The polling path is harder: `poll_chat`
-(`chat.py:557`) does not relay live events at all — it reads persisted `SessionMessage` rows and
-converts them via `msg_to_stream_event` (`session_manager.py:2000`), which hardcodes three types
+(`chat.py:669`) does not relay live events at all — it reads persisted `SessionMessage` rows and
+converts them via `msg_to_stream_event` (`session_manager.py:2772`), which hardcodes three types
 and defaults everything else to `assistant`.
 
 **The reorder buffer is a query, not a data structure:** release position *n* once all positions
@@ -9174,7 +9190,9 @@ def test_no_spec_lives_outside_tests_e2e_where_the_matrix_cannot_reach_it():
 
 def test_the_findings_drawer_spec_is_covered():
     """The specific gap §C names: the only spec exercising the drawer and findings."""
-    matrix = re.findall(r"^\s+- ([a-z0-9-]+)$", WORKFLOW.read_text(encoding="utf-8"), re.M)
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    e2e_section = workflow_text[workflow_text.find("e2e-tests:"):workflow_text.find("e2e-tests:") + 5000]
+    matrix = re.findall(r"^\s+- ([a-z0-9-]+)$", e2e_section, re.M)
     assert "slide-viewer" in matrix
 ```
 
@@ -9449,7 +9467,7 @@ Ground truth, re-derived from the code:
 | RC12 | generation intent with an existing deck → ask add-or-replace | `:408`, `:924` |
 | RC13 | auto-create `slide_context` from a text reference | `:471`, `:992` |
 | RC14 | frontend/backend deck-state mismatch | `:1032` |
-| RC15 | canvas-ID rewriting | `:2388`, `:2413` |
+| RC15 | canvas-ID rewriting | `:2552`, `:2577` |
 
 - [ ] **Step 1: Re-derive every rule from the code before writing a single test**
 
@@ -9580,8 +9598,9 @@ No `TBD`, `TODO`, `[To be filled]`, "implement later", "add appropriate error ha
 to Task N" appears in this plan. Every code step carries a code block. **Three places name a
 follow-up rather than a value, each deliberately and each with a check that surfaces it:**
 
-1. `resolve_deck_owner` / `resolve_deck_owner_deck_id` — `SessionManager` resolves the deck owner
-   inline today; the real method name goes in `.pr3-PLAN-CORRECTIONS.md` (Tasks 2.2, 3.2).
+1. `_get_deck_owner_session(db, session: UserSession)` at `session_manager.py:709` — already
+   integrated at call sites (Tasks 2.2, 3.2). Callers must fetch the UserSession first via
+   `_get_session_or_raise(db, session_id)` before passing it in.
 2. `extract_template_style_block` / `resolve_template_token_css` — reuse the existing style-block
    walk and `chat_service._resolve_pinned_template_token_css` rather than reimplementing (Task 5.3).
 3. Task 0.2's outcome branches Task 5.4's `extract_section` between bare-root and re-parenting. The
