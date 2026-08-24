@@ -5552,7 +5552,8 @@ class GraphState(TypedDict, total=False):
     target_positions: Optional[list[int]]
     #: CSS from template extraction (§K4). Written pre-fan-out by architect_node.
     token_css: Optional[str]
-    #: HTML from aggregated slides, written post-commit by deck_reviewer_node (§L2).
+    #: HTML from all aggregated slides, knitted by deck_reviewer_node (§L2). Written by
+    #: calling SlideDeck.knit() after retrieving the deck via SessionManager.
     knitted_html: Optional[str]
     #: Username for deck-write attribution. From session or MCP request.
     modified_by: Optional[str]
@@ -5590,7 +5591,9 @@ class GraphState(TypedDict, total=False):
     #: original_SCRIPTS as well as original_html: the fix reviewer compares both.
     fix_map: Annotated[dict, turn_scoped_merge]
     fixed: Annotated[dict, turn_scoped_merge]
-    #: <style> blocks to aggregate at the post-commit write (Task 3.4).
+    #: Template's <style> block extracted once by architect_node, to aggregate at the post-commit
+    #: write (Task 3.4). One block only (one deck pins one template). Written by architect_node
+    #: as scoped(turn_id, [template_style_block]).
     emitted_style_blocks: Annotated[dict, turn_scoped_concat]
 
 
@@ -6520,6 +6523,10 @@ def deck_reviewer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     slides = deck.get("slides", [])
     htmls = [s.get("html", "") for s in slides]
 
+    # Knit the complete HTML document from all committed slides, and stitch in the aggregated CSS
+    # and template-derived scripts/metadata (§L2, §H1).
+    knitted_html = deck.knit()
+
     css = aggregate_deck_css(
         deck.get("css", ""),
         list(scoped_vals(state, "emitted_style_blocks") or []),
@@ -6527,7 +6534,7 @@ def deck_reviewer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     write_deck_level_columns(
         session_id, css=css, slide_count=len(slides),
-        html_content=state.get("knitted_html"), modified_by=state.get("modified_by"),
+        html_content=knitted_html, modified_by=state.get("modified_by"),
     )
 
     try:
@@ -6559,6 +6566,8 @@ def architect_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Converse, and on a build/edit turn commit the deck spec plus the PRE-FAN-OUT write."""
     from src.api.services.deck_level_writer import write_deck_level_columns
     from src.core.skills import call_skill
+    from src.services.graph.state import scoped
+    from src.services.template_sections import resolve_template_bytes
 
     out = call_skill("architect", state)
     update: Dict[str, Any] = {"architect_intent": out.intent, "architect_message": out.message}
@@ -6577,6 +6586,25 @@ def architect_node(state: Dict[str, Any]) -> Dict[str, Any]:
     external_scripts = out.external_scripts or state.get("external_scripts", ["https://cdn.jsdelivr.net/npm/chart.js"])
     head_meta = out.head_meta or state.get("head_meta", {})
     scripts_content = out.scripts_content or state.get("scripts_content", "")
+    
+    # Extract the template's <style> block once here (one deck pins one template), then write it
+    # to emitted_style_blocks so the post-commit CSS aggregator (Task 3.4) can collect it.
+    # The template style block is extracted deterministically and travels whole (§M5); all slides
+    # built from this one template get the same block, so dedupe is automatic in the merge.
+    template_style_block = ""
+    if out.deck_spec.design_contract:
+        try:
+            design_contract = out.deck_spec.design_contract
+            layout_html, template_style_block, _ = resolve_template_bytes(
+                design_contract.design_system_id, design_contract.template_id
+            )
+        except Exception:
+            logger.warning("template extraction failed; proceeding with empty style block",
+                          exc_info=True)
+            template_style_block = ""
+    
+    if template_style_block:
+        update["emitted_style_blocks"] = scoped(state["turn_id"], [template_style_block])
     
     update["deterministic_css"] = deterministic_css
     update["token_css"] = token_css
