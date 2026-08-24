@@ -107,15 +107,14 @@ The backend creates a blank Google Slides presentation, then converts each slide
 | "Not authorized" after previously working | Token expired or encryption key changed | Click **Authorize with Google** again |
 | Export fails for a single slide | LLM-generated code error | The slide gets a placeholder; other slides are unaffected |
 | "Credentials not configured" | Admin hasn't uploaded `credentials.json` | Ask an admin to upload credentials on the `/admin` page |
-| App won't start in production | Missing `GOOGLE_OAUTH_ENCRYPTION_KEY` env var | Set the environment variable (see below) |
+| App won't start in production | Encryption key missing or mis-configured | Verify the deployment used `tellr.update` / `deploy_local` (not the Databricks Apps UI button); check app logs for a key-resolution error |
 
 ### Production Encryption Key
 
-In production, the `GOOGLE_OAUTH_ENCRYPTION_KEY` environment variable must be set. Generate one with:
+The Fernet key for encrypting Google OAuth credentials lives in one of two places depending on how the app was deployed:
 
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
+- **Secret-backed (recommended):** The key is stored in a Databricks secret and injected automatically — no env var to manage manually. Deploy with `encryption_secret_scope` passed to `tellr.create()` / `tellr.update()`.
+- **Lakebase-backed (default):** The key is stored in the `encryption_keys` table of the app's Lakebase database. Self-seeded on first use; no manual setup required.
 
 In local development, a key is auto-generated and persisted to `.encryption_key` (gitignored).
 
