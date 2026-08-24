@@ -3254,8 +3254,20 @@ def _deck_id(db, session_id: str) -> Optional[int]:
     history — they already share the deck-owner row.
     """
     from src.api.services.session_manager import SessionManager
+    from src.database.models import UserSession
 
-    return SessionManager().resolve_deck_owner_deck_id(db, session_id)
+    session = (
+        db.query(UserSession)
+        .filter_by(session_id=session_id)
+        .first()
+    )
+    if session is None:
+        return None
+    manager = SessionManager()
+    deck_owner = manager._get_deck_owner_session(db, session)
+    if deck_owner is None or deck_owner.slide_deck is None:
+        return None
+    return deck_owner.slide_deck.id
 
 
 def save_deck_review(
@@ -3314,10 +3326,9 @@ def get_deck_review(session_id: str, digest: str) -> Optional[Dict[str, Any]]:
         }
 ```
 
-> `resolve_deck_owner_deck_id` may not exist under that name. `SessionManager` already resolves
-> the deck owner for contributor sessions in `save_slide_deck` and `get_slide_deck`; extract that
-> lookup into a small public method rather than duplicating the query, and record the real name
-> in `.pr3-PLAN-CORRECTIONS.md`.
+> Implement `_deck_id` using `SessionManager._get_deck_owner_session(db, session)` where `session`
+> is a `UserSession` object resolved first via `db.query(UserSession).filter_by(session_id=...)`.
+> This correctly handles contributor sessions.
 
 - [ ] **Step 6: Run, then sabotage-verify the reorder-invalidation test**
 
@@ -3715,24 +3726,32 @@ prompts = ConfigPrompts(
 Leave `model_config` absent, so `extra='ignore'` keeps dropping a legacy key silently — which is
 the desired forward behaviour for a stored blob that has not been migrated yet.
 
-**4c — `agent_factory.py:250-263`.** It branches on the **JSON field**, not the column. Replace
-the branch with the in-repo default so the monolith keeps working:
+**4c — `agent_factory.py:78-314`.** DO NOT apply the inline diff shown in the superseded plan.
+The real function `_get_prompt_content(config: AgentConfig, mode: str = "generate")` spans 237 lines
+and returns `dict[str, Optional[str]]` with six keys (`system_prompt`, `slide_editing_instructions`,
+`deck_prompt`, `slide_style`, `image_guidelines`, `pre_assembled`). It carries the entire design-system
+/ pinned-template / type-scale-reassertion pipeline (§L). This is verified at lines 78-314.
+
+**The real edit is only the conditional branch** at `:250-268` (not `:250-263` as the superseded plan
+claims; `:263` cuts mid-dict). Replace the legacy branch with the in-repo default:
 
 ```python
-# Before
-def _get_prompt_content(config: AgentConfig) -> str:
+# In the existing _get_prompt_content function at agent_factory.py, find the branch (line ~250):
+# Before:
     if config.system_prompt is not None:
-        return config.system_prompt
-    return DEFAULT_CONFIG["prompts"]["system_prompt"]
-# After — §E1: the seven skills are never user-editable, and the monolith survives this PR,
-# so it reads the in-repo default rather than a retired per-profile override.
-def _get_prompt_content(config: AgentConfig) -> str:
-    return prompt_modules.BASE_PROMPT
+        # Legacy override from stored JSON
+        return {
+            "system_prompt": config.system_prompt,
+            "slide_editing_instructions": config.slide_editing_instructions or DEFAULT_CONFIG["prompts"].get("slide_editing_instructions"),
+            ...
+        }
+# After — §E1: the skill overrides are never user-editable, and the monolith survives this PR
+    # (this branch is deleted entirely; all paths now use the modular assembly below)
 ```
 
-Keep the function's **name and signature**: six unit suites pin `_get_prompt_content` /
-`_build_tools` and Task 5.2 repoints them at the moved module. Renaming here would make that task
-look like a rewrite.
+Keep the **name and all six return keys** — Task 5.2 repoints six unit suites at the moved module
+and expects this exact signature. Deleting the override branch (lines ~250-268) leaves the
+non-override paths intact, which build the dict using the modular assembly.
 
 **4d — `agent.py:250-252,617,624-625`.** The monolith survives (§D), so these must keep
 compiling. Replace each read with the in-repo default; do not delete the code path.
@@ -4545,10 +4564,18 @@ def write_deck_level_columns(
     """
     from src.api.services.session_manager import SessionManager, VersionConflictError
     from src.core.database import get_db_session
+    from src.database.models import UserSession
 
     manager = SessionManager()
     with get_db_session() as db:
-        deck_owner = manager.resolve_deck_owner(db, session_id)
+        session = (
+            db.query(UserSession)
+            .filter_by(session_id=session_id)
+            .first()
+        )
+        if session is None:
+            raise ValueError(f"no session {session_id}")
+        deck_owner = manager._get_deck_owner_session(db, session)
         if deck_owner is None or deck_owner.slide_deck is None:
             raise ValueError(f"no slide deck for session {session_id}")
         deck = deck_owner.slide_deck
@@ -4605,9 +4632,17 @@ def read_deck_spec(session_id: str) -> Optional[Dict[str, Any]]:
     """
     from src.api.services.session_manager import SessionManager
     from src.core.database import get_db_session
+    from src.database.models import UserSession
 
     with get_db_session() as db:
-        deck_owner = SessionManager().resolve_deck_owner(db, session_id)
+        session = (
+            db.query(UserSession)
+            .filter_by(session_id=session_id)
+            .first()
+        )
+        if session is None:
+            return None
+        deck_owner = SessionManager()._get_deck_owner_session(db, session)
         if deck_owner is None or deck_owner.slide_deck is None:
             return None
         raw = deck_owner.slide_deck.deck_spec_json
@@ -5992,17 +6027,28 @@ def architect_router(state: Dict[str, Any]) -> str:
 
 
 def foreman_router(state: Dict[str, Any]) -> Union[str, List[Send]]:
-    """Dispatch the next ascending batch, hand over to the fixer, or advance the turn.
+    """Dispatch the next ascending batch, hand over to the fixer, commit stalled positions, or advance the turn.
 
     Reads ONLY keys that nodes actually write. An earlier draft read a `builder_queue` nothing
     wrote, so it always fell through to END and the graph never built a deck.
+    
+    Terminal failures (builder exceptions caught in builder_node) are committed as placeholders
+    by the builder itself; this router checks for any remaining stalled positions and commits them
+    before the turn ends (§I).
     """
+    from src.services.foreman_service import stalled_positions
+    import time
+
     if has_pending_fix(state):        # NOT `if state.get("fix_map")` — bool({0: None}) is True
         return "fixer"
 
     batch = next_dispatch_batch(state)
     if batch:
         return [Send("builder", build_branch_payload(state, p)) for p in batch]
+
+    # Check for stalled positions (timed out or abandoned) and commit them as placeholders.
+    if stalled_positions(state, now=time.time()):
+        return "placeholder"
 
     if all_positions_committed(state):
         return "deck_reviewer"
@@ -6067,16 +6113,30 @@ def builder_node(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns position-keyed values so the `slides` reducer merges concurrent branches, and
     carries the payload forward so `fan_reviewers` can rebuild the reviewer's input.
+
+    On failure: write a placeholder and return empty state so orchestration continues.
     """
+    from src.api.services.slide_repository import SlideWriter
     from src.core.skills import call_skill
 
     position = payload["position"]
     turn_id = payload["turn_id"]
-    out = call_skill("builder", payload)          # -> BuilderOutput
-    return {
-        "slides": scoped(turn_id, {position: {**payload, "html": out.html, "scripts": out.scripts}}),
-        "dispatched_at": scoped(turn_id, {position: time.time()}),
-    }
+    session_id = payload["session_id"]
+    
+    try:
+        out = call_skill("builder", payload)          # -> BuilderOutput
+        return {
+            "slides": scoped(turn_id, {position: {**payload, "html": out.html, "scripts": out.scripts}}),
+            "dispatched_at": scoped(turn_id, {position: time.time()}),
+        }
+    except Exception as e:
+        # Terminal failure: write a placeholder so the deck completes and the user sees what failed.
+        # This allows release to proceed past the stalled position rather than hanging.
+        SlideWriter().commit_placeholder(session_id, position, error_message=str(e))
+        return {
+            "landed_positions": scoped(turn_id, {position}),
+            "findings": [{"error": True, "criterion": "builder_failed", "message": str(e)}],
+        }
 
 
 def build_reviewer_node(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -6394,7 +6454,7 @@ def build_graph():
     # ONE conditional-edge set out of foreman. A static add_edge alongside conditional edges
     # from the same node gives duplicate conflicting edges and a GraphRecursionError.
     g.add_conditional_edges("foreman", routers.foreman_router,
-                            ["builder", "fixer", "deck_reviewer", END])
+                            ["builder", "fixer", "placeholder", "deck_reviewer", END])
 
     # RE-FAN, not a static edge: a static edge out of a Send-reached node collapses N branches
     # into ONE invocation with no payload (measured).
@@ -7805,14 +7865,16 @@ def test_clearing_context_KEEPS_the_deck_spec(session_with_spec_and_messages):
 
 def test_clear_context_requires_deck_permission(session_with_messages, other_user):
     """A round-2 finding on the superseded plan: POST /chat/clear-context had NO permission
-    check, so any authenticated user could wipe any session."""
+    check, so any authenticated user could wipe any session. The check is done by
+    _check_deck_permission_for_session, which raises HTTPException on denial."""
     import pytest
+    from starlette.exceptions import HTTPException
     from src.api.services.chat_service import clear_context
 
     s = session_with_messages(["USE AGENT MODE build it"])
     with other_user:
-        with pytest.raises(PermissionError):
-            clear_context(s)
+        with pytest.raises(HTTPException):
+            clear_context(s.session_id)
 
 
 def test_duplicating_a_graph_session_stays_in_graph_mode(session_with_messages):
@@ -7885,13 +7947,13 @@ def clear_context(session_id: str) -> None:
       * it must NOT run without a permission check. The superseded plan's route had none, so any
         authenticated user could wipe any session.
     """
+    from src.api.routes._authz import _check_deck_permission_for_session
     from src.core.checkpointer import get_checkpointer
     from src.core.database import get_db_session
     from src.database.models import UserSession
     from src.database.models.session import SessionMessage
 
-    session_manager = SessionManager()
-    session_manager.require_deck_permission(session_id)      # raises PermissionError
+    _check_deck_permission_for_session(session_id)      # raises HTTPException on denial
 
     with get_db_session() as db:
         session = db.query(UserSession).filter(UserSession.session_id == session_id).first()
@@ -8341,9 +8403,17 @@ def mark_dirty(session_id: str, author: Optional[str] = None) -> None:
     from src.api.services.session_manager import SessionManager
     from src.core.database import get_db_session
     from src.core.user_context import get_current_user
+    from src.database.models import UserSession
 
     with get_db_session() as db:
-        deck_owner = SessionManager().resolve_deck_owner(db, session_id)
+        session = (
+            db.query(UserSession)
+            .filter_by(session_id=session_id)
+            .first()
+        )
+        if session is None:
+            return
+        deck_owner = SessionManager()._get_deck_owner_session(db, session)
         if deck_owner is None or deck_owner.slide_deck is None:
             return
         deck = deck_owner.slide_deck
@@ -8360,9 +8430,17 @@ def clear_marker(session_id: str) -> None:
     """Discard the marker without running a review (§B3, and after a completed review)."""
     from src.api.services.session_manager import SessionManager
     from src.core.database import get_db_session
+    from src.database.models import UserSession
 
     with get_db_session() as db:
-        deck_owner = SessionManager().resolve_deck_owner(db, session_id)
+        session = (
+            db.query(UserSession)
+            .filter_by(session_id=session_id)
+            .first()
+        )
+        if session is None:
+            return
+        deck_owner = SessionManager()._get_deck_owner_session(db, session)
         if deck_owner is None or deck_owner.slide_deck is None:
             return
         deck = deck_owner.slide_deck
@@ -9029,21 +9107,27 @@ git commit -m "feat(frontend): wire the feedback drawer to real per-slide findin
 **Files:** modify `.github/workflows/test.yml:479-501`.
 
 **§C.** The `e2e-tests` job is an **explicit matrix allowlist of 23 spec names** against **32** specs
-on disk (measured), so a spec runs in CI only after a matrix edit. **PR3's frontend surface has zero
-CI coverage today:** `slide-viewer` — the only spec exercising the feedback drawer and findings
-(`frontend/tests/e2e/slide-viewer.spec.ts:304-360`) — is **absent** from the matrix, as are
-`slide-host-frame` and `template-viewer`; and `frontend/tests/viewer-readonly.spec.ts` sits outside
-`tests/e2e/` entirely, so it is unreachable by that job's naming scheme.
+on disk in `frontend/tests/e2e/` (measured), so a spec runs in CI only after a matrix edit. **PR3's
+frontend surface has zero CI coverage today:** `slide-viewer` — the only spec exercising the feedback
+drawer and findings (`frontend/tests/e2e/slide-viewer.spec.ts:304-360`) — is **absent** from the
+matrix, as are `admin-page`, `design-system-brand-text-uncapped`, `genie-detail-panel`,
+`save-points-versioning`, `session-config-isolation`, `slide-host-frame`, `style-source-exclusivity`,
+and `template-viewer`. Additionally, `frontend/tests/viewer-readonly.spec.ts` sits outside
+`tests/e2e/` entirely (10 other specs also live in `frontend/tests/` and 6 in
+`frontend/tests/user-guide/`), so it is unreachable by that job's naming scheme.
 
 **Adding the existing specs to the matrix is PR3 work, not a follow-up.** Without it, every new
 Playwright spec PR3 writes ships uncollected — including Task 1.2's re-keyed drawer assertions,
 which is precisely why nothing would have caught a fixture drift.
 
-- [ ] **Step 1: Add the missing entries**
+- [ ] **Step 1: Add the 9 missing e2e specs to the matrix**
 
-Add to the matrix, alphabetically placed: `slide-viewer`, `slide-host-frame`, `template-viewer`,
-plus PR3's new `spec-view`. **Move** `frontend/tests/viewer-readonly.spec.ts` into
-`frontend/tests/e2e/` so the naming scheme can reach it, and add `viewer-readonly`.
+Add to the matrix, alphabetically placed: `admin-page`, `design-system-brand-text-uncapped`,
+`genie-detail-panel`, `save-points-versioning`, `session-config-isolation`, `slide-host-frame`,
+`slide-viewer`, `style-source-exclusivity`, `template-viewer`, plus PR3's new `spec-view`. **Move**
+`frontend/tests/viewer-readonly.spec.ts` into `frontend/tests/e2e/` so the naming scheme can reach
+it, then add `viewer-readonly` to the matrix. (Step 1 adds 10 specs total, taking the matrix from
+23 to 33 entries.)
 
 - [ ] **Step 2: Assert the matrix cannot silently drift again**
 
@@ -9064,7 +9148,11 @@ DELIBERATE_EXCLUSIONS = {
 
 
 def test_every_e2e_spec_is_either_in_the_matrix_or_deliberately_excluded():
-    matrix = set(re.findall(r"^\s+- ([a-z0-9-]+)$", WORKFLOW.read_text(encoding="utf-8"), re.M))
+    # Extract the e2e matrix block only, to avoid matching job names, branches, etc.
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    # The e2e matrix lives under "e2e-tests:" job and the matrix key. Scope to that block.
+    e2e_section = workflow_text[workflow_text.find("e2e-tests:"):workflow_text.find("e2e-tests:") + 5000]
+    matrix = set(re.findall(r"^\s+- ([a-z0-9-]+)$", e2e_section, re.M))
     on_disk = {p.stem.replace(".spec", "") for p in SPEC_DIR.glob("*.spec.ts")}
     uncovered = on_disk - matrix - set(DELIBERATE_EXCLUSIONS)
     assert not uncovered, (
@@ -9074,8 +9162,14 @@ def test_every_e2e_spec_is_either_in_the_matrix_or_deliberately_excluded():
 
 
 def test_no_spec_lives_outside_tests_e2e_where_the_matrix_cannot_reach_it():
-    stray = [p for p in Path("frontend/tests").glob("*.spec.ts")]
-    assert not stray, f"unreachable by the matrix's naming scheme: {stray}"
+    # Specs in frontend/tests/ directly and in user-guide/ cannot be reached by the matrix's scheme.
+    # This test ensures new specs are added to e2e/ or deliberately excluded.
+    stray = [p for p in Path("frontend/tests").glob("*.spec.ts") if not p.parent.name == "e2e"]
+    stray += [p for p in Path("frontend/tests").glob("user-guide/*.spec.ts")]
+    assert not stray, (
+        f"unreachable by the matrix's naming scheme (lives outside tests/e2e/): {stray}. "
+        f"Move into tests/e2e/, or deliberately exclude with a reason in DELIBERATE_EXCLUSIONS."
+    )
 
 
 def test_the_findings_drawer_spec_is_covered():
