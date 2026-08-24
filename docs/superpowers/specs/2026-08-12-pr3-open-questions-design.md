@@ -458,25 +458,97 @@ Playwright spec PR3 writes ships uncollected.
 
 ---
 
-## D. Feature flag end state: no flag
+## D. Engine selection: build alongside the monolith, switched from the chat input
 
-`agent.py` is deleted and the flag is **removed entirely in the same PR**. The graph is
-simply the engine; there is no `LANGGRAPH_ENABLED`, no legacy path, no "off" state to define.
+**Reversed 2026-08-24.** This section previously said: no flag, `agent.py` deleted in the same
+PR, the graph simply *is* the engine. That is now the end state of a **later** PR, not of PR3.
 
-This resolves the plan's sequencing hazard (Phase 11 adding a flag whose `false` default
-selects a path Phase 9.2 already deleted) by deleting the question rather than ordering it.
+**PR3 builds the graph alongside the existing monolith and selects between them with a
+trigger phrase in the chat input** — e.g. a first message containing `USE AGENT MODE` runs the
+graph; anything else runs the monolith unchanged.
 
-**Consequence, named explicitly: there is no dogfooding period with both engines live.**
-The graph must be correct at merge. Two things follow, and the plan must reflect them:
+### D0. Scope — this is a personal testing affordance, and the spec should say so
 
-1. The **agentic test layer (§G) carries the weight** a flag would otherwise carry.
-2. Validation is a **devloop deploy**, not a flag flip. The `deploy-tellr-dev` skill's
-   loop is the pre-merge gate.
+Stated plainly so nobody hardens it beyond its purpose: the switch exists so **one developer
+can exercise both engines in one deployment**. It is not a product feature, it is not a
+security boundary, and it is deliberately not defended against misuse. Three consequences
+follow, all deliberate:
 
-Consistent with PRD §10's "many small PRs, big-bang release" and §13's "deliberately not
-offered: a toggle back to the old viewer or the old selection model."
+- **Chat interactions first.** MCP (`create_deck` / `edit_deck`) has no chat input and so
+  cannot carry the phrase. MCP keeps running the monolith until the chat path works, then gets
+  its own selection mechanism. §D5's MCP obligations move with it.
+- **No hardening.** A loose substring match is acceptable here. If the switch ever outlives
+  testing it needs a strict form (exact prefix, first message only) and an authorisation
+  check, because a phrase matched anywhere in user text can be tripped by pasted content or
+  echoed tool output — the injection surface §D4's spotlight guards. Recorded, not built.
+- **Merge risk is not a consideration.** The branch is not merged until the graph is ready, so
+  "both engines coexist in the tree" carries no release exposure.
 
-### D1. Deleting `agent.py` deletes two shipped security controls — re-home both
+### D1. Why a trigger phrase rather than an env flag
+
+An env flag needs a redeploy to switch, so comparing engines means two deployments or a
+restart between every A/B. The phrase keeps both code paths reachable in **one running app**,
+which is the whole point.
+
+**It also restores both mitigations §D previously dropped.** PRD §14's response to the
+big-bang-release risk is *"Workstreams merge continuously behind flags; dogfood the
+integration branch internally well before release"*
+(`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`). The earlier no-flag decision dropped
+both and accepted the residual risk. This restores both: the monolith stays live as the
+comparison baseline, and dogfooding happens per-message rather than per-deployment.
+
+### D2. The mode must be sticky, or turn 2 silently swaps engines
+
+This is the one mechanic that decides whether the switch works at all, and it is not a safety
+concern — it is a correctness one for the tester.
+
+Evaluated **per message**, only the first turn would run the graph; turn 2 has no phrase and
+would fall back to the monolith. That breaks the thing being tested twice over: the architect
+is a *conversation* whose state lives in the checkpointer under a `thread_id`, and a deck
+written alternately by both engines would diverge between `session_slides` rows and
+`deck_json`. So mode has to be a property of the **session**, not the message.
+
+**The cheapest sticky store needs no schema at all: read it back off the transcript.** On each
+turn, resolve the mode by checking whether the session's **earliest `role='user'` message**
+contains the phrase. `SessionMessage` already stores `role` and `content`
+(`src/database/models/session.py:218-219`) and the user turn is persisted before the agent
+runs, so the answer is always available and always the same for the life of the session.
+Sticky by construction, no migration, nothing to keep in sync, and multi-worker safe because
+it is derived from the database rather than held in a process.
+
+**Rejected: a key on `agent_config`.** Measured — `AgentConfig`'s `model_config` uses
+Pydantic's default `extra='ignore'`, so an undeclared `use_experimental_graph` key is
+**silently dropped** by `sanitize_agent_config_for_persist`
+(`src/api/schemas/agent_config.py:319`), which round-trips the blob through the model. It
+survives `NormalizedAgentConfig` (which passes every byte through, §E2) but dies at the
+sanitiser. Making it survive means a **declared** field plus its validator, both write routes
+and the frontend types — the exact cost the plan cited when it rejected
+`use_experimental_graph`. Not worth it for a test affordance whose answer is already sitting in
+the transcript.
+
+### D3. What this defers rather than removes
+
+`agent.py` survives PR3, so two obligations stop being merge-blocking and become **owed by the
+deletion PR instead**. They are not cancelled:
+
+- **§D4's two security controls** — the AISEC-248 output safety gate and the SDR-4437
+  slide-context spotlight. While the monolith stands, both keep working on the monolith path.
+  The graph path still needs its own copies from the day it can emit HTML, because a
+  graph-mode turn does not traverse `agent.py` at all. So §D4 is still PR3 work; what moves is
+  only the *deletion* half of it.
+- **§L6's `agent_factory` preservation** — nothing is deleted, so nothing can be lost. The
+  design-system resolution logic must still be reachable from the graph path.
+
+And the end state is unchanged: the monolith is deleted, the phrase removed, and the graph
+becomes the only engine — in a later PR, once chat and MCP both work on it. Consistent with
+PRD §10's "many small PRs, big-bang release" and §13's refusal of a permanent toggle back.
+
+### D4. Deleting `agent.py` deletes two shipped security controls — re-home both
+
+**Timing note added 2026-08-24:** PR3 no longer deletes `agent.py` (§D), so the *deletion* half
+of this section belongs to the later deletion PR. The *re-homing* half is still PR3 work — a
+graph-mode turn never traverses `agent.py`, so the graph path needs both controls from the day
+it can emit HTML, whether or not the monolith still stands.
 
 **Added 2026-08-19.** `src/services/agent.py` is not only the monolith; it is the only home
 of two controls that landed as security work and have no equivalent on the graph path
@@ -509,7 +581,7 @@ text, but neither replaces the generate-time gate-and-retry.
 failure count does not rise when a suite stops existing. These two are security controls, so
 their tests must be re-pointed and seen to pass, not merely absent from the failure list.
 
-### D2. The MCP surface is a third caller this document had not accounted for
+### D5. The MCP surface is a third caller this document had not accounted for
 
 **Added 2026-08-20.** `src/api/mcp_server.py` exposes four tools — `create_deck` (`:410`),
 `get_deck_status` (`:658`), `edit_deck` (`:894`), `get_deck` (`:1034`) — and parent spec §6.4
@@ -524,7 +596,7 @@ adds work its section must carry.
    is `src/services/agent.py:885`, in the file §D deletes. Spec §6.4's "contracts are
    unchanged" is true of the *tool signature* and false of the payload shape behind it. So
    PR3 must either accept that same `slide_context` shape at the graph's edit entry point, or
-   repoint `_edit_deck_impl` in the same PR. Note this is also §D1's second control's
+   repoint `_edit_deck_impl` in the same PR. Note this is also §D4's second control's
    territory: the slide HTMLs `_edit_deck_impl` pulls via `SessionManager.get_slide_deck` are
    exactly the prior-slide HTML that must go through `spotlight`.
 2. **§I's placeholder is invisible to an MCP caller.** §I hands a failed position back as a
@@ -1199,14 +1271,14 @@ Recorded so the divergences are deliberate rather than drift.
 | spec §5.2.8 | the foreman is sole CSS writer | a second, **measured** deck-CSS write is now required post-commit (`ensure_deck_token_css`), or pinned-template decks ship washed out (§L2) |
 | spec §4.6 | design-contract change = `slide_style_id` | three fields plus template pinning; setting a design system clears the style (§L4) |
 | plan Phase 9.2 | delete or reduce `agent_factory` | it now owns design-system resolution, template blocks and `search_brand_assets` gating — move, do not delete (§L6) |
-| spec §6.4 | "`create_deck` / `edit_deck` contracts are unchanged, so the TAP builder, DAIS agenda curator and KPMG pricing skills need no coordinated change" | true of the tool *signatures*, not of what is behind them: `_edit_deck_impl` targets `agent.py`'s `_format_slide_context` shape (deleted by §D), `get_deck_status` has no field that exposes §I's placeholders, and §F routes findings only to browser surfaces (§D2) |
+| spec §6.4 | "`create_deck` / `edit_deck` contracts are unchanged, so the TAP builder, DAIS agenda curator and KPMG pricing skills need no coordinated change" | true of the tool *signatures*, not of what is behind them: `_edit_deck_impl` targets `agent.py`'s `_format_slide_context` shape (deleted by §D), `get_deck_status` has no field that exposes §I's placeholders, and §F routes findings only to browser surfaces (§D5) |
 | spec §5.2.1 | tool manifest comes from `AgentConfig.tools` | it must also carry the design-system library, or the architect cannot offer a brand it cannot see (§M1) |
 | spec §4.1 slide level | `SlideSpec` fields are **position** / purpose / brief / assumes / hands-off / data refs | plus a **template section assignment** (§M3) |
 | `design-system-library.md` §9 | a first-request template pin is stripped | **no change** — the strip is correct and stays. An earlier revision of this document promised a graph-path fix; withdrawn, because the strip runs before any agent exists and §M1 covers the user story a turn later (§M2) |
 | current pinned-template prompt block | injects the whole layout for the whole deck | per-slide **section extraction**; the layout never goes to a builder whole (§M3–§M5) |
 | `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` on failure (§L8). §E2 is corrected in place; the still-stale *source* docstrings are named in §L8 |
 | PRD §12.1 | leaves open "whether drawer findings and reviewer verdicts share one record" | slide-level: yes, `verification_record` (§F3). Deck-level: **a separate content-addressed `deck_reviews` table** keyed `(deck_id, deck_digest)` — a per-row hash-keyed column cannot hold a verdict about an *ordering* (§F4) |
-| PRD §14 (big-bang-release mitigation) | "Workstreams merge continuously **behind flags**; **dogfood the integration branch** internally well before release" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`) | **both named mitigations are dropped** (§D). The flag is removed entirely and there is no dogfooding period with both engines live. Deliberate: a `false`-default flag would select a path plan Phase 9.2 deletes, so the flag cannot exist in the form PRD §14 assumes. Substituted mitigations: the four-layer test suite with a real-LLM agentic layer (§G) and a `deploy-tellr-dev` devloop deploy as the pre-merge gate (§D). The residual risk — no both-engines-live comparison, and the graph must be correct at merge — is **accepted**; recorded here because §J documents every other divergence |
+| PRD §14 (big-bang-release mitigation) | "Workstreams merge continuously **behind flags**; **dogfood the integration branch** internally well before release" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`) | **honoured, by a trigger phrase rather than a flag** (§D). An earlier revision of this document dropped both mitigations and accepted the residual risk; reversed 2026-08-24. The monolith stays live as the comparison baseline and dogfooding is per-message rather than per-deployment. The phrase is a personal testing affordance, explicitly not a product feature (§D0) |
 | PRD §14 (review-fatigue mitigation) | "Objective defects are fixed silently, **not reported**" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:695`) | auto-fixed findings **are** reported, as a read-only "we fixed this" list in the drawer (§F2). Deliberate: PRD §3 (`:120-122`) requires "what was fixed is visible", and PRD §7.3 (`:379-380`) already says "the *list of what was auto-fixed* is shown in chat for transparency, along with the iteration count" — so the PRD contradicts itself and §F2 picks the visible branch. §F2 also moves that list from **chat** to the **drawer**, read-only; §14's fatigue concern is answered by read-only presentation rather than by silence |
 
 ---
@@ -1550,7 +1622,7 @@ assembly". That is no longer safe — it is now the only home for:
 `test_factory_tool_spotlighting.py`, `test_agent_factory.py` and `test_design_systems_routes.py`.
 Whatever module the resolution logic moves into, those tests must be repointed at it and seen
 to pass — not deleted. Under §0's baseline rule a deleted suite is invisible, so this is the
-same trap §D1 names for the security controls.
+same trap §D4 names for the security controls.
 
 `chat_service` likewise gained design-system responsibilities that must survive its
 rewrite: `resolve_active_design_system_id`, `{{ds-asset:ID}}` substitution inside
