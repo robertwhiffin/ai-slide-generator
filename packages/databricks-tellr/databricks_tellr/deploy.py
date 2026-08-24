@@ -363,6 +363,9 @@ def _create_databricks(
     """
     ws = _get_workspace_client(client, profile)
 
+    # Task 7 will replace this stub with the real resource key.
+    encryption_secret_resource_key = None
+
     deployment_flat_for_mlflow: dict[str, Any] = {}
 
     # Handle YAML config loading
@@ -417,6 +420,7 @@ def _create_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=encryption_secret_resource_key,
             )
             print("   Generated app.yaml")
 
@@ -519,6 +523,9 @@ def _update_databricks(
 
     ws = _get_workspace_client(client, profile)
 
+    # Task 9 will replace this stub with the real resource key.
+    encryption_secret_resource_key = None
+
     mlflow_subs = _mlflow_substitutions_for_app_yaml(
         deployment_flat={},
         overrides=mlflow_tracing,
@@ -577,6 +584,7 @@ def _update_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=encryption_secret_resource_key,
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
@@ -1367,6 +1375,7 @@ def _write_app_yaml(
     seed_databricks_defaults: bool = False,
     lakebase_result: dict[str, Any] | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_resource_key: str | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
 
@@ -1381,6 +1390,11 @@ def _write_app_yaml(
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
         mlflow_tracing: Resolved template keys for UC tracing (four entries). If
             omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
+        encryption_secret_resource_key: When set, add an ``env:`` entry mapping
+            this Apps secret resource key into the environment. The resource
+            declaration alone does not inject anything — the ``valueFrom`` entry
+            is required (verified live). No key material is written; this is a
+            resource reference only. Leave None for the Lakebase-backed path.
     """
     # Build init_database call - only show seed_databricks_defaults when True
     if seed_databricks_defaults:
@@ -1396,6 +1410,15 @@ def _write_app_yaml(
 
     if mlflow_tracing is None:
         mlflow_tracing = _mlflow_substitutions_for_app_yaml()
+
+    if encryption_secret_resource_key:
+        # The Apps secret resource supplies the value; this only names it.
+        secret_env_block = (
+            f"  - name: {encryption_secret_resource_key}\n"
+            f'    valueFrom: "{encryption_secret_resource_key}"\n'
+        )
+    else:
+        secret_env_block = ""
 
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
@@ -1414,6 +1437,7 @@ def _write_app_yaml(
         TELLR_MLFLOW_UC_TABLE_PREFIX=mlflow_tracing.get(
             "TELLR_MLFLOW_UC_TABLE_PREFIX", ""
         ),
+        ENCRYPTION_SECRET_ENV_BLOCK=secret_env_block,
     )
     (staging_dir / "app.yaml").write_text(content)
 

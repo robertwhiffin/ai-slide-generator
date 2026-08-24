@@ -397,6 +397,9 @@ def create_local(
     config = load_deployment_config(env)
     ws = _get_workspace_client(profile=profile)
 
+    # Task 11 will replace this stub with the real resource key.
+    encryption_secret_resource_key = None
+
     app_name, workspace_path, target_branch = _resolve_target(config, env, instance)
     lakebase_name = config["lakebase_name"]
     schema_name = config["schema_name"]
@@ -480,6 +483,7 @@ def create_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=encryption_secret_resource_key,
             )
             print("   Generated app.yaml")
 
@@ -608,6 +612,9 @@ def update_local(
     """
     config = load_deployment_config(env)
     ws = _get_workspace_client(profile=profile)
+
+    # Task 13 will replace this stub with the real resource key.
+    encryption_secret_resource_key = None
 
     app_name, workspace_path, target_branch = _resolve_target(config, env, instance)
     lakebase_name = config["lakebase_name"]
@@ -772,6 +779,7 @@ def update_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=encryption_secret_resource_key,
             )
             print("   Generated app.yaml")
 
