@@ -344,36 +344,28 @@ orphans every stored credential. So:
 
 ```
 verify the secret  ->  attach the resource  ->  deploy_and_wait
+                   ->  poll /api/health for key source == "secret"
                    ->  DELETE FROM <schema>.encryption_keys WHERE id = 1
 ```
 
-The row is deleted **unconditionally** after every successful secret-mode deploy,
-not just on the first run (when the ladder resolves to case 2 or 3). This means
-every secret-mode `update()` requires a Postgres connection to delete the row.
-For branching deploys (dev forks), which must avoid human Postgres logins, the
-DELETE is omitted: a fork never has a pre-existing row, so no delete is needed.
-The row is removed only once code that prefers the injected variable is
-actually live, and only once the secret has been read back and confirmed.
+The health poll is the gate, not the deploy's success: see "DELETE gating" below
+for the full rule, the fail-closed requirement, and why the check runs on every
+secret-mode update rather than only the relocating one. Forks are excepted. The
+row is removed only once the live app has confirmed it is reading the secret, and
+only once that secret has been read back and confirmed.
 
 **On fresh-era installs** (where `encryption_keys` was created by the app SP
 inside `init_db()`, not by the human's `CREATE TABLE IF NOT EXISTS` in
 `_migrate_encryption_key_to_lakebase`), the deploying human may not have
-DELETE privilege on the table. Preflight step 2's scope creation runs as the
-human; table grants come from the app SP only. Add a permission check in
-`_preflight_encryption_scope` to verify the human can DELETE from
-`<schema>.encryption_keys` before proceeding (or accept this as an explicit risk
-for fresh-era stores turning on secret mode, in which case capture it in
-Accepted risks rather than failing the deploy silently). If the DELETE itself
-fails, print a loud warning with the exact SQL rather than failing the deploy
-— by that point the deploy has succeeded and the key is safely in the secret.
-
-**Minimum app version:** Deploying old app code with secret mode, or rolling
-back to an earlier app version after the DELETE, leaves the app running code
-that ignores `TELLR_ENCRYPTION_KEY` and finds no row, so it mints a fresh key
-and orphans stored credentials. Either refuse secret mode when `app_version` is
-below the minimum version that carries the secret-path boot code (once that
-version is released), or require an explicit `app_version` parameter to pin the
-deployed version before the DELETE.
+DELETE privilege on the table — the spike confirmed the mechanism, and that it
+works for an admin deployer only because membership of `databricks_superuser`
+carries explicit privileges on every table in the schema, not because of
+ownership. `_preflight_encryption_scope` therefore probes
+`has_table_privilege(current_user, '<schema>.encryption_keys', 'SELECT'/'DELETE')`
+before any key material is written, and aborts if either is missing. If the
+DELETE still fails at the end, print a loud warning with the exact SQL rather
+than failing the deploy — by that point the deploy has succeeded and the key is
+safely in the secret.
 
 ### `update()` in legacy mode against a secret-mode app
 
@@ -511,8 +503,9 @@ implementation.
 ### Unit — new `tests/unit/test_deploy_secret_encryption_key.py`
 
 - Preflight: missing scope is created; creation denied yields the actionable
-  error; non-Databricks-backed scope is refused. MANAGE permission probe
-  (or non-fatal `put_acl` error) is tested.
+  error; non-Databricks-backed scope is refused; the
+  `has_table_privilege` probe aborts when the deployer lacks SELECT or DELETE on
+  `encryption_keys`, before any key material is written.
 - `create`: an existing secret is reused and not overwritten; an absent one is
   generated, written, and read back.
 - The `update` ladder in all four branches, including ladder case 2 read errors
@@ -521,6 +514,13 @@ implementation.
 - Resource rebuild preserves `app_database` and `user_api_scopes`.
 - The DELETE happens only after a successful deploy, asserted by call ordering
   on the mock.
+- The health-source gate, which is the highest-value test in this file because
+  every branch of it is a data-loss guard. Each of these must leave the row
+  intact: the app reports `"lakebase"`; the key-source field is **absent**
+  (the old-app-code case); the body is unparseable; the endpoint returns non-200;
+  the poll times out. Only a reported `"secret"` permits the DELETE.
+- A row left over from a previously-interrupted run is deleted on a later update
+  even though that run resolves to ladder case 1 and performs no relocate.
 - Secret mode disables the legacy `_migrate_encryption_key_to_lakebase` migration
   (no row exists to migrate, and the secret is the source of truth instead).
   Existing tests in `tests/unit/test_deploy_encryption_key_migration.py` cover
@@ -569,19 +569,48 @@ the ladder-case-1 comparison are all available as designed, and the
 presence-only/`--force` fallback is dropped: it is unnecessary, and it would have
 converted the one guard against clobbering a live key into an opt-in.
 
-**DATA-LOSS GUARD CHOICE (blocks implementation):**
+**RESOLVED — no version gate, superseded by the health-source gate below.**
+Deploying pre-feature app code alongside secret mode would leave the app ignoring
+`TELLR_ENCRYPTION_KEY`, and a DELETE at that point orphans stored credentials at
+the next restart. This is reachable *unintentionally*: `databricks-tellr` does not
+depend on `databricks-tellr-app`, so `pip install -U databricks-tellr` upgrades the
+tool alone, and a default `app_version=None` then resolves to whatever stale app
+version sits in the deployer's venv (`_resolve_installed_app_version`,
+`deploy.py:1355`). A version-comparison guard was rejected as unnecessary: the
+health-source gate makes an old app fail closed — it has no key-source field, so
+the DELETE never runs, the row is retained, and the app keeps reading Lakebase.
+Graceful degradation rather than delayed data loss.
 
-1. **Minimum app version:** Deploying old app code with secret mode, or rolling
-   back after the DELETE, leaves the app running code that ignores
-   `TELLR_ENCRYPTION_KEY` and mints a fresh key, orphaning stored credentials.
-   Choose one approach: (a) refuse secret mode when `app_version` is below the
-   minimum version that carries the secret-path boot code (once released), or
-   (b) require an explicit `app_version` parameter to pin the deployed version
-   before the DELETE. Option (a) gates the feature on a version check; option (b)
-   shifts responsibility to the operator. The local-wheel-path flow (`local_wheel_path`
-   parameter in `_write_requirements`) bypasses version resolution (L1324-1326),
-   so the guard must be enforceable on that path too, or documented as an
-   exception with explicit risk acceptance.
+### DELETE gating — decided: verify the live app, then delete
+
+The DELETE is gated on positive proof that the deployed app is reading from the
+secret, and it is evaluated on **every** secret-mode update rather than only on
+the run that relocates.
+
+1. The app reports its key *source* — never the key — on `/api/health`
+   (`src/api/main.py:490`), as `"secret"` or `"lakebase"`.
+2. After `deploy_and_wait`, the deploy tool polls that endpoint.
+3. `DELETE FROM <schema>.encryption_keys WHERE id = 1` runs only when the app
+   reports `"secret"` **and** a row actually exists.
+
+**The poll must fail closed.** A missing field, an unparseable body, a non-200,
+or a timeout all mean "not confirmed", and not-confirmed means do not delete —
+print what was observed and leave the row. The missing-field case is exactly the
+old-app-code case above, so treating it as "probably fine" would reintroduce the
+hazard this gate exists to remove.
+
+Evaluating on every update (rather than only when this run relocated) is
+deliberate. A run that writes the secret but dies before the DELETE leaves a row;
+on the next update ladder case 1 short-circuits, so a relocate-only condition
+would never revisit it and key material would sit in Lakebase indefinitely while
+every signal reported healthy. The cost is one `SELECT` per secret-mode update
+over a human Lakebase connection — where `_update_databricks` currently opens
+none outside the one-time legacy migration (`deploy.py:552-558`). Accepted: the
+guarantee that Lakebase holds no key material is the point of the work.
+
+**The fork path is excepted.** It has no row by construction and must not open a
+human Lakebase connection — `scripts/deploy_local.py` avoids one there because it
+would break SP-only dev-loop deploys.
 
 ### Open questions — both closed by the spike
 
@@ -626,6 +655,8 @@ yields no variable.
 - `config/deployment.example.yaml`, and the `create`/`update` snippets in
   `README.md`.
 - `src/core/encryption.py` module docstring — rewrite for two paths.
+- `src/api/main.py:490` (`/api/health`) — add the key-source field the DELETE gate
+  reads. Report the source only (`"secret"` / `"lakebase"`), never the key.
 - `src/database/models/encryption_key.py:5-8` — the accepted-risk paragraph
   gains a pointer to the secret-backed alternative.
 - Minor version bump on `packages/databricks-tellr/pyproject.toml` and
