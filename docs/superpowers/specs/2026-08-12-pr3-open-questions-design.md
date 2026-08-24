@@ -186,8 +186,9 @@ Those placeholders name spec §5.2.1/§5.2.2 as the source of "the full prompt",
 sections hold behavioural description, not prompt text** — §5.2.1 describes the architect's
 job, its data awareness, its tone hook and its two output types; it contains no prompt. That
 is exactly the trap §A1 exists to close: an executor who follows the placeholder to its cited
-source finds a role description and invents the prompt. The gap is **content, not code**, and
-it is the single largest one.
+source finds a role description and invents the prompt. The gap is **content, not code** —
+which is precisely why it does **not** block the build (§A1). It is the largest gap by volume
+and the smallest by sequencing risk.
 
 **Reusable material:** `src/core/prompt_modules.py` holds **11,189 chars across 12 named
 blocks** (measured 2026-08-19). `CHART_JS_RULES` (1470 chars), `EDITING_RULES` (3731),
@@ -198,21 +199,53 @@ the one §L5 depends on — and **`UNTRUSTED_DATA_NOTICE` (516)**, which every s
 receives tool output or prior slide HTML needs (see §D on the two safety controls that die
 with `agent.py`). The architect and all four reviewers are net-new writing.
 
-### A1. Authoring: draft-then-review, one skill at a time
+### A1. Placeholders unblock the build; the schemas do not
 
-Each skill is drafted, reviewed by the user, and corrected before the next begins.
-Sequential rather than one batch pass, because these prompts *are* the product, and because
-the skills share fragments — a correction to the builder's CSS-contract language must
-propagate to the fixer, which only works if the builder is settled first.
+**Revised 2026-08-24.** An earlier version of this section made prompt authoring a
+build-blocking gate: seven human-in-the-loop checkpoints, sequential, "not subagent work",
+scheduled inside the code phases. That was wrong about what the build actually needs.
 
-**Consequence for execution: prompt authoring is not subagent work.** It is seven
-human-in-the-loop checkpoints in a working session. The plan must schedule it as such and
-must not dispatch it in parallel.
+**A skill's prompt prose is metadata. Its output schema is a contract.** §5.1 already makes
+each skill a versioned in-repo artifact — instructions **plus** output schema **plus** tool
+grants — and only the middle one is load-bearing for code. The graph binds to the schema:
+the reducers key off it, `foreman_router` reads fields from it, `finding.ts` mirrors it
+(§F1), and the schema-conformance tests parse it. Nothing in the graph reads the prose.
 
-Suggested order (dependency, not preference): `architect` → `builder` → `fixer` →
-`build_reviewer` → `fix_reviewer` → `deck_reviewer` → `data_analyst`. The architect first
-because its deck-spec output is every downstream skill's input; reviewers after builders
-because a reviewer's rubric is the builder's brief.
+So the build proceeds on **basic generated placeholder prompts**, and real authoring is a
+separate track that can run later or in parallel. This is not a compromise — it is what the
+test layering already implies:
+
+| Layer (§G) | Needs real prompts? | Why |
+|---|---|---|
+| 1. Orchestration | **no** | stub agents return canned outputs; no model in the loop |
+| 2. Schema / contract | **no** | canned payloads parsed against the schema |
+| 3. Agentic behaviour | **yes** | it asserts whether the agents actually behave |
+| 4. Concurrency / multi-worker | **no** | DB only |
+
+Three of the four layers — every layer that runs in CI — are indifferent to prompt quality.
+
+**What this moves earlier rather than removing.** Two things must be settled before the code
+phases, and neither is prose:
+
+1. **Each skill's output schema**, because the graph is written against it. A schema change
+   after the fact ripples into reducers, routers, `finding.ts`, the conformance tests and the
+   frontend types.
+2. **§A2's criteria list**, because it is schema-relevant, not stylistic: §F1 records that
+   `FindingCategory` is a **closed union** consumed by an exhaustive `Record`
+   (`FeedbackDrawer.tsx:13`), so a criterion that does not map into
+   `content | design | narrative` widens the union and **fails to compile**.
+
+**The trap to avoid, stated explicitly.** Layer-3 tests are written against *real* prompts.
+With placeholders in place they will not pass, and the failure mode to refuse is **weakening
+a layer-3 assertion until a placeholder satisfies it** — that manufactures exactly the
+"test that cannot fail" class this project has already paid for twice. Mark them skipped
+against placeholders (they are `-m live` and out of CI anyway, §G1) and turn them on with the
+real prompts. A skipped honest test beats a passing dishonest one.
+
+**Authoring order, when it happens** (dependency, not preference): `architect` → `builder` →
+`fixer` → `build_reviewer` → `fix_reviewer` → `deck_reviewer` → `data_analyst`. The architect
+first because its deck-spec output is every downstream skill's input; reviewers after builders
+because a reviewer's rubric is the builder's brief. Reusable material is in §A above.
 
 ### A2. Reviewer criteria: start minimal and objective-heavy
 
@@ -1285,10 +1318,14 @@ Recorded so the divergences are deliberate rather than drift.
 
 ## K. What this document does not decide
 
-- The **content** of the seven prompts. A1 fixes the process; the prompts are written in the
-  next session.
+- The **content** of the seven prompts. Generated placeholders unblock the build; real
+  authoring is a separate track (§A1). What is *not* deferrable is each skill's **output
+  schema**, which the graph binds to.
 - The **specific initial reviewer criteria list**. A2 fixes the posture (minimal,
-  objective-heavy); the list is drafted with `build_reviewer`.
+  objective-heavy). Note this one is **schema-relevant, not just prose**: every criterion must
+  map into `content | design | narrative` or §F1's closed union and its exhaustive `Record`
+  fail to compile — so the list must be settled with the reviewer schema, before the code
+  phases, even though the prompt prose need not be.
 - Anything the parent spec §10 excludes: WYSIWYG (ws8), gateway abstraction (ws2), the
   MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
 - The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
