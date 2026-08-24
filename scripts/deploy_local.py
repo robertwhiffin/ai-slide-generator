@@ -1004,7 +1004,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         type=str,
-        default=None,
+        required=True,
         help="Databricks CLI profile name from ~/.databrickscfg",
     )
 

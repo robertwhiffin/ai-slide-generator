@@ -11,6 +11,7 @@ def test_parser_accepts_the_secret_flags():
     parser = deploy_local.build_parser()
     args = parser.parse_args([
         "--update", "--env", "devtest",
+        "--profile", "tellr-dev",
         "--encryption-secret-scope", "tellr",
         "--encryption-secret-key", "tellr-encryption-key",
     ])
