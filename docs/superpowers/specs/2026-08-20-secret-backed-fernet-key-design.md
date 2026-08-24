@@ -78,6 +78,7 @@ questions.
 | `apps.update` with a GET-fetched `App`? | **Fails:** `InvalidParameterValue: Compute size updates are not supported in this update API.` |
 | Correct `apps.update` construction? | Build a fresh `App(name=..., resources=..., description=..., user_api_scopes=..., default_source_code_path=...)` and **omit `compute_size`**. Omitted fields are wiped — `description` became `''` and `user_api_scopes` became `None` — so every mutable field must be carried explicitly. |
 | Can the deploying human `SELECT`/`DELETE` on `encryption_keys`? | **Yes here, but not for the reason assumed.** It works because the deployer is a member of `databricks_superuser`, which holds explicit privileges on every table in the schema — not because of table ownership. |
+| `app.yaml` carries `valueFrom` for a resource that is **not** attached? | **Deploy succeeds and the variable is simply absent.** No validation error, no empty string — `os.environ.get()` returns `None`. |
 
 Two consequences worth stating plainly. First, the auto-grant removes `put_acl`
 from the design entirely, which in turn removes the MANAGE requirement that made
@@ -473,6 +474,18 @@ name is arbitrary config that cannot be derived from the path.
    Detaching an app resource requires MANAGE on the app, and no mechanism short
    of that permission prevents it. Accepted deliberately: if someone detaches
    the resource, so be it.
+
+   The spike closed the one hope of getting a mitigation for free: a deploy whose
+   `app.yaml` references an unattached resource **succeeds**, and the variable is
+   simply absent rather than empty or rejected. So a detach produces exactly the
+   silent fallback described above, with no platform-level error anywhere.
+
+   Worth knowing that the economics of the declined marker have changed, if this
+   is ever revisited. The marker was declined partly because it added entries to
+   `app.yaml`; the spike has since established that secret mode *must* add a
+   `valueFrom` entry regardless, so a second plain-value line in the same
+   conditional template block is now near-zero marginal cost. Not adopted — the
+   risk stands as accepted — but the reason it was rejected no longer holds.
 
 ## Testing
 
