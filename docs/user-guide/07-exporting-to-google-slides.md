@@ -113,7 +113,7 @@ The backend creates a blank Google Slides presentation, then converts each slide
 
 The Fernet key for encrypting Google OAuth credentials lives in one of two places depending on how the app was deployed:
 
-- **Secret-backed (recommended):** The key is stored in a Databricks secret and injected automatically — no env var to manage manually. Deploy with `encryption_secret_scope` passed to `tellr.create()` / `tellr.update()`.
+- **Secret-backed (opt-in):** The key is stored in a Databricks secret and injected automatically — no env var to manage manually. Deploy with `encryption_secret_scope` passed to `tellr.create()` / `tellr.update()`.
 - **Lakebase-backed (default):** The key is stored in the `encryption_keys` table of the app's Lakebase database. Self-seeded on first use; no manual setup required.
 
 In local development, a key is auto-generated and persisted to `.encryption_key` (gitignored).
