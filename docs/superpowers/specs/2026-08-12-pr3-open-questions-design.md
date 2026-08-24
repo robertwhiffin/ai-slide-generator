@@ -291,10 +291,16 @@ a **canned fixture** (`_load_fixture()`, reading `src/api/fixtures/tour_demo_dec
 saves it via `sm.save_slide_deck` at `:82`. It is deck *creation* from fixed bytes, not an
 edit, and the bytes are identical on every tour. Firing `mark_dirty` there schedules an LLM
 narrative-arc re-description of the same demo deck for every user who takes the tour, for no
-user value and at §B2's per-window cost. Two admissible resolutions, and the plan must pick
-one explicitly rather than inherit the list above: **exclude `tour.py`** from the trigger
-sites (the honest reading of the rule), or ship the arc description **inside the fixture** so
-the tour deck has a spec without an LLM call. Recorded in §K as unsettled.
+user value and at §B2's per-window cost. **Resolved 2026-08-24: ship the arc description inside the fixture.**
+`src/api/fixtures/tour_demo_deck.json` (4.7 KB, module-cached at `tour.py:34-39`) gains a
+deck-spec field, so the tour deck arrives *with* its spec and `mark_dirty` is never called on
+this route. Chosen over simply excluding the route because it costs one JSON field and is
+strictly better: the tour then also demonstrates spec §7.1's spec view, which an
+excluded-and-specless tour deck could not. The fixture is static, so its arc description is
+authored once by hand — never at runtime, and never per user.
+
+`tour.py` therefore does **not** appear in §B1's trigger list. The rule's warrant ("a human
+authored this") is preserved without exception.
 
 **And one deck-content route this section does not consider at all:
 `POST /sessions/{session_id}/duplicate`.** See §B5.
@@ -831,13 +837,65 @@ drawer)." `deck_reviewer` is one of the seven skills, and spec §5.2.7 says its 
 "route to the main chat (deck-level) per PRD §6.3". `verification_record` cannot hold them:
 it is a **per-row** column (`src/database/models/session.py:412`) keyed by slide content
 hash, and a deck-level verdict has no slide content hash to key on — which is §F3's own
-closing property read the other way. So PRD §12.1 is answered for slide-level findings and
-**still open for deck-level ones**: no column is nominated here, and §H1b's deck-level
-enumeration adds none. Recorded in §K as still-open, with the two candidate homes — ride the
-chat transcript as a message (what spec §5.2.7's routing implies; no new column, but the
-verdict gets no queryable identity, which cuts against PRD §7.1's MLflow-assessment goal),
-or a deck-level verdict column alongside `deck_spec_json` (queryable, but a new column plus
-a save-point/restore obligation).
+closing property read the other way. So PRD §12.1 is answered for slide-level findings, and the
+deck-level half needs its own home. **Resolved 2026-08-24 — see §F4.**
+
+### F4. Deck-level reviews get their own content-addressed table
+
+**Decided 2026-08-24.** Deck-level verdicts live in a new **`deck_reviews`** table, joined on
+**`(deck_id, deck_digest)`** — a content key, not a validity window and not a sequence number.
+
+| Column | Meaning |
+|---|---|
+| `deck_id` | FK to `session_slide_decks.id` — the deck, not the session, so contributor sessions all resolve to one review history (they already share the deck-owner row) |
+| `deck_digest` | hash over the **ordered** per-slide content hashes; the deck-level analogue of `verification_record`'s per-slide key |
+| verdict payload | the deck reviewer's findings, same schema shape as §F1 |
+| `created_at` | ordering only — not identity |
+
+**Why content-addressed rather than SCD2.** An SCD2 pair (`valid_from`/`valid_to`) records
+*when* a review was current. What every consumer actually needs is *which deck state it
+judged* — and those come apart the moment a user edits and reverts. A content key answers the
+real question, and gives deck reviews the same property `verification_record` already has for
+slides: **edit-then-revert finds the earlier verdict again** (PRD §12.1's "finding
+persistence"). Reuse `compute_slide_hash` (`src/utils/slide_hash.py:52`, already the
+per-slide key) over the rows in position order; there is no deck-level hash helper yet, so
+PR3 adds one.
+
+**Three consequences, all of them simplifications:**
+
+1. **Restore needs no handling at all.** There is no "current" row to go stale. A save-point
+   restore returns the deck to a prior state, its digest reverts with it, and the join finds
+   the review made against that state if one exists. Contrast `deck_spec_json`, which *did*
+   need a snapshot-and-copy-back (`create_version` at `session_manager.py:1939-1951`,
+   restored at `:2240`) precisely because it is keyed by deck rather than by content. **No new
+   snapshot column and no restore step.**
+2. **It cannot be broken by the save-point cap.** `VERSION_LIMIT = 40`
+   (`session_manager.py:1859`) deletes the oldest version once exceeded. Anything FK'd to
+   `slide_deck_versions` would either orphan on that prune or cascade and destroy the review
+   history the table exists to keep. `deck_reviews` references only the deck, so pruning save
+   points cannot touch it.
+3. **Reorder correctly invalidates.** Reordering changes the ordered digest even though no
+   slide's HTML changed — which is right, because a deck review judges the narrative arc and
+   the arc is exactly what a reorder changes. Note this is the **opposite** of the per-slide
+   rule, where a record deliberately travels with its slide across a reorder (§F3). Both are
+   correct: a slide verdict is about a slide, a deck verdict is about an ordering.
+
+**The digest is computed, not stored.** Deriving it on read from the `session_slides` rows
+avoids a denormalised column that could drift from the rows it summarises. The read path
+already loads every row (`get_slide_deck`), so there is no extra query.
+
+**This also dissolves the trade-off the two earlier candidates forced.** Riding the chat
+transcript would have left the verdict with no queryable identity (against PRD §7.1's
+MLflow-assessment goal); a column on the deck would have been queryable but needed
+save-point handling. A content-addressed table is queryable **and** needs no restore
+handling, and it is orthogonal to *surfacing*: the verdict is stored here and still surfaces
+in chat per spec §5.2.7 and PRD §3's grain routing. Storage and channel were never the same
+question.
+
+**PR3 owes:** the table, a `_migrate_*` step for it — **pre-fork, in the chain reached from
+`run.py::init_database`** per §L8, and sequenced in the same `_run_migrations()` list as
+§E2's drop and §B2's dirty marker (three schema changes that should be planned together
+rather than as three separate migrations) — the deck-digest helper, and the read-side join.
 
 **Two hard constraints on the reviewer verdict schema — added 2026-08-19.**
 
@@ -1147,6 +1205,7 @@ Recorded so the divergences are deliberate rather than drift.
 | `design-system-library.md` §9 | a first-request template pin is stripped | **no change** — the strip is correct and stays. An earlier revision of this document promised a graph-path fix; withdrawn, because the strip runs before any agent exists and §M1 covers the user story a turn later (§M2) |
 | current pinned-template prompt block | injects the whole layout for the whole deck | per-slide **section extraction**; the layout never goes to a builder whole (§M3–§M5) |
 | `migrations-run-at-startup` memory | backfills go in the FastAPI lifespan | superseded — they run **once pre-fork** in `run.py::init_database` and `SystemExit(1)` on failure (§L8). §E2 is corrected in place; the still-stale *source* docstrings are named in §L8 |
+| PRD §12.1 | leaves open "whether drawer findings and reviewer verdicts share one record" | slide-level: yes, `verification_record` (§F3). Deck-level: **a separate content-addressed `deck_reviews` table** keyed `(deck_id, deck_digest)` — a per-row hash-keyed column cannot hold a verdict about an *ordering* (§F4) |
 | PRD §14 (big-bang-release mitigation) | "Workstreams merge continuously **behind flags**; **dogfood the integration branch** internally well before release" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:693`) | **both named mitigations are dropped** (§D). The flag is removed entirely and there is no dogfooding period with both engines live. Deliberate: a `false`-default flag would select a path plan Phase 9.2 deletes, so the flag cannot exist in the form PRD §14 assumes. Substituted mitigations: the four-layer test suite with a real-LLM agentic layer (§G) and a `deploy-tellr-dev` devloop deploy as the pre-merge gate (§D). The residual risk — no both-engines-live comparison, and the graph must be correct at merge — is **accepted**; recorded here because §J documents every other divergence |
 | PRD §14 (review-fatigue mitigation) | "Objective defects are fixed silently, **not reported**" (`2026-07-30-tellr-agentic-rebuild-prd-design.md:695`) | auto-fixed findings **are** reported, as a read-only "we fixed this" list in the drawer (§F2). Deliberate: PRD §3 (`:120-122`) requires "what was fixed is visible", and PRD §7.3 (`:379-380`) already says "the *list of what was auto-fixed* is shown in chat for transparency, along with the iteration count" — so the PRD contradicts itself and §F2 picks the visible branch. §F2 also moves that list from **chat** to the **drawer**, read-only; §14's fatigue concern is answered by read-only presentation rather than by silence |
 
@@ -1162,6 +1221,10 @@ Recorded so the divergences are deliberate rather than drift.
   MLflow rebuild (ws3), per-agent model routing, the tone authoring UI, speaker notes.
 - The ~34 bare steps and unapplied review findings in the plan. Those are plan-repair work,
   scheduled next via `writing-plans`, informed by these decisions.
+
+Resolved on 2026-08-24 and moved out of this list: where deck-level reviewer findings live
+(now §F4 — a content-addressed `deck_reviews` table) and whether `tour.py` fires the §4.4
+trigger (it does not; the arc ships inside the fixture — §B1).
 
 Two items that stood here were later resolved by §M below, and are listed so the change of
 status is visible rather than silently dropped:
@@ -1182,12 +1245,6 @@ Still open, and deliberately so:
   dedupe by exact block text. Either is small; both need an at-rule survival test.
 - **The tone-vs-BRAND-MANUAL precedence rule** (§E1). The collision is named; which artifact
   wins is not settled.
-- **Where deck-level reviewer findings live** (§F3). `verification_record` is per-row and
-  hash-keyed, so it cannot hold a deck-level verdict; chat-transcript message vs. a
-  deck-level verdict column is not settled. §F resolves the slide-level half only.
-- **Whether `tour.py` fires the §4.4 trigger at all** (§B1). §B1 names it as a trigger site,
-  but the route saves a canned fixture, so the rule's "a human authored this" warrant does not
-  reach it. Exclude the route, or ship the arc description inside the fixture — not decided.
 - **The dirty marker's storage** (§B2). §B2 says it "lives in the database" and wants a
   `claimed_at` lease, but no table, column or `_migrate_*` step is nominated, and none of
   §H1b's or §E2's schema work covers it.
