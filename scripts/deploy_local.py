@@ -274,6 +274,33 @@ def upload_wheel(
     return f"./wheels/{wheel_path.name}"
 
 
+def _source_secret_config(ws, source_app_name: str) -> tuple[str, str] | None:
+    """Return the (scope, key) the source app uses, or None if it is legacy.
+
+    The fork inherits the source's ciphertext through the copy-on-write branch but
+    gets no encryption_keys row, because secret mode never writes one. So a fork of
+    a secret-mode app MUST point at the same secret, or it boots, finds nothing,
+    mints a fresh key, and silently destroys its own inherited test data.
+
+    Fetching the source app is the only source of truth here; the
+    --encryption-secret-scope flag applies to non-branching deploys only.
+    """
+    try:
+        app = ws.apps.get(name=source_app_name)
+    except Exception as exc:
+        print(
+            f"ERROR: cannot read the source app '{source_app_name}' to determine "
+            f"whether it uses a secret-backed encryption key: {exc}\n"
+            f"Refusing to fork: if the source is in secret mode, the fork would "
+            f"mint a fresh key over inherited ciphertext."
+        )
+        raise SystemExit(1) from exc
+    for r in (app.resources or []):
+        if r.name == secret_key.RESOURCE_KEY and getattr(r, "secret", None):
+            return r.secret.scope, r.secret.key
+    return None
+
+
 def _check_branching_preconditions(
     ws: WorkspaceClient, config: dict[str, Any]
 ) -> None:
@@ -332,6 +359,14 @@ def _check_branching_preconditions(
         raise DeploymentError(
             f'source branch "{branch_from_env}" not found in project {project_name}'
         )
+
+    # 7: Secret-mode inheritance: if the source uses a secret-backed key, the
+    # fork must point at the same secret. _source_secret_config refuses
+    # (SystemExit) when the source app cannot be read — safe-fail over
+    # proceeding blindly and minting a fresh key over inherited ciphertext.
+    source_app = config.get("branch_from_app_name")
+    if source_app:
+        config["_inherited_secret"] = _source_secret_config(ws, source_app)
 
 
 def _trigger_owner_grant_job(ws, job_id, new_sp_id, host, endpoint_name) -> None:
@@ -493,6 +528,11 @@ def create_local(
         print(f"   Type: {lakebase_type}")
         print()
 
+        # Read any inherited secret that _check_branching_preconditions detected.
+        # Set by _source_secret_config when the source app carries RESOURCE_KEY;
+        # None for legacy sources and for non-branching deploys.
+        _inherited_secret = config.get("_inherited_secret")
+
         # Generate and upload deployment files
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
@@ -518,7 +558,9 @@ def create_local(
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
                 encryption_secret_resource_key=(
-                    secret_key.RESOURCE_KEY if (scope and not branch_from_env) else None
+                    secret_key.RESOURCE_KEY
+                    if (_inherited_secret or (scope and not branch_from_env))
+                    else None
                 ),
             )
             print("   Generated app.yaml")
@@ -540,8 +582,14 @@ def create_local(
             compute_size=config["compute_size"],
             lakebase_name=lakebase_name,
             lakebase_type=lakebase_type,
-            encryption_secret_scope=scope if not branch_from_env else None,
-            encryption_secret_key=skey if not branch_from_env else None,
+            encryption_secret_scope=(
+                _inherited_secret[0] if _inherited_secret
+                else (scope if not branch_from_env else None)
+            ),
+            encryption_secret_key=(
+                _inherited_secret[1] if _inherited_secret
+                else (skey if not branch_from_env else None)
+            ),
         )
         print("   App registered")
         print()
