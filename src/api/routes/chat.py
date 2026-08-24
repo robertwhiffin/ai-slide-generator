@@ -543,18 +543,6 @@ async def send_message_streaming(
     )
 
 
-@router.get("/health")
-async def health_check():
-    """Health check endpoint.
-
-    Returns:
-        Status information
-    """
-    return {
-        "status": "healthy",
-        "service": "AI Slide Generator",
-    }
-
 
 @router.post("/chat/async")
 async def submit_chat_async(
