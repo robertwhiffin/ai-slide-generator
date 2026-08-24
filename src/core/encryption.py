@@ -57,7 +57,7 @@ def _validated(key: bytes) -> bytes:
 def _seed_value() -> bytes:
     """Pick the value to seed an empty encryption_keys table with.
 
-    Priority (SELECT-first in get_encryption_key means this runs only when
+    Priority (SELECT-first in _from_lakebase means this runs only when
     the table is empty):
     1. GOOGLE_OAUTH_ENCRYPTION_KEY env var — the safety net for a stray
        Databricks Apps UI "Deploy" button upgrade of an un-migrated app
@@ -117,7 +117,9 @@ def _from_lakebase() -> bytes:
     """Return the Fernet master key from the encryption_keys table (id=1)."""
     from src.core.database import get_db_session
 
-    # 1. Read-first (see module docstring for why this order matters).
+    # 1. Read-first: check for an existing row before seeding so concurrent
+    #    workers never mint two different keys (INSERT … ON CONFLICT DO NOTHING
+    #    is still safe against the race, but this avoids the seed call entirely).
     with get_db_session() as session:
         row = session.execute(_SELECT_KEY).first()
     if row and row[0]:

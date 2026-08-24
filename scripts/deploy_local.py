@@ -34,6 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "packages" / "databricks-tellr"))
 CONFIG_PATH = PROJECT_ROOT / "config" / "deployment.yaml"
 
 from databricks_tellr import secret_key
+from databricks_tellr.identifiers import validate_schema_name
 from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
@@ -802,6 +803,7 @@ def update_local(
                 or secret_key.DEFAULT_SECRET_KEY
             )
             if scope:
+                validate_schema_name(schema_name)  # defense-in-depth: interpolated into SQL below
                 secret_key.preflight_scope(ws, scope)
                 mig_conn = None
                 try:
@@ -899,7 +901,9 @@ def update_local(
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
                 encryption_secret_resource_key=(
-                    secret_key.RESOURCE_KEY if (scope and not branch_from_env) else None
+                    secret_key.RESOURCE_KEY
+                    if (config.get("_inherited_secret") or (scope and not branch_from_env))
+                    else None
                 ),
             )
             print("   Generated app.yaml")

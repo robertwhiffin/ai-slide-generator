@@ -612,6 +612,7 @@ def _update_databricks(
 
         if encryption_secret_scope:
             # Secret mode: relocate into the secret; never seed Lakebase.
+            validate_schema_name(schema_name)  # defense-in-depth: interpolated into SQL below
             secret_key.preflight_scope(ws, encryption_secret_scope)
             mig_conn, _ = _get_lakebase_connection(
                 ws, lakebase_name, lakebase_result=lakebase_result

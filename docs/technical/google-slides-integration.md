@@ -117,7 +117,7 @@ Uses Fernet symmetric encryption from the `cryptography` library.
 | `decrypt_data(ciphertext)` | Decrypts. Raises `InvalidToken` if the key doesn't match. |
 
 **Key management — two paths:**
-- **Secret-backed (recommended for new installs):** Pass `encryption_secret_scope` to `tellr.create()` / `tellr.update()`. The deploy tool writes the Fernet key to a Databricks secret and injects it as `TELLR_ENCRYPTION_KEY` via a `valueFrom` entry in `app.yaml`. The `encryption_keys` table stays empty. See `docs/technical/databricks-app-deployment.md` for the full flow.
+- **Secret-backed (opt-in):** Pass `encryption_secret_scope` to `tellr.create()` / `tellr.update()`. The deploy tool writes the Fernet key to a Databricks secret and injects it as `TELLR_ENCRYPTION_KEY` via a `valueFrom` entry in `app.yaml`. The `encryption_keys` table stays empty. See `docs/technical/databricks-app-deployment.md` for the full flow.
 - **Lakebase-backed (default):** The key lives in the single-row `encryption_keys` table in the app's Lakebase data schema. Self-seeded by the app on first use; migrated from legacy `GOOGLE_OAUTH_ENCRYPTION_KEY` env var by the deploy tool if still present in `app.yaml`.
 - **Local dev:** The key is auto-generated and persisted to `.encryption_key` (gitignored).
 
