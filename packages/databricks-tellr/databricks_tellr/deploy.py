@@ -731,6 +731,12 @@ def delete(
 
     Note: This does not delete the Lakebase instance by default.
 
+    Deliberately does NOT touch secrets or secret scopes. A devloop fork shares
+    the production app's secret scope and key by design (so it can decrypt
+    inherited ciphertext), which means deleting the secret here would destroy
+    production's Fernet master key during a fork teardown. Only the app and its
+    Lakebase branch are removed. Do not "clean up" the secret here.
+
     Args:
         app_name: Name of the app to delete
         lakebase_name: Lakebase instance name (required if reset_database=True)

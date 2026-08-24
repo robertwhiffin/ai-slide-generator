@@ -49,7 +49,8 @@ tellr.create(
     lakebase_name="tellr-db",
     schema_name="app_data",
     app_name="tellr",
-    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/tellr"
+    app_file_workspace_path="/Workspace/Users/you@example.com/.apps/tellr",
+    # encryption_secret_scope="tellr",  # optional: store the Fernet key in a Databricks secret instead of Lakebase
 )
 ```
 
@@ -68,6 +69,7 @@ tellr.update(
     app_file_workspace_path="/Workspace/Users/you@example.com/.apps/tellr",
     lakebase_name="tellr-db",
     schema_name="app_data",
+    # encryption_secret_scope="tellr",  # optional: relocate the Fernet key to a Databricks secret
 )
 
 # Delete (optionally reset database)
