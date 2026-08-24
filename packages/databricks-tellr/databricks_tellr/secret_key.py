@@ -19,6 +19,11 @@ from typing import Any
 
 import requests
 from cryptography.fernet import Fernet
+from databricks.sdk.service.apps import (
+    AppResource,
+    AppResourceSecret,
+    AppResourceSecretSecretPermission,
+)
 from databricks.sdk.service.workspace import ScopeBackendType
 
 logger = logging.getLogger(__name__)
@@ -159,6 +164,33 @@ def write_and_verify_secret_key(ws: Any, scope: str, key: str, value: str) -> No
             f"store problem and re-run."
         )
     logger.info("Secret %s/%s written and verified", scope, key)
+
+
+def build_secret_resource(scope: str, key: str) -> AppResource:
+    """Build the Apps secret resource that injects the key.
+
+    No ``put_acl`` is needed anywhere: attaching this resource auto-grants the
+    app's service principal READ on the scope (verified live). Adding one would
+    require MANAGE on the scope, which is what made fork creation unworkable.
+    """
+    return AppResource(
+        name=RESOURCE_KEY,
+        secret=AppResourceSecret(
+            scope=scope, key=key,
+            permission=AppResourceSecretSecretPermission.READ,
+        ),
+    )
+
+
+def resolve_key_for_create(ws: Any, scope: str, key: str) -> str:
+    """Return the key a fresh install should use, writing one if none exists."""
+    existing = read_secret_key(ws, scope, key)
+    if existing:
+        logger.info("Reusing the existing Fernet key at %s/%s", scope, key)
+        return existing
+    generated = Fernet.generate_key().decode()
+    write_and_verify_secret_key(ws, scope, key, generated)
+    return generated
 
 
 def app_reports_secret_source(
