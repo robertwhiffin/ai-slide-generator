@@ -389,7 +389,7 @@ grep -rn 'get_deck_spec\|write_deck_spec' src/ || echo absent
 # Counts this plan's repointing tasks are sized against
 grep -rln 'src\.services\.agent' tests/ | while read f; do grep -qE 'src\.services\.agent[^_a-zA-Z]' "$f" && echo "$f"; done | wc -l   # 13
 grep -rln 'src\.services\.agent_factory' tests/ | wc -l          # 6
-grep -rn 'ConfigPrompts(' src/ scripts/ .github/ | grep -v build/lib | wc -l   # 8 (1 class def + 7 inserts)
+grep -rn 'ConfigPrompts(' src/ scripts/ .github/ | grep -v build/lib | wc -l   # 9 (1 class def + 7 inserts + 1 __repr__ f-string)
 find frontend/tests -name '*.spec.ts' | wc -l                    # 49
 ls frontend/tests/e2e/*.spec.ts | wc -l                          # 32
 
@@ -416,7 +416,7 @@ shipped a defect straight from the plan's own inline code without this list.
    params raise `TypeError`, and the config parameter must be **named `config`**.
 6. `Send` objects must be **returned from a conditional-edge router**, never written into state.
    Signature: `Send(node, arg, *, timeout=None)`.
-7. All API routes carry the `/api` prefix (`chat.py:43` is `APIRouter(prefix="/api")`).
+7. All API routes carry the `/api` prefix (`chat.py:44` is `APIRouter(prefix="/api")`).
 8. `StreamEvent`'s field is `type`, not `event_type`, and `to_sse()` reads `self.type.value` — so
    a new event type must be added to the **`StreamEventType` enum**, not just to a union.
 9. Existing emitters queue the `StreamEvent` **object**; `chat.py` calls `.to_sse()` on what it
@@ -1219,6 +1219,14 @@ export const mockFindings: SlideFinding[] = [
 ];
 ```
 
+> **NOTE on f3: `arc_gap` is a deck-level criterion per §5.1 and the plan routes deck-level
+> findings to chat with `slide_index: -1`. But f3 sits on `slideIndex: 3` in the drawer fixture.**
+> **This is a test fixture (drawer layout only, not routing).** The spec §8.2 adds a test
+> `'a deck-level finding (slideIndex -1) never appears in the drawer'` which asserts deck findings
+> are excluded from the drawer. The f3 fixture exists solely for UI testing the drawer rendering;
+> its placement here does not imply deck-level findings route through the drawer. Deck-level
+> findings (slide_index == -1) are routed to chat only, never to the drawer.
+
 > The ids stay `f1`/`f2`/`f3`. About ten assertions in
 > `frontend/tests/e2e/slide-viewer.spec.ts:314-359` are keyed on them (`finding-f1`,
 > `finding-dismiss-f1`, `finding-apply-f2`, …), and that spec is **not in the CI matrix** today
@@ -1233,9 +1241,11 @@ separate test at 341-352 clicks the Dismiss button — which will be suppressed 
 the test at 353-360 and add a guard to the dismiss test:
 
 **NOTE: The currently untouched test at 341-352 (`'dismiss removes a finding from the drawer'`)
-clicks `finding-dismiss-f1` and will break if f1's status is 'fixed'. After this task, that test
-must still pass — it verifies f2 instead of f1. Consider whether to repoint it to f2 or add a
-separate f3 assertion.**
+clicks `finding-dismiss-f1` and will break if f1's status is 'fixed'. After this task, repoint it
+to f2 (which remains `status: 'open'`). The fixture has three findings: f1 (status: 'fixed'),
+f2 (status: 'open'), f3 (status: 'open'). The dismiss test should use f2. If a separate f3 test
+is desired, add it to the suite — but the primary goal is to keep the existing dismiss test
+passing by targeting a finding that remains actionable.**
 
 ```typescript
   test('Apply and Discuss buttons are present on each finding', async ({ page }) => {
@@ -2841,6 +2851,14 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         return self._session_factory()
 
     @staticmethod
+    def _qual(table_name: str) -> str:
+        """Qualify a table name with the Lakebase schema. init_db sets search_path once on
+        a throwaway connection, not per pooled connection, so raw table names silently fail
+        when the session's search_path is not set. Use this for all raw SQL."""
+        from src.core.database import LAKEBASE_SCHEMA
+        return f"{LAKEBASE_SCHEMA}.{table_name}"
+
+    @staticmethod
     def _keys(config) -> tuple[str, str, Optional[str]]:
         configurable = (config or {}).get("configurable") or {}
         thread_id = configurable.get("thread_id")
@@ -2869,16 +2887,16 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         with self._session() as db:
             if checkpoint_id:
                 row = db.execute(text(
-                    "SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, "
-                    "checkpoint_blob, metadata_type, metadata_blob FROM graph_checkpoints "
-                    "WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :cid"
+                    f"SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, "
+                    f"checkpoint_blob, metadata_type, metadata_blob FROM {self._qual('graph_checkpoints')} "
+                    f"WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :cid"
                 ), {"t": thread_id, "ns": ns, "cid": checkpoint_id}).first()
             else:
                 row = db.execute(text(
-                    "SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, "
-                    "checkpoint_blob, metadata_type, metadata_blob FROM graph_checkpoints "
-                    "WHERE thread_id = :t AND checkpoint_ns = :ns "
-                    "ORDER BY created_at DESC, checkpoint_id DESC LIMIT 1"
+                    f"SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, "
+                    f"checkpoint_blob, metadata_type, metadata_blob FROM {self._qual('graph_checkpoints')} "
+                    f"WHERE thread_id = :t AND checkpoint_ns = :ns "
+                    f"ORDER BY created_at DESC, checkpoint_id DESC LIMIT 1"
                 ), {"t": thread_id, "ns": ns}).first()
             if row is None:
                 return None
@@ -2887,17 +2905,17 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
     def list(self, config, *, filter=None, before=None, limit=None) -> Iterator[CheckpointTuple]:
         thread_id, ns, _ = self._keys(config)
         sql = (
-            "SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, checkpoint_blob, "
-            "metadata_type, metadata_blob FROM graph_checkpoints "
-            "WHERE thread_id = :t AND checkpoint_ns = :ns"
+            f"SELECT checkpoint_id, parent_checkpoint_id, checkpoint_type, checkpoint_blob, "
+            f"metadata_type, metadata_blob FROM {self._qual('graph_checkpoints')} "
+            f"WHERE thread_id = :t AND checkpoint_ns = :ns"
         )
         params: dict[str, Any] = {"t": thread_id, "ns": ns}
         if before:
             _, _, before_id = self._keys(before)
             if before_id:
                 sql += (
-                    " AND created_at < (SELECT created_at FROM graph_checkpoints "
-                    "WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :bid)"
+                    f" AND created_at < (SELECT created_at FROM {self._qual('graph_checkpoints')} "
+                    f"WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :bid)"
                 )
                 params["bid"] = before_id
         sql += " ORDER BY created_at DESC, checkpoint_id DESC"
@@ -2912,9 +2930,9 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         checkpoint = self.serde.loads_typed((row.checkpoint_type, row.checkpoint_blob))
         metadata = self.serde.loads_typed((row.metadata_type, row.metadata_blob))
         writes = db.execute(text(
-            "SELECT task_id, channel, value_type, value_blob FROM graph_checkpoint_writes "
-            "WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :cid "
-            "ORDER BY task_id, idx"
+            f"SELECT task_id, channel, value_type, value_blob FROM {self._qual('graph_checkpoint_writes')} "
+            f"WHERE thread_id = :t AND checkpoint_ns = :ns AND checkpoint_id = :cid "
+            f"ORDER BY task_id, idx"
         ), {"t": thread_id, "ns": ns, "cid": row.checkpoint_id}).fetchall()
         return CheckpointTuple(
             config=self._cfg(thread_id, ns, row.checkpoint_id),
@@ -2940,13 +2958,13 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
         meta_type, meta_blob = self.serde.dumps_typed(dict(metadata))
         with self._session() as db:
             db.execute(text(
-                "DELETE FROM graph_checkpoints WHERE thread_id = :t AND checkpoint_ns = :ns "
-                "AND checkpoint_id = :cid"
+                f"DELETE FROM {self._qual('graph_checkpoints')} WHERE thread_id = :t AND checkpoint_ns = :ns "
+                f"AND checkpoint_id = :cid"
             ), {"t": thread_id, "ns": ns, "cid": checkpoint_id})
             db.execute(text(
-                "INSERT INTO graph_checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
-                "parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_type, "
-                "metadata_blob, created_at) VALUES (:t, :ns, :cid, :pid, :ct, :cb, :mt, :mb, :ts)"
+                f"INSERT INTO {self._qual('graph_checkpoints')} (thread_id, checkpoint_ns, checkpoint_id, "
+                f"parent_checkpoint_id, checkpoint_type, checkpoint_blob, metadata_type, "
+                f"metadata_blob, created_at) VALUES (:t, :ns, :cid, :pid, :ct, :cb, :mt, :mb, :ts)"
             ), {
                 "t": thread_id, "ns": ns, "cid": checkpoint_id, "pid": parent_id,
                 "ct": chk_type, "cb": chk_blob, "mt": meta_type, "mb": meta_blob,
@@ -2963,13 +2981,13 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver):
             for idx, (channel, value) in enumerate(writes):
                 value_type, value_blob = self.serde.dumps_typed(value)
                 db.execute(text(
-                    "DELETE FROM graph_checkpoint_writes WHERE thread_id = :t AND "
-                    "checkpoint_ns = :ns AND checkpoint_id = :cid AND task_id = :tid AND idx = :i"
+                    f"DELETE FROM {self._qual('graph_checkpoint_writes')} WHERE thread_id = :t AND "
+                    f"checkpoint_ns = :ns AND checkpoint_id = :cid AND task_id = :tid AND idx = :i"
                 ), {"t": thread_id, "ns": ns, "cid": checkpoint_id, "tid": task_id, "i": idx})
                 db.execute(text(
-                    "INSERT INTO graph_checkpoint_writes (thread_id, checkpoint_ns, "
-                    "checkpoint_id, task_id, idx, task_path, channel, value_type, value_blob, "
-                    "created_at) VALUES (:t, :ns, :cid, :tid, :i, :tp, :ch, :vt, :vb, :ts)"
+                    f"INSERT INTO {self._qual('graph_checkpoint_writes')} (thread_id, checkpoint_ns, "
+                    f"checkpoint_id, task_id, idx, task_path, channel, value_type, value_blob, "
+                    f"created_at) VALUES (:t, :ns, :cid, :tid, :i, :tp, :ch, :vt, :vb, :ts)"
                 ), {
                     "t": thread_id, "ns": ns, "cid": checkpoint_id, "tid": task_id, "i": idx,
                     "tp": task_path, "ch": channel, "vt": value_type, "vb": value_blob,
@@ -3594,7 +3612,7 @@ cannot retire both:
 | Storage | Where | Retired by |
 |---|---|---|
 | Real columns | `ConfigPrompts.system_prompt` / `.slide_editing_instructions`, `Column(Text, nullable=False)` (`src/database/models/prompts.py:39-40`) | Task 2.5's `_migrate_*` |
-| JSON keys inside `agent_config` | `AgentConfig.system_prompt` / `.slide_editing_instructions` (`src/api/schemas/agent_config.py:97-98`, validator `:100-104`), persisted through `Column(NormalizedAgentConfig, …)` on **both** `UserSession` (`session.py:135`) and `ConfigProfile` (`profile.py:31`) | Task 2.5's data migration over stored blobs |
+| JSON keys inside `agent_config` | `AgentConfig.system_prompt` / `.slide_editing_instructions` (`src/api/schemas/agent_config.py:97-98`, validator `:100-105`), persisted through `Column(NormalizedAgentConfig, …)` on **both** `UserSession` (`session.py:135`) and `ConfigProfile` (`profile.py:31`) | Task 2.5's data migration over stored blobs |
 
 > **`NormalizedAgentConfig` needs NO change.** It inspects only `slide_style_id` and
 > `design_system_id` (`src/database/types.py:139-156`) and passes every other byte through
@@ -6434,10 +6452,11 @@ def foreman_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     turn_id = state["turn_id"]
     # Record a wake-up: which positions are being dispatched in this batch. Used only by tests.
+    # Avoid in-place mutation of checkpointed state: create a new list instead.
     wakes = scoped_vals(state, "foreman_wakes") or []
     batch = next_dispatch_batch(state)
     if batch:
-        wakes.append(batch)
+        wakes = wakes + [batch]  # Create new list, do not mutate the checkpointed one
         # Write initial dispatch timestamp for each position in this batch. This allows stall
         # detection to measure elapsed time from when the position was actually dispatched,
         # even if the builder hangs or crashes immediately (and never completes to write it).
@@ -6551,13 +6570,27 @@ def architect_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # §H1/§L2 write 1 of 2. Six columns decidable up front. Before the fan-out so an
     # incrementally-released slide renders STYLED (§6.2's payoff) — which is why §K4 persists
     # the pinned template's token_css + style block here rather than nothing.
+    # Write the template-derived values to state before persisting to DB, so downstream nodes
+    # can read them. The skill output carries these from template extraction.
+    deterministic_css = out.deterministic_css or state.get("deterministic_css")
+    token_css = out.token_css or state.get("token_css")
+    external_scripts = out.external_scripts or state.get("external_scripts", ["https://cdn.jsdelivr.net/npm/chart.js"])
+    head_meta = out.head_meta or state.get("head_meta", {})
+    scripts_content = out.scripts_content or state.get("scripts_content", "")
+    
+    update["deterministic_css"] = deterministic_css
+    update["token_css"] = token_css
+    update["external_scripts"] = external_scripts
+    update["head_meta"] = head_meta
+    update["scripts_content"] = scripts_content
+    
     write_deck_level_columns(
         state["session_id"],
         title=out.deck_spec.purpose[:120],
-        css=state.get("deterministic_css") or None,
-        external_scripts=state.get("external_scripts", ["https://cdn.jsdelivr.net/npm/chart.js"]),
-        head_meta=state.get("head_meta", {}),
-        scripts_content=state.get("scripts_content", ""),
+        css=deterministic_css or None,
+        external_scripts=external_scripts,
+        head_meta=head_meta,
+        scripts_content=scripts_content,
         deck_spec=out.deck_spec.to_dict(),
         modified_by=state.get("modified_by"),
     )
@@ -6838,7 +6871,9 @@ def test_the_orchestrator_wakes_once_per_COMPLETED_BATCH(stub_skills, stub_write
     per-completion wakeups fails loudly here instead of degrading silently."""
     out = _run(5, thread="barrier")
     assert out.get("foreman_wakes"), "foreman_node must record its wakes for this assertion"
-    for wake in out["foreman_wakes"]:
+    # foreman_wakes is turn-scoped: extract via scoped_vals to get the actual list
+    wakes = scoped_vals(out, "foreman_wakes")
+    for wake in wakes:
         assert len(wake) > 0            # each wake observed at least one completed batch
 
 
@@ -7194,7 +7229,14 @@ def test_no_skill_is_user_editable():
 
 def test_no_skill_hardcodes_the_frame_numbers():
     """§L5: a design-system deck would then get two conflicting copies. The numbers are
-    injected by prompt ASSEMBLY, from the imported constant."""
+    injected by prompt ASSEMBLY, from the imported constant.
+    
+    **BLOCKED on decision:** `src/core/prompt_modules.py:222` contains `"1280x720"` inside
+    `EDITING_RULES`, a live monolith prompt. This test will RED on day 1. Three paths:
+    1. Strip that line from fixer_skill.py's `EDITING_RULES` composition (§L5 guidance).
+    2. Edit shipped prose in `src/core/prompt_modules.py` (product impact, not agent scope).
+    3. Narrow the test to exclude that specific line. The decision is already on PENDING;
+       this test must not ship until resolved."""
     for name in SEVEN:
         body = load_skill(name).instructions
         for number in ("88px", "72px", "56px", "1280x720", "1280×720"):
@@ -8183,41 +8225,42 @@ from src.api.services.chat_service import AGENT_MODE_PHRASE, resolve_engine_mode
 
 def test_a_first_message_carrying_the_phrase_selects_the_graph(session_with_messages):
     s = session_with_messages(["please USE AGENT MODE and build a cost deck"])
-    assert resolve_engine_mode(s) == "graph"
+    assert resolve_engine_mode(s.session_id) == "graph"
 
 
 def test_a_first_message_without_it_selects_the_monolith(session_with_messages):
-    assert resolve_engine_mode(session_with_messages(["build a cost deck"])) == "monolith"
+    s = session_with_messages(["build a cost deck"])
+    assert resolve_engine_mode(s.session_id) == "monolith"
 
 
 def test_mode_is_sticky_across_turns(session_with_messages):
     """The mechanic that decides whether the switch works at all. Evaluated per message, turn 2
     would silently swap engines and the deck would diverge between rows and deck_json."""
     s = session_with_messages(["USE AGENT MODE build it", "now make slide 2 bolder"])
-    assert resolve_engine_mode(s) == "graph"
+    assert resolve_engine_mode(s.session_id) == "graph"
 
 
 def test_a_LATER_message_carrying_the_phrase_does_not_switch_a_monolith_session(session_with_messages):
     """Only the EARLIEST user message decides. Otherwise mid-session switching reintroduces
     exactly the divergence stickiness exists to prevent."""
     s = session_with_messages(["build it", "USE AGENT MODE now"])
-    assert resolve_engine_mode(s) == "monolith"
+    assert resolve_engine_mode(s.session_id) == "monolith"
 
 
 def test_assistant_messages_are_ignored(session_with_messages):
     """Echoed tool output or an assistant quoting the phrase must not flip the engine."""
     s = session_with_messages(
         ["build it"], assistant_messages=["I could USE AGENT MODE if you wanted"])
-    assert resolve_engine_mode(s) == "monolith"
+    assert resolve_engine_mode(s.session_id) == "monolith"
 
 
 def test_a_session_with_no_user_message_yet_defaults_to_the_monolith(empty_session):
-    assert resolve_engine_mode(empty_session) == "monolith"
+    assert resolve_engine_mode(empty_session.session_id) == "monolith"
 
 
 def test_an_mcp_created_session_gets_the_monolith(mcp_created_session):
     """§D0: MCP has no chat input, so it cannot carry the phrase and keeps the monolith."""
-    assert resolve_engine_mode(mcp_created_session) == "monolith"
+    assert resolve_engine_mode(mcp_created_session.session_id) == "monolith"
 
 
 def test_clearing_context_preserves_the_mode(session_with_messages):
@@ -8226,18 +8269,21 @@ def test_clearing_context_preserves_the_mode(session_with_messages):
     from src.api.services.chat_service import clear_context
 
     s = session_with_messages(["USE AGENT MODE build it", "and again", "and again"])
-    clear_context(s)
-    assert resolve_engine_mode(s) == "graph"
+    clear_context(s.session_id)
+    assert resolve_engine_mode(s.session_id) == "graph"
 
 
 def test_clearing_context_still_drops_the_rest_of_the_transcript(session_with_messages):
     """The feature must still work: clearing drops the agent context and the transcript and
     keeps the deck spec, so nothing agreed is lost and no hidden state survives."""
     from src.api.services.chat_service import clear_context
+    from src.api.services.session_manager import SessionManager
 
     s = session_with_messages(["USE AGENT MODE build it", "second", "third"])
-    clear_context(s)
-    assert len(session_messages(s)) == 1
+    clear_context(s.session_id)
+    # After clearing, only the first user message remains (for engine mode resolution)
+    messages = SessionManager().get_messages(s.session_id)
+    assert len([m for m in messages if m.get("role") == "user"]) == 1
 
 
 def test_clearing_context_deletes_the_graph_thread(session_with_messages):
@@ -8247,8 +8293,9 @@ def test_clearing_context_deletes_the_graph_thread(session_with_messages):
     from src.core.checkpointer import get_checkpointer
 
     s = session_with_messages(["USE AGENT MODE build it"])
-    clear_context(s)
-    assert get_checkpointer().get_tuple({"configurable": {"thread_id": s}}) is None
+    clear_context(s.session_id)
+    # The thread_id for graph invocation is derived from session, not stored on fixture
+    assert get_checkpointer().get_tuple({"configurable": {"thread_id": s.session_id}}) is None
 
 
 def test_clearing_context_KEEPS_the_deck_spec(session_with_spec_and_messages):
@@ -8459,8 +8506,10 @@ def test_both_deck_level_writes_happen_and_bump_version_twice(stub_skills, graph
 
 - [ ] **Step 2: Implement the branch**
 
-At the top of both `send_message` and `send_message_streaming`, after the user message is persisted
-(`:899`) and before the monolith is invoked (`:1137`):
+**ONLY in `send_message_streaming`** (which IS a generator), after the user message is persisted
+(`:899`) and before the monolith is invoked (`:1137`). `send_message` is not a generator and must
+not receive this code — adding `yield from` converts a function from synchronous to generator,
+breaking every caller.
 
 ```python
         # §D: engine selection. Sticky per session, derived from the earliest user message.
@@ -8474,7 +8523,9 @@ At the top of both `send_message` and `send_message_streaming`, after the user m
 `_send_message_streaming_graph` builds the initial state (including the resolved
 `design_contract`, `token_css` and `deterministic_css` from `agent_resolution`), calls
 `invoke_graph`, and yields `StreamEvent`s. **Leave the monolith path untouched** — do not refactor
-shared helpers "while you are in there".
+shared helpers "while you are in there". **For `send_message` (non-generator), a separate
+non-streaming path is NEEDED but is out of scope for this plan.** The two functions have
+different signatures and return types; no shared implementation exists.
 
 - [ ] **Step 3: Run both suites and commit**
 
@@ -8611,6 +8662,18 @@ class StreamEvent(BaseModel):
 Add `slides_since_cursor(session_id, cursor)` to `SessionManager`, implemented as the release
 query over `session_slides` rows (reusing `releasable_positions`' prefix rule), and extend
 `msg_to_stream_event` to map `slide_ready` explicitly rather than defaulting it to `assistant`.
+
+Add `emit_slide_ready` to `src/services/streaming_callback.py` as a module-level function:
+
+```python
+def emit_slide_ready(queue, position: int, html: str, scripts: str) -> None:
+    """Queue a SLIDE_READY event for incremental delivery. Queues the object, not a serialized
+    string — chat.py will call .to_sse() on dequeue."""
+    from src.api.schemas.streaming import StreamEvent, StreamEventType
+    
+    event = StreamEvent(type=StreamEventType.SLIDE_READY, position=position, html=html, scripts=scripts)
+    queue.put(event)
+```
 
 Frontend: add `slide_ready` to the `StreamEventType` union in `frontend/src/services/api.ts:62`
 plus `agent`/`position`/`html`/`scripts`/`slide_cursor` on `StreamEvent`. **There is no
@@ -8851,13 +8914,15 @@ def clear_marker(session_id: str) -> None:
 ```
 
 In `src/api/routes/slides.py`, add one call per human mutation route, **after** the service call
-succeeds:
+succeeds. Import `get_current_user` from `src.core.user_context` at the top of the file:
 
 ```python
+    from src.core.user_context import get_current_user
+    
     result = chat_service.update_slide(session_id, index, html)
     # §B1: the trigger lives HERE, in the route, because the route is the only human entry
     # point and the graph does not use it.
-    spec_sync.mark_dirty(session_id, author=get_current_username())
+    spec_sync.mark_dirty(session_id, author=get_current_user())
     return result
 ```
 
@@ -9021,17 +9086,17 @@ def claim_due_marker(now: datetime) -> Optional[tuple]:
     """
     from sqlalchemy import text
 
-    from src.core.database import get_db_session
+    from src.core.database import get_db_session, LAKEBASE_SCHEMA
     from src.database.models import UserSession
 
     due_before = now - timedelta(seconds=DEBOUNCE_SECONDS)
     claim_expired = now - timedelta(seconds=CLAIM_TTL_SECONDS)
     with get_db_session() as db:
-        row = db.execute(text("""
-            UPDATE session_slide_decks
+        row = db.execute(text(f"""
+            UPDATE {LAKEBASE_SCHEMA}.session_slide_decks
                SET spec_dirty_claimed_at = :now
              WHERE id = (
-                   SELECT d.id FROM session_slide_decks d
+                   SELECT d.id FROM {LAKEBASE_SCHEMA}.session_slide_decks d
                     WHERE d.spec_dirty_at IS NOT NULL
                       AND d.spec_dirty_at <= :due_before
                       AND d.spec_dirty_by IS NOT NULL
@@ -9847,6 +9912,11 @@ and are "a test checklist for the supervisor's intent handling, not merely dead 
 
 **There are RC1–RC15** — verified by grepping the in-code markers. The table below covers 11 of them.
 **Omissions:** RC1, RC4, RC8, RC9 are present in code but not indexed below (pending review).
+**However, Step 2 requires "Fifteen tests, one per rule"** — a contradiction with "11 of them" and
+the pending review status. Before writing tests, derive the meaning of all 15 rules directly from
+the code (Step 1's grep command), record them in .pr3-PLAN-CORRECTIONS.md, and then write all 15
+tests in Step 2. Mark the ones needing a real model as layer 3 (Task 9.1); keep the deterministic
+ones (RC3, RC5, RC6, RC7, RC14, RC15) in CI. Do not ship with an incomplete ruleset.
 **Additional markers:** 14 RC markers exist in `src/services/agent.py` and 1 in `src/api/mcp_server.py`
 but are not indexed here. The superseded plan had wrong mappings (ordinals, ranges, relative references).
 Ground truth, re-derived from the code where indexed:
@@ -10002,7 +10072,7 @@ each deliberately and each with a check that surfaces it:**
    `_get_session_or_raise(db, session_id)` before passing it in.
 3. `extract_template_style_block` / `resolve_template_token_css` — reuse the existing style-block
    walk and `chat_service._resolve_pinned_template_token_css` rather than reimplementing (Task 5.3).
-4. Task 0.2's outcome branches Task 5.4's `extract_section` between bare-root and re-parenting. The
+4. Task 0.2's outcome branches Task 5.3's `extract_section` between bare-root and re-parenting. The
    branch and both consequences are written out; only the measurement is pending.
 
 ### Type consistency
