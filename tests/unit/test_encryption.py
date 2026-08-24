@@ -44,6 +44,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr("src.core.database.get_db_session", _session)
     monkeypatch.setattr("src.core.encryption._KEY_FILE", tmp_path / ".encryption_key")
     monkeypatch.delenv("GOOGLE_OAUTH_ENCRYPTION_KEY", raising=False)
+    monkeypatch.delenv("TELLR_ENCRYPTION_KEY", raising=False)
     get_encryption_key.cache_clear()
     yield engine, _session
     get_encryption_key.cache_clear()
@@ -271,3 +272,54 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         run.init_database()
     assert exc.value.code == 1
+
+
+def test_secret_env_var_is_used_and_lakebase_untouched(db, monkeypatch):
+    """Secret mode returns the injected key and never writes to Lakebase."""
+    engine, _ = db
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("TELLR_ENCRYPTION_KEY", key)
+    assert get_encryption_key() == key.encode()
+    assert _stored_key(engine) is None
+
+
+def test_secret_env_var_wins_over_existing_row_and_leaves_it_alone(db, monkeypatch):
+    """The env var takes precedence; the pre-existing row is not modified."""
+    engine, session = db
+    row_key = Fernet.generate_key().decode()
+    with session() as s:
+        s.execute(
+            text(
+                "INSERT INTO encryption_keys (id, key_value, created_at) "
+                "VALUES (1, :k, CURRENT_TIMESTAMP)"
+            ),
+            {"k": row_key},
+        )
+    env_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("TELLR_ENCRYPTION_KEY", env_key)
+    assert get_encryption_key() == env_key.encode()
+    assert _stored_key(engine) == row_key
+
+
+def test_secret_env_var_invalid_fernet_raises(db, monkeypatch):
+    """A corrupt secret refuses to boot rather than producing garbage."""
+    monkeypatch.setenv("TELLR_ENCRYPTION_KEY", "not-a-fernet-key")
+    with pytest.raises(RuntimeError, match="TELLR_ENCRYPTION_KEY"):
+        get_encryption_key()
+
+
+def test_blank_secret_env_var_falls_through_to_lakebase(db, monkeypatch):
+    """A blank variable is treated as absent, not as a corrupt key."""
+    engine, _ = db
+    monkeypatch.setenv("TELLR_ENCRYPTION_KEY", "   ")
+    key = get_encryption_key()
+    assert Fernet(key)
+    assert _stored_key(engine) == key.decode()
+
+
+def test_key_source_reports_secret_or_lakebase(db, monkeypatch):
+    from src.core.encryption import key_source
+
+    assert key_source() == "lakebase"
+    monkeypatch.setenv("TELLR_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    assert key_source() == "secret"
