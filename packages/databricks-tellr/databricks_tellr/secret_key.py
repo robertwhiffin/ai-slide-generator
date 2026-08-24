@@ -20,6 +20,7 @@ from typing import Any
 import requests
 from cryptography.fernet import Fernet
 from databricks.sdk.service.apps import (
+    App,
     AppResource,
     AppResourceSecret,
     AppResourceSecretSecretPermission,
@@ -290,3 +291,37 @@ def app_reports_secret_source(
         if attempt < attempts and delay:
             time.sleep(delay)
     return False
+
+
+def attach_secret_resource(ws: Any, app_name: str, scope: str, key: str) -> None:
+    """Add or replace the secret resource on an existing app.
+
+    A GET-fetched ``App`` cannot be passed back: ``apps.update`` rejects it with
+    "Compute size updates are not supported in this update API" (verified). It is
+    also a full replace on the fields it does accept — omitting ``description``
+    blanks it and omitting ``user_api_scopes`` nulls it. So build a fresh App,
+    carry every mutable field explicitly, and omit ``compute_size``.
+    """
+    cur = ws.apps.get(name=app_name)
+    # Filter by name only: an app may legitimately carry other secret
+    # resources, and dropping those would silently break it.
+    kept = [r for r in (cur.resources or []) if r.name != RESOURCE_KEY]
+    kept.append(build_secret_resource(scope, key))
+    ws.apps.update(
+        name=app_name,
+        app=App(
+            name=app_name,
+            description=cur.description,
+            default_source_code_path=cur.default_source_code_path,
+            user_api_scopes=cur.user_api_scopes,
+            resources=kept,
+            # compute_size deliberately omitted — passing it is rejected.
+        ),
+    )
+    logger.info("Attached %s resource to app %s", RESOURCE_KEY, app_name)
+
+
+def delete_lakebase_key_row(cur: Any, schema_name: str) -> None:
+    """Remove the relocated key row. Only ever called behind the health gate."""
+    cur.execute(f'DELETE FROM "{schema_name}".encryption_keys WHERE id = 1')
+    logger.info("Deleted the relocated key row from %s.encryption_keys", schema_name)

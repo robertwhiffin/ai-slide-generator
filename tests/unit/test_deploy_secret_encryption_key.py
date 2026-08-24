@@ -322,3 +322,48 @@ def test_ladder_case4_generates_when_nothing_exists():
     value, wrote = secret_key.resolve_key_for_update(ws, "s", "k", None, None)
     assert wrote is True
     assert Fernet(value.encode())
+
+
+# ---------------------------------------------------------------------------
+# Task 9 tests: attach_secret_resource, delete_lakebase_key_row
+# ---------------------------------------------------------------------------
+
+from databricks.sdk.service.apps import App, ComputeSize
+
+
+def test_attach_preserves_mutable_fields_and_omits_compute_size():
+    """apps.update rejects compute_size and wipes omitted fields (verified live)."""
+    ws = MagicMock()
+    db_resource = MagicMock()
+    db_resource.name = "app_database"
+    db_resource.secret = None
+    ws.apps.get.return_value = App(
+        name="app", description="Tellr", compute_size=ComputeSize.MEDIUM,
+        default_source_code_path="/ws/src", user_api_scopes=["sql"],
+        resources=[db_resource],
+    )
+    secret_key.attach_secret_resource(ws, "app", "tellr", "tellr-encryption-key")
+    sent = ws.apps.update.call_args.kwargs["app"]
+    assert sent.compute_size is None
+    assert sent.description == "Tellr"
+    assert sent.user_api_scopes == ["sql"]
+    assert sent.default_source_code_path == "/ws/src"
+    names = [r.name for r in sent.resources]
+    assert names == ["app_database", "TELLR_ENCRYPTION_KEY"]
+
+
+def test_attach_replaces_an_existing_secret_resource():
+    ws = MagicMock()
+    stale = secret_key.build_secret_resource("old-scope", "old-key")
+    ws.apps.get.return_value = App(name="app", resources=[stale])
+    secret_key.attach_secret_resource(ws, "app", "new-scope", "new-key")
+    sent = ws.apps.update.call_args.kwargs["app"]
+    assert len(sent.resources) == 1
+    assert sent.resources[0].secret.scope == "new-scope"
+
+
+def test_delete_lakebase_key_row_issues_the_delete():
+    cur = MagicMock()
+    secret_key.delete_lakebase_key_row(cur, "app_data")
+    sql = cur.execute.call_args[0][0]
+    assert "DELETE FROM" in sql and "encryption_keys" in sql

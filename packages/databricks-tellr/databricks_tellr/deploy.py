@@ -283,6 +283,8 @@ def update(
     profile: str | None = None,
     encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
 
@@ -303,6 +305,11 @@ def update(
         mlflow_tracing: Optional overrides for UC tracing env vars (same keys as ``create``).
             Values from deployment YAML are not loaded on update; use this argument or
             ``TELLR_DEPLOY_MLFLOW_*`` environment variables.
+        encryption_secret_scope: Databricks secret scope that holds the Fernet
+            master key (opt-in secret mode). When set, the key is stored in and
+            read from this scope rather than Lakebase.
+        encryption_secret_key: Name of the secret within *encryption_secret_scope*.
+            Defaults to ``DEFAULT_SECRET_KEY`` ("tellr-encryption-key").
 
     Returns:
         Dictionary with deployment info
@@ -322,6 +329,8 @@ def update(
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
         mlflow_tracing=mlflow_tracing,
+        encryption_secret_scope=encryption_secret_scope,
+        encryption_secret_key=encryption_secret_key,
     )
 
 
@@ -523,9 +532,11 @@ def _update_databricks(
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
-    
+
     Internal function with full control over seeding behavior.
 
     Args:
@@ -542,6 +553,11 @@ def _update_databricks(
             the encryption_keys table. Default: read from the deployed
             app.yaml. The key is no longer written to app.yaml.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
+        encryption_secret_scope: Databricks secret scope that holds the Fernet
+            master key (opt-in secret mode). When set, the key is stored in and
+            read from this scope rather than Lakebase.
+        encryption_secret_key: Name of the secret within *encryption_secret_scope*.
+            Defaults to ``DEFAULT_SECRET_KEY`` ("tellr-encryption-key").
 
     Returns:
         Dictionary with deployment info
@@ -553,8 +569,9 @@ def _update_databricks(
 
     ws = _get_workspace_client(client, profile)
 
-    # Task 9 will replace this stub with the real resource key.
-    encryption_secret_resource_key = None
+    encryption_secret_resource_key = (
+        secret_key.RESOURCE_KEY if encryption_secret_scope else None
+    )
 
     mlflow_subs = _mlflow_substitutions_for_app_yaml(
         deployment_flat={},
@@ -582,11 +599,31 @@ def _update_databricks(
             print(f"   Schema '{schema_name}' reset (tables will be recreated on app startup)")
             print()
 
-        # CRITICAL-3 migration: relocate the legacy app.yaml key into the
-        # encryption_keys table BEFORE the new (keyless) app.yaml overwrites
-        # it. Runs at most once per install: after it succeeds, the deployed
-        # app.yaml has no key entry and encryption_key is None on re-runs.
-        if encryption_key:
+        if encryption_secret_scope:
+            # Secret mode: relocate into the secret; never seed Lakebase.
+            secret_key.preflight_scope(ws, encryption_secret_scope)
+            mig_conn, _ = _get_lakebase_connection(
+                ws, lakebase_name, lakebase_result=lakebase_result
+            )
+            try:
+                with mig_conn.cursor() as cur:
+                    secret_key.preflight_lakebase_privileges(cur, schema_name)
+                    lakebase_key = secret_key.read_lakebase_key(cur, schema_name)
+            finally:
+                mig_conn.close()
+
+            _, wrote = secret_key.resolve_key_for_update(
+                ws, encryption_secret_scope, encryption_secret_key,
+                lakebase_key, encryption_key,
+            )
+            if wrote:
+                print("   Key written to the secret and verified")
+            secret_key.attach_secret_resource(
+                ws, app_name, encryption_secret_scope, encryption_secret_key
+            )
+            print("   Secret resource attached")
+        elif encryption_key:
+            # Legacy CRITICAL-3 relocation into Lakebase — unchanged.
             print("Relocating encryption key into Lakebase (encryption_keys)...")
             app_for_grant = ws.apps.get(name=app_name)
             grant_client_id = _get_app_client_id(app_for_grant)
@@ -628,6 +665,33 @@ def _update_databricks(
         app = ws.apps.get(name=app_name)
         if app.url:
             print(f"   URL: {app.url}")
+
+        if encryption_secret_scope:
+            if not app.url:
+                print("   WARNING: no app URL — cannot confirm the key source; "
+                      "leaving the Lakebase key row in place")
+            elif secret_key.app_reports_secret_source(ws, app.url):
+                del_conn, _ = _get_lakebase_connection(
+                    ws, lakebase_name, lakebase_result=lakebase_result
+                )
+                try:
+                    with del_conn.cursor() as cur:
+                        if secret_key.read_lakebase_key(cur, schema_name):
+                            secret_key.delete_lakebase_key_row(cur, schema_name)
+                            print("   Lakebase key row deleted — the secret is now "
+                                  "the only copy")
+                        else:
+                            print("   No Lakebase key row to remove")
+                except Exception as exc:  # noqa: BLE001 — deploy already succeeded
+                    print(f"   WARNING: could not delete the Lakebase key row: {exc}")
+                    print(f'   Run manually: DELETE FROM "{schema_name}".'
+                          f"encryption_keys WHERE id = 1;")
+                finally:
+                    del_conn.close()
+            else:
+                print("   WARNING: the deployed app does not report the secret as "
+                      "its key source. Leaving the Lakebase key row in place. This "
+                      "is expected if the app version predates secret-mode support.")
 
         return {
             "url": app.url,
