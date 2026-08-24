@@ -122,3 +122,75 @@ def test_write_and_verify_aborts_on_mismatch():
         secret_key.write_and_verify_secret_key(
             ws, "tellr", "k", Fernet.generate_key().decode()
         )
+
+
+# ---------------------------------------------------------------------------
+# Health-gate tests (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _poll_ws():
+    ws = MagicMock()
+    ws.config.authenticate.return_value = {"Authorization": "Bearer t"}
+    return ws
+
+
+def _resp(status=200, payload=None, raise_json=False):
+    r = MagicMock()
+    r.status_code = status
+    if raise_json:
+        r.json.side_effect = ValueError("not json")
+    else:
+        r.json.return_value = payload or {}
+    return r
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _resp(200, {"encryption_key_source": "lakebase"}),
+        _resp(200, {"status": "healthy"}),          # field absent — old app code
+        _resp(200, raise_json=True),                 # unparseable body
+        _resp(503, {"encryption_key_source": "secret"}),
+    ],
+    ids=["reports-lakebase", "field-absent", "unparseable", "non-200"],
+)
+def test_health_gate_fails_closed(monkeypatch, response):
+    monkeypatch.setattr(secret_key.requests, "get", lambda *a, **k: response)
+    assert secret_key.app_reports_secret_source(
+        _poll_ws(), "https://app", attempts=1, delay=0
+    ) is False
+
+
+def test_health_gate_fails_closed_on_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(secret_key.requests, "get", boom)
+    assert secret_key.app_reports_secret_source(
+        _poll_ws(), "https://app", attempts=2, delay=0
+    ) is False
+
+
+def test_health_gate_opens_only_on_secret(monkeypatch):
+    monkeypatch.setattr(
+        secret_key.requests, "get",
+        lambda *a, **k: _resp(200, {"encryption_key_source": "secret"}),
+    )
+    assert secret_key.app_reports_secret_source(
+        _poll_ws(), "https://app", attempts=1, delay=0
+    ) is True
+
+
+def test_health_gate_sends_workspace_credentials(monkeypatch):
+    seen = {}
+
+    def capture(url, headers=None, timeout=None):
+        seen["url"] = url
+        seen["headers"] = headers
+        return _resp(200, {"encryption_key_source": "secret"})
+
+    monkeypatch.setattr(secret_key.requests, "get", capture)
+    secret_key.app_reports_secret_source(_poll_ws(), "https://app/", attempts=1, delay=0)
+    assert seen["url"] == "https://app/api/health"
+    assert seen["headers"]["Authorization"] == "Bearer t"

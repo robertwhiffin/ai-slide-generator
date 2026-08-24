@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Any
 
+import requests
 from cryptography.fernet import Fernet
 from databricks.sdk.service.workspace import ScopeBackendType
 
@@ -157,3 +159,42 @@ def write_and_verify_secret_key(ws: Any, scope: str, key: str, value: str) -> No
             f"store problem and re-run."
         )
     logger.info("Secret %s/%s written and verified", scope, key)
+
+
+def app_reports_secret_source(
+    ws: Any, app_url: str, attempts: int = 10, delay: float = 6.0
+) -> bool:
+    """Return True only if the live app reports it is reading from the secret.
+
+    This is the gate on deleting the Lakebase key row. It **fails closed**: a
+    missing field, an unparseable body, a non-200, or a network error all return
+    False, because every one of those is indistinguishable from "the deployed code
+    does not know about secret mode". An app pinned to a pre-feature version has
+    no ``encryption_key_source`` field at all, which is exactly the case that must
+    not delete the row.
+
+    Databricks Apps sit behind the workspace proxy, so the request carries
+    workspace credentials from ``ws.config.authenticate()``.
+    """
+    url = f"{app_url.rstrip('/')}/api/health"
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, headers=ws.config.authenticate(), timeout=15)
+            if resp.status_code == 200:
+                source = resp.json().get("encryption_key_source")
+                if source == "secret":
+                    return True
+                logger.info(
+                    "Health gate attempt %s/%s: key source is %r, not 'secret'",
+                    attempt, attempts, source,
+                )
+            else:
+                logger.info(
+                    "Health gate attempt %s/%s: HTTP %s", attempt, attempts,
+                    resp.status_code,
+                )
+        except Exception as exc:  # noqa: BLE001 — any failure means "not confirmed"
+            logger.info("Health gate attempt %s/%s failed: %s", attempt, attempts, exc)
+        if attempt < attempts and delay:
+            time.sleep(delay)
+    return False
