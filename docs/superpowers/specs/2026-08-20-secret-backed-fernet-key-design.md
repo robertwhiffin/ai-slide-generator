@@ -283,7 +283,8 @@ secret-mode changes here: if `encryption_secret_scope` is set, run the ladder
 to resolve or generate the key, read it back, attach the resource, deploy, then
 DELETE (or skip DELETE if branching).
 
-Schema setup and deploy are unchanged. `_write_app_yaml` is untouched.
+Schema setup and deploy are otherwise unchanged. `_write_app_yaml` gains the
+secret-mode parameter described under Mechanism, and every call site supplies it.
 
 ### `update()` — the relocate
 
@@ -602,7 +603,12 @@ the run that relocates.
 
 1. The app reports its key *source* — never the key — on `/api/health`
    (`src/api/main.py:490`), as `"secret"` or `"lakebase"`.
-2. After `deploy_and_wait`, the deploy tool polls that endpoint.
+2. After `deploy_and_wait`, the deploy tool polls that endpoint at
+   `{app.url}/api/health`. Databricks Apps sit behind the workspace proxy, so the
+   request must carry workspace credentials — `ws.config.authenticate()` returns
+   the header dict to pass. `requests` is already available transitively via
+   `databricks-sdk`; add it as an explicit dependency of `databricks-tellr` rather
+   than relying on that.
 3. `DELETE FROM <schema>.encryption_keys WHERE id = 1` runs only when the app
    reports `"secret"` **and** a row actually exists.
 
@@ -633,13 +639,12 @@ would break SP-only dev-loop deploys.
    `valueFrom` entry is required. This is now part of the design rather than a
    fallback; see Mechanism, and the `_write_app_yaml` parameter it implies.
 
-One question the spike did **not** answer, worth knowing before implementation
-because it bears on accepted risk 2: what happens when `app.yaml` carries a
-`valueFrom` entry for a resource that is *not* attached. If the deploy rejects
-it, the "someone detached the resource" case becomes a loud deploy failure
-instead of a silent revert to Lakebase, which would partly close that risk for
-free. The reverse case (resource attached, no `valueFrom`) was tested and simply
-yields no variable.
+A third question, asked because it bore on accepted risk 2, was also settled:
+an `app.yaml` whose `valueFrom` names an **unattached** resource deploys
+successfully and leaves the variable absent — not empty, not rejected. So a
+detached resource produces the silent fallback of accepted risk 2 with no
+platform-level error at any layer. The reverse case (resource attached, no
+`valueFrom`) yields no variable either.
 
 ### Verification steps (live testing on deployed app)
 
