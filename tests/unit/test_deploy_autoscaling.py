@@ -602,6 +602,49 @@ class TestUpdateDatabricks:
 
         assert result["lakebase_type"] == "autoscaling"
 
+    @patch("databricks_tellr.deploy._upload_files")
+    @patch("databricks_tellr.deploy._write_app_yaml")
+    @patch("databricks_tellr.deploy._write_requirements")
+    @patch("databricks_tellr.deploy._get_or_create_lakebase")
+    @patch("databricks_tellr.deploy._read_existing_encryption_key", return_value=None)
+    def test_update_retains_secret_resource_key_for_existing_secret_mode_app(
+        self, _mock_key, mock_get_lakebase, _mock_req, mock_yaml, _mock_upload
+    ):
+        """Plain update of a secret-mode app must pass encryption_secret_resource_key
+        to _write_app_yaml so the valueFrom entry is preserved in app.yaml.
+
+        Without the fix, encryption_secret_resource_key is None (gated only on
+        encryption_secret_scope which is absent on a plain update), so the
+        TELLR_ENCRYPTION_KEY env var is missing at boot and the app mints a fresh
+        key over existing ciphertext — silently orphaning all stored credentials.
+
+        RED before fix (encryption_secret_resource_key is None), GREEN after.
+        """
+        from databricks_tellr import secret_key as sk
+
+        mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
+        ws = MagicMock()
+        ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
+        # Carry the TELLR_ENCRYPTION_KEY resource so app_is_secret_mode → True.
+        secret_resource = sk.build_secret_resource("s", "k")
+        ws.apps.get.return_value = Mock(
+            url="https://app.test", resources=[secret_resource]
+        )
+
+        _update_databricks(
+            app_name="app", app_file_workspace_path="/path",
+            lakebase_name="test-db", schema_name="schema", client=ws,
+            # No encryption_secret_scope — this is the plain update path.
+        )
+
+        _, kwargs = mock_yaml.call_args
+        assert kwargs["encryption_secret_resource_key"] == sk.RESOURCE_KEY, (
+            "_write_app_yaml was not called with encryption_secret_resource_key="
+            f"{sk.RESOURCE_KEY!r} for a secret-mode app — the valueFrom entry "
+            "would be missing from app.yaml, causing the app to boot without "
+            "TELLR_ENCRYPTION_KEY and mint a fresh key over existing ciphertext."
+        )
+
 
 class TestGetOrCreateLakebaseAutoscalingBranchName:
     def test_default_branch_is_production(self, mock_ws):
