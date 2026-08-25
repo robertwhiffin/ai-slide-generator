@@ -81,8 +81,18 @@ the two deploy-autoscaling failures raise completely different messages.
 
 - **Save the baseline log, not the number.** Re-derive it after every schema/ORM/dependency
   change — those are exactly the changes that mutate a cause while preserving a count.
-- **A deleted test is invisible to this gate.** Phases 2 and 5 repoint 13 + 6 + 4 test files.
-  Repoint and see them pass; never delete.
+- **A deleted test is invisible to this gate, so every deletion must be enumerated.** The rule is
+  per-TEST, not per-file, and it turns on whether the *functionality* survives:
+  - **Functionality survives → repoint and see it pass.** §L6's six `agent_factory` suites and
+    §D4's 13 security-control suites are this case: the resolution logic and both controls move
+    rather than disappearing, so a red or absent test there is a real regression.
+  - **Functionality is removed → DELETE the test.** A test asserting behaviour the new design does
+    not have is not a regression signal, it is dead weight. Do not migrate it, do not weaken it to
+    pass, and do not leave it red. (Ruling, 2026-08-25.)
+  - **Every deletion is named in its commit message**, with the removed behaviour stated. That is
+    what keeps the cause-based gate honest: a shrinking suite must be explained, not merely
+    tolerated. When re-deriving the baseline after a deletion, note the new collected count
+    alongside the cause list.
 
 ### Design invariants
 
@@ -152,6 +162,19 @@ improvise.
 | K8 | What **identity** a sweeper-driven arc review runs as | **The marker records its author (`spec_dirty_by`) and the sweeper reuses it.** `modified_by` gets that username; the deck permission check already happened on the human's route when the marker was set; PRD §8.1 cost attribution lands on a real user. No new identity concept, no stored credential | Task 2.3, Task 7.2 |
 | K9 | Reviewer finding **`id` stability** across re-reviews | **A `(criterion, slide_content_hash)` composite.** Stable while the slide is unchanged, so a carried-over finding stays seen; **changes** when the slide is edited, so a legitimately re-raised finding reads as new. Maps exactly onto the two requirements that pull against each other | Task 1.1 |
 
+### Two rulings from 2026-08-25 — these settle what the review loop could not
+
+| # | Question | Ruling |
+|---|---|---|
+| R1 | Tests that assert the feature §E2 removes: delete or migrate? | **Delete them.** A test asserting behaviour the new design does not have gets stripped out, not migrated — there is nothing for it to be repointed *at*. Triage per **test**, not per file: keep tests whose subject survives (§L6's resolution behaviour, §D4's controls) and drop the retired kwarg from their setup; delete tests whose subject *is* the retired override. **Enumerate every deletion in its commit**, because a deleted test is invisible to the cause-based gate. Amends the Global Constraints' former blanket "never delete". |
+| R2 | The fixer skill composes `EDITING_RULES`, which carries `"1280x720"` and so violates §L5 | **Wrong question — the monolith is not touched at all.** The graph is a **new code path** (§D), so the skills **copy** what they need and `src/core/prompt_modules.py` is neither modified nor composed from. The copy omits that line; the frame numbers arrive from `_SLIDE_FRAME_CONSTRAINTS` via deterministic prompt assembly, which is where §L5 puts them. The conflict dissolves rather than being traded off. Two consequences: `UNTRUSTED_DATA_NOTICE` is **imported** rather than copied (a security control deserves one source of truth, and reading a constant is not modifying anything), and `design_system_compiler.py` is **no longer modified** either — the private constant is imported directly instead of being promoted. |
+
+**The general principle both rulings share, worth applying to any later question of this shape:**
+the new path takes what it needs from existing code **without changing existing code**. Read it,
+copy it, import it — do not edit it to accommodate the graph. The one deliberate exception in this
+plan is `merge_css` (Task 3.1), and it earns the exception by being a **shipped bug fix with a
+user-visible symptom** on the current edit path, not an accommodation for the new one.
+
 ### Two additional corrections this plan makes to the addendum
 
 | Finding | Consequence |
@@ -217,7 +240,6 @@ improvise.
 | `src/api/schemas/agent_config.py` | Remove `system_prompt` / `slide_editing_instructions` + validator (§E2); add `tone_guideline` |
 | `src/database/models/prompts.py` | Remove `system_prompt` and `slide_editing_instructions` column declarations from `ConfigPrompts` ORM model (§E2, Task 2.5) |
 | `src/services/agent_factory.py` | **MOVE** the resolution logic, do not delete (§L6); third frame-rules case (§L5) |
-| `src/services/design_system_compiler.py` | Promote `_SLIDE_FRAME_CONSTRAINTS` to importable (§L5) |
 | `src/api/fixtures/tour_demo_deck.json` | Gains a hand-authored deck-spec field (§B1) |
 | `frontend/src/types/finding.ts` | Mirror the canonical schema: `status`, stable `id`, `slideIndex` |
 | `frontend/src/components/SlideViewer/FeedbackDrawer.tsx` | Branch on `status`; suppress actions when `fixed` |
@@ -3596,10 +3618,6 @@ git commit -m "feat(spec): dirty-marker columns with an author and a claim lease
 
 ### Task 2.4: Stop every writer and reader of the retired prompt columns
 
-**⚠️ GATED on decision:** May the executor delete tests that asserted §E2's removed feature, or
-must they be repointed? This decision blocks dispatch — do not start this task until the ruling is
-on PENDING list status: "DECIDED: [delete|repoint]".
-
 §E2 retires `ConfigPrompts.system_prompt` and `.slide_editing_instructions`. **This task changes
 code only — the drop migration is Task 2.5**, and the order is a hard requirement: a drop that
 outruns its callers now kills the pre-fork boot command with `SystemExit(1)`, not the lifespan.
@@ -3669,7 +3687,25 @@ cannot retire both:
 - `frontend/src/api/config.ts:83,92` — `system_prompt: string;` field definitions
 - `frontend/src/components/config/ProfileList.tsx:34,59` — `hasCustomSystemPrompt` check, a **third** "has custom config" site beyond the two in `AgentConfigContext.tsx`
 
-> **Policy decision required:** Tests asserting the removed feature (e.g. `test_custom_system_prompt_overrides_default`) must either be **deleted** or **repointed to test new behavior**. §E1's premise ("editing these is highly unlikely in practice") enables breaking the tests; without custom values in production, their deletion does not hide a user's data loss. **Do not leave these tests red.** The standing rule ("repoint and see them pass; never delete") assumes tests assert something that survives; these assert a removed feature. This plan needs a JUDGMENT ruling before Task 2.4 dispatches: may the executor delete tests that asserted §E2's removed feature, or must they be repointed?
+> **RULED 2026-08-25: delete them.** A test asserting behaviour the new design does not have gets
+> **stripped out**, not migrated. There is no equivalent of a per-profile prompt override in the
+> in-repo-skills design (§E1 closes that surface deliberately), so there is nothing for
+> `test_custom_system_prompt_overrides_default` and its siblings to be repointed *at*.
+>
+> **Triage each test, not each file.** These six files mix both kinds, so do not delete wholesale:
+>
+> | The test asserts… | Action |
+> |---|---|
+> | that a custom `system_prompt` / `slide_editing_instructions` **overrides** the default, or that the field round-trips, or validator behaviour on it | **DELETE.** The functionality is gone. |
+> | design-system resolution, tool gating, prompt precedence or template pinning, and merely *constructs* an `AgentConfig` with the retired kwarg incidentally | **KEEP**, dropping the kwarg from the construction. §L6 requires this behaviour survive. |
+>
+> `test_agent_factory.py` is the clearest example of the split: its 41 references include both
+> `test_custom_system_prompt_overrides_default` (delete) and the `_get_prompt_content` /
+> `_build_tools` assertions §L6 names as the regression harness (keep, repoint per Task 5.2).
+>
+> **Enumerate every deletion in the commit message**, naming the behaviour removed. A deleted test
+> is invisible to the cause-based gate, so a shrinking suite has to be explained rather than
+> tolerated — record the new collected count next to the cause list.
 
 **Plus four `ConfigPrompts(...)` constructors under `tests/`** —
 `tests/unit/config/test_models.py:87`, `:137`, `tests/unit/test_settings_db.py:69`,
@@ -3908,7 +3944,10 @@ compiling. Replace each read with the in-repo default; do not delete the code pa
 
 **4g — the four test constructors.** `tests/unit/config/test_models.py:87`, `:137`,
 `tests/unit/test_settings_db.py:69`, `tests/unit/test_unset_agent_config_is_sql_null.py:126`.
-Repoint, never delete — a deleted test is invisible to the baseline gate.
+These construct `ConfigPrompts(...)` incidentally while testing something that survives, so drop
+the two kwargs and **keep** them. Apply the triage table above to the six files in the inventory:
+delete the tests whose subject is the retired override, keep and de-kwarg the rest, and name every
+deletion in the commit.
 
 - [ ] **Step 5: Run the removal test, the type check, and the full suite by cause**
 
@@ -7065,7 +7104,7 @@ def assemble_skill_prompt(skill: 'Skill', payload: dict) -> str:
     (builder gets slide brief, reviewer gets HTML/findings, etc.).
     """
     import json
-    from src.core.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+    from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
     from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
 
     prompt = skill.instructions or ""
@@ -7237,8 +7276,6 @@ git commit -m "feat(skills): call_skill infrastructure — invocation, prompt as
 
 ### Task 5.1: Seven skill implementations (architect, analyst, builder, reviewers, fixer, deck reviewer)
 
-**⚠️ GATED on decision:** `test_no_skill_hardcodes_the_frame_numbers` cannot ship until resolved: does the fixer_skill composition strip the "1280x720" line from `src/core/prompt_modules.py::EDITING_RULES` (§L5), or does shipped prose get edited, or does the test narrow to exclude that line? The test is written below and will RED on day 1 without a ruling. Decision is already on PENDING.
-
 **Files:**
 - Modify: `src/core/skills/__init__.py` (register the seven skills; the file structure was created in Task 4.5)
 - Create: `src/core/skills/<name>_skill.py` × 7
@@ -7255,12 +7292,36 @@ placeholder prompts**; real authoring is a separate track in the order
 (dependency, not preference: the architect's deck-spec output is every downstream skill's input,
 and a reviewer's rubric is the builder's brief).
 
-**Reusable prompt material — do not reinvent.** `src/core/prompt_modules.py` holds 12 named
-blocks. Directly reusable by builder and fixer: `CHART_JS_RULES`, `EDITING_RULES`,
-`SLIDE_GUIDELINES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT`. Two are **load-bearing rather than
-optional**: `DESIGN_SYSTEM_PRECEDENCE` (include only when a design system is active) and
-**`UNTRUSTED_DATA_NOTICE`**, which every skill receiving tool output or prior slide HTML needs
-(Task 5.1). The architect and all four reviewers are net-new writing.
+**Reusable prompt material — COPY it, never compose the monolith's module. (Ruled 2026-08-25.)**
+
+The graph is a **new code path** (§D), so it owns its own prose. `src/core/prompt_modules.py` is
+**not modified and not composed from** — the seven skill files carry their own copies of whatever
+they need. The monolith keeps its blocks exactly as they are.
+
+`prompt_modules.py` holds 12 named blocks worth reading as source material for the copy:
+`CHART_JS_RULES`, `EDITING_RULES`, `SLIDE_GUIDELINES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT` for
+the builder and fixer, plus `DESIGN_SYSTEM_PRECEDENCE`. The architect and all four reviewers are
+net-new writing.
+
+Three consequences, and the first is the whole point of the ruling:
+
+1. **The §L5 conflict disappears rather than being traded off.** `EDITING_RULES:222` contains
+   `"1280x720"`, and §L5 forbids a skill hardcoding the frame numbers because a design-system deck
+   would then get two conflicting copies. Composing that block into `fixer_skill.py` would have
+   imported the violation. A copy simply **omits that line** — the numbers arrive from
+   `_SLIDE_FRAME_CONSTRAINTS` via deterministic prompt assembly (Task 4.5), which is where §L5 puts
+   them. Nothing in the monolith changes, and `test_no_skill_hardcodes_the_frame_numbers` passes on
+   its own terms.
+2. **Copies can drift from their originals, and that is accepted here.** These are ordinary prose
+   blocks with no currency contract, and the two paths are deliberately diverging anyway — the
+   monolith is deleted in a later PR. Do not add a test pinning skill prose to
+   `prompt_modules` bytes; that would re-couple exactly what this ruling separates.
+3. **`UNTRUSTED_DATA_NOTICE` is the one to think about before copying.** It is a security control's
+   prose (§D4), and two copies can drift where it matters. **Import this one** —
+   `from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE` — because reading a constant is not
+   modifying the monolith, and a single source of truth is worth more than symmetry for a security
+   string. Task 5.1's `test_skills_that_receive_untrusted_input_carry_the_notice` already asserts
+   the imported value, so it keeps working unchanged.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7314,12 +7375,12 @@ def test_no_skill_hardcodes_the_frame_numbers():
     """§L5: a design-system deck would then get two conflicting copies. The numbers are
     injected by prompt ASSEMBLY, from the imported constant.
     
-    **BLOCKED on decision:** `src/core/prompt_modules.py:222` contains `"1280x720"` inside
-    `EDITING_RULES`, a live monolith prompt. This test will RED on day 1. Three paths:
-    1. Strip that line from fixer_skill.py's `EDITING_RULES` composition (§L5 guidance).
-    2. Edit shipped prose in `src/core/prompt_modules.py` (product impact, not agent scope).
-    3. Narrow the test to exclude that specific line. The decision is already on PENDING;
-       this test must not ship until resolved."""
+    This passes because the skills COPY their prose rather than composing
+    `prompt_modules` (ruled 2026-08-25). `EDITING_RULES:222` contains "1280x720", so composing it
+    into fixer_skill.py would have imported a §L5 violation; the copy omits that line and the
+    numbers arrive from `_SLIDE_FRAME_CONSTRAINTS` via prompt assembly instead. If this test goes
+    red, a skill body has re-acquired the numbers — fix the skill, never the test, and never
+    `prompt_modules.py`."""
     for name in SEVEN:
         body = load_skill(name).instructions
         for number in ("88px", "72px", "56px", "1280x720", "1280×720"):
@@ -7493,13 +7554,25 @@ _register(Skill(
 ))
 ```
 
-The other six follow the same shape. `builder_skill.py` composes `SLIDE_GUIDELINES`,
-`CHART_JS_RULES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT` and `UNTRUSTED_DATA_NOTICE`;
-`fixer_skill.py` composes `EDITING_RULES` plus the same shared fragments with a
-minimal-change instruction (spec §5.6: a builder's disposition is to *author*, a fixer's is
-*minimal change* — hand an authoring agent broken HTML and it re-authors the slide, undoing what
-already passed review and, once WYSIWYG lands, a user's manual edits). `data_analyst_skill.py`
-carries `DATA_ANALYSIS_GUIDELINES` and its tool grants.
+The other six follow the same shape, and each writes its **own prose** — only
+`UNTRUSTED_DATA_NOTICE` is imported (see the ruling above).
+
+- **`builder_skill.py`** — its own slide-authoring, Chart.js, image-handling and HTML-output rules,
+  written with `SLIDE_GUIDELINES`, `CHART_JS_RULES`, `IMAGE_SUPPORT` and `HTML_OUTPUT_FORMAT` open
+  as source material, plus the imported `UNTRUSTED_DATA_NOTICE`.
+- **`fixer_skill.py`** — its own editing rules, written from `EDITING_RULES` **minus that block's
+  `"1280x720"` line**, plus a minimal-change instruction. Spec §5.6: a builder's disposition is to
+  *author*, a fixer's is *minimal change* — hand an authoring agent broken HTML and it re-authors
+  the slide, undoing what already passed review and, once WYSIWYG lands, a user's manual edits.
+  This is the one file where the copy must differ from its source, and §L5 is why: the frame
+  numbers arrive from prompt assembly, never from a skill body.
+- **`data_analyst_skill.py`** — its own synthesis guidance (single source → pass through, synthesis
+  only at 2+ sources), written from `DATA_ANALYSIS_GUIDELINES`, plus its tool grants.
+- **`architect_skill.py`** and the two remaining reviewer skills are net-new writing with no source
+  block to draw on.
+
+Every one of these is a **placeholder body** at this stage (§A1) — the schemas above are the
+contract, and real authoring is a separate track.
 
 - [ ] **Step 3: Run, then commit**
 
@@ -7704,22 +7777,23 @@ reviewer against numbers its builder's prompt never received:
 Promote the constant and inject it where the style is resolved — **never** in a skill body, or a
 design-system deck gets two conflicting copies:
 
-```python
-# src/services/design_system_compiler.py
-# §L5: promoted out of _-private so prompt assembly can inject the SAME BYTES rather than a
-# retyped copy. Restating the numbers in assembly code would create exactly the divergence class
-# the COMPILER_VERSION currency contract exists to prevent. Importing does not: the injected
-# value is never persisted, so it cannot go stale against COMPILER_VERSION the way a compiled
-# artifact row can.
-SLIDE_FRAME_CONSTRAINTS = (
-    ...   # unchanged bytes
-)
-_SLIDE_FRAME_CONSTRAINTS = SLIDE_FRAME_CONSTRAINTS   # keep the private alias; :2535 uses it
-```
+**`design_system_compiler.py` is NOT modified. (Ruled 2026-08-25 — same principle as the prompt
+blocks: the new path takes what it needs without touching existing code.)** An earlier draft
+promoted `_SLIDE_FRAME_CONSTRAINTS` out of `_`-private and left a private alias behind. That edit
+buys nothing: `from … import _SLIDE_FRAME_CONSTRAINTS` works on a module-private name, and §L5's
+actual requirement is only that both sites read **the same bytes at request time** rather than a
+retyped copy. Reaching for the private name satisfies that and changes no existing file.
 
 ```python
 # src/services/agent_resolution.py — inside prompt assembly, next to the branch
-from src.services.design_system_compiler import SLIDE_FRAME_CONSTRAINTS
+#
+# Deliberately importing a _-private name. §L5 requires prompt assembly and the compiler to read
+# ONE set of bytes: restating the numbers here would create exactly the divergence class the
+# COMPILER_VERSION currency contract exists to prevent. Importing does not — the injected value is
+# never persisted, so it cannot go stale against COMPILER_VERSION the way a compiled artifact row
+# can. Promoting the constant would also work but would modify a file this PR otherwise leaves
+# alone, so it is not done.
+from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 
 def _inject_frame_constraints_if_absent(style_content: str) -> str:
     """§L5's third case. "Already carries it" is a property of the RESOLVED TEXT, so the check
@@ -7731,7 +7805,7 @@ def _inject_frame_constraints_if_absent(style_content: str) -> str:
     """
     if "88" in style_content and "clearance" in style_content.lower():
         return style_content
-    return f"{style_content}\n\n{SLIDE_FRAME_CONSTRAINTS}"
+    return f"{style_content}\n\n{_SLIDE_FRAME_CONSTRAINTS}"
 ```
 
 Test it across all three cases:
@@ -7739,12 +7813,12 @@ Test it across all three cases:
 ```python
 def test_frame_rules_reach_the_builder_on_all_three_style_paths():
     from src.services.agent_resolution import _inject_frame_constraints_if_absent
-    from src.services.design_system_compiler import SLIDE_FRAME_CONSTRAINTS
+    from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
     from src.core.defaults import DEFAULT_SLIDE_STYLE
 
     # 1. design system: already present -> injected exactly once
-    assert _inject_frame_constraints_if_absent(SLIDE_FRAME_CONSTRAINTS).count("88") == \
-           SLIDE_FRAME_CONSTRAINTS.count("88")
+    assert _inject_frame_constraints_if_absent(_SLIDE_FRAME_CONSTRAINTS).count("88") == \
+           _SLIDE_FRAME_CONSTRAINTS.count("88")
     # 2. DEFAULT_SLIDE_STYLE: no safe area at all -> injected
     assert "88" in _inject_frame_constraints_if_absent(DEFAULT_SLIDE_STYLE)
     # 3. a library slide style replacing the default wholesale -> injected
