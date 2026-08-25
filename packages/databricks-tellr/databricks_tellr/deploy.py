@@ -569,7 +569,8 @@ def _update_databricks(
 
     ws = _get_workspace_client(client, profile)
 
-    if not encryption_secret_scope and secret_key.app_is_secret_mode(ws, app_name):
+    app_already_secret = secret_key.app_is_secret_mode(ws, app_name)
+    if not encryption_secret_scope and app_already_secret:
         if encryption_key:
             raise DeploymentError(
                 f"App {app_name} uses a secret-backed encryption key, so passing "
@@ -581,7 +582,9 @@ def _update_databricks(
         print("   Secret-backed encryption key retained (app resource unchanged)")
 
     encryption_secret_resource_key = (
-        secret_key.RESOURCE_KEY if encryption_secret_scope else None
+        secret_key.RESOURCE_KEY
+        if (encryption_secret_scope or app_already_secret)
+        else None
     )
 
     mlflow_subs = _mlflow_substitutions_for_app_yaml(

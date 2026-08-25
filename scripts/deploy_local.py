@@ -893,6 +893,10 @@ def update_local(
                 deployment_flat=config,
                 overrides=None,
             )
+            app_already_secret = (
+                not branch_from_env
+                and secret_key.app_is_secret_mode(ws, app_name)
+            )
             _write_app_yaml(
                 staging_dir,
                 lakebase_name,
@@ -902,7 +906,9 @@ def update_local(
                 mlflow_tracing=mlflow_subs,
                 encryption_secret_resource_key=(
                     secret_key.RESOURCE_KEY
-                    if (config.get("_inherited_secret") or (scope and not branch_from_env))
+                    if (config.get("_inherited_secret")
+                        or (scope and not branch_from_env)
+                        or app_already_secret)
                     else None
                 ),
             )
