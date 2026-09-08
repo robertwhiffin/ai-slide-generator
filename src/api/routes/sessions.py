@@ -743,28 +743,11 @@ async def get_session_slides(session_id: str):
         ) from e
 
 
-@router.post("/cleanup")
-async def cleanup_expired_sessions():
-    """Clean up expired sessions.
-
-    Returns:
-        Number of sessions deleted
-    """
-    try:
-        session_manager = get_session_manager()
-        count = await asyncio.to_thread(session_manager.cleanup_expired_sessions)
-
-        logger.info("Session cleanup completed", extra={"deleted_count": count})
-
-        return {"status": "completed", "deleted_count": count}
-
-    except Exception as e:
-        logger.error(f"Failed to cleanup sessions: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Cleanup failed",
-        ) from e
-
+# F-CR-16 (SDR-4437): the POST /cleanup endpoint was removed — it had no
+# authorization check and allowed any authenticated CAN_USE user to delete all
+# sessions older than 24h (cascading to decks, chat history, etc.). The endpoint
+# was unused (no frontend caller, no scheduler, no script), so removal was safer
+# than gating. See SDR-4437 for details.
 
 # F-CR-10 (SDR-4437): the debug-only POST /{session_id}/export endpoint was
 # removed — it was unused by the frontend and dumped full session data (all chat
