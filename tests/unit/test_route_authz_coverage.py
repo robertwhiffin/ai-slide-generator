@@ -114,16 +114,20 @@ DESIGN_SYSTEM_READ_RATIONALE = (
     "handlers and covered by the cross-design-system disclosure tests."
 )
 
-DESIGN_SYSTEM_CONTRIBUTE_RATIONALE = (
-    "Deliberate product decision: ANY user may CONTRIBUTE a design system, so "
-    "create and import stay open — the same shape as the shared image "
-    "library's open upload. Contributing adds a NEW row owned by the caller; "
-    "it does not mutate another principal's design system or change what other "
-    "users get by default. Managing an EXISTING row is gated: rename/delete are "
-    "creator-or-admin (you manage what you uploaded) but become ADMIN-ONLY once "
-    "that row is the org default, and set-default — the one mutation with "
-    "org-wide blast radius — stays admin-only always."
-)
+# DESIGN_SYSTEM_CONTRIBUTE_RATIONALE was removed by SDR-4437 F-CR-17, along with
+# the two ALLOWLIST entries it justified. It read, in part: "Contributing adds a
+# NEW row owned by the caller; it does not mutate another principal's design
+# system or change what other users get by default."
+#
+# That second clause is the part that turned out to be false, and it is why the
+# open-contribution decision looked safe at the time. A design system's
+# ``compiled_style_content`` embeds the bundle's README/SKILL.md VERBATIM
+# (``design_system_compiler._brand_manual_section``) and is injected into the
+# generation system prompt of every user who selects it, under a heading calling
+# it authoritative. Contributing is therefore a write into OTHER users' prompt
+# context — the same privilege class as the deck-prompt and slide-style libraries
+# that HIGH-3 gated. Both routes are now "admin" in
+# DESIGN_SYSTEM_MUTATION_LEVELS below; reads are unchanged and stay open.
 
 # (method, path) -> rationale. Exemptions must be visible in review, not
 # implicit in the heuristic. Entries that do not trip the heuristic are kept
@@ -178,12 +182,13 @@ ALLOWLIST = {
         "Read-only library browse; HIGH-3 admin-gates writes only.",
     ("GET", "/api/settings/slide-styles/{style_id}"):
         "Read-only library browse; HIGH-3 admin-gates writes only.",
-    # Design systems adapt the deck-prompt / slide-style library shape to
-    # user-contributed content: rename/delete are creator-or-admin and
-    # set-default is admin-only (see DESIGN_SYSTEM_MUTATION_LEVELS), so all
-    # three mutations are gated and absent here. Reads stay open — any user
-    # browses the library to pick a system, and the generation path needs its
-    # assets/templates/files.
+    # Design systems adapt the deck-prompt / slide-style library shape:
+    # rename/delete are creator-or-admin (admin-only while the row is the org
+    # default), set-default is admin-only, and — since SDR-4437 F-CR-17 —
+    # create/import are admin-only too (see DESIGN_SYSTEM_MUTATION_LEVELS). All
+    # FIVE mutations are therefore gated and absent from this allowlist. Reads
+    # stay open — any user browses the library to pick a system, and the
+    # generation path needs its assets/templates/files.
     ("GET", "/api/settings/design-systems"): DESIGN_SYSTEM_READ_RATIONALE,
     ("GET", "/api/settings/design-systems/{ds_id}"): DESIGN_SYSTEM_READ_RATIONALE,
     ("GET", "/api/settings/design-systems/{ds_id}/templates"): DESIGN_SYSTEM_READ_RATIONALE,
@@ -199,8 +204,6 @@ ALLOWLIST = {
     # NOTE: APIRoute.path preserves the raw ":path" converter suffix.
     ("GET", "/api/settings/design-systems/{ds_id}/files/{file_path:path}"):
         DESIGN_SYSTEM_READ_RATIONALE,
-    ("POST", "/api/settings/design-systems/import"): DESIGN_SYSTEM_CONTRIBUTE_RATIONALE,
-    ("POST", "/api/settings/design-systems"): DESIGN_SYSTEM_CONTRIBUTE_RATIONALE,
     ("GET", "/api/tools/available"): TOOLS_DISCOVERY_RATIONALE,
     ("GET", "/api/tools/discover/genie"): TOOLS_DISCOVERY_RATIONALE,
     ("GET", "/api/tools/discover/vector"): TOOLS_DISCOVERY_RATIONALE,
@@ -435,8 +438,19 @@ DESIGN_SYSTEM_MUTATION_LEVELS = {
     # Removing the org default is the same ORG-WIDE state change as setting it:
     # it decides what EVERY user gets by default, so authorship must not buy it.
     ("POST", "/api/settings/design-systems/{ds_id}/clear-default"): "admin",
-    ("POST", "/api/settings/design-systems/import"): "open",
-    ("POST", "/api/settings/design-systems"): "open",
+    # SDR-4437 F-CR-17: contribution is ADMIN-ONLY, reversing the earlier "any
+    # user may CONTRIBUTE" decision. Not because creating a row is itself
+    # privileged, but because of where the row's content ends up: the bundle's
+    # README/SKILL.md is embedded VERBATIM in ``compiled_style_content`` and
+    # injected into the generation system prompt of every user who selects the
+    # design system, under a heading calling it authoritative. That makes
+    # contribution a write into other users' prompt context, which is the
+    # privilege class HIGH-3 already gated for the deck-prompt and slide-style
+    # libraries. "open" is intentionally no longer used by any design-system
+    # route; it stays in _KNOWN_MUTATION_LEVELS so the unknown-level branch keeps
+    # rejecting typos rather than treating them as permissive.
+    ("POST", "/api/settings/design-systems/import"): "admin",
+    ("POST", "/api/settings/design-systems"): "admin",
 }
 
 # Levels the assertion below knows how to check. A typo'd or newly-invented
