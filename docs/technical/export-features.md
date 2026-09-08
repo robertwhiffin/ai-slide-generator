@@ -248,7 +248,7 @@ PDF export is client-side and is not a route.
 **Configuration:**
 - Google Cloud project with Slides API + Drive API enabled
 - OAuth 2.0 Desktop Client credentials (`credentials.json`)
-- `GOOGLE_OAUTH_ENCRYPTION_KEY` env var for production encryption key
+- Fernet encryption key for credentials/token storage — lives either in the `encryption_keys` Lakebase table (default) or in a Databricks secret injected as `TELLR_ENCRYPTION_KEY` (secret-backed deployments; see `docs/technical/databricks-app-deployment.md`)
 
 **Limitations:**
 - Requires Google Cloud project setup

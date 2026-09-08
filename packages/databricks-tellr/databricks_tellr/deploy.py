@@ -30,6 +30,7 @@ from databricks.sdk.service.apps import (
 from databricks.sdk.service.database import DatabaseInstance
 from databricks.sdk.service.workspace import ImportFormat
 
+from databricks_tellr import secret_key
 from databricks_tellr.identifiers import validate_client_id, validate_schema_name
 
 # Autoscaling imports (Lakebase next-gen)
@@ -198,6 +199,8 @@ def create(
     profile: str | None = None,
     config_yaml_path: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps.
 
@@ -232,6 +235,11 @@ def create(
             ``config_yaml_path``, YAML ``mlflow_tracing`` applies first; non-empty
             entries here override. Empty slots can be filled from deploy-time env
             vars ``TELLR_DEPLOY_MLFLOW_*``.
+        encryption_secret_scope: Opt in to the secret-backed Fernet key. When set,
+            the key is stored in this Databricks secret scope and attached to the
+            app as a secret resource instead of living in the encryption_keys
+            Lakebase table. When omitted, the Lakebase-backed path is used.
+        encryption_secret_key: Secret key name within that scope.
 
     Returns:
         Dictionary with deployment info:
@@ -259,6 +267,8 @@ def create(
         config_yaml_path=config_yaml_path,
         seed_databricks_defaults=False,
         mlflow_tracing=mlflow_tracing,
+        encryption_secret_scope=encryption_secret_scope,
+        encryption_secret_key=encryption_secret_key,
     )
 
 
@@ -273,6 +283,8 @@ def update(
     profile: str | None = None,
     encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app.
 
@@ -293,6 +305,11 @@ def update(
         mlflow_tracing: Optional overrides for UC tracing env vars (same keys as ``create``).
             Values from deployment YAML are not loaded on update; use this argument or
             ``TELLR_DEPLOY_MLFLOW_*`` environment variables.
+        encryption_secret_scope: Databricks secret scope that holds the Fernet
+            master key (opt-in secret mode). When set, the key is stored in and
+            read from this scope rather than Lakebase.
+        encryption_secret_key: Name of the secret within *encryption_secret_scope*.
+            Defaults to ``DEFAULT_SECRET_KEY`` ("tellr-encryption-key").
 
     Returns:
         Dictionary with deployment info
@@ -312,6 +329,8 @@ def update(
         seed_databricks_defaults=False,
         encryption_key=encryption_key,
         mlflow_tracing=mlflow_tracing,
+        encryption_secret_scope=encryption_secret_scope,
+        encryption_secret_key=encryption_secret_key,
     )
 
 
@@ -334,6 +353,8 @@ def _create_databricks(
     config_yaml_path: str | None = None,
     seed_databricks_defaults: bool = True,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy Tellr to Databricks Apps with configurable seeding.
     
@@ -377,6 +398,25 @@ def _create_databricks(
         app_file_workspace_path = config.get("app_file_workspace_path")
         lakebase_compute = config.get("lakebase_compute", lakebase_compute)
         app_compute = config.get("app_compute", app_compute)
+        encryption_secret_scope = encryption_secret_scope or config.get(
+            "encryption_secret_scope"
+        )
+        encryption_secret_key = (
+            config.get("encryption_secret_key") or encryption_secret_key
+        )
+
+    # Preflight before anything is created, so a failure leaves nothing behind.
+    resolved_key: str | None = None
+    if encryption_secret_scope:
+        print(f"Secret-backed encryption key: {encryption_secret_scope}/{encryption_secret_key}")
+        secret_key.preflight_scope(ws, encryption_secret_scope)
+        resolved_key = secret_key.resolve_key_for_create(
+            ws, encryption_secret_scope, encryption_secret_key
+        )
+
+    encryption_secret_resource_key = (
+        secret_key.RESOURCE_KEY if encryption_secret_scope else None
+    )
 
     mlflow_subs = _mlflow_substitutions_for_app_yaml(
         deployment_flat=deployment_flat_for_mlflow,
@@ -417,6 +457,7 @@ def _create_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=encryption_secret_resource_key,
             )
             print("   Generated app.yaml")
 
@@ -435,6 +476,8 @@ def _create_databricks(
             compute_size=app_compute,
             lakebase_name=lakebase_name,
             lakebase_type=lakebase_type,
+            encryption_secret_scope=encryption_secret_scope,
+            encryption_secret_key=encryption_secret_key,
         )
         print("   App registered")
         print()
@@ -489,9 +532,11 @@ def _update_databricks(
     seed_databricks_defaults: bool = True,
     encryption_key: str | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str = secret_key.DEFAULT_SECRET_KEY,
 ) -> dict[str, Any]:
     """Deploy a new version of an existing Tellr app with configurable seeding.
-    
+
     Internal function with full control over seeding behavior.
 
     Args:
@@ -508,6 +553,11 @@ def _update_databricks(
             the encryption_keys table. Default: read from the deployed
             app.yaml. The key is no longer written to app.yaml.
         mlflow_tracing: Optional overrides for UC tracing placeholders in ``app.yaml``.
+        encryption_secret_scope: Databricks secret scope that holds the Fernet
+            master key (opt-in secret mode). When set, the key is stored in and
+            read from this scope rather than Lakebase.
+        encryption_secret_key: Name of the secret within *encryption_secret_scope*.
+            Defaults to ``DEFAULT_SECRET_KEY`` ("tellr-encryption-key").
 
     Returns:
         Dictionary with deployment info
@@ -518,6 +568,24 @@ def _update_databricks(
     print(f"Updating Tellr app: {app_name}")
 
     ws = _get_workspace_client(client, profile)
+
+    app_already_secret = secret_key.app_is_secret_mode(ws, app_name)
+    if not encryption_secret_scope and app_already_secret:
+        if encryption_key:
+            raise DeploymentError(
+                f"App {app_name} uses a secret-backed encryption key, so passing "
+                f"encryption_key would recreate the Lakebase key row this app was "
+                f"migrated off — and a mismatched value would silently orphan "
+                f"stored credentials. Re-run with "
+                f"encryption_secret_scope=... instead."
+            )
+        print("   Secret-backed encryption key retained (app resource unchanged)")
+
+    encryption_secret_resource_key = (
+        secret_key.RESOURCE_KEY
+        if (encryption_secret_scope or app_already_secret)
+        else None
+    )
 
     mlflow_subs = _mlflow_substitutions_for_app_yaml(
         deployment_flat={},
@@ -545,11 +613,32 @@ def _update_databricks(
             print(f"   Schema '{schema_name}' reset (tables will be recreated on app startup)")
             print()
 
-        # CRITICAL-3 migration: relocate the legacy app.yaml key into the
-        # encryption_keys table BEFORE the new (keyless) app.yaml overwrites
-        # it. Runs at most once per install: after it succeeds, the deployed
-        # app.yaml has no key entry and encryption_key is None on re-runs.
-        if encryption_key:
+        if encryption_secret_scope:
+            # Secret mode: relocate into the secret; never seed Lakebase.
+            validate_schema_name(schema_name)  # defense-in-depth: interpolated into SQL below
+            secret_key.preflight_scope(ws, encryption_secret_scope)
+            mig_conn, _ = _get_lakebase_connection(
+                ws, lakebase_name, lakebase_result=lakebase_result
+            )
+            try:
+                with mig_conn.cursor() as cur:
+                    secret_key.preflight_lakebase_privileges(cur, schema_name)
+                    lakebase_key = secret_key.read_lakebase_key(cur, schema_name)
+            finally:
+                mig_conn.close()
+
+            _, wrote = secret_key.resolve_key_for_update(
+                ws, encryption_secret_scope, encryption_secret_key,
+                lakebase_key, encryption_key,
+            )
+            if wrote:
+                print("   Key written to the secret and verified")
+            secret_key.attach_secret_resource(
+                ws, app_name, encryption_secret_scope, encryption_secret_key
+            )
+            print("   Secret resource attached")
+        elif encryption_key:
+            # Legacy CRITICAL-3 relocation into Lakebase — unchanged.
             print("Relocating encryption key into Lakebase (encryption_keys)...")
             app_for_grant = ws.apps.get(name=app_name)
             grant_client_id = _get_app_client_id(app_for_grant)
@@ -577,6 +666,7 @@ def _update_databricks(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=encryption_secret_resource_key,
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
@@ -590,6 +680,35 @@ def _update_databricks(
         app = ws.apps.get(name=app_name)
         if app.url:
             print(f"   URL: {app.url}")
+
+        if encryption_secret_scope:
+            if not app.url:
+                print("   WARNING: no app URL — cannot confirm the key source; "
+                      "leaving the Lakebase key row in place")
+            elif secret_key.app_reports_secret_source(ws, app.url):
+                del_conn = None
+                try:
+                    del_conn, _ = _get_lakebase_connection(
+                        ws, lakebase_name, lakebase_result=lakebase_result
+                    )
+                    with del_conn.cursor() as cur:
+                        if secret_key.read_lakebase_key(cur, schema_name):
+                            secret_key.delete_lakebase_key_row(cur, schema_name)
+                            print("   Lakebase key row deleted — the secret is now "
+                                  "the only copy")
+                        else:
+                            print("   No Lakebase key row to remove")
+                except Exception as exc:  # noqa: BLE001 — deploy already succeeded
+                    print(f"   WARNING: could not delete the Lakebase key row: {exc}")
+                    print(f'   Run manually: DELETE FROM "{schema_name}".'
+                          f"encryption_keys WHERE id = 1;")
+                finally:
+                    if del_conn is not None:
+                        del_conn.close()
+            else:
+                print("   WARNING: the deployed app does not report the secret as "
+                      "its key source. Leaving the Lakebase key row in place. This "
+                      "is expected if the app version predates secret-mode support.")
 
         return {
             "url": app.url,
@@ -615,6 +734,12 @@ def delete(
     """Delete a Tellr app.
 
     Note: This does not delete the Lakebase instance by default.
+
+    Deliberately does NOT touch secrets or secret scopes. A devloop fork shares
+    the production app's secret scope and key by design (so it can decrypt
+    inherited ciphertext), which means deleting the secret here would destroy
+    production's Fernet master key during a fork teardown. Only the app and its
+    Lakebase branch are removed. Do not "clean up" the secret here.
 
     Args:
         app_name: Name of the app to delete
@@ -888,6 +1013,8 @@ def _load_deployment_config(config_yaml_path: str) -> dict[str, str]:
         "lakebase_name": lakebase_config.get("database_name"),
         "schema_name": lakebase_config.get("schema"),
         "lakebase_compute": lakebase_config.get("capacity"),
+        "encryption_secret_scope": env_config.get("encryption_secret_scope"),
+        "encryption_secret_key": env_config.get("encryption_secret_key"),
         **ml_flat,
     }
 
@@ -1367,6 +1494,7 @@ def _write_app_yaml(
     seed_databricks_defaults: bool = False,
     lakebase_result: dict[str, Any] | None = None,
     mlflow_tracing: dict[str, str] | None = None,
+    encryption_secret_resource_key: str | None = None,
 ) -> None:
     """Generate app.yaml with environment variables.
 
@@ -1381,6 +1509,11 @@ def _write_app_yaml(
         lakebase_result: Result dict from _get_or_create_lakebase() with type info.
         mlflow_tracing: Resolved template keys for UC tracing (four entries). If
             omitted, values are taken only from ``TELLR_DEPLOY_MLFLOW_*`` env vars.
+        encryption_secret_resource_key: When set, add an ``env:`` entry mapping
+            this Apps secret resource key into the environment. The resource
+            declaration alone does not inject anything — the ``valueFrom`` entry
+            is required (verified live). No key material is written; this is a
+            resource reference only. Leave None for the Lakebase-backed path.
     """
     # Build init_database call - only show seed_databricks_defaults when True
     if seed_databricks_defaults:
@@ -1396,6 +1529,15 @@ def _write_app_yaml(
 
     if mlflow_tracing is None:
         mlflow_tracing = _mlflow_substitutions_for_app_yaml()
+
+    if encryption_secret_resource_key:
+        # The Apps secret resource supplies the value; this only names it.
+        secret_env_block = (
+            f"  - name: {encryption_secret_resource_key}\n"
+            f'    valueFrom: "{encryption_secret_resource_key}"\n'
+        )
+    else:
+        secret_env_block = ""
 
     template_content = _load_template("app.yaml.template")
     content = Template(template_content).substitute(
@@ -1414,6 +1556,7 @@ def _write_app_yaml(
         TELLR_MLFLOW_UC_TABLE_PREFIX=mlflow_tracing.get(
             "TELLR_MLFLOW_UC_TABLE_PREFIX", ""
         ),
+        ENCRYPTION_SECRET_ENV_BLOCK=secret_env_block,
     )
     (staging_dir / "app.yaml").write_text(content)
 
@@ -1485,6 +1628,8 @@ def _create_app(
     compute_size: str,
     lakebase_name: str,
     lakebase_type: str = "provisioned",
+    encryption_secret_scope: str | None = None,
+    encryption_secret_key: str | None = None,
 ) -> App:
     """Create Databricks App with database resource (without deploying).
 
@@ -1513,6 +1658,15 @@ def _create_app(
         # Autoscaling: no AppResourceDatabase, connection via env vars
         app_resources = []
         logger.info("Autoscaling mode: skipping AppResourceDatabase (using env vars)")
+
+    # Both branches: autoscaling builds an empty resource list, so appending
+    # after the branch covers provisioned and autoscaling alike.
+    if encryption_secret_scope:
+        app_resources.append(
+            secret_key.build_secret_resource(
+                encryption_secret_scope, encryption_secret_key
+            )
+        )
 
     app = App(
         name=app_name,

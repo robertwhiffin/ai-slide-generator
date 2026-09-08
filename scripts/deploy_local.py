@@ -30,6 +30,11 @@ from databricks.sdk.service.workspace import ImportFormat
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "packages" / "databricks-tellr"))
 
+# Module-level config path — monkeypatched by tests that need a custom config.
+CONFIG_PATH = PROJECT_ROOT / "config" / "deployment.yaml"
+
+from databricks_tellr import secret_key
+from databricks_tellr.identifiers import validate_schema_name
 from databricks_tellr.deploy import (
     DeploymentError,
     _branch_exists,
@@ -57,24 +62,33 @@ from databricks_tellr.deploy import (
 )
 
 
-def _load_branch_source_config(
-    environments: dict, source_env_name: str
-) -> dict:
-    """Return {workspace_path, schema, database_name} from the source env.
+def _load_branch_source_config(source_env_name: str) -> dict:
+    """Return {workspace_path, schema, database_name, app_name} from the source env.
+
+    Reads CONFIG_PATH directly so callers only need the env name.
 
     Raises:
-        DeploymentError: if source env is missing.
+        DeploymentError: if the config file is missing or the env is absent.
     """
+    if not CONFIG_PATH.exists():
+        raise DeploymentError(f"Deployment config not found: {CONFIG_PATH}")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    environments = config.get("environments", {})
     if source_env_name not in environments:
         raise DeploymentError(
             f'branch_from "{source_env_name}" not found in deployment config'
         )
-    src = environments[source_env_name]
-    src_lb = src.get("lakebase", {})
+    env_config = environments[source_env_name]
+    lb = env_config.get("lakebase", {})
     return {
-        "workspace_path": src.get("workspace_path"),
-        "schema": src_lb.get("schema"),
-        "database_name": src_lb.get("database_name"),
+        "workspace_path": env_config.get("workspace_path"),
+        "schema": lb.get("schema"),
+        "database_name": lb.get("database_name"),
+        # Needed so the fork can read the source app's resources and inherit its
+        # secret scope/key. Not derivable from workspace_path — the app name is
+        # arbitrary config.
+        "app_name": env_config.get("app_name"),
     }
 
 
@@ -86,11 +100,10 @@ def load_deployment_config(env: str) -> dict[str, Any]:
     `branch_from_env` + `branch_from_workspace_path` so callers can run the
     branching flow.
     """
-    config_path = PROJECT_ROOT / "config" / "deployment.yaml"
-    if not config_path.exists():
-        raise DeploymentError(f"Deployment config not found: {config_path}")
+    if not CONFIG_PATH.exists():
+        raise DeploymentError(f"Deployment config not found: {CONFIG_PATH}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
     environments = config.get("environments", {})
@@ -108,9 +121,10 @@ def load_deployment_config(env: str) -> dict[str, Any]:
     branch_from = lakebase_config.get("branch_from")
     schema_name = lakebase_config.get("schema")
     branch_from_workspace_path = None
+    branch_from_app_name = None
 
     if branch_from:
-        src = _load_branch_source_config(environments, branch_from)
+        src = _load_branch_source_config(branch_from)
         if src["database_name"] != lakebase_config.get("database_name"):
             raise DeploymentError(
                 f"branching requires same database_name; "
@@ -128,6 +142,7 @@ def load_deployment_config(env: str) -> dict[str, Any]:
             )
         schema_name = src["schema"]
         branch_from_workspace_path = src["workspace_path"]
+        branch_from_app_name = src.get("app_name")
 
     return {
         "app_name": env_config.get("app_name"),
@@ -139,7 +154,10 @@ def load_deployment_config(env: str) -> dict[str, Any]:
         "schema_name": schema_name,
         "branch_from_env": branch_from,
         "branch_from_workspace_path": branch_from_workspace_path,
+        "branch_from_app_name": branch_from_app_name,
         "owner_grant_job_id": lakebase_config.get("owner_grant_job_id"),
+        "encryption_secret_scope": env_config.get("encryption_secret_scope"),
+        "encryption_secret_key": env_config.get("encryption_secret_key"),
         **ml_flat,
     }
 
@@ -257,6 +275,33 @@ def upload_wheel(
     return f"./wheels/{wheel_path.name}"
 
 
+def _source_secret_config(ws, source_app_name: str) -> tuple[str, str] | None:
+    """Return the (scope, key) the source app uses, or None if it is legacy.
+
+    The fork inherits the source's ciphertext through the copy-on-write branch but
+    gets no encryption_keys row, because secret mode never writes one. So a fork of
+    a secret-mode app MUST point at the same secret, or it boots, finds nothing,
+    mints a fresh key, and silently destroys its own inherited test data.
+
+    Fetching the source app is the only source of truth here; the
+    --encryption-secret-scope flag applies to non-branching deploys only.
+    """
+    try:
+        app = ws.apps.get(name=source_app_name)
+    except Exception as exc:
+        print(
+            f"ERROR: cannot read the source app '{source_app_name}' to determine "
+            f"whether it uses a secret-backed encryption key: {exc}\n"
+            f"Refusing to fork: if the source is in secret mode, the fork would "
+            f"mint a fresh key over inherited ciphertext."
+        )
+        raise SystemExit(1) from exc
+    for r in (app.resources or []):
+        if r.name == secret_key.RESOURCE_KEY and getattr(r, "secret", None):
+            return r.secret.scope, r.secret.key
+    return None
+
+
 def _check_branching_preconditions(
     ws: WorkspaceClient, config: dict[str, Any]
 ) -> None:
@@ -315,6 +360,14 @@ def _check_branching_preconditions(
         raise DeploymentError(
             f'source branch "{branch_from_env}" not found in project {project_name}'
         )
+
+    # 7: Secret-mode inheritance: if the source uses a secret-backed key, the
+    # fork must point at the same secret. _source_secret_config refuses
+    # (SystemExit) when the source app cannot be read — safe-fail over
+    # proceeding blindly and minting a fresh key over inherited ciphertext.
+    source_app = config.get("branch_from_app_name")
+    if source_app:
+        config["_inherited_secret"] = _source_secret_config(ws, source_app)
 
 
 def _trigger_owner_grant_job(ws, job_id, new_sp_id, host, endpoint_name) -> None:
@@ -380,6 +433,8 @@ def create_local(
     seed_databricks_defaults: bool = True,
     from_pypi: Optional[str] = None,
     instance: Optional[str] = None,
+    encryption_secret_scope: Optional[str] = None,
+    encryption_secret_key: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create a new Databricks App using locally-built wheels.
 
@@ -390,6 +445,10 @@ def create_local(
         from_pypi: If set (a version string), skip building/uploading a
             local wheel and instead pin ``databricks-tellr-app==<version>``
             from PyPI.
+        encryption_secret_scope: Opt into secret-backed Fernet key. CLI arg
+            takes precedence over the config value.
+        encryption_secret_key: Secret key name (defaults to
+            secret_key.DEFAULT_SECRET_KEY when scope is set).
 
     Returns:
         Dictionary with deployment info
@@ -402,6 +461,14 @@ def create_local(
     schema_name = config["schema_name"]
     branch_from_env = config.get("branch_from_env")
 
+    # Secret-mode resolution: CLI arg takes precedence over config.
+    scope = encryption_secret_scope or config.get("encryption_secret_scope")
+    skey = (
+        encryption_secret_key
+        or config.get("encryption_secret_key")
+        or secret_key.DEFAULT_SECRET_KEY
+    )
+
     print("Deploying AI Slide Generator (local wheels)...")
     print(f"   App name: {app_name}")
     print(f"   Workspace path: {workspace_path}")
@@ -412,6 +479,12 @@ def create_local(
     print()
 
     try:
+        # Secret mode preflight (non-branching only; branching path is handled
+        # by Task 13's fork secret-inheritance).
+        if scope and not branch_from_env:
+            secret_key.preflight_scope(ws, scope)
+            secret_key.resolve_key_for_create(ws, scope, skey)
+
         # Resolve the app package source: local wheel (default) or PyPI.
         wheel_path = None
         local_wheel_ref = None
@@ -456,6 +529,11 @@ def create_local(
         print(f"   Type: {lakebase_type}")
         print()
 
+        # Read any inherited secret that _check_branching_preconditions detected.
+        # Set by _source_secret_config when the source app carries RESOURCE_KEY;
+        # None for legacy sources and for non-branching deploys.
+        _inherited_secret = config.get("_inherited_secret")
+
         # Generate and upload deployment files
         print("Preparing deployment files...")
         staging_dir = Path(tempfile.mkdtemp(prefix="tellr_local_staging_"))
@@ -480,6 +558,11 @@ def create_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=(
+                    secret_key.RESOURCE_KEY
+                    if (_inherited_secret or (scope and not branch_from_env))
+                    else None
+                ),
             )
             print("   Generated app.yaml")
 
@@ -500,6 +583,14 @@ def create_local(
             compute_size=config["compute_size"],
             lakebase_name=lakebase_name,
             lakebase_type=lakebase_type,
+            encryption_secret_scope=(
+                _inherited_secret[0] if _inherited_secret
+                else (scope if not branch_from_env else None)
+            ),
+            encryption_secret_key=(
+                _inherited_secret[1] if _inherited_secret
+                else (skey if not branch_from_env else None)
+            ),
         )
         print("   App registered")
         print()
@@ -600,6 +691,8 @@ def update_local(
     seed_databricks_defaults: bool = True,
     from_pypi: Optional[str] = None,
     instance: Optional[str] = None,
+    encryption_secret_scope: Optional[str] = None,
+    encryption_secret_key: Optional[str] = None,
 ) -> dict[str, Any]:
     """Update an existing Databricks App using locally-built wheels.
 
@@ -613,6 +706,10 @@ def update_local(
     lakebase_name = config["lakebase_name"]
     schema_name = config["schema_name"]
     branch_from_env = config.get("branch_from_env")
+
+    # Pre-define scope so the post-deploy health gate can reference it
+    # regardless of which path was taken below.
+    scope: Optional[str] = None
 
     if branch_from_env and reset_database:
         print(
@@ -697,23 +794,54 @@ def update_local(
             lakebase_result = _get_or_create_lakebase(
                 ws, lakebase_name, config["lakebase_capacity"]
             )
-            legacy_key = _read_existing_encryption_key(ws, workspace_path)
-            if legacy_key:
-                # CRITICAL-3: relocate before the keyless app.yaml overwrites it
-                print("Relocating encryption key into Lakebase (encryption_keys)...")
-                app_for_grant = ws.apps.get(name=app_name)
-                grant_client_id = _get_app_client_id(app_for_grant)
-                mig_conn, _ = _get_lakebase_connection(
-                    ws, lakebase_name, lakebase_result=lakebase_result
-                )
+
+            # Resolve effective scope (CLI arg beats config).
+            scope = encryption_secret_scope or config.get("encryption_secret_scope")
+            skey = (
+                encryption_secret_key
+                or config.get("encryption_secret_key")
+                or secret_key.DEFAULT_SECRET_KEY
+            )
+            if scope:
+                validate_schema_name(schema_name)  # defense-in-depth: interpolated into SQL below
+                secret_key.preflight_scope(ws, scope)
+                mig_conn = None
                 try:
+                    mig_conn, _ = _get_lakebase_connection(
+                        ws, lakebase_name, lakebase_result=lakebase_result
+                    )
                     with mig_conn.cursor() as cur:
-                        _migrate_encryption_key_to_lakebase(
-                            cur, schema_name, grant_client_id, legacy_key
-                        )
+                        secret_key.preflight_lakebase_privileges(cur, schema_name)
+                        lakebase_key = secret_key.read_lakebase_key(cur, schema_name)
                 finally:
-                    mig_conn.close()
-                print("   Key relocated")
+                    if mig_conn is not None:
+                        mig_conn.close()
+                legacy_key = _read_existing_encryption_key(ws, workspace_path)
+                _, wrote = secret_key.resolve_key_for_update(
+                    ws, scope, skey, lakebase_key, legacy_key
+                )
+                if wrote:
+                    print("   Key written to the secret and verified")
+                secret_key.attach_secret_resource(ws, app_name, scope, skey)
+                print("   Secret resource attached")
+            else:
+                legacy_key = _read_existing_encryption_key(ws, workspace_path)
+                if legacy_key:
+                    # CRITICAL-3: relocate before the keyless app.yaml overwrites it
+                    print("Relocating encryption key into Lakebase (encryption_keys)...")
+                    app_for_grant = ws.apps.get(name=app_name)
+                    grant_client_id = _get_app_client_id(app_for_grant)
+                    mig_conn, _ = _get_lakebase_connection(
+                        ws, lakebase_name, lakebase_result=lakebase_result
+                    )
+                    try:
+                        with mig_conn.cursor() as cur:
+                            _migrate_encryption_key_to_lakebase(
+                                cur, schema_name, grant_client_id, legacy_key
+                            )
+                    finally:
+                        mig_conn.close()
+                    print("   Key relocated")
 
         lakebase_type = lakebase_result.get("type", "provisioned")
         print(f"   Lakebase: {lakebase_result['name']} (type={lakebase_type})")
@@ -765,6 +893,10 @@ def update_local(
                 deployment_flat=config,
                 overrides=None,
             )
+            app_already_secret = (
+                not branch_from_env
+                and secret_key.app_is_secret_mode(ws, app_name)
+            )
             _write_app_yaml(
                 staging_dir,
                 lakebase_name,
@@ -772,6 +904,13 @@ def update_local(
                 seed_databricks_defaults=seed_databricks_defaults,
                 lakebase_result=lakebase_result,
                 mlflow_tracing=mlflow_subs,
+                encryption_secret_resource_key=(
+                    secret_key.RESOURCE_KEY
+                    if (config.get("_inherited_secret")
+                        or (scope and not branch_from_env)
+                        or app_already_secret)
+                    else None
+                ),
             )
             print("   Generated app.yaml")
 
@@ -789,6 +928,38 @@ def update_local(
         app = ws.apps.get(name=app_name)
         if app.url:
             print(f"   URL: {app.url}")
+
+        # Health gate + DELETE: only on the non-branching secret path.
+        # A fork has no pre-existing row, and _get_lakebase_connection connects
+        # as the deploying human, which breaks SP-only dev-loop deploys.
+        if scope and not branch_from_env:
+            app = ws.apps.get(name=app_name)
+            if not app.url:
+                print("   WARNING: no app URL — cannot confirm the key source; "
+                      "leaving the Lakebase key row in place")
+            elif secret_key.app_reports_secret_source(ws, app.url):
+                del_conn = None
+                try:
+                    del_conn, _ = _get_lakebase_connection(
+                        ws, lakebase_name, lakebase_result=lakebase_result
+                    )
+                    with del_conn.cursor() as cur:
+                        if secret_key.read_lakebase_key(cur, schema_name):
+                            secret_key.delete_lakebase_key_row(cur, schema_name)
+                            print("   Lakebase key row deleted")
+                        else:
+                            print("   No Lakebase key row to remove")
+                except Exception as exc:  # noqa: BLE001 — deploy already succeeded
+                    print(f"   WARNING: could not delete the key row: {exc}")
+                    print(f'   Run manually: DELETE FROM "{schema_name}".'
+                          f"encryption_keys WHERE id = 1;")
+                finally:
+                    if del_conn is not None:
+                        del_conn.close()
+            else:
+                print("   WARNING: the deployed app does not report the secret "
+                      "as its key source. Leaving the Lakebase key row in "
+                      "place. Expected if the app version predates secret mode.")
 
         return {
             "url": app.url,
@@ -839,8 +1010,12 @@ def delete_local(
     return result
 
 
-def main() -> None:
-    """CLI entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the deploy_local CLI argument parser.
+
+    Extracted from main() with no behaviour change so tests (and secret-mode
+    plumbing) can construct the parser directly.
+    """
     parser = argparse.ArgumentParser(
         description="Deploy AI Slide Generator to Databricks Apps using local wheels"
     )
@@ -927,6 +1102,25 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--encryption-secret-scope",
+        default=None,
+        help="Databricks secret scope for the Fernet encryption key. Opts into "
+             "the secret-backed key path; omit for the Lakebase-backed default.",
+    )
+    parser.add_argument(
+        "--encryption-secret-key",
+        default=None,
+        help="Secret key name within the scope (default: tellr-encryption-key).",
+    )
+
+    return parser
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = build_parser()
+
     args = parser.parse_args()
 
     if args.from_pypi and not _is_valid_version(args.from_pypi):
@@ -955,6 +1149,8 @@ def main() -> None:
                 seed_databricks_defaults=args.include_databricks_prompts,
                 from_pypi=args.from_pypi,
                 instance=args.instance,
+                encryption_secret_scope=args.encryption_secret_scope,
+                encryption_secret_key=args.encryption_secret_key,
             )
         elif args.action == "update":
             result = update_local(
@@ -964,6 +1160,8 @@ def main() -> None:
                 seed_databricks_defaults=args.include_databricks_prompts,
                 from_pypi=args.from_pypi,
                 instance=args.instance,
+                encryption_secret_scope=args.encryption_secret_scope,
+                encryption_secret_key=args.encryption_secret_key,
             )
         elif args.action == "delete":
             result = delete_local(
