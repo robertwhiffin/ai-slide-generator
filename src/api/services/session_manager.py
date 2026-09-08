@@ -2073,41 +2073,6 @@ class SessionManager:
 
             return count
 
-    # Cleanup operations
-    def cleanup_expired_sessions(self) -> int:
-        """Delete sessions that have exceeded TTL.
-
-        WARNING: user_sessions is the app's durable usage history. This
-        method is intentionally NOT scheduled anywhere — it is only
-        reachable via the manual POST /api/sessions/cleanup endpoint.
-        Do not wire it to a scheduler; doing so would destroy the
-        history that the /admin usage dashboard's pre-event-log
-        aggregations rely on.
-
-        Returns:
-            Number of sessions deleted
-        """
-        cutoff = datetime.utcnow() - timedelta(hours=self.session_ttl_hours)
-
-        with get_db_session() as db:
-            expired = (
-                db.query(UserSession)
-                .filter(UserSession.last_activity < cutoff)
-                .all()
-            )
-
-            count = len(expired)
-            for session in expired:
-                db.delete(session)
-
-            if count > 0:
-                logger.info(
-                    "Cleaned up expired sessions",
-                    extra={"count": count, "cutoff": cutoff.isoformat()},
-                )
-
-            return count
-
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.
 
