@@ -191,6 +191,36 @@ def _refresh_oauth_env_token() -> None:
         pass  # non-critical; existing token may still be valid
 
 
+def sp_auth_diagnostics(client: WorkspaceClient) -> dict:
+    """Report which SP credential material the platform supplied, and what the SDK chose.
+
+    SDR-4437 F-CR-18: the SDK credential chain is ordered pat -> basic ->
+    metadata-service -> oauth-m2m, so a ``DATABRICKS_TOKEN`` in the environment
+    silently wins over the platform-injected client id/secret. ``app.yaml``
+    currently supplies that token via ``valueFrom: system.databricks_token``.
+
+    Whether the token can simply be dropped from ``app.yaml`` turns on whether
+    the platform also supplies a usable ``DATABRICKS_CLIENT_SECRET``: the SDK's
+    oauth-m2m provider requires host + client_id + client_secret together, and
+    MLflow delegates to this same chain (it needs no token of its own when
+    ``MLFLOW_ENABLE_DB_SDK`` is on, which is its default). This records the
+    answer from a running deployment instead of inferring it.
+
+    Presence booleans only — never any part of a credential value.
+    """
+    try:
+        resolved_auth_type = client.config.auth_type
+    except Exception as e:  # pragma: no cover - defensive; config access is local
+        resolved_auth_type = f"unavailable: {type(e).__name__}"
+
+    return {
+        "has_client_id": bool(os.getenv("DATABRICKS_CLIENT_ID")),
+        "has_client_secret": bool(os.getenv("DATABRICKS_CLIENT_SECRET")),
+        "has_token": bool(os.getenv("DATABRICKS_TOKEN")),
+        "resolved_auth_type": resolved_auth_type,
+    }
+
+
 def get_system_client(force_new: bool = False) -> WorkspaceClient:
     """
     Get the system-level WorkspaceClient (service principal).
@@ -270,6 +300,22 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
                     product=PRODUCT_NAME_SYSTEM,
                     product_version=version,
                 )
+
+            # SDR-4437 F-CR-18: record which credential material the platform
+            # supplied and which auth the SDK actually selected. Logged before
+            # the dev/test early return so it is available in every environment.
+            # Values go in the message, not ``extra``: the app boots on
+            # ``logging.basicConfig`` with a "%(message)s" format, so extra
+            # fields never reach the log.
+            diag = sp_auth_diagnostics(_system_client)
+            logger.info(
+                "System SP auth resolution: "
+                "resolved_auth_type=%s has_client_id=%s has_client_secret=%s has_token=%s",
+                diag["resolved_auth_type"],
+                diag["has_client_id"],
+                diag["has_client_secret"],
+                diag["has_token"],
+            )
 
             # Skip verification in dev/test mode
             # Allows local dev and tests without valid token
