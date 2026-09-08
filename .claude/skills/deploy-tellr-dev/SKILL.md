@@ -45,10 +45,23 @@ Prod is unaffected: `pip` ignores pre-releases by default, so a bare
 
 ## Upgrade path & the encryption key (SDR-4437) — use the tool, not the UI button
 
-The Google-OAuth Fernet master key lives in the `encryption_keys` Lakebase
-table, not in `app.yaml`. `tellr.update` / `deploy_local` (run as the human)
-migrate a pre-key-table app: read the legacy `GOOGLE_OAUTH_ENCRYPTION_KEY` from
-the old `app.yaml`, seed the table, and write a **keyless** `app.yaml`.
+The Google-OAuth Fernet master key lives either in the `encryption_keys` Lakebase
+table (default) or in a Databricks secret (opt-in). `tellr.update` / `deploy_local`
+(run as the human) migrate a pre-key-table app: read the legacy `GOOGLE_OAUTH_ENCRYPTION_KEY`
+from the old `app.yaml`, seed the table, and write a **keyless** `app.yaml`.
+
+**Secret-backed deployments:** pass `--encryption-secret-scope <scope>` to store
+the key in a Databricks secret instead of Lakebase. The deploy tool writes the key
+to the secret and injects it as `TELLR_ENCRYPTION_KEY` via a `valueFrom` entry in
+`app.yaml`; the `encryption_keys` table stays empty. You can also pass
+`--encryption-secret-key` to override the default key name (`tellr-encryption-key`).
+
+```bash
+./scripts/deploy_local.sh update --env devtest --profile tellr-dev \
+    --from-pypi <version> --encryption-secret-scope tellr
+```
+
+A devloop fork inherits secret mode automatically from the source app — no flag needed.
 
 **Always upgrade via `deploy_local` / `tellr.update`, never the Databricks Apps
 UI "Deploy" button.** The UI button bypasses the tool and reuses the old

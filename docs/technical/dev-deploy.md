@@ -42,13 +42,33 @@ builds (e.g. `0.4.0.dev1`).
 
 ## Encryption key & the supported upgrade path (SDR-4437)
 
-The Google-OAuth Fernet master key lives in the **`encryption_keys` table** of
-the app's Lakebase database (schema-qualified), NOT in `app.yaml`. On a fresh
+The Google-OAuth Fernet master key lives in one of two places:
+
+**Lakebase-backed (default):** The key lives in the **`encryption_keys` table**
+of the app's Lakebase database (schema-qualified), NOT in `app.yaml`. On a fresh
 install the app self-seeds it; on an upgrade of a pre-key-table app the
 **deploy tool migrates it**: `tellr.update` / `deploy_local` — run as the
 deploying human, who has the privilege — read the legacy
 `GOOGLE_OAUTH_ENCRYPTION_KEY` from the existing `app.yaml`, seed it into the
 table, and write a **keyless** `app.yaml`.
+
+**Secret-backed (opt-in):** Pass `--encryption-secret-scope <scope>` to
+`deploy_local`. The deploy tool writes the key into a Databricks secret and
+injects it as `TELLR_ENCRYPTION_KEY` via a `valueFrom` entry in `app.yaml`.
+The `encryption_keys` table stays empty. Example:
+
+```bash
+./scripts/deploy_local.sh update --env devtest --profile tellr-dev \
+    --from-pypi <version> --encryption-secret-scope tellr
+# --encryption-secret-key can also be specified; default is "tellr-encryption-key"
+```
+
+A devloop fork (`--env devloop --instance <id>`) detects secret mode on the
+source app automatically and inherits the same scope and key — no flag needed
+on the fork. This applies on **both `create` and `update`**: every iteration
+of the devloop restores the `valueFrom` entry in the fork's `app.yaml` so the
+fork continues to read the inherited secret rather than minting a fresh key
+over its inherited ciphertext.
 
 **The supported upgrade path is `tellr.update` / `deploy_local`, NOT the
 Databricks Apps UI "Deploy" button.** The UI button bypasses the deploy tool
@@ -117,3 +137,17 @@ and run `ALTER`-bearing migrations against inherited prod tables. Ownership of
 deploy triggers a serverless job (running as a dedicated granter SP) that grants
 the instance's service principal into that role, so its migrations can alter the
 inherited tables. See `docs/technical/lakebase-table-ownership.md`.
+
+### Live verification checklist — secret-mode devloop fork
+
+When the source app (`devloop`) uses a secret-backed encryption key, verify
+the fork is working correctly on **both** the first deploy and subsequent
+iterations:
+
+- [ ] `create`: fork's `app.yaml` contains the `valueFrom` entry for
+  `TELLR_ENCRYPTION_KEY`; app boots without errors; `/api/health` returns
+  `"key_source": "secret"`.
+- [ ] `update` (at least one iteration after `create`): fork's `app.yaml`
+  still contains the `valueFrom` entry; existing Google OAuth credentials
+  encrypted under the inherited key are still decryptable (no
+  "InvalidToken" errors in app logs after update).

@@ -489,11 +489,19 @@ logger.info("MCP server mounted at /mcp")
 
 @app.get("/api/health")
 async def health():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    ``encryption_key_source`` is load-bearing for deployment: ``tellr.update``
+    polls it to confirm a relocated app is reading the secret before it deletes
+    the Lakebase key row. Reports the source only — never the key.
+    """
+    from src.core.encryption import key_source
+
     return {
         "status": "healthy",
         "environment": ENVIRONMENT,
         "version": "0.3.0",
+        "encryption_key_source": key_source(),
     }
 
 

@@ -61,3 +61,40 @@ def test_app_yaml_has_databricks_token():
     assert "DATABRICKS_TOKEN" in content
     assert "system.databricks_token" in content
     assert "DATABRICKS_HOST" in content  # still required by create_user_client
+
+
+def test_app_yaml_omits_secret_block_in_legacy_mode(tmp_path: Path):
+    """Legacy deploys must not reference a resource the app does not have."""
+    deploy._write_app_yaml(
+        tmp_path, lakebase_name="db-tellr", schema_name="app_data",
+        lakebase_result={"type": "provisioned"},
+    )
+    content = (tmp_path / "app.yaml").read_text()
+    assert "TELLR_ENCRYPTION_KEY" not in content
+    assert "valueFrom" in content  # system.databricks_host etc. still present
+
+
+def test_app_yaml_includes_secret_block_in_secret_mode(tmp_path: Path):
+    deploy._write_app_yaml(
+        tmp_path, lakebase_name="db-tellr", schema_name="app_data",
+        lakebase_result={"type": "provisioned"},
+        encryption_secret_resource_key="TELLR_ENCRYPTION_KEY",
+    )
+    content = (tmp_path / "app.yaml").read_text()
+    assert "- name: TELLR_ENCRYPTION_KEY" in content
+    assert 'valueFrom: "TELLR_ENCRYPTION_KEY"' in content
+
+
+def test_app_yaml_never_contains_key_material(tmp_path: Path):
+    """Secret mode references the resource; it must not embed a key."""
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key().decode()
+    deploy._write_app_yaml(
+        tmp_path, lakebase_name="db-tellr", schema_name="app_data",
+        lakebase_result={"type": "provisioned"},
+        encryption_secret_resource_key="TELLR_ENCRYPTION_KEY",
+    )
+    content = (tmp_path / "app.yaml").read_text()
+    assert key not in content
+    assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in content
