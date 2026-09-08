@@ -3,7 +3,21 @@
 CRUD + bundle import for org-shared design systems. Mirrors the slide-styles
 router (``slide_styles.py``): design systems are company-wide assets (everyone
 can view/use), ``created_by`` records authorship, and a single ``is_default``
-marks the org default. A design system compiles to ``compiled_style_content`` —
+marks the org default.
+
+AUTHORIZATION (SDR-4437 F-CR-17): CREATE and IMPORT are ADMIN-ONLY. This
+supersedes the earlier "any user may contribute a design system" decision. The
+reason is the downstream blast radius rather than the write itself: a design
+system's ``compiled_style_content`` is injected into the generation system
+prompt of every user who selects it (``agent_factory._get_prompt_content`` ->
+``prompt_modules.build_generation_system_prompt``), and that artifact embeds the
+bundle's README/SKILL.md **verbatim** as the BRAND MANUAL block. Contribution is
+therefore a write into other users' prompt context, not just into a shared
+library, so it is gated to the same ``require_admin`` primitive that already
+guards ``set-default``, the slide-style library and the deck-prompt library.
+Reads stay open; rename/delete remain CREATOR-OR-ADMIN (see
+``_require_creator_or_admin``). The prompt-side hardening that complements this
+gate lives in ``design_system_compiler.DESIGN_SYSTEM_SCOPE_FIREWALL``. A design system compiles to ``compiled_style_content`` —
 the drop-in equivalent of ``slide_style_library.style_content`` — so it flows
 through the existing generation seam (see ``agent_factory._get_prompt_content``).
 
@@ -523,6 +537,7 @@ def list_design_systems(
     "/import",
     response_model=DesignSystemImportResult,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
 )
 async def import_design_system(
     file: UploadFile = File(...),
@@ -583,7 +598,12 @@ async def import_design_system(
         )
 
 
-@router.post("", response_model=DesignSystemDetail, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=DesignSystemDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
 def create_design_system(
     request: DesignSystemCreate,
     db: Session = Depends(get_db),

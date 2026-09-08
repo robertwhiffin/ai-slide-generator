@@ -368,12 +368,43 @@ export interface ContributorListResponse {
 
 export class ConfigApiError extends Error {
   status: number;
-  
+
   constructor(status: number, message: string) {
     super(message);
     this.status = status;
     this.name = 'ConfigApiError';
   }
+}
+
+/**
+ * Shown when the backend answers 403 on an admin-gated config route.
+ *
+ * SDR-4437 F-CR-17 made design-system create/import admin-only. We deliberately
+ * do NOT hide those affordances from non-admins: a control that silently
+ * disappears leaves the user unable to tell a missing feature from a missing
+ * permission, and gives them nothing to act on. The button stays, the attempt is
+ * refused by the backend (which is where the security boundary belongs), and the
+ * user gets a sentence that says what happened and what to do next.
+ *
+ * The backend's own `detail` for this case is "Admin access required", which is
+ * accurate but reads as machine output; this replaces it at the presentation
+ * layer only.
+ */
+export const PERMISSION_DENIED_MESSAGE =
+  "You don't have permission to do this — design systems are managed by workspace " +
+  'admins. Ask an admin to upload or create one, or request admin access if you ' +
+  'need to manage them yourself.';
+
+/**
+ * Turn a caught API error into a message fit to show a user, mapping 403 onto
+ * {@link PERMISSION_DENIED_MESSAGE}. Use this instead of a bare
+ * `err instanceof Error ? err.message : fallback` on any admin-gated call.
+ */
+export function describeConfigError(err: unknown, fallback: string): string {
+  if (err instanceof ConfigApiError && err.status === 403) {
+    return PERMISSION_DENIED_MESSAGE;
+  }
+  return err instanceof Error ? err.message : fallback;
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {

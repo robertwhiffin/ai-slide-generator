@@ -15,6 +15,20 @@ rename/delete rows of this table green-for-the-wrong-reason. The
 creator-allowed half of the model lives in
 ``tests/unit/test_authz_design_systems_creator.py``.
 
+SCOPE AMENDMENT (SDR-4437 F-CR-17): CREATE and IMPORT are now ADMIN-ONLY too,
+which REVERSES the "Explicit product decision: any user may contribute a design
+system" that the previous revision of this file asserted. Option C gated the
+routes that mutate an EXISTING org-shared row but left contribution open,
+reading contribution as low-risk. The re-review showed it is not: a design
+system's ``compiled_style_content`` embeds the bundle's README/SKILL.md verbatim
+(``design_system_compiler._brand_manual_section``) and is injected into the
+generation system prompt of every user who selects it, under a heading that
+calls it authoritative. Contribution is therefore a write into other users'
+prompt context, which is the same privilege class as the slide-style and
+deck-prompt libraries that Option C did gate. The prompt-side half of the fix is
+``design_system_compiler.DESIGN_SYSTEM_SCOPE_FIREWALL``, which now withdraws
+INSTRUCTION authority from that prose while leaving its STYLE authority intact.
+
 Test idiom copied from ``tests/unit/test_authz_settings_admin.py`` (the
 parametrized 403 table covering the slide-style / deck-prompt admin routes),
 with the ``production`` / ``non_admin`` / ``admin`` fixture triple from
@@ -168,8 +182,31 @@ def test_design_system_mutations_succeed_for_admin(client, seeded_ds, admin, ind
     )
 
 
-def test_import_stays_open_for_non_admin(client, non_admin):
-    """Explicit product decision: any user may contribute a design system."""
+def test_import_403_for_non_admin(client, non_admin):
+    """Import is ADMIN-ONLY (SDR-4437 F-CR-17).
+
+    This REVERSES the earlier "any user may contribute a design system" decision
+    that the previous revision of this file asserted. The reversal is about the
+    downstream blast radius, not the write: the bundle's README/SKILL.md is
+    embedded verbatim in ``compiled_style_content``, which is injected into the
+    generation system prompt of every user who selects the design system. So
+    contributing is a write into other users' prompt context.
+    """
+    resp = client.post(
+        f"{BASE}/import",
+        files={"file": ("synthetic.zip", make_bundle_zip(), "application/zip")},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+def test_create_403_for_non_admin(client, non_admin):
+    """Create is ADMIN-ONLY (SDR-4437 F-CR-17) — see the import test above."""
+    resp = client.post(BASE, json={"name": "Contributed by a regular user"})
+    assert resp.status_code == 403, resp.text
+
+
+def test_import_succeeds_for_admin(client, admin):
+    """Behavior preserved: the new gate must not break the admin path."""
     resp = client.post(
         f"{BASE}/import",
         files={"file": ("synthetic.zip", make_bundle_zip(), "application/zip")},
@@ -177,9 +214,9 @@ def test_import_stays_open_for_non_admin(client, non_admin):
     assert resp.status_code == 201, resp.text
 
 
-def test_create_stays_open_for_non_admin(client, non_admin):
-    """Explicit product decision: any user may contribute a design system."""
-    resp = client.post(BASE, json={"name": "Contributed by a regular user"})
+def test_create_succeeds_for_admin(client, admin):
+    """Behavior preserved: the new gate must not break the admin path."""
+    resp = client.post(BASE, json={"name": "Contributed by an admin"})
     assert resp.status_code == 201, resp.text
 
 
