@@ -247,8 +247,12 @@ class TestUpdateLocalNonBranchingSecretRetain:
 
 def test_parser_accepts_the_secret_flags():
     parser = deploy_local.build_parser()
+    # Use "production" — it is in build_parser's hardcoded fallback choices, so the
+    # test does not depend on the gitignored config/deployment.yaml. In CI that file
+    # is absent, the env choices fall back to development/staging/production, and a
+    # config-only env like "devtest" would be rejected with argparse SystemExit: 2.
     args = parser.parse_args([
-        "--update", "--env", "devtest",
+        "--update", "--env", "production",
         "--profile", "tellr-dev",
         "--encryption-secret-scope", "tellr",
         "--encryption-secret-key", "tellr-encryption-key",
