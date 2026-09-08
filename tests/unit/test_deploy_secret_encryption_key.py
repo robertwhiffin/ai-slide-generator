@@ -100,6 +100,30 @@ def test_read_secret_key_raises_on_permission_denied():
         secret_key.read_secret_key(ws, "tellr", "k")
 
 
+def test_read_secret_key_returns_none_on_typed_notfound_without_code_in_message():
+    """Regression (fresh-install bug): the SDK raises a typed ResourceDoesNotExist
+    whose str() is the human message "Failed to get secret X for scope Y" and does
+    NOT contain the error code. A fresh secret-mode install (scope just created,
+    key not yet written) must read that as absent and return None — not abort as a
+    permission problem. Matching must key off the exception type/error_code, not the
+    message text."""
+    from databricks.sdk.errors.platform import ResourceDoesNotExist
+
+    ws = _secret_ws(
+        get_error=ResourceDoesNotExist("Failed to get secret k for scope tellr.")
+    )
+    assert secret_key.read_secret_key(ws, "tellr", "k") is None
+
+
+def test_read_secret_key_raises_on_typed_permission_denied():
+    """A typed 403 is NOT absent — still refuse (never clobber a possibly-live key)."""
+    from databricks.sdk.errors import PermissionDenied
+
+    ws = _secret_ws(get_error=PermissionDenied("User lacks READ on scope tellr"))
+    with pytest.raises(SecretKeyError, match="permission"):
+        secret_key.read_secret_key(ws, "tellr", "k")
+
+
 def test_read_secret_key_rejects_non_fernet_value():
     ws = _secret_ws(value="not-a-fernet-key")
     with pytest.raises(SecretKeyError, match="not a valid Fernet key"):
