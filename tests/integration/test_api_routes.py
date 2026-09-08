@@ -959,15 +959,8 @@ class TestSessionEndpoints:
         response = client.get("/api/sessions/nonexistent/slides")
         assert response.status_code == 404
 
-    def test_cleanup_expired_sessions(self, client, mock_session_manager):
-        """POST /api/sessions/cleanup cleans up expired sessions."""
-        mock_session_manager.cleanup_expired_sessions.return_value = 5
-
-        response = client.post("/api/sessions/cleanup")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "completed"
-        assert data["deleted_count"] == 5
+    # (POST /api/sessions/cleanup tests removed — endpoint deleted as unused
+    #  and unauthenticated in SDR-4437 F-CR-16.)
 
     # (POST /api/sessions/{id}/export tests removed — endpoint deleted as unused
     #  dead code in SDR-4437 F-CR-10.)

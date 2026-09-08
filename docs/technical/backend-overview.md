@@ -56,8 +56,11 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
 | `DELETE` | `/api/sessions/{id}` | Delete session | `routes/sessions.delete_session` |
 | `GET` | `/api/sessions/{id}/slides` | Get slide deck for session | `routes/sessions.get_session_slides` |
 | `POST` | `/api/sessions/{id}/contribute` | Get or create contributor session for shared deck | `routes/sessions.get_or_create_contributor_session` |
-| `POST` | `/api/sessions/cleanup` | Clean up expired sessions | `routes/sessions.cleanup_expired_sessions` |
-| `POST` | `/api/sessions/{id}/export` | Export full session data to JSON for debugging | `routes/sessions.export_session` |
+
+Two session routes were removed by SDR-4437 and are intentionally absent from the
+table above: `POST /api/sessions/cleanup` (F-CR-16 — unauthenticated cascading
+delete of all users' expired sessions) and `POST /api/sessions/{id}/export`
+(F-CR-10 — dumped full session data to disk). Neither had a caller.
 
 ### Session Messages Endpoints
 
