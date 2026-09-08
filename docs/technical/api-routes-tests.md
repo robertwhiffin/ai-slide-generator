@@ -148,9 +148,9 @@ tests/integration/test_api_routes.py::TestSessionEndpoints
 | `test_get_session_messages_not_found` | GET `/api/sessions/{id}/messages` | Invalid id | 404 |
 | `test_get_session_slides_success` | GET `/api/sessions/{id}/slides` | Get slides | 200 |
 | `test_get_session_slides_not_found` | GET `/api/sessions/{id}/slides` | Invalid id | 404 |
-| `test_cleanup_expired_sessions` | POST `/api/sessions/cleanup` | Cleanup | 200 |
-| `test_export_session_success` | POST `/api/sessions/{id}/export` | Export | 200 |
-| `test_export_session_not_found` | POST `/api/sessions/{id}/export` | Invalid id | 404 |
+
+The `test_cleanup_expired_sessions` and `test_export_session_*` rows were removed
+with their endpoints by SDR-4437 (F-CR-16 and F-CR-10 respectively).
 
 **Limit Validation:** `limit` parameter must be between 1 and 100. Session listing filters by authenticated user via `created_by`.
 
