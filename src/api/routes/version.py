@@ -39,8 +39,12 @@ class VersionCheckResponse(BaseModel):
     package_name: str
 
 
-def _get_installed_version() -> str:
+def get_installed_version() -> str:
     """Get the installed version of databricks-tellr-app.
+
+    Shared with the ``/api/health`` handler in ``src.api.main``, which reports
+    the same value. Returns "unknown" when running from a source checkout
+    rather than an installed wheel.
 
     Returns:
         Version string or "unknown" if not installed
@@ -129,7 +133,7 @@ async def check_version() -> VersionCheckResponse:
     - update_available: Whether an update is available
     - update_type: "patch" (redeploy) or "major" (run tellr.update())
     """
-    installed = _get_installed_version()
+    installed = get_installed_version()
     latest = _get_latest_version_from_pypi()
 
     update_available = False

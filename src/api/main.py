@@ -494,13 +494,17 @@ async def health():
     ``encryption_key_source`` is load-bearing for deployment: ``tellr.update``
     polls it to confirm a relocated app is reading the secret before it deletes
     the Lakebase key row. Reports the source only — never the key.
+
+    ``version`` comes from the installed wheel's metadata, so it tracks the
+    deployed release; it reads "unknown" from a source checkout.
     """
+    from src.api.routes.version import get_installed_version
     from src.core.encryption import key_source
 
     return {
         "status": "healthy",
         "environment": ENVIRONMENT,
-        "version": "0.3.0",
+        "version": get_installed_version(),
         "encryption_key_source": key_source(),
     }
 
