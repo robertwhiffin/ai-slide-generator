@@ -19,6 +19,7 @@ from typing import Any
 
 import requests
 from cryptography.fernet import Fernet
+from databricks.sdk.errors import NotFound
 from databricks.sdk.service.apps import (
     App,
     AppResource,
@@ -113,6 +114,21 @@ def preflight_lakebase_privileges(cur: Any, schema_name: str) -> None:
 
 
 def _looks_absent(exc: Exception) -> bool:
+    """True when *exc* means the secret/scope genuinely does not exist.
+
+    The SDK raises a typed ``NotFound`` (subclass ``ResourceDoesNotExist``,
+    ``error_code == "RESOURCE_DOES_NOT_EXIST"``) whose ``str()`` is a human
+    message like ``"Failed to get secret X for scope Y"`` that does NOT contain
+    the code — so match on the exception TYPE (and ``error_code``), never the
+    message text. A permission denial is a distinct ``PermissionDenied`` (403)
+    that is not a ``NotFound``, so it is correctly NOT treated as absent — the
+    guard against overwriting a live key still holds.
+    """
+    if isinstance(exc, NotFound):
+        return True
+    if getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST":
+        return True
+    # Fallback for un-typed errors that still name the code in their text.
     return "RESOURCE_DOES_NOT_EXIST" in str(exc).upper()
 
 
@@ -129,11 +145,13 @@ def read_secret_key(ws: Any, scope: str, key: str) -> str | None:
     except Exception as exc:  # noqa: BLE001
         if _looks_absent(exc):
             return None
+        _code = getattr(exc, "error_code", None)
         raise SecretKeyError(
-            f"Could not read secret {scope}/{key}: {exc}. This is not a "
-            f"'not found' error, so it is most likely a permission problem — "
-            f"refusing to continue rather than risk overwriting a key that may "
-            f"already protect stored credentials."
+            f"Could not read secret {scope}/{key}: "
+            f"[{type(exc).__name__}{'/' + _code if _code else ''}] {exc}. "
+            f"This is not a recognized 'not found' error (most likely a permission "
+            f"problem) — refusing to continue rather than risk overwriting a key "
+            f"that may already protect stored credentials."
         ) from exc
 
     if resp is None or not resp.value:
