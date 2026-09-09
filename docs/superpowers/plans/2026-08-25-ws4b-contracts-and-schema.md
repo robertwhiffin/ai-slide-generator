@@ -353,9 +353,18 @@ but never declared.
 | `other_user` | context manager | A different principal, for permission denials |
 | `fake_queue` | `.items` | ws4d asserts the emitter queues the **object**, not a string |
 
-**Build the sqlite engines with the real `_migrate_*` helpers, never `create_all()`.** A fixture that
-builds tables from the ORM tests `create_all`, not the migration — a measured PR1 defect where an
-idempotency test stayed green with the migration disabled.
+**Fixture engines must call `create_all()` after `init_db()` to populate deck tables.** The `_migrate_*`
+helpers for `graph_checkpoints`, `graph_checkpoint_writes`, and `deck_reviews` assume their tables already
+exist (they perform `ALTER` and `DROP` operations only, never `CREATE TABLE`). In production this is safe
+because `create_all()` runs at `database.py:411` before `_run_migrations` at `:414`. In test fixtures:
+- Call `init_db(engine)` to load the ORM and apply migrations (which no-op on empty tables)
+- Ensure the new models are **registered on `Base.metadata`** — a missing import of the model module means `create_all()` skips those tables
+- Call `create_all(bind=engine)` to materialize the deck-level tables, then `_run_migrations(conn)`
+- Verify the fixture produces non-empty `engine.table_names()` or fail loudly rather than silently
+
+**This matters because:** a fixture that yields an engine with zero tables and no error is exactly the
+measured PR1 defect where an idempotency test stayed green with the migration disabled. Guard with an
+explicit assertion.
 
 **Trap for `session_with_garbage_blob`.** `agent_config` is a `NormalizedAgentConfig` (JSON) column,
 so decoding happens in the type's **result processor during the query**, outside any `try` in the

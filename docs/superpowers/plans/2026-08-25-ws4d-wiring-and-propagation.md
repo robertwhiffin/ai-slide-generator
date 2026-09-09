@@ -24,9 +24,13 @@ start living in one deployment, which is the entire point of §D.
 exercise both engines in one deployment**. It is not a product feature, not a security boundary, and
 deliberately not defended against misuse. Three consequences, all intended:
 
-- **Chat only.** MCP has no chat input, so it cannot carry the phrase and **keeps the monolith**. Spec
-  §6.4 / PRD §9.2 (the one-shot path) and §D5's three MCP obligations are **not delivered by this PR or
-  any of the five** — they travel with MCP to a later PR. MCP behaviour is unchanged.
+- **MCP stays behind structurally, not by input absence.** MCP has no chat input, but `enqueue_create_job`
+  (`src/api/mcp_server.py:170`) persists prompts and its worker runs `send_message_streaming`. Mode
+  resolution must happen in the **chat route handlers** at the top of the streaming path, with mode passed
+  as a parameter to `send_message_streaming` **defaulting to monolith**. MCP never calls those routes, so it
+  is excluded by its traffic path, not by capability. Spec §6.4 / PRD §9.2 (the one-shot path) and §D5's
+  three MCP obligations are **not delivered by this PR or any of the five** — they travel with MCP to a
+  later PR. MCP behaviour is unchanged.
 - **No hardening.** A loose substring match is acceptable. If the switch ever outlives testing it needs
   a strict form (exact prefix, first message only) plus an authorisation check, because a phrase matched
   anywhere in user text can be tripped by pasted content or echoed tool output — the injection surface
@@ -252,6 +256,15 @@ tour deck could not.
 **original** timestamp, so a burst of WYSIWYG edits coalesces into one review rather than pushing the
 window out forever. The author is refreshed on each set (the most recent human editor is the right
 attribution, and the review has not run yet).
+
+**Contributor sessions and deck ownership:** Decks are shared across sessions via `UserSession.parent_session_id`;
+a contributor session has `UserSession.slide_deck` as `None`. Routes pass `request.session_id` directly to
+`mark_dirty`, which can receive a contributor id. **`mark_dirty` must resolve the actual owner deck via
+`SessionManager._get_deck_owner_session(session_id)`** — that is, resolve to the session whose `slide_deck`
+is not `None` and holds the shared deck. The marker lives on the owner deck, not the contributor's ephemeral
+session. And `claim_due_marker` returns the **owner's** string id, so if `clear_marker` uses a different key,
+markers are never cleared on the owner when a contributor session clears them — both must use the owner-resolved
+key.
 
 **Test intent:** **no `chat_service` method mentions `mark_dirty`** (the structural guarantee — assert
 it against the module source); every human mutation route calls it; reorder triggers despite no HTML
