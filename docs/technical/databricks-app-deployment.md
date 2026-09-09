@@ -308,8 +308,7 @@ env:
     value: ""                  # set for autoscaling instances
   - name: DATABRICKS_HOST
     valueFrom: "system.databricks_host"
-  - name: DATABRICKS_TOKEN
-    valueFrom: "system.databricks_token"
+  # No DATABRICKS_TOKEN — SP auth is platform OAuth M2M (SDR-4437 F-CR-18)
 ```
 
 The `init_database()` call in the command accepts an optional `seed_databricks_defaults=True`
@@ -678,7 +677,9 @@ app = App(
 - `databricks-sdk>=0.96.0` for Apps and Lakebase Autoscaling API compatibility
 
 **Runtime requirements:**
-- Databricks Apps platform provides `DATABRICKS_HOST` and `DATABRICKS_TOKEN`
+- Databricks Apps platform provides `DATABRICKS_HOST` (via `app.yaml`) plus the
+  `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` pair it injects itself; the SP
+  authenticates with OAuth M2M and needs no token env var (SDR-4437 F-CR-18)
 - Lakebase instance must be running (auto-provisioned credentials via database resource)
 - Port 8000 available (Databricks Apps standard)
 
