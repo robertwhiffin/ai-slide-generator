@@ -102,6 +102,34 @@ not re-implement it.
 
 ---
 
+## E2b — §7.4: The "Agentic deck review in progress" flag
+
+**§7.4 names a non-blocking UI flag: "Agentic deck review in progress"**, with the spec's warning that
+*"a flag that gates export is a serial gate wearing a spinner"*. This means the flag suppresses nothing
+— export, presenting, and editing all stay live. It is purely informational: a user seeing it knows a
+review is pending.
+
+**Contract** — trigger on the marker being set (ws4d D4's `spec_sync.mark_dirty`), clear when the
+review completes or the marker clears. The flag lives in UI state (`AppLayout`), not server state.
+
+**Where it appears:** §7.1's spec view, as a subtle spinner or "Review pending" badge. The spec does
+not name a location; choose one that is discoverable but non-intrusive — e.g., near the view toggle or
+in the spec pane header.
+
+**Test intent** — a component test plus one e2e spec:
+
+| Assertion | Why |
+|---|---|
+| the flag appears once a marker exists on a deck | editing triggers it |
+| the flag disappears when the marker clears | successful review or restore |
+| **editing, export and presenting all stay live while the flag is set** | "non-blocking", stated as a structural property — buttons work, routes respond |
+| a failed review clears the claim but keeps the marker, so the flag stays on | retried reviews must not flicker the UI |
+
+**Sabotage:** make export gate on the flag and confirm the test goes red — confirming that the sabotage
+landed and that the gate is not in the code.
+
+---
+
 ## E3 — `tests/agentic/`: layer 3, honest and skipped
 
 **§G's four layers, organised by what each needs in order to run** — not by marker. The spec conflated
@@ -175,6 +203,12 @@ fails if it contains a wording comparison. Layer 3 is exactly where that temptat
 **Sabotage the cross-process one.** Add an in-process cache in front of the release query and confirm the
 second-process test goes red. If it stays green the test is not actually crossing a process boundary —
 fix the test, because that is the exact defect it exists to catch.
+
+**CI: the layer-4 integration job** — `.github/workflows/test.yml` adds a new **`layer4-integration`**
+job running `pytest tests/integration -k layer4 -v --tb=short` (or a marker-based filter of your choice).
+The job must use the shared database fixture from `tests/integration/conftest.py` (ws4b's infrastructure
+task). The job is **enabled by default** (not disabled like the layer-3 job) because it needs only a
+database, not a live model endpoint.
 
 ---
 

@@ -201,6 +201,12 @@ served by E2E, so the runner lands here rather than as a follow-up.
 | suppress Apply/Dismiss/Discuss when `status === 'fixed'`; add a "Fixed" marker | `FeedbackDrawer.tsx`, replacing the unconditional action block at `:128-160` | §F2: an auto-fixed finding is **reported** (PRD §3 wants what was fixed visible) but not **actionable** |
 | `unseenSlideIndices` and `hasUnseen` both ignore `status === 'fixed'` | `SlideViewer.tsx:201-205` and `:525` | Otherwise the unseen badge nags about work already done — the exact fatigue symptom §F2's read-only presentation exists to avoid. §F1 lists this as the third settled field |
 
+**CI: the vitest job** — `frontend-build` runs `npx tsc -b` + `npx vite build` and **adds `npx vitest`**
+with `include: src/**/*.test.{ts,tsx}`. `.github/workflows/test.yml` adds a new **`frontend-unit-tests`**
+job (separate from `frontend-build`) running `cd frontend && npm run test:unit`, enabled by default. The
+job must **not** block the e2e matrix (E1's new e2e spec also adds the vitest job to `.github/`; both
+PRs are committing the same job). Earliest merge wins and the second PR sees no change needed.
+
 **Test intent** — `FeedbackDrawer.test.tsx`: an open finding renders all three actions; a fixed
 finding renders none and is labelled; the two render correctly when mixed. **Sabotage** by replacing
 the status gate with `true &&`, confirm red, and grep to confirm the edit landed.
@@ -700,22 +706,30 @@ row; a contributor session writes to the **owner**; **it creates the deck row wh
 **Sabotage:** make the writer delegate to `save_slide_deck(deck_dict={"slides": []})` — the plausible
 wrong implementation §H1a exists to rule out — and confirm the no-row-touched test goes red.
 
-### B3.2 Serve the deck spec through the read path
+### B3.2 Serve the deck spec and findings through the read path
 
-`deck_spec_json` is the only deck-level column with a **reader** gap as well as a writer gap: today its
-only touchers are `create_version`'s snapshot (`:1939-1951`) and `restore_version`'s copy-back
-(`:2240`), and the row-read `deck_dict` (`:1538-1564`) emits no deck spec at all. So §7.1's spec view
-has no data path.
+Two keys need read paths now: `deck_spec_json` and the findings index. Today `deck_spec_json`'s only
+touchers are `create_version`'s snapshot (`:1939-1951`) and `restore_version`'s copy-back
+(`:2240`), and the row-read `deck_dict` (`:1538-1564`) emits neither. So §7.1's spec view and E2's
+findings drawer have no data path.
 
-**Contract:** add a parsed `deck_spec` key to **both** read paths — the row-read `deck_dict` and the
-blob fallback at `:1572`, since a pre-cutover deck with no rows reaches the latter. Parse with a helper
-that never raises, alongside `_read_head_meta`.
+**Contract:** add **two** parsed keys to **both** read paths — the row-read `deck_dict` and the
+blob fallback at `:1572`, since a pre-cutover deck with no rows reaches the latter. Parse with helpers
+that never raise, alongside each other and `_read_head_meta`.
 
-**Test intent:** the key is present and parsed; a specless deck reports `deck_spec: None` rather than
-omitting the key (a missing key and a null are different things to a frontend); the blob-fallback path
-exposes it; a contributor sees the owner's spec (§7.5); and **adding this key changes no other key** —
-PRD §10.2's parity guarantee means the export chain and every `html_content` consumer depend on that
-dict's exact shape. Run the export and preview suites, not just the new test.
+1. **`deck_spec`** — parsed from `deck_spec_json`, returns `None` if absent or unparseable.
+2. **`findings`** — call `findings_from_record(record, content_hash)` on every slide's
+   `verification_record` and **flatten into a keyed index**, keyed by slide position, or return
+   a single list and state the interaction with the existing `verification` key that ws4c writes.
+   (B1.1 defines `findings_from_record`; the frontend's `Slide` type lists both keys — resolve which
+   survives and which is internal-only. If `verification` persists as-is, state that `findings` is
+   derived and `verification` is canonical — do not collide silently.)
+
+**Test intent:** both keys are present and parsed; a specless/findingless deck reports the key as `None`
+rather than omitting it; the blob-fallback path exposes both; a contributor sees the owner's spec and
+findings (§7.5); **adding these keys changes no other key** — PRD §10.2's parity guarantee means the
+export chain and every `html_content` consumer depend on that dict's exact shape. Run the export and
+preview suites, not just the new test.
 
 ### B3.3 Aggregate the deck's CSS and run the token backstop
 
@@ -755,6 +769,14 @@ the next pass; no `token_css` means no backstop and no crash; a failing backstop
 declares, or the backstop legitimately prepends and the test fails for the wrong reason. And count
 occurrences carefully — a fixture that both defines and `var()`-references a token contains it twice.
 (Round-3 findings 6 and 7.)
+
+**Layer-4 infrastructure note (ws4e E4)** — E4's concurrency tests need a database shared across
+**two processes**, and the existing row-per-slide integration tests use `sqlite:///:memory:`
+(`tests/integration/test_slide_row_identity_and_verdicts.py:45-47`), which two processes **cannot**
+share. Create `tests/integration/conftest.py` with a `pytest` fixture that provides a **file-backed
+sqlite** (or postgres) engine/session shared across processes. Layer 4 tests will use this fixture
+to assert that cross-process reads and writes work correctly. This conftest also unblocks any other
+multi-process integration tests that land later.
 
 ---
 
