@@ -494,52 +494,55 @@ class HtmlToGoogleSlidesConverter:
             _shutil.rmtree(job_dir, ignore_errors=True)
         by_index = {e["index"]: e for e in emitted}
 
-        # ── Phase 2c: execute per slide on the host (validate, upload, chunked)
-        for i, (code, (html_str, chart_files, content_files, assets_dir)) in enumerate(
-            zip(codes, slide_inputs), 1,
-        ):
-            page_id = page_ids[i - 1]
-            if page_id is None:
-                continue
-            entry = by_index.get(i - 1)
-            requests = entry.get("requests") if entry else None
+        try:
+            # ── Phase 2c: execute per slide on the host (validate, upload, chunked)
+            for i, (code, (html_str, chart_files, content_files, assets_dir)) in enumerate(
+                zip(codes, slide_inputs), 1,
+            ):
+                page_id = page_ids[i - 1]
+                if page_id is None:
+                    continue
+                entry = by_index.get(i - 1)
+                requests = entry.get("requests") if entry else None
 
-            if requests is None:
-                logger.warning("Slide %d: no emitted requests, adding fallback", i)
-                self._add_fallback(slides_service, pres_id, page_id, i)
-            else:
-                err = self._execute_slide_requests(
-                    requests, slides_service, drive_service, pres_id, page_id,
-                    assets_dir, i,
-                )
-                if err is not None:
-                    fixed = await self._retry_with_error(
-                        code, err, html_str, chart_files, content_files,
+                if requests is None:
+                    logger.warning("Slide %d: no emitted requests, adding fallback", i)
+                    self._add_fallback(slides_service, pres_id, page_id, i)
+                else:
+                    err = self._execute_slide_requests(
+                        requests, slides_service, drive_service, pres_id, page_id,
+                        assets_dir, i,
                     )
-                    retry_err = "no-retry-code"
-                    if fixed:
-                        retry_requests = self._emit_single_slide(fixed, html_str, assets_dir, page_id)
-                        if retry_requests is not None:
-                            retry_err = self._execute_slide_requests(
-                                retry_requests, slides_service, drive_service,
-                                pres_id, page_id, assets_dir, i,
-                            )
-                    if retry_err is not None:
-                        logger.warning("Slide %d: all attempts failed, fallback", i)
-                        self._add_fallback(slides_service, pres_id, page_id, i)
+                    if err is not None:
+                        fixed = await self._retry_with_error(
+                            code, err, html_str, chart_files, content_files,
+                        )
+                        retry_err = "no-retry-code"
+                        if fixed:
+                            retry_requests = self._emit_single_slide(fixed, html_str, assets_dir, page_id)
+                            if retry_requests is not None:
+                                retry_err = self._execute_slide_requests(
+                                    retry_requests, slides_service, drive_service,
+                                    pres_id, page_id, assets_dir, i,
+                                )
+                        if retry_err is not None:
+                            logger.warning("Slide %d: all attempts failed, fallback", i)
+                            self._add_fallback(slides_service, pres_id, page_id, i)
 
-            if progress_callback:
-                try:
-                    progress_callback(i, total, f"Building slide {i}/{total}…")
-                except Exception:
-                    pass
-
-        # Best-effort Drive cleanup of uploaded asset files (generated code never did this).
-        for file_id in getattr(self, "_uploaded_file_ids", []):
-            try:
-                drive_service.files().delete(fileId=file_id).execute()
-            except Exception:
-                logger.debug("Asset cleanup failed for %s", file_id, exc_info=True)
+                if progress_callback:
+                    try:
+                        progress_callback(i, total, f"Building slide {i}/{total}…")
+                    except Exception:
+                        pass
+        finally:
+            # SDR-4437: a guaranteed sweep. Per-slide deletion in
+            # _execute_slide_requests handles the normal path; this catches
+            # anything whose delete failed there, and runs even when the
+            # export raises part-way, so a failed export cannot leave an
+            # anyone:reader asset behind.
+            self._delete_drive_assets(
+                drive_service, list(getattr(self, "_uploaded_file_ids", [])),
+            )
 
         print(f"[GSLIDES_CONVERTER] Done: {url}")
         return {"presentation_id": pres_id, "presentation_url": url}
@@ -1187,7 +1190,36 @@ class HtmlToGoogleSlidesConverter:
                     )
         return requests
 
-    def _upload_and_substitute_assets(self, requests, drive_service, assets_dir):
+    def _delete_drive_assets(self, drive_service, file_ids) -> None:
+        """Delete transient Drive image assets and drop them from the pending list.
+
+        SDR-4437: ``createImage`` requires a URL Google's own servers can fetch,
+        and the app's endpoints sit behind the gateway, so each asset is uploaded
+        to the user's Drive as ``anyone:reader`` for the duration of one
+        ``batchUpdate``. Google copies the image into the presentation during
+        that call, so the Drive copy is redundant the moment it returns — and it
+        is world-readable, so it must not outlive the call.
+
+        IDs that fail to delete stay on ``_uploaded_file_ids`` for the
+        end-of-export sweep to retry. Failures log at WARNING, not DEBUG: a
+        leaked asset is publicly readable, and the app runs at INFO, so a DEBUG
+        line would make the one case worth knowing about invisible.
+        """
+        pending = getattr(self, "_uploaded_file_ids", None)
+        for file_id in list(file_ids):
+            try:
+                drive_service.files().delete(fileId=file_id).execute()
+            except Exception:
+                logger.warning(
+                    "Drive asset cleanup failed for %s - it remains anyone:reader",
+                    file_id, exc_info=True,
+                )
+                continue
+            if pending is not None and file_id in pending:
+                pending.remove(file_id)
+
+    def _upload_and_substitute_assets(self, requests, drive_service, assets_dir,
+                                      uploaded_ids=None):
         """Upload each tellr-asset:// referenced file to Drive and substitute
         the real URL. Records uploaded file IDs on self._uploaded_file_ids.
 
@@ -1237,6 +1269,8 @@ class HtmlToGoogleSlidesConverter:
                     label=f"Share {filename}",
                 )
                 self._uploaded_file_ids.append(file_id)
+                if uploaded_ids is not None:
+                    uploaded_ids.append(file_id)
                 cache[filename] = f"https://drive.google.com/uc?id={file_id}"
             req["createImage"]["url"] = cache[filename]
         return requests
@@ -1244,11 +1278,19 @@ class HtmlToGoogleSlidesConverter:
     def _execute_slide_requests(self, requests, slides_service, drive_service,
                                 pres_id, page_id, assets_dir, slide_num):
         """Validate → upload+substitute → execute through _ChunkedSlidesService.
-        Returns None on success, error string on failure."""
+        Returns None on success, error string on failure.
+
+        SDR-4437: assets uploaded for this slide are deleted in the ``finally``,
+        so a publicly readable Drive copy never outlives the single
+        ``batchUpdate`` that consumes it. This runs on the failure path too — the
+        substitution cache is per-call, so a retry uploads its own copies and
+        shares nothing with the attempt that failed.
+        """
+        slide_asset_ids: List[str] = []
         try:
             self._validate_requests(requests)
             requests = self._upload_and_substitute_assets(
-                requests, drive_service, assets_dir,
+                requests, drive_service, assets_dir, slide_asset_ids,
             )
             wrapped = _ChunkedSlidesService(
                 slides_service, chunk_size=4, slide_num=slide_num,
@@ -1260,6 +1302,8 @@ class HtmlToGoogleSlidesConverter:
         except Exception as exc:
             logger.warning("Slide %d host execution failed", slide_num, exc_info=True)
             return str(exc)
+        finally:
+            self._delete_drive_assets(drive_service, slide_asset_ids)
 
     def _build_gslides_job_dir(self, codes, slide_inputs, page_ids) -> str:
         """Write the jail job dir: manifest + per-slide code/html/assets, with
