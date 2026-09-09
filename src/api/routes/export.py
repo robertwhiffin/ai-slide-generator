@@ -117,18 +117,6 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                 extra={"slide_id": slide_id}
             )
 
-    logger.info(
-        "Building slide HTML",
-        extra={
-            "slide_id": slide_id,
-            "raw_html_length": len(raw_slide_html),
-            "external_scripts_count": len(external_scripts),
-            "css_length": len(deck_css),
-            "scripts_length": len(deck_scripts),
-            "raw_html_preview": raw_slide_html[:500] + "..." if len(raw_slide_html) > 500 else raw_slide_html,
-        }
-    )
-
     # NO `crossorigin` — deliberately, and it must stay that way (WM-02).
     #
     # `crossorigin="anonymous"` turns these into CORS requests. cdn.tailwindcss.com
@@ -499,18 +487,6 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
 </body>
 </html>"""
 
-    logger.info(
-        "Built complete slide HTML",
-        extra={
-            "slide_id": slide_id,
-            "complete_html_length": len(complete_html),
-            "includes_external_scripts": len(external_scripts) > 0,
-            "includes_css": len(deck_css) > 0,
-            "includes_scripts": len(deck_scripts) > 0,
-            "complete_html_preview": complete_html[:1000] + "..." if len(complete_html) > 1000 else complete_html,
-        }
-    )
-
     return complete_html
 
 
@@ -529,10 +505,10 @@ async def export_to_pptx(request: ExportPPTXRequest):
     """
     # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
-    # Log to both logger and print to ensure visibility
-    log_msg = f"PPTX export request received - session_id: {request.session_id}, use_screenshot: {request.use_screenshot}"
-    logger.info(log_msg)
-    print(f"[EXPORT] {log_msg}")  # Also print to stdout for uvicorn to capture
+    logger.info(
+        "PPTX export requested",
+        extra={"session_id": request.session_id, "use_screenshot": request.use_screenshot},
+    )
 
     try:
         # Get current slide deck
@@ -555,31 +531,6 @@ async def export_to_pptx(request: ExportPPTXRequest):
             substitute_deck_dict_images(slide_deck, db)
             substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
 
-        slide_count = len(slide_deck.get("slides", []))
-        log_msg = (
-            f"Starting PPTX export - slides: {slide_count}, "
-            f"title: {slide_deck.get('title')}, "
-            f"has_css: {bool(slide_deck.get('css'))}, "
-            f"has_scripts: {bool(slide_deck.get('scripts'))}, "
-            f"external_scripts: {len(slide_deck.get('external_scripts', []))}"
-        )
-        logger.info(log_msg)
-        print(f"[EXPORT] {log_msg}")  # Also print to stdout
-
-        # Log slide deck structure
-        slides_info = [
-            {
-                "slide_id": slide.get("slide_id"),
-                "html_length": len(slide.get("html", "")),
-                "html_preview": slide.get("html", "")[:200] + "..." if len(slide.get("html", "")) > 200 else slide.get("html", "")
-            }
-            for slide in slide_deck.get("slides", [])
-        ]
-        logger.info("Slide deck structure for export", extra={"slides": slides_info})
-        print(f"[EXPORT] Slide deck structure: {len(slides_info)} slides")
-        for i, slide_info in enumerate(slides_info):
-            print(f"[EXPORT]   Slide {i}: {slide_info['slide_id']}, HTML length: {slide_info['html_length']}, preview: {slide_info['html_preview']}")
-
         # Initialize converter
         converter = HtmlToPptxConverterV3()
 
@@ -589,31 +540,12 @@ async def export_to_pptx(request: ExportPPTXRequest):
 
         # Create temporary directory for HTML files (needed for screenshots)
         temp_dir = Path(tempfile.mkdtemp(prefix="pptx_export_"))
-        logger.info("Created temp directory for export", extra={"temp_dir": str(temp_dir)})
 
         try:
             for i, slide in enumerate(slide_deck.get("slides", [])):
-                slide_id = slide.get("slide_id", f"slide_{i}")
-                raw_html = slide.get("html", "")
-                log_msg = f"Building HTML for slide {i} ({slide_id}) - raw HTML length: {len(raw_html)}"
-                logger.info(log_msg, extra={"slide_index": i, "slide_id": slide_id, "raw_html_length": len(raw_html)})
-                print(f"[EXPORT] {log_msg}")
-                print(f"[EXPORT] Raw HTML preview: {raw_html[:500]}{'...' if len(raw_html) > 500 else ''}")
-
                 # Build complete HTML for each slide
                 slide_html = build_slide_html(slide, slide_deck)
-                html_length = len(slide_html)
                 slides_html.append(slide_html)
-
-                log_msg = (
-                    f"Built complete HTML for slide {i} ({slide_id}) - "
-                    f"length: {html_length}, "
-                    f"has_external_scripts: {len(slide_deck.get('external_scripts', [])) > 0}, "
-                    f"has_scripts: {bool(slide_deck.get('scripts'))}"
-                )
-                logger.info(log_msg, extra={"slide_index": i, "slide_id": slide_id, "complete_html_length": html_length})
-                print(f"[EXPORT] {log_msg}")
-                print(f"[EXPORT] Complete HTML preview: {slide_html[:1000]}{'...' if html_length > 1000 else ''}")
 
                 # Create temporary HTML file for screenshot capture
                 if request.use_screenshot:
@@ -621,31 +553,9 @@ async def export_to_pptx(request: ExportPPTXRequest):
                     html_file.write_text(slide_html, encoding='utf-8')
                     html_files.append(str(html_file))
 
-                    # Verify file was written and contains Chart.js
-                    file_size = html_file.stat().st_size
-                    has_chart_js = 'chart.js' in slide_html.lower() or 'cdn.jsdelivr.net/npm/chart' in slide_html.lower()
-                    has_canvas = '<canvas' in slide_html.lower()
-                    has_scripts = '<script' in slide_html.lower()
-
-                    logger.info(
-                        "Created HTML file for screenshot",
-                        extra={
-                            "slide_index": i,
-                            "html_file": str(html_file),
-                            "file_size": file_size,
-                            "has_chart_js": has_chart_js,
-                            "has_canvas": has_canvas,
-                            "has_scripts": has_scripts,
-                        }
-                    )
-                    print(
-                        f"[EXPORT] Created HTML file for slide {i}: {html_file}, "
-                        f"size: {file_size} bytes, Chart.js: {has_chart_js}, Canvas: {has_canvas}, Scripts: {has_scripts}"
-                    )
-
-                    if not has_chart_js:
-                        logger.warning(f"HTML file for slide {i} does not contain Chart.js CDN link")
-                        print(f"[EXPORT] WARNING: HTML file for slide {i} missing Chart.js!")
+                    lowered = slide_html.lower()
+                    if 'chart.js' not in lowered and 'cdn.jsdelivr.net/npm/chart' not in lowered:
+                        logger.warning("HTML file for slide %d does not contain Chart.js CDN link", i)
                 else:
                     html_files.append(None)
 
@@ -658,38 +568,14 @@ async def export_to_pptx(request: ExportPPTXRequest):
             output_path = output_file.name
             output_file.close()
 
-            # Log summary before conversion
-            logger.info(
-                "Starting PPTX conversion",
-                extra={
-                    "total_slides": len(slides_html),
-                    "html_lengths": [len(html) for html in slides_html],
-                    "total_html_size": sum(len(html) for html in slides_html),
-                    "use_screenshot": request.use_screenshot,
-                    "html_files_count": len([f for f in html_files if f]),
-                    "output_path": output_path,
-                }
-            )
-
             # Prepare chart images per slide (if provided by client)
             chart_images_per_slide = None
             if request.chart_images:
                 # Convert ChartImage objects to dicts
-                chart_images_per_slide = []
-                for slide_idx, slide_charts in enumerate(request.chart_images):
-                    chart_dict = {img.canvas_id: img.base64_data for img in slide_charts}
-                    chart_images_per_slide.append(chart_dict)
-                    if chart_dict:
-                        print(f"[EXPORT] Slide {slide_idx + 1}: {len(chart_dict)} chart images (IDs: {list(chart_dict.keys())})")
-                    else:
-                        print(f"[EXPORT] Slide {slide_idx + 1}: No chart images")
-                logger.info(
-                    "Using client-provided chart images",
-                    extra={"slides_with_charts": len([c for c in chart_images_per_slide if c]), "total_slides": len(chart_images_per_slide)}
-                )
-                print(f"[EXPORT] Using client-provided chart images for {len([c for c in chart_images_per_slide if c])} of {len(chart_images_per_slide)} slides")
-            else:
-                print(f"[EXPORT] No chart_images in request (request.chart_images is {request.chart_images})")
+                chart_images_per_slide = [
+                    {img.canvas_id: img.base64_data for img in slide_charts}
+                    for slide_charts in request.chart_images
+                ]
 
             # Convert to PPTX
             await converter.convert_slide_deck(
@@ -706,7 +592,14 @@ async def export_to_pptx(request: ExportPPTXRequest):
             safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
             filename = f"{safe_title.replace(' ', '_')}.pptx"
 
-            logger.info("PPTX export completed", extra={"path": output_path, "pptx_filename": filename})
+            logger.info(
+                "PPTX export completed",
+                extra={
+                    "session_id": request.session_id,
+                    "total_slides": len(slides_html),
+                    "pptx_filename": filename,
+                },
+            )
 
             # Cleanup function for temporary files
             def cleanup():
@@ -813,9 +706,6 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     import time
     start_time = time.time()
 
-    # Log immediately to confirm request was received and parsed
-    print(f"[EXPORT_ASYNC] Handler started at {start_time:.3f}")
-
     chart_count = len(request.chart_images) if request.chart_images else 0
     chart_data_size = 0
     if request.chart_images:
@@ -827,7 +717,6 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         f"Received async PPTX export request (chart_images: {chart_count} slides, ~{chart_data_size // 1024}KB)",
         extra={"session_id": request.session_id},
     )
-    print(f"[EXPORT_ASYNC] Request parsed: {chart_count} slides with chart images (~{chart_data_size // 1024}KB)")
 
     try:
         # Get current slide deck - just validate it exists and get count
@@ -838,7 +727,6 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         db_start = time.time()
         slide_deck = await asyncio.to_thread(chat_service.get_slides, request.session_id)
         db_time = time.time() - db_start
-        print(f"[EXPORT_ASYNC] DB fetch took {db_time:.2f}s")
 
         if not slide_deck or not slide_deck.get("slides"):
             raise HTTPException(status_code=404, detail="No slides available")
@@ -878,7 +766,6 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         )
 
         total_time = time.time() - start_time
-        print(f"[EXPORT_ASYNC] Job queued in {total_time:.2f}s, returning job_id={job_id}")
         logger.info(f"Export job queued in {total_time:.2f}s", extra={"job_id": job_id})
 
         return ExportJobResponse(
