@@ -1,0 +1,623 @@
+# ws4c — The graph core and the seven skills
+
+> **For agentic workers:** REQUIRED SUB-SKILLS: `superpowers:subagent-driven-development` **plus**
+> `executing-plans-tellr`. **Read `2026-08-25-ws4-index.md` first** — this plan inherits its Global
+> Conventions (environment, the cause-based baseline gate, rulings R1/R2, the verified runtime facts,
+> execution requirements) and does not repeat them.
+
+**Goal:** A compiled LangGraph that builds a deck end to end — under stub agents in CI, and against a
+real model locally — plus the seven skills, `agent_factory`'s relocation, deterministic template-section
+extraction, and the two shipped security controls re-homed onto the graph path.
+
+**Why this is its own PR:** it is the only part of workstream 4 where the *topology* is the deliverable.
+Everything it touches is new code under `src/services/graph/` and `src/core/skills/`; the only existing
+files it modifies are `agent_factory.py` (a move that preserves every public name) and the test files
+that pin what moved. Nothing here is reachable from chat — that is ws4d.
+
+**Depends on:** ws4b's frozen contracts. **Blocks:** ws4d, ws4e.
+
+**The rule inherited from ws4b, restated because breaking it caused three blocking findings:**
+**if this PR wants a schema field that does not exist, that is an escalation back to ws4b — never a
+local edit.** In particular, `ArchitectOutput` and `AnalystOutput` are closed: do not read a field off
+them that ws4b did not declare, and never take brand bytes from model output.
+
+**Spec:** §5.1–§5.7, §6.1–§6.3, §8, §I, §A1, §A2, §D4, §L5, §L6, §L7, §M3–§M6, §G1–§G3.
+
+---
+
+## The runtime facts this phase is built on
+
+All re-executed on langgraph 1.2.10. **Do not re-derive them; do re-probe if you doubt one.**
+
+| Fact | Measurement | Consequence |
+|---|---|---|
+| **Superstep barrier** | An orchestrator sending batches of 2 over 5 positions woke exactly 4 times: `[]`, `[0,1]`, `[0,1,2,3]`, `[0,1,2,3,4]` — never per worker | There is **no "a slot freed, dispatch the next" event to hook.** The cap and the ordering live in **state**, not in the dispatch call |
+| **A `Send`-reached node sees ONLY its payload** | The node saw `['batch','position']`; no state key was visible | The router must **pre-copy** everything the branch needs. `deck_spec` is invisible inside a builder |
+| **A static edge out of a `Send`-reached node collapses N into ONE** | 3 builders → **1** invocation, input keys were plain state with no payload | `builder → build_reviewer` **must** be a conditional edge that re-fans |
+| **Re-fanning with a conditional edge** | 6 builders → **6** reviewers, each with its own payload | The fix for the above |
+| **`bool({0: None})` is `True`** | | A dict reducer cannot delete a key; a tombstone still reads as pending |
+| **Turn-2 state accumulates** | turn 2 passing a fresh empty set still saw turn 1's values; a fresh `checkpoint_ns` does not reset it either | Turn-scoping is required, not a nicety |
+| **Undeclared keys are silently dropped** | a node returning an undeclared key produces no error and the write is discarded; an undeclared *input* key never reaches the node | **`GraphState` is an exhaustive contract.** This caused three separate blocking findings |
+| **`Send(timeout=)` is unusable here** | `ValueError: Node timeouts are only supported for async nodes because sync Python execution cannot be safely cancelled in-process` | Stall detection uses state-recorded timestamps, and that is the **only** option |
+
+**Net difference from spec §8's wording:** dispatch proceeds ascending in batches bounded by the cap,
+rather than backfilling individual slots the instant one frees. Ordered release, the cap and retry
+priority all survive; only per-slot backfill does not, because the runtime provides no such event.
+
+---
+
+## C1 — `GraphState` and the turn-scoped reducers
+
+**Contract** — `src/services/graph/state.py`. This is one of the few places the code *is* the design, so
+it is given in full.
+
+```python
+def scoped(turn_id: str, value):            # wrap a value with the turn it belongs to
+    return {"turn": turn_id, "vals": value}
+
+def scoped_vals(state: dict, key: str):
+    """Read a turn-scoped key, discarding a value from a previous turn.
+
+    The turn comparison is HERE, not only in the reducers. Reducers fire on a WRITE, but every
+    foreman read happens BEFORE any write in the turn — so without this check turn 2 reads turn 1's
+    landed positions, next_dispatch_batch returns [], all_positions_committed is true, and the graph
+    goes straight to deck review having built NOTHING.
+    """
+    wrapper = (state or {}).get(key)
+    empty = _EMPTY_FOR[key]                  # per-key: set(), {} or []
+    if not isinstance(wrapper, dict):
+        return empty
+    if wrapper.get("turn") != (state or {}).get("turn_id"):
+        return empty                         # stale
+    return wrapper.get("vals", empty)
+```
+
+`_EMPTY_FOR` is a per-key mapping, **not** a suffix heuristic. A heuristic that returns `{}` for
+anything not ending in `positions` gives a dict where `emitted_style_blocks`' list reducer needs a
+list — survivable only by accident. (Round-3 finding 24.)
+
+Three reducers, each discarding on a turn change:
+
+```python
+def turn_scoped_union(a, b):   ...   # set union within a turn
+def turn_scoped_merge(a, b):   ...   # per-key dict merge; CANNOT delete a key, hence tombstones
+def turn_scoped_concat(a, b):  ...   # list append within a turn
+```
+
+**`GraphState` — the exhaustive contract.** Single-writer keys carry **no** reducer (a reducer there
+would silently merge where the semantics are "replace"); every key written by more than one concurrent
+branch **must** carry one, or the runtime raises
+`InvalidUpdateError: At key 'x': Can receive only one value per step`.
+
+| Key | Reducer | Written by |
+|---|---|---|
+| `session_id`, `turn_id`, `deck_spec`, `error_state`, `fix_target` | none | one node each |
+| `architect_intent`, `architect_message`, `target_positions` | none | `architect_node` |
+| `token_css`, `deterministic_css`, `external_scripts`, `head_meta`, `scripts_content`, `knitted_html` | none | see C4's note on **who produces these** |
+| `findings` | `operator.add` | every reviewer |
+| `landed_positions`, `placeheld_positions`, `reviewed_positions` | `turn_scoped_union` | reviewers, placeholder node |
+| `slides`, `dispatched_at`, `retry_count`, `fix_map`, `fixed` | `turn_scoped_merge` | builders, fixer, reviewers, foreman |
+| `emitted_style_blocks` | `turn_scoped_concat` | see C4 |
+| `foreman_wakes` | `turn_scoped_concat` | `foreman_node` |
+
+**`has_pending_fix(state)` — never `if state.get("fix_map")`.** `turn_scoped_merge` cannot delete keys,
+so a completed fix is tombstoned as `{position: None}` — and `bool({0: None})` is `True`. Testing
+truthiness routes to the fixer **forever**; the fixer's `min()` then raises `ValueError` on an empty
+candidate set and the graph loops to `GraphRecursionError`.
+
+**Test intent:**
+
+| Assertion | Why |
+|---|---|
+| union/merge/concat each merge within a turn and **discard** on a turn change | The core mechanic |
+| `scoped_vals` returns empty for a **stale** wrapper even though the reducers have not fired | The read-side half — this is the one an earlier draft missed, so turn 2 built nothing while the test passed |
+| `scoped_vals` returns the **right empty type** per key (`set`, `dict`, `list`) | Finding 24 |
+| `has_pending_fix` is False for an all-tombstoned map and True when any entry survives | |
+| every fan-in key declares a reducer; every single-writer key does not | Undeclared/mis-declared keys fail silently |
+| **a compiled graph actually merges 6 concurrent `Send` branches** | The test that catches a missing reducer. A dict-merge unit test alone does **not** — `InvalidUpdateError` is raised by the runtime |
+| **turn 2 against a real checkpointer builds** | The behavioural version. State it as "turn 2 dispatched N builders", never as "turn 2's landed set equals X" — the latter passes *because* the bug is present |
+
+**Sabotage:** swap `turn_scoped_union` for `turn_scoped_merge` on `landed_positions` and confirm the
+turn-2 test goes red **for the right reason** (an earlier attempt went red on a `TypeError` in turn 1,
+which gave false confidence); make `has_pending_fix` truthiness-based and confirm the tombstone test
+goes red.
+
+---
+
+## C2 — The foreman: pure functions over state
+
+**Contract** — `src/services/foreman_service.py`. `CAP = 15`, `RELEASE_TIMEOUT_S = 300`, and:
+
+```python
+def outstanding_positions(state) -> list[int]      # not landed, not placeheld, ascending — INCLUDES in-flight
+def next_dispatch_batch(state, cap=CAP) -> list[int]
+def releasable_positions(state) -> list[int]       # the committed PREFIX
+def stalled_positions(state, now: float, timeout_s=RELEASE_TIMEOUT_S) -> list[int]
+def all_positions_committed(state) -> bool
+```
+
+**No class and no instance state.** Every function is a pure function of `GraphState`, so the
+checkpointer is the only home for turn state. A bare state class that is never instantiated is
+`self.sessions = {}` under a new name — PRD §12.1's named bug class.
+
+**Three rules inside `next_dispatch_batch`, and each has a failure behind it:**
+
+1. **Ascending is load-bearing, not tidiness.** Release requires all positions `< n` committed, so
+   lowest-first means releases begin almost immediately. Dispatching from the end would leave the buffer
+   holding every finished slide while position 0 had not started, and the user would see nothing.
+2. **In-flight positions are never re-dispatched.** The foreman re-runs on a partially completed batch,
+   so a batch computed from `outstanding_positions` alone re-dispatches the siblings still running —
+   duplicating LLM spend and racing two writers onto the same slide row.
+3. **Subtracting in-flight from the cap is what makes the cap real.** The cap bounds *concurrent*
+   builders, so dispatching `cap` fresh positions while N run allows up to `cap + N`.
+
+**Retries need no special case** beyond clearing their in-flight marker: a failed position is still
+outstanding, so ascending order re-enters it ahead of higher unstarted positions by construction.
+
+**A placeholder counts as committed** for both `releasable_positions` and `all_positions_committed`
+(§5.5, §I). `len(landed) == len(spec.slides)` is the wrong predicate: one terminal failure would mean
+deck review never fires and the turn never ends.
+
+**An edit turn covers `target_positions` only** (§6.3's multi-target case is simply n ≠ all), a build
+turn every spec slide.
+
+**Test intent:** first batch is `[0..14]` of 31; a 15-slide deck dispatches entirely (the common case —
+fully parallel, no queueing); the next batch continues ascending; in-flight excluded; the cap counts
+in-flight; a retry appears ahead of higher unstarted positions; release emits only a committed prefix
+and extends when the gap lands; a placeholder releases and satisfies the deck-review trigger; stalls
+computed from state timestamps, never a wall clock on an instance; a landed position is never stalled;
+an empty spec dispatches nothing and is trivially committed; a partial multi-target turn dispatches only
+its targets.
+
+**Sabotage:** remove the in-flight subtraction and confirm both the duplicate-dispatch and real-cap
+tests go red.
+
+> These tests pin the **policy**, and they pass whether or not the wiring is right. That is exactly why
+> C5 exists — the superseded plan had only these and would have shipped green with the runtime silently
+> degraded to "dispatch 15, wait for all 15, dispatch the next 15."
+
+---
+
+## C3 — Skill invocation: `call_skill`, prompt assembly, model binding
+
+**This lands before the nodes, because every node calls it.** An earlier draft put it in the skills
+phase, so Phase 4 imported a module Phase 5 created.
+
+**Contract** — `src/core/skills/__init__.py` and `src/services/agent_resolution.py`:
+
+```python
+@dataclass(frozen=True)
+class Skill:
+    name: str; version: int; instructions: str
+    output_schema: type[BaseModel]; tool_grants: list[str]
+
+def load_skill(name) -> Skill
+def list_skills() -> list[str]
+def call_skill(name: str, payload: dict) -> BaseModel      # every node's single entry point
+
+# src/services/agent_resolution.py
+def assemble_skill_prompt(skill: Skill, payload: dict) -> str
+def get_structured_model(schema: type[BaseModel])
+```
+
+**One `Skill` definition, in one place.** An earlier draft defined this module twice in two tasks — a
+`BaseModel` with `prompt_body` in one and a frozen dataclass with `instructions`/`version`/`tool_grants`
+in the other, with different register functions. The dataclass wins: spec §5.1 requires the version and
+the tool grants.
+
+**`assemble_skill_prompt` must pass the payload.** The obvious implementation returns the instructions
+plus two conditional blocks and stops — which means the builder never receives its slide brief, the
+reviewer never receives the HTML it is reviewing, and the fixer never receives the finding. Every skill
+would be invoked with instructions and nothing else. **Serialise the payload into the prompt.**
+
+**Two conditionals, both decided from the *resolved style* at request time, not from the skill:**
+
+- **`_SLIDE_FRAME_CONSTRAINTS` is injected only when the resolved style lacks it** (§L5's third case).
+  Import it from `src.services.design_system_compiler` **under its private name** — reading a private
+  constant is legal and changes no existing file, and §L5's actual requirement is only that both sites
+  read the **same bytes at request time**. Retyping the numbers would create exactly the divergence the
+  `COMPILER_VERSION` currency contract exists to prevent.
+- **`DESIGN_SYSTEM_PRECEDENCE` only when a design system is active.**
+
+**Why three style cases, not two (§L5):**
+
+| Resolved style | Carries the safe-area numbers? |
+|---|---|
+| design system (`compiled_style_content`) | **yes** — the compiler emits them |
+| no style at all → `DEFAULT_SLIDE_STYLE` | **no safe area at all.** `defaults.py:5-26` has only body-level `1280x720px` / `margin:0; padding:0; overflow:hidden` — no 88px, no 72px, no 56px, no clearance rule |
+| a selected library slide style | **unknown, usually no** — `agent_factory.py:216` does `slide_style = style.style_content`, which **replaces** `DEFAULT_SLIDE_STYLE` wholesale |
+
+This is not cosmetic: §L7 puts `overflow` on the build reviewer's objective criteria and tells it to
+judge against these exact numbers, so a legacy-style deck would be judged against numbers its builder
+never received. **The builder and the reviewer must be handed the same numbers or the criterion is
+unfair by construction.**
+
+**`get_structured_model` follows the repo's existing client path** — `agent_factory.py:56` uses
+`get_system_client()`. Do not invent a new client.
+
+**Test intent:** all seven skills load and bind to their `OUTPUT_SCHEMAS` entry; each declares a
+version and a non-empty instruction body (a placeholder is fine, empty is not — an empty prompt
+produces garbage that still parses); **the payload appears in the assembled prompt**; frame constraints
+injected in cases 2 and 3 and **not duplicated** in case 1; `DESIGN_SYSTEM_PRECEDENCE` present only with
+an active design system; no skill body contains `88px`/`72px`/`56px`/`1280x720`; the analyst and
+architect declare tool grants and builders/reviewers declare none (§5.2.2 concentrates user-scoped data
+access in the analyst — the natural OBO boundary); an unknown skill name raises.
+
+---
+
+## C4 — Nodes, routers and graph assembly
+
+**Contract** — `src/services/graph/nodes.py`, `routers.py`, `builder.py`. Nine nodes:
+`architect`, `data_analyst`, `foreman`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
+`placeholder`, `deck_reviewer`.
+
+### The four wiring rules
+
+1. **`builder → build_reviewer` is a CONDITIONAL edge that re-fans**, never static. A static edge
+   collapses N branches into one invocation receiving plain state with no payload — so
+   `payload["position"]` raises `KeyError`, there is one review per *batch* rather than per slide
+   (breaking both the one-reviewer-writes-one-row invariant and the n-not-3n cost model), and the
+   per-slide fix path never fires.
+2. **`Send` objects are returned from a router**, never written into state. Signature
+   `Send(node, arg, *, timeout=None)`.
+3. **A router takes `(state)` or `(state, config)` only** — extra positional params raise `TypeError`,
+   and the config parameter must be **named `config`**.
+4. **One conditional-edge set per node.** A static `add_edge` alongside conditional edges from the same
+   node gives duplicate conflicting edges and a `GraphRecursionError`.
+
+### `foreman_node` — and the two things it owns because routers cannot write state
+
+```
+if has_pending_fix(state):        -> "fixer"
+if stalled_positions(...):        -> "placeholder"
+batch = next_dispatch_batch(...)  -> [Send("builder", build_branch_payload(state, p)) for p in batch]
+if all_positions_committed(...):  -> "deck_reviewer"
+else:                             -> END        # a batch is in flight; the barrier re-enters us
+```
+
+`foreman_node` itself writes two things before the router runs:
+
+- **`dispatched_at[p] = now` for every position about to be dispatched.** This must be a **dispatch**
+  timestamp. Writing it on builder *return* makes it a **completion** timestamp, so a branch that hangs
+  or dies never gets an entry and `stalled_positions` can never observe the case it exists for. The
+  foreman runs before the batch, so it is the only node that can stamp it.
+- **`foreman_wakes`**, appended **non-destructively** (`wakes + [batch]`, never `wakes.append(batch)`) —
+  in-place mutation of checkpointed state is the failure the adjacent comment warns about, and an
+  earlier draft did exactly that for `dispatched_at` while forbidding it for `wakes`.
+
+**`build_branch_payload(state, position)` pre-copies everything the branch needs**, because a
+`Send`-reached node cannot see `GraphState`: `session_id`, `turn_id`, `position`, the `SlideSpec` looked
+up **by position**, `assumes`, `hands_off`, `design_contract`, `resolved_data`.
+
+**Reconcile stall detection with the barrier, explicitly.** The barrier means a timeout evaluated in
+`foreman_node` cannot fire *while* a position is stalled — the node only runs once the batch completes,
+which is the one moment the timeout is not needed. So what the `"placeholder"` branch actually catches
+is a position **left uncommitted by a completed batch** (a builder that returned nothing usable, or a
+resumed checkpoint whose branch died). Say that in the docstring rather than claiming a live-stall
+guard the runtime cannot provide. (Round-3 finding 21.)
+
+### `reviewer_router` — wire it or delete it
+
+An earlier draft specified it, tested it, and left `builder.py` using a static
+`add_edge("build_reviewer", "foreman")`, so its return values matched no node name. **Decide:** either
+route `build_reviewer` through it (`"fix"` → `fixer`, `"land"` → `foreman`) and drop the static edge, or
+delete the function and its test. A tested-but-unreachable router misleads about the topology.
+(Round-3 finding 14.) Prefer wiring it — the fix path benefits from being explicit in the graph rather
+than implicit in `foreman_router`.
+
+### Node behaviour, and the invariants each one carries
+
+| Node | Reached by | Must |
+|---|---|---|
+| `architect_node` | edge | Set `architect_intent`/`architect_message`; on build/edit commit `deck_spec` and perform the **pre-fan-out deck-level write** (§H1's trigger *is* "the architect committed the spec"). **Read only fields `ArchitectOutput` declares** |
+| `data_analyst_node` | edge | Return exactly one of three outcome shapes; **read only `AnalystOutput`'s fields** |
+| `builder_node` | `Send` payload | Emit body HTML only (no `<style>`); gate the HTML through the safety control (C7); carry its payload forward in `slides[position]` so the re-fan can rebuild the reviewer's input; on exception, commit a **placeholder** and return `placeheld_positions`, never `landed_positions` |
+| `build_reviewer_node` | re-fan `Send` | Stamp finding ids from `(criterion, content_hash)`; if no objective finding, **write the row** with an explicit `verification_record`; else populate `fix_map` with `original_html` **and `original_scripts`** |
+| `fixer_node` | state | Pick the lowest entry that is neither tombstoned nor `in_flight`; mark it `in_flight` on dispatch |
+| `fix_reviewer_node` | state | Choose fixed-or-original, **write the winner**, mark auto-fixed objective findings `status="fixed"`, tombstone the `fix_map` entry |
+| `placeholder_node` | `foreman_router` | Commit via `SlideWriter.commit_placeholder`; detect failures via `is_placeholder_record`, **never an HTML class** |
+| `deck_reviewer_node` | edge | Perform the **post-commit deck-level write**; then review. **Non-fatal** — a failure clears the flag and surfaces a notice, never invalidating a delivered deck |
+
+**Fix-round bookkeeping — this table is what makes "exactly one fix round" true rather than
+aspirational:**
+
+| Stage | `fix_map[pos]` becomes | Effect |
+|---|---|---|
+| build reviewer finds an objective defect | `{original_html, original_scripts, finding, payload}` | `has_pending_fix` → True, router sends to the fixer |
+| fixer dispatches it | `{…, "in_flight": True}` | excluded from candidates, so it cannot be picked twice |
+| fix reviewer decides | `None` (tombstone) | `has_pending_fix` → False once every entry is tombstoned |
+
+Without `in_flight`, `fix_reviewer_node` clears only `fix_target`, so **every position above the minimum
+is re-fixed on the next foreman pass** — measured as each position entering the fixer twice and deck
+review firing twice.
+
+### Where the deck-level write's values actually come from
+
+**This is the trap that produced four separate findings, so it is stated as a rule.** `token_css`,
+`deterministic_css` and the template's style block are **brand bytes**. They come from
+`resolve_template_bytes` (C6) — **deterministic code** — and **never from model output**. An earlier
+draft read them off `ArchitectOutput`, which both violated the invariant and invented five fields the
+schema does not declare.
+
+- **Pre-fan-out** (in `architect_node`, after the spec is committed): `title`, `external_scripts`,
+  `head_meta`, `scripts_content`, `deck_spec`, and §K4's deterministic CSS — the pinned template's
+  `token_css` plus its `<style>` block, resolved **here**, from the deck spec's `design_contract`.
+- **Post-commit** (in `deck_reviewer_node`): aggregated `css`, `slide_count`, and `html_content` —
+  which is **derived, not read from state**: build the domain object from the deck dict
+  (`SlideDeck.from_dict`, `slide_deck.py:111` — there is no `from_json`) and call `knit()`.
+
+**Guard the template resolution on `design_system_id and template_id`, not on `design_contract`'s
+truthiness.** `design_contract` has a `default_factory`, and an all-`None` pydantic model is **truthy**,
+so a bare truth test calls `resolve_template_bytes(None, None)` on every unpinned deck and a `try/except`
+hides it. (Round-3 finding 28.)
+
+**`invoke_graph(session_id, initial)`** mints a fresh `turn_id` per turn (the discriminator that resets
+turn-scoped state), passes `thread_id`, sets `max_concurrency=CAP` as the belt to the queue's braces,
+and sets **no `recursion_limit`** — the default is 10007 and the superseded plan's ~50 would have made
+the graph fail *earlier* than shipping no config.
+
+---
+
+## C5 — Layer-1 orchestration tests against the COMPILED graph
+
+**These are the ones that matter.** Spec §8 is explicit that a scheduler test in isolation passes
+regardless while the shipped behaviour silently degrades.
+
+**Harness** — `tests/integration/conftest_stub_skills.py`: a `SkillRecorder` the fixture returns and
+each test mutates, carrying `slide_count`, `fail_positions`, `slow_positions`,
+`objective_findings_at`, plus `calls`, `positions(skill)`, `counts(skill)` and `peak_concurrent`.
+`call_skill` is monkeypatched to return canned schema-valid outputs.
+
+**The stub's parametrisation lives on the recorder, never in graph state.** An earlier draft passed
+`_stub_slide_count` through `invoke()`, which the runtime **silently drops** because it is not a declared
+key — so every test built 3 slides regardless: six failed, and two (`cap holds at 15`,
+`release order ascending`) **passed vacuously** on 3 slides. Then the "fix" declared it *in*
+`GraphState`, putting test scaffolding into the production contract. Neither. Put it on the recorder,
+alongside `fail_positions`.
+
+**Test intent** — each against the real compiled graph with stub agents:
+
+| Assertion | Guards |
+|---|---|
+| a 3-slide deck builds every position | baseline |
+| **one reviewer invocation per slide, not per batch** (6 → 6) | the re-fan; a static edge collapses to 1 |
+| peak concurrent builders ≤ 15 over 40 positions | the cap |
+| the first batch of 31 is `[0..14]`, ascending | ordering |
+| with position 1 slow, no higher position dispatches while it is outstanding | ordering under skew |
+| release order is strictly ascending with a slow position | §7.4's no-flapping guarantee |
+| the orchestrator wakes once per **completed batch** | acknowledges the barrier, so a future change assuming per-completion wakeups fails loudly. Read `foreman_wakes` through `scoped_vals`, and assert something falsifiable about each wake — not `len(wake) % 1 == 0`, which is true for every int |
+| **exactly one fixer invocation per position needing a fix**, and deck review fires **once** | the headline invariant |
+| a surviving defect becomes a surfaced finding, not a retry | |
+| a terminal failure becomes a **placeholder**, release proceeds past it, and deck review still fires | §I |
+| **turn 2 builds** rather than going straight to deck review | no test in the superseded plan covered a second turn, and that is the failure it hid |
+
+**Sabotage two, at minimum:** replace the re-fan with a static edge and confirm the per-slide reviewer
+test goes red; drop `in_flight` from the fixer's `fix_map` write and confirm the one-fix-round test goes
+red.
+
+---
+
+## C6 — Template-section extraction and the architect's inventory
+
+**Contract** — `src/services/template_sections.py`:
+
+```python
+def section_inventory(layout_html: str) -> list[dict]     # index, tag, classes, text_snippet, affordances
+def extract_section(layout_html: str, index: int) -> str  # VERBATIM markup
+def resolve_template_bytes(design_system_id, template_id) -> tuple[str, str, str]
+                                                          # (normalized layout_html, <style> block, token_css)
+```
+
+**The division of labour, and the line that must not be crossed (§M3):** the **architect assigns** a
+section per slide (intent — model-appropriate); **deterministic code extracts** its HTML and CSS
+byte-for-byte. **The architect never rewrites layout HTML or CSS.** That is not stylistic: it is the
+failure `ensure_deck_token_css` was built to catch — a model dropped 57 `var(--…)` definitions and
+washed out preview and both PPTX export paths. A model retyping brand markup has no backstop.
+
+**Grain is measured, not assumed.** `find_slide_roots(BeautifulSoup(layout_html))` returns **1** root
+for a per-slide template and **N** for a deck skeleton — probed on both shapes — so **no grain detection
+appears in the graph at all**:
+
+| Sections in layout | Architect assigns | Builder receives |
+|---|---|---|
+| N | section *i* per slide | one section |
+| 1 | that section for every slide | the same section |
+| fewer than the slide count | reuses sections, varying which | its assigned section |
+
+The last row is already the shipped instruction — *"vary which slide sections you reuse rather than
+repeating one"* — written for a monolith emitting a whole deck, and here it becomes a per-slide
+assignment.
+
+**`resolve_template_bytes` MUST route through `get_template_for_generation`** (`design_system_templates.py:849`,
+which calls `materialize_templates` at `:859`) and only then read `template.layout_html`. There is no
+normalizing accessor to read through: `normalize_root_tag_selectors` (`:527`) is a plain function whose
+callers **persist** its output — `materialize_templates` self-heals existing rows by assigning
+`template.layout_html` (`:705`). Extracting from a row that has not been through that pass yields a
+section whose CSS selectors match nothing in the built slide: a **silent, whole-section styling loss**.
+The pass is idempotent, so routing through it costs nothing on an already-healed row.
+
+**The promotion gotcha.** `SLIDE_WRAPPER_TAGS` is `{"section", "article"}` only — a `<div>` is
+deliberately excluded and so is `<main>`. A template wrapping its slides in a non-promoting tag keeps
+that wrapper's styles **outside** the extracted section. **Probe this before implementing:** render an
+extracted section against its template's full CSS and compare computed styles with the same section
+in situ. If they diverge (expect `padding` via a custom property defined on the wrapper, plus
+`font-family`, `background-color`, `color`), `extract_section` must **re-parent** — return the section
+wrapped in its non-promoted ancestor chain with the ancestors' other children stripped. **Never resolve
+a divergence by pruning or rewriting the template's CSS**; §M5 is explicit that CSS travels whole, and
+an undefined `var(--…)` is the measured washout defect.
+
+Two notes on running that probe: the spec file must live **inside** `frontend/tests/` (Playwright's
+`testDir` is `./tests`, so a `/tmp` file is never collected), and `page.evaluate` takes
+`(pageFunction, arg)` — passing a third argument, or a function as the second, throws instead of
+measuring.
+
+**The inventory is deterministic and small (§M4)** — a few hundred bytes per section: index, tag,
+class list, a short text snippet, and structural affordances (canvas / image / table / list). It is
+**not** the raw layout: a real template measures **24–47 KB**, and the architect holds the only durable
+conversation in the system (§5.3), so injecting the full layout every turn would be both expensive and
+contrary to §7.2's compaction story. Per-turn context, never accumulated into the transcript.
+
+**CSS travels whole with every section, never pruned (§M5).** Pruning was rejected: CSS is small next
+to markup, and under-including is the known washout defect — and `ensure_deck_token_css` backstops only
+custom properties and `@font-face` families, so a pruner's mistakes land outside the safety net.
+
+> **§M6's rejected alternative, recorded so it is not revisited:** handing every builder the full
+> template layout and grouping builders by template for prompt-cache reuse. ~130k duplicated tokens per
+> build turn against PRD §14's cost risk, and it leaned on prompt caching that workstream 2 has not
+> delivered.
+
+> **§M7 probe 2 is dropped:** there is no real design-system bundle in the repo and the DS fixtures
+> carry an explicit "no real brand content ever" hygiene rule, so §M5/§M6's "CSS is small next to
+> markup" cost claim stands **unmeasured**. It does not reopen §M5 — under-including is the washout
+> defect either way.
+
+**Test intent:** a deck skeleton inventories every section and a single-slide template exactly one;
+affordances detected; the inventory carries **no markup** and is smaller than the layout; extraction is
+byte-for-byte verbatim; an out-of-range index raises rather than silently returning nothing; the
+`<main>`-wrapper case behaves per the probe's finding.
+
+---
+
+## C7 — The two shipped security controls, re-homed
+
+**§D4.** `src/services/agent.py` is the only home of two controls that landed as security work and have
+no equivalent on the graph path (verified: no other module implements either).
+
+| Control | Where | Pinned by |
+|---|---|---|
+| **Output safety gate** — `_run_output_safety_gate` + `SAFETY_RETRY_NOTICE` (`agent.py:96-118`, call sites `:1488`, `:1746`): scans model HTML for disallowed external network/resource access, regenerates once with a corrective instruction, raises if still unsafe (AISEC-248) | generation *and* streaming paths | `test_agent_safety_gate.py`, `test_safety_gate_http.py` |
+| **Slide-context spotlight** — `spotlight("slide_context", html, session_id=…)` (`agent.py:885-916`): prior slide HTML is untrusted input, framed as `<untrusted-data>`, delimiters neutralised, injection patterns scanned at the prompt boundary (SDR-4437 F-TM-12) | edit/add operations injecting prior slides | `test_slide_context_injection.py` |
+
+**Neither is a monolith artifact.** The graph's builder and fixer emit HTML from a model, and its
+fixer and reviewers receive prior slide HTML as input, so both threats survive the rewrite unchanged.
+`export.py:159` runs the same scanner at *export* time and `streaming_callback.py:90` suppresses unsafe
+streamed text, but **neither replaces the generate-time gate-and-retry.**
+
+**Contract** — `src/utils/graph_safety.py`: `gate_emitted_html(html, regenerate, session_id, on_retry=None) -> (html, retried)`
+and `spotlight_prior_slides(htmls, session_id) -> str`. Both **delegate** to the shipped
+implementations so there is one scanner and one policy; when the later PR deletes `agent.py`, the
+implementation moves here and this signature does not change.
+
+**Two API traps:** `_run_output_safety_gate(html_output, regenerate, session_id, on_retry=None)` takes
+`regenerate` as a **zero-arg callable it invokes** and returns `(safe_html, retried)`; it scans HTML
+only, never scripts. Passing `scripts` as the second argument raises `TypeError` on the unsafe path.
+And **never hand-roll an `<untrusted-data>` f-string** — `spotlight()` neutralises embedded delimiters
+(its docstring cites review finding #7) and applies `cap_tool_output`; an f-string does neither, so
+builder HTML containing a closing delimiter breaks out of the wrapper.
+
+**Wire both:** the gate at the builder's and fixer's HTML boundary (spec §8.1 — reviewer input **and**
+fixer output both pass it; auto-remediated HTML reaching the user unchecked is the hole PRD §12.1
+names); the spotlight on every path receiving prior slide HTML.
+
+**Repoint the 13 test files referencing `src.services.agent`** (measured). The three named security
+suites gain **graph-path cases alongside** their monolith cases, since both paths now carry the
+controls; the other ten keep testing the monolith, which survives this PR. **Under the cause-based gate
+a deleted test is invisible**, and these are security controls — repoint and see them pass, never
+delete. Ruling R1 does not apply here: the functionality survives.
+
+**Sabotage both:** bypass the gate in `builder_node` and confirm red; replace `spotlight_prior_slides`
+with an f-string and confirm red.
+
+---
+
+## C8 — `agent_factory` MOVES; it is not deleted
+
+**§L6.** An earlier plan said delete or "reduce to graph config assembly". That is unsafe: it is now the
+only home for the design-system resolution branch and its `compiled_style_content` currency check;
+pinned-template block assembly; **the late type-scale re-assertion**; and **`search_brand_assets` tool
+gating**.
+
+**The type-scale re-assertion is not incidental plumbing.** `strip_type_scale_region_markers` (`:170`),
+`extract_type_scale_block` (`:292`), `build_type_scale_reassertion` (`:294-295`) and the
+`template_pinned` flag (`:134`, set at `:194`) exist because the compiled artifact delimits its
+type-scale region with control-character sentinels so the numbers restated **last** cannot drift from
+those injected earlier — and **a pinned template changes those numbers** (its own CSS title sizes
+outrank the design system's ramp). Dropping it re-opens a measured defect: the model fell back to its
+own heading sizes when the scale was stated only early.
+
+**The brand-tool gate has TWO halves, and the docstring lies about it.**
+`agent_factory.py:359-360`'s docstring says "only when `design_system_id is not None`". The code is
+`if config.design_system_id is not None and _design_system_is_active(config.design_system_id)`
+(`:404-406`), and the comment above it records the measured defect the second half fixes: a session
+keeps its pin after the design system is soft-deleted, and on the id alone generation *"got a fully
+working brand tool for a TOMBSTONE (measured: 'Found 2 brand asset(s)' with embeddable handles) while
+the prompt branch, which does filter `is_active`, supplied no brand at all."* `_design_system_is_active`
+(`:315-350`) fails **closed**. **Preserve both halves.**
+
+**Resolution is a BRANCH, not a ladder.** An **inactive** `design_system_id` does **not** fall through
+to the slide style — it lands on the `DEFAULT_SLIDE_STYLE` constant and the `elif` is never evaluated.
+
+**Sequencing:** `src/services/agent_resolution.py` is **created** here (C3 adds to it), so it belongs in
+this plan's new-files list — not described as a file to "modify". (Round-3 finding 10.)
+
+**`agent_factory.py` keeps every public name as a re-export shim**, because `agent.py` survives this PR
+and six suites import from it. **Repoint and run all six:** `test_ds_generation_state_matrix.py`,
+`test_design_system_compiler.py`, `test_prompt_precedence_fixes.py`, `test_factory_tool_spotlighting.py`,
+`test_agent_factory.py`, `test_design_systems_routes.py`. If a test is genuinely obsolete, say so in the
+commit rather than letting it vanish.
+
+**`chat_service` likewise keeps its design-system responsibilities** through ws4d's rewrite:
+`resolve_active_design_system_id`, `{{ds-asset:ID}}` substitution inside
+`_substitute_images_for_response(..., session_id=)` (note the keyword-only argument),
+`_resolve_pinned_template_token_css` and `_ensure_pinned_template_token_css`.
+
+**Test intent:** every moved symbol exists in the new module and is still reachable from the old one;
+the brand gate's source retains both halves; `_design_system_is_active` fails closed on `None` and an
+unknown id; the type-scale re-assertion is still wired; resolution is a branch — asserted
+**behaviourally** (construct a config with an inactive `design_system_id` **and** a real
+`slide_style_id`, resolve, assert the slide style was **not** used), never with a source-string grep.
+Note `agent_factory` imports `get_db_session` **inside** each function (`:141`, `:206`, `:229`, `:335`),
+so a module-level patch does not intercept it — patch where it is imported from. (Round-3 finding 14's
+sibling.)
+
+---
+
+## C9 — The seven skills, with placeholder prompts
+
+**§A1 governs this task.** A skill's prose is metadata; its output schema is a contract (frozen in
+ws4b). The build proceeds on **generated placeholder prompts**, and real authoring is a separate track
+in the dependency order `architect → builder → fixer → build_reviewer → fix_reviewer → deck_reviewer →
+data_analyst` (the architect first because its deck-spec output is every downstream skill's input;
+reviewers after builders because a reviewer's rubric is the builder's brief).
+
+**Ruling R2 applies: the skills COPY their prose; `prompt_modules.py` is neither modified nor composed
+from.** The graph is a new code path, so it owns its own prose and the monolith keeps its blocks exactly
+as they are.
+
+| Skill | Prose |
+|---|---|
+| `build_reviewer` | Its criteria block is **generated from `CRITERIA`**, not written — that keeps the prompt and the schema in step by construction |
+| `builder` | Own slide-authoring / Chart.js / image / HTML-output rules, written with `SLIDE_GUIDELINES`, `CHART_JS_RULES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT` open as source material |
+| `fixer` | Own editing rules, written from `EDITING_RULES` **minus that block's `"1280x720"` line**, plus a minimal-change instruction. The one file whose copy must differ from its source, and §L5 is why |
+| `data_analyst` | Own synthesis guidance (single source → pass through; synthesis only at 2+ sources), plus tool grants |
+| `architect`, `fix_reviewer`, `deck_reviewer` | Net-new writing |
+
+**`UNTRUSTED_DATA_NOTICE` is IMPORTED, not copied** — it is a security control's prose (§D4), two
+copies can drift where it matters, and reading a constant is not modifying the monolith.
+
+**Do not add a test pinning skill prose to `prompt_modules` bytes.** That would re-couple exactly what
+R2 separates, and the two paths are deliberately diverging — the monolith is deleted in a later PR.
+
+**Builder and fixer are separate skills over shared fragments (§5.6):** a builder's disposition is to
+*author*, a fixer's is *minimal change*. Hand an authoring agent broken HTML and it re-authors the
+slide, undoing what already passed review and — once WYSIWYG lands — a user's manual edits.
+
+---
+
+## Definition of done
+
+- [ ] Every suite passes and **every guard has been sabotage-verified**, with the sabotage confirmed on
+      the executed path.
+- [ ] The layer-1 suite runs against the **compiled** graph with stub agents and asserts all twelve
+      behaviours in C5, none of them vacuously.
+- [ ] A real-model local run builds a multi-slide deck end to end: ascending release, one reviewer per
+      slide, at most one fix round per position, deck review once.
+- [ ] All six `agent_factory` suites and all 13 `src.services.agent` test files pass at their new
+      homes. **None deleted** — the functionality survives, so R1's deletion rule does not apply.
+- [ ] `prompt_modules.py`, `design_system_compiler.py` and `agent.py` are **unmodified**. Confirm with
+      `git diff --stat` against the merge base.
+- [ ] No skill body contains `88px`, `72px`, `56px` or `1280x720`.
+- [ ] Full suite compared **by cause** to the index's baseline: no new cause, no change to the
+      deploy-autoscaling cause, no test that stopped existing.
+- [ ] `GraphState` is exhaustive: no node returns or reads a key it does not declare. A grep of node
+      returns against the TypedDict is a cheap standing check.
