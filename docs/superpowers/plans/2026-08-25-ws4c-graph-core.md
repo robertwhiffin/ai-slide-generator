@@ -91,13 +91,16 @@ branch **must** carry one, or the runtime raises
 
 | Key | Reducer | Written by |
 |---|---|---|
-| `session_id`, `turn_id`, `deck_spec`, `error_state`, `fix_target` | none | one node each |
+| `session_id`, `turn_id`, `fix_target` | none | one node each |
+| `deck_spec`, `error_state` | none | `architect_node`, exception handlers |
 | `architect_intent`, `architect_message`, `target_positions` | none | `architect_node` |
-| `token_css`, `deterministic_css`, `external_scripts`, `head_meta`, `scripts_content`, `knitted_html` | none | see C4's note on **who produces these** |
-| `findings` | `operator.add` | every reviewer |
-| `landed_positions`, `placeheld_positions`, `reviewed_positions` | `turn_scoped_union` | reviewers, placeholder node |
+| `token_css`, `deterministic_css` | none | `architect_node` (via `resolve_template_bytes`, C6) |
+| `external_scripts`, `head_meta`, `scripts_content` | none | `architect_node` (from `ArchitectOutput` fields, pre-fan-out) |
+| `knitted_html` | none | `deck_reviewer_node` (from `SlideDeck.knit()`, post-commit) |
+| `findings` | `operator.add` | every `build_reviewer_node` and `fix_reviewer_node` |
+| `landed_positions`, `placeheld_positions`, `reviewed_positions` | `turn_scoped_union` | build reviewers, placeholder node, fix reviewer |
 | `slides`, `dispatched_at`, `retry_count`, `fix_map`, `fixed` | `turn_scoped_merge` | builders, fixer, reviewers, foreman |
-| `emitted_style_blocks` | `turn_scoped_concat` | see C4 |
+| `emitted_style_blocks` | `turn_scoped_concat` | each `builder_node` (template's `<style>` block, pre-fan-out) |
 | `foreman_wakes` | `turn_scoped_concat` | `foreman_node` |
 
 **`has_pending_fix(state)` — never `if state.get("fix_map")`.** `turn_scoped_merge` cannot delete keys,
@@ -316,7 +319,7 @@ than implicit in `foreman_router`.
 | `fixer_node` | state | Pick the lowest entry that is neither tombstoned nor `in_flight`; mark it `in_flight` on dispatch |
 | `fix_reviewer_node` | state | Choose fixed-or-original, **write the winner**, mark auto-fixed objective findings `status="fixed"`, tombstone the `fix_map` entry |
 | `placeholder_node` | `foreman_router` | Commit via `SlideWriter.commit_placeholder`; detect failures via `is_placeholder_record`, **never an HTML class** |
-| `deck_reviewer_node` | edge | Perform the **post-commit deck-level write**; then review. **Non-fatal** — a failure clears the flag and surfaces a notice, never invalidating a delivered deck |
+| `deck_reviewer_node` | edge | Perform the **post-commit deck-level write** (§H1b); invoke the deck reviewer to assess the arc, and **persist findings via `save_deck_review`** (ws4b B2.2). Emit findings to chat as a **deck-level activity message** (ws4d D3's `emit_slide_ready` pattern, but for findings, **not** slides). **Non-fatal** — a failure clears the flag and surfaces a notice, never invalidating a delivered deck |
 
 **Fix-round bookkeeping — this table is what makes "exactly one fix round" true rather than
 aspirational:**
@@ -342,6 +345,14 @@ schema does not declare.
 - **Pre-fan-out** (in `architect_node`, after the spec is committed): `title`, `external_scripts`,
   `head_meta`, `scripts_content`, `deck_spec`, and §K4's deterministic CSS — the pinned template's
   `token_css` plus its `<style>` block, resolved **here**, from the deck spec's `design_contract`.
+  
+  **⚠️ `scripts_content` resolution note:** `SlideDeck.__init__` (`:50-57`) takes no deck-level scripts
+  parameter, `from_dict` (`:111-139`) sets none, and `scripts` is a **read-only property** (`:79-95`)
+  aggregating per-slide scripts. A persisted `scripts_content` value cannot reach `knit()`. Either
+  **drop this from the pre-fan-out write** (script aggregation is per-slide, not deck-level), or **state
+  the mechanism by which a deck-level script reaches the domain object** (e.g., a method parameter to
+  `from_dict`, or a separate getter that the post-commit write reads). Decide and state it here.
+  
 - **Post-commit** (in `deck_reviewer_node`): aggregated `css`, `slide_count`, and `html_content` —
   which is **derived, not read from state**: build the domain object from the deck dict
   (`SlideDeck.from_dict`, `slide_deck.py:111` — there is no `from_json`) and call `knit()`.
@@ -355,6 +366,39 @@ hides it. (Round-3 finding 28.)
 turn-scoped state), passes `thread_id`, sets `max_concurrency=CAP` as the belt to the queue's braces,
 and sets **no `recursion_limit`** — the default is 10007 and the superseded plan's ~50 would have made
 the graph fail *earlier* than shipping no config.
+
+### Event emission via ContextVar (the emitter lifecycle)
+
+**Context:** nodes cannot queue events into `GraphState` because the runtime **silently drops undeclared
+keys**, and a `queue.Queue` is not serialisable through the checkpointer anyway. D3 specifies the
+emission contract; this section specifies the **graph-side setup**.
+
+**The emitter lives in a `ContextVar`** — a thread-local (or async-context-local) variable that persists
+across `Send` fan-out. Set it **once per graph invocation**, before the first node runs, and every node
+can read it via `contextvars.get()` — no parameter passing, no state pollution.
+
+**Contract** — `src/services/graph/event_emitter.py`:
+
+```python
+event_emitter_var: ContextVar[StreamEventQueue]     # a queue.Queue or similar
+def set_event_emitter(queue: StreamEventQueue) -> None
+def get_event_emitter() -> StreamEventQueue | None
+```
+
+- **Set in `invoke_graph`** before `graph.invoke()` runs, so the ContextVar is live for the entire turn.
+- **Every node that emits calls `get_event_emitter().put(event)`** — e.g., `deck_reviewer_node` queues
+  finding events and `builder_node`'s exception handler can queue error placeholders.
+- **The ContextVar must NOT enter `GraphState`.** Declare it only once, set it once per turn, never
+  read it into state. An undeclared key read back from state is silently dropped by the runtime, so
+  its presence in `GraphState` is undetectable until the next turn inherits it from the checkpointer —
+  a silent corruption risk.
+- **Reset or validate it when resuming a turn in a new process.** A second invoke on a different worker
+  must set a fresh emitter, or events queue into the first process's queue forever.
+
+**Test intent:** `invoke_graph` sets the emitter before the graph runs; a node reading it without it
+being set gets `None` and either raises or handles gracefully (state the behaviour); a second `invoke_graph`
+call in the same turn-id gets a fresh emitter; the emitter survives `Send` fan-out and every fanned node
+can queue independently.
 
 ---
 
