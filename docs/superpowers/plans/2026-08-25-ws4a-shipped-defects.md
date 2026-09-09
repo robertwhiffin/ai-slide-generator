@@ -22,12 +22,12 @@ uncollected.
 
 ## What is broken, in one table
 
-| # | Defect | Live symptom today | Verified |
+| # | Defect | Status | Verified |
 |---|---|---|---|
-| A1 | `merge_css` keeps only `qualified-rule` blocks (`src/utils/css_utils.py:28-34`) | **Every slide-replacement edit silently drops the deck's `@media`, `@keyframes` and `@supports` rules.** A branded deck loses its print rules and animations after one edit. `@font-face` survives only because `ensure_deck_token_css` re-emits it | Measured: `merge_css(css, css)` on a sheet carrying `:root`, `@font-face`, `section.slide`, `@media print`, `@keyframes` returns **only `:root` and `section.slide`** |
-| A2 | `duplicate_session` builds `SessionSlideDeck(...)` without `deck_spec_json` (`session_manager.py:1014-1026`) | **`POST /sessions/{id}/duplicate` yields a deck whose spec is gone permanently, with no self-heal** | Verified: the constructor passes 11 fields; `deck_spec_json` is not among them |
-| A3 | Two docstrings in `src/core/backfill_session_slides_startup.py` (`:4`, `:239`) still say the backfill runs "from its FastAPI lifespan" | Misleads any reader who trusts them — main moved migrations pre-fork into `run.py::init_database` (§L8). The code is correct; only the prose is stale | Verified both lines |
-| A4 | The `e2e-tests` job is an explicit **23-entry allowlist** (`.github/workflows/test.yml`) against **32** specs in `frontend/tests/e2e/` plus **17** more outside it | **9 e2e specs never run in CI**, including `slide-viewer` — the only spec exercising the feedback drawer and findings. 17 further specs sit where the job's naming scheme cannot reach them | Measured: 23 matrix entries, 32 + 11 + 6 = 49 specs on disk |
+| A1 | `merge_css` keeps only `qualified-rule` blocks (`src/utils/css_utils.py:28-34`) | **Live defect on main:** Every slide-replacement edit silently drops the deck's `@media`, `@keyframes` and `@supports` rules. A branded deck loses its print rules and animations after one edit. `@font-face` survives only because `ensure_deck_token_css` re-emits it | Measured: `merge_css(css, css)` on a sheet carrying `:root`, `@font-face`, `section.slide`, `@media print`, `@keyframes` returns **only `:root` and `section.slide`** |
+| A2 | `duplicate_session` builds `SessionSlideDeck(...)` without `deck_spec_json` (`session_manager.py:1014-1026`) | **Latent on main (PR1-only).** `deck_spec_json` does not exist on main yet; no writer touches it. The duplicate drops nothing today. Live the moment ws4b's writer persists a spec. | PR1-verified: constructor passes 11 fields; `deck_spec_json` was added in PR1; `duplicate_session` still omits it |
+| A3 | Two docstrings in `src/core/backfill_session_slides_startup.py` (`:4`, `:239`) still say the backfill runs "from its FastAPI lifespan" | **Latent on main (PR1-only).** File does not exist on main; it was added in PR1. The code is correct; only the prose would be stale once the file exists. | PR1-verified: file exists on the branch at the stated line numbers |
+| A4 | The `e2e-tests` job is an explicit **23-entry allowlist** (`.github/workflows/test.yml`) against **32** specs in `frontend/tests/e2e/` plus **17** more outside it. Matrix entry arithmetic is 23 (main matrix) vs 26 on branch. | **Spec coverage gap on main (and branch).** Main has 14 matrix entries collecting 18 specs; branch has 23 entries collecting 32 + 11 + 6 = 49 total specs. 9 branch specs absent from matrix; 17 strays outside `tests/e2e/`. | Measured on branch: 23 matrix entries at `:479-501`, 32 specs in `e2e/`, 11 in `frontend/tests/`, 6 in `user-guide/` |
 
 **A1 is the one deliberate exception to ruling R2** (the new path does not change existing code). It
 changes monolith edit-path behaviour on purpose, because it is a bug fix with a user-visible
@@ -137,7 +137,7 @@ code comment.
 - duplicating **from a version** carries that version's snapshot, not the live spec (set them
   different first, or the test cannot distinguish them)
 - duplicating a specless deck does not raise
-- the duplicate's `spec_dirty_at` is `NULL` — the copy fires no trigger
+- the copy does not fire a `mark_dirty` trigger (no-op check: route is absent from §B1's trigger list)
 
 **Note for the executor:** `duplicate_session`'s signature is
 `duplicate_session(source_session_id: str, created_by, …)` — it takes a **string**, not a session
@@ -192,13 +192,12 @@ so a new spec ships uncollected **by default**; this test makes that a visible f
 job names (`unit-tests`, `frontend-build`, `wheel-build`, `e2e-tests`), the branch `main`, and the
 *integration* matrix. **Scope the search to the e2e matrix block** before applying it.
 
-**A4 edits `.github/workflows/test.yml`, which ws4b also edits** (its `ConfigPrompts` seed step at
-`:589`). If both are in flight, land A4 first and rebase; the two edits are in different blocks but a
-conflict here fails all matrix jobs at seeding.
+**A4 edits `.github/workflows/test.yml`, which ws4e also edits** (its layer-4 job near line 290).
+If both are in flight, coordinate the conflict; the two edits are in disjoint blocks.
 
-**Expect newly-collected specs to fail.** Nine specs have never run in CI. Any that fail are
-**pre-existing defects this task surfaces, not defects it causes** — and that is the point. Triage
-them: fix a genuine break, or add a `DELIBERATE_EXCLUSIONS` entry with a reason and a follow-up. Do
+**Expect newly-collected specs to fail.** 26 specs have never run in CI (9 absent from matrix, 17 relocated).
+Any that fail are **pre-existing defects this task surfaces, not defects it causes** — and that is the point.
+Triage them: fix a genuine break, or add a `DELIBERATE_EXCLUSIONS` entry with a reason and a follow-up. Do
 not weaken a spec to get the matrix green, and record the triage in the PR description so the
 distinction survives review.
 

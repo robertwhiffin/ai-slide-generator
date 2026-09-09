@@ -19,7 +19,7 @@ parallel writers, and the release gate needs a deployment. None of it is testabl
 new Playwright spec this PR writes must be added to the matrix in the same commit**, or that guard fails.
 That is the interlock working as intended.
 
-**Spec:** §7.1, §7.2, §7.5, §F1–§F4, §G1–§G3, §9, §M7, PRD §3, PRD §12.1.
+**Spec:** §7.1, §7.2, §7.4, §7.5, §F1–§F4, §G1–§G3, §9, §M7, PRD §3, PRD §12.1.
 
 ---
 
