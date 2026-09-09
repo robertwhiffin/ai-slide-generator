@@ -37,8 +37,12 @@ env:
     value: "${LAKEBASE_ENDPOINT_NAME}"
   - name: DATABRICKS_HOST
     valueFrom: "system.databricks_host"
-  - name: DATABRICKS_TOKEN
-    valueFrom: "system.databricks_token"
+  # No DATABRICKS_TOKEN here (SDR-4437 F-CR-18). App SP auth is platform OAuth
+  # M2M via the injected DATABRICKS_CLIENT_ID/DATABRICKS_CLIENT_SECRET, and
+  # MLflow delegates to the same SDK credential chain. Do not reinstate it: a
+  # token in the environment is picked FIRST by that chain (pat -> basic ->
+  # metadata-service -> oauth-m2m), so it silently downgrades SP auth from
+  # OAuth M2M to token auth. See tests/unit/test_deploy_app_yaml.py.
   # Opt-in to trust x-forwarded-email / x-forwarded-user on the MCP endpoint
   # for app-to-app calls. Safe inside Databricks Apps because the proxy sets
   # these headers itself and strips any caller-supplied versions. See
