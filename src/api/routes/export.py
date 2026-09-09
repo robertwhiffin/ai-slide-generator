@@ -71,11 +71,11 @@ class ExportPPTXRequest(BaseModel):
 
 def build_slide_html(slide: dict, slide_deck: dict) -> str:
     """Build complete HTML for a single slide.
-    
+
     Args:
         slide: Slide dictionary with html content
         slide_deck: Full slide deck with css, scripts, etc.
-    
+
     Returns:
         Complete HTML string for the slide
     """
@@ -94,7 +94,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
         # Count opening and closing IIFEs
         iife_open = deck_scripts.count('(function() {')
         iife_close = deck_scripts.count('})();')
-        
+
         # If there are more closings than openings, remove the extra ones
         if iife_close > iife_open:
             logger.warning(
@@ -106,7 +106,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
             while iife_close > iife_open and deck_scripts.rstrip().endswith('})();'):
                 deck_scripts = deck_scripts.rstrip()[:-6].rstrip()  # Remove })();
                 iife_close -= 1
-        
+
         # Validate deck_scripts doesn't contain incomplete try-catch blocks
         try_count = len(re.findall(r'\btry\s*\{', deck_scripts))
         catch_finally_count = len(re.findall(r'\b(catch|finally)\s*\(', deck_scripts))
@@ -116,19 +116,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                 "This may cause syntax errors.",
                 extra={"slide_id": slide_id}
             )
-    
-    logger.info(
-        "Building slide HTML",
-        extra={
-            "slide_id": slide_id,
-            "raw_html_length": len(raw_slide_html),
-            "external_scripts_count": len(external_scripts),
-            "css_length": len(deck_css),
-            "scripts_length": len(deck_scripts),
-            "raw_html_preview": raw_slide_html[:500] + "..." if len(raw_slide_html) > 500 else raw_slide_html,
-        }
-    )
-    
+
     # NO `crossorigin` — deliberately, and it must stay that way (WM-02).
     #
     # `crossorigin="anonymous"` turns these into CORS requests. cdn.tailwindcss.com
@@ -282,7 +270,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     (function() {{
       function initCharts() {{
         console.log('[CHART_INIT] Starting chart initialization process...');
-        
+
         // Step 1: Wait for Chart.js to be fully loaded and ready
         function waitForChartJs(callback, maxAttempts = 200) {{
           let attempts = 0;
@@ -330,31 +318,31 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
           }};
           check();
         }}
-        
+
         // Step 2: Initialize charts after Chart.js is ready
         waitForChartJs(() => {{
           try {{
             console.log('[CHART_INIT] Chart.js ready, setting up canvases...');
-            
+
             // Find all canvas elements
             const canvases = document.querySelectorAll('canvas');
             console.log('[CHART_INIT] Found ' + canvases.length + ' canvas elements');
-            
+
             if (canvases.length === 0) {{
               console.warn('[CHART_INIT] No canvas elements found');
               return;
             }}
-            
+
             // Step 3: Set canvas dimensions BEFORE Chart.js initialization
             // This is critical - Chart.js needs non-zero dimensions
             canvases.forEach((canvas, idx) => {{
               const rect = canvas.getBoundingClientRect();
               const container = canvas.closest('.chart-container') || canvas.parentElement;
-              
+
               // Determine dimensions from container, CSS, or defaults
               let targetWidth = 0;
               let targetHeight = 0;
-              
+
               if (rect.width > 0 && rect.height > 0) {{
                 targetWidth = Math.floor(rect.width);
                 targetHeight = Math.floor(rect.height);
@@ -365,39 +353,39 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                   targetHeight = Math.floor(containerRect.height);
                 }}
               }}
-              
+
               // Use defaults if still no dimensions
               if (targetWidth === 0 || targetHeight === 0) {{
                 targetWidth = 800;
                 targetHeight = 400;
                 console.log('[CHART_INIT] Using default dimensions for canvas ' + idx);
               }}
-              
+
               // Set dimensions explicitly (Chart.js will respect these)
               canvas.width = targetWidth;
               canvas.height = targetHeight;
-              
+
               // Also set CSS dimensions to match (for responsive behavior)
               canvas.style.width = targetWidth + 'px';
               canvas.style.height = targetHeight + 'px';
-              
-              console.log('[CHART_INIT] Canvas ' + idx + ' (' + (canvas.id || 'unnamed') + '): ' + 
+
+              console.log('[CHART_INIT] Canvas ' + idx + ' (' + (canvas.id || 'unnamed') + '): ' +
                          targetWidth + 'x' + targetHeight + ' (rect: ' + rect.width + 'x' + rect.height + ')');
             }});
-            
+
             // Step 4: Wait for layout to settle, then initialize charts
             // Use requestAnimationFrame for better timing
             requestAnimationFrame(() => {{
               setTimeout(() => {{
                 try {{
                   console.log('[CHART_INIT] Executing chart scripts...');
-                  
+
                   // Execute chart initialization scripts
                   // These are already IIFE-wrapped, so execute directly
                   {deck_scripts}
-                  
+
                   console.log('[CHART_INIT] Chart scripts executed successfully');
-                  
+
                   // Step 5: Verify charts are rendering
                   let checkCount = 0;
                   const maxChecks = 30; // More checks for reliability
@@ -405,10 +393,10 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                     checkCount++;
                     const canvasesAfter = document.querySelectorAll('canvas');
                     console.log('[CHART_INIT] Check ' + checkCount + ': ' + canvasesAfter.length + ' canvases');
-                    
+
                     let renderedCount = 0;
                     let allReady = true;
-                    
+
                     canvasesAfter.forEach((canvas, index) => {{
                       try {{
                         // Verify canvas has dimensions
@@ -425,7 +413,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                           allReady = false;
                           return;
                         }}
-                        
+
                         // Check if canvas has content
                         const ctx = canvas.getContext('2d');
                         if (!ctx) {{
@@ -433,7 +421,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                           allReady = false;
                           return;
                         }}
-                        
+
                         // Sample a larger area for more reliable detection
                         const sampleWidth = Math.min(canvas.width, 400);
                         const sampleHeight = Math.min(canvas.height, 400);
@@ -445,11 +433,11 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                             pixelCount++;
                           }}
                         }}
-                        
+
                         const hasContent = pixelCount > 100; // Lower threshold for faster detection
-                        console.log('[CHART_INIT] Canvas ' + index + ' (' + (canvas.id || 'unnamed') + 
+                        console.log('[CHART_INIT] Canvas ' + index + ' (' + (canvas.id || 'unnamed') +
                                    '): ' + pixelCount + ' pixels, ready: ' + hasContent);
-                        
+
                         if (hasContent) {{
                           renderedCount++;
                         }} else {{
@@ -460,33 +448,33 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                         allReady = false;
                       }}
                     }});
-                    
+
                     console.log('[CHART_INIT] Progress: ' + renderedCount + '/' + canvasesAfter.length + ' charts rendered');
-                    
+
                     if (allReady && renderedCount === canvasesAfter.length && canvasesAfter.length > 0) {{
                       console.log('[CHART_INIT] All charts are ready!');
                       clearInterval(checkInterval);
                     }} else if (checkCount >= maxChecks) {{
-                      console.warn('[CHART_INIT] Max checks reached (' + maxChecks + '), ' + 
+                      console.warn('[CHART_INIT] Max checks reached (' + maxChecks + '), ' +
                                  renderedCount + '/' + canvasesAfter.length + ' charts rendered');
                       clearInterval(checkInterval);
                     }}
                   }}, 600); // Check every 600ms
-                  
+
                 }} catch (scriptError) {{
                   console.error('[CHART_INIT] Error executing chart scripts:', scriptError);
                   console.error('[CHART_INIT] Stack:', scriptError.stack);
                 }}
               }}, 200); // Short delay after dimensions are set
             }});
-            
+
           }} catch (error) {{
             console.error('[CHART_INIT] Chart initialization error:', error);
             console.error('[CHART_INIT] Stack:', error.stack);
           }}
         }});
       }}
-      
+
       // Start initialization when DOM is ready
       if (document.readyState === 'loading') {{
         document.addEventListener('DOMContentLoaded', initCharts);
@@ -498,42 +486,30 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
   </script>
 </body>
 </html>"""
-    
-    logger.info(
-        "Built complete slide HTML",
-        extra={
-            "slide_id": slide_id,
-            "complete_html_length": len(complete_html),
-            "includes_external_scripts": len(external_scripts) > 0,
-            "includes_css": len(deck_css) > 0,
-            "includes_scripts": len(deck_scripts) > 0,
-            "complete_html_preview": complete_html[:1000] + "..." if len(complete_html) > 1000 else complete_html,
-        }
-    )
-    
+
     return complete_html
 
 
 @router.post("/pptx")
 async def export_to_pptx(request: ExportPPTXRequest):
     """Export current slide deck to PowerPoint format.
-    
+
     Args:
         request: Export request with options
-    
+
     Returns:
         FileResponse with PPTX file
-    
+
     Raises:
         HTTPException: 404 if no slides, 500 on conversion error
     """
     # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
-    # Log to both logger and print to ensure visibility
-    log_msg = f"PPTX export request received - session_id: {request.session_id}, use_screenshot: {request.use_screenshot}"
-    logger.info(log_msg)
-    print(f"[EXPORT] {log_msg}")  # Also print to stdout for uvicorn to capture
-    
+    logger.info(
+        "PPTX export requested",
+        extra={"session_id": request.session_id, "use_screenshot": request.use_screenshot},
+    )
+
     try:
         # Get current slide deck
         chat_service = get_chat_service()
@@ -554,101 +530,35 @@ async def export_to_pptx(request: ExportPPTXRequest):
         with get_db_session() as db:
             substitute_deck_dict_images(slide_deck, db)
             substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
-        
-        slide_count = len(slide_deck.get("slides", []))
-        log_msg = (
-            f"Starting PPTX export - slides: {slide_count}, "
-            f"title: {slide_deck.get('title')}, "
-            f"has_css: {bool(slide_deck.get('css'))}, "
-            f"has_scripts: {bool(slide_deck.get('scripts'))}, "
-            f"external_scripts: {len(slide_deck.get('external_scripts', []))}"
-        )
-        logger.info(log_msg)
-        print(f"[EXPORT] {log_msg}")  # Also print to stdout
-        
-        # Log slide deck structure
-        slides_info = [
-            {
-                "slide_id": slide.get("slide_id"),
-                "html_length": len(slide.get("html", "")),
-                "html_preview": slide.get("html", "")[:200] + "..." if len(slide.get("html", "")) > 200 else slide.get("html", "")
-            }
-            for slide in slide_deck.get("slides", [])
-        ]
-        logger.info("Slide deck structure for export", extra={"slides": slides_info})
-        print(f"[EXPORT] Slide deck structure: {len(slides_info)} slides")
-        for i, slide_info in enumerate(slides_info):
-            print(f"[EXPORT]   Slide {i}: {slide_info['slide_id']}, HTML length: {slide_info['html_length']}, preview: {slide_info['html_preview']}")
-        
+
         # Initialize converter
         converter = HtmlToPptxConverterV3()
-        
+
         # Prepare slides HTML
         slides_html = []
         html_files = []
-        
+
         # Create temporary directory for HTML files (needed for screenshots)
         temp_dir = Path(tempfile.mkdtemp(prefix="pptx_export_"))
-        logger.info("Created temp directory for export", extra={"temp_dir": str(temp_dir)})
-        
+
         try:
             for i, slide in enumerate(slide_deck.get("slides", [])):
-                slide_id = slide.get("slide_id", f"slide_{i}")
-                raw_html = slide.get("html", "")
-                log_msg = f"Building HTML for slide {i} ({slide_id}) - raw HTML length: {len(raw_html)}"
-                logger.info(log_msg, extra={"slide_index": i, "slide_id": slide_id, "raw_html_length": len(raw_html)})
-                print(f"[EXPORT] {log_msg}")
-                print(f"[EXPORT] Raw HTML preview: {raw_html[:500]}{'...' if len(raw_html) > 500 else ''}")
-                
                 # Build complete HTML for each slide
                 slide_html = build_slide_html(slide, slide_deck)
-                html_length = len(slide_html)
                 slides_html.append(slide_html)
-                
-                log_msg = (
-                    f"Built complete HTML for slide {i} ({slide_id}) - "
-                    f"length: {html_length}, "
-                    f"has_external_scripts: {len(slide_deck.get('external_scripts', [])) > 0}, "
-                    f"has_scripts: {bool(slide_deck.get('scripts'))}"
-                )
-                logger.info(log_msg, extra={"slide_index": i, "slide_id": slide_id, "complete_html_length": html_length})
-                print(f"[EXPORT] {log_msg}")
-                print(f"[EXPORT] Complete HTML preview: {slide_html[:1000]}{'...' if html_length > 1000 else ''}")
-                
+
                 # Create temporary HTML file for screenshot capture
                 if request.use_screenshot:
                     html_file = temp_dir / f"slide_{i}.html"
                     html_file.write_text(slide_html, encoding='utf-8')
                     html_files.append(str(html_file))
-                    
-                    # Verify file was written and contains Chart.js
-                    file_size = html_file.stat().st_size
-                    has_chart_js = 'chart.js' in slide_html.lower() or 'cdn.jsdelivr.net/npm/chart' in slide_html.lower()
-                    has_canvas = '<canvas' in slide_html.lower()
-                    has_scripts = '<script' in slide_html.lower()
-                    
-                    logger.info(
-                        "Created HTML file for screenshot",
-                        extra={
-                            "slide_index": i,
-                            "html_file": str(html_file),
-                            "file_size": file_size,
-                            "has_chart_js": has_chart_js,
-                            "has_canvas": has_canvas,
-                            "has_scripts": has_scripts,
-                        }
-                    )
-                    print(
-                        f"[EXPORT] Created HTML file for slide {i}: {html_file}, "
-                        f"size: {file_size} bytes, Chart.js: {has_chart_js}, Canvas: {has_canvas}, Scripts: {has_scripts}"
-                    )
-                    
-                    if not has_chart_js:
-                        logger.warning(f"HTML file for slide {i} does not contain Chart.js CDN link")
-                        print(f"[EXPORT] WARNING: HTML file for slide {i} missing Chart.js!")
+
+                    lowered = slide_html.lower()
+                    if 'chart.js' not in lowered and 'cdn.jsdelivr.net/npm/chart' not in lowered:
+                        logger.warning("HTML file for slide %d does not contain Chart.js CDN link", i)
                 else:
                     html_files.append(None)
-            
+
             # Create temporary output file
             output_file = tempfile.NamedTemporaryFile(
                 delete=False,
@@ -657,40 +567,16 @@ async def export_to_pptx(request: ExportPPTXRequest):
             )
             output_path = output_file.name
             output_file.close()
-            
-            # Log summary before conversion
-            logger.info(
-                "Starting PPTX conversion",
-                extra={
-                    "total_slides": len(slides_html),
-                    "html_lengths": [len(html) for html in slides_html],
-                    "total_html_size": sum(len(html) for html in slides_html),
-                    "use_screenshot": request.use_screenshot,
-                    "html_files_count": len([f for f in html_files if f]),
-                    "output_path": output_path,
-                }
-            )
-            
+
             # Prepare chart images per slide (if provided by client)
             chart_images_per_slide = None
             if request.chart_images:
                 # Convert ChartImage objects to dicts
-                chart_images_per_slide = []
-                for slide_idx, slide_charts in enumerate(request.chart_images):
-                    chart_dict = {img.canvas_id: img.base64_data for img in slide_charts}
-                    chart_images_per_slide.append(chart_dict)
-                    if chart_dict:
-                        print(f"[EXPORT] Slide {slide_idx + 1}: {len(chart_dict)} chart images (IDs: {list(chart_dict.keys())})")
-                    else:
-                        print(f"[EXPORT] Slide {slide_idx + 1}: No chart images")
-                logger.info(
-                    "Using client-provided chart images",
-                    extra={"slides_with_charts": len([c for c in chart_images_per_slide if c]), "total_slides": len(chart_images_per_slide)}
-                )
-                print(f"[EXPORT] Using client-provided chart images for {len([c for c in chart_images_per_slide if c])} of {len(chart_images_per_slide)} slides")
-            else:
-                print(f"[EXPORT] No chart_images in request (request.chart_images is {request.chart_images})")
-            
+                chart_images_per_slide = [
+                    {img.canvas_id: img.base64_data for img in slide_charts}
+                    for slide_charts in request.chart_images
+                ]
+
             # Convert to PPTX
             await converter.convert_slide_deck(
                 slides=slides_html,
@@ -699,15 +585,22 @@ async def export_to_pptx(request: ExportPPTXRequest):
                 html_source_paths=html_files if request.use_screenshot and not request.chart_images else None,
                 chart_images_per_slide=chart_images_per_slide
             )
-            
+
             # Generate filename
             title = slide_deck.get("title", "slides")
             # Sanitize filename
             safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
             filename = f"{safe_title.replace(' ', '_')}.pptx"
-            
-            logger.info("PPTX export completed", extra={"path": output_path, "pptx_filename": filename})
-            
+
+            logger.info(
+                "PPTX export completed",
+                extra={
+                    "session_id": request.session_id,
+                    "total_slides": len(slides_html),
+                    "pptx_filename": filename,
+                },
+            )
+
             # Cleanup function for temporary files
             def cleanup():
                 try:
@@ -721,18 +614,18 @@ async def export_to_pptx(request: ExportPPTXRequest):
                         temp_dir.rmdir()
                 except Exception as e:
                     logger.warning("Failed to cleanup temp files", exc_info=True, extra={"error": str(e)})
-            
+
             # Use BackgroundTasks for cleanup
             background_tasks = BackgroundTasks()
             background_tasks.add_task(cleanup)
-            
+
             return FileResponse(
                 path=output_path,
                 filename=filename,
                 media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 background=background_tasks
             )
-            
+
         except PPTXConversionError as e:
             logger.error("PPTX conversion failed", exc_info=True, extra={"error": str(e)})
             # Cleanup on error
@@ -755,7 +648,7 @@ async def export_to_pptx(request: ExportPPTXRequest):
             except Exception:
                 pass
             raise HTTPException(status_code=500, detail="Export failed")
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -784,21 +677,21 @@ class ExportJobResponse(BaseModel):
 @router.post("/pptx/async", response_model=ExportJobResponse)
 async def start_pptx_export_async(request: ExportPPTXRequest):
     """Start async PPTX export for background processing.
-    
+
     Use this endpoint for large slide decks that would timeout with the
     synchronous /pptx endpoint.
-    
+
     Flow:
     1. POST /api/export/pptx/async -> returns job_id
     2. Poll GET /api/export/pptx/poll/{job_id} until status is completed/error
     3. GET /api/export/pptx/download/{job_id} to download the file
-    
+
     Args:
         request: Export request with session_id and chart_images
-    
+
     Returns:
         ExportJobResponse with job_id and initial status
-    
+
     Raises:
         HTTPException: 404 if no slides available
     """
@@ -809,43 +702,38 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         enqueue_export_job,
         generate_job_id,
     )
-    
+
     import time
     start_time = time.time()
-    
-    # Log immediately to confirm request was received and parsed
-    print(f"[EXPORT_ASYNC] Handler started at {start_time:.3f}")
-    
+
     chart_count = len(request.chart_images) if request.chart_images else 0
     chart_data_size = 0
     if request.chart_images:
         for slide_charts in request.chart_images:
             for img in slide_charts:
                 chart_data_size += len(img.base64_data) if img.base64_data else 0
-    
+
     logger.info(
         f"Received async PPTX export request (chart_images: {chart_count} slides, ~{chart_data_size // 1024}KB)",
         extra={"session_id": request.session_id},
     )
-    print(f"[EXPORT_ASYNC] Request parsed: {chart_count} slides with chart images (~{chart_data_size // 1024}KB)")
-    
+
     try:
         # Get current slide deck - just validate it exists and get count
         # Don't build HTML here - that happens in the background worker
         # Use asyncio.to_thread to avoid blocking
         chat_service = get_chat_service()
-        
+
         db_start = time.time()
         slide_deck = await asyncio.to_thread(chat_service.get_slides, request.session_id)
         db_time = time.time() - db_start
-        print(f"[EXPORT_ASYNC] DB fetch took {db_time:.2f}s")
-        
+
         if not slide_deck or not slide_deck.get("slides"):
             raise HTTPException(status_code=404, detail="No slides available")
-        
+
         slides = slide_deck.get("slides", [])
         total_slides = len(slides)
-        
+
         logger.info(
             f"Queueing async PPTX export for {total_slides} slides (DB: {db_time:.2f}s)",
             extra={
@@ -853,7 +741,7 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
                 "total_slides": total_slides,
             },
         )
-        
+
         # Prepare chart images per slide (if provided by client)
         # This is just converting the pydantic models to dicts - fast operation
         chart_images_per_slide = None
@@ -862,11 +750,11 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
                 {img.canvas_id: img.base64_data for img in slide_charts}
                 for slide_charts in request.chart_images
             ]
-        
+
         # Generate job ID and queue for processing
         # Pass session_id - the worker will fetch and build HTML
         job_id = generate_job_id()
-        
+
         await enqueue_export_job(
             job_id,
             {
@@ -876,18 +764,17 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
                 "total_slides": total_slides,
             },
         )
-        
+
         total_time = time.time() - start_time
-        print(f"[EXPORT_ASYNC] Job queued in {total_time:.2f}s, returning job_id={job_id}")
         logger.info(f"Export job queued in {total_time:.2f}s", extra={"job_id": job_id})
-        
+
         return ExportJobResponse(
             job_id=job_id,
             status="pending",
             progress=0,
             total_slides=total_slides,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -899,20 +786,20 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
 @router.get("/pptx/poll/{job_id}", response_model=ExportJobResponse)
 async def poll_pptx_export(job_id: str):
     """Poll for PPTX export status and progress.
-    
+
     Args:
         job_id: Job ID from start_pptx_export_async
-    
+
     Returns:
         ExportJobResponse with current status and progress
-    
+
     Raises:
         HTTPException: 404 if job not found
     """
     # SDR-4437: job-ID IDOR — possession of a job_id must not grant access.
     _require_export_job_access(job_id)
     from src.api.services.export_job_queue import build_export_job_response
-    
+
     try:
         return ExportJobResponse(**build_export_job_response(job_id))
     except ValueError:
@@ -922,14 +809,14 @@ async def poll_pptx_export(job_id: str):
 @router.get("/pptx/download/{job_id}")
 async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
     """Download completed PPTX export.
-    
+
     Args:
         job_id: Job ID from start_pptx_export_async
         background_tasks: FastAPI background tasks for cleanup
-    
+
     Returns:
         FileResponse with PPTX file
-    
+
     Raises:
         HTTPException: 404 if job not found, 400 if not completed
     """
@@ -939,32 +826,32 @@ async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
         get_export_job_status,
         cleanup_export_job,
     )
-    
+
     job = get_export_job_status(job_id)
-    
+
     if not job:
         raise HTTPException(status_code=404, detail="Export job not found")
-    
+
     if job["status"] != "completed":
         raise HTTPException(
             status_code=400,
             detail=f"Export not ready. Status: {job['status']}",
         )
-    
+
     output_path = job.get("output_path")
     if not output_path or not Path(output_path).exists():
         raise HTTPException(status_code=404, detail="Export file not found")
-    
+
     # Generate filename
     title = job.get("title", "slides")
     safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title)
     filename = f"{safe_title.replace(' ', '_')}.pptx"
-    
+
     logger.info(
         "Serving PPTX download",
         extra={"job_id": job_id, "pptx_filename": filename},
     )
-    
+
     # Schedule cleanup after download
     background_tasks.add_task(cleanup_export_job, job_id)
 
