@@ -43,24 +43,54 @@ def test_write_app_yaml_is_keyless():
     assert "GOOGLE_OAUTH_ENCRYPTION_KEY" not in content
 
 
-def test_app_yaml_has_databricks_token():
-    """MEDIUM-4 DROPPED: DATABRICKS_TOKEN stays in app.yaml. It is a
-    platform-managed short-lived OAuth token reference (valueFrom:
-    system.databricks_token), not a hardcoded secret, and MLflow tracing
-    reads it from the env — dropping it broke MLflow, so it is retained.
+def test_app_yaml_has_no_databricks_token():
+    """SDR-4437 F-CR-18: SP auth is platform OAuth M2M, not a token env var.
+
+    This assertion was added and reverted once before (a2676e944 -> 6f23a2bef,
+    July 2026) on the belief that MLflow tracing needs DATABRICKS_TOKEN in the
+    environment. Measured on a live deployment (0.4.3.dev18, 2026-09-08)
+    before re-landing it:
+
+    * The deployed app.yaml did carry ``valueFrom: system.databricks_token``,
+      yet the SDK resolved ``auth_type=oauth-m2m``. ``pat_auth`` is FIRST in
+      the DefaultCredentials chain and needs only host+token, so it can only
+      have been skipped because the variable was absent or empty — the
+      ``system.databricks_token`` reference does not populate.
+    * ``oauth-m2m`` is declared as requiring host+client_id+client_secret, so
+      its selection proves DATABRICKS_CLIENT_SECRET *is* injected; the
+      subsequent ``current_user.me()`` call then succeeded.
+    * MLflow needs no token of its own — it delegates to this same SDK chain
+      whenever MLFLOW_ENABLE_DB_SDK is set, which is its default.
+
+    So the entry was inert config, and removing it cannot change runtime
+    behaviour: the app already authenticates without it. Before reverting this
+    again, re-measure ``resolved_auth_type`` on a live deployment rather than
+    assuming the July conclusion still holds.
+
     (CRITICAL-3 still removes GOOGLE_OAUTH_ENCRYPTION_KEY — see the keyless
-    test above.)"""
+    test above.)
+    """
     import tempfile
     from pathlib import Path
+
+    import yaml
 
     from databricks_tellr import deploy
 
     with tempfile.TemporaryDirectory() as td:
         deploy._write_app_yaml(Path(td), "lb", "app_data")
         content = (Path(td) / "app.yaml").read_text()
-    assert "DATABRICKS_TOKEN" in content
-    assert "system.databricks_token" in content
-    assert "DATABRICKS_HOST" in content  # still required by create_user_client
+
+    # Assert on the parsed env entries, not on substrings: the template carries
+    # a comment naming DATABRICKS_TOKEN to warn against reinstating it, and a
+    # substring check would flag that comment as the very thing it prevents.
+    env = yaml.safe_load(content)["env"]
+    names = {entry["name"] for entry in env}
+    value_froms = {entry.get("valueFrom") for entry in env}
+
+    assert "DATABRICKS_TOKEN" not in names
+    assert "system.databricks_token" not in value_froms
+    assert "DATABRICKS_HOST" in names  # still required by create_user_client
 
 
 def test_app_yaml_omits_secret_block_in_legacy_mode(tmp_path: Path):

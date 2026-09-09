@@ -307,10 +307,14 @@ def get_system_client(force_new: bool = False) -> WorkspaceClient:
             # Values go in the message, not ``extra``: the app boots on
             # ``logging.basicConfig`` with a "%(message)s" format, so extra
             # fields never reach the log.
+            # The Apps log scrubber redacts any field whose NAME contains
+            # "secret" or "token", so these labels are deliberately indirect:
+            # "has_client_secret=True" rendered in /logz as
+            # "has_client_REDACTED_SECRET" and could not be read.
             diag = sp_auth_diagnostics(_system_client)
             logger.info(
-                "System SP auth resolution: "
-                "resolved_auth_type=%s has_client_id=%s has_client_secret=%s has_token=%s",
+                "System SP auth resolution: resolved_auth_type=%s "
+                "client_id_present=%s m2m_credential_present=%s pat_credential_present=%s",
                 diag["resolved_auth_type"],
                 diag["has_client_id"],
                 diag["has_client_secret"],
