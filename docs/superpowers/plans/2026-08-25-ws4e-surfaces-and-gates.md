@@ -176,7 +176,7 @@ landed and that the gate is not in the code.
 
 | Layer | Needs | In CI | Owned by |
 |---|---|---|---|
-| 1. Orchestration | nothing — stub agents, real compiled graph | ✅ | ws4c |
+| 1. Orchestration | nothing — stub agents, real compiled graph | ✅ via ws4c's **`integration-graph`** job | ws4c |
 | 2. Schema / contract | nothing — canned payloads | ✅ | ws4b |
 | 3. **Agentic behaviour** | a real model via local Databricks | ❌ today | **here** |
 | 4. Concurrency / multi-worker | a database, no model | ✅ | **here** |
