@@ -11,87 +11,85 @@ Legend: `[new]` = no prior reviewer recorded it. `[already recorded]` = present 
 
 ---
 
-## OPEN — judgment calls for the human. Do NOT implement past these.
+## RESOLVED — all five decided 2026-09-10, with probes. Nothing here blocks implementation.
 
-### S1. `invoke_graph`'s contract admits neither the event queue nor the principal, and ws4d puts it on a thread the principal cannot cross (ws4c C4 <-> ws4d D2/D3) `[new]` (queue half `[already recorded]`)
+Each was a contract hole needing a human decision. The original statements are preserved in git
+(`9c73d58f`); what follows is the decision and the evidence behind it.
 
-ws4c: `invoke_graph(session_id, initial)` — two parameters — and "Set in `invoke_graph` before
-`graph.invoke()` runs". ws4d D3 defines `emit_slide_ready(queue, ...)` and D2 requires "invoke the
-graph in a worker thread". The queue is created in ws4d's generator; `invoke_graph` has no slot for it.
+### S1 — `invoke_graph(session_id, initial, *, emitter=None, principal=None)` — commit `a63124e9`
 
-Deeper: ws4c declares `initiated_by` "resolved once in `invoke_graph`" and makes `modified_by=initiated_by`
-load-bearing. Identity is a ContextVar (`src/core/user_context.py:11`). **A bare `threading.Thread` does
-not carry the parent's context**, so `get_current_user()` on the worker thread returns `None`.
-`grep -rn initiated_by` over the five plans returns three hits, all ws4c — ws4d, the only caller, never
-populates it.
+**Probed on langgraph 1.2.10:** a ContextVar set before `graph.invoke()` was read by **all six**
+`Send`-fanned nodes through a `threading.Thread(target=ctx.run)`, and a node-local `.set()` leaked
+neither back nor sideways. Cause: LangChain fans out via `ContextThreadPoolExecutor`, whose `submit`
+wraps every task in `copy_context().run(...)` (`langchain_core/runnables/config.py:607-628`).
 
-Breaks: either events queue nowhere (no slide ever streams), or `invoke_graph` grows an undeclared
-parameter mid-build. Independently every graph row insert lands `modified_by` NULL
-(`slide_repository.py:91`, `:104-107`) and ws4c's own author test fails.
+So the ContextVar mechanism works and the principal needs no payload field. ws4c's stated reason for
+carrying `initiated_by` — *"`get_current_user()` returns `None` inside the graph"* — was **measurably
+false**: it returns `None` only when the caller failed to copy its context.
 
-Decision needed: widen `invoke_graph`'s signature to take the emitter and the principal explicitly,
-and state that ws4d resolves both **before** spawning the thread (`contextvars.copy_context()` is the
-mechanism). Owner: ws4c.
+**Decided:** ws4c owns the emitter's lifecycle via an explicit parameter, so the dependency is visible in
+a signature and testable. `emitter=None` means nodes **skip** emission rather than raise — emission is an
+optional side channel, which the sweeper path and every state-asserting layer-1 test need. ws4d must
+`contextvars.copy_context()` before spawning, exactly as the monolith already does
+(`chat_service.py:1133` *"Capture context BEFORE starting thread to preserve user auth"*, `:1187`). D5's
+sweeper passes `principal=marker.spec_dirty_by` and no emitter.
 
-### S2. `resolved_style` has a consumer, a payload slot and a test — and no producer in any plan (ws4c C1/C3/C4 <-> ws4d D2) `[new]`
+### S2 — `resolve_slide_style` delegates; it does not reimplement — commit `830b4590`
 
-`grep -rn resolved_style` over all six documents: three hits, all ws4c. C6's `resolve_template_bytes`
-returns `(layout_html, <style> block, token_css)` — no style prose. C3 makes the **entire**
-`_SLIDE_FRAME_CONSTRAINTS` decision turn on the resolved style's three cases and tests all three.
-The real resolver is `agent_factory._get_prompt_content` — 237 lines, and C8 leaves it where it is.
-ws4d D2 attributes resolution to `agent_resolution`, a module declared to hold only
-`assemble_skill_prompt` and `get_structured_model`.
+The producer already existed: `_get_prompt_content(config)` returns a `"slide_style"` key, and style is
+resolved **before** its mode split, so `generate` and `edit` yield the same bytes.
 
-Breaks: `resolved_style` is `None`, so C3 injects frame constraints unconditionally or never, its
-three-case test cannot be written, and §L5's "builder and reviewer get the same numbers or the
-criterion is unfair" is unmet silently.
+**Decided:** `agent_resolution.resolve_slide_style(config)` is one line delegating to it. C8 documents why
+a second copy is unsafe — resolution is a **branch, not a ladder** (an inactive `design_system_id` does
+not fall through), `_design_system_is_active` fails **closed** on a tombstone, and a stale
+`compiled_style_content` is lazily recompiled. That branch has already shipped a measured defect once. The
+plan therefore adds a test asserting the graph and the monolith resolve **identical bytes** from the same
+config — the only guard against someone later "optimising away" the delegation. The `AgentConfig` comes
+from the session via `resolve_agent_config` (`agent_config.py:238`), **not** through `GraphState`.
+Accepted cost: one discarded system-prompt assembly per turn.
 
-Decision needed: name the function that resolves style for the graph path, and whether it reads into
-the moved `agent_factory` under R2's read-don't-modify licence. Owner: ws4c.
+### S3 — two readers, two purposes, no new machinery — commit `a24aa2b2`
 
-### S3. Deck-level findings have a writer and no reader (ws4b B2.2 <-> ws4c C4 <-> ws4e E2) `[new]`
+**Probed:** `message_type="info"` is already the shipped vehicle for machine-generated advisories the user
+must see (`chat_service.py:758` RC11 conflict note, `:793` safety notice); the frontend **never inspects
+`message_type`** (`ChatPanel.tsx:101` maps `msg.role`), so any persisted `role="assistant"` message
+renders; and `_hydrate_chat_history` skips `info` by an explicit rule.
 
-ws4b defines `get_deck_review(session_id, deck_id)`; `grep -rn get_deck_review` over all six documents
-returns two hits, both inside ws4b's own contract. ws4c writes via `save_deck_review` and emits once as
-a "deck-level activity message". ws4e E2: "Deck-level findings do NOT come from here... The drawer must
-never render one." No plan declares a `StreamEventType` for that message, and ws4d's own rule is that
-"a new type that is not on the enum cannot be constructed."
+**Decided:** `deck_reviewer_node` persists the verdict as `role="assistant", message_type="info"` — no new
+`StreamEventType`, no route, no UI work. `architect_node` reads the structured row via `get_deck_review`
+at turn start, which is that function's **only** production caller and the reason the table is
+content-addressed and survives a restore; without it turn *n+1* re-proposes an arc the reviewer already
+rejected, indefinitely. D3's rejection of persisting *slide-ready* stands: that is 15–40 mechanical events
+per turn, this is one content message.
 
-Breaks: `deck_reviews`, its unique key, digest, restore-immunity and four tests are built for a table
-nothing reads. A user who reloads sees nothing — the chat message is ephemeral by D3's own rejection of
-persisting build mechanics, the drawer must not render it, no surface calls the getter. §F4's payoff
-(edit-then-revert recall of the arc verdict) is unreachable.
+### S4 — ws4c adds its own CI job; ws4a adds the guard that makes the gap loud — commit `6678c997`
 
-Decision needed: name a reader (route + surface) and the event type, or state that `get_deck_review`
-exists only for the next turn's architect and drop the unread-surface claim. Owner: ws4c or ws4e.
+**Measured:** `tests/integration/` holds **17** `test_*.py` files, the workflow names **7**, and **10 run
+in no job** — including PR1's `test_slide_row_identity_and_verdicts.py` (the foundation every plan here
+builds on), PR1's dual-write and row-read suites, PRD §3's `test_export_parity.py`, and
+`test_mcp_endpoint.py`, which **ws4d's own DoD names as a gate**.
 
-### S4. ws4c's layer-1 suite runs in no CI job, while ws4e's layer table marks it "In CI" `[new]`
+**Decided:** ws4c adds an `integration-graph` job with the suite (cloning `integration-slides`
+`:306-345` for the Postgres service that "turn 2 against a real checkpointer" needs anyway) — parking it
+in ws4e's layer-4 job would leave ws4c's headline DoD unverifiable in CI for three PRs. ws4a gains
+**Task A5**, the exact analogue of its e2e matrix guard, landing **first** so ws4c's and ws4e's new files
+cannot silently join the graveyard. The index now records that **four** of the five PRs edit `test.yml`.
 
-`.github/workflows/test.yml`'s only directory-wide collection is `pytest tests/unit` (`:102`); every
-integration job names **files**. ws4c C5 lands its harness and suite in `tests/integration/`. The only
-new integration job in the set is ws4e E4's `pytest tests/integration -k layer4`, whose `-k` excludes
-layer 1 by construction.
+### S5 — the §7.4 flag is derived from the turn, not read from the sweeper — commit `ee2bc8e9`
 
-Breaks: ws4c's DoD ("the layer-1 suite runs against the compiled graph, all eleven behaviours") is
-satisfiable locally and never runs in CI. These are the tests the five-PR split exists to protect —
-spec §8's whole point is that scheduler unit tests pass while shipped behaviour degrades.
+E2b was bound to the wrong thing. §7.4 gives the flag to *"the whole-deck pass"* — the deck review inside
+a turn — but E2b bound it to ws4d D4's `spec_sync.mark_dirty`, the **sweeper's** between-turns marker, then
+asserted transitions no client can observe: that needs a server read ws4b deliberately refuses **and** an
+idle poll loop that does not exist (`startPolling` takes a message and runs only during a turn).
 
-Decision needed: ws4c adds a job for its own suite, or ws4e E4 widens its job. Either way ws4e's table
-must stop claiming a green tick. Round 1 caught this class for layer 4; the fix covered only layer 4.
-
-### S5. E2b's "review in progress" flag has no data path, and ws4b asserts a test forbidding the obvious one (ws4b B2.3 <-> ws4e E2b) `[new]`
-
-ws4b B2.3: "Not deck presentation state, so deliberately absent from `get_slide_deck`'s dict. **Assert
-that.**" ws4e E2b asserts the flag appears when a marker exists, disappears when it clears, and stays
-on when a failed review keeps the marker. `grep -rn spec_dirty` across the plans: ws4b B2.3 and ws4d D5
-only — no route, no response key, no read function.
-
-Breaks: two of E2b's four assertions need the client to observe server-side transitions it cannot see.
-An implementer invents a read path (which ws4b's own test then fails) or fakes it from local state (at
-which point three of four tests are untestable).
-
-Decision needed: ws4b adds a non-presentation read and relaxes the assertion to the deck dict
-specifically, or ws4e scopes E2b to what a client can observe.
+**Decided:** derive it —
+`reviewInProgress = releasedPositions.size === deckSpec.slides.length && !turnComplete`. Exact, not a
+heuristic: ws4c's topology after the last commit is `all_positions_committed → deck_reviewer → END`, so
+once every position is released the only remaining work *is* the deck review. No endpoint, no response
+key, no server change, and ws4b's assertion stands untouched. Sweeper-driven reviews are not visible in
+this PR and §7.4 never asked them to be. Two unsatisfiable assertions dropped; two added that can fail —
+the flag must be **off** mid-build, and "non-blocking" is now falsifiable as *no control's `disabled` prop
+reads it*.
 
 ---
 
