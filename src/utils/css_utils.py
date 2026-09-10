@@ -1,4 +1,25 @@
-"""CSS parsing and merging utilities for slide deck editing."""
+"""CSS parsing and merging utilities for slide deck editing.
+
+Hoisting contract
+-----------------
+:func:`merge_css` stable-partitions the merged block list so that ``@charset``
+appears first, ``@import`` blocks appear second, and everything else follows.
+These are the only two at-rule types that are hoisted.
+
+**Known unhoisted cases:** ``@namespace`` and the statement form of ``@layer``
+(e.g. ``@layer base;`` — a block-less at-rule, distinct from the block form
+``@layer base { ... }`` which does not need to be first) are NOT hoisted.
+Both parse as at-rules with ``content is None``, indistinguishable from each
+other and from ``@import`` by content shape alone, but they are not included in
+the hoist logic because the existing callers do not emit them.
+
+A consumer that needs ``@namespace`` or statement-form ``@layer`` to appear
+before other rules must either (a) ensure those at-rules are already at the
+top of the ``existing_css`` it passes in (they will then stay at position
+in the merge output), or (b) post-process the output of :func:`merge_css` to
+move them.  Do not add them to the hoist lists here without a concrete use
+case — the hoist is deliberately narrow so its contract is testable.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,6 +32,8 @@ import tinycss2
 # then everything else -- because ``dict.update`` semantics hold position only
 # for keys that ALREADY exist, so a replacement introducing an @import the
 # existing sheet lacks would otherwise land last, where a browser ignores it.
+# NOTE: only @charset and @import are hoisted. @namespace and statement-form
+# @layer are known unhoisted cases -- see module docstring for details.
 _CHARSET_KEYWORD = "charset"
 _IMPORT_KEYWORD = "import"
 
@@ -205,6 +228,9 @@ def merge_css(existing_css: str, replacement_css: str) -> str:
           ``existing_css`` on the next edit.
         - New blocks from replacement_css are appended, then ``@charset`` and
           ``@import`` are hoisted to the front, where a browser honours them.
+          **Only these two at-rule types are hoisted.** ``@namespace`` and the
+          statement form of ``@layer`` (``@layer base;``) are NOT hoisted; see
+          the module docstring for how a consumer should handle them if needed.
         - Blocks in existing_css that replacement_css does not mention are
           preserved. Nothing is deleted by omission.
         - Top-level comments do not survive the merge (unchanged behaviour).

@@ -33,6 +33,12 @@ jobs:
         id: filter
         with:
           filters: |
+            # NOTE: `backend` includes `frontend/tests/**` so that a
+            # frontend-tests-only PR (e.g. a new E2E spec) also runs the backend
+            # unit tests and all seven integration jobs — they all gate on
+            # `backend`. This coupling is intentional: E2E spec files import
+            # backend fixtures, and integration guards (test_ci_collects_integration_tests,
+            # test_e2e_matrix_covers_specs) live in tests/unit.
             backend:
               - 'src/**'
               - 'tests/**'
@@ -402,6 +408,11 @@ jobs:
   integration-general:
     name: "Integration: General"
     runs-on: ubuntu-latest
+    # Backstop: the measured baseline is ~18 s for all ten files. 15 minutes is
+    # far above that but far below GitHub's 6-hour default, so a future
+    # regression that re-introduces the SCIM-retry hang fails fast instead of
+    # burning the runner for hours.
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -417,8 +428,16 @@ jobs:
       - name: Run general integration tests
         env:
           ENVIRONMENT: test
-          DATABRICKS_HOST: https://test.cloud.databricks.com
-          DATABRICKS_TOKEN: test-token
+          # IMPORTANT: these must be empty strings, NOT fake values like
+          # "https://test.cloud.databricks.com". A non-empty but unreachable host
+          # puts the identity provider into WORKSPACE mode via get_system_client()
+          # (databricks_client.py), and the first SCIM call against that host then
+          # retries until the job dies (measured: >60 s each for four of these ten
+          # tests). Empty credentials make WorkspaceClient() construction raise,
+          # which _determine_mode() catches and falls back to LOCAL identity — no
+          # SCIM call, no retries, all ten tests finish in ~18 s total.
+          DATABRICKS_HOST: ""
+          DATABRICKS_TOKEN: ""
         run: |
           pytest \
             tests/integration/test_comments_removed.py \

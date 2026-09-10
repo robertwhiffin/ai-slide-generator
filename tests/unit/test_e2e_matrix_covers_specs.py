@@ -142,6 +142,32 @@ def _e2e_spec_stems() -> set[str]:
 
 
 # ---------------------------------------------------------------------------
+# Assertion 4 — no nested specs
+# ---------------------------------------------------------------------------
+def test_no_nested_e2e_specs():
+    """No *.spec.ts may exist inside a sub-directory of frontend/tests/e2e/.
+
+    The e2e matrix names specs by their flat stem (e.g. "slide-viewer").  A
+    spec at tests/e2e/subdir/foo.spec.ts cannot be named in that flat list, so
+    a flat matrix can never collect it.  The correct fix is to flatten it into
+    tests/e2e/ — not to silently ignore it or expand the matrix format to
+    accommodate subdirectories.
+    """
+    nested = [
+        p.relative_to(E2E_DIR)
+        for p in E2E_DIR.rglob("*.spec.ts")
+        if p.parent != E2E_DIR
+    ]
+    assert not nested, (
+        "Found *.spec.ts files in sub-directories of frontend/tests/e2e/:\n"
+        + "\n".join(f"  - frontend/tests/e2e/{p}" for p in sorted(nested))
+        + "\n\nThe e2e matrix names specs by flat stem only. A nested spec"
+        " cannot be named in the matrix and will never run in CI. Flatten it"
+        " into frontend/tests/e2e/ and add it to the matrix."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Assertion 1 — coverage
 # ---------------------------------------------------------------------------
 def test_every_spec_is_in_matrix_or_excluded_with_reason():
