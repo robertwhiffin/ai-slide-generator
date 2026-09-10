@@ -148,24 +148,42 @@ appears in `npm run test:unit`'s collected set, exactly as E1 requires.
 — export, presenting, and editing all stay live. It is purely informational: a user seeing it knows a
 review is pending.
 
-**Contract** — trigger on the marker being set (ws4d D4's `spec_sync.mark_dirty`), clear when the
-review completes or the marker clears. The flag lives in UI state (`AppLayout`), not server state.
+**What the flag covers, precisely — and it is NOT the sweeper's marker.** §7.4 gives the flag to *"the
+whole-deck pass"*: the deck review that runs inside a turn, after every slide has committed. An earlier
+draft bound it to ws4d D4's `spec_sync.mark_dirty` instead — the **sweeper's** between-turns marker — and
+that produced two assertions no client can satisfy, because observing a sweeper transition needs a server
+read that ws4b deliberately refuses (`spec_dirty` is *"not deck presentation state, so deliberately absent
+from `get_slide_deck`'s dict"*) and an idle polling loop that does not exist (`startPolling` takes a
+message and runs only during a turn). **A sweeper-driven review is not visible in this PR, and §7.4 does
+not ask it to be.**
 
-**Where it appears:** §7.1's spec view, as a subtle spinner or "Review pending" badge. The spec does
-not name a location; choose one that is discoverable but non-intrusive — e.g., near the view toggle or
-in the spec pane header.
+**Contract — derive it, do not fetch it.** The flag needs no endpoint, no response key and no server
+change, because the client already holds everything required:
+
+```
+reviewInProgress = releasedPositions.size === deckSpec.slides.length && !turnComplete
+```
+
+This is **exact**, not a heuristic: ws4c's topology after the last position commits is
+`all_positions_committed → deck_reviewer → END`, so once every position has been released the only work
+left in the turn *is* the deck review. The flag lives in UI state (`AppLayout`), and it is non-blocking by
+construction — nothing can gate on a value no control reads.
+
+**Where it appears:** §7.1's spec view, as a subtle spinner or "Review pending" badge. The spec does not
+name a location; choose one discoverable but non-intrusive — near the view toggle, or in the spec pane
+header.
 
 **Test intent** — a component test plus one e2e spec:
 
 | Assertion | Why |
 |---|---|
-| the flag appears once a marker exists on a deck | editing triggers it |
-| the flag disappears when the marker clears | successful review or restore |
-| **editing, export and presenting all stay live while the flag is set** | "non-blocking", stated as a structural property — buttons work, routes respond |
-| a failed review clears the claim but keeps the marker, so the flag stays on | retried reviews must not flicker the UI |
+| the flag turns on once every position in `deck_spec.slides` has been released, while the turn is still open | the whole-deck pass is the only remaining work at that point |
+| the flag turns off when the turn completes | the deck review is the last thing before `END` |
+| the flag is **off** mid-build, with some positions still outstanding | otherwise it reads as "building", not "reviewing", and cannot distinguish the two |
+| **export, presenting and editing all stay live while the flag is set, and no control's `disabled` prop reads it** | §7.4's *"a flag that gates export is a serial gate wearing a spinner"*, stated so it can actually fail — assert the absence of the coupling, not just that the buttons happen to work |
 
-**Sabotage:** make export gate on the flag and confirm the test goes red — confirming that the sabotage
-landed and that the gate is not in the code.
+**Sabotage:** wire the export button's `disabled` to `reviewInProgress` and confirm the non-blocking
+assertion goes red; then revert and confirm no such coupling exists in the shipped tree.
 
 ---
 
