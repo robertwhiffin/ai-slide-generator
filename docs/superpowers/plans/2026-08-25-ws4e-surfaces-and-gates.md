@@ -76,9 +76,12 @@ assert that the route gate is still there, not that `get_slide_deck` checks perm
 | **the conversation (and any in-flight message stream) survives the toggle** | Structural property — no remount |
 | **dismissed findings are still dismissed after toggling to spec and back** | `dismissed` is `useState` reset on `deckKey` change; state must survive |
 
-**CI note:** E1's component test is collected by **ws4b's new vitest job** (ws4b adds the runner and CI job);
-ws4a's guard test covers only `*.spec.ts` under `frontend/tests/e2e/`, so it does not fire on component tests
-under `frontend/src/`. Component test coverage must be asserted in the ws4b job or it will silently disappear.
+**CI note:** E1's component test is collected by **ws4b's `frontend-unit-tests` job** — ws4b owns that job
+outright and lands first, so **this PR adds no vitest job**. ws4a's guard test covers only `*.spec.ts`
+under `frontend/tests/e2e/`, so it does not fire on component tests under `frontend/src/`. **Verify the
+collection rather than assuming it:** run `cd frontend && npm run test:unit` and confirm this PR's
+component test files are in the collected set. If the job is missing, escalate to ws4b — a component test
+that runs nowhere is the silent disappearance this note exists to prevent.
 
 ---
 
@@ -104,7 +107,7 @@ in `deck_reviews` keyed `(deck_id, deck_digest)` (§F4). The drawer must never r
 | findings render from the slide's verification records, not from a test global | The wiring itself |
 | findings are scoped to the current slide by `slideIndex` | |
 | a finding **travels with its slide across a reorder** | §F3's non-obvious property, and the 0a defect |
-| a finding with a deck-level criterion AND a real slide index does NOT appear | Grain routing risk: `f3` has `slideIndex: 3` + `category: 'narrative'`—ws4b flagged this |
+| a finding with a deck-level criterion AND a real slide index does NOT appear | Grain routing. Build it in the **component** test on its own injected finding — never on `mockFindings.f3` (see the note below) |
 | Apply / Dismiss / Discuss call real handlers, not `console.info` | |
 | Dismiss persists to seen-state keyed `(deckKey, finding.id)` | `seenState.ts`'s store shape |
 | **a re-review of an UNCHANGED slide does not re-highlight a dismissed finding** | §K9, half one |
@@ -112,17 +115,23 @@ in `deck_reviews` keyed `(deck_id, deck_digest)` (§F4). The drawer must never r
 
 **Those last two are the pair that justify ws4b's id rule**, and they are the reason it had to be settled
 before any code bound to it. A `(criterion, subject_hash)` composite is what makes both true at once (ws4b
-names this `make_finding_id(criterion, subject_hash)` where `subject_hash` is the slide hash for slide
-findings, deck digest for deck findings); either component alone is satisfiable by a simpler scheme that
+names this `make_finding_id(criterion, subject_hash, ordinal)` — **three** arguments, where `subject_hash`
+is the slide hash for slide findings and the deck digest for deck findings, and `ordinal` separates two
+findings of one criterion on one subject); either component alone is satisfiable by a simpler scheme that
 breaks the other. **Note:** `slideIndex: -1` assertions are tautologies (filtering already excludes them),
-so the real test must be a *deck-level criterion on a real slide index*.
+so the real test must be a *deck-level criterion on a real slide index* — and it gets **its own fixture
+data, injected by the component test**. Do not reach for `mockFindings.f3`: ws4b pins it at
+`slideIndex: 3`, unreachable in the 3-slide e2e deck (`slide-viewer.spec.ts:63-64`), and that is exactly
+what keeps `drawer-empty` visible on slide 2 at `:319`. Ten e2e assertions at `:314-359` are bound to
+that fixture, so moving f3 onto a reachable index to give this assertion something to filter turns
+`:319` red — and ws4b forbids the move for that reason. `mockFindings` is left alone.
 
 **Note ws4b already delivered the `status` branch** (fixed findings render read-only) and the `hasUnseen`
 rule (a fixed finding does not count as unseen). This task wires real data into that behaviour; it does
 not re-implement it.
 
-**CI note:** E2's component test is also collected by **ws4b's vitest job**. Component test coverage must be
-asserted there, or silent disappearance will repeat the E1 hazard.
+**CI note:** E2's component test is collected by the same **ws4b `frontend-unit-tests` job**. Confirm it
+appears in `npm run test:unit`'s collected set, exactly as E1 requires.
 
 ---
 
@@ -279,7 +288,7 @@ grep -rhoE 'RC[0-9]+' src/ | sort -u -V        # expect RC1 .. RC15
 | RC8 | **synthesise `slide_context` from a parsed reference** | `chat_service.py:1268` |
 | RC9 | **add *with* a slide reference** | `chat_service.py:1325` |
 
-**All fifteen RC rules are now mapped.** Record these meanings in `.PLAN-CORRECTIONS.md` (they were already
+**All fifteen RC rules are now mapped.** Record these meanings in `.ws4e-PLAN-CORRECTIONS.md` (they were already
 found in `2026-08-09-pr3-langgraph-core.md:2739-2748` and verified). Note the table anchors most entries
 in `chat_service.py` but **14 further RC markers in `src/services/agent.py`** and **1 in `src/api/mcp_server.py`**;
 the four entries above straddle both files.
@@ -292,8 +301,18 @@ task.
 RC6 is subsumed by row-per-slide persistence, and **RC11's precondition is retired** (`SelectionContext` is
 gone and the only surviving `slide_context` producer carries no textual reference). Test the architect's
 language handling: write behavioural tests for RC2, RC3, RC8, RC9, RC10, RC12, RC13, RC14, and (if needed)
-RC6 — nine tests, not fifteen. Deterministic ones in CI: RC3, RC6, RC8, RC9, RC10, RC14 (six tests).
-Mark RC2, RC12, RC13 as layer 3 (needing a real model).
+RC6 — nine tests, not fifteen.
+
+**Which of the nine run in CI is settled by one question: does the assertion need a model?** A rule whose
+behaviour is a deterministic code path — a guard, a cache, a state-mismatch check — runs in CI: **RC3, RC6,
+RC14**. Every rule asserted through the **architect's language handling** is layer 3 by E3's rule, so it
+lives under `tests/agentic/`, carries both guards, and ships **skipped** until the real prompts land:
+**RC2, RC8, RC9, RC10, RC12, RC13**. RC10 is the one that proves the rule — it is already E3's own first
+layer-3 row (*"the architect asks rather than picking when a reference is ambiguous"*), so calling it
+deterministic-in-CI put one test in two layers and left the executor no way to make it green except
+weakening the assertion until a placeholder prompt satisfied it, which is exactly what E3 refuses. When
+deriving each rule from the code, apply the same question to it and record the layer you assigned in
+`.ws4e-PLAN-CORRECTIONS.md`.
 
 ---
 
@@ -316,10 +335,13 @@ suitable for this gate.
 Then verify **in this order**, because an early failure invalidates the later checks:
 
 1. **The app reaches RUNNING, and §E2's ConfigPrompts column DROP completed.** `create_all` runs before
-   `_run_migrations`, so RUNNING alone proves only ORM convergence. Verify the material migration:
-   `SELECT COUNT(*) FROM information_schema.columns WHERE table_name='config_prompts' AND column_name='disabled_at'`
-   should return **0** (the column dropped successfully). If it returns 1, the migration was skipped or rolled
-   back and the check fails.
+   `_run_migrations`, so RUNNING alone proves only ORM convergence. Verify the material migration against the
+   **two columns ws4b actually drops** — `system_prompt` and `slide_editing_instructions`
+   (`src/database/models/prompts.py:39-40`):
+   `SELECT COUNT(*) FROM information_schema.columns WHERE table_name='config_prompts'
+   AND column_name IN ('system_prompt','slide_editing_instructions')` must return **0**. A non-zero count
+   means the migration was skipped or rolled back and the check fails. Query no other column name: one ws4b
+   never touches returns 0 unconditionally, so the gate would pass whether or not the migration ran.
 2. **A monolith-mode turn is unchanged.** Send a message with no phrase; the deck builds as today. This
    is §D's comparison baseline — if it moved, the comparison is worthless and so is the dogfooding
    argument.
@@ -345,19 +367,15 @@ Then verify **in this order**, because an early failure invalidates the later ch
 
 **Final baseline comparison, by cause:**
 
-Capture a baseline before any edits:
-
-```bash
-git stash
-~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q > pr3_baseline_main.log 2>&1
-git stash pop
-```
-
-Then after edits:
+Compare against the **committed** baseline artifact,
+`docs/superpowers/baselines/pr3_ws4_collected.log`, created and committed by ws4a's Definition of Done.
+**Do not re-capture a baseline with `git stash`.** ws4a–ws4d are already committed on this branch, so a
+stash captures only this PR's uncommitted work: the "baseline" run is the after-state, the cause diff is
+empty by construction, and the gate passes whatever ws4b–ws4d broke.
 
 ```bash
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q > pr3_after_ws4e.log 2>&1
-diff <(grep -E '^(FAILED|ERROR)' pr3_baseline_main.log | sort) \
+diff <(grep -E '^(FAILED|ERROR)' docs/superpowers/baselines/pr3_ws4_collected.log | sort) \
      <(grep -E '^(FAILED|ERROR)' pr3_after_ws4e.log | sort)
 grep -c 'UndefinedColumn' pr3_after_ws4e.log      # must be 0 — the cause a column drop mutates
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/agentic -q   # all SKIPPED, none failed
@@ -380,7 +398,10 @@ accounted for** — a shrinking suite explained rather than tolerated.
 - [ ] Both UI surfaces work against real data, with component tests and e2e specs, and **every new spec
       added to the CI matrix in the same commit** (ws4a's guard test enforces this). Spec view assertion for
       §7.2 (ws4d's feature, ws4e's test): after `clear_context`, the spec view still renders data while the
-      transcript is empty.
+      transcript is **cleared down to the single earliest `role='user'` message**. Do not assert an empty
+      transcript — ws4d D1 preserves that one row deliberately (it is the sticky engine-mode marker) and
+      `_hydrate_chat_history`'s `HUMAN_TYPES` allowlist replays it, so "empty" is red by construction on
+      every graph-mode session.
 - [ ] `tests/agentic/` exists as a **sibling** of `tests/unit/`; every file carries both the marker and a
       self-skip guard; the whole suite reports **SKIPPED**, none failed; the disabled CI job is present
       and turning it on is a workflow-only change.
@@ -388,9 +409,11 @@ accounted for** — a shrinking suite explained rather than tolerated.
       the test is skipped instead and the reason recorded.
 - [ ] Layer 4 passes, and the cross-process release test has been **sabotage-verified** with an
       in-process cache.
-- [ ] All fifteen RC rules have their meanings **derived from the code** and recorded in `.PLAN-CORRECTIONS.md`.
+- [ ] All fifteen RC rules have their meanings **derived from the code** and recorded in `.ws4e-PLAN-CORRECTIONS.md`.
       Behavioural tests for the architect's language handling only (RC2, RC3, RC8, RC9, RC10, RC12, RC13,
-      RC14, RC6 if needed — nine tests). Deterministic tests in CI (RC3, RC6, RC8, RC9, RC10, RC14 — six tests).
+      RC14, RC6 if needed — nine tests). **Model-free tests in CI (RC3, RC6, RC14 — three tests); the six
+      that go through the architect's language handling (RC2, RC8, RC9, RC10, RC12, RC13) are layer 3 and
+      ship SKIPPED.** No RC test appears in both layers.
       RC7 is logging only; RC1/RC4/RC5/RC15 are builder/infrastructure; RC11's precondition is retired.
 - [ ] All seven release-gate checks pass on a devloop deployment, including the **past-50-minute** token
       check and a **manual Google Slides export**.

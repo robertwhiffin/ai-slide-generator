@@ -1,35 +1,46 @@
-# Workstream 4 review findings — round 1 (and ws4a round 2)
+# Workstream 4 review findings — round 1, ws4a round 2, and the seam pass
 
-Verbatim reviewer output from the `doc-review-loop` run of 2026-09-10. Moved here from `/tmp`
-so it survives; **untracked by design** until someone decides these belong in git.
-
-> **The "State" column is a snapshot taken 11:27 and it is already stale.** A concurrently
-> live session was still running fix agents against `ws4a` and `ws4c` at 11:48 — both have
-> uncommitted working-tree changes. **Read `git diff` before trusting any row below.** The
-> findings themselves are verbatim and do not go stale; only the state does.
+Verbatim reviewer output from the `doc-review-loop` runs of 2026-09-10. Kept here (not in `/tmp`)
+because a fresh implementer needs them and `/tmp` does not survive five PRs.
 
 | File | Document | Findings | State |
 |---|---|---|---|
-| `ws4_r1_index_findings.md` | `2026-08-25-ws4-index.md` | — | fixed (waves 1, 1b, 1c) |
-| `ws4_r1_ws4a_findings.md` | `2026-08-25-ws4a-shipped-defects.md` | 14 | fixed (wave 2) |
-| `ws4_r1_ws4b_findings.md` | `2026-08-25-ws4b-contracts-and-schema.md` | — | fixed (wave 2) |
-| `ws4_r1_cde_findings.md` | ws4c / ws4d / ws4e | 20 / 21 / 29 | **ws4c ~15 UNFIXED**; ws4d 18/21; ws4e ~22/29 |
-| `ws4_r2_ws4a_findings.md` | ws4a, second fresh review | 15 | ~10 addressed in an **uncommitted** working-tree diff, incl. the at-rule dedupe key that was flagged as needing a human ruling |
+| `ws4_r1_index_findings.md` | `2026-08-25-ws4-index.md` | — | **applied** (waves 1, 1b, 1c) |
+| `ws4_r1_ws4a_findings.md` | `2026-08-25-ws4a-shipped-defects.md` | 14 | **applied** (wave 2) |
+| `ws4_r1_ws4b_findings.md` | `2026-08-25-ws4b-contracts-and-schema.md` | — | **applied** (wave 2) |
+| `ws4_r1_cde_findings.md` | ws4c / ws4d / ws4e | 20 / 21 / 29 | ws4c **all 20 applied**; ws4d 18/21; ws4e ~22/29 |
+| `ws4_r2_ws4a_findings.md` | ws4a, second fresh review | 15 | **all 15 applied** |
 
-**Read before executing any ws4 plan.** ws4c's unfixed residue is blocking-class for the
-graph PR.
+**Remaining unapplied residue: ~3 of ws4d's and ~7 of ws4e's round-1 findings.** Those are the only
+known-and-unfixed items in the set. Read them before executing ws4d or ws4e.
 
-## `2026-08-25-ws4c-graph-core.md.bak` is not a backup — do not delete it
+## Two decisions were reversed on evidence — the plans are right, older text is not
 
-It is a **divergent partial state** from the wave-2 collision (a fix agent ran
-`git show HEAD` over sibling plans while their agents were editing them). Diffed against
-`HEAD`, the `.bak` **carries two fixes the committed plan lost**:
+If you meet a contradiction between a plan and anything older (the superseded
+`2026-08-24-pr3-langgraph-core.md`, or a spec section), the plan wins on these two:
 
-- the `title` producer row in the `GraphState` table (round-1 ws4c finding 2, *"BLOCKING —
-  the deck title has no source"*);
-- the builder-foundation text naming extracted section HTML, section CSS and resolved style
-  prose as what the builder authors on (the §M5/§M6 fairness constraint).
+- **The at-rule dedupe key** is `(at_keyword, serialized_prelude)`, falling back to the serialized
+  **content** when the prelude is empty. Text-keying (the earlier choice) made at-rules append-only.
+  Prelude-only keying silently lost `@font-face` weights, because `ensure_deck_token_css`'s guard is
+  per-family, not per-block. Both measured; both recorded in ws4a Task A1 and the index's §K5 row.
+- **`scripts_content` IS persisted**, derived at the post-commit write from `SlideDeck(...).scripts`.
+  The earlier "deliberately unproduced" reasoning was wrong: the column is a denormalised cache of
+  the per-slide aggregate, and not writing it blanks JavaScript in thumbnails, PDF and PPTX export.
 
-and **lacks one the committed plan has**: the `stalled_positions` / `retry_count` paragraph.
+## `2026-08-25-ws4c-graph-core.md.bak` — the merge is DONE; the file is now superseded
 
-So neither file is a superset. Recovering ws4c means a three-way merge, not a copy.
+It was a divergent partial state from the wave-2 collision (a fix agent ran `git show HEAD` over
+sibling plans while their agents were editing them, and lost its own uncommitted work). It carried
+three fixes the committed plan had lost — the `title` producer row, the expanded
+`build_branch_payload`, and the `reviewer_router` deletion decision — while lacking the
+`stalled_positions` paragraph the committed plan had.
+
+**All three have since been merged into `2026-08-25-ws4c-graph-core.md` and committed** (`ff52ad55`),
+each re-verified rather than copied. The `.bak` holds nothing unique any more and is safe to delete.
+It is left in place only so nobody wonders what happened to it. **Do not copy text out of it** — its
+`title` row asserted a `DeckSpec.title` field that did not exist at the time; ws4b now declares one.
+
+## The lesson that cost the most here
+
+Never run a git command from a fix agent working in a shared tree, and give parallel fix agents
+disjoint file sets. The collision above cost roughly fifteen applied findings.

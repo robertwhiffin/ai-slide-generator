@@ -102,6 +102,13 @@ when multiple findings of the same criterion exist on one subject. `subject_hash
 position in the list of findings of that criterion on that subject (0-indexed), or derive it from the
 message content (digest or hash of the message text) — **decide in this PR and state it.**
 
+**Every caller passes all three arguments.** `ordinal` has a default, so a two-argument call compiles —
+and two `overflow` findings on one slide then mint the **same id**: `build_verification_record` keeps one
+of them, the drawer renders one, and dismissing it marks the other seen. Both consumers currently cite
+the two-part form (ws4c C4's `build_reviewer_node`, ws4e E2's parenthetical); the signature is three-part,
+and a stamping site that has no ordinal to pass has not yet worked out which finding of that criterion
+it is holding.
+
 **Test intent** — `tests/unit/test_finding_schema.py`:
 
 | Assertion | Why |
@@ -109,6 +116,7 @@ message content (digest or hash of the message text) — **decide in this PR and
 | every criterion's category is one of the three | Widening breaks the TS compile |
 | slide criteria are objective-heavy; deck criteria are all narrative and subjective | §A2's posture, and §F3/§F4's grain split |
 | an id is stable for the same `(criterion, hash)` and **changes** when the hash changes | Both halves of §K9 — one without the other is the bug |
+| two findings of the **same criterion on one subject** get different ids, asserted by round-tripping them through `build_verification_record` and counting what comes back | The collision `ordinal`'s default hides. Calling the helper twice with two explicit ordinals cannot fail; going through the record is what catches a caller that omitted the argument |
 | a `Finding` with an unknown criterion is rejected; one whose category contradicts the registry is rejected | The registry is the authority |
 | `objective` and `status` are independent | The superseded plan's `auto_fixable` conflated predicate and state, which made §F2 unimplementable |
 | `is_placeholder_record(build_verification_record(...))` is **False** for every `SlideVerdict` value | Constraint 2. The qualifier "when `verdict != "placeholder"`" would now be vacuous — `"placeholder"` was removed from the union, so no reachable verdict can produce a placeholder record. Placeholders come only from `commit_placeholder`, which writes `error: True`, and that path is asserted separately below |
@@ -183,7 +191,10 @@ Two specific breakages to handle rather than discover:
   `openDrawerOnSlide` helper — an earlier draft invented one.
 - `f3` carries `criterion: 'arc_gap'`, a **deck**-level criterion, on `slideIndex: 3`. That is fine
   for a drawer *layout* fixture but contradicts the grain-routing rule, so say so in a comment — and
-  do not let it become the basis of a deck-level assertion.
+  do not let it become the basis of a deck-level assertion. `slideIndex: 3` is **unreachable** in the
+  spec's 3-slide deck (`slide-viewer.spec.ts:63-64`), which is what keeps `drawer-empty` visible on
+  slide 2 at `:319`, so **leave the index where it is**. ws4e E2 asserts grain routing on its own
+  injected component-test finding, not on this fixture.
 
 ---
 
@@ -219,8 +230,10 @@ served by E2E, so the runner lands here rather than as a follow-up.
 **CI: the vitest job** — `frontend-build` runs `npx tsc -b` + `npx vite build` and **adds `npx vitest`**
 with `include: src/**/*.test.{ts,tsx}`. `.github/workflows/test.yml` adds a new **`frontend-unit-tests`**
 job (separate from `frontend-build`) running `cd frontend && npm run test:unit`, enabled by default. The
-job must **not** block the e2e matrix (E1's new e2e spec also adds the vitest job to `.github/`; both
-PRs are committing the same job). Earliest merge wins and the second PR sees no change needed.
+job must **not** block the e2e matrix. **ws4b is its sole owner: there is no co-ownership and no
+"earliest merge wins".** ws4b precedes ws4e by construction — ws4e's `Depends on:` names it — so ws4e
+adds no vitest job of its own and instead verifies that its component tests are collected by this one.
+A missing job is an escalation back here, never a local addition there.
 
 **Test intent — two files, because the table above states two behaviour changes.**
 
@@ -373,6 +386,22 @@ payload and confirm that skill's parse test goes red.
 `tests/unit/conftest_design_system.py` and `tests/unit/conftest_images.py`. Everything from B2
 onwards depends on these, so they are built here, first, with contracts stated.
 
+**Two conftests, and which fixture goes in which.** A `conftest.py` is scoped to its own directory tree,
+so nothing declared in `tests/unit/conftest.py` can be requested by a test under `tests/integration/`.
+Three fixtures in the table below have integration-only consumers — `stub_writer`, whose stated purpose is
+call-order assertions in ws4c/d and whose named consumer is ws4c C5's suite in `tests/integration/`, and
+the release-order pair `partial_deck` / `released_deck` — so **declare those three in
+`tests/integration/conftest.py`**, next to the file-backed engine fixture B3.3's closing note puts there.
+Declared under `tests/unit/` they are fixtures no test can request: ws4c rebuilds its own recorder, and the
+call-order contract this table exists to pin drifts across two copies. Everything else stays unit-scoped.
+If a unit test later needs one of the three, it moves up to the existing `tests/conftest.py`, which both
+trees can see — it is never duplicated.
+
+**`tests/integration/conftest.py` is a contended file.** ws4b creates it, ws4c adds the fixtures its
+layer-1 suite still needs, and ws4e's layer-4 job depends on the engine fixture in it. So create it here,
+in one commit, carrying every fixture a later plan's task names; a later plan **appends** to it and
+re-reads it first rather than resolving by hunk.
+
 **Contract — one table, and the methods are part of it.** A fixture whose methods are undeclared is
 a fixture the next task guesses at; round-3 finding 13 caught ~20 such methods and three fixtures used
 but never declared.
@@ -475,7 +504,9 @@ JsonPlusSerializer().dumps_typed(obj) -> (type: str, bytes);  loads_typed((type,
 Note this inventory is the subset the compiled graph uses; `prune`, `copy_thread`, `delete_for_runs`,
 `get_delta_channel_history`, `with_allowlist` and the `a*` methods also exist on the base class with
 `NotImplementedError` (do not implement; they are not called). Only the five above are called and require
-implementation. `get_next_version` is NOT called (despite containing a raise), so omit it.
+implementation. `get_next_version` is NOT called, so omit it — and do not omit it "because it raises":
+probed on langgraph-checkpoint 4.1.1 the base class ships a **working** integer increment (`None` -> `1`,
+otherwise `current + 1`) and raises only when `current` is a `str`. Omit it because nothing calls it.
 
 **Three traps, all measured.**
 
@@ -545,7 +576,7 @@ using `_get_deck_owner_session` to resolve `deck_id` from `session_id` (§B3.1).
 remove inter-token whitespace: `src/utils/slide_hash.py:44` is `' '.join(html.split())`. So
 `"<DIV CLASS='slide'>  a  </DIV>"` and `"<div class='slide'>a</div>"` produce **different** digests.
 Do not assert they match. (`slide_hash.py:69-72`'s own docstring example is wrong, which is what
-misled an earlier draft — record it in `.PLAN-CORRECTIONS.md`.) Assert the normalisation that *does*
+misled an earlier draft — record it in `.ws4b-PLAN-CORRECTIONS.md`.) Assert the normalisation that *does*
 hold: case, and runs of whitespace between tokens.
 
 **Test intent:** digest stable for identical ordered content; **changes on reorder**; save/get
@@ -808,14 +839,29 @@ legacy fallback at `:1637-1650`. Parse with helpers that never raise, alongside 
 
 1. **`deck_spec`** — parsed from `deck_spec_json`, returns `None` if absent or unparseable.
 2. **`findings`** — call `findings_from_record(record, content_hash)` on every slide's
-   `verification_record` and **flatten into a keyed index**, keyed by slide position, or return
-   a single list and state the interaction with the existing `verification` key that ws4c writes.
-   (B1.1 defines `findings_from_record`; the frontend's `Slide` type lists both keys — resolve which
-   survives and which is internal-only. If `verification` persists as-is, state that `findings` is
-   derived and `verification` is canonical — do not collide silently.)
+   `verification_record` and emit **one flat deck-level list**, each entry carrying its own
+   `slideIndex`. **Not** a per-position index, and the choice is forced three ways: `Finding.slide_index`
+   already carries the position (B1.1), the `:1637` fallback has **no `slides` array** to key an index
+   against, and the drawer already holds a single flat `SlideFinding[]` and filters it by `slideIndex`
+   (`AppLayout.tsx:762`'s `testFindings`, which this key replaces — ws4e E2 wires it).
+   **`verification` stays canonical and per-slide; `findings` is derived and additive.** The per-slide
+   `verification` key is untouched, so nothing collides: `findings` is a projection of the same
+   `verification_record` blobs into the shape the drawer consumes.
 
-**Test intent:** both keys are present and parsed; a specless/findingless deck reports the key as `None`
-rather than omitting it; the blob-fallback path exposes both; a contributor sees the owner's spec and
+**The frontend needs a declared field for it, and does not have one.** `frontend/src/types/slide.ts:3-14`
+declares `verification?` and `content_hash?` and **no `findings`** — so without this, findings stay
+server-only, ws4e E2 has no typed field to read and `npm run typecheck` fails at the last PR. Add
+`findings?: SlideFinding[]` to **`SlideDeck`** in `frontend/src/types/slide.ts` (deck-level, because the
+key is deck-level on both read paths), importing `SlideFinding` from B1.2's `finding.ts`. It earns a
+conformance test for the same reason `Finding` does — there is no runtime bridge between the two
+declarations, which is exactly why they had already drifted — so extend B1.2's
+`test_finding_conformance.py` to assert the read path's `findings` entries map field-for-field onto the
+declared `SlideFinding[]`, `slideIndex` included.
+
+**Test intent:** both keys are present and parsed; neither is ever omitted — a specless deck reports
+`deck_spec` as `None` and a findingless deck reports `findings` as `[]`, so no consumer sees `undefined`;
+every `findings` entry carries a `slideIndex` and the list is flat (no position keys);
+the blob-fallback path exposes both; a contributor sees the owner's spec and
 findings (§7.5); **adding these keys changes no other key** — PRD §10.2's parity guarantee means the
 export chain and every `html_content` consumer depend on that dict's exact shape. Run the export and
 preview suites, not just the new test.
