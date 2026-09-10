@@ -24,7 +24,7 @@ test('slide CSP withholds unsafe-eval', () => {
 
 test('domWalker performs no eval() (would throw under the slide CSP)', () => {
   const src = readFileSync(
-    fileURLToPath(new URL('../src/services/domWalker.ts', import.meta.url)),
+    fileURLToPath(new URL('../../src/services/domWalker.ts', import.meta.url)),
     'utf8',
   );
   // Strip line comments so the AISEC-248 explanatory comments don't trip this.
