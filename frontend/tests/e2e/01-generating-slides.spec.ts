@@ -16,7 +16,7 @@ import {
   UserGuideCapture, 
   setupUserGuideMocks, 
   goToGenerator 
-} from './shared';
+} from '../user-guide/shared';
 
 test.describe('User Guide: Generating Slides', () => {
   test('capture workflow screenshots', async ({ page }) => {

@@ -37,6 +37,8 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'pyproject.toml'
+              - '.github/workflows/test.yml'
+              - 'frontend/tests/**'
             frontend:
               - 'frontend/**'
             packages:
@@ -476,29 +478,49 @@ jobs:
       fail-fast: false
       matrix:
         test:
+          - admin-page
           - admin-route-gate
+          - agent-config-integration
+          - api-route-matcher
           - chat-ui
           - css-bg-export
           - deck-integrity
           - deck-prompts-integration
           - deck-prompts-ui
+          - design-system-brand-text-uncapped
           - design-system-selector
           - design-systems-ui
+          - export-csp
           - export-ui
+          - genie-detail-panel
           - help-ui
           - history-integration
           - history-ui
-          - agent-config-integration
+          - inline-svg-records-export
+          - navigation
           - presentation-mode
-          - profiles-integration
           - profile-ui
+          - profiles-integration
+          - routing
+          - save-points-versioning
+          - session-config-isolation
+          - session-loading
+          - share-link
+          - slide-generator
+          - slide-host-frame
           - slide-operations-ui
+          - slide-security
           - slide-styles-integration
           - slide-styles-ui
           - slide-surface-fidelity
+          - slide-viewer
+          - stale-session-recovery
+          - style-source-exclusivity
           - svg-raster-export
-          - inline-svg-records-export
           - template-cards
+          - template-preview-import-scan
+          - template-viewer
+          - viewer-readonly
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:

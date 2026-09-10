@@ -17,7 +17,7 @@ import {
   goToImageLibrary,
   goToGenerator,
   goToSlideStyles
-} from './shared';
+} from '../user-guide/shared';
 
 async function setupImageMocks(page: import('@playwright/test').Page): Promise<void> {
   const { 

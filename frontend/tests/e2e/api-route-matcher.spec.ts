@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { apiPath } from './helpers/api-route';
+import { apiPath } from '../helpers/api-route';
 
 /**
  * Self-test for the query-agnostic route matcher.
