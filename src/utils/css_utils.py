@@ -36,7 +36,7 @@ def parse_css_rules(css_text: Optional[str]) -> Dict[str, str]:
     rules: Dict[str, str] = {}
     if not css_text:
         return rules
-
+    
     try:
         parsed = tinycss2.parse_stylesheet(css_text, skip_whitespace=True)
         for rule in parsed:
@@ -48,7 +48,7 @@ def parse_css_rules(css_text: Optional[str]) -> Dict[str, str]:
         # If parsing fails, return empty dict rather than crashing
         # The original CSS will be preserved
         pass
-
+    
     return rules
 
 
@@ -198,7 +198,7 @@ def merge_css(existing_css: str, replacement_css: str) -> str:
         - Qualified rules in replacement_css override matching selectors in
           existing_css, IN PLACE: an overridden rule keeps its original
           position, so ``@font-face`` still precedes its consumers.
-        - At-rules override by ``(at_keyword, discriminator)`` -- see
+        - At-rules override by ``(lower_at_keyword, discriminator)`` -- see
           :func:`parse_css_blocks` -- so an edited ``@media print`` REPLACES the
           existing one instead of accumulating a second copy. This matters
           because this function's output is persisted and re-fed as

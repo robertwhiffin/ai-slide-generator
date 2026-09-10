@@ -114,7 +114,19 @@ class TestShippedPathRegression:
         assert "color: #000000" in deck.css
 
     def test_update_css_empty_guard_is_untouched(self):
-        """update_css's own guard (slide_deck.py:106-107) still short-circuits."""
+        """An empty or whitespace-only replacement leaves deck.css unchanged via update_css.
+
+        Pins the observable behaviour through the full call path
+        (slide_deck.py:update_css -> merge_css): deck.css is identical before
+        and after passing an empty or whitespace-only string.
+
+        Does NOT isolate slide_deck.py:106-107's own early-return guard from
+        merge_css's: both guards fire for empty/whitespace input (merge_css
+        returns existing_css unchanged when parse_css_blocks yields no blocks),
+        so deleting update_css's guard would not change the outcome and this
+        test would still pass. Isolating the guards would require mocking
+        merge_css, which is out of scope here.
+        """
         deck = SlideDeck.from_html_string(load_6_slide_deck(css=BRANDED_SHEET))
         before = deck.css
 
