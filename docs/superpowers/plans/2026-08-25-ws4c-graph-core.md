@@ -95,12 +95,13 @@ branch **must** carry one, or the runtime raises
 | `deck_spec`, `error_state` | none | `architect_node`, exception handlers |
 | `architect_intent`, `architect_message`, `target_positions` | none | `architect_node` |
 | `token_css`, `deterministic_css` | none | `architect_node` (via `resolve_template_bytes`, C6) |
-| `external_scripts`, `head_meta`, `scripts_content` | none | `architect_node` (from `ArchitectOutput` fields, pre-fan-out) |
+| `external_scripts`, `head_meta` | none | `architect_node`, resolved **deterministically** — the Chart.js CDN default and the deck's `<meta>` set are known before any builder runs. **NOT from `ArchitectOutput`**, which declares neither (see the closed-schema rule above) |
+| `scripts_content` | none | **nobody — see the note under C4.** Deliberately unproduced |
 | `knitted_html` | none | `deck_reviewer_node` (from `SlideDeck.knit()`, post-commit) |
 | `findings` | `operator.add` | every `build_reviewer_node` and `fix_reviewer_node` |
 | `landed_positions`, `placeheld_positions`, `reviewed_positions` | `turn_scoped_union` | build reviewers, placeholder node, fix reviewer |
 | `slides`, `dispatched_at`, `retry_count`, `fix_map`, `fixed` | `turn_scoped_merge` | builders, fixer, reviewers, foreman |
-| `emitted_style_blocks` | `turn_scoped_concat` | each `builder_node` (template's `<style>` block, pre-fan-out) |
+| `emitted_style_blocks` | `turn_scoped_concat` | `architect_node`, **once per turn**, from `resolve_template_bytes` (C6). **Not builders** — `BuilderOutput` forbids a builder emitting `<style>` at all, and brand bytes never pass through a model. See the shape note under C4 |
 | `foreman_wakes` | `turn_scoped_concat` | `foreman_node` |
 
 **`has_pending_fix(state)` — never `if state.get("fix_map")`.** `turn_scoped_merge` cannot delete keys,
@@ -343,19 +344,44 @@ draft read them off `ArchitectOutput`, which both violated the invariant and inv
 schema does not declare.
 
 - **Pre-fan-out** (in `architect_node`, after the spec is committed): `title`, `external_scripts`,
-  `head_meta`, `scripts_content`, `deck_spec`, and §K4's deterministic CSS — the pinned template's
-  `token_css` plus its `<style>` block, resolved **here**, from the deck spec's `design_contract`.
-  
-  **⚠️ `scripts_content` resolution note:** `SlideDeck.__init__` (`:50-57`) takes no deck-level scripts
-  parameter, `from_dict` (`:111-139`) sets none, and `scripts` is a **read-only property** (`:79-95`)
-  aggregating per-slide scripts. A persisted `scripts_content` value cannot reach `knit()`. Either
-  **drop this from the pre-fan-out write** (script aggregation is per-slide, not deck-level), or **state
-  the mechanism by which a deck-level script reaches the domain object** (e.g., a method parameter to
-  `from_dict`, or a separate getter that the post-commit write reads). Decide and state it here.
+  `head_meta`, `deck_spec`, and §K4's deterministic CSS — the pinned template's `token_css` plus its
+  `<style>` block, resolved **here**, from the deck spec's `design_contract`.
+
+  `external_scripts` and `head_meta` are resolved **deterministically**, not read off model output —
+  the Chart.js CDN default and the deck's `<meta>` set are both known before any builder runs, and
+  `ArchitectOutput` declares neither field.
+
+  **⚠️ `scripts_content` is deliberately NOT written. Decided here.** `SlideDeck.__init__` (`:50-57`)
+  takes no deck-level scripts parameter, `from_dict` (`:111-139`) sets none, and `scripts` is a
+  **read-only property** (`slide_deck.py:79-95`) that aggregates per-slide scripts with IIFE wrapping.
+  So a persisted deck-level value would appear in the row-read dict (`"scripts": deck.scripts_content
+  or ""`) and then **vanish at knit time**, because a `SlideDeck` built from that dict re-derives
+  `scripts` from its slides. Writing it would create a column that reads back and silently fails to
+  render — worse than not writing it. **Script aggregation is per-slide** (`SlideWriter.write_slide`
+  takes `scripts`), and that is the mechanism.
+
+  **This is an escalation to ws4b, not a local fix:** B3.1's table lists `scripts_content` as one of the
+  **eight** required deck-level columns with the consequence "deck-level JS lost from the row-read path".
+  That consequence does not survive contact with the read-only property. ws4b must either drop it to
+  seven columns or name a domain-object mechanism. Do not silently write it here to satisfy the count.
   
 - **Post-commit** (in `deck_reviewer_node`): aggregated `css`, `slide_count`, and `html_content` —
   which is **derived, not read from state**: build the domain object from the deck dict
   (`SlideDeck.from_dict`, `slide_deck.py:111` — there is no `from_json`) and call `knit()`.
+
+**⚠️ `emitted_style_blocks`' shape, and a second escalation to ws4b.** The template's `<style>` block is
+resolved **once per turn** by `architect_node`, from `resolve_template_bytes` — not by builders, which
+`BuilderOutput` forbids from emitting `<style>` at all. So on a pinned deck the `turn_scoped_concat` list
+holds **exactly one element**, and on an unpinned deck it holds none.
+
+That is harmless in itself, but it undercuts what ws4b's B3.3 says it is for: *"N identical copies collapse
+to one"* and *"§M5 hands every builder the template's full `<style>` block, so a 15-slide pinned deck yields
+up to 15 identical copies and the aggregator's job is to collapse them."* **With one producer there are
+never 15 copies**, so B3.3's dedupe test describes a path nothing reaches — the "test that cannot fail"
+class. ws4b's own B3.3 anticipated this and asked to be told: *"If ws4c concludes one pinned template needs
+no per-slide accumulation at all, this function's dedupe premise weakens and its test must change with it."*
+**It does. Report it.** The aggregator still earns its place — merging one template block into existing deck
+CSS and running the token backstop — but its dedupe assertion must be re-scoped or dropped.
 
 **Guard the template resolution on `design_system_id and template_id`, not on `design_contract`'s
 truthiness.** `design_contract` has a `default_factory`, and an all-`None` pydantic model is **truthy**,
