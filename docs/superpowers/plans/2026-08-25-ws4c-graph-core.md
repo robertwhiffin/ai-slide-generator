@@ -231,6 +231,7 @@ def call_skill(name: str, payload: dict) -> BaseModel      # every node's single
 # src/services/agent_resolution.py
 def assemble_skill_prompt(skill: Skill, payload: dict) -> str
 def get_structured_model(schema: type[BaseModel])
+def resolve_slide_style(config: AgentConfig) -> str        # the producer of `resolved_style`
 ```
 
 **One `Skill` definition, in one place.** An earlier draft defined this module twice in two tasks — a
@@ -242,6 +243,30 @@ the tool grants.
 plus two conditional blocks and stops — which means the builder never receives its slide brief, the
 reviewer never receives the HTML it is reviewing, and the fixer never receives the finding. Every skill
 would be invoked with instructions and nothing else. **Serialise the payload into the prompt.**
+
+**`resolve_slide_style` is the producer of `resolved_style`, and it DELEGATES.** One line:
+`_get_prompt_content(config)["slide_style"]`, importing from `src.services.agent_factory`. Do **not**
+reimplement the resolution branch. What delegation buys, all of it already measured and defended in C8:
+resolution is a **branch, not a ladder** (an inactive `design_system_id` lands on `DEFAULT_SLIDE_STYLE`
+and the `elif` is never evaluated); `_design_system_is_active` fails **closed** on a tombstone; a
+`compiled_style_content` that predates `COMPILER_VERSION` is lazily recompiled; the pinned-template block
+is appended and the type-scale re-assertion sentinels survive. A second copy of that branch is free to
+regress independently of the monolith's, silently, with no test comparing the two — and the tombstone case
+is a defect that has already shipped once.
+
+Three facts that make the delegation safe, each checkable:
+- **`mode` is irrelevant.** Style is resolved before `_get_prompt_content`'s mode split, so `generate`
+  and `edit` return the same `slide_style`. Call it with the default.
+- **The assembled system prompt in the returned dict is discarded.** That is wasted string assembly once
+  per turn, and it is the whole cost of delegating. Accept it.
+- **The config comes from the session, not from state.** `architect_node` calls
+  `resolve_agent_config(session["agent_config"])` (`src/api/schemas/agent_config.py:238`) — the same
+  helper `chat_service.py:204` uses. An `AgentConfig` does **not** go into `GraphState`: the architect is
+  the sole resolver of everything brand-related (see ws4d D2), it needs the config exactly once, and a
+  pydantic config object in checkpointed state is bloat that the next turn would inherit.
+
+When `agent.py` is deleted in a later PR the implementation moves into this function and its signature
+does not change — the same arrangement C7 uses for the two security controls.
 
 **Two conditionals, both decided from the *resolved style* at request time, not from the skill:**
 
@@ -264,6 +289,12 @@ This is not cosmetic: §L7 puts `overflow` on the build reviewer's objective cri
 judge against these exact numbers, so a legacy-style deck would be judged against numbers its builder
 never received. **The builder and the reviewer must be handed the same numbers or the criterion is
 unfair by construction.**
+
+**All three rows are reachable in a test only because `resolve_slide_style` exists** — construct an
+`AgentConfig` per row and assert which case you land in. Add one more assertion that no other test can
+replace: **the graph and the monolith resolve the same bytes from the same config**, asserted by calling
+`resolve_slide_style(config)` and `_get_prompt_content(config)["slide_style"]` and comparing. That is the
+guard against someone later "optimising away" the delegation, which is the only way these two can drift.
 
 **`get_structured_model` follows the repo's existing client path** — `agent_factory.py:56` uses
 `get_system_client()`. Do not invent a new client.
@@ -406,7 +437,7 @@ dispatch entirely, so a 31-slide deck stops dispatching new builders until every
 
 | Node | Reached by | Must |
 |---|---|---|
-| `architect_node` | edge | Set `architect_intent`/`architect_message`; on build/edit commit `deck_spec` and perform the **pre-fan-out deck-level write** (§H1's trigger *is* "the architect committed the spec"). **Read only fields `ArchitectOutput` declares** |
+| `architect_node` | edge | Set `architect_intent`/`architect_message`; on build/edit commit `deck_spec` and perform the **pre-fan-out deck-level write** (§H1's trigger *is* "the architect committed the spec"). **Sole resolver of everything brand-related** (§L5, ws4d D2): `resolve_slide_style` into `resolved_style`, plus `resolve_template_bytes` into `template_layout_html`/`deterministic_css`/`token_css` — **once per turn**, so no builder re-resolves inside its branch. **Read only fields `ArchitectOutput` declares** |
 | `data_analyst_node` | edge | Return exactly one of three outcome shapes; **read only `AnalystOutput`'s fields** |
 | `builder_node` | `Send` payload | Emit body HTML only (no `<style>`); gate the HTML through the safety control (C7); carry its payload forward in `slides[position]` so the re-fan can rebuild the reviewer's input; on exception, commit a **placeholder** and return `placeheld_positions`, never `landed_positions` |
 | `build_reviewer_node` | re-fan `Send` | Stamp finding ids with `make_finding_id(criterion, content_hash, ordinal)` — **all three arguments**; `ordinal` is the finding's 0-indexed position among findings of that criterion on this slide, and omitting it (it defaults) makes two `overflow` findings share one id. If no objective finding, **write the row** with an explicit `verification_record`; else populate `fix_map` with `original_html` **and `original_scripts`** |
