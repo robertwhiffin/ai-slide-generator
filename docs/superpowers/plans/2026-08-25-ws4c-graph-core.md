@@ -41,6 +41,7 @@ All re-executed on langgraph 1.2.10. **Do not re-derive them; do re-probe if you
 | **`bool({0: None})` is `True`** | | A dict reducer cannot delete a key; a tombstone still reads as pending |
 | **Turn-2 state accumulates** | turn 2 passing a fresh empty set still saw turn 1's values; a fresh `checkpoint_ns` does not reset it either | Turn-scoping is required, not a nicety |
 | **Undeclared keys are silently dropped** | a node returning an undeclared key produces no error and the write is discarded; an undeclared *input* key never reaches the node | **`GraphState` is an exhaustive contract.** This caused three separate blocking findings |
+| **ContextVars survive the thread boundary AND the fan-out** | A var set before `graph.invoke()` was read by **all 6** `Send`-fanned nodes, through a `threading.Thread(target=ctx.run)`; a node-local `.set()` did **not** leak back to the parent or sideways to a sibling. Cause: LangChain fans out through `ContextThreadPoolExecutor`, whose `submit` wraps every task in `copy_context().run(...)` (`langchain_core/runnables/config.py:607-628`) | This is what makes the emitter and the principal work. It is also why the caller **must** use `contextvars.copy_context()` before spawning its thread — the copy happens at spawn, so anything set after is invisible |
 | **`Send(timeout=)` is unusable here** | `ValueError: Node timeouts are only supported for async nodes because sync Python execution cannot be safely cancelled in-process` | Stall detection uses state-recorded timestamps, and that is the **only** option |
 
 **Net difference from spec §8's wording:** dispatch proceeds ascending in batches bounded by the cap,
@@ -98,7 +99,7 @@ branch **must** carry one, or the runtime raises
 | `deck_spec`, `error_state` | none | `architect_node`, exception handlers |
 | `architect_intent`, `architect_message`, `target_positions` | none | `architect_node` |
 | `title` | none | `architect_node`, from `deck_spec.title` — ws4b B1.4 declares the field (§H1: pre-fan-out deck-level write). **Deterministic** — read off the committed spec, never derived from builder output |
-| `initiated_by` | none | `invoke_graph`'s initial state — the turn's principal. `get_current_user()` returns `None` inside the graph, so every row write needs it from state (see the row-write rule under C4) |
+| `initiated_by` | none | `invoke_graph`, from its `principal` argument or else `get_current_user()`. Carried in state **and** in `build_branch_payload`, so a fanned branch writes an author without re-reading a ContextVar (see the row-write rule under C4) |
 | `token_css`, `deterministic_css` | none | `architect_node` (via `resolve_template_bytes`, C6) |
 | `template_layout_html`, `resolved_style` | none | `architect_node` (C6/§L5), **once per turn**. These are the two inputs `build_branch_payload` extracts each branch's section HTML from and copies the style prose out of — without them in state there is no channel to the fan-out and each builder would re-resolve from the DB inside its own branch |
 | `external_scripts`, `head_meta` | none | `architect_node`, resolved **deterministically** — the Chart.js CDN default and the deck's `<meta>` set are known before any builder runs. **NOT from `ArchitectOutput`**, which declares neither (see the closed-schema rule above) |
@@ -494,7 +495,7 @@ truthiness.** `design_contract` has a `default_factory`, and an all-`None` pydan
 so a bare truth test calls `resolve_template_bytes(None, None)` on every unpinned deck and a `try/except`
 hides it. (Round-3 finding 28.)
 
-**`invoke_graph(session_id, initial)`** mints a fresh `turn_id` per turn (the discriminator that resets
+**`invoke_graph(session_id, initial, *, emitter=None, principal=None)`** mints a fresh `turn_id` per turn (the discriminator that resets
 turn-scoped state), passes `thread_id`, sets `max_concurrency=CAP` as the belt to the queue's braces,
 and sets **no `recursion_limit`** — the default is 10007 and the superseded plan's ~50 would have made
 the graph fail *earlier* than shipping no config.
@@ -505,9 +506,14 @@ the graph fail *earlier* than shipping no config.
 keys**, and a `queue.Queue` is not serialisable through the checkpointer anyway. D3 specifies the
 emission contract; this section specifies the **graph-side setup**.
 
-**The emitter lives in a `ContextVar`** — a thread-local (or async-context-local) variable that persists
-across `Send` fan-out. Set it **once per graph invocation**, before the first node runs, and every node
-can read it via `contextvars.get()` — no parameter passing, no state pollution.
+**The emitter lives in a `ContextVar`**, and **ws4c owns its lifecycle.** The queue is created by the
+caller and handed in as `invoke_graph`'s `emitter=` argument; `invoke_graph` sets the ContextVar. The
+dependency is therefore visible in a signature rather than ambient — a caller in another module setting
+a variable this module's nodes read is not a contract, and nothing would test it.
+
+Measured (see the runtime-facts table): a var set before `graph.invoke()` reaches every `Send`-fanned
+node, and a node-local write cannot leak to a sibling. So no parameter threading through the payload and
+no state pollution.
 
 **Contract** — `src/services/graph/event_emitter.py`:
 
@@ -518,6 +524,9 @@ def get_event_emitter() -> StreamEventQueue | None
 ```
 
 - **Set in `invoke_graph`** before `graph.invoke()` runs, so the ContextVar is live for the entire turn.
+  When `emitter` is `None` — the sweeper path, and every layer-1 test that asserts state rather than
+  events — nodes see `None` from `get_event_emitter()` and **skip emission**; they must not raise.
+  Emission is an optional side channel, never a precondition for building a deck.
 - **Every node that emits calls `get_event_emitter().put(event)`** — e.g., `deck_reviewer_node` queues
   finding events and `builder_node`'s exception handler can queue error placeholders.
 - **The ContextVar must NOT enter `GraphState`.** Declare it only once, set it once per turn, never
@@ -527,10 +536,20 @@ def get_event_emitter() -> StreamEventQueue | None
 - **Reset or validate it when resuming a turn in a new process.** A second invoke on a different worker
   must set a fresh emitter, or events queue into the first process's queue forever.
 
-**Test intent:** `invoke_graph` sets the emitter before the graph runs; a node reading it without it
-being set gets `None` and either raises or handles gracefully (state the behaviour); a second `invoke_graph`
-call in the same turn-id gets a fresh emitter; the emitter survives `Send` fan-out and every fanned node
-can queue independently.
+**The principal travels the same way, and needs no payload field.** `invoke_graph` resolves
+`principal or get_current_user()` **once**, into `initiated_by`. `get_current_user()` genuinely works
+inside the graph — including inside a fanned branch — **provided the caller copied its context before
+spawning the thread**, which is ws4d's obligation and is stated there. The explicit `principal=` argument
+exists for callers with no request context: ws4d's D5 sweeper passes the marker's `spec_dirty_by`.
+Resolve it once and read it from state thereafter; a node that calls `get_current_user()` itself will
+work today and break the first time someone invokes the graph from a bare thread.
+
+**Test intent:** `invoke_graph` sets the emitter before the graph runs, and with `emitter=None` the graph
+still builds a deck and emits nothing; a second `invoke_graph` in the same turn-id gets a fresh emitter;
+the emitter survives `Send` fan-out and **every fanned node queues independently**; `initiated_by` equals
+an explicitly passed `principal` even when `get_current_user()` is `None`; and — the regression this
+closes — a graph invoked from a thread whose context was copied writes a **non-NULL** `modified_by` on
+every reviewer-written row.
 
 ---
 

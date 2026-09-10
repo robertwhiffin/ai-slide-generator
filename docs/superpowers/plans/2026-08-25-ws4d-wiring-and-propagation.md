@@ -140,7 +140,29 @@ preserves the mode, drops the rest of the transcript, deletes the graph thread, 
 the monolith is invoked, delegating to a `_send_message_streaming_graph` generator that builds the
 initial state, calls `invoke_graph`, and yields `StreamEvent`s.
 
-**`invoke_graph` must run in a separate thread.** `_send_message_streaming_graph` is a generator that yields `StreamEvent`s as they arrive. A synchronous `invoke_graph(session_id, initial)` call blocks until the graph completes, so calling it directly inside the generator cannot yield anything until finished — incrementally delivered slides would be impossible. The monolith solves this with `run_agent` in a thread (`:1187`) plus an `event_queue` (`:1107`). Apply the same pattern: invoke the graph in a worker thread, yield events from a queue as they arrive, and signal completion with a sentinel. This is not just an implementation detail — it is the contract for "slides arrive incrementally."
+**`invoke_graph` must run in a separate thread.** `_send_message_streaming_graph` is a generator that
+yields `StreamEvent`s as they arrive. A synchronous `invoke_graph(...)` call blocks until the graph
+completes, so calling it directly inside the generator cannot yield anything until finished —
+incrementally delivered slides would be impossible. The monolith solves this with `run_agent` in a thread
+(`:1187`) plus an `event_queue` (`:1107`). Apply the same pattern: invoke the graph in a worker thread,
+yield events from a queue as they arrive, and signal completion with a sentinel. This is not an
+implementation detail — it is the contract for "slides arrive incrementally."
+
+**Copy the context BEFORE spawning the thread, or every graph-written row loses its author.** This is the
+one line that makes ws4c's identity story work, and getting it wrong fails silently. `contextvars` do not
+cross a bare `threading.Thread`, so `get_current_user()` inside `invoke_graph` returns `None`
+(`user_context.py:11`), `modified_by` is `None`, and `_upsert_slide_row` inserts a NULL author
+(`slide_repository.py:104-107`) — no exception, no failing test unless one asserts the author. The
+monolith already ships the fix and says why: `ctx = contextvars.copy_context()` at
+`chat_service.py:1133`, commented *"Capture context BEFORE starting thread to preserve user auth"*, then
+`threading.Thread(target=lambda: ctx.run(run_agent), daemon=True)` at `:1187`. Do exactly that.
+
+**Create the queue here and hand it in.** ws4c owns the emitter ContextVar's lifecycle, so this path
+creates the `queue.Queue` and passes it as `invoke_graph(..., emitter=evq)` rather than setting the
+ContextVar itself. Two consequences worth stating: the copy at `copy_context()` happens **at spawn**, so
+anything set after it is invisible inside the thread; and one `Context` object cannot be entered by two
+threads at once — the monolith's `:1191-1195` takes a **second** copy for its title thread for exactly
+this reason, so if this path ever spawns a sibling thread it needs its own copy too.
 
 **`send_message` is NOT a generator.** `chat_service.py:819` returns/raises, so adding `yield from`
 there converts it into one and breaks every caller. The graph branch goes **only** in
@@ -371,7 +393,12 @@ SDR-4437 HIGH-6 removed the SP fallback outside non-prod). The LLM call itself i
 permission check and PRD §8.1's cost attribution are not. Using `spec_dirty_by` gives all three a real
 user, and the permission check already happened on that human's route when the marker was set. **A
 marker with no author is not claimed** — with no identity there is no attribution, and inventing a
-system identity was the rejected alternative. **Note:** the sweeper tick must call
+system identity was the rejected alternative. **So the sweeper passes it explicitly:** `invoke_graph(session_id, initial, principal=marker.spec_dirty_by)`.
+ws4c resolves `principal or get_current_user()`, and on a sweeper tick the second is `None` — this is the
+caller the `principal=` argument exists for. It passes no `emitter`: a sweeper tick has no SSE stream, and
+ws4c's nodes skip emission when the emitter is `None`.
+
+**Note:** the sweeper tick must call
 `set_current_user(author)` for its duration, so `require_editing_lock` and permission checks see the
 actual user, not `None`. (Finding 11 — identity must be *bound*, not just recorded.)
 
