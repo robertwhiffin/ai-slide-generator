@@ -22,6 +22,7 @@ import { ToolPicker } from './ToolPicker';
 import GenieDetailPanel from './GenieDetailPanel';
 import ToolDetailPanel from './ToolDetailPanel';
 import type { ToolPreviewData } from './ToolDetailPanel';
+import { SlideStylePreviewThumbnail } from '../config/SlideStylePreviewFrame';
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -804,6 +805,22 @@ export const AgentConfigBar: React.FC = () => {
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
+
+              {/* Visual preview of the SETTLED slide-style selection. Shown only
+                  when a slide style is active AND no design system is selected
+                  (they are mutually exclusive; a design system carries its own
+                  template previews). Fetches after the selection commits and
+                  cancels on change (handled inside the thumbnail hook). */}
+              {agentConfig.slide_style_id != null &&
+                agentConfig.design_system_id == null && (
+                  <SlideStylePreviewThumbnail
+                    key={agentConfig.slide_style_id}
+                    styleId={agentConfig.slide_style_id}
+                    name={selectedStyleName ?? 'Slide style'}
+                    enabled
+                    className="mt-2"
+                  />
+                )}
             </div>
 
             {/* Deck prompt selector */}

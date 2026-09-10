@@ -445,10 +445,16 @@ class SlideGeneratorAgent:
             system_client = get_system_client()
             llm_config = DEFAULT_CONFIG["llm"]
 
+            # Slide-style preview generation caps max_tokens (same model, smaller
+            # thinking budget) via a context-var; everything else uses the full
+            # deck budget. Defaults to None so normal generation is unaffected.
+            from src.services.slide_style_preview_fixture import preview_max_tokens_override
+            max_tokens = preview_max_tokens_override.get() or llm_config["max_tokens"]
+
             model = ChatDatabricks(
                 endpoint=llm_config["endpoint"],
                 temperature=llm_config["temperature"],
-                max_tokens=llm_config["max_tokens"],
+                max_tokens=max_tokens,
                 top_p=llm_config["top_p"],
                 workspace_client=system_client,
             )
@@ -458,7 +464,8 @@ class SlideGeneratorAgent:
                 extra={
                     "endpoint": llm_config["endpoint"],
                     "temperature": llm_config["temperature"],
-                    "max_tokens": llm_config["max_tokens"],
+                    "max_tokens": max_tokens,
+                    "preview_capped": max_tokens != llm_config["max_tokens"],
                 },
             )
 
