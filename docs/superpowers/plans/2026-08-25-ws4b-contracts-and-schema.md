@@ -569,8 +569,13 @@ a user edits and reverts. Three consequences, all simplifications:
 **The digest is stored in the unique key `(deck_id, deck_digest)`, NOT denormalised onto `session_slide_decks`.** 
 The table is keyed by the digest (content-addressed); the digest is computed once per review and persisted
 as the row's clustering key. `save_deck_review` computes it at write time; the row is immutable and the
-digest is preserved. Callers read `get_deck_review(session_id, deck_id)` to retrieve reviews for that deck,
-using `_get_deck_owner_session` to resolve `deck_id` from `session_id` (§B3.1).
+digest is preserved. **Its one production caller is `architect_node`, at turn start** (ws4c C4) — it reads the previous
+verdict so turn *n+1* does not re-propose an arc the deck reviewer already criticised. That caller is why
+this table is content-addressed and survives a version restore: the architect must be able to ask "has
+this exact deck been reviewed, and what was said". Resolve `deck_id` from `session_id` through
+`_get_deck_owner_session` (§B3.1). **The human's copy of the verdict is a separate path** — a persisted
+`role="assistant", message_type="info"` chat message written by `deck_reviewer_node` — so do **not** add a
+route or a deck-dict key for this getter; it is a model-facing read, not a presentation one.
 
 **Trap.** `compute_slide_hash` normalises case and collapses whitespace **runs**, but does **not**
 remove inter-token whitespace: `src/utils/slide_hash.py:44` is `' '.join(html.split())`. So
