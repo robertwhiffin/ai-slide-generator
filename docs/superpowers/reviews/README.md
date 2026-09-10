@@ -1,7 +1,11 @@
 # Workstream 4 review findings — round 1, ws4a round 2, and the seam pass
 
-Verbatim reviewer output from the `doc-review-loop` runs of 2026-09-10. Kept here (not in `/tmp`)
-because a fresh implementer needs them and `/tmp` does not survive five PRs.
+Verbatim reviewer output from the `doc-review-loop` runs of 2026-09-10, kept out of `/tmp` because it
+does not survive five PRs.
+
+> **Implementing? Start at `../plans/ws4-START-HERE.md`, not here.** This directory is the review
+> *record* — what was found, what was applied, what was decided and why. The only part an implementer
+> needs is the residue line below, and `ws4-START-HERE.md` already points at it.
 
 | File | Document | Findings | State |
 |---|---|---|---|
