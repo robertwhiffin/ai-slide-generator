@@ -19,14 +19,25 @@ parallel writers, and the release gate needs a deployment. None of it is testabl
 new Playwright spec this PR writes must be added to the matrix in the same commit**, or that guard fails.
 That is the interlock working as intended.
 
-**Spec:** §7.1, §7.2, §7.4, §7.5, §F1–§F4, §G1–§G3, §9, §M7, PRD §3, PRD §12.1.
+**Spec:** §7.1, §7.4, §7.5, §F1–§F4, §G1–§G3, §9, §M7 (probe 3 only), PRD §3, PRD §12.1. (§7.2 is ws4d's work, not this PR's; §M7 probes 1–2 are ws4c's.)
 
 ---
 
 ## E1 — The spec view toggle
 
 **Contract:** a `SpecView` component reading `slideDeck.deck_spec` — ws4b's new read-path key, so **no
-new endpoint** — and a toggle in `AppLayout.tsx` beside the existing view controls.
+new endpoint** — and a toggle in `AppLayout.tsx` beside the existing view controls. **Critical:** implement
+as a **local `showSpec` state inside the main view**, not an entry in `ViewMode`. `ViewMode` drives route-level
+navigation via `navigate()`, and adding `'spec'` would unmount the ChatPanel, destroying the conversation state
+and any in-flight stream. The chat and viewer must coexist unconditionally; the toggle switches which panel
+renders inside them (`AppLayout.tsx:944-946` carries a shipped comment warning about remount hazards).
+
+**TypeScript surface:** E1 renders `narrative_arc`, `slides[].assumes`/`hands_off` and `design_contract` ids
+from a `DeckSpec` object. Create TypeScript types mirroring `DeckSpec` (currently ws4b mirrors only `Finding`);
+add a `deck_spec` field to `SlideDeck` (`frontend/src/types/slide.ts:16-28` has none); and add a conformance
+test to `frontend/src/services/__tests__/` asserting the shape matches the server schema. ws4b's `Finding` type
+came with such a test precisely because "there is no runtime bridge, which is exactly why they had already
+drifted."
 
 **§7.1's shape, and the two alternatives it rejects.** A toggle: **view slides ⇄ view spec**, with **one
 conversation throughout** — not a second chat, not a filtered view. Rejected: putting the spec in the
@@ -46,8 +57,9 @@ switches which panel renders and **nothing about it reaches intent parsing**. As
 state must not appear in any request body.
 
 **Permissions are free here.** §7.5 makes spec visibility equal deck visibility — contributors and
-read-only viewer links included — and the spec rides `get_slide_deck`'s dict, which already enforces
-deck permission. Nothing to add; assert it rather than implement it.
+read-only viewer links included — and the spec rides `get_slide_deck`'s dict. Enforcement lives in the route
+(`src/api/routes/slides.py:87`, `_require_slide_permission`), not in `get_slide_deck` itself. Nothing to add;
+assert that the route gate is still there, not that `get_slide_deck` checks permissions (it does not).
 
 **Test intent** — a component test plus one e2e spec:
 
@@ -61,6 +73,12 @@ deck permission. Nothing to add; assert it rather than implement it.
 | a specless deck renders an empty state rather than crashing | Pre-cutover and MCP-built decks have no spec |
 | the design contract shows **which** brand (ids), never compiled style content | §L3 — the spec stores a reference |
 | a contributor sees the spec | §7.5 |
+| **the conversation (and any in-flight message stream) survives the toggle** | Structural property — no remount |
+| **dismissed findings are still dismissed after toggling to spec and back** | `dismissed` is `useState` reset on `deckKey` change; state must survive |
+
+**CI note:** E1's component test is collected by **ws4b's new vitest job** (ws4b adds the runner and CI job);
+ws4a's guard test covers only `*.spec.ts` under `frontend/tests/e2e/`, so it does not fire on component tests
+under `frontend/src/`. Component test coverage must be asserted in the ws4b job or it will silently disappear.
 
 ---
 
@@ -86,19 +104,25 @@ in `deck_reviews` keyed `(deck_id, deck_digest)` (§F4). The drawer must never r
 | findings render from the slide's verification records, not from a test global | The wiring itself |
 | findings are scoped to the current slide by `slideIndex` | |
 | a finding **travels with its slide across a reorder** | §F3's non-obvious property, and the 0a defect |
-| a deck-level finding (`slideIndex: -1`) **never** appears in the drawer | PRD §3's grain routing |
+| a finding with a deck-level criterion AND a real slide index does NOT appear | Grain routing risk: `f3` has `slideIndex: 3` + `category: 'narrative'`—ws4b flagged this |
 | Apply / Dismiss / Discuss call real handlers, not `console.info` | |
 | Dismiss persists to seen-state keyed `(deckKey, finding.id)` | `seenState.ts`'s store shape |
 | **a re-review of an UNCHANGED slide does not re-highlight a dismissed finding** | §K9, half one |
 | **a finding re-raised after an EDIT reads as unseen** | §K9, half two |
 
 **Those last two are the pair that justify ws4b's id rule**, and they are the reason it had to be settled
-before any code bound to it. A `(criterion, slide_content_hash)` composite is what makes both true at
-once; either alone is satisfiable by a simpler scheme that breaks the other.
+before any code bound to it. A `(criterion, subject_hash)` composite is what makes both true at once (ws4b
+names this `make_finding_id(criterion, subject_hash)` where `subject_hash` is the slide hash for slide
+findings, deck digest for deck findings); either component alone is satisfiable by a simpler scheme that
+breaks the other. **Note:** `slideIndex: -1` assertions are tautologies (filtering already excludes them),
+so the real test must be a *deck-level criterion on a real slide index*.
 
 **Note ws4b already delivered the `status` branch** (fixed findings render read-only) and the `hasUnseen`
 rule (a fixed finding does not count as unseen). This task wires real data into that behaviour; it does
 not re-implement it.
+
+**CI note:** E2's component test is also collected by **ws4b's vitest job**. Component test coverage must be
+asserted there, or silent disappearance will repeat the E1 hazard.
 
 ---
 
@@ -150,14 +174,17 @@ marker filter and no `DATABRICKS_HOST`/`DATABRICKS_TOKEN` at all** (`test.yml:10
 incidentally because the Databricks proxy host is unreachable". A layer-3 suite parked under
 `tests/unit/` would be collected on day one.
 
-**Built CI-ready now, enabled later — and "enabled" means two mechanisms, not one.**
+**Built CI-ready now, enabled later — and "enabled" means three mechanisms, not one.**
 
 - **The workflow gate** is a **new job** running `pytest tests/agentic -m live` with real credentials,
   added **disabled** (`if: false`). When the repo moves to a company org, turning this on must be a
   workflow change and **nothing else** — no test rewrites.
-- **Every layer-3 test also carries a self-skip guard**, so a test somehow collected without a reachable
-  endpoint skips rather than fails. **Marker for selection, guard for safety** — ship both, because the
-  marker alone is not load-bearing in this repo.
+- **A `skipif` guard on endpoint reachability**, so a test collected without `DATABRICKS_HOST` reachable
+  skips rather than fails.
+- **An unconditional `pytest.mark.skip(reason="real prompts pending")`**, distinct from the endpoint guard.
+  Local `.env` contains `DATABRICKS_HOST`, so the endpoint guard passes locally; the real barrier is that ws4c
+  ships placeholders, not the real prompts. Every layer-3 test carries both guards — **marker for selection,
+  endpoint guard for safety, placeholder skip for honesty**.
 
 **The trap to refuse, stated as a rule.** Layer-3 tests are written against **real prompts** and ws4c
 ships **placeholders**, so they will not pass. **Mark them skipped and enable them with the real
@@ -170,7 +197,7 @@ necessary but insufficient — it can confirm a reviewer returns valid JSON, not
 
 | Behaviour | Assertion shape |
 |---|---|
-| the architect **asks** rather than picking when a reference is ambiguous | intent is `discuss`, and the message contains a question |
+| the architect **asks** rather than picking when a reference is ambiguous | intent is `discuss`, and the message contains a question — this is RC10 from E5's table |
 | a deliberately-broken slide **is** flagged by the build reviewer | a finding with `criterion == "overflow"` exists — judged against `_SLIDE_FRAME_CONSTRAINTS`' numbers, the same ones the builder received |
 | the fixer's diff is **small** relative to the finding | a diff ratio below a threshold — not a re-author |
 | the fix reviewer **keeps the original** when handed a worse "fix" | verdict is `surfaced` |
@@ -200,9 +227,11 @@ fails if it contains a wording comparison. Layer 3 is exactly where that temptat
 | the checkpointer **resumes a turn in a second process** | Graph state must be visible to every worker, or the architect's conversation is lost the moment a poll lands elsewhere |
 | **four concurrent sweepers run at most one arc review** | ws4d defers this here deliberately: its sqlite version is weak by construction, because sqlite's single-writer lock surfaces `database is locked` rather than demonstrating the race. **This is the load-bearing version** |
 
-**Sabotage the cross-process one.** Add an in-process cache in front of the release query and confirm the
-second-process test goes red. If it stays green the test is not actually crossing a process boundary —
-fix the test, because that is the exact defect it exists to catch.
+**Sabotage the cross-process one.** A cold cache in a fresh process misses and reads the DB, so an in-process
+cache sabotage stays **green** and masks the defect. Instead: have the **first process buffer instead of
+persist** to the database and confirm the second process sees nothing (finds no releasable positions), or assert
+the child process ID (`os.getpid()`) differs from the parent. Either discriminates in-process buffering from
+a genuine cross-process read.
 
 **CI: the layer-4 integration job** — `.github/workflows/test.yml` adds a new **`layer4-integration`**
 job running `pytest tests/integration -k layer4 -v --tb=short` (or a marker-based filter of your choice).
@@ -217,10 +246,11 @@ database, not a live model endpoint.
 **PRD §12.1 is explicit** that the retired regex rules "each encode a previously-shipped bug fix" and are
 "a test checklist for the supervisor's intent handling, not merely dead code to delete."
 
-**There are RC1–RC15, not six** — verified by grepping the in-code markers. And **all six RC10–RC15
-mappings in the superseded plan were wrong**: it had ordinals, ranges and relative references.
-**Wrong-but-plausible mappings are the worst class of defect here, because a test written against the
-wrong semantics ships the regression green.**
+**There are RC1–RC15, not six** — verified by grepping the in-code markers. The RC table in the immediate
+superseded plan (`2026-08-24-pr3-langgraph-core.md`) is correct and appears again below. An earlier draft
+(`2026-08-09-pr3-langgraph-core.md:2728-2730`) had wrong ordinal/range/relative mappings. **Wrong-but-plausible
+mappings are the worst class of defect here, because a test written against the wrong semantics ships the
+regression green.** Do not teach this plan to distrust the correct table it reproduces.
 
 **Derive every rule from the code before writing a single test:**
 
@@ -244,20 +274,26 @@ grep -rhoE 'RC[0-9]+' src/ | sort -u -V        # expect RC1 .. RC15
 | RC13 | auto-create `slide_context` from a text reference | `:471`, `:992` |
 | RC14 | frontend/backend deck-state mismatch | `:1032` |
 | RC15 | canvas-ID rewriting | `:2552`, `:2577` |
+| RC1 | **validate response is real slide HTML, retry once** | `agent.py:960` |
+| RC4 | **unique canvas IDs to prevent collisions** | `agent.py:1005` |
+| RC8 | **synthesise `slide_context` from a parsed reference** | `chat_service.py:1268` |
+| RC9 | **add *with* a slide reference** | `chat_service.py:1325` |
 
-**RC1, RC4, RC8 and RC9 are not mapped above and must be derived.** Do not skip them and do not write
-"pending" into the plan — Step 1 is not complete until all fifteen have a stated meaning recorded in
-`.PLAN-CORRECTIONS.md`. Note also that the table anchors everything in `chat_service.py` while there are
-**14 further RC markers in `src/services/agent.py`** and **1 in `src/api/mcp_server.py`**; read those
-before concluding a rule's meaning.
+**All fifteen RC rules are now mapped.** Record these meanings in `.PLAN-CORRECTIONS.md` (they were already
+found in `2026-08-09-pr3-langgraph-core.md:2739-2748` and verified). Note the table anchors most entries
+in `chat_service.py` but **14 further RC markers in `src/services/agent.py`** and **1 in `src/api/mcp_server.py`**;
+the four entries above straddle both files.
 
 **Read each rule's meaning off the code, never infer it from the name.** That instruction is the whole
 task.
 
-**One behavioural test per rule, against the COMPILED graph** — the point is that the architect's
-language handling preserves each shipped fix, and only the compiled graph exercises that. Fifteen tests.
-Mark the ones needing a real model as layer 3 (E3); keep the deterministic ones — RC3, RC5, RC6, RC7,
-RC14, RC15 — in CI.
+**Behavioural tests: not one per rule.** Ruling R1 says "removed → delete it"; but RC7 is logging only
+(no LLM behaviour to test), RC1/RC4/RC5/RC15 are builder script-integrity, not architect language handling,
+RC6 is subsumed by row-per-slide persistence, and **RC11's precondition is retired** (`SelectionContext` is
+gone and the only surviving `slide_context` producer carries no textual reference). Test the architect's
+language handling: write behavioural tests for RC2, RC3, RC8, RC9, RC10, RC12, RC13, RC14, and (if needed)
+RC6 — nine tests, not fifteen. Deterministic ones in CI: RC3, RC6, RC8, RC9, RC10, RC14 (six tests).
+Mark RC2, RC12, RC13 as layer 3 (needing a real model).
 
 ---
 
@@ -266,17 +302,24 @@ RC14, RC15 — in CI.
 **Neither PRD §3's no-regression gate nor the checkpointer's token path can be proven locally.** This
 section is the deployment check, and it is the only place some of these can be observed at all.
 
-Deploy per `.claude/skills/deploy-tellr-dev/`:
+Deploy per `.claude/skills/deploy-tellr-dev/` to a **devloop deployment** (copy-on-write branch per instance):
 
 ```bash
 gh workflow run publish-dev.yml     # auto-increments the next .devN; note the version
-./scripts/deploy_local.sh update --env devtest --profile tellr-dev --from-pypi <version>
+./scripts/deploy_local.sh update --env devloop --profile tellr-dev --from-pypi <version>
 ```
+
+**Note:** devloop forks an isolated copy-on-write branch per instance, which is necessary for reproducible
+verification (no cross-contamination with other deployments). devtest reuses a shared schema and is not
+suitable for this gate.
 
 Then verify **in this order**, because an early failure invalidates the later checks:
 
-1. **The app reaches RUNNING.** Every step in `run.py::init_database` is `SystemExit(1)` on failure, so
-   RUNNING is proof all four migrations applied against real Lakebase.
+1. **The app reaches RUNNING, and §E2's ConfigPrompts column DROP completed.** `create_all` runs before
+   `_run_migrations`, so RUNNING alone proves only ORM convergence. Verify the material migration:
+   `SELECT COUNT(*) FROM information_schema.columns WHERE table_name='config_prompts' AND column_name='disabled_at'`
+   should return **0** (the column dropped successfully). If it returns 1, the migration was skipped or rolled
+   back and the check fails.
 2. **A monolith-mode turn is unchanged.** Send a message with no phrase; the deck builds as today. This
    is §D's comparison baseline — if it moved, the comparison is worthless and so is the dogfooding
    argument.
@@ -286,23 +329,37 @@ Then verify **in this order**, because an early failure invalidates the later ch
 4. **Export to PPTX *and* Google Slides, and confirm charts render.** The `external_scripts_json` failure
    is **silent** — no exception, no empty-`<style>` symptom, just blank charts — so only looking at an
    export catches it. **Google Slides export could not be tested hermetically** (`HtmlToGoogleSlidesConverter`
-   needs live Databricks *and* Google credentials), so this manual check is the only coverage it has.
+   needs live Databricks *and* Google credentials), so this manual check is the only **end-to-end** coverage
+   it has. (Unit tests exist for converter helpers in `test_google_slides_converter.py`.)
 5. **A pinned-template deck is not washed out** in preview or either export path. This is the defect
    `ensure_deck_token_css` exists to catch — a deck referencing 57 `var(--…)` tokens while defining none.
 6. **The checkpointer survives the OAuth refresh.** Leave a graph session open and exercise it again
-   **past 50 minutes**. Lakebase's token expires after an hour on a 50-minute refresh timer, and **no
-   local test can observe an expired token** — this is the only check that can, and it is the entire
-   reason the saver goes through the engine rather than holding its own connection.
-7. **A placeholder is honest.** Force a builder failure; confirm the deck completes, the failed position
-   shows as a placeholder, and the rest released past it.
+   **past ~60 minutes, with several requests** (to land on different workers with independent jitter).
+   Lakebase's token expires after an hour on a 50-minute refresh timer with ±5-minute jitter; several
+   requests ensure at least one lands on a worker past refresh. **No local test can observe an expired token**
+   — this is the only check that can, and it is the entire reason the saver goes through the engine rather
+   than holding its own connection.
+7. **A placeholder is honest.** This check requires injecting a builder failure into a live deployment
+   — no fault-injection flag exists in any plan. Skip this check for now: it needs a mechanism (an env var
+   or failing-prompt recipe) that this plan does not provide. Return when one lands.
 
 **Final baseline comparison, by cause:**
 
+Capture a baseline before any edits:
+
 ```bash
-~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q > /tmp/after_ws4e.log 2>&1
-diff <(grep -E '^(FAILED|ERROR)' /tmp/pr3_baseline.log | sort) \
-     <(grep -E '^(FAILED|ERROR)' /tmp/after_ws4e.log | sort)
-grep -c 'UndefinedColumn' /tmp/after_ws4e.log      # must be 0 — the cause a column drop mutates
+git stash
+~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q > pr3_baseline_main.log 2>&1
+git stash pop
+```
+
+Then after edits:
+
+```bash
+~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q > pr3_after_ws4e.log 2>&1
+diff <(grep -E '^(FAILED|ERROR)' pr3_baseline_main.log | sort) \
+     <(grep -E '^(FAILED|ERROR)' pr3_after_ws4e.log | sort)
+grep -c 'UndefinedColumn' pr3_after_ws4e.log      # must be 0 — the cause a column drop mutates
 ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/agentic -q   # all SKIPPED, none failed
 ```
 
@@ -310,7 +367,7 @@ grep -c 'UndefinedColumn' /tmp/after_ws4e.log      # must be 0 — the cause a c
 
 ```bash
 git diff --stat main...HEAD -- tests/ | tail -1
-git diff main...HEAD -- tests/ | grep -c '^-def test_'   # every deletion must be named in a commit
+git diff main...HEAD -- tests/ | grep -cE '^-\s*(def test_|    def test_)'   # top-level and class-method defs
 ```
 
 **The gate:** no new cause, no change to the deploy-autoscaling cause, and **every deleted test
@@ -321,7 +378,9 @@ accounted for** — a shrinking suite explained rather than tolerated.
 ## Definition of done
 
 - [ ] Both UI surfaces work against real data, with component tests and e2e specs, and **every new spec
-      added to the CI matrix in the same commit** (ws4a's guard test enforces this).
+      added to the CI matrix in the same commit** (ws4a's guard test enforces this). Spec view assertion for
+      §7.2 (ws4d's feature, ws4e's test): after `clear_context`, the spec view still renders data while the
+      transcript is empty.
 - [ ] `tests/agentic/` exists as a **sibling** of `tests/unit/`; every file carries both the marker and a
       self-skip guard; the whole suite reports **SKIPPED**, none failed; the disabled CI job is present
       and turning it on is a workflow-only change.
@@ -329,8 +388,10 @@ accounted for** — a shrinking suite explained rather than tolerated.
       the test is skipped instead and the reason recorded.
 - [ ] Layer 4 passes, and the cross-process release test has been **sabotage-verified** with an
       in-process cache.
-- [ ] All fifteen RC rules have a meaning **derived from the code** and recorded in
-      `.PLAN-CORRECTIONS.md`, with fifteen behavioural tests — the deterministic six in CI.
+- [ ] All fifteen RC rules have their meanings **derived from the code** and recorded in `.PLAN-CORRECTIONS.md`.
+      Behavioural tests for the architect's language handling only (RC2, RC3, RC8, RC9, RC10, RC12, RC13,
+      RC14, RC6 if needed — nine tests). Deterministic tests in CI (RC3, RC6, RC8, RC9, RC10, RC14 — six tests).
+      RC7 is logging only; RC1/RC4/RC5/RC15 are builder/infrastructure; RC11's precondition is retired.
 - [ ] All seven release-gate checks pass on a devloop deployment, including the **past-50-minute** token
       check and a **manual Google Slides export**.
 - [ ] Full suite compared **by cause**: no new cause, no change to the deploy-autoscaling cause, and the
