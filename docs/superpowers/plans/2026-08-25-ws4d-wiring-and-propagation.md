@@ -113,9 +113,11 @@ agent context and the transcript, keeps the spec, and **loses nothing that was a
 non-architect agent starts empty on every invocation, so no hidden state can survive a clear and make
 the agent "remember" something the user cleared.
 
-**Delete the graph thread**, via `BaseCheckpointSaver.delete_thread` (which exists as a base-class
-no-op on this class; ws4b implements it for the Lakebase checkpointer — use it rather than inventing
-a function). Otherwise checkpointed state outlives the clear.
+**Delete the graph thread**, via `BaseCheckpointSaver.delete_thread`. It is **not** a base-class no-op:
+probed on langgraph-checkpoint 4.1.1, the base method body is `raise NotImplementedError`, so an
+unimplemented saver surfaces as a 500 on the clear route rather than skipping quietly. ws4b's B2.1
+implements it for the Lakebase checkpointer — call that, rather than inventing a function. Otherwise
+checkpointed state outlives the clear.
 
 **Gate on `CAN_EDIT`, not the default.** `_check_deck_permission_for_session(session_id)`
 (`src/api/routes/_authz.py:188-191`) defaults to `PermissionLevel.CAN_VIEW`, so taking the default
@@ -149,9 +151,15 @@ explicitly-designed path — not the same three lines. (Round-3 finding 19's sib
 monolith is §D's comparison baseline, and perturbing it breaks both the comparison and every existing
 user.
 
-**The initial state must carry what ws4c's nodes read** — the resolved `design_contract`, and the
-deterministic template bytes if a template is pinned. Those come from `agent_resolution` /
-`resolve_template_bytes`, **never from model output**.
+**The initial state carries only keys `GraphState` declares, and it resolves nothing brand-related.**
+Do **not** put `design_contract` in it: the key is not on `GraphState` (ws4c C1's table is the exhaustive
+contract), so the runtime **silently drops** the write and no node ever sees the value. Do **not** resolve
+template bytes here either — `token_css`, `deterministic_css`, `template_layout_html` and `resolved_style`
+are single-writer keys ws4c assigns to `architect_node`, which resolves them once per turn through
+`resolve_template_bytes` (C6); a second resolver in this generator either races that write or is overwritten
+by it. **`architect_node` is the sole resolver of the design contract and the template bytes.** There is
+nothing here to resolve *from* on turn 1 in any case: the contract lives at `deck_spec.design_contract`, the
+architect is what commits `deck_spec`, and `build_branch_payload` copies the contract into each branch.
 
 **Graph mode must also run `run_title_gen`.** The monolith runs it inline at `send_message_streaming:1155`
 only when `is_first_message` (`:1193-1196`), emitting `SESSION_TITLE` (`:1564`). A graph branch that
@@ -302,8 +310,11 @@ attribution, and the review has not run yet).
 **Contributor sessions and deck ownership:** Decks are shared across sessions via `UserSession.parent_session_id`;
 a contributor session has `UserSession.slide_deck` as `None`. Routes pass `request.session_id` directly to
 `mark_dirty`, which can receive a contributor id. **`mark_dirty` must resolve the actual owner deck via
-`SessionManager._get_deck_owner_session(session_id)`** — that is, resolve to the session whose `slide_deck`
-is not `None` and holds the shared deck. The marker lives on the owner deck, not the contributor's ephemeral
+`SessionManager._get_deck_owner_session(db, session)`** — an **instance method** taking a live `Session` and
+a **`UserSession` object**, never a session_id string (`session_manager.py:709`; every one of its ~20 call
+sites passes both, e.g. `:1096`, `:1300`). So `mark_dirty` opens a session, looks the `UserSession` up from
+its string id, and passes the object — writing `_get_deck_owner_session(session_id)` raises `TypeError` on
+the first human edit. The marker lives on the owner deck, not the contributor's ephemeral
 session. And `claim_due_marker` returns the **owner's** string id, so if `clear_marker` uses a different key,
 markers are never cleared on the owner when a contributor session clears them — both must use the owner-resolved
 key.
@@ -333,7 +344,9 @@ a periodic loop is the opposite case.
 
 **Contract:** `claim_due_marker(now) -> (session_id, author) | None`, `run_arc_review(session_id, author)`,
 `spec_review_sweeper_loop()`, `SWEEP_INTERVAL_SECONDS = 60`, `CLAIM_TTL_SECONDS = 900`. The claim is
-stored in `session_slide_decks.spec_dirty_claimed_at` (created by ws4b migration at `:497-498`).
+stored in `session_slide_decks.spec_dirty_claimed_at`, the third column created by **ws4b's B2.3**
+migration. Cite the section, not a line: `:497-498` was B2.1's `Send(timeout=)` trap, and a line anchor
+into a sibling plan moves every time that plan is edited.
 
 **The claim is required, not defensive.** `run.py:128` defaults `UVICORN_WORKERS=4` and the sweeper runs
 in every worker, so four loops racing one marker with no lease means a WYSIWYG session pays for up to
