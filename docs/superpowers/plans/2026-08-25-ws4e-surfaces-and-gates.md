@@ -100,6 +100,12 @@ which shipped as a defect during 0a before being caught.
 **Deck-level findings do NOT come from here.** They route to **chat** (PRD §3's grain routing) and live
 in `deck_reviews` keyed `(deck_id, deck_digest)` (§F4). The drawer must never render one.
 
+**Where the positive half of §F4 is delivered, so this negative assertion is not the whole story:**
+`deck_reviewer_node` (ws4c C4) persists the verdict as a `role="assistant", message_type="info"` chat
+message, which renders through the existing transcript with no change in this PR, and `architect_node`
+reads the structured row back via `get_deck_review`. **This PR adds no deck-findings surface** — if you
+find yourself building one, stop: that is the drawer rule being violated from the other direction.
+
 **Test intent:**
 
 | Assertion | Why |
