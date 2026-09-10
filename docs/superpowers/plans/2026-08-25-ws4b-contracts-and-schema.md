@@ -15,7 +15,7 @@ off it, `foreman_router` reads its fields, `finding.ts` mirrors it, the conforma
 schema change after ws4c starts ripples through all four plus the frontend types. So the contracts
 land, and get reviewed, **before** any code binds to them.
 
-**Depends on:** nothing (ws4a is parallel). **Blocks:** ws4c, ws4d, ws4e.
+**Depends on:** ws4a. **Blocks:** ws4c, ws4d, ws4e.
 
 **The rule that makes this PR worth separating:** once merged, **a later PR that wants a schema field
 which does not exist escalates back here — it never edits locally.** Three of the review loop's
@@ -32,13 +32,12 @@ blocking findings were exactly that violation.
 **Contract** — `src/domain/finding.py`. Pure Pydantic; no DB, no framework imports.
 
 ```python
-SCHEMA_VERSION = 1
 VERDICT_KEY = "tellr_review"          # findings nest one level deeper than is_placeholder_record scans
 
 FindingCategory = Literal["content", "design", "narrative"]     # CLOSED
 FindingStatus   = Literal["open", "fixed"]
 FindingLevel    = Literal["slide", "deck"]
-SlideVerdict    = Literal["clean", "fixed", "surfaced", "placeholder"]
+SlideVerdict    = Literal["clean", "fixed", "surfaced"]  # "placeholder" verdicts are constructed by commit_placeholder with error:True
 
 class FindingCriterion(BaseModel):
     name: str; category: FindingCategory; level: FindingLevel
@@ -54,7 +53,7 @@ class Finding(BaseModel):
     status: FindingStatus = "open"      # STATE: did a fixer handle it (§F2 branches on this)
     seen: bool = False                 # initial value only; lifecycle owned client-side
 
-def make_finding_id(criterion: str, subject_hash: str) -> str
+def make_finding_id(criterion: str, subject_hash: str, ordinal: int = 0) -> str
 class SlideReviewOutput(BaseModel)     # slide_index, verdict, findings + objective/subjective splits
 class DeckReviewOutput(BaseModel)      # findings
 def build_verification_record(*, content_hash, findings, verdict) -> dict
@@ -67,11 +66,12 @@ canonical rather than convenient.
 1. **`category` is a closed union** consumed by an exhaustive `Record<SlideFinding['category'], string>`
    at `FeedbackDrawer.tsx:13`. A fourth value **fails to compile**. So every criterion must map into
    the three — which is why §A2's criteria list is schema-relevant, not stylistic.
-2. **`error` is reserved anywhere inside a verification record.** `is_placeholder_record`
-   (`slide_repository.py:41-61`) returns True when the record's top level **or any verdict value
-   inside it** has `error is True`. A finding payload using `error` makes a healthy slide read as a
-   failed placeholder in the release query, the deck-review trigger and the UI badge. Hence
-   `VERDICT_KEY`.
+2. **`error` is reserved for placeholder detection (ws4c/d).** `is_placeholder_record`
+   (`slide_repository.py:41-61`) checks for `error is True` to detect failed placeholders. In the frontend,
+   `VerificationResult.error` is a **required boolean field** (`types/verification.ts:22`), not a trap key.
+   A finding payload must not use the key name `error` outside the verdict's structure. `is_placeholder_record`
+   currently has **zero production callers** today (only test fixtures), so this is a guard for ws4c/d's
+   future use, not present-tense breakage. Hence `VERDICT_KEY`.
 3. **A verdict stays inside the `{content_hash: verdict}` shape.** `get_verification_map`
    (`session_manager.py:1793-1811`) flattens every row's record into one dict that feeds
    `create_version`, so anything keyed otherwise is persisted into save points and silently lost.
@@ -95,9 +95,12 @@ fatigue as a live risk and PRD §3 wants most defects fixed before the user sees
 client-side in `localStorage` keyed `(deckKey, finding.id)` (`SlideViewer/seenState.ts`), and two
 requirements pull opposite ways: ids that are *not* stable make every carried-over finding re-highlight
 as unseen each turn (PRD §14's fatigue failure), while ids that are *unconditionally* stable make a
-finding legitimately re-raised after an edit read as already-seen. **A `(criterion, subject_hash)`
-composite satisfies both** — stable while the slide is unchanged, different once it is edited.
-`subject_hash` is the slide's `compute_slide_hash` for a slide finding, the deck digest for a deck one.
+finding legitimately re-raised after an edit read as already-seen. **A `(criterion, subject_hash, ordinal)`
+composite satisfies both** — stable while the slide is unchanged, different once it is edited, and unique
+when multiple findings of the same criterion exist on one subject. `subject_hash` is the slide's
+`compute_slide_hash` for a slide finding, the deck digest for a deck one. `ordinal` is the finding's
+position in the list of findings of that criterion on that subject (0-indexed), or derive it from the
+message content (digest or hash of the message text) — **decide in this PR and state it.**
 
 **Test intent** — `tests/unit/test_finding_schema.py`:
 
@@ -108,7 +111,7 @@ composite satisfies both** — stable while the slide is unchanged, different on
 | an id is stable for the same `(criterion, hash)` and **changes** when the hash changes | Both halves of §K9 — one without the other is the bug |
 | a `Finding` with an unknown criterion is rejected; one whose category contradicts the registry is rejected | The registry is the authority |
 | `objective` and `status` are independent | The superseded plan's `auto_fixable` conflated predicate and state, which made §F2 unimplementable |
-| `is_placeholder_record(build_verification_record(...))` is **False**, and no level carries `error` | Constraint 2 |
+| `is_placeholder_record(build_verification_record(...))` is **False** for every `SlideVerdict` value | Constraint 2. The qualifier "when `verdict != "placeholder"`" would now be vacuous — `"placeholder"` was removed from the union, so no reachable verdict can produce a placeholder record. Placeholders come only from `commit_placeholder`, which writes `error: True`, and that path is asserted separately below |
 | the record's only top-level key is the content hash | Constraint 3 |
 | findings round-trip through the record | |
 | PR1's placeholder shape still reads as a placeholder | The other direction — don't break what works |
@@ -128,16 +131,21 @@ what covers it. (Round-3 finding 25.)
 
 ### B1.2 Mirror the schema into `finding.ts`, with a conformance test
 
-**Contract** — `frontend/src/types/finding.ts` mirrors `Finding` field-for-field in camelCase, and
-adds `FindingStatus`. `DrawerCallbacks` is unchanged.
+**Contract** — `frontend/src/types/finding.ts` defines `SlideFinding` type that mirrors `Finding` 
+field-for-field in camelCase: `id`, `slideIndex`, `category`, `criterion`, `objective`, `status`, 
+`message`, `seen`. Adds `FindingStatus` type and `CATEGORY_LABEL` constant. `frontend/src/types/verification.ts` 
+defines `VerificationResult` and `VerificationRating`. `DrawerCallbacks` is unchanged.
 
 **Why a conformance test rather than trust:** there is no runtime bridge between the two, which is
 exactly why they had already drifted — the backend produced `{category, severity, description,
 auto_fixable}` while the frontend declared `{id, slideIndex, category, message, seen}`. §7.1 names
-this seam explicitly.
+this seam explicitly. The `VerificationResult` interface is equally critical — it's constructed by
+`get_slide_deck` from the backend record and rendered by `VerificationBadge.tsx`, which dereferences
+`.rating` and `.issues.length` (lines 119, 201) without null-checking the whole value.
 
-**Test intent** — `tests/unit/test_finding_conformance.py`, which *parses the TypeScript*:
+**Test intent** — `tests/unit/test_finding_conformance.py` and `test_verification_conformance.py`:
 
+*Finding conformance:*
 - every backend field has a camelCase mirror, and `finding.ts` declares no field the backend lacks
 - the `FindingCategory` union equals the categories in `CRITERIA` equals exactly the three
 - the `FindingStatus` union is exactly `open | fixed`
@@ -145,13 +153,20 @@ this seam explicitly.
   test that matters**, per finding 25 above
 - a real `Finding.model_dump()` maps to the exact camelCase dict the frontend will read
 
+*Verification conformance:*
+- `VerificationResult` has all required fields: `score`, `rating`, `explanation`, `issues`, `duration_ms`, `error`
+- `VerificationRating` union matches the color and icon switch statements in `verification.ts`
+- a minimal `{content_hash: {"tellr_review": {…}}}` record from the backend maps to a full `VerificationResult` without missing required fields
+
 **Sabotage:** rename `message` → `description` in the mirror only and confirm red. A conformance test
 that survives a rename is the entire defect.
 
 **Fixture and e2e consequences — the part that is easy to miss.**
 `frontend/tests/fixtures/findings.ts` exports **`mockFindings`** with **three** entries: `f1`/`f2` on
-`slideIndex: 1` and **`f3` on `slideIndex: 3`**. All three need the new fields, and one must carry
-`status: 'fixed'` so the read-only branch has coverage. **Keep the ids** — about ten assertions in
+`slideIndex: 1` (content and design categories) and **`f3` on `slideIndex: 3`** (arc_gap, deck-level).
+All three need the full mirror: `id`, `slideIndex`, `category`, `criterion`, `objective`, `status`, 
+`message`. One must carry `status: 'fixed'` (suggest `f1`) so the read-only branch has coverage.
+`f2` and `f3` carry `status: 'open'`. **Keep the ids** — about ten assertions in
 `frontend/tests/e2e/slide-viewer.spec.ts:314-359` key on them, and after ws4a that spec runs in CI.
 
 Two specific breakages to handle rather than discover:
@@ -198,7 +213,7 @@ served by E2E, so the runner lands here rather than as a follow-up.
 
 | Change | Site | Why |
 |---|---|---|
-| suppress Apply/Dismiss/Discuss when `status === 'fixed'`; add a "Fixed" marker | `FeedbackDrawer.tsx`, replacing the unconditional action block at `:128-160` | §F2: an auto-fixed finding is **reported** (PRD §3 wants what was fixed visible) but not **actionable** |
+| suppress Apply/Dismiss/Discuss when `status === 'fixed'`; add a "Fixed" marker | `FeedbackDrawer.tsx`, replacing the unconditional action block at `:135-160` | §F2: an auto-fixed finding is **reported** (PRD §3 wants what was fixed visible) but not **actionable** |
 | `unseenSlideIndices` and `hasUnseen` both ignore `status === 'fixed'` | `SlideViewer.tsx:201-205` and `:525` | Otherwise the unseen badge nags about work already done — the exact fatigue symptom §F2's read-only presentation exists to avoid. §F1 lists this as the third settled field |
 
 **CI: the vitest job** — `frontend-build` runs `npx tsc -b` + `npx vite build` and **adds `npx vitest`**
@@ -207,9 +222,28 @@ job (separate from `frontend-build`) running `cd frontend && npm run test:unit`,
 job must **not** block the e2e matrix (E1's new e2e spec also adds the vitest job to `.github/`; both
 PRs are committing the same job). Earliest merge wins and the second PR sees no change needed.
 
-**Test intent** — `FeedbackDrawer.test.tsx`: an open finding renders all three actions; a fixed
-finding renders none and is labelled; the two render correctly when mixed. **Sabotage** by replacing
-the status gate with `true &&`, confirm red, and grep to confirm the edit landed.
+**Test intent — two files, because the table above states two behaviour changes.**
+
+`FeedbackDrawer.test.tsx`: an open finding renders all three actions; a fixed finding renders none and
+is labelled; the two render correctly when mixed. **Sabotage** by replacing the status gate with
+`true &&`, confirm red, and grep to confirm the edit landed.
+
+`SlideViewer.test.tsx` — **the second row of the table has no coverage without this.** Assert that a
+slide whose only unseen finding is `status: 'fixed'` reports **no** unseen indicator, and that a slide
+with an open unseen finding still does. Note the existing e2e (`slide-viewer.spec.ts:324-337`, "unseen
+indicator appears then clears once slide 1 is viewed") passes **regardless** of this change, because
+`f2` stays open — so it is not coverage. **Sabotage** by dropping the `status === 'fixed'` filter from
+`unseenSlideIndices` and confirming the fixed-only case goes red.
+
+**The tsconfig decision, made here rather than left to the builder.** Tests at
+`src/**/*.test.{ts,tsx}` land **inside** `tsconfig.app.json`'s `include: ["src"]`, which declares
+`types: ["vite/client"]` only and runs `noUnusedLocals`/`noUnusedParameters` — so `describe`/`it`/`expect`
+and the `jest-dom` matchers are untyped and `tsc -b` fails, which the Definition of Done requires to be
+clean. `vitest.config.ts` also falls outside both projects (`tsconfig.node.json` includes only
+`vite.config.ts` and `playwright.config.ts`). **Resolve by adding `"vitest/globals"` and
+`"@testing-library/jest-dom"` to `tsconfig.app.json`'s `types`, and `vitest.config.ts` to
+`tsconfig.node.json`'s `include`.** This is not a preference — leaving it unstated makes the plan's own
+DoD unsatisfiable on the first `tsc -b`.
 
 ---
 
@@ -417,22 +451,23 @@ reaches connections **only** through `provide_token`, a SQLAlchemy `do_connect` 
 holding a raw connection never traverses that listener, so its writes begin failing about an hour
 into every deployment — **in production only, and invisibly to any test that mocks the database.**
 
-**Verified surface on `langgraph-checkpoint` 4.1.1** — implement these; everything else has a working
-base-class default:
+**Verified surface on `langgraph-checkpoint` 4.1.1** — implement these five methods (they raise 
+`NotImplementedError` on the base class):
 
 ```
 get_tuple(config) -> CheckpointTuple | None
 list(config, *, filter=None, before=None, limit=None) -> Iterator[CheckpointTuple]
 put(config, checkpoint, metadata, new_versions) -> RunnableConfig
 put_writes(config, writes: Sequence[tuple[str, Any]], task_id, task_path="") -> None
-delete_thread(thread_id) -> None        # already on the base class — ws4d uses it for context clearing
+delete_thread(thread_id) -> None        # ws4d uses it for context clearing
 CheckpointTuple = (config, checkpoint, metadata, parent_config, pending_writes)
 JsonPlusSerializer().dumps_typed(obj) -> (type: str, bytes);  loads_typed((type, bytes)) -> Any
 ```
 
-Note this inventory is the subset the compiled graph uses; `prune`, `copy_thread`,
-`delete_for_runs`, `get_delta_channel_history`, `with_allowlist` and the `a*` methods also exist and
-are deliberately left to the base class.
+Note this inventory is the subset the compiled graph uses; `prune`, `copy_thread`, `delete_for_runs`,
+`get_delta_channel_history`, `with_allowlist` and the `a*` methods also exist on the base class with
+`NotImplementedError` (do not implement; they are not called). Only the five above are called and require
+implementation. `get_next_version` is NOT called (despite containing a raise), so omit it.
 
 **Three traps, all measured.**
 
@@ -442,7 +477,7 @@ are deliberately left to the base class.
    this, which is how it survived review once.
 2. **Do NOT schema-qualify the raw SQL.** `database.py:239,259` append
    `options=-csearch_path%3D{schema}` to the **connection URL**, so every pooled connection carries
-   it — and `src/core/encryption.py:44-54` is an explicit in-repo NOTE relying on exactly that, with
+   it — and `src/core/encryption.py:46-54` is an explicit in-repo NOTE relying on exactly that, with
    deliberately unqualified raw SQL "because this module must also run against SQLite (unit tests —
    no schemas)". **Follow `encryption.py`.** Unconditional qualification also breaks every sqlite
    unit test, and there is no `LAKEBASE_SCHEMA` symbol to import — `database.py` only reads
@@ -476,8 +511,8 @@ fixture is building tables from the ORM — fix the fixture, not the test.
 ### B2.2 `deck_reviews` and the deck digest
 
 **Contract** — `src/services/deck_review_store.py`: `compute_deck_digest(list[str]) -> str`,
-`save_deck_review(session_id, digest, findings, author)`, `get_deck_review(session_id, digest)`. Model
-`DeckReview` on `deck_reviews`, unique on `(deck_id, deck_digest)`.
+`save_deck_review(session_id, deck_id, digest, findings, author)`, `get_deck_review(session_id, deck_id)`. 
+Model `DeckReview` on `deck_reviews`, unique on `(deck_id, deck_digest)`.
 
 **Content-addressed, not SCD2 and not the version counter (§F4).** An SCD2 pair records *when* a
 review was current; every consumer needs *which deck state it judged*, and those come apart the moment
@@ -492,8 +527,11 @@ a user edits and reverts. Three consequences, all simplifications:
   what changes it. This is the **opposite** of the per-slide rule (§F3), where a record travels with
   its slide. Both are correct; say so.
 
-**The digest is computed on read, never stored** — a denormalised column could drift from the rows it
-summarises, and the read path already loads every row.
+**The digest is stored in the unique key `(deck_id, deck_digest)`, NOT denormalised onto `session_slide_decks`.** 
+The table is keyed by the digest (content-addressed); the digest is computed once per review and persisted
+as the row's clustering key. `save_deck_review` computes it at write time; the row is immutable and the
+digest is preserved. Callers read `get_deck_review(session_id, deck_id)` to retrieve reviews for that deck,
+using `_get_deck_owner_session` to resolve `deck_id` from `session_id` (§B3.1).
 
 **Trap.** `compute_slide_hash` normalises case and collapses whitespace **runs**, but does **not**
 remove inter-token whitespace: `src/utils/slide_hash.py:44` is `' '.join(html.split())`. So
@@ -506,6 +544,22 @@ hold: case, and runs of whitespace between tokens.
 round-trips; edit-then-revert finds the earlier verdict; re-saving the same digest updates rather than
 duplicating; no FK to `slide_deck_versions`; a review survives pruning every version.
 **Sabotage:** `sorted()` the per-slide hashes before joining and confirm the reorder test goes red.
+
+### B2.2b Findings and slide position stability
+
+**Trap — `Finding.slide_index` is captured at record-write time and carried inside the verdict blob.**
+Findings persist inside `verification_record`, keyed by `content_hash` (§F3). `findings_from_record(record, content_hash)`
+takes no position argument — it reads `slide_index` back from the payload. After a reorder, carried-over
+findings on the wrong slide trigger the drawer's filter `f.slideIndex === currentIndex`, silently detaching
+them from the view. This is exactly the slide-separation defect the per-row content-hash design exists to prevent.
+
+**Decision: store the `slide_index` captured at review time inside each `Finding`, never recompute.**
+This keeps findings with their slide across reorders (correct for cross-slide checks that reference position).
+The position is semantics-bearing (§F3's grain); drop it only if findings are never surfaced to users in a
+reorder context (which they are — the drawer runs live). Verify the field is read from the record, not
+re-derived.
+
+---
 
 ### B2.3 The dirty-marker columns
 
@@ -553,7 +607,8 @@ matrix entry runs, so missing it **fails all matrix jobs at seeding before a sin
 
 **Plus two read sites that fail independently of insert ordering:** `settings_db.py:386-387` reads
 both ORM attributes into `AppSettings`; `config_service.py:69-75` **assigns** both columns behind
-`PUT /agent-config`.
+`PUT /agent-config`. **Dead parameters in scope:** `config_service.py:29-30` declares the function kwargs,
+`:41-42` documents them, and `:69-75` uses them — drop all three ranges together.
 
 **Plus `src/database/models/prompts.py:39-40` itself** — the ORM declarations. Removing them is
 sequenced **before** B2.5's drop, because otherwise every `db.query(ConfigPrompts)` emits
@@ -561,12 +616,13 @@ sequenced **before** B2.5's drop, because otherwise every `db.query(ConfigPrompt
 `create_all()` will **not** re-add it (it only creates missing *tables*), so the breakage is permanent.
 (Round-3 finding 7 — this file was in neither the file table nor the site list.)
 
-**Plus the rest:** `agent_config.py:97-98` + validator; `requests.py:35-36`, `:133-134`, `:136-141`;
-`responses.py:53-54` (`PromptsConfig` — **dead schema**: referenced only by `ProfileDetail`, which no
-route declares as a `response_model`; update or delete, nothing breaks either way);
-`defaults.py:41`, `:150`; `config_loader.py:130`; `validator.py:39`;
-`migrate_profiles_to_agent_config.py:15,17,44-45,51-52,54,76-77` (**each line is a pair** — an earlier
-draft cited only the `system_prompt` half); `agent_factory.py:250-268`; `agent.py:250-252,617,624-625`;
+**Plus the rest:** `src/api/schemas/agent_config.py:97-98` + validator; `src/api/schemas/requests.py:35-36`, 
+`:133-134`, `:136-141`; `src/api/schemas/responses.py:53-54` (`PromptsConfig` — **dead schema**: referenced 
+only by `ProfileDetail`, which no route declares as a `response_model`; update or delete, nothing breaks 
+either way); `src/api/schemas/defaults.py:41`, `:150`; `src/api/schemas/config_loader.py:130`; 
+`src/api/schemas/validator.py:39`; `src/core/migrate_profiles_to_agent_config.py:15,17,44-45,51-52,54,76-77` 
+(**each line is a pair** — an earlier draft cited only the `system_prompt` half); 
+`src/core/agent_factory.py:250-268`; `src/core/agent.py:250-252,617,624-625`;
 `frontend/src/types/agentConfig.ts:82-83,135-136`;
 `frontend/src/contexts/AgentConfigContext.tsx:124-125,1137-1138` (**two** sites);
 `frontend/src/api/config.ts:83,92`; `frontend/src/components/config/ProfileList.tsx:34,59` (a **third**
@@ -581,17 +637,21 @@ draft cited only the `system_prompt` half); `agent_factory.py:250-268`; `agent.p
 - **`agent.py:617,624-625` read the ASSEMBLED prompt dict**, not the retired `AgentConfig` field, so
   "replace each read with the default" would break the monolith's prompt assembly. The real consequence
   to record: once the override branch goes, `pre_assembled` is always `True` and `agent.py`'s legacy
-  concatenation branch (`620-640`) becomes unreachable dead code. (Round-3 finding 7.)
+  concatenation branch (`620-675`) becomes unreachable dead code. (Round-3 finding 7.)
 
-**Ruling R1 applies to the tests.** Six files carry ~132 references:
+**Ruling R1 applies to the tests.** Twelve files carry ~200+ references. **Primary files (six carry ~132):**
 `test_agent_factory.py` (41), `test_prompt_precedence_fixes.py` (40), `test_design_system_compiler.py`
 (17), `test_ds_generation_state_matrix.py` (14), `test_migration.py` (12),
-`test_agent_config_schema.py` (8). **Triage per test:**
+`test_agent_config_schema.py` (8). **Secondary files (six carry ConfigPrompts/AgentConfig structural assertions):**
+`test_models.py` (4), `test_unset_agent_config_is_sql_null.py` (2 assertions that blob **stores** both keys),
+`test_settings_db.py` (2), `test_services.py` (3), `test_config_loader.py` (1),
+`test_default_config_integration.py` (1). **Triage per test:**
 
 | The test asserts… | Action |
 |---|---|
 | that a custom prompt **overrides** the default, that the field round-trips, or validator behaviour on it | **DELETE** — the functionality is gone, there is nothing to repoint at |
 | design-system resolution, tool gating, prompt precedence or template pinning, merely *constructing* an `AgentConfig` with the retired kwarg incidentally | **KEEP**, dropping the kwarg. §L6 requires this behaviour survive |
+| `ConfigPrompts` round-trips or the blob **stores** both keys (secondary files) | **DELETE** or **ADAPT**: the secondary assertions are structural and lose ground once the blob changes. Drop them entirely rather than inventing new assertions on the leaner blob. The primary tests (which test override and precedence mechanics, not shape) survive. |
 
 `test_agent_factory.py` is the clearest split: its 41 references include both
 `test_custom_system_prompt_overrides_default` (delete) and the `_get_prompt_content` / `_build_tools`
@@ -609,10 +669,7 @@ local pytest run would tell you.
 
 ### B2.5 Drop the columns, and migrate the stored blobs
 
-**Contract:** `_migrate_drop_config_prompt_columns` issues `ALTER TABLE config_prompts DROP COLUMN`
-for both, idempotently; `src/core/strip_retired_prompt_keys.py` removes the two keys from every stored
-`agent_config` blob and is wired into `run.py::init_database` after `init_db()` and before
-`seed_defaults()`, in its own `try` that `raise SystemExit(1)`.
+**Contract:** B2.4's edits to `migrate_profiles_to_agent_config.py` (lines 51-56) are a **hard prerequisite** — they stop `build_agent_config_from_profile` from emitting the retired keys. Then `_migrate_drop_config_prompt_columns` issues `ALTER TABLE config_prompts DROP COLUMN` for both, idempotently; `src/core/strip_retired_prompt_keys.py` removes the two keys from every stored `agent_config` blob and is wired into `run.py::init_database` **LAST in the migration window**, after `migrate_profiles` / `backfill_sessions` complete, and before `seed_defaults()`, in its own `try` that `raise SystemExit(1)`. This ordering ensures B2.4's preventive edit (no new keys emitted) runs before the data fix (strip existing keys).
 
 **The implementation lives under `src/`, and the CLI (if any) imports *from* it.** The app wheel ships
 `src/` but **not** `scripts/`, so a startup step written as `from scripts.… import …` raises
@@ -656,8 +713,8 @@ wrong way — state the sentinel here and only here.
 **Why a new writer rather than `save_slide_deck` (§H1a).** That method has exactly two behaviours and
 neither is a deck-level-only write:
 
-- **`deck_dict=None`** → `deck.css` is *never assigned* (both assignments are inside `if deck_dict:`,
-  `session_manager.py:1356`/`:1366`) and it sets `deck.deck_json = None` (`:1303`, `:1320`).
+- **`deck_dict=None`** → `deck.css` is *never assigned* (the assignment is inside `if deck_dict:`,
+  `session_manager.py:1366`) and it sets `deck.deck_json = None` (`:1303`, `:1320`).
 - **`deck_dict={…}`** → it upserts every slide in `deck_dict["slides"]` and then runs
   `_prune_slide_rows_beyond(db, deck_owner.id, len(slides))` (`:1403`), hard-deleting every row at
   `position >= len(slides)`. A **pre-fan-out** call carries a shorter list than the live row count, so
@@ -677,18 +734,19 @@ finding 8.)
 sites) — note it takes a **`UserSession` object, not a session_id string**, so a `session_id` caller
 needs the session lookup first. Do not write a second implementation.
 
-**The eight columns, split across two writes (§H1b, §L2). Nothing self-heals.**
+**Seven columns, split across two writes (§H1b, §L2). Nothing self-heals. Deck-level JavaScript is NOT persisted.**
 
 | Column | Which write | If never written |
 |---|---|---|
 | `title` | pre-fan-out | untitled deck **and** untitled session row |
 | `css` | both (B3.3 aggregates for the second) | unstyled deck — the §H defect. `knit()` guards with `if self.css:` so an empty value emits **nothing** |
-| `external_scripts_json` | pre-fan-out | **Chart.js missing from every export.** Does **not** self-heal: `_ensure_default_external_scripts` runs only when something builds a `SlideDeck` domain object, and nothing on the export or preview path does — `export.py:84` reads the raw dict, and five frontend consumers read `slideDeck.external_scripts`. Failure is **silent**: no exception, blank charts |
+| `external_scripts_json` | pre-fan-out | **Chart.js missing from every export.** Does **not** self-heal: `_ensure_default_external_scripts` runs only when something builds a `SlideDeck` domain object, and nothing on the export or preview path does — `export.py:84` reads the raw dict, and ten frontend consumers read `slideDeck.external_scripts`. Failure is **silent**: no exception, blank charts |
 | `head_meta_json` | pre-fan-out | custom viewport and every other `<meta>` reverts to `knit()`'s default |
-| `scripts_content` | pre-fan-out | deck-level JS lost from the row-read path |
 | `deck_spec_json` | pre-fan-out | **the spec is never persisted** — §7.1's view has no data and turn *n+1*'s architect starts blind. The pre-fan-out trigger *is* "the architect committed the spec" |
 | `slide_count` | post-commit | **the session list renders `0 slides`** (`routes/sessions.py:233` — a *column*, not derived) |
 | `html_content` | post-commit | raw-HTML debug view empty |
+
+**Why `scripts_content` is not persisted.** `SlideDeck.scripts` is a read-only `@property` (`slide_deck.py:79-95`) that aggregates per-slide scripts with IIFE wrapping. Its implementation takes no constructor parameter and is re-derived on every `SlideDeck` instantiation, including from a persisted row dict. A persisted `scripts_content` value appears in the row-read dict and then vanishes at knit time because `SlideDeck.from_dict` (`:111-139`) does not populate it — the value is always recomputed from the slides. Deck-level JS enters the domain object **only** through per-slide `Slide.scripts` fields written by builders.
 
 **§K4 — what deterministic CSS the pre-fan-out write persists: the pinned template's `token_css` plus
 its own `<style>` block.** Forced, not preferred: §H1's stated reason for writing before the fan-out is
@@ -713,9 +771,16 @@ touchers are `create_version`'s snapshot (`:1939-1951`) and `restore_version`'s 
 (`:2240`), and the row-read `deck_dict` (`:1538-1564`) emits neither. So §7.1's spec view and E2's
 findings drawer have no data path.
 
-**Contract:** add **two** parsed keys to **both** read paths — the row-read `deck_dict` and the
-blob fallback at `:1572`, since a pre-cutover deck with no rows reaches the latter. Parse with helpers
-that never raise, alongside each other and `_read_head_meta`.
+**The deck-less state is reachable — B3.1's pre-fan-out write produces it.** The row-read path has
+two branches: the normal case at `:1585` when `deck_json` is populated, and the fallback at `:1637`
+when `deck_json` is falsy (legacy path, "return basic info without slides array"). B3.1's pre-fan-out
+write creates a `SessionSlideDeck` row with `deck_json` never assigned, so the new session reaches
+the `:1637` fallback on the first read, before the post-commit write assigns `deck_json`. **Both paths
+must expose `deck_spec_json` and findings**, or the spec view renders null even on the moment after
+the architecture turn.
+
+**Contract:** add **two** parsed keys to **both** read paths — the normal `deck_dict` and the
+legacy fallback at `:1637-1650`. Parse with helpers that never raise, alongside each other and `_read_head_meta`.
 
 1. **`deck_spec`** — parsed from `deck_spec_json`, returns `None` if absent or unparseable.
 2. **`findings`** — call `findings_from_record(record, content_hash)` on every slide's
@@ -748,21 +813,22 @@ stylesheet alone and the deck knits with **no layout CSS**, the exact §H defect
 deck CSS against the token stylesheet and so cannot run before builders have emitted anything.
 
 **Where the blocks come from — the constraint that makes this coherent.** `BuilderOutput` **forbids**
-a builder emitting `<style>` (B1.5), so the blocks are **not** builder output. They are the
-**template's** style block: §M5 pairs each extracted section with the template's full block, so a
-15-slide pinned deck yields up to 15 identical copies and the aggregator's job is to collapse them.
-ws4c owns producing them; this task owns consuming them. **If ws4c concludes one pinned template needs
-no per-slide accumulation at all, this function's dedupe premise weakens and its test must change with
-it** — flag that rather than leaving a test asserting a path nothing reaches.
+a builder emitting `<style>` (B1.5), so the blocks are **not** builder output. They are produced by
+**one writer**: `architect_node` in ws4c, which emits them once per turn. The list holds exactly one
+element (or is empty on a legacy/unpinned deck). The aggregator's job is **not deduplication** but
+**aggregation and token backstopping** — merging the one emitted block into existing deck CSS and running
+`ensure_deck_token_css`. ws4c owns producing the blocks; this task owns consuming them. **A test asserting
+N-identical-copies-collapse-to-one is untestable** — constrain it to one block and assert its properties
+(at-rules survive, tokens are present).
 
 **CSS travels whole and is never pruned** (§M5): the backstop covers only custom properties and
 `@font-face` families, so a pruner's mistakes land outside the safety net.
 
-**Test intent:** N identical blocks collapse to one occurrence each; at-rules survive; the backstop
+**Test intent:** the one emitted block is merged without duplication; at-rules survive; the backstop
 **prepends** when a token is undefined (so deck CSS stays later in the cascade and anything the model
 authored still wins) and leaves a genuinely compliant deck untouched; the pipeline is **semantically**
 idempotent — assert the invariant (every token defined exactly once, every at-rule present), **not
-byte equality**, because the backstop prepends a CSS *comment* marker that `parse_css_blocks` drops on
+byte equality**, because the backstop prepends a CSS *comment* marker that `merge_css` drops on
 the next pass; no `token_css` means no backstop and no crash; a failing backstop never blocks the save.
 
 **Fixture trap:** a "compliant" deck fixture must define **every** custom property `token_css`
