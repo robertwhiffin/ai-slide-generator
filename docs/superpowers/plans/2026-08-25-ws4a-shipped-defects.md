@@ -54,6 +54,7 @@ accommodation for the graph. Recorded in the index for exactly this reason.
 | `tests/unit/test_deck_css_at_rule_survival.py` | **new** |
 | `tests/unit/test_duplicate_session_carries_spec.py` | **new**. `tests/unit/test_session_duplicate.py` is the *existing* `duplicate_session` suite and must stay green — reuse its `_make_root_session`/`_add_deck` fixtures |
 | `tests/unit/test_e2e_matrix_covers_specs.py` | **new** |
+| `tests/unit/test_ci_collects_integration_tests.py` | **new** (A5) — the same guard for `tests/integration/`, where **10 of 17 files run in no job** |
 | `docs/superpowers/baselines/pr3_ws4_collected.log` | **new**, directory included — the index designates ws4a the owner of the by-cause baseline every later plan compares against |
 
 ---
@@ -326,6 +327,54 @@ distinction survives review.
 
 ---
 
+## Task A5 — the same coverage guard, for Python integration tests
+
+A4 makes the e2e matrix collect the specs it ignores. **The Python side has the identical defect and
+nobody has looked.** Measured: `tests/integration/` holds **17** `test_*.py` files; the workflow names
+**7**; **10 run in no job at all.**
+
+| Orphan | Why it is not merely untidy |
+|---|---|
+| `test_slide_row_identity_and_verdicts.py` | **PR1's row-per-slide identity and verdict tests** — the foundation every later PR in this workstream builds on |
+| `test_get_slide_deck_row_read.py`, `test_save_slide_deck_dual_write.py` | PR1's dual-write / dual-read core |
+| `test_mcp_endpoint.py` | **ws4d's Definition of Done names this file as a gate** |
+| `test_export_parity.py` | PRD §3's export-parity suite |
+| `test_savepoint_e2e.py`, `test_task7_verification_and_restore.py` | version/restore behaviour ws4d's D6 touches |
+| `test_comments_removed.py`, `test_image_api.py`, `test_request_logging.py` | pre-existing, unexamined |
+
+**Why this belongs in ws4a and not in ws4c.** ws4c adds an `integration-graph` job for its own layer-1
+suite, and that job would pass a guard it wrote for itself. The gap is pre-existing CI hygiene, which is
+what this PR is; and a guard landing **first** means ws4c's and ws4e's new integration files cannot
+silently join the graveyard.
+
+**The mechanism is an allowlist, which is why the default is broken.** Integration jobs name **files**,
+not directories — `pytest tests/integration/test_export.py` — unlike `unit-tests`, which collects
+`tests/unit` wholesale (`:102`). So a new integration file ships uncollected **by default**, exactly as a
+new `*.spec.ts` does.
+
+**Guard test** — `tests/unit/test_ci_collects_integration_tests.py`:
+
+| Assertion | Note |
+|---|---|
+| every `tests/integration/test_*.py` is named in some workflow job, or in an explicit `DELIBERATE_EXCLUSIONS` dict with a non-empty reason | Same rule and same empty-reason prohibition as A4's guard |
+| `test_slide_row_identity_and_verdicts.py` specifically is collected | Pins the most load-bearing of the ten, so a future re-drop is loud |
+
+Parse the workflow with `yaml.safe_load` and scan each job's `run` block for
+`tests/integration/<name>`; do **not** regex the raw file. Anchor paths with
+`Path(__file__).resolve().parents[2]`, the convention in `tests/unit/test_startup_migrations.py:16`.
+
+**Expect newly-collected files to fail, and triage them the way A4 triages specs.** Ten files have never
+run in CI. A failure is a **pre-existing defect this task surfaces, not one it causes**. Fix a genuine
+break, or add a `DELIBERATE_EXCLUSIONS` entry with a reason and a follow-up — and **do not weaken a test
+to get the guard green.** Record the triage in the PR description. Several of the ten need a Postgres
+service and `DATABASE_URL`; the `integration-slides` job (`:306-345`) is the shape to copy, and grouping
+several orphans into one new job is preferable to ten new jobs.
+
+**Sabotage.** Add a new empty `tests/integration/test_zzz_guard_probe.py`, confirm the guard goes red
+naming that file, then delete it.
+
+---
+
 ## Definition of done
 
 - [ ] `tests/unit/test_deck_css_at_rule_survival.py`, `test_duplicate_session_carries_spec.py` and
@@ -359,3 +408,8 @@ distinction survives review.
       move, so a spec total cannot distinguish pass from fail.
 - [ ] The e2e job runs green on the widened **43-entry** matrix, with any newly-surfaced failure either
       fixed or excluded-with-a-reason and listed in the PR description.
+- [ ] `tests/unit/test_ci_collects_integration_tests.py` passes and is sabotage-verified, and each of the
+      **10** previously-uncollected `tests/integration/` files is either collected-and-green or excluded
+      with a non-empty reason and a follow-up. `test_slide_row_identity_and_verdicts.py` is collected —
+      PR1's row-per-slide foundation has been running in no CI job, and every plan in this set builds on
+      it. Triage goes in the PR description, and **no test is weakened to get the guard green.**

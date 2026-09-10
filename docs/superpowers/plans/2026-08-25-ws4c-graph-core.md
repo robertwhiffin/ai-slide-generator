@@ -634,6 +634,18 @@ alongside `fail_positions`.
 | a terminal failure becomes a **placeholder**, release proceeds past it, and deck review still fires | §I |
 | **turn 2 builds** rather than going straight to deck review | no test in the superseded plan covered a second turn, and that is the failure it hid |
 
+**This suite needs a CI job, and adding it is part of this task.** `unit-tests` collects `tests/unit`
+wholesale (`.github/workflows/test.yml:102`), but every integration job names **files** — so a new file
+under `tests/integration/` runs **nowhere** by default, and ws4e's E4 job filters on `-k layer4`, which
+excludes this suite by construction. Add an **`integration-graph`** job by cloning `integration-slides`
+(`:306-345`): the same Postgres service (which "turn 2 against a real checkpointer" requires), the same
+`DATABASE_URL`/`ENVIRONMENT` env, `-m "not live"`, and a junit artifact. Name this suite's files
+explicitly. **Do not park these tests in ws4e's layer-4 job** — that leaves ws4c's headline DoD
+unverifiable in CI for three PRs, and this is the suite the whole five-PR split exists to protect: spec
+§8's point is that a scheduler test passes while the shipped topology silently degrades.
+
+ws4a's A5 guard fails if this job is missing, so the two are consistent by construction.
+
 **Sabotage two, at minimum:** replace the re-fan with a static edge and confirm the per-slide reviewer
 test goes red; drop `in_flight` from the fixer's `fix_map` write and confirm the one-fix-round test goes
 red.
