@@ -3,6 +3,7 @@
 import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -66,6 +67,7 @@ def _add_deck(
     slide_count: int = 2,
     html: str = "<div>deck</div>",
     deck_json: str = '{"slides":[{"html":"<div>1</div>"},{"html":"<div>2</div>"}]}',
+    deck_spec_json: Optional[str] = None,
 ) -> SessionSlideDeck:
     deck = SessionSlideDeck(
         session_id=session.id,
@@ -77,6 +79,7 @@ def _add_deck(
         verification_map='{"abc": {"score": 90}}',
         version=5,
         modified_by=session.created_by,
+        deck_spec_json=deck_spec_json,
     )
     db.add(deck)
     db.commit()
