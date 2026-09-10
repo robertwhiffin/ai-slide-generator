@@ -2,20 +2,24 @@
 
 Written 2026-09-10, at the end of the planning phase. Read this before the plans.
 
-## 1. Five decisions are OPEN and they block ws4c/ws4d/ws4e
+## 1. Nothing is open. Start at ws4a.
 
-`ws4_seam_findings.md` § **OPEN — judgment calls for the human**, items **S1–S5**. They are
-contract holes, not polish. Building ws4c past S1/S2 wastes work:
+The five seam-review judgment calls (S1–S5) were **all closed on 2026-09-10**, each with a probe rather
+than an argument. `ws4_seam_findings.md` § RESOLVED carries the decisions and the evidence; the commits are
+`a63124e9`, `830b4590`, `a24aa2b2`, `6678c997`, `ee2bc8e9`.
 
-- **S1** `invoke_graph(session_id, initial)` has no slot for ws4d's event queue *or* the turn's
-  principal — and ws4d runs the graph on a bare `threading.Thread`, which does not carry the
-  identity ContextVar, so every graph row insert lands `modified_by` NULL.
-- **S2** `resolved_style` has a consumer, a payload slot and a three-case test, and **no producer**.
-- **S3** deck-level findings have a writer and no reader — no caller, no route, no event type.
-- **S4** ws4c's layer-1 suite runs in **no CI job**.
-- **S5** ws4e's "review in progress" flag has no data path.
+The five you should know before reading any plan, because each changed a contract:
 
-**ws4a and ws4b are unblocked by all five.** Start there while these are settled.
+- **`invoke_graph(session_id, initial, *, emitter=None, principal=None)`.** ws4d must
+  `contextvars.copy_context()` before spawning its thread, or every graph-written row loses its author.
+- **`resolve_slide_style` delegates** to `_get_prompt_content(config)["slide_style"]`. Never reimplement
+  that branch; there is a test asserting the graph and the monolith return identical bytes.
+- **Deck-review verdicts have two readers:** `architect_node` via `get_deck_review`, and the human via a
+  persisted `message_type="info"` chat message. No new event type, route or UI.
+- **ws4c adds an `integration-graph` CI job**, and **ws4a Task A5** guards integration-test collection —
+  10 of 17 integration files currently run in no job, including PR1's row-per-slide foundation.
+- **The §7.4 flag is derived** from `releasedPositions.size === deckSpec.slides.length && !turnComplete`,
+  not read from the sweeper's marker.
 
 ## 2. Order, and why
 
