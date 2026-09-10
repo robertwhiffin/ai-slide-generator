@@ -191,16 +191,24 @@ def test_every_preview_surface_routes_its_frame_through_the_shared_contract(slid
     )
 
 
-def test_the_preview_reset_has_exactly_two_consumers(slide_document):
-    """Neither of them an export path, so the preview reset and the export resets
-    stay separately attributable."""
+def test_the_preview_reset_has_exactly_three_consumers(slide_document):
+    """All three are preview surfaces, none an export path, so the preview reset
+    and the export resets stay separately attributable.
+
+    SlideStylePreviewFrame.tsx (slide-style visual preview) is the third: like
+    SlideTile and VisualEditorPanel it renders a framed single slide in-app, not
+    a scrolling export document, so it correctly shares the preview reset."""
     consumers = [
         p
         for p in (_FRONTEND).rglob("*.tsx")
         if "SLIDE_PREVIEW_RESET_STYLE" in p.read_text(encoding="utf-8")
         and "extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE" in p.read_text(encoding="utf-8")
     ]
-    assert {p.name for p in consumers} == {"SlideTile.tsx", "VisualEditorPanel.tsx"}
+    assert {p.name for p in consumers} == {
+        "SlideTile.tsx",
+        "VisualEditorPanel.tsx",
+        "SlideStylePreviewFrame.tsx",
+    }
 
     wrapper_start = slide_document.index("const wrapperStyle = `")
     wrapper = slide_document[wrapper_start : slide_document.index("`;", wrapper_start)]
