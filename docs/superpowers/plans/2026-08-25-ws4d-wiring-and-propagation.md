@@ -14,7 +14,7 @@ start living in one deployment, which is the entire point of §D.
 **Depends on:** ws4b (contracts, the writer, the checkpointer) and ws4c (a graph that builds).
 **Blocks:** ws4e.
 
-**Spec:** §D, §D0–§D2, §B1–§B5, §K7, §K8, §3.1, §6.2, §6.3, §7.2, §7.3, §4.4, §4.6, §L4, §M1.
+**Spec:** §D, §D0–§D2, §B1–§B5, §K (dirty marker storage, sweeper identity), §3.1, §6.2, §6.3, §7.2, §7.3, §4.4, §4.6, §L4, §M1.
 
 ---
 
@@ -69,13 +69,15 @@ Pydantic's default `extra='ignore'` applies and an undeclared key is **silently 
 plus its validator, both write routes and the frontend types — not worth it for a test affordance whose
 answer is already in the transcript.
 
-**Verify the persistence order before relying on it.** `send_message_streaming` persists the user
-message and then runs the agent, but the `add_message` call at `chat_service.py:899` sits **inside
-`if not request_id:`** — so on the async/job-queue path (the production path) it is persisted
-*elsewhere*. Confirm which call site persists it on each of the four entry points in §3.1 before
-assuming the row exists when `resolve_engine_mode` runs; if any path resolves mode before the row is
-written, that path needs the phrase read from the inbound message instead. **Record the finding in
-`.PLAN-CORRECTIONS.md`.**
+**Persistence order is verified.** The async route (job-queue path, production) persists the user message
+at `chat.py:630-637` before `enqueue_job` at `:640`, so the row exists when the job runs
+`resolve_engine_mode`. The sync route persists at `chat_service.py:899` inside `if not request_id:` —
+the condition is true only for non-job paths, so again the row exists before mode resolution. Both
+paths read from the database, so they see the phrase there. **Critical trap:** the two paths use
+**different** `message_type` values (`"user_input"` sync, `"user_query"` async and MCP), so
+`resolve_engine_mode` must filter on `role` only (`role="user"`), never on `message_type`. Also:
+`POST /sessions/{id}/messages` at `sessions.py:658` lets the caller append an arbitrary-`role`
+message, which could become the marker on a session with no user turns yet — unusual but possible.
 
 ### The two edges that silently revert a session
 
@@ -90,9 +92,20 @@ mode from the transcript.
    safe for mode resolution because the first user message predates every version.
 2. **`duplicate_session` copies no `SessionMessage` rows** (verified: the method references them
    nowhere). A duplicate of an agent-mode session has no phrase and reverts. **Resolution: carry the
-   earliest user message across**, alongside ws4a's `deck_spec_json` fix.
+   earliest user message across**, alongside ws4a's `deck_spec_json` fix. **This has a consequence:**
+   `_hydrate_chat_history` allowlist (`HUMAN_TYPES = {"user_query", "user_input", "chat"}`,
+   `:1761`) replays it as turn 1 of the duplicate. And `message_count` is a live `COUNT` query, not a
+   column (`:779-782`), so a duplicate carrying one message has `is_first_message == False`, suppressing
+   title generation on its first *real* turn (when the architect starts working). This is acceptable —
+   the early message is metadata, not user input, and the title should come from the new conversation.
+   **But do not copy any other `SessionMessage` rows** — only the phrase marker. The duplicate is
+   graph-mode with a deck that exists in `deck_json` (from ws4a's fix), not in prior `session_slides`
+   rows, so copying rows would create a phantom-data inconsistency.
 
-### `clear_context` — two requirements beyond the obvious
+### `clear_context` — implementation and two requirements beyond the obvious
+
+**Route and service signature:** `DELETE /sessions/{session_id}/context` calls
+`ChatService.clear_context(session_id)`. Test that only a `CAN_EDIT` user can call it.
 
 **Keep the deck spec.** §7.2's whole point: the spec is a structured compaction of the conversation, so
 once it holds what was decided the transcript is just the path taken to get there. Clearing drops the
@@ -100,8 +113,9 @@ agent context and the transcript, keeps the spec, and **loses nothing that was a
 non-architect agent starts empty on every invocation, so no hidden state can survive a clear and make
 the agent "remember" something the user cleared.
 
-**Delete the graph thread**, via `BaseCheckpointSaver.delete_thread` (which already exists — use it
-rather than inventing a function). Otherwise checkpointed state outlives the clear.
+**Delete the graph thread**, via `BaseCheckpointSaver.delete_thread` (which exists as a base-class
+no-op on this class; ws4b implements it for the Lakebase checkpointer — use it rather than inventing
+a function). Otherwise checkpointed state outlives the clear.
 
 **Gate on `CAN_EDIT`, not the default.** `_check_deck_permission_for_session(session_id)`
 (`src/api/routes/_authz.py:188-191`) defaults to `PermissionLevel.CAN_VIEW`, so taking the default
@@ -124,7 +138,9 @@ preserves the mode, drops the rest of the transcript, deletes the graph thread, 
 the monolith is invoked, delegating to a `_send_message_streaming_graph` generator that builds the
 initial state, calls `invoke_graph`, and yields `StreamEvent`s.
 
-**`send_message` is NOT a generator.** `chat_service.py:821-823` returns/raises, so adding `yield from`
+**`invoke_graph` must run in a separate thread.** `_send_message_streaming_graph` is a generator that yields `StreamEvent`s as they arrive. A synchronous `invoke_graph(session_id, initial)` call blocks until the graph completes, so calling it directly inside the generator cannot yield anything until finished — incrementally delivered slides would be impossible. The monolith solves this with `run_agent` in a thread (`:1187`) plus an `event_queue` (`:1107`). Apply the same pattern: invoke the graph in a worker thread, yield events from a queue as they arrive, and signal completion with a sentinel. This is not just an implementation detail — it is the contract for "slides arrive incrementally."
+
+**`send_message` is NOT a generator.** `chat_service.py:819` returns/raises, so adding `yield from`
 there converts it into one and breaks every caller. The graph branch goes **only** in
 `send_message_streaming`. If the non-streaming entry point needs graph support, that is a separate,
 explicitly-designed path — not the same three lines. (Round-3 finding 19's sibling.)
@@ -137,11 +153,20 @@ user.
 deterministic template bytes if a template is pinned. Those come from `agent_resolution` /
 `resolve_template_bytes`, **never from model output**.
 
+**Graph mode must also run `run_title_gen`.** The monolith runs it inline at `send_message_streaming:1155`
+only when `is_first_message` (`:1193-1196`), emitting `SESSION_TITLE` (`:1564`). A graph branch that
+bypasses the monolith entirely bypasses title generation — every graph-mode session stays untitled. The
+graph branch must replicate the title-generation step: call the title model with the first message,
+rename the session on success, and emit `SESSION_TITLE` to the event queue. Failing the title-gen does
+not fail the message — catch and log (as the monolith does), so a naming service outage does not
+stall conversations.
+
 **Test intent:** a graph-mode turn writes rows **and** all eight deck-level columns — assert `css` is
 non-empty (the §H defect), `deck_spec` present, `external_scripts` non-empty (its absence is **silent**:
 no exception, just blank charts in every export), and `slide_count` equal to the row count rather than
 0; **two** version bumps per turn (§L2's two deck-level writes, neither per-slide); a monolith-mode turn
-still reaches the monolith; a graph-mode turn never does.
+still reaches the monolith; a graph-mode turn never does. **Graph-mode sessions are titled** — assert a
+`SESSION_TITLE` event arrives with a non-empty string on turn 1 of a graph-mode session.
 
 **Note on mocking the monolith:** `generate_slides_streaming` is a **method on the agent class**
 (`agent.py:1582`), not a module function, so `monkeypatch.setattr("src.services.agent.generate_slides_streaming", …)`
@@ -157,10 +182,20 @@ no incremental slide event today, so per-slide delivery changes **both** transpo
 
 **The polling path is the harder one.** `poll_chat` (`chat.py:669`) does not relay live events at all —
 it reads persisted `SessionMessage` rows and converts them via `msg_to_stream_event`
-(`session_manager.py:2772`), which hardcodes three types and defaults everything else to `assistant`.
-So a `slide_ready` row would arrive at the frontend as a chat message unless that converter learns the
-type. **Note `msg_to_stream_event` is a METHOD on `SessionManager`**, not a module function — a
-module-level import of it is an `ImportError`. (Round-3 finding 18.)
+(`session_manager.py:2772-2799`), which returns only six hardcoded keys: `type`, `content`, `tool_name`,
+`tool_input`, `tool_output`, `message_id`. It **cannot carry** `position`, `html`, `scripts` even if
+the converter learned the type, because the method returns a fixed dict shape with no place for them.
+So the polling path does **not** deliver incremental slides — `poll_chat` has no `slide_cursor`
+parameter, no new response field for slides, and no way to return them. **This contradicts the contract
+table**, which requires "`msg_to_stream_event` maps `slide_ready` explicitly" and `slides_since_cursor`
+as the release query. If slide-ready rows are never persisted (finding 3's own two-line contradiction),
+the converter never sees them and is dead code. **Resolution:** do not persist `slide_ready` as
+`SessionMessage` rows. Instead, the polling path reads committed `session_slides` rows directly via
+`slides_since_cursor(session_id, cursor)` — the same reorder-buffer query that enforces ascending
+release on both transports, without needing a converter that cannot carry the data. Update the
+contract table to remove the `msg_to_stream_event` row and clarify that polling reads slides via query,
+not message conversion. **Note `msg_to_stream_event` is a METHOD on `SessionManager`**, not a module
+function — a module-level import of it is an `ImportError`. (Round-3 finding 18.)
 
 **The reorder buffer is a query, not a data structure:** release position *n* once all positions `< n`
 are committed. Because the truth is the `session_slides` rows, it is inherently multi-worker safe; an
@@ -171,9 +206,8 @@ in-process buffer would be invisible to the worker serving the next poll.
 | Change | Where | Note |
 |---|---|---|
 | `SLIDE_READY = "slide_ready"` on the **`StreamEventType` enum** | `src/api/schemas/streaming.py` | `StreamEvent`'s field is `type`, not `event_type`, and `to_sse()` reads `self.type.value` — so a new type that is not on the enum cannot be constructed |
-| `position`, `html`, `scripts`, `agent`, `slide_cursor` as optional fields | same | `StreamEvent` already has optional fields, so this extends without breaking consumers. **`scripts` is `str`**, matching ws4b — not `Optional[str]` |
+| `position`, `html`, `scripts`, `agent`, `slide_cursor` as optional fields | same | `StreamEvent` already has optional fields, so this extends without breaking consumers. **`scripts: str = ""`**, not `scripts: Optional[str]` — all fields follow the pattern `fieldname: Type = default_value`, and `Optional[str] = None` breaks existing code that passes no `scripts` argument. A bare `scripts: str` would break every existing `StreamEvent(...)` construction too. The correct form is `scripts: str = ""` so the field is always present, defaulting to empty. |
 | `SessionManager.slides_since_cursor(session_id, cursor)` | `session_manager.py` | The release query over rows, reusing `releasable_positions`' prefix rule |
-| `msg_to_stream_event` maps `slide_ready` explicitly | same | Rather than defaulting it to `assistant` |
 | `emit_slide_ready(queue, position, html, scripts)` | `src/services/streaming_callback.py` | That module currently contains **only** `class StreamingCallbackHandler` — no module-level functions — so this is a new function, not an edit to an existing one. (Round-3 finding 21's sibling.) |
 | `slide_ready` on the `StreamEventType` union plus the new fields | `frontend/src/services/api.ts:62` | **There is no `frontend/src/types/streaming.ts`** — these types live in `api.ts` |
 
@@ -194,13 +228,15 @@ progress as slides land, not ten "builder N started" lines. Activity messages ge
 `_hydrate_chat_history` already gives `reasoning`/`info`/`tool_*`: excluded from replay, so they stay
 out of the architect's context.
 
-**Test intent:** `slide_ready` is on the enum; the event carries position/html/scripts and survives
-`to_sse()` — **assert on parsed JSON, not on a formatted substring**, because `to_sse()` uses
+**Test intent:** streaming transport — `slide_ready` is on the enum; the event carries position/html/scripts
+and survives `to_sse()` — **assert on parsed JSON, not on a formatted substring**, because `to_sse()` uses
 `model_dump_json()` which emits compact JSON with no space after the colon; existing consumers are
-unbroken by the new optional fields; `msg_to_stream_event` yields `slide_ready` rather than `assistant`;
-the emitter queues the object; the cursor returns only newly-released positions and nothing on a
-re-poll; release never emits out of order when a later position lands first; a placeholder position is
-released like any other.
+unbroken by the new optional fields; the emitter queues the object. Polling transport — the cursor
+returns only newly-released positions and nothing on a re-poll; release never emits out of order when a
+later position lands first; a placeholder position is released like any other. **Frontend rendering of
+`slide_ready` events is ws4e's responsibility** (`handleStreamEvent` in ChatPanel.tsx:183) — this PR
+delivers infrastructure on both backend transports; ws4e realizes the user-visible feature of incremental
+slides in the UI.
 
 **Two test-hygiene notes.** Do not write `assert … in (str, "Optional[str]", type(None))` — a string
 literal can never equal an annotation object and `type(None)` would pass a broken field; assert the
@@ -239,7 +275,11 @@ origin column.
 | `POST /slides/{index}/duplicate` | **yes** | slide added |
 | `DELETE /slides/{index}` | **yes** | slide removed |
 | `POST /slides` (D6) | **yes** | slide inserted |
-| version restore | **no** | D5 *cancels* the pending review instead |
+| `PATCH /slides/{index}/verification` | **out of scope** | verification verdicts do not trigger a deck-level review — they *complete* a builder task triggered by a prior change. If a human manually changes a verdict, that should re-run the review, but the specification of what "manually" means (edit route? approval endpoint? verdict-specific route?) is deferred. |
+| `POST /slides/versions/create` | **out of scope** | version save/restore are part of PR ?. A version save is not a deck change (the live deck is unchanged); restoring is handled separately at D6. |
+| `PATCH /slides/versions/{n}/verification` | **out of scope** | see `PATCH /slides/{index}/verification`. |
+| `POST /slides/versions/sync-verification` | **out of scope** | verification sync across versions is part of PR ?; defer trigger semantics. |
+| version restore | **no** | D6 *cancels* the pending review instead |
 | `POST /sessions/{id}/duplicate` | **no** | a **copy, not a trigger** — the duplicated spec is already correct for the HTML it carries. Its absence from §B1's list was silence rather than a decision, which is what made ws4a's defect invisible |
 | `tour.py` | **no** | see below |
 
@@ -248,9 +288,11 @@ origin column.
 `sm.save_slide_deck` at `:82`. It is deck *creation* from fixed bytes, identical on every tour, so
 firing `mark_dirty` would schedule an LLM arc re-description of the same demo deck **for every user who
 takes the tour**, at §B2's per-window cost, for no value. **Ship the arc description inside the
-fixture** — one JSON field, authored **once by hand**, never at runtime. Strictly better than excluding
-the route, because the tour then also demonstrates §7.1's spec view, which an excluded-and-specless
-tour deck could not.
+fixture** — one `narrative_arc` field in the `DeckSpec` JSON, authored **once by hand**, never at
+runtime. That field travels through `sm.save_slide_deck` → `_upsert_slide_deck` → persisted
+`deck_spec_json`. Strictly better than excluding the route, because the tour then also demonstrates
+§7.1's spec view, which an excluded-and-specless tour deck could not. Verify that the fixture's
+`narrative_arc` text is **not** empty — a placeholder or the demo deck's actual content.
 
 **Marker semantics:** setting is idempotent within a window — an existing unclaimed marker keeps its
 **original** timestamp, so a burst of WYSIWYG edits coalesces into one review rather than pushing the
@@ -266,10 +308,13 @@ session. And `claim_due_marker` returns the **owner's** string id, so if `clear_
 markers are never cleared on the owner when a contributor session clears them — both must use the owner-resolved
 key.
 
-**Test intent:** **no `chat_service` method mentions `mark_dirty`** (the structural guarantee — assert
-it against the module source); every human mutation route calls it; reorder triggers despite no HTML
-change; the marker records its **author**; a graph write does **not** set it; `tour.py` never calls it
-and its fixture ships a `deck_spec` with a narrative arc; session-duplicate is a copy, not a trigger.
+**Test intent:** **only `src/api/routes/slides.py` may reference `mark_dirty`** (the structural
+guarantee — grep the entire tree and assert no other file imports or calls it); every human mutation
+route in slides.py calls it; reorder triggers despite no HTML change; the marker records its **author**;
+a graph write does **not** set it; `tour.py` never calls it and its fixture ships a `deck_spec` with
+a narrative arc; session-duplicate is a copy, not a trigger; the four routes not yet in the table
+(`PATCH /{index}/verification`, `POST /versions/create`, `PATCH /versions/{n}/verification`,
+`POST /versions/sync-verification`) either call it or are explicitly ruled out in this PR's scope.
 
 ---
 
@@ -287,7 +332,8 @@ in `run.py::init_database`. §L8's pre-fork rule is about migrations and backfil
 a periodic loop is the opposite case.
 
 **Contract:** `claim_due_marker(now) -> (session_id, author) | None`, `run_arc_review(session_id, author)`,
-`spec_review_sweeper_loop()`, `SWEEP_INTERVAL_SECONDS = 60`, `CLAIM_TTL_SECONDS = 900`.
+`spec_review_sweeper_loop()`, `SWEEP_INTERVAL_SECONDS = 60`, `CLAIM_TTL_SECONDS = 900`. The claim is
+stored in `session_slide_decks.spec_dirty_claimed_at` (created by ws4b migration at `:497-498`).
 
 **The claim is required, not defensive.** `run.py:128` defaults `UVICORN_WORKERS=4` and the sweeper runs
 in every worker, so four loops racing one marker with no lease means a WYSIWYG session pays for up to
@@ -303,15 +349,18 @@ filter on the **string** — no row matches, the marker is never cleared, and it
 **A stale claim must be reclaimable** so a worker that dies mid-review does not wedge the deck
 permanently — hence the TTL rather than a bare `IS NULL`.
 
-**Identity: the marker's recorded author (§K8, ruled).** A sweeper tick has no request, so
-`get_current_user()` returns `None` (`user_context.py:21-23`) and `get_user_client()` **fails closed** in
-production (`databricks_client.py:492`, raised at `:536`; `:511-515` records that SDR-4437 HIGH-6
-removed the SP fallback outside non-prod). The LLM call itself is fine — `agent_factory.py:56` uses
-`get_system_client()`, SP-scoped by design — but `modified_by`, the deck permission check and PRD §8.1's
-cost attribution are not. Using `spec_dirty_by` gives all three a real user, and the permission check
-already happened on that human's route when the marker was set. **A marker with no author is not
-claimed** — with no identity there is no attribution, and inventing a system identity was the rejected
-alternative.
+**Identity: the marker's recorded author.** Spec §K asks "What identity a sweeper-driven arc review runs
+as" — this PR answers it: use the marker's recorded author, `spec_dirty_by`. A sweeper tick has no
+request, so `get_current_user()` returns `None` (`user_context.py:21-23`) and `get_user_client()`
+**fails closed** in production (`databricks_client.py:492`, raised at `:536`; `:511-515` records that
+SDR-4437 HIGH-6 removed the SP fallback outside non-prod). The LLM call itself is fine —
+`agent_factory.py:56` uses `get_system_client()`, SP-scoped by design — but `modified_by`, the deck
+permission check and PRD §8.1's cost attribution are not. Using `spec_dirty_by` gives all three a real
+user, and the permission check already happened on that human's route when the marker was set. **A
+marker with no author is not claimed** — with no identity there is no attribution, and inventing a
+system identity was the rejected alternative. **Note:** the sweeper tick must call
+`set_current_user(author)` for its duration, so `require_editing_lock` and permission checks see the
+actual user, not `None`. (Finding 11 — identity must be *bound*, not just recorded.)
 
 **`run_arc_review` never raises.** A failure clears the **claim** but keeps the **marker**, so the next
 sweep retries rather than the deck wedging.
@@ -361,11 +410,18 @@ route; and position-shift handling for every position above the insertion point.
 **No UI** — the "add slide here" affordance belongs with ws8, where slide-stage affordances live. The
 capability is fully usable via the API and via the architect ("add a slide after slide 3").
 
+**`deck_spec_slide` travels with shifted positions.** `_attribute_slide_records` (`session_manager.py:194-239`)
+maps `{new_position: verification_record}`, and `_upsert_slide_row` treats `deck_spec_slide=None` as
+"leave unchanged" (`:337`). So a shift calls `_attribute_slide_records`, which moves verification
+records correctly, but `deck_spec_slide` stays attached to the old position. D6 also introduces
+persisting per-row spec fragments. **Update `_attribute_slide_records` to shift `deck_spec_slide`
+values alongside verification records** — map both, so the per-slide spec snippet moves with its slide.
+
 **Test intent:** inserting shifts every higher position; the slide lands at the requested position; the
 deck spec gains an entry and higher entries shift with contiguous positions; **verification records
-travel with their slides across the shift** (a record belongs to a slide, not a position — writing
-per-position silently attaches one slide's verdict to another, which shipped as a defect during 0a); the
-route fires the trigger; a save point is created; inserting beyond the end appends rather than erroring.
+AND `deck_spec_slide` fragments travel with their slides across the shift** (either belongs to a slide,
+not a position); the route fires the trigger; a save point is created; inserting beyond the end appends
+rather than erroring.
 
 ### Deck-level spec edits and confirm-then-rebuild-all (§4.6, widened by §L4)
 
@@ -399,18 +455,29 @@ rebuilds every position; the manifest includes the design-system library with ea
 ## Definition of done
 
 - [ ] Every suite passes and **every guard has been sabotage-verified** on the executed path.
-- [ ] `resolve_engine_mode` correct on all four §3.1 entry points, with the persistence-order finding
-      recorded in `.PLAN-CORRECTIONS.md`.
+- [ ] **Streaming paths only:** `resolve_engine_mode` correct on `send_message_streaming` and its
+      callers (`chat.py:588` async route, `chat.py:708` sync route). The non-streaming `send_message`
+      path (§3.1 entry point 4 at `api.ts:876` / `submitChatAsync`) is explicitly out of scope — D2
+      excludes it. Test is: mode is sticky on the two entry points in scope, and `send_message` never
+      references the graph. Persistence order: the async route persists the user message at
+      `chat.py:630-637` before `enqueue_job` at `:640` — so the row exists when `resolve_engine_mode`
+      runs; the sync path persists at `chat_service.py:899` inside `if not request_id:` — both read the
+      row correctly.
 - [ ] A graph-mode turn writes rows **and** all eight deck-level columns, with **two** version bumps.
+      **Graph-mode sessions are titled** — `SESSION_TITLE` event arrives on turn 1.
 - [ ] A monolith-mode turn is unchanged: `test_agent.py`, `test_llm_edit_responses.py` and
       `test_slide_replacement_flow.py` all pass, and `git diff` shows no gratuitous change to the
       monolith path.
 - [ ] Slides arrive in ascending order on **both** transports, and a placeholder releases like any
       other position.
 - [ ] `clear_context` keeps the spec, deletes the graph thread, preserves the mode marker, and
-      **refuses a viewer**.
+      **refuses a viewer**. Route is `DELETE /sessions/{session_id}/context`.
 - [ ] The sweeper's claim is exclusive; a marker with no author is not claimed; a failed review retries.
-- [ ] `tour.py` never calls `mark_dirty`, and its fixture ships a hand-authored arc.
+      **Sweeper tick runs with `set_current_user(author)`** so `require_editing_lock` sees the user.
+- [ ] `tour.py` never calls `mark_dirty`, and its fixture ships a hand-authored `narrative_arc`.
+      **The fixture's arc is not empty** — verify populated with the demo deck's actual description.
+- [ ] **Only `src/api/routes/slides.py` references `mark_dirty`** — grep the tree and assert no other
+      file imports or calls it.
 - [ ] Full suite compared **by cause** to the index's baseline: no new cause, no change to the
       deploy-autoscaling cause, no test that stopped existing.
 - [ ] MCP behaviour **unchanged** — `create_deck` / `edit_deck` contract tests pass untouched.
