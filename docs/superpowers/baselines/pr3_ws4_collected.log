@@ -68,22 +68,26 @@ SECTION 2 — POST-ws4a  (THIS is what ws4b, ws4c, ws4d and ws4e build on)
 Measured 2026-09-10 on branch `feat/ws4a-shipped-defects` with all of ws4a applied, with no
 application server running (same conditions as Section 1).
 
-    3 failed, 4210 passed, 8 skipped, 332 warnings in 190.87s
-    COLLECTED: 4221
+    3 failed, 4212 passed, 8 skipped, 332 warnings in 175.72s
+    COLLECTED: 4223
 
 CAUSES: IDENTICAL to Section 1. Same three tests, same four assertion strings, verbatim.
   No new cause. No change to the deploy-autoscaling cause.
 
-DELTA: +33 collected (4188 -> 4221).
-  Fully accounted for, with NO deletions:
+DELTA: +35 collected (4188 -> 4223).
+  Fully accounted for, with NO deletions. Counts taken per file with `--collect-only -q`:
     +25  tests/unit/test_deck_css_at_rule_survival.py         (A1, merge_css at-rules)
     + 3  tests/unit/test_duplicate_session_carries_spec.py    (A2, deck_spec_json copy)
-    + 3  tests/unit/test_e2e_matrix_covers_specs.py           (A4, e2e coverage guard)
-    + 2  tests/unit/test_ci_collects_integration_tests.py     (A5, integration coverage guard)
+    + 4  tests/unit/test_e2e_matrix_covers_specs.py           (A4, e2e coverage guard)
+    + 3  tests/unit/test_ci_collects_integration_tests.py     (A5, integration coverage guard)
     ----
-    +33
-  Verified NOT a count collision: 33 test functions added, ZERO removed, ZERO test files deleted.
+    +35
+  Verified NOT a count collision: 35 test functions added, ZERO removed, ZERO test files deleted.
   The 17 relocated Playwright specs are git RENAMES, not deletions.
+
+  NOTE: an earlier revision of this file recorded 4221 / +33. That was measured before the final
+  whole-branch review's fix wave, which added one nested-path assertion to EACH guard (bringing them
+  to 4 and 3 tests respectively). The figures above are the authoritative post-review measurement.
 
 --------------------------------------------------------------------------------
 SECTION 3 — WHAT THIS FILE DOES *NOT* COVER
