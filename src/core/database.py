@@ -496,6 +496,9 @@ def _run_migrations(engine, schema: str | None = None):
 
         _migrate_slide_style_default(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- slide-style generated-preview cache columns (payload offloaded) ---
+        _migrate_slide_style_preview_columns(conn, inspector, schema, _qual, is_sqlite)
+
         # --- permissions model: parent_session_id, locking, optimistic concurrency ---
         _migrate_permissions_columns(conn, inspector, schema, _qual, is_sqlite)
 
@@ -1686,6 +1689,73 @@ def _migrate_to_v0_2(conn, inspector, schema, _qual, is_sqlite):
         ))
 
     logger.info("Migration: v0.2 schema migration complete")
+
+
+def _migrate_slide_style_preview_columns(conn, inspector, schema, _qual, is_sqlite):
+    """Add generated-preview cache columns to slide_style_library.
+
+    Idempotent additive ALTERs (all nullable). Fresh installs get these via
+    ``create_all()``; existing/forked-prod databases need the ALTERs. The
+    ``slide_style_preview_payload`` table itself is created by ``create_all()``
+    (it creates missing tables), so only the column adds are handled here.
+    """
+    from sqlalchemy import text
+
+    table_name = "slide_style_library"
+    qualified_table = _qual(table_name)
+    try:
+        columns = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    except Exception:
+        return
+    if not columns:
+        return
+
+    # column name -> SQL type/default (nullable, additive-safe).
+    preview_columns = {
+        "preview_status": "VARCHAR(16) NULL",
+        "preview_fingerprint": "VARCHAR(64) NULL",
+        "preview_content_hash": "VARCHAR(64) NULL",
+        "preview_payload_id": "INTEGER NULL",
+        "preview_asset_manifest": "JSON NULL",
+        "preview_total_bytes": "INTEGER NULL",
+        "preview_error_code": "VARCHAR(64) NULL",
+        "preview_error_message": "TEXT NULL",
+        "preview_generated_at": "TIMESTAMP NULL",
+        "preview_attempted_at": "TIMESTAMP NULL",
+        "preview_failed_at": "TIMESTAMP NULL",
+        "style_revision": "INTEGER NULL",
+    }
+    added_columns = []
+    for col, ddl in preview_columns.items():
+        if col not in columns:
+            logger.info(f"Migration: adding {col} column to {table_name}")
+            conn.execute(text(f"ALTER TABLE {qualified_table} ADD COLUMN {col} {ddl}"))
+            added_columns.append(col)
+
+    # Backfill style_revision on already-populated (e.g. branch-inherited) rows.
+    # The column is added nullable with no default, so pre-existing rows are NULL.
+    # The generation write-back guard compares `style_revision == snapshot(0)`, and
+    # `NULL == 0` is never true in SQL — leaving NULL would make EVERY preview
+    # generation get discarded on a fork (never reaching 'ready'). Normalize to 0.
+    # Idempotent: only touches NULL rows, so re-runs are no-ops.
+    if "style_revision" in columns or "style_revision" in added_columns:
+        try:
+            result = conn.execute(
+                text(
+                    f"UPDATE {qualified_table} SET style_revision = 0 "
+                    f"WHERE style_revision IS NULL"
+                )
+            )
+            backfilled = getattr(result, "rowcount", 0) or 0
+            if backfilled:
+                logger.info(
+                    f"Migration: backfilled style_revision=0 on {backfilled} "
+                    f"{table_name} row(s)"
+                )
+        except Exception:
+            logger.warning(
+                "Migration: style_revision backfill failed (non-fatal)", exc_info=True
+            )
 
 
 def _migrate_slide_style_default(conn, inspector, schema, _qual, is_sqlite):
