@@ -10,9 +10,11 @@ real model locally — plus the seven skills, `agent_factory`'s relocation, dete
 extraction, and the two shipped security controls re-homed onto the graph path.
 
 **Why this is its own PR:** it is the only part of workstream 4 where the *topology* is the deliverable.
-Everything it touches is new code under `src/services/graph/` and `src/core/skills/`; the only existing
-files it modifies are `agent_factory.py` (a move that preserves every public name) and the test files
-that pin what moved. Nothing here is reachable from chat — that is ws4d.
+Everything it touches is **new** code — under `src/services/graph/` and `src/core/skills/`, plus four new
+modules that sit outside both: `src/services/foreman_service.py` (C2), `src/services/agent_resolution.py`
+(C3), `src/services/template_sections.py` (C6) and `src/utils/graph_safety.py` (C7). The only existing
+files it modifies are `agent_factory.py` (a move that preserves every name, **private ones included** —
+C8) and the test files that pin what moved. Nothing here is reachable from chat — that is ws4d.
 
 **Depends on:** ws4b's frozen contracts. **Blocks:** ws4d, ws4e.
 
@@ -35,6 +37,7 @@ All re-executed on langgraph 1.2.10. **Do not re-derive them; do re-probe if you
 | **A `Send`-reached node sees ONLY its payload** | The node saw `['batch','position']`; no state key was visible | The router must **pre-copy** everything the branch needs. `deck_spec` is invisible inside a builder |
 | **A static edge out of a `Send`-reached node collapses N into ONE** | 3 builders → **1** invocation, input keys were plain state with no payload | `builder → build_reviewer` **must** be a conditional edge that re-fans |
 | **Re-fanning with a conditional edge** | 6 builders → **6** reviewers, each with its own payload | The fix for the above |
+| **A router out of a `Send`-reached node sees PLAIN STATE, once per branch** | The re-fan router was invoked **6 times** for 6 builders; every invocation's input keys were the declared state keys with **no payload key** (`state["position"]` → `KeyError`), and each saw only its own branch's write — `slides` keys `[0]`, `[1]`, `[2]`, `[3]`, `[4]`, `[5]`, never the merged `[0..5]` | The re-fan router rebuilds each reviewer's payload from `slides[position]`, and that works **because** of the per-branch view. A router must never read a payload key off state |
 | **`bool({0: None})` is `True`** | | A dict reducer cannot delete a key; a tombstone still reads as pending |
 | **Turn-2 state accumulates** | turn 2 passing a fresh empty set still saw turn 1's values; a fresh `checkpoint_ns` does not reset it either | Turn-scoping is required, not a nicety |
 | **Undeclared keys are silently dropped** | a node returning an undeclared key produces no error and the write is discarded; an undeclared *input* key never reaches the node | **`GraphState` is an exhaustive contract.** This caused three separate blocking findings |
@@ -94,15 +97,28 @@ branch **must** carry one, or the runtime raises
 | `session_id`, `turn_id`, `fix_target` | none | one node each |
 | `deck_spec`, `error_state` | none | `architect_node`, exception handlers |
 | `architect_intent`, `architect_message`, `target_positions` | none | `architect_node` |
+| `title` | none | `architect_node`, from `deck_spec.title` — ws4b B1.4 declares the field (§H1: pre-fan-out deck-level write). **Deterministic** — read off the committed spec, never derived from builder output |
+| `initiated_by` | none | `invoke_graph`'s initial state — the turn's principal. `get_current_user()` returns `None` inside the graph, so every row write needs it from state (see the row-write rule under C4) |
 | `token_css`, `deterministic_css` | none | `architect_node` (via `resolve_template_bytes`, C6) |
+| `template_layout_html`, `resolved_style` | none | `architect_node` (C6/§L5), **once per turn**. These are the two inputs `build_branch_payload` extracts each branch's section HTML from and copies the style prose out of — without them in state there is no channel to the fan-out and each builder would re-resolve from the DB inside its own branch |
 | `external_scripts`, `head_meta` | none | `architect_node`, resolved **deterministically** — the Chart.js CDN default and the deck's `<meta>` set are known before any builder runs. **NOT from `ArchitectOutput`**, which declares neither (see the closed-schema rule above) |
-| `scripts_content` | none | **nobody — see the note under C4.** Deliberately unproduced |
+| `scripts_content` | none | `deck_reviewer_node`, post-commit — **derived** from `SlideDeck(...).scripts`, not read from state (see the post-commit bullet under C4) |
 | `knitted_html` | none | `deck_reviewer_node` (from `SlideDeck.knit()`, post-commit) |
 | `findings` | `operator.add` | every `build_reviewer_node` and `fix_reviewer_node` |
 | `landed_positions`, `placeheld_positions`, `reviewed_positions` | `turn_scoped_union` | build reviewers, placeholder node, fix reviewer |
 | `slides`, `dispatched_at`, `retry_count`, `fix_map`, `fixed` | `turn_scoped_merge` | builders, fixer, reviewers, foreman |
 | `emitted_style_blocks` | `turn_scoped_concat` | `architect_node`, **once per turn**, from `resolve_template_bytes` (C6). **Not builders** — `BuilderOutput` forbids a builder emitting `<style>` at all, and brand bytes never pass through a model. See the shape note under C4 |
 | `foreman_wakes` | `turn_scoped_concat` | `foreman_node` |
+
+**`findings` is deliberately NOT turn-scoped, and that carries one rule.** It is the single key on
+`operator.add` — the one that breaks the pattern C1 exists to establish — because a finding is stamped
+with an id and persisted at the moment its row is written, so the channel is an append-only log rather
+than turn state. But turn 2 inherits turn 1's entries permanently (the accumulation fact above), so
+**no node may read `state["findings"]` as *this turn's* findings**: `build_reviewer_node` persists the
+findings it returned, `deck_reviewer_node` persists what the deck review returned, and ws4d emits from
+the node's own return value. A consumer needing a per-turn view adds a turn-scoped key rather than
+re-purposing this one. **Test it:** turn 2 sees turn 1's findings in state and still emits and persists
+only its own.
 
 **`has_pending_fix(state)` — never `if state.get("fix_map")`.** `turn_scoped_merge` cannot delete keys,
 so a completed fix is tombstoned as `{position: None}` — and `bool({0: None})` is `True`. Testing
@@ -145,7 +161,7 @@ goes red.
 def outstanding_positions(state) -> list[int]      # not landed, not placeheld, ascending — INCLUDES in-flight
 def next_dispatch_batch(state, cap=CAP) -> list[int]
 def releasable_positions(state) -> list[int]       # the committed PREFIX
-def stalled_positions(state, now: float, timeout_s=RELEASE_TIMEOUT_S) -> list[int]
+def stalled_positions(state, now: float, timeout_s=RELEASE_TIMEOUT_S) -> list[int]   # two limbs, C4
 def all_positions_committed(state) -> bool
 ```
 
@@ -178,7 +194,10 @@ turn every spec slide.
 fully parallel, no queueing); the next batch continues ascending; in-flight excluded; the cap counts
 in-flight; a retry appears ahead of higher unstarted positions; release emits only a committed prefix
 and extends when the gap lands; a placeholder releases and satisfies the deck-review trigger; stalls
-computed from state timestamps, never a wall clock on an instance; a landed position is never stalled;
+computed from state timestamps, never a wall clock on an instance; **a dispatched, uncommitted position
+outside the most recent wake's batch is stalled at zero elapsed time** (C4's limb 1) while one inside that
+batch is not; a `dispatched_at` entry with no wake record needs the full timeout (limb 2, the resumed
+checkpoint); a landed position is never stalled;
 an empty spec dispatches nothing and is trivially committed; a partial multi-target turn dispatches only
 its targets.
 
@@ -285,38 +304,102 @@ if has_pending_fix(state):        -> "fixer"
 if stalled_positions(...):        -> "placeholder"
 batch = next_dispatch_batch(...)  -> [Send("builder", build_branch_payload(state, p)) for p in batch]
 if all_positions_committed(...):  -> "deck_reviewer"
-else:                             -> END        # a batch is in flight; the barrier re-enters us
+else:                             -> END        # nothing outstanding, nothing to reconcile
 ```
 
 `foreman_node` itself writes two things before the router runs:
 
-- **`dispatched_at[p] = now` for every position about to be dispatched.** This must be a **dispatch**
+- **`dispatched_at`**, written as `scoped(turn_id, {p: now})` for every position about to be dispatched
+  — the wrapper, never `state["dispatched_at"][p] = now`. This must be a **dispatch**
   timestamp. Writing it on builder *return* makes it a **completion** timestamp, so a branch that hangs
   or dies never gets an entry and `stalled_positions` can never observe the case it exists for. The
-  foreman runs before the batch, so it is the only node that can stamp it.
-- **`foreman_wakes`**, appended **non-destructively** (`wakes + [batch]`, never `wakes.append(batch)`) —
-  in-place mutation of checkpointed state is the failure the adjacent comment warns about, and an
-  earlier draft did exactly that for `dispatched_at` while forbidding it for `wakes`.
+  foreman runs before the batch, so it is the only node that can stamp it. Stamp **only the positions it
+  actually dispatches**: a wake whose decision is `"fixer"` or `"placeholder"` stamps nothing, or the next
+  wake reads positions that never started as dispatched-and-never-completed.
+- **`foreman_wakes`**, written as `{"foreman_wakes": scoped(turn_id, [batch])}` — this turn's batch in a
+  wrapper, and **`wakes + [batch]` must not appear anywhere.** Non-destructiveness is
+  `turn_scoped_concat`'s job, not the node's: a value read through `scoped_vals`, concatenated and
+  returned bare arrives at the reducer as an unwrapped list, fails its `isinstance(b, dict)` check, and
+  the write is discarded or raises. Record a wake on **every** foreman entry, including one that
+  dispatches nothing (`[]`) — C5 counts wakes through this channel, and the reconciliation rule below
+  reads the most recent entry. `wakes.append(batch)` is worse still — in-place mutation of
+  checkpointed state is the failure the adjacent comment warns about, and an earlier draft did exactly
+  that for `dispatched_at` while forbidding it for `wakes`.
 
 **`build_branch_payload(state, position)` pre-copies everything the branch needs**, because a
-`Send`-reached node cannot see `GraphState`: `session_id`, `turn_id`, `position`, the `SlideSpec` looked
-up **by position**, `assumes`, `hands_off`, `design_contract`, `resolved_data`.
+`Send`-reached node cannot see `GraphState`: `session_id`, `turn_id`, `initiated_by`, `position`, the
+`SlideSpec` looked up **by position**, `assumes`, `hands_off`, `design_contract`, `resolved_data`, **plus
+the extracted section HTML, the section CSS, and the resolved style prose**. The builder authors on this
+foundation — section HTML provides the markup, section CSS + resolved style are the constraints §M5/§M6
+require. This is also the resolved style C3's `assemble_skill_prompt` needs to inject
+`_SLIDE_FRAME_CONSTRAINTS` conditionally (§L5's cases: the builder and reviewer must receive the same
+safe-area numbers or the criterion is unfair by construction).
 
-**Reconcile stall detection with the barrier, explicitly.** The barrier means a timeout evaluated in
-`foreman_node` cannot fire *while* a position is stalled — the node only runs once the batch completes,
-which is the one moment the timeout is not needed. So what the `"placeholder"` branch actually catches
-is a position **left uncommitted by a completed batch** (a builder that returned nothing usable, or a
-resumed checkpoint whose branch died). Say that in the docstring rather than claiming a live-stall
-guard the runtime cannot provide. (Round-3 finding 21.)
+`design_contract` does **not** close this gap — ws4b makes `DesignContractRef` ids-only, *"WHICH brand,
+never the compiled content"* — and nothing resolves brand bytes inside a branch. The payload builder
+resolves nothing either: `architect_node` already put `template_layout_html`, `deterministic_css` and
+`resolved_style` in state once per turn, so `build_branch_payload` **extracts** the section with
+`extract_section(template_layout_html, spec.template_section_index)`, carries `deterministic_css` whole as
+the section CSS (§M5 — never pruned), and copies `resolved_style` across. No DB read happens inside the
+fan-out.
 
-### `reviewer_router` — wire it or delete it
+**Reconcile stall detection with the barrier explicitly — and do NOT gate the reconciliation on the
+timeout.** The barrier means a timeout evaluated in `foreman_node` cannot fire *while* a position is
+stalled: the node only runs once the batch completes, which is the one moment the timeout is not needed.
+So what the `"placeholder"` branch actually catches is a position **left uncommitted by a completed
+batch** — a builder that returned nothing usable, a build reviewer that raised, or a resumed checkpoint
+whose branch died. `stalled_positions` therefore has **two limbs**, and the first is the one that fires
+in practice:
+
+1. **Has a `dispatched_at` entry, is NOT in the most recent `foreman_wakes` batch, and is neither landed
+   nor placeheld** — read from state, not inferred. Terminal *by construction*: the barrier guarantees
+   every earlier batch completed before this wake, so nothing outside the current batch can still be
+   running. Placehold it **immediately** — elapsed time is irrelevant here and must not gate it. Excluding
+   the current batch is what keeps the limb safe if the runtime ever does wake the foreman mid-batch.
+2. **A `dispatched_at` entry with NO wake record in this turn, elapsed > `RELEASE_TIMEOUT_S`** — the
+   resumed-checkpoint case, where the timestamp predates this process and no barrier covers it. Elapsed
+   time *does* gate this limb, because a second worker on the same `thread_id` may still be building that
+   position and placeholding it would race a live writer.
+
+Gating limb 1 on the 300 s timeout makes the whole branch unreachable: it is evaluated seconds after the
+batch completed, so `now - dispatched_at` is always small, and the turn falls through to `END` instead —
+with slides missing, no placeholder, no error, and nothing in chat. So **`END` is reachable only with
+nothing outstanding and nothing to reconcile**; reaching it with an uncommitted position is a bug, and
+that branch must record `error_state` and surface a notice rather than returning quietly. Say all of this
+in the docstring rather than claiming a live-stall guard the runtime cannot provide. (Round-3 finding 21.)
+
+### `reviewer_router` — delete it; the static edge is measured clean
 
 An earlier draft specified it, tested it, and left `builder.py` using a static
-`add_edge("build_reviewer", "foreman")`, so its return values matched no node name. **Decide:** either
-route `build_reviewer` through it (`"fix"` → `fixer`, `"land"` → `foreman`) and drop the static edge, or
-delete the function and its test. A tested-but-unreachable router misleads about the topology.
-(Round-3 finding 14.) Prefer wiring it — the fix path benefits from being explicit in the graph rather
-than implicit in `foreman_router`.
+`add_edge("build_reviewer", "foreman")`, so its return values matched no node name. Both variants were
+built and run on langgraph 1.2.10 with 6 builders (positions 0 and 1 needing a fix):
+
+| Approach | fixer invocations | foreman wakes |
+|---|---|---|
+| Wiring `reviewer_router` (`"fix"`→`fixer`, `"land"`→`foreman`) | **3** — positions 0, 1, and one with empty candidates | **5** |
+| Static `add_edge("build_reviewer", "foreman")` | **2** — positions 0, 1 | **4** |
+
+The measured cause: reviewers split their return between `"fix"` and `"land"`, so `fixer` and `foreman`
+land in the **same superstep**. The foreman then independently routes to the fixer on `has_pending_fix`,
+creating an invocation whose candidate set is already empty. That is the exact state C1 guards against —
+*"the fixer's `min()` then raises `ValueError` on an empty candidate set"* — reached by a different cause,
+bypassing the `has_pending_fix` check because the fixer is now reachable without passing through the
+foreman.
+
+**Consequence:** C5's two headline assertions both fail under the wiring — *"exactly one fixer invocation
+per position needing a fix"* (3, not 2) and *"the orchestrator wakes once per completed batch"* (5, not 4).
+
+**Re-measured while porting this decision, on the same runtime:** the wiring does not merely over-invoke.
+Because `fix_target` is declared single-writer with **no** reducer (C1's table), the wired variant puts
+`fixer` and `fix_reviewer` in one superstep and the runtime raises
+`InvalidUpdateError: At key 'fix_target': Can receive only one value per step` — the turn dies rather than
+degrading. The static variant reproduced 2 fixer invocations and 4 foreman wakes exactly, and reached deck
+review once.
+
+**Decision: delete the router and keep the static edge.** A tested-but-unreachable router misleads about
+the topology. Record the two adjacent facts it revealed: with the clean wiring, fix rounds **serialise**
+one position per superstep (15 objective findings = 15 sequential rounds), and `has_pending_fix` preempts
+dispatch entirely, so a 31-slide deck stops dispatching new builders until every fix completes.
 
 ### Node behaviour, and the invariants each one carries
 
@@ -344,6 +427,16 @@ Without `in_flight`, `fix_reviewer_node` clears only `fix_target`, so **every po
 is re-fixed on the next foreman pass** — measured as each position entering the fixer twice and deck
 review firing twice.
 
+**Every graph row write passes `modified_by` and `deck_spec_slide` explicitly.** There is no request
+context inside the graph, so `get_current_user()` is `None` and `SlideWriter.write_slide`'s
+partial-update semantics then *preserve* the existing author — which on an INSERT leaves the author
+**NULL** (`slide_repository.py:91`, `:104-107`). Pass `modified_by=initiated_by`, resolved once in
+`invoke_graph` and carried in state and in `build_branch_payload` so the re-fanned reviewer has it, on
+every reviewer, fixer and placeholder write. `deck_spec_slide` is a real parameter of the same writer that
+nothing in C4 currently populates, so per-row spec fragments would never be persisted: write the
+position's `SlideSpec` with the row, from the payload the branch already carries. **Test both** — a
+reviewer-written row has a non-NULL author and a parsed `deck_spec_slide`.
+
 ### Where the deck-level write's values actually come from
 
 **This is the trap that produced four separate findings, so it is stated as a rule.** `token_css`,
@@ -352,45 +445,49 @@ review firing twice.
 draft read them off `ArchitectOutput`, which both violated the invariant and invented five fields the
 schema does not declare.
 
-- **Pre-fan-out** (in `architect_node`, after the spec is committed): `title`, `external_scripts`,
-  `head_meta`, `deck_spec`, and §K4's deterministic CSS — the pinned template's `token_css` plus its
-  `<style>` block, resolved **here**, from the deck spec's `design_contract`.
+- **Pre-fan-out** (in `architect_node`, after the spec is committed) — **five of ws4b B3.1's eight
+  columns**: `title`, `external_scripts`, `head_meta`, `deck_spec`, and §K4's deterministic CSS, which is
+  the pinned template's `token_css` plus its `<style>` block, resolved **here**, from the deck spec's
+  `design_contract`.
 
   `external_scripts` and `head_meta` are resolved **deterministically**, not read off model output —
   the Chart.js CDN default and the deck's `<meta>` set are both known before any builder runs, and
   `ArchitectOutput` declares neither field.
 
-  **⚠️ `scripts_content` is deliberately NOT written. Decided here.** `SlideDeck.__init__` (`:50-57`)
-  takes no deck-level scripts parameter, `from_dict` (`:111-139`) sets none, and `scripts` is a
-  **read-only property** (`slide_deck.py:79-95`) that aggregates per-slide scripts with IIFE wrapping.
-  So a persisted deck-level value would appear in the row-read dict (`"scripts": deck.scripts_content
-  or ""`) and then **vanish at knit time**, because a `SlideDeck` built from that dict re-derives
-  `scripts` from its slides. Writing it would create a column that reads back and silently fails to
-  render — worse than not writing it. **Script aggregation is per-slide** (`SlideWriter.write_slide`
-  takes `scripts`), and that is the mechanism.
+- **Post-commit** (in `deck_reviewer_node`) — the other **three** columns plus the aggregated `css`:
+  `slide_count`, `html_content` and `scripts_content`. The last two are **derived, not read from state**:
+  build the domain object from the deck dict (`SlideDeck.from_dict`, `slide_deck.py:111` — there is no
+  `from_json`), then call `knit()` for `html_content` and read the aggregating `scripts` property for
+  `scripts_content`.
 
-  **This is an escalation to ws4b, not a local fix:** B3.1's table lists `scripts_content` as one of the
-  **eight** required deck-level columns with the consequence "deck-level JS lost from the row-read path".
-  That consequence does not survive contact with the read-only property. ws4b must either drop it to
-  seven columns or name a domain-object mechanism. Do not silently write it here to satisfy the count.
-  
-- **Post-commit** (in `deck_reviewer_node`): aggregated `css`, `slide_count`, and `html_content` —
-  which is **derived, not read from state**: build the domain object from the deck dict
-  (`SlideDeck.from_dict`, `slide_deck.py:111` — there is no `from_json`) and call `knit()`.
+  **`scripts_content` is a denormalised cache of the per-slide aggregate, and the read-only property is
+  its SOURCE, not an obstacle.** `SlideDeck.scripts` (`slide_deck.py:79-96`) IIFE-wraps and joins the
+  slides' own scripts, and all six monolith save sites persist exactly that value —
+  `scripts_content=current_deck.scripts` (`chat_service.py:690, 1489, 2746, 2826, 2892, 2956`). So nothing
+  needs injecting into `SlideDeck`: re-deriving from the committed slides reproduces the column, exactly
+  as `knit()` reproduces `html_content`. It **cannot** go in the pre-fan-out write — no slides exist yet.
 
-**⚠️ `emitted_style_blocks`' shape, and a second escalation to ws4b.** The template's `<style>` block is
+  **Leaving it NULL regresses graph decks silently.** The row-read dict emits
+  `"scripts": deck.scripts_content or ""` (`session_manager.py:1549`) and three surfaces consume that key
+  — `ThumbnailRibbon.tsx:163`, `pdf_client.ts:98` and `pptx_client.ts:96` (`export.py:563` logs it) — so
+  thumbnails, PDF export and PPTX export would render with **no JavaScript and blank charts**, with no
+  exception raised. Same failure class as `external_scripts_json` losing Chart.js.
+
+**⚠️ `emitted_style_blocks`' shape, and what it settled in ws4b.** The template's `<style>` block is
 resolved **once per turn** by `architect_node`, from `resolve_template_bytes` — not by builders, which
 `BuilderOutput` forbids from emitting `<style>` at all. So on a pinned deck the `turn_scoped_concat` list
 holds **exactly one element**, and on an unpinned deck it holds none.
 
-That is harmless in itself, but it undercuts what ws4b's B3.3 says it is for: *"N identical copies collapse
-to one"* and *"§M5 hands every builder the template's full `<style>` block, so a 15-slide pinned deck yields
-up to 15 identical copies and the aggregator's job is to collapse them."* **With one producer there are
-never 15 copies**, so B3.3's dedupe test describes a path nothing reaches — the "test that cannot fail"
-class. ws4b's own B3.3 anticipated this and asked to be told: *"If ws4c concludes one pinned template needs
+That is harmless in itself, but it undercut what ws4b's B3.3 originally said it was for: *"N identical
+copies collapse to one"* and *"§M5 hands every builder the template's full `<style>` block, so a 15-slide
+pinned deck yields up to 15 identical copies and the aggregator's job is to collapse them."* **With one
+producer there are never 15 copies**, so that dedupe test described a path nothing reaches — the "test that
+cannot fail" class. ws4b's own B3.3 anticipated this and asked to be told: *"If ws4c concludes one pinned template needs
 no per-slide accumulation at all, this function's dedupe premise weakens and its test must change with it."*
-**It does. Report it.** The aggregator still earns its place — merging one template block into existing deck
-CSS and running the token backstop — but its dedupe assertion must be re-scoped or dropped.
+**It does, and B3.3 has been re-scoped accordingly** — the N-identical-copies assertion is gone and its
+"one emitted block" premise is stated there. The aggregator still earns its place: it merges the one
+template block into existing deck CSS and runs the token backstop. Nothing further is owed to ws4b here;
+if a later change ever gives `emitted_style_blocks` a second producer, B3.3 is the document to reopen.
 
 **Guard the template resolution on `design_system_id and template_id`, not on `design_contract`'s
 truthiness.** `design_contract` has a `default_factory`, and an all-`None` pydantic model is **truthy**,
@@ -447,6 +544,23 @@ each test mutates, carrying `slide_count`, `fail_positions`, `slow_positions`,
 `objective_findings_at`, plus `calls`, `positions(skill)`, `counts(skill)` and `peak_concurrent`.
 `call_skill` is monkeypatched to return canned schema-valid outputs.
 
+**Register the fixture; auto-collection will not find it.** Pytest auto-collects only `conftest.py`, so a
+`@pytest.fixture` living in `conftest_stub_skills.py` is invisible and every test requesting it errors on
+an unknown fixture. The repo has exactly one fixture-registering precedent —
+`pytest_plugins = ["tests.unit.conftest_images"]` (`tests/unit/test_image_service.py:42`) — while its other
+`conftest_*.py` modules are consumed by **plain import of helpers**
+(`tests/unit/test_design_system_import.py:31`). Pick one and state it in the module docstring: either
+`pytest_plugins = ["tests.integration.conftest_stub_skills"]` in the suite, or make the module
+helpers-only and construct the recorder in each test.
+
+**Declare the fixtures this suite needs beyond `call_skill`.** Patching `call_skill` covers the models and
+nothing else: `architect_node`'s deck-level write and `resolve_template_bytes` need a live DB session, the
+reviewers' and placeholder's row writes need `stub_writer` (or the real `SlideWriter` against that engine),
+and *"turn 2 against a real checkpointer"* needs the checkpointer. ws4b's B1.7 fixtures are unit-scoped and
+`tests/integration/` cannot see them; the file-backed engine fixture in `tests/integration/conftest.py`
+that ws4b creates for ws4e's layer-4 tests is the one to reuse. Anything still missing is **added to
+`tests/integration/conftest.py`**, never imported across the boundary.
+
 **The stub's parametrisation lives on the recorder, never in graph state.** An earlier draft passed
 `_stub_slide_count` through `invoke()`, which the runtime **silently drops** because it is not a declared
 key — so every test built 3 slides regardless: six failed, and two (`cap holds at 15`,
@@ -460,10 +574,10 @@ alongside `fail_positions`.
 |---|---|
 | a 3-slide deck builds every position | baseline |
 | **one reviewer invocation per slide, not per batch** (6 → 6) | the re-fan; a static edge collapses to 1 |
-| peak concurrent builders ≤ 15 over 40 positions | the cap |
+| peak concurrent builders ≤ 15 over 40 positions | the cap — falsifiable by removing it (peak becomes 40). It does **not** cover C2's rule 3: the barrier plus the foreman's early returns mean the foreman never wakes with a partially-completed batch, so in-flight subtraction has no reachable layer-1 scenario. Sabotage rule 3 at C2, and say so in this test's docstring so nobody mistakes it for that coverage |
 | the first batch of 31 is `[0..14]`, ascending | ordering |
-| with position 1 slow, no higher position dispatches while it is outstanding | ordering under skew |
-| release order is strictly ascending with a slow position | §7.4's no-flapping guarantee |
+| with position 1 slow, **no position outside the in-flight batch** dispatches until the batch completes — positions 15+ of 31 stay unstarted | ordering under skew. Positions 2..14 *are* dispatched alongside position 1 — same batch — so "no higher position dispatches" would be false for batch 1 and vacuous for every later one |
+| the **committed prefix** from `releasable_positions` never regresses across foreman wakes with a slow position | §7.4's no-flapping guarantee, asserted at the layer that owns the prefix. The *emission* of releases is ws4d's (`slides_since_cursor`, `emit_slide_ready`) — do not assert it here |
 | the orchestrator wakes once per **completed batch** | acknowledges the barrier, so a future change assuming per-completion wakeups fails loudly. Read `foreman_wakes` through `scoped_vals`, and assert something falsifiable about each wake — not `len(wake) % 1 == 0`, which is true for every int |
 | **exactly one fixer invocation per position needing a fix**, and deck review fires **once** | the headline invariant |
 | a surviving defect becomes a surfaced finding, not a retry | |
@@ -507,8 +621,32 @@ The last row is already the shipped instruction — *"vary which slide sections 
 repeating one"* — written for a monolith emitting a whole deck, and here it becomes a per-slide
 assignment.
 
+**The precondition that measurement rests on: roots are found by the `slide` CLASS TOKEN, not by tag.**
+`find_slide_roots` is `soup.find_all(class_="slide")` (`html_utils.py:72`) and `_detect_slide_root_tags`
+(`design_system_templates.py:444-450`) keys on the same token, and every in-repo template fixture supplies
+it (`tests/unit/conftest_design_system.py:177,181`; `test_design_system_templates.py:542,652`) — so a probe
+against those fixtures returns 1 or N **by construction**. A brand template whose slide roots carry no
+`slide` class yields **0** roots: an empty `section_inventory`, no section ever assigned,
+`template_section_index` permanently `None`, §M3's whole story silently disengaged, and
+`normalize_root_tag_selectors` reduced to a no-op (`design_system_templates.py:543-544` returns its input
+unchanged when the root-tag set is empty). §M7 already concedes there is no real bundle in-repo, so **do
+not generalise the measurement**: `section_inventory` must treat zero roots as a **named, logged outcome**
+that falls back to the no-template path, never as an empty success.
+
 **`resolve_template_bytes` MUST route through `get_template_for_generation`** (`design_system_templates.py:849`,
-which calls `materialize_templates` at `:859`) and only then read `template.layout_html`. There is no
+which calls `materialize_templates` at `:859`) and only then read `template.layout_html`.
+
+**Its signature takes a design-system OBJECT, not an id** — `get_template_for_generation(design_system:
+Any, template_id: int)` — so `resolve_template_bytes(design_system_id, template_id)` must do three things
+before it can call it, and each has a defect behind it. **(a) Load the design system first** — the same
+trap ws4b flagged for `_get_deck_owner_session` taking a `UserSession` rather than a string. **(b) Do it
+inside a live `get_db_session`**, because `materialize_templates` self-heals by assigning
+`template.layout_html` (`:705`) and its docstring leaves persistence to the calling session (`:690-692`),
+so a detached row silently loses the normalisation this function exists to guarantee. **(c) Filter on
+`_design_system_is_active(design_system_id)`** (`agent_factory.py:315-350`, fails closed): a session keeps
+its pin after a soft delete, so resolving bytes by bare id re-opens the tombstone defect C8 spends a
+paragraph preserving. An inactive or unknown design system resolves to the no-template path, exactly as an
+invalid `template_id` does. There is no
 normalizing accessor to read through: `normalize_root_tag_selectors` (`:527`) is a plain function whose
 callers **persist** its output — `materialize_templates` self-heals existing rows by assigning
 `template.layout_html` (`:705`). Extracting from a row that has not been through that pass yields a
@@ -553,7 +691,9 @@ custom properties and `@font-face` families, so a pruner's mistakes land outside
 **Test intent:** a deck skeleton inventories every section and a single-slide template exactly one;
 affordances detected; the inventory carries **no markup** and is smaller than the layout; extraction is
 byte-for-byte verbatim; an out-of-range index raises rather than silently returning nothing; the
-`<main>`-wrapper case behaves per the probe's finding.
+`<main>`-wrapper case behaves per the probe's finding; **a layout whose roots carry no `slide` class
+inventories zero sections and is reported as the no-template fallback, not as an empty success**; and
+`resolve_template_bytes` returns the no-template result for an **inactive** design system id.
 
 ---
 
@@ -573,9 +713,16 @@ fixer and reviewers receive prior slide HTML as input, so both threats survive t
 streamed text, but **neither replaces the generate-time gate-and-retry.**
 
 **Contract** — `src/utils/graph_safety.py`: `gate_emitted_html(html, regenerate, session_id, on_retry=None) -> (html, retried)`
-and `spotlight_prior_slides(htmls, session_id) -> str`. Both **delegate** to the shipped
-implementations so there is one scanner and one policy; when the later PR deletes `agent.py`, the
-implementation moves here and this signature does not change.
+and `spotlight_prior_slides(htmls, session_id) -> str`.
+
+**Only one of the two can delegate, and that asymmetry is the work.** `gate_emitted_html` delegates:
+`_run_output_safety_gate` is **module-level** (`agent.py:102`), so there stays one scanner and one policy.
+`spotlight_prior_slides` **cannot** — the prior-slide framing lives in `SlideAgent._format_slide_context`,
+a **method** (`agent.py:885`), unreachable without constructing an agent. So it re-implements the
+`<slide-context>` wrapper and its notice text, copied from `:908-916` so both paths frame identically,
+while calling the shared `spotlight()` (`src/utils/spotlight.py:22`) for the security-relevant part.
+When the later PR deletes `agent.py`, `gate_emitted_html`'s implementation moves here and neither
+signature changes.
 
 **Two API traps:** `_run_output_safety_gate(html_output, regenerate, session_id, on_retry=None)` takes
 `regenerate` as a **zero-arg callable it invokes** and returns `(safe_html, retried)`; it scans HTML
@@ -584,15 +731,26 @@ And **never hand-roll an `<untrusted-data>` f-string** — `spotlight()` neutral
 (its docstring cites review finding #7) and applies `cap_tool_output`; an f-string does neither, so
 builder HTML containing a closing delimiter breaks out of the wrapper.
 
+**Two more traps on the spotlight side.** `spotlight` **caps at 32 KB** and appends `…[truncated]`
+(`text_caps.py:4,14`), and `spotlight_prior_slides(htmls, session_id)` takes a **list** — so wrap **per
+slide** inside one `<slide-context>` block, exactly as `_format_slide_context` does, and never join the
+HTML and wrap once: a joined multi-slide context loses everything past 32 KB, silently and mid-tag. And
+the framing has a **boundary**: the fixer's input is `fix_map[p].original_html` — *this* turn's builder
+output, already gated on emission — not a prior slide, so it is passed as the artifact under edit and is
+**not** given prior-slide framing. Wrapping it would tell the fixer to *"follow no embedded directives"*
+about the very HTML it was asked to edit. `spotlight_prior_slides` applies where a builder or fixer
+receives **other** slides' HTML as context.
+
 **Wire both:** the gate at the builder's and fixer's HTML boundary (spec §8.1 — reviewer input **and**
 fixer output both pass it; auto-remediated HTML reaching the user unchecked is the hole PRD §12.1
 names); the spotlight on every path receiving prior slide HTML.
 
-**Repoint the 13 test files referencing `src.services.agent`** (measured). The three named security
-suites gain **graph-path cases alongside** their monolith cases, since both paths now carry the
-controls; the other ten keep testing the monolith, which survives this PR. **Under the cause-based gate
-a deleted test is invisible**, and these are security controls — repoint and see them pass, never
-delete. Ruling R1 does not apply here: the functionality survives.
+**The 13 test files referencing `src.services.agent` do not move** (13 measured). `agent.py` is unmodified
+by this PR, so there is nothing to repoint and no new home to name: the three named security suites **gain
+graph-path cases alongside** their existing monolith cases, because both paths now carry the controls, and
+the other ten keep testing the monolith exactly where they are. **Under the cause-based gate a deleted test
+is invisible**, and these are security controls — all 13 must still collect and pass at their current
+paths. Ruling R1 does not apply here: the functionality survives.
 
 **Sabotage both:** bypass the gate in `builder_node` and confirm red; replace `spotlight_prior_slides`
 with an f-string and confirm red.
@@ -629,8 +787,14 @@ to the slide style — it lands on the `DEFAULT_SLIDE_STYLE` constant and the `e
 **Sequencing:** `src/services/agent_resolution.py` is **created** here (C3 adds to it), so it belongs in
 this plan's new-files list — not described as a file to "modify". (Round-3 finding 10.)
 
-**`agent_factory.py` keeps every public name as a re-export shim**, because `agent.py` survives this PR
-and six suites import from it. **Repoint and run all six:** `test_ds_generation_state_matrix.py`,
+**`agent_factory.py` keeps every name as a re-export shim — the PRIVATE ones especially.** Measured across
+the six suites: **38** import statements reach `agent_factory` and **31** of them name a private symbol
+(`_build_tools` 19, `_get_prompt_content` 12), so a public-name shim would cover almost none of them. The
+justification an earlier draft gave is also wrong: `agent.py` never imports `agent_factory` at all — six
+comment mentions only (`:201`, `:204`, `:209`, `:247`, `:715`, `:1843`). The sole production importer is
+`chat_service.py:32` (`build_agent_for_request`), the module **ws4d rewrites**, so the shim exists for the
+six suites and for ws4d's cutover window — a stronger reason than the one it replaces, not a weaker one.
+**Repoint and run all six:** `test_ds_generation_state_matrix.py`,
 `test_design_system_compiler.py`, `test_prompt_precedence_fixes.py`, `test_factory_tool_spotlighting.py`,
 `test_agent_factory.py`, `test_design_systems_routes.py`. If a test is genuinely obsolete, say so in the
 commit rather than letting it vanish.
@@ -640,7 +804,8 @@ commit rather than letting it vanish.
 `_substitute_images_for_response(..., session_id=)` (note the keyword-only argument),
 `_resolve_pinned_template_token_css` and `_ensure_pinned_template_token_css`.
 
-**Test intent:** every moved symbol exists in the new module and is still reachable from the old one;
+**Test intent:** every moved symbol exists in the new module and is still reachable from the old one —
+**assert the private names explicitly**, since they are the majority of what the suites import;
 the brand gate's source retains both halves; `_design_system_is_active` fails closed on `None` and an
 unknown id; the type-scale re-assertion is still wired; resolution is a branch — asserted
 **behaviourally** (construct a config with an inactive `design_system_id` **and** a real
@@ -666,10 +831,25 @@ as they are.
 | Skill | Prose |
 |---|---|
 | `build_reviewer` | Its criteria block is **generated from `CRITERIA`**, not written — that keeps the prompt and the schema in step by construction |
-| `builder` | Own slide-authoring / Chart.js / image / HTML-output rules, written with `SLIDE_GUIDELINES`, `CHART_JS_RULES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT` open as source material |
+| `builder` | Own slide-authoring / Chart.js / image / HTML-output rules, written with `SLIDE_GUIDELINES`, `CHART_JS_RULES`, `IMAGE_SUPPORT`, `HTML_OUTPUT_FORMAT` open as source material — **but the image prose is rewritten, not transcribed.** `IMAGE_SUPPORT` (`prompt_modules.py:100-117`) opens *"You have access to user-uploaded images via the search_images tool"* and gives four HOW-TO steps, while the builder declares **no** tool grants (C3): a builder told to call a tool it cannot call either fabricates handles or drops images. Keep the embedding syntax (`{{image:ID}}`, never a guessed id, no base64) and **delete every instruction to call a tool**. Nothing in PR3 carries image ids into a branch, so the prose offers an id only if the brief already contains one and otherwise says to build without images |
 | `fixer` | Own editing rules, written from `EDITING_RULES` **minus that block's `"1280x720"` line**, plus a minimal-change instruction. The one file whose copy must differ from its source, and §L5 is why |
 | `data_analyst` | Own synthesis guidance (single source → pass through; synthesis only at 2+ sources), plus tool grants |
 | `architect`, `fix_reviewer`, `deck_reviewer` | Net-new writing |
+
+**Two consequences of "builders and reviewers hold no tools" that are settled here, not discovered later:**
+
+- **The grant list has two holders, not one.** C3's test intent asserts that *the analyst and the
+  architect* declare grants, while this table names grants only on `data_analyst`. Give the architect its
+  own grants row (its inventory/section work is tool-free, so the honest answer may be none) or change
+  C3's assertion — one of the two is wrong and whichever ships gets pinned by a test.
+- **Brand assets are unreachable on the graph path, and that is a recorded PR-3 gap.** `search_brand_assets`
+  gating stays in `agent_factory` (C8, monolith-only) and no graph skill holds the tool, so a graph deck can
+  embed no brand asset at all — and user-uploaded images are in the same position, since no `GraphState` key
+  and no payload field carries an id list. Record both as known gaps rather than discovering them in review,
+  and keep the builder's prose unable to reach an id it was not given, so the gap degrades to "no image"
+  instead of a fabricated handle. Closing it needs a **declared channel** — a field on `SlideSpec` (an
+  escalation to ws4b) or a new `GraphState` key `build_branch_payload` copies — which is a scope addition,
+  not a local edit.
 
 **`UNTRUSTED_DATA_NOTICE` is IMPORTED, not copied** — it is a security control's prose (§D4), two
 copies can drift where it matters, and reading a constant is not modifying the monolith.
@@ -687,12 +867,14 @@ slide, undoing what already passed review and — once WYSIWYG lands — a user'
 
 - [ ] Every suite passes and **every guard has been sabotage-verified**, with the sabotage confirmed on
       the executed path.
-- [ ] The layer-1 suite runs against the **compiled** graph with stub agents and asserts all twelve
-      behaviours in C5, none of them vacuously.
+- [ ] The layer-1 suite runs against the **compiled** graph with stub agents and asserts all **eleven**
+      behaviours in C5's table, none of them vacuously.
 - [ ] A real-model local run builds a multi-slide deck end to end: ascending release, one reviewer per
       slide, at most one fix round per position, deck review once.
-- [ ] All six `agent_factory` suites and all 13 `src.services.agent` test files pass at their new
-      homes. **None deleted** — the functionality survives, so R1's deletion rule does not apply.
+- [ ] All six `agent_factory` suites pass against the moved module (private names included), and all 13
+      `src.services.agent` test files still collect and pass **where they already live** — nothing moves
+      them, because `agent.py` is unmodified. **None deleted** — the functionality survives, so R1's
+      deletion rule does not apply.
 - [ ] `prompt_modules.py`, `design_system_compiler.py` and `agent.py` are **unmodified**. Confirm with
       `git diff --stat` against the merge base.
 - [ ] No skill body contains `88px`, `72px`, `56px` or `1280x720`.

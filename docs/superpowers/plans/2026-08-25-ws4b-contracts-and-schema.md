@@ -261,6 +261,7 @@ class SlideSpec(BaseModel):
     position: int; purpose: str; content_brief: str; assumes: str; hands_off: str
     data_references: list[str]; template_section_index: int | None
 class DeckSpec(BaseModel):
+    title: str
     audience: str; purpose: str; argument: str; call_to_action: str
     narrative_arc: list[str]; design_contract: DesignContractRef
     resolved_data: ResolvedData; slides: list[SlideSpec]
@@ -270,8 +271,14 @@ class DeckSpec(BaseModel):
     def from_json(cls, raw: str | None) -> DeckSpec | None    # never raises
 ```
 
-**Four invariants the validators must enforce, each with a reason:**
+**Five invariants the validators must enforce, each with a reason:**
 
+- **`title` is required and non-empty (§H1).** Nothing else in these contracts carries a deck title:
+  `ArchitectOutput` is closed and declares none, `SlideSpec` has no title, and the graph's pre-fan-out
+  deck-level write persists `title` to the deck row **and** the session row (B3.1) while ws4d asserts a
+  `SESSION_TITLE` event on turn 1 of a graph session. So the title reaches the writer only as a field on
+  the spec the architect commits — read off the committed spec, never derived from builder output. Reject
+  empty and whitespace-only.
 - **`design_contract` stores a reference, never content (§L3).** `compiled_style_content`'s currency
   is an **exact** `COMPILER_VERSION` match, so a snapshot in the spec is stale the moment the version
   moves and the spec would silently drive builds from a superseded artifact. §4.1's "+ image
@@ -295,7 +302,8 @@ an absent spec, which it cannot do if the read raised.
 against, review independence would be nominal. Assert their absence — `review_criteria`, `criteria`,
 `rubric`, `quality_bar` — so a later "helpful" addition fails a test.
 
-**Test intent:** the four validator rejections; `slide_at` by position with a gap in the sequence;
+**Test intent:** the five validator rejections, **including an empty or whitespace-only `title`**;
+`slide_at` by position with a gap in the sequence;
 positions unique; JSON round-trip lossless; `from_json` tolerates `None`, `""`, malformed JSON and a
 partial object; criteria absent.
 
@@ -734,7 +742,8 @@ finding 8.)
 sites) — note it takes a **`UserSession` object, not a session_id string**, so a `session_id` caller
 needs the session lookup first. Do not write a second implementation.
 
-**Seven columns, split across two writes (§H1b, §L2). Nothing self-heals. Deck-level JavaScript is NOT persisted.**
+**Eight columns — five belong to the pre-fan-out write, three to the post-commit write (§H1b, §L2).
+Nothing self-heals.** `css` is the one written by both: deterministic bytes up front, the aggregate after.
 
 | Column | Which write | If never written |
 |---|---|---|
@@ -745,8 +754,23 @@ needs the session lookup first. Do not write a second implementation.
 | `deck_spec_json` | pre-fan-out | **the spec is never persisted** — §7.1's view has no data and turn *n+1*'s architect starts blind. The pre-fan-out trigger *is* "the architect committed the spec" |
 | `slide_count` | post-commit | **the session list renders `0 slides`** (`routes/sessions.py:233` — a *column*, not derived) |
 | `html_content` | post-commit | raw-HTML debug view empty |
+| `scripts_content` | post-commit (derived — see below) | **thumbnails, PDF export and PPTX export render with no JavaScript and blank charts.** Failure is **silent**: no exception |
 
-**Why `scripts_content` is not persisted.** `SlideDeck.scripts` is a read-only `@property` (`slide_deck.py:79-95`) that aggregates per-slide scripts with IIFE wrapping. Its implementation takes no constructor parameter and is re-derived on every `SlideDeck` instantiation, including from a persisted row dict. A persisted `scripts_content` value appears in the row-read dict and then vanishes at knit time because `SlideDeck.from_dict` (`:111-139`) does not populate it — the value is always recomputed from the slides. Deck-level JS enters the domain object **only** through per-slide `Slide.scripts` fields written by builders.
+**Why `scripts_content` is written, and where its value comes from.** It is a **denormalised cache of the
+per-slide aggregate**, not independent deck-level JavaScript. `SlideDeck.scripts` (`slide_deck.py:79-96`) is
+a read-only `@property` that IIFE-wraps and joins the slides' own `scripts`, and all six monolith save sites
+persist exactly that value — `scripts_content=current_deck.scripts` (`chat_service.py:690, 1489, 2746,
+2826, 2892, 2956`). The property is therefore the column's **source**, not an obstacle: nothing has to
+inject a value into `SlideDeck`, and re-deriving from the committed slides reproduces the column, exactly as
+`knit()` reproduces `html_content`. That is why it belongs to the **post-commit** write — at fan-out time
+there are no slides to aggregate. The graph writes it from `SlideDeck(...).scripts` in `deck_reviewer_node`
+(ws4c C4's post-commit bullet).
+
+**Leaving it NULL is a silent regression, not a no-op.** The row-read dict emits
+`"scripts": deck.scripts_content or ""` (`session_manager.py:1549`) and three surfaces consume that key —
+`ThumbnailRibbon.tsx:163`, `pdf_client.ts:98` and `pptx_client.ts:96` (`export.py:563` logs it) — so a graph
+deck's thumbnails, PDF export and PPTX export would all render with no JavaScript and blank charts, with no
+exception raised anywhere. Same failure class as `external_scripts_json` losing Chart.js.
 
 **§K4 — what deterministic CSS the pre-fan-out write persists: the pinned template's `token_css` plus
 its own `<style>` block.** Forced, not preferred: §H1's stated reason for writing before the fan-out is
