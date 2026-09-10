@@ -24,7 +24,7 @@ uncollected.
 
 | # | Defect | Status | Verified |
 |---|---|---|---|
-| A1 | `merge_css` keeps only `qualified-rule` blocks (`src/utils/css_utils.py:28-34`) | **Live defect on main:** Every slide-replacement edit silently drops the deck's `@media`, `@keyframes` and `@supports` rules. A branded deck loses its print rules and animations after one edit. `@font-face` survives only because `ensure_deck_token_css` re-emits it | Measured: `merge_css(css, css)` on a sheet carrying `:root`, `@font-face`, `section.slide`, `@media print`, `@keyframes` returns **only `:root` and `section.slide`** |
+| A1 | `merge_css` drops at-rules because `parse_css_rules` discards them (`src/utils/css_utils.py:28-38`, merged at `:41`) | **Live defect on main:** Every slide-replacement edit silently drops the deck's `@media`, `@keyframes` and `@supports` rules. A branded deck loses its print rules and animations after one edit. `@font-face` survives only because `ensure_deck_token_css` re-emits it | Measured: `merge_css(css, css)` on a sheet carrying `:root`, `@font-face`, `section.slide`, `@media print`, `@keyframes` returns **only `:root` and `section.slide`** |
 | A2 | `duplicate_session` builds `SessionSlideDeck(...)` without `deck_spec_json` (`session_manager.py:1014-1026`) | **Latent on main (PR1-only).** `deck_spec_json` does not exist on main yet; no writer touches it. The duplicate drops nothing today. Live the moment ws4b's writer persists a spec. | PR1-verified: constructor passes 11 fields; `deck_spec_json` was added in PR1; `duplicate_session` still omits it |
 | A3 | Two docstrings in `src/core/backfill_session_slides_startup.py` (`:4`, `:239`) still say the backfill runs "from its FastAPI lifespan" | **Latent on main (PR1-only).** File does not exist on main; it was added in PR1. The code is correct; only the prose would be stale once the file exists. | PR1-verified: file exists on the branch at the stated line numbers |
 | A4 | The `e2e-tests` job is an explicit **23-entry allowlist** (`.github/workflows/test.yml`) against **32** specs in `frontend/tests/e2e/` plus **17** more outside it. Matrix entry arithmetic is 23 (main matrix) vs 26 on branch. | **Spec coverage gap on main (and branch).** Main has 14 matrix entries collecting 18 specs; branch has 23 entries collecting 32 + 11 + 6 = 49 total specs. 9 branch specs absent from matrix; 17 strays outside `tests/e2e/`. | Measured on branch: 23 matrix entries at `:479-501`, 32 specs in `e2e/`, 11 in `frontend/tests/`, 6 in `user-guide/` |
@@ -59,13 +59,15 @@ tests. Two additions:
 @dataclass(frozen=True)
 class CssBlock:
     key: str          # a qualified rule keys on its SELECTOR; an at-rule on its EXACT SERIALIZED TEXT
-    text: str
+    text: str         # for qualified rules, the declaration block with no newline normalization (preserve source formatting so golden files match); for at-rules, the complete block with its prelude and content
     is_at_rule: bool
 
 def parse_css_blocks(css_text: str | None) -> list[CssBlock]: ...
 ```
 
 `merge_css(existing, replacement)` then merges over ordered blocks instead of a selector dict.
+
+**Override ordering:** When a replacement rule matches an existing selector (or an at-rule matches by key), the overridden rule stays in its **original position** in the block list (use `dict.update` semantics, not append). This preserves CSS order sensitivity — `@import` must stay first, and `@font-face` should precede its consumers.
 
 **The one design decision, and why it is not the obvious one.** Dedupe keys at-rules on their
 **exact serialized block text**, not on `at_keyword`. Keying on the keyword would make a second
@@ -75,6 +77,8 @@ CSS aggregation needs, because §M5 hands every builder the same full style bloc
 
 **Order is preserved** because CSS is order-sensitive: `@import` must come first and `@font-face`
 should precede its consumers, so a merge that reshuffles at-rules can change rendering.
+
+**Known limit: dedupe is whitespace-sensitive.** `tinycss2.serialize` reproduces source formatting exactly, so two copies of the same `@media` block differing only in indentation will both survive. This is acceptable under §M5's rule (identical bytes to every builder), and any builder that reformats will hit it on the ws4c side. Worth one line in the DoD as a known constraint for ws4c.
 
 **Test intent** — `tests/unit/test_deck_css_at_rule_survival.py`. Write the **first** test against
 the shipped path; a test written only against ws4c's future aggregator would ship green over the live
@@ -89,14 +93,15 @@ defect.
 | `@import` (prelude, no block — `rule.content is None`) survives | A fix assuming every at-rule has a block silently drops these |
 | `@font-face` still precedes `@media print` in the output | Order sensitivity |
 
+**Emptiness guard:** The plan must state the behavior for empty inputs, since `test_css_utils.py:71-77` pins `merge_css(existing, "") == existing` (the early return must survive). A replacement consisting only of at-rules is also stripped by the current code, so the new version needs a guard: **"if not replacement_rules: return existing_css"** must remain in place. This matters downstream: **ws4b's** CSS aggregator (B3.3 — the aggregator is ws4b's per the index, not ws4c's) cannot dedupe by concatenating then merging with `""`; it must fold pairwise. **The design note "N identical copies collapse to one" is true only under a fold**, and that constraint should be stated since it affects ws4b's aggregation strategy. Note ws4c produces the style block and ws4b consumes it, so the fold constraint lands on the consumer.
+
 **Fixture.** One branded stylesheet carrying `:root` with two custom properties, `@font-face`,
 `section.slide` referencing `var(--…)`, `@media print`, `@keyframes` and `@supports`. Reuse it across
 every assertion so a failure names the block that was lost.
 
 **Steps.** Write the tests → run and record the exact failure list (this failure *is* the shipped
-defect; put it in `.PLAN-CORRECTIONS.md`) → implement → run both this file and
-`tests/unit/test_css_utils.py` (the latter must pass **unchanged**; if a formatting assertion there
-breaks, the fix changed qualified-rule output, which it must not) → sabotage → commit.
+defect; put it in `.PLAN-CORRECTIONS.md`) → implement → run this file,
+`tests/unit/test_css_utils.py` (must pass **unchanged**), `tests/integration/test_slide_replacement_flow.py` (golden-file constraint on `text` formatting and override ordering), and `tests/unit/test_deck_integrity.py::TestCSSMerging` (runs on `load_databricks_theme()` which contains `@media`, so its output changes after the fix) → sabotage → commit.
 
 **Sabotage.** Replace `elif rule.type == "at-rule":` with `elif False:`, confirm the six at-rule
 assertions go red, and `grep -n 'elif False'` to confirm the edit is on the executed path. Revert.
@@ -150,7 +155,7 @@ object. A round-3 review finding caught a test passing the wrong thing.
 `src/core/backfill_session_slides_startup.py:4` says "from its FastAPI lifespan on every boot" and
 `:239` says "Called from the FastAPI lifespan alongside `migrate_profiles`". Both are wrong since
 main's `fix(startup): run migrations once pre-fork, never in the uvicorn workers` — the backfill runs
-in `run.py::init_database`, pre-fork, and `SystemExit(1)`s on failure.
+in `packages/databricks-tellr-app/databricks_tellr_app/run.py::init_database`, pre-fork, and `SystemExit(1)`s on failure (wiring already pinned by `tests/unit/test_startup_migrations.py`).
 
 Prose only; no test. Fold into A2's commit rather than raising a commit for two comments.
 
@@ -171,9 +176,12 @@ the feedback drawer and findings, which is ws4b's and ws4e's whole frontend surf
 
 **Two changes.**
 
-1. **Relocate the 17 strays into `frontend/tests/e2e/`** so the job's naming scheme can reach them.
-   Check each one's relative imports after moving; the `user-guide/` six may want their own matrix
-   entries or a deliberate exclusion.
+1. **Relocate the 17 strays into `frontend/tests/e2e/`.** The six `user-guide/` specs are documentation screenshot generators (`frontend/tests/user-guide/shared.ts:19` writes to `docs/user-guide/images` via `path.join(__dirname, '..', '..', '..', 'docs', ...)` — depth 3). **Decide now:** 
+   - **Option A (flatten+reason):** Move all six into `tests/e2e/`, which breaks the path (depth becomes 4). Update the path and add `DELIBERATE_EXCLUSIONS` with a reason stating they are documentation, not functional specs. 
+   - **Option B (scope exemption):** Move the 11 non-user-guide strays into `tests/e2e/`, and leave user-guide where it is, adding an exemption to the guard's "no spec outside `tests/e2e/`" rule (same reason).
+   
+   **This plan chooses Option A (flatten).** Check each one's relative imports after moving; fix any paths.
+   
 2. **Add every uncovered spec to the allowlist.** 23 + 9 + up to 17 relocated. **Do the arithmetic
    from what is on disk after the move, not from this document** — a round-3 finding caught the
    superseded plan off by one here, and an off-by-one leaves a spec uncovered *and* fails the guard
@@ -188,12 +196,13 @@ so a new spec ships uncollected **by default**; this test makes that a visible f
 | no `*.spec.ts` remains outside `tests/e2e/` where the naming scheme cannot see it | |
 | `slide-viewer` specifically is in the matrix | Pins the named gap so a future re-drop is loud |
 
+**Job count and parallelism.** This change grows the e2e matrix from 23 to ~49 entries. Each entry is a full job: `npm ci`, `playwright install --with-deps chromium`, `pip install -e ".[dev]"`, Postgres service, DB seed, backend boot, and one spec at `--workers=1`. The matrix roughly doubles minutes and artifacts. This is an acceptable trade-off given the spec coverage gap (23 existing, 26 never run), but worth acknowledging. Consider adding `max-parallel` to the job config if you hit concurrent-job caps. The alternative — `--shard=i/N` over `tests/e2e/` — would dissolve both the allowlist and its guard; that option was rejected in favour of explicit matrix control.
+
 **The regex is a trap.** `r"^\s+- ([a-z0-9-]+)$"` against the whole workflow matches **34** items —
 job names (`unit-tests`, `frontend-build`, `wheel-build`, `e2e-tests`), the branch `main`, and the
-*integration* matrix. **Scope the search to the e2e matrix block** before applying it.
+*integration* matrix. **Scope the search to the e2e matrix block** before applying it. **Better: use a YAML parser.** `pyyaml` is already in `pyproject.toml:24`, so `yaml.safe_load(...)["jobs"]["e2e-tests"]["strategy"]["matrix"]["test"]` is exact and immune to formatting drift. Also anchor file paths with `Path(__file__).resolve().parents[2]` (the repo convention per `tests/unit/test_startup_migrations.py:16`), not a cwd-dependent relative path.
 
-**A4 edits `.github/workflows/test.yml`, which ws4e also edits** (its layer-4 job near line 290).
-If both are in flight, coordinate the conflict; the two edits are in disjoint blocks.
+**Workflow file edits:** A4 edits `.github/workflows/test.yml` (this PR's matrix allowlist), which ws4e also edits (its layer-4 job near line 290). If both are in flight, coordinate the conflict; the two edits are in disjoint blocks. **Important: The `backend` filter (`.github/workflows/test.yml:35-38`) gates the `unit-tests` job to `src/**`, `tests/**`, `pyproject.toml`. Add `.github/workflows/test.yml` and `frontend/tests/**` to that filter**, else a PR editing only test.yml or adding frontend specs skips `unit-tests` entirely, and the guard test `test_e2e_matrix_covers_specs.py` never runs. The guard exists to catch spec-coverage gaps; a filter that makes it skip-able defeats its whole purpose.
 
 **Expect newly-collected specs to fail.** 26 specs have never run in CI (9 absent from matrix, 17 relocated).
 Any that fail are **pre-existing defects this task surfaces, not defects it causes** — and that is the point.
@@ -215,5 +224,6 @@ distinction survives review.
 - [ ] Full suite compared **by cause** to the index's baseline: no new cause, no change to the
       deploy-autoscaling cause, and no test that stopped existing.
 - [ ] `npm run typecheck` clean (never `npx tsc --noEmit` — it checks zero files).
+- [ ] Relocation import verification: `cd frontend && npx playwright test --list` succeeds and loads all 49 relocated specs without unresolved-import errors (cheap gate that needs no server).
 - [ ] The e2e job runs green on the widened matrix, with any newly-surfaced failure either fixed or
       excluded-with-a-reason and listed in the PR description.
