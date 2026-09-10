@@ -66,6 +66,17 @@ def test_every_integration_file_is_collected_or_excluded_with_reason():
     run_blocks = _collect_run_blocks()
     test_names = _integration_test_names()
 
+    # Guard: a coverage check that discovers zero files is vacuously true —
+    # it reports success over an empty universe, which is the exact failure mode
+    # these guards exist to prevent elsewhere.  If this fires, INTEGRATION_DIR
+    # is wrong or the directory has been emptied; fix the path, not the assertion.
+    assert test_names, (
+        f"No test_*.py files found in {INTEGRATION_DIR.resolve()!s}. "
+        "Either INTEGRATION_DIR points at the wrong path or the directory is empty. "
+        "A coverage guard that discovers nothing must fail loudly rather than "
+        "report success over an empty set."
+    )
+
     # First validate that every DELIBERATE_EXCLUSIONS entry has a non-empty
     # reason — an empty reason is not allowed.
     empty_reasons = {name for name, reason in DELIBERATE_EXCLUSIONS.items() if not reason.strip()}
