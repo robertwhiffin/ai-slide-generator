@@ -109,6 +109,15 @@ so a completed fix is tombstoned as `{position: None}` — and `bool({0: None})`
 truthiness routes to the fixer **forever**; the fixer's `min()` then raises `ValueError` on an empty
 candidate set and the graph loops to `GraphRecursionError`.
 
+**`stalled_positions(state, now, timeout_s)` — guard against `dispatched_at` tombstones.** `dispatched_at`
+uses the same `turn_scoped_merge` reducer as `fix_map`, carrying the identical tombstone hazard. The in-flight
+predicate — *"a position was dispatched but has not yet committed or placeheld"* — is never defined despite
+three rules depending on it (C4's stall check, C2's "retries need no special case", and C2's rule 2 "in-flight
+excluded from batch"). `stalled_positions` must skip `None` timestamps. `retry_count` is declared with a
+reducer but **never written** — no node retries anything (builder exceptions go straight to placeholder). Yet
+C2 tests state "retry priority" and "retries appear ahead of higher unstarted positions". Either delete the
+`retry_count` key or define and implement its writer.
+
 **Test intent:**
 
 | Assertion | Why |
