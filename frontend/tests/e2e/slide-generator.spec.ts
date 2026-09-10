@@ -9,7 +9,7 @@ import {
   mockSlides,
   mockVerificationResponse,
   createStreamingResponse
-} from './fixtures/mocks';
+} from '../fixtures/mocks';
 import {
   goToGenerator as goToGeneratorNewUi,
   NEW_DECK_BUTTON_LABEL,
@@ -18,7 +18,7 @@ import {
   DECK_PROMPTS_LABEL,
   SLIDE_STYLES_LABEL,
   HELP_LABEL,
-} from './helpers/new-ui';
+} from '../helpers/new-ui';
 
 /**
  * Set up API mocks for all tests.
