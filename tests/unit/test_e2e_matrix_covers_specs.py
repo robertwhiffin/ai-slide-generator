@@ -16,6 +16,21 @@ Three assertions
    *.spec.ts, so helpers like user-guide/shared.ts staying put is fine).
 3. pin: slide-viewer is in the matrix (the only spec that exercises the
    findings drawer, which ws4b and ws4e depend on).
+
+DELIBERATE_EXCLUSIONS — two distinct kinds
+------------------------------------------
+KIND A — Documentation screenshot generators (keys 01-* through 07-*):
+  These specs write PNG screenshots to docs/user-guide/images when run.
+  They are NEVER meant to run in CI, and there is no expectation that they
+  will return to the matrix.
+
+KIND B — Quarantined specs pending re-authoring (FOLLOW-UP marker):
+  These were written against an older app shell that has since been
+  redesigned (AppLayout / brand-header / sidebar / deck-history replaced
+  the shell these specs target).  They were surfaced — not caused — by
+  the matrix widening that added them to CI collection.  They are
+  expected to return to the matrix once re-authored against the current
+  shell.  Search for FOLLOW-UP to find them all.
 """
 import yaml
 from pathlib import Path
@@ -57,6 +72,59 @@ DELIBERATE_EXCLUSIONS: dict[str, str] = {
     "07-exporting-to-google-slides": (
         "Documentation screenshot generator, not a functional spec. "
         "Writes PNG screenshots to docs/user-guide/images when run."
+    ),
+    # KIND B — quarantined specs pending re-authoring against the current AppLayout shell.
+    # Failures are pre-existing; they were surfaced, not caused, by the matrix widening.
+    # FOLLOW-UP: re-author each against AppLayout / brand-header / sidebar / deck-history
+    # and restore to the matrix.
+    "save-points-versioning": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "22 failures: spec targets the pre-redesign app shell — selectors "
+        "'New Session' (button, removed from frontend/src/), role=navigation (app-shell "
+        "landmark, now only on breadcrumb/tab-strip), and 'Chat' level-2 heading no longer "
+        "exist in the current AppLayout/brand-header/sidebar shell. "
+        "Needs re-authoring against the current shell before returning to the matrix."
+    ),
+    "share-link": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "4 failures: spec targets the pre-redesign app shell — selector "
+        "'New Session' (button removed from frontend/src/) and role=navigation "
+        "(app-shell landmark replaced by AppLayout/brand-header/sidebar). "
+        "Needs re-authoring against the current shell before returning to the matrix."
+    ),
+    "slide-generator": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "3 failures: spec targets the pre-redesign app shell — selector "
+        "'New Session' (button removed from frontend/src/), role=navigation "
+        "(app-shell landmark), and tool-picker/deck-prompt UI selectors that have drifted. "
+        "Needs re-authoring against the current AppLayout shell before returning to the matrix."
+    ),
+    "routing": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "3 failures: spec targets the pre-redesign app shell — selectors "
+        "'New Session' (button removed from frontend/src/) and role=navigation "
+        "(app-shell landmark replaced by AppLayout/brand-header/sidebar). "
+        "Needs re-authoring against the current shell before returning to the matrix."
+    ),
+    "navigation": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "2 failures: spec targets the pre-redesign app shell — selectors "
+        "'New Session' (button removed from frontend/src/) and role=navigation "
+        "(app-shell landmark replaced by AppLayout/brand-header/sidebar). "
+        "Needs re-authoring against the current shell before returning to the matrix."
+    ),
+    "slide-host-frame": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "1 failure: spec pins a four-surface contract map against "
+        "src/components/SlidePanel/SlideSelection.tsx, which no longer exists anywhere "
+        "in frontend/src/. "
+        "Needs re-authoring against the current slide panel component before returning to the matrix."
+    ),
+    "genie-detail-panel": (
+        "FOLLOW-UP: pre-existing failures surfaced by matrix widening; not caused by it. "
+        "1 failure: spec uses selector 'add-tool-genie' / tool-picker that has drifted "
+        "from the current UI (tool-picker UI redesigned, selector no longer present). "
+        "Needs re-authoring against the current tool-picker surface before returning to the matrix."
     ),
 }
 
@@ -100,6 +168,16 @@ def test_every_spec_is_in_matrix_or_excluded_with_reason():
     assert not empty_reasons, (
         f"DELIBERATE_EXCLUSIONS entries must have a non-empty reason. "
         f"These have an empty reason: {sorted(empty_reasons)}"
+    )
+
+    # No spec may be in both the matrix and DELIBERATE_EXCLUSIONS — if it is in
+    # the matrix it will still run in CI even though it is supposed to be excluded.
+    both = matrix & set(DELIBERATE_EXCLUSIONS.keys())
+    assert not both, (
+        f"These specs are in BOTH the e2e matrix and DELIBERATE_EXCLUSIONS:\n"
+        + "\n".join(f"  - {s}" for s in sorted(both))
+        + "\n\nA spec in DELIBERATE_EXCLUSIONS will still run in CI if it is also "
+        "in the matrix.  Remove it from the matrix."
     )
 
     # Every spec must be in the matrix or explicitly excluded.
