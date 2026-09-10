@@ -83,6 +83,17 @@ def test_every_spec_is_in_matrix_or_excluded_with_reason():
     matrix = set(_load_matrix())
     specs = _e2e_spec_stems()
 
+    # Guard: a coverage check that discovers zero files is vacuously true —
+    # it reports success over an empty universe, which is the exact failure mode
+    # these guards exist to prevent elsewhere.  If this fires, E2E_DIR is wrong
+    # or the directory has been emptied; fix the path, not the assertion.
+    assert specs, (
+        f"No *.spec.ts files found in {E2E_DIR.resolve()!s}. "
+        "Either E2E_DIR points at the wrong path or the directory is empty. "
+        "A coverage guard that discovers nothing must fail loudly rather than "
+        "report success over an empty set."
+    )
+
     # First validate that every DELIBERATE_EXCLUSIONS entry has a non-empty
     # reason — an empty reason is not allowed.
     empty_reasons = {stem for stem, reason in DELIBERATE_EXCLUSIONS.items() if not reason.strip()}
