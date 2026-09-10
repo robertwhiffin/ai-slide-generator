@@ -56,6 +56,29 @@ def _integration_test_names() -> set[str]:
     return {p.name for p in INTEGRATION_DIR.glob("test_*.py")}
 
 
+def test_no_nested_integration_tests():
+    """No test_*.py may exist inside a sub-directory of tests/integration/.
+
+    The CI job names files by their flat path (tests/integration/test_foo.py).
+    A file at tests/integration/subdir/test_foo.py cannot be named in the flat
+    job listing, so it would silently receive no CI coverage.  The correct fix
+    is to flatten it into tests/integration/ — not to silently ignore it or
+    expand the guard to cover subdirectories.
+    """
+    nested = [
+        p.relative_to(INTEGRATION_DIR)
+        for p in INTEGRATION_DIR.rglob("test_*.py")
+        if p.parent != INTEGRATION_DIR
+    ]
+    assert not nested, (
+        "Found test_*.py files in sub-directories of tests/integration/:\n"
+        + "\n".join(f"  - tests/integration/{p}" for p in sorted(nested))
+        + "\n\nThe CI job lists files by their flat path under tests/integration/."
+        " A nested file cannot be named in that listing and will receive no CI"
+        " coverage. Flatten it into tests/integration/ and add it to a CI job."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Assertion 1 — coverage
 # ---------------------------------------------------------------------------
@@ -91,6 +114,18 @@ def test_every_integration_file_is_collected_or_excluded_with_reason():
         for name in test_names
         if any(f"tests/integration/{name}" in block for block in run_blocks)
     }
+
+    # A file must not be in BOTH DELIBERATE_EXCLUSIONS and a CI job's run block.
+    # If it is in both, CI still runs it even though it is supposed to be excluded
+    # — the exclusion appears honoured while the file quietly continues to run.
+    both = collected & set(DELIBERATE_EXCLUSIONS.keys())
+    assert not both, (
+        "These tests/integration/test_*.py files are in BOTH a CI job's run "
+        "block and DELIBERATE_EXCLUSIONS:\n"
+        + "\n".join(f"  - {n}" for n in sorted(both))
+        + "\n\nA file in DELIBERATE_EXCLUSIONS will still run in CI if it is "
+        "also named in a job's run block.  Remove it from the job."
+    )
 
     # Every file must be collected or explicitly excluded.
     uncovered = test_names - collected - set(DELIBERATE_EXCLUSIONS.keys())

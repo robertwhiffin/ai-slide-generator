@@ -90,10 +90,25 @@ SECTION 3 — WHAT THIS FILE DOES *NOT* COVER
 --------------------------------------------------------------------------------
 
 Playwright specs are NOT in the pytest suite and so are not in any count above. ws4a widened the
-CI e2e matrix from 23 to 36 collected specs and quarantined 13 more; the current state is recorded
-in `tests/unit/test_e2e_matrix_covers_specs.py`'s DELIBERATE_EXCLUSIONS, which is the authority.
-Of the 20 specs ws4a newly collected, 13 pass (including `slide-viewer`) and 7 were quarantined as
-pre-existing failures against a redesigned app shell, each with a FOLLOW-UP marker.
+CI e2e matrix from 23 to 36 collected specs and placed 13 in DELIBERATE_EXCLUSIONS; the current
+state is recorded in `tests/unit/test_e2e_matrix_covers_specs.py`'s DELIBERATE_EXCLUSIONS, which
+is the authority.  The 13 excluded specs fall into two distinct groups that must not be conflated:
+  KIND A (6 specs) — documentation screenshot generators (01-generating-slides, 02-creating-profiles,
+    03-advanced-configuration, 04-retrieving-feedback, 06-uploading-images, 07-exporting-to-google-
+    slides).  These write PNG screenshots to docs/user-guide/images and are NEVER meant to run in CI.
+  KIND B (7 specs) — quarantined pending re-authoring against the current AppLayout shell
+    (save-points-versioning, share-link, slide-generator, routing, navigation, slide-host-frame,
+    genie-detail-panel).  Pre-existing failures surfaced — not caused — by the matrix widening;
+    each carries a FOLLOW-UP marker and is expected to return to the matrix once re-authored.
+Of the 20 specs ws4a newly added (to matrix or KIND B — KIND A pre-existed outside the matrix),
+13 pass (including `slide-viewer`) and 7 were quarantined as KIND B.
+
+**Those 13 were measured LOCALLY, not in CI.** ws4a's branch was never pushed, so the widened
+36-entry matrix has never executed on a runner. The local run used the installed Playwright
+chromium against a dev server, once with and once without a live backend on 127.0.0.1:8000 — the
+per-spec results were identical both ways, which is what established that the 7 KIND B failures are
+environment-independent. Treat "13 pass" as a local measurement awaiting its first CI confirmation,
+and do not cite this file as evidence that CI is green.
 
 `tests/integration/` coverage is likewise a CI-wiring property, not a pytest count: all 17 files
 are now named in a CI job (10 of them previously ran in no job at all). The guard is
