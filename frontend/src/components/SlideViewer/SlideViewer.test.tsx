@@ -113,9 +113,12 @@ afterEach(() => {
   localStorage.removeItem(SEEN_STORAGE_KEY);
 });
 
-// ── tests ─────────────────────────────────────────────────────────────────────
+// ── tests — SlideViewer.tsx:201 (unseenSlideIndices) ─────────────────────────
+//
+// Sabotage target: `f.status !== 'fixed' &&` in unseenSlideIndices at :201.
+// Removing it causes the fixed-only ribbon test to go red.
 
-describe('SlideViewer — fixed findings excluded from unseen indicators', () => {
+describe('SlideViewer — fixed findings excluded from unseenSlideIndices (:201)', () => {
   it('slide with only a fixed unseen finding shows no unseen dot on the ribbon thumbnail', () => {
     renderViewer([makeFinding('fix1', 'fixed')]);
 
@@ -136,5 +139,34 @@ describe('SlideViewer — fixed findings excluded from unseen indicators', () =>
 
     // At least one open unseen finding → dot appears.
     expect(screen.getByTestId('ribbon-unseen-0')).toBeInTheDocument();
+  });
+});
+
+// ── tests — SlideViewer.tsx:525 (hasUnseen prop to FeedbackDrawer) ────────────
+//
+// This is a DISTINCT site from :201.  Removing `f.status !== 'fixed' &&` from
+// :525 only leaves all three ribbon tests above GREEN (they drive unseenSlideIndices
+// via :201, which is untouched), but makes the tests below RED.  That split is the
+// proof that this group covers :525 and not :201 again.
+//
+// The drawer tab header (including drawer-tab-unseen) is always rendered regardless
+// of whether the drawer is open or closed, so startWithDrawerClosed() still works:
+// the mark-as-seen effect is suppressed (drawerOpen===false → early return), keeping
+// `seen` empty, which is what lets the status filter at :525 be the deciding factor.
+
+describe('SlideViewer — fixed findings excluded from hasUnseen prop (:525)', () => {
+  it('current slide with only a fixed unseen finding shows no unseen dot on the drawer tab', () => {
+    renderViewer([makeFinding('fix3', 'fixed')]);
+
+    // drawer-tab-unseen appears only when hasUnseen is true.
+    // A fixed finding on the current slide must NOT set hasUnseen.
+    expect(screen.queryByTestId('drawer-tab-unseen')).not.toBeInTheDocument();
+  });
+
+  it('current slide with an open unseen finding DOES show the unseen dot on the drawer tab', () => {
+    renderViewer([makeFinding('open3', 'open')]);
+
+    // An open unseen finding on the current slide must set hasUnseen.
+    expect(screen.getByTestId('drawer-tab-unseen')).toBeInTheDocument();
   });
 });
