@@ -16,7 +16,7 @@ import {
   setupUserGuideMocks, 
   goToDeckPrompts,
   goToSlideStyles 
-} from './shared';
+} from '../user-guide/shared';
 
 test.describe('User Guide: Advanced Configuration', () => {
   

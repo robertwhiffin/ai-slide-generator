@@ -1,6 +1,6 @@
-import { test, expect } from './fixtures/base-test';
-import { setupMocks } from './helpers/setup-mocks';
-import { mockSessionNotFound } from './helpers/session-helpers';
+import { test, expect } from '../fixtures/base-test';
+import { setupMocks } from '../helpers/setup-mocks';
+import { mockSessionNotFound } from '../helpers/session-helpers';
 
 test.describe('Session Recovery', () => {
   test.beforeEach(async ({ page }) => {

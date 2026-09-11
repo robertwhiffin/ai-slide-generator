@@ -1,6 +1,6 @@
-import { test, expect } from './fixtures/base-test';
-import { setupMocks } from './helpers/setup-mocks';
-import { mockSessionWithSlides, TEST_SESSION_ID } from './helpers/session-helpers';
+import { test, expect } from '../fixtures/base-test';
+import { setupMocks } from '../helpers/setup-mocks';
+import { mockSessionWithSlides, TEST_SESSION_ID } from '../helpers/session-helpers';
 
 test.describe('Share Link', () => {
   test.beforeEach(async ({ page }) => {

@@ -1,6 +1,6 @@
-import { test, expect } from './fixtures/base-test';
-import { setupMocks } from './helpers/setup-mocks';
-import { mockSessionWithSlides } from './helpers/session-helpers';
+import { test, expect } from '../fixtures/base-test';
+import { setupMocks } from '../helpers/setup-mocks';
+import { mockSessionWithSlides } from '../helpers/session-helpers';
 
 test.describe('URL Routing', () => {
   test.beforeEach(async ({ page }) => {

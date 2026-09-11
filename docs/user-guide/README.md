@@ -30,7 +30,7 @@ The screenshots in this guide are generated using Playwright. To regenerate them
 
 ```bash
 cd frontend
-npx playwright test user-guide/ --project=chromium
+npx playwright test "tests/e2e/[0-9][0-9]-*.spec.ts" --project=chromium
 ```
 
 This will capture fresh screenshots reflecting the current UI state.

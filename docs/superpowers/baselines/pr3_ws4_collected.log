@@ -1,0 +1,123 @@
+# PR3 / workstream 4 — test baseline, by CAUSE
+
+Owner: ws4a (`docs/superpowers/plans/2026-08-25-ws4a-shipped-defects.md`).
+Every later PR in the set (ws4b, ws4c, ws4d, ws4e) compares its full-suite result against this
+file. Compare **causes**, never counts: a 13-to-13 count collision once hid a genuine new breakage
+in this repo for seven consecutive tasks.
+
+Command, in every measurement below:
+
+    ~/.pyenv/versions/3.11.0/bin/python -m pytest tests/ -n auto -q
+
+Collected count taken separately with `pytest tests/ --collect-only -q`.
+
+Interpreter is the shared pyenv at `~/.pyenv/versions/3.11.0/bin/python`. The gitignored in-tree
+`.venv` carries the PRE-PR2 stack and MUST NOT be used — two facts these plans depend on are false
+in it.
+
+--------------------------------------------------------------------------------
+HOW TO USE THIS FILE
+--------------------------------------------------------------------------------
+
+The gate is three clauses, all of which must hold:
+
+  1. No NEW failure cause appears.
+  2. The deploy-autoscaling cause is unchanged (same two tests, same two assertion strings).
+  3. No test stopped existing. A falling collected count must be explained by an enumerated
+     deletion, per ruling R1 ("irrelevant tests are DELETED, not migrated; name every deletion in
+     its change description").
+
+Clause 3 cannot be checked by a count alone, because N deletions plus N additions preserve it.
+Check it the way ws4a did — diff the test trees against your base and confirm that no line
+removing a `def test_`, an `async def test_`, or a `class Test` appears, and that no test file was
+deleted. Both checks must come back empty unless a deletion is intended and named.
+
+Never grep for a single quoted failure string to identify the deploy-autoscaling cause: its two
+tests raise DIFFERENT messages, so matching one of them silently misses the other.
+
+--------------------------------------------------------------------------------
+SECTION 1 — PRE-ws4a BASELINE  (what ws4a itself was measured against)
+--------------------------------------------------------------------------------
+
+Measured 2026-09-10 on branch `feat/ws4a-shipped-defects` at its base 13c0ab23
+(`feat/langgraph-core`), BEFORE any ws4a edit. Reproduces the index's 2026-08-24 measurement
+exactly, count and causes.
+
+    3 failed, 4177 passed, 8 skipped, 332 warnings in 228.02s
+    COLLECTED: 4188
+
+CAUSE 1 — deploy-autoscaling. Reproduces anywhere; not environmental.
+  `_get_or_create_lakebase` never returns the autoscaling result.
+  tests/unit/test_deploy_autoscaling.py::TestGetOrCreateLakebase::test_returns_autoscaling_when_available
+    E   AssertionError: assert 'provisioned' == 'autoscaling'
+  tests/unit/test_deploy_autoscaling.py::TestGetOrCreateLakebase::test_falls_back_when_autoscaling_creation_fails
+    E   AssertionError: Expected '_get_or_create_lakebase_provisioned' to have been called once. Called 0 times.
+  NOTE: two DISTINCT assertion strings. This is the cause clause 2 above pins.
+
+CAUSE 2 — stale stored Genie space id. ENVIRONMENTAL: depends on a local `.env` and a stored
+  space, so it may or may not reproduce for you. It DID reproduce for the operator who measured
+  this file.
+  tests/integration/test_genie_integration.py::test_genie_conversation_continuation
+    E   databricks.sdk.errors.platform.NotFound: Space with id 01effebcc2781b6bbb749077a55d31e3 not found
+    E   src.services.tools.genie_tool.GenieToolError: Failed to query Genie space after 3 attempts: ...
+
+--------------------------------------------------------------------------------
+SECTION 2 — POST-ws4a  (THIS is what ws4b, ws4c, ws4d and ws4e build on)
+--------------------------------------------------------------------------------
+
+Measured 2026-09-10 on branch `feat/ws4a-shipped-defects` with all of ws4a applied, with no
+application server running (same conditions as Section 1).
+
+    3 failed, 4212 passed, 8 skipped, 332 warnings in 175.72s
+    COLLECTED: 4223
+
+CAUSES: IDENTICAL to Section 1. Same three tests, same four assertion strings, verbatim.
+  No new cause. No change to the deploy-autoscaling cause.
+
+DELTA: +35 collected (4188 -> 4223).
+  Fully accounted for, with NO deletions. Counts taken per file with `--collect-only -q`:
+    +25  tests/unit/test_deck_css_at_rule_survival.py         (A1, merge_css at-rules)
+    + 3  tests/unit/test_duplicate_session_carries_spec.py    (A2, deck_spec_json copy)
+    + 4  tests/unit/test_e2e_matrix_covers_specs.py           (A4, e2e coverage guard)
+    + 3  tests/unit/test_ci_collects_integration_tests.py     (A5, integration coverage guard)
+    ----
+    +35
+  Verified NOT a count collision: 35 test functions added, ZERO removed, ZERO test files deleted.
+  The 17 relocated Playwright specs are git RENAMES, not deletions.
+
+  NOTE: an earlier revision of this file recorded 4221 / +33. That was measured before the final
+  whole-branch review's fix wave, which added one nested-path assertion to EACH guard (bringing them
+  to 4 and 3 tests respectively). The figures above are the authoritative post-review measurement.
+
+--------------------------------------------------------------------------------
+SECTION 3 — WHAT THIS FILE DOES *NOT* COVER
+--------------------------------------------------------------------------------
+
+Playwright specs are NOT in the pytest suite and so are not in any count above. ws4a widened the
+CI e2e matrix from 23 to 36 collected specs and placed 13 in DELIBERATE_EXCLUSIONS; the current
+state is recorded in `tests/unit/test_e2e_matrix_covers_specs.py`'s DELIBERATE_EXCLUSIONS, which
+is the authority.  The 13 excluded specs fall into two distinct groups that must not be conflated:
+  KIND A (6 specs) — documentation screenshot generators (01-generating-slides, 02-creating-profiles,
+    03-advanced-configuration, 04-retrieving-feedback, 06-uploading-images, 07-exporting-to-google-
+    slides).  These write PNG screenshots to docs/user-guide/images and are NEVER meant to run in CI.
+  KIND B (7 specs) — quarantined pending re-authoring against the current AppLayout shell
+    (save-points-versioning, share-link, slide-generator, routing, navigation, slide-host-frame,
+    genie-detail-panel).  Pre-existing failures surfaced — not caused — by the matrix widening;
+    each carries a FOLLOW-UP marker and is expected to return to the matrix once re-authored.
+Of the 20 specs ws4a newly added (to matrix or KIND B — KIND A pre-existed outside the matrix),
+13 pass (including `slide-viewer`) and 7 were quarantined as KIND B.
+
+**Those 13 were measured LOCALLY, not in CI.** ws4a's branch was never pushed, so the widened
+36-entry matrix has never executed on a runner. The local run used the installed Playwright
+chromium against a dev server, once with and once without a live backend on 127.0.0.1:8000 — the
+per-spec results were identical both ways, which is what established that the 7 KIND B failures are
+environment-independent. Treat "13 pass" as a local measurement awaiting its first CI confirmation,
+and do not cite this file as evidence that CI is green.
+
+`tests/integration/` coverage is likewise a CI-wiring property, not a pytest count: all 17 files
+are now named in a CI job (10 of them previously ran in no job at all). The guard is
+`tests/unit/test_ci_collects_integration_tests.py`.
+
+RE-DERIVE THIS BASELINE if your PR alters schemas, the ORM, or dependencies — ws4b, ws4c, ws4d and
+ws4e all should assume they must. Those are exactly the changes that mutate a cause while
+preserving a count.

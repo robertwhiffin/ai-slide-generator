@@ -15,7 +15,7 @@
  */
 import { test, expect } from '@playwright/test';
 
-import { PREVIEW_CSP, stripCssImports } from '../src/components/config/templatePreviewDoc';
+import { PREVIEW_CSP, stripCssImports } from '../../src/components/config/templatePreviewDoc';
 
 // The one that must always go: an ordinary external webfont import, semicolons and all.
 const ORDINARY_IMPORT =

@@ -1,7 +1,9 @@
 """Row-per-slide backfill: migrate legacy ``deck_json`` blobs into ``session_slides`` rows.
 
 Lives under ``src/`` rather than ``scripts/`` because the app calls
-``backfill_unmigrated_decks`` from its FastAPI lifespan on every boot, and the
+``backfill_unmigrated_decks`` from ``init_database`` in
+``packages/databricks-tellr-app/databricks_tellr_app/run.py``, pre-fork before the
+uvicorn workers start, and the
 Databricks Apps wheel ships only ``src/`` (see
 ``packages/databricks-tellr-app/setup.py``, which copytrees ``src`` and the
 frontend/sidecars but NOT ``scripts``).  Importing this from ``scripts`` would
@@ -236,7 +238,9 @@ def backfill_session(
 def backfill_unmigrated_decks(session_factory) -> int:
     """Backfill every deck that has NO session_slides rows yet. Returns count migrated.
 
-    Called from the FastAPI lifespan alongside ``migrate_profiles`` so an upgrade
+    Called from ``init_database`` in
+    ``packages/databricks-tellr-app/databricks_tellr_app/run.py``, pre-fork before the
+    uvicorn workers start; ``SystemExit(1)`` on failure.  An upgrade therefore
     migrates historical decks by itself, instead of depending on an operator
     remembering to run this module by hand.  Leaving it manual meant every deploy
     sat in a split state: reads still worked (``get_slide_deck`` falls back to

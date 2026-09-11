@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
-import { SLIDE_CSP } from '../src/services/slideDocument';
+import { SLIDE_CSP } from '../../src/services/slideDocument';
 // Import the doc builder used by screenshotCapture (export it if not already).
-import { buildSlideHtml } from '../src/services/screenshotCapture';
+import { buildSlideHtml } from '../../src/services/screenshotCapture';
 
 test('screenshot export document carries the slide CSP', () => {
   // NB: SlideDeck uses snake_case `external_scripts` (see screenshotCapture.ts:21).
@@ -24,7 +24,7 @@ test('slide CSP withholds unsafe-eval', () => {
 
 test('domWalker performs no eval() (would throw under the slide CSP)', () => {
   const src = readFileSync(
-    fileURLToPath(new URL('../src/services/domWalker.ts', import.meta.url)),
+    fileURLToPath(new URL('../../src/services/domWalker.ts', import.meta.url)),
     'utf8',
   );
   // Strip line comments so the AISEC-248 explanatory comments don't trip this.
