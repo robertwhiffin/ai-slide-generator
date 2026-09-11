@@ -14,9 +14,9 @@
  * (the same pattern navigation.spec.ts's "History page session click" test uses
  * to load a deck into edit mode). No real backend is required.
  */
-import { test, expect } from './fixtures/base-test';
-import { setupMocks } from './helpers/setup-mocks';
-import { mockSessionWithSlides } from './helpers/session-helpers';
+import { test, expect } from '../fixtures/base-test';
+import { setupMocks } from '../helpers/setup-mocks';
+import { mockSessionWithSlides } from '../helpers/session-helpers';
 
 // Deterministic session id (a fresh value distinct from session-helpers' default
 // so these tests are self-contained and order-independent).

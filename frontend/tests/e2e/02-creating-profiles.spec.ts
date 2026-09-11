@@ -18,7 +18,7 @@ import {
   goToGenerator,
   goToPreSessionGenerator,
   goToProfiles
-} from './shared';
+} from '../user-guide/shared';
 
 test.describe('User Guide: Creating Profiles', () => {
   test('capture save-from-session workflow', async ({ page }) => {

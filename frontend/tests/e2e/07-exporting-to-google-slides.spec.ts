@@ -16,7 +16,7 @@ import {
   setupUserGuideMocks, 
   goToAdmin,
   goToGenerator
-} from './shared';
+} from '../user-guide/shared';
 
 async function setupGoogleSlidesMocks(
   page: import('@playwright/test').Page,

@@ -982,6 +982,7 @@ class SessionManager:
                 )
                 deck_json = version.deck_json
                 verification_map = version.verification_map_json
+                deck_spec_json = version.deck_spec_json
             else:
                 source_deck = deck_owner.slide_deck
                 html_content = source_deck.html_content
@@ -989,6 +990,7 @@ class SessionManager:
                 slide_count = source_deck.slide_count
                 deck_json = source_deck.deck_json
                 verification_map = source_deck.verification_map
+                deck_spec_json = source_deck.deck_spec_json
 
             base_title = deck_owner.title or "Untitled"
             if title and title.strip():
@@ -1011,6 +1013,10 @@ class SessionManager:
             db.add(new_session)
             db.flush()
 
+            # deck_spec_json is copied directly from the source (version snapshot on the
+            # version branch, live deck spec on the else branch), so it is already correct
+            # for the HTML it carries.  This route is deliberately absent from ws4d's
+            # mark_dirty trigger list: a duplicate never starts with a stale spec.
             new_deck = SessionSlideDeck(
                 session_id=new_session.id,
                 title=new_title,
@@ -1023,6 +1029,7 @@ class SessionManager:
                 modified_by=created_by,
                 locked_by=None,
                 locked_at=None,
+                deck_spec_json=deck_spec_json,
             )
             db.add(new_deck)
             db.flush()

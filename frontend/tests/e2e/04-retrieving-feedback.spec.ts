@@ -16,7 +16,7 @@ import {
   UserGuideCapture, 
   setupUserGuideMocks, 
   goToAdmin
-} from './shared';
+} from '../user-guide/shared';
 
 async function setupFeedbackMocks(page: import('@playwright/test').Page): Promise<void> {
   const { mockFeedbackStats, mockFeedbackSummary } = await import('../fixtures/mocks');

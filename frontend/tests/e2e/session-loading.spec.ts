@@ -1,6 +1,6 @@
-import { test, expect } from './fixtures/base-test';
-import { setupMocks } from './helpers/setup-mocks';
-import { mockSessionWithSlides, mockSessionNotFound, TEST_SESSION_ID } from './helpers/session-helpers';
+import { test, expect } from '../fixtures/base-test';
+import { setupMocks } from '../helpers/setup-mocks';
+import { mockSessionWithSlides, mockSessionNotFound, TEST_SESSION_ID } from '../helpers/session-helpers';
 
 test.describe('Session Loading from URL', () => {
   test.beforeEach(async ({ page }) => {
