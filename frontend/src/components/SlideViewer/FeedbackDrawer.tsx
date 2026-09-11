@@ -1,7 +1,7 @@
 import React, { useCallback, useRef } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/ui/button';
-import type { DrawerCallbacks, SlideFinding } from '../../types/finding';
+import { CATEGORY_LABEL, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
 import { useViewer } from '../../contexts/ViewerContext';
 
 interface FeedbackDrawerProps {
@@ -9,12 +9,6 @@ interface FeedbackDrawerProps {
   callbacks: DrawerCallbacks;
   hasUnseen: boolean;
 }
-
-const CATEGORY_LABEL: Record<SlideFinding['category'], string> = {
-  content: 'Content',
-  design: 'Design',
-  narrative: 'Narrative',
-};
 
 export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callbacks, hasUnseen }) => {
   const { drawerOpen, setDrawerOpen, drawerHeight, setDrawerHeight, activeTab, setActiveTab } = useViewer();
