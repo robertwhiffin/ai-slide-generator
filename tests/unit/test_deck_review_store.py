@@ -441,6 +441,26 @@ class TestSchemaIntegrity:
         }
         assert "uq_deck_reviews_deck_digest" in constraint_names
 
+    def test_digest_not_denormalised_onto_session_slide_decks(self):
+        """The digest must NOT be denormalised onto session_slide_decks.
+
+        The digest lives only in the unique key (deck_id, deck_digest) on
+        deck_reviews.  Adding it to SessionSlideDeck would duplicate the source
+        of truth (the content-addressed row is the authority) and introduce a
+        field that goes stale every time the deck changes.
+
+        Sabotage: monkeypatch a fake 'deck_digest' Column onto
+        SessionSlideDeck.__table__.c to simulate a future "helpful" addition,
+        confirm this test goes red, then restore.  session.py is not edited.
+        """
+        col_names = {c.name for c in SessionSlideDeck.__table__.columns}
+        digest_cols = {n for n in col_names if "digest" in n.lower()}
+        assert not digest_cols, (
+            f"SessionSlideDeck must carry no digest column — the digest lives "
+            f"only in deck_reviews.(deck_id, deck_digest).  "
+            f"Found: {sorted(digest_cols)}"
+        )
+
     def test_review_survives_pruning_every_version(self, session):
         """Deleting all SlideDeckVersions must not delete the DeckReview row.
 

@@ -168,6 +168,16 @@ def save_deck_review(
     Returns:
         The persisted :class:`~src.database.models.deck_review.DeckReview` row
         (added/updated but not yet committed).
+
+    Note — query-then-write, not an atomic UPSERT:
+        This function checks for an existing row and either updates or inserts.
+        That is correct for the single caller it has today (one architect turn
+        at a time).  Two concurrent writers with the same ``(deck_id, digest)``
+        could both see no row and both attempt an insert; the second would raise
+        ``IntegrityError`` from the unique constraint rather than updating
+        cleanly.  The race is unreachable while the caller is one-per-turn.  If
+        a future caller ever becomes concurrent, replace this with a real
+        ``ON CONFLICT DO UPDATE`` statement.
     """
     findings_json = json.dumps([f.model_dump() for f in findings])
     existing = (
