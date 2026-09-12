@@ -27,16 +27,15 @@ dead code — and the codebase-conventional ``datetime.utcnow`` is deprecated on
 Python 3.12+.
 """
 
-from sqlalchemy import Column, DateTime, Index, Integer, LargeBinary, String, Text
+from sqlalchemy import Column, DateTime, Integer, LargeBinary, String, Text
 
 from src.core.database import Base
 
-#: Lookup index names. ``_migrate_graph_checkpoints`` re-derives its raw
-#: ``CREATE INDEX IF NOT EXISTS`` statements from the ``Index`` objects declared
-#: below, so these names are declared once, here, and the migration cannot drift
-#: from the ORM.
-GRAPH_CHECKPOINTS_THREAD_INDEX = "ix_graph_checkpoints_thread_ns"
-GRAPH_CHECKPOINT_WRITES_CHECKPOINT_INDEX = "ix_graph_checkpoint_writes_checkpoint"
+# NO secondary indexes are declared on either table, deliberately. Every lookup
+# this saver makes is a leading-column prefix of the table's own primary key —
+# (thread_id, checkpoint_ns[, checkpoint_id]) — which the PK btree already
+# serves on both PostgreSQL and SQLite. An index over a strict prefix of the PK
+# can never be preferred over it, so one would be dead weight.
 
 
 class GraphCheckpoint(Base):
@@ -65,10 +64,6 @@ class GraphCheckpoint(Base):
     metadata_blob = Column(LargeBinary, nullable=False)
 
     created_at = Column(DateTime, nullable=False)
-
-    __table_args__ = (
-        Index(GRAPH_CHECKPOINTS_THREAD_INDEX, "thread_id", "checkpoint_ns"),
-    )
 
     def __repr__(self) -> str:  # blobs are opaque; never print them
         return (
@@ -100,15 +95,6 @@ class GraphCheckpointWrite(Base):
     task_path = Column(Text, nullable=False, default="")
 
     created_at = Column(DateTime, nullable=False)
-
-    __table_args__ = (
-        Index(
-            GRAPH_CHECKPOINT_WRITES_CHECKPOINT_INDEX,
-            "thread_id",
-            "checkpoint_ns",
-            "checkpoint_id",
-        ),
-    )
 
     def __repr__(self) -> str:  # blobs are opaque; never print them
         return (
