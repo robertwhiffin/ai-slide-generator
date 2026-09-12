@@ -1,0 +1,24 @@
+{
+  "findings": [
+    {
+      "id": "arc_gap:deck:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "arc_gap",
+      "message": "The migration approach slide (position 1) does not connect explicitly to the incidents catalogued in the before-state slide. A reader skimming headlines cannot follow the causal chain from 'fragmented pipelines' to 'shadow mode rollout' without re-reading body copy. Add a bridging sentence to the approach slide header.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    },
+    {
+      "id": "cross_slide_repetition:deck:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "cross_slide_repetition",
+      "message": "The phrase '62% latency reduction' appears verbatim on both the results slide (position 2) and the ask slide (position 3). Remove the duplication from the ask slide and replace with a reference such as 'the Q3 gains described above'.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

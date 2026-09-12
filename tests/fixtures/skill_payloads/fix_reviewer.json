@@ -1,0 +1,26 @@
+{
+  "slide_index": 2,
+  "verdict": "fixed",
+  "findings": [
+    {
+      "id": "contrast_failure:d9e2f4a7b1c8e3f0:0",
+      "slide_index": 2,
+      "category": "design",
+      "criterion": "contrast_failure",
+      "message": "Delta annotation text colour #6b7280 against white (#ffffff) yields a contrast ratio of 3.0:1, below the WCAG AA minimum of 4.5:1 for normal text. Fixed by darkening to #374151 (contrast ratio 7.2:1).",
+      "objective": true,
+      "status": "fixed",
+      "seen": true
+    },
+    {
+      "id": "source_contradiction:d9e2f4a7b1c8e3f0:0",
+      "slide_index": 2,
+      "category": "content",
+      "criterion": "source_contradiction",
+      "message": "The slide displayed a latency reduction of 58% but resolved_data carries 62% from pipeline-metrics-dashboard/2024-Q3-report. Fixed: the figure now reads 62% matching the resolved source.",
+      "objective": true,
+      "status": "fixed",
+      "seen": false
+    }
+  ]
+}
