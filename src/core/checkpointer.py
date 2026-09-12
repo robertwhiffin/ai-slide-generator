@@ -18,6 +18,24 @@ Because the failure mode is "a mocked database cannot see it", the unit suite
 for this module runs against a REAL SQLite engine and the live half against a
 real PostgreSQL — never a mock.
 
+AND THE PROPERTY THIS TURNS ON IS NOT TESTABLE HERE — read this before
+"simplifying" the session handling. The design rests on each operation opening a
+session, committing, and closing it, so no connection is retained across the
+50-minute token refresh. **No test in this suite can verify that, and none of
+the ones below do.** A saver that cached its Session on ``self`` passes every
+test in the file — and would not even reproduce the Lakebase failure, because
+``commit()`` returns the connection to the pool, so ``do_connect`` re-fires on
+the next checkout and the token refreshes anyway. The lethal variants are a
+retained **``Connection``** (or an ``Engine.connect()`` held open), or a
+transaction that is never committed: those pin one physical connection, and its
+token expires on it. Nothing reachable locally — SQLite or real PostgreSQL —
+can observe that, because neither has an expiring credential. So this module is
+correct for a stronger reason than its tests prove, and the two things that
+actually protect it are code review of the session lifetime in ``_session``
+below, and the release gate that keeps an app up past the 50-minute refresh
+under graph traffic. Guard against a retained ``Connection``, not a retained
+``Session``.
+
 SYNC ONLY. ``BaseCheckpointSaver``'s ``a*`` methods raise
 ``NotImplementedError`` and Tellr's generation path is sync end to end, so the
 graph is driven with ``invoke``/``stream`` and never ``ainvoke``/``astream``.
@@ -59,9 +77,10 @@ langgraph-checkpoint 4.1.1 the base class ships a WORKING integer increment
 is omitted because nothing calls it. ``prune``, ``copy_thread``,
 ``delete_for_runs``, ``get_delta_channel_history``, ``with_allowlist`` and
 every ``a*`` method are left on the base class for the same reason: nothing
-calls them. ``get_delta_channel_history`` additionally COULD NOT be
-implemented as this saver stores state today — see ``put`` for why, and for
-what starts failing if a ``DeltaChannel`` ever enters the graph state.
+calls them. Of those, only ``prune``, ``copy_thread`` and ``delete_for_runs``
+actually raise ``NotImplementedError`` — probed on langgraph-checkpoint 4.1.1.
+``get_delta_channel_history`` ships a working 68-line default that needs
+nothing from a subclass beyond ``get_tuple`` and ``parent_config``; see ``put``.
 """
 
 from __future__ import annotations
@@ -376,15 +395,19 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
         channel values into a separate per-version blob table, an optimisation
         this saver does not make, so there is nothing here for it to key.
 
-        KNOWN CONSEQUENCE OF THAT CHOICE, accepted deliberately: because there
-        is no per-channel, per-version blob table, this saver cannot reconstruct
-        a channel's ancestor history, so ``get_delta_channel_history`` is left
-        raising ``NotImplementedError`` on the base class. Nothing calls it
-        today. **If a later change puts a ``DeltaChannel`` into the graph
-        state, Pregel WILL start calling it and the graph will raise at run
-        time.** The fix then is to add the per-version blob table (see
-        ``InMemorySaver.blobs`` and its ``_load_blobs`` for the shape) and
-        override the method — not to work around it at the call site.
+        WHAT THAT CHOICE COSTS, and what it does NOT: storing one blob means
+        this saver keeps no per-channel, per-version blobs of the kind
+        ``InMemorySaver.blobs`` holds, so it cannot serve a channel's history
+        out of an index. It does not need to. ``get_delta_channel_history`` is
+        left on the base class, whose default implementation walks the parent
+        chain via ``get_tuple`` and ``parent_config`` — exactly what this saver
+        does store — and it works: measured on langgraph-checkpoint 4.1.1, a
+        ``DeltaChannel``-annotated graph ran against this saver through an
+        interrupt and a resume, and the base method returned that channel's
+        history. So the method is omitted because NOTHING CALLS IT, not because
+        it would fail; there is no latent runtime failure here. An override
+        would only ever be a performance choice, and would need the per-version
+        blob table added first.
 
         The incoming ``config``'s ``checkpoint_id`` is the PARENT of the
         checkpoint being written — that is what ``parent_config`` is later built

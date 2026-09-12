@@ -35,16 +35,12 @@ from src.core.database import Base, _migrate_graph_checkpoints, _run_migrations
 
 _TABLES = ("graph_checkpoints", "graph_checkpoint_writes")
 
-# The unqualified form of the ``_qual`` callable ``_run_migrations`` threads into
-# every migration helper when no schema is configured (database.py:430).
-def _unqualified(table_name: str) -> str:
-    return f'"{table_name}"'
-
 
 def _build_checkpoint_tables(engine) -> None:
     """Create the two tables through the MIGRATION only, then fail loudly if absent."""
     with engine.begin() as conn:
-        _migrate_graph_checkpoints(conn, None, _unqualified)
+        # schema=None, as _run_migrations passes on an unqualified deployment.
+        _migrate_graph_checkpoints(conn, None)
 
     tables = set(inspect(engine).get_table_names())
     missing = [name for name in _TABLES if name not in tables]
@@ -119,7 +115,7 @@ def saver(saver_engine):
 
 
 class TestTheMigrationBuildsTheSchema:
-    def test_migration_creates_both_tables_with_their_keys_and_indexes(self, saver_engine):
+    def test_migration_creates_both_tables_with_their_keys(self, saver_engine):
         inspector = inspect(saver_engine)
 
         checkpoints_pk = inspector.get_pk_constraint("graph_checkpoints")
@@ -142,12 +138,12 @@ class TestTheMigrationBuildsTheSchema:
         columns = {c["name"] for c in inspector.get_columns("graph_checkpoints")}
         assert "parent_checkpoint_id" in columns
 
-        assert [i["name"] for i in inspector.get_indexes("graph_checkpoints")] == [
-            "ix_graph_checkpoints_thread_ns"
-        ]
-        assert [
-            i["name"] for i in inspector.get_indexes("graph_checkpoint_writes")
-        ] == ["ix_graph_checkpoint_writes_checkpoint"]
+        # No secondary index on either table, by design: every lookup the saver
+        # makes is a leading-column prefix of the primary key, which the PK btree
+        # already serves. An index over a strict PK prefix could never be
+        # preferred over it, so adding one back would be dead weight.
+        assert inspector.get_indexes("graph_checkpoints") == []
+        assert inspector.get_indexes("graph_checkpoint_writes") == []
 
     def test_migration_is_idempotent(self, saver_engine):
         _build_checkpoint_tables(saver_engine)  # a second run must not raise
