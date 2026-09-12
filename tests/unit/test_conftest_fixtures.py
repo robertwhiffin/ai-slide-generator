@@ -391,6 +391,34 @@ class TestContributorSession:
             contributor_session, "_owner_session_id", None
         )
 
+    def test_contributor_read_resolves_to_the_owners_deck(self, contributor_session):
+        """The fixture's declared purpose: contributor writes reach the deck OWNER.
+
+        owner_deck_row() queries the owner directly, so it passes whether or not
+        the contributor session actually resolves there.  Read AS the contributor
+        instead: the contributor session owns no deck of its own, so production's
+        parent_session_id resolution (_get_deck_owner_session) is the only route
+        by which a deck can come back.  Uses the base fixture's own SessionManager
+        machinery rather than widening the frozen method surface.
+        """
+        with contributor_session._patched():
+            result = contributor_session._sm.get_slide_deck(
+                contributor_session.contributor_session_id
+            )
+
+        assert result is not None, (
+            "contributor read returned None — parent_session_id resolution never "
+            "reached the owner's deck"
+        )
+        assert isinstance(result, dict)
+        owner_deck = contributor_session.owner_deck_row()
+        assert result["title"] == owner_deck.title == "Shared Deck", (
+            "contributor read did not return the OWNER's deck"
+        )
+        assert result["created_by"] == "owner@example.com", (
+            "deck authorship did not come from the owner session"
+        )
+
 
 # ---------------------------------------------------------------------------
 # contributor_session_with_spec
