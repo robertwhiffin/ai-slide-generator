@@ -81,6 +81,30 @@ class TestDeckFixture:
 # ---------------------------------------------------------------------------
 
 
+def _mutate_first_row_html(fixture, new_html: str) -> None:
+    """Rewrite the html of the position-0 SessionSlide row of *fixture*'s deck.
+
+    Goes through the fixture's own factory (the private accessors the xfail
+    tests below also use) so the write lands in the fixture's throwaway engine.
+    """
+    from src.database.models.session import SessionSlide
+
+    db = fixture._factory()
+    try:
+        owner_id = fixture._owner_pk(fixture.session_id)
+        row = (
+            db.query(SessionSlide)
+            .filter(SessionSlide.session_id == owner_id)
+            .order_by(SessionSlide.position)
+            .first()
+        )
+        assert row is not None, "fixture has no SessionSlide rows to mutate"
+        row.html = new_html
+        db.commit()
+    finally:
+        db.close()
+
+
 class TestDeckWithThreeRows:
     def test_rows_returns_three_rows(self, deck_with_three_rows):
         rows = deck_with_three_rows.rows()
@@ -91,7 +115,12 @@ class TestDeckWithThreeRows:
         positions = [r.position for r in rows]
         assert positions == sorted(positions)
 
-    def test_row_snapshot_captures_enough_to_detect_changes(self, deck_with_three_rows):
+    def test_row_snapshot_captures_the_declared_surface(self, deck_with_three_rows):
+        """Key presence — documents which columns the snapshot carries.
+
+        Cheap, but on its own it is satisfied by a snapshot that returns a
+        constant; the two tests below carry the real property.
+        """
         snap = deck_with_three_rows.row_snapshot()
         assert len(snap) == 3
         # Must capture both identity columns
@@ -102,6 +131,36 @@ class TestDeckWithThreeRows:
             assert "position" in entry
             assert "modified_by" in entry
             assert "verification_record" in entry
+
+    def test_row_snapshot_detects_a_mutated_row(self, deck_with_three_rows):
+        """The property row_snapshot() exists for: a changed row shows up.
+
+        A later task asserts a write touched NO row by comparing two snapshots.
+        That assertion is vacuous unless a snapshot demonstrably changes when a
+        row changes, so mutate one row's html between two snapshots.
+        """
+        before = deck_with_three_rows.row_snapshot()
+        _mutate_first_row_html(deck_with_three_rows, "<section>MUTATED</section>")
+        after = deck_with_three_rows.row_snapshot()
+
+        assert after != before, (
+            "row_snapshot() did not change after a row's html was rewritten — it "
+            "cannot prove that a write left every row untouched"
+        )
+        # The captured html is what moved, and only the mutated row moved.
+        assert [e["html"] for e in after] != [e["html"] for e in before]
+        assert after[0]["html"] == "<section>MUTATED</section>"
+        assert after[1:] == before[1:]
+
+    def test_row_snapshot_is_stable_when_nothing_changes(self, deck_with_three_rows):
+        """The other half: two snapshots with no write between them are EQUAL.
+
+        Without this, a snapshot that differed on every call would satisfy the
+        detection test above and still be useless.
+        """
+        first = deck_with_three_rows.row_snapshot()
+        second = deck_with_three_rows.row_snapshot()
+        assert second == first
 
     def test_deck_row_is_accessible(self, deck_with_three_rows):
         deck = deck_with_three_rows.deck_row()
@@ -124,10 +183,18 @@ class TestDeckWithThreeRows:
         deck = deck_with_three_rows.deck_row()
         assert deck.deck_spec_json == '{"title":"overwritten"}'
 
-    def test_get_slide_deck_returns_dict(self, deck_with_three_rows):
+    def test_get_slide_deck_returns_the_deck_from_the_rows(self, deck_with_three_rows):
+        """The row-read path must actually return the deck.
+
+        `None` is not an acceptable outcome here: three rows exist, so a None
+        (or a dict with no slides) means the row-read path is broken.
+        """
         result = deck_with_three_rows.get_slide_deck()
-        # May be None if no slides returned, or a dict
-        assert result is None or isinstance(result, dict)
+        assert result is not None, "row-read path returned no deck"
+        assert isinstance(result, dict)
+        assert result["title"] == "Three-Row Test Deck"
+        assert len(result["slides"]) == 3
+        assert all(s["html"] for s in result["slides"])
 
     def test_version_count_starts_at_zero(self, deck_with_three_rows):
         assert deck_with_three_rows.version_count() == 0
@@ -178,10 +245,19 @@ class TestDeckWithSpecButNoRows:
     def test_session_id_is_string(self, deck_with_spec_but_no_rows):
         assert deck_with_spec_but_no_rows.session_id
 
-    def test_get_slide_deck_returns_something(self, deck_with_spec_but_no_rows):
-        # Should trigger blob fallback; returns None or a dict
+    def test_get_slide_deck_returns_the_deck_from_the_blob(self, deck_with_spec_but_no_rows):
+        """This fixture exists to force the deck_json blob-fallback read path.
+
+        The fallback must return the deck: no SessionSlide rows exist, so the
+        three slides in the result can only have come from the blob.  A None
+        here would mean the fallback silently produced nothing.
+        """
         result = deck_with_spec_but_no_rows.get_slide_deck()
-        assert result is None or isinstance(result, dict)
+        assert result is not None, "blob-fallback path returned no deck"
+        assert isinstance(result, dict)
+        assert result["title"] == "Spec-Only Deck"
+        assert len(result["slides"]) == 3
+        assert all(s["html"] for s in result["slides"])
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +401,54 @@ class TestContributorSessionWithSpec:
     def test_contributor_session_id_is_string(self, contributor_session_with_spec):
         assert contributor_session_with_spec.contributor_session_id
 
-    def test_get_slide_deck_as_contributor_returns_result(self, contributor_session_with_spec):
+    def test_get_slide_deck_as_contributor_reads_the_owners_deck(
+        self, contributor_session_with_spec
+    ):
+        """§7.5, the half that is verifiable today: the contributor's read
+        resolves to the OWNER's deck, and that deck carries the owner's spec.
+
+        The contributor session owns no deck of its own, so get_slide_deck would
+        return None if production's parent_session_id resolution
+        (_get_deck_owner_session) failed to follow the FK.  A non-None dict
+        carrying the OWNER's title and created_by is proof it followed.
+        """
         result = contributor_session_with_spec.get_slide_deck_as_contributor()
-        # Returns None or a dict
-        assert result is None or isinstance(result, dict)
+        assert result is not None, (
+            "contributor read returned None — parent_session_id resolution never "
+            "reached the owner's deck"
+        )
+        assert isinstance(result, dict)
+
+        owner_deck = contributor_session_with_spec.owner_deck_row()
+        assert result["title"] == owner_deck.title == "Shared Spec Deck"
+        assert result["created_by"] == "owner@example.com"
+
+        # The deck that read resolved to genuinely carries the OWNER's spec —
+        # not an empty or default one.
+        assert owner_deck.deck_spec_json is not None
+        spec = json.loads(owner_deck.deck_spec_json)
+        assert spec["title"] == "Test Deck"
+        assert spec["audience"] == "Test audience"
+        assert len(spec["slides"]) == 3
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="get_slide_deck() does not emit a deck_spec key yet — PR3 Task 3.3 "
+               "('Serve the deck spec through the read path') adds it, and src/ is "
+               "frozen by this PR.  strict=True so this goes RED when Task 3.3 "
+               "lands, forcing conversion to a passing test."
+    )
+    def test_the_spec_reaches_the_contributor_in_the_deck_dict(
+        self, contributor_session_with_spec
+    ):
+        """§7.5 in full: spec visibility equals deck visibility.
+
+        The owner's spec must arrive IN the dict the contributor reads, not just
+        be reachable on the owner's row.  Until Task 3.3 serves it, the key is
+        absent and this xfails on KeyError.
+        """
+        result = contributor_session_with_spec.get_slide_deck_as_contributor()
+        assert result["deck_spec"]["audience"] == "Test audience"
 
 
 # ---------------------------------------------------------------------------
