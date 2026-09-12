@@ -35,6 +35,15 @@ DEFAULT_CONFIG = {
         "timeout": 600,
     },
     # No default Genie space - must be explicitly configured per profile
+    #
+    # RETIRED, and deliberately RETAINED as inert text. No production path reads
+    # ``DEFAULT_CONFIG["prompts"]`` any more: the per-profile system_prompt /
+    # slide_editing_instructions overrides are gone and prompt assembly lives in
+    # ``src.core.prompt_modules``, which carries its OWN verbatim copies of this
+    # text (see that module's header). These blocks survive only as the
+    # historical monolithic prompt that tests/unit/test_prompt_performance.py
+    # measures the modular prompts against. Do not wire them back into a request
+    # path.
     "prompts": {
         # Technical system prompt - hidden from regular users (debug mode only)
         # Controls HOW to generate valid HTML/charts, not HOW slides should look

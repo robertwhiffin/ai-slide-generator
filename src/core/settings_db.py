@@ -383,8 +383,9 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     "deck_prompt": deck_prompt_content or "",
                     "slide_style": slide_style_content or "",
                     "image_guidelines": image_guidelines or "",
-                    "system_prompt": prompts.system_prompt,
-                    "slide_editing_instructions": prompts.slide_editing_instructions,
+                    # The retired system_prompt / slide_editing_instructions
+                    # override columns are no longer read: prompts are assembled
+                    # from src.core.prompt_modules via agent_factory.
                 },
                 environment=os.getenv("ENVIRONMENT", "development"),
                 llm_judge_backend=judge_backend,

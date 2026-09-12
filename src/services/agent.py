@@ -603,13 +603,16 @@ class SlideGeneratorAgent:
            system message built by ``prompt_modules``.  Only curly-brace
            escaping is needed.
 
-        2. **Legacy / custom-override** (``pre_assembled`` is False or
-           absent): the old concatenation logic runs so that custom
-           ``system_prompt`` overrides, DB-stored prompts, and the
-           backward-compatible ``defaults.py`` path keep working.
+        2. **Legacy concatenation** (``pre_assembled`` is False or absent):
+           NO LONGER REACHED FROM PRODUCTION. It is kept, not deleted, on
+           purpose — see the comment on the ``else`` below.
 
         The system prompt is tool-agnostic — the LLM discovers available
         tools through the tool binding mechanism, not the prompt.
+
+        Every name below is a key of the ASSEMBLED PROMPT DICT this method is
+        handed, not the retired ``AgentConfig.system_prompt`` field. The dict
+        contract is unchanged.
         """
         pre_assembled = prompts.get("pre_assembled", False)
 
@@ -618,7 +621,23 @@ class SlideGeneratorAgent:
             if not full_system_prompt:
                 raise AgentError("System prompt not found in configuration")
         else:
-            # Legacy concatenation path (custom overrides / old settings_db)
+            # DEAD IN PRODUCTION, deliberately retained.
+            #
+            # The per-profile system_prompt / slide_editing_instructions override
+            # fields are retired, so agent_factory._get_prompt_content now always
+            # returns ``pre_assembled: True`` and every production agent is built
+            # through that factory. The only other producer of a prompts dict is
+            # ``get_settings().prompts`` on the no-``pre_built_prompts`` path
+            # (``create_agent()``), which has NO production caller — it is reached
+            # only from tests and the ``src.services`` re-export.
+            #
+            # Not deleted, for two reasons. (a) It is not strictly unreachable:
+            # constructing ``SlideGeneratorAgent()`` directly still lands here.
+            # (b) ``settings_db`` no longer puts ``system_prompt`` in that dict, so
+            # this branch now raises ``AgentError("System prompt not found in
+            # configuration")`` rather than silently building a wrong prompt — a
+            # loud failure is the right behaviour for a path being retired.
+            # The whole monolith is removed by a later PR; it goes then, as a unit.
             deck_prompt = prompts.get("deck_prompt") or ""
             slide_style = prompts.get("slide_style") or ""
             system_prompt = prompts.get("system_prompt") or ""
