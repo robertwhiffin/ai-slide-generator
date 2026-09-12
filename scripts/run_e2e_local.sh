@@ -159,9 +159,7 @@ with get_db_session() as db:
         # Create prompts config
         prompts = ConfigPrompts(
             profile_id=profile.id,
-            selected_slide_style_id=style_id,
-            system_prompt='You are a helpful assistant.',
-            slide_editing_instructions='Edit slides as requested.'
+            selected_slide_style_id=style_id
         )
         db.add(prompts)
         

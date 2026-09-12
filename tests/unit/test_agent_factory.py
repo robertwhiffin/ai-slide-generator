@@ -158,23 +158,12 @@ def test_mcp_tool_builds_tools(default_prompts):
     mock_build_mcp.assert_called_once()
 
 
-def test_get_prompt_content_uses_config_overrides():
-    """Custom system_prompt in config triggers legacy path with pre_assembled=False."""
-    from src.api.schemas.agent_config import AgentConfig
-    from src.services.agent_factory import _get_prompt_content
-
-    config = AgentConfig(
-        system_prompt="Custom system prompt",
-        slide_editing_instructions="Custom editing",
-    )
-
-    result = _get_prompt_content(config)
-
-    assert result["system_prompt"] == "Custom system prompt"
-    assert result["slide_editing_instructions"] == "Custom editing"
-    assert result["pre_assembled"] is False
-    assert result["slide_style"] is not None
-    assert result["deck_prompt"] is None
+# DELETED with B2.4: test_get_prompt_content_uses_config_overrides asserted that a
+# custom ``AgentConfig.system_prompt`` OVERRIDES the modular assembly and yields
+# ``pre_assembled: False``. That is the one behaviour this workstream deliberately
+# removes — the override branch is gone and ``pre_assembled`` is always True — so
+# there is no repointed form of this test. The surviving
+# test_get_prompt_content_generate_mode_uses_modules pins the only path left.
 
 
 def test_get_prompt_content_generate_mode_uses_modules():

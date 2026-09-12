@@ -82,17 +82,16 @@ def _get_prompt_content(
     """Resolve prompt content from AgentConfig, falling back to library lookups
     and then to backend defaults.
 
-    When a custom ``system_prompt`` override is present in the config the
-    caller takes full control and the modular assembly is skipped (same
-    behaviour as before).  Otherwise prompt_modules builds a mode-specific
-    system prompt so generation and editing each receive only the
-    instructions they need.
+    prompt_modules builds a mode-specific system prompt so generation and editing
+    each receive only the instructions they need. The per-profile
+    ``system_prompt`` / ``slide_editing_instructions`` override fields are
+    RETIRED, so ``pre_assembled`` is ALWAYS ``True`` in the returned dict and
+    there is no path that hands ``agent.py`` unassembled parts.
 
     Resolution order for each prompt field:
-    1. Explicit value in config (system_prompt, slide_editing_instructions)
-    2. Library lookup by ID (design_system_id / slide_style_id, deck_prompt_id)
-    3. Modular assembly via prompt_modules (mode-aware)
-    4. Backend defaults from DEFAULT_CONFIG / DEFAULT_SLIDE_STYLE (legacy)
+    1. Library lookup by ID (design_system_id / slide_style_id, deck_prompt_id)
+    2. Modular assembly via prompt_modules (mode-aware)
+    3. Backend defaults from DEFAULT_SLIDE_STYLE (legacy)
 
     Slide-style source precedence (Design System Library, spec §8):
         design_system_id (if set) -> slide_style_id -> DEFAULT_SLIDE_STYLE.
@@ -116,7 +115,10 @@ def _get_prompt_content(
 
     Returns:
         Dict with keys: system_prompt, slide_editing_instructions,
-        deck_prompt, slide_style, image_guidelines, pre_assembled
+        deck_prompt, slide_style, image_guidelines, pre_assembled.
+        ``system_prompt`` carries the fully assembled prompt and
+        ``pre_assembled`` is always True; the other four are always None,
+        retained because ``agent.py::_create_prompt`` reads the whole dict.
     """
     slide_style = DEFAULT_SLIDE_STYLE
     deck_prompt: Optional[str] = None
@@ -245,29 +247,13 @@ def _get_prompt_content(
         except Exception as e:
             logger.error(f"Failed to resolve deck_prompt_id: {e}")
 
-    # --- Decide between modular assembly and legacy/override path ---
-
-    has_custom_system_prompt = config.system_prompt is not None
-
-    if has_custom_system_prompt:
-        # User provided a full custom system_prompt — use legacy concatenation
-        # path so _create_prompt in agent.py assembles it the old way.
-        defaults = DEFAULT_CONFIG["prompts"]
-        slide_editing_instructions = (
-            config.slide_editing_instructions
-            if config.slide_editing_instructions is not None
-            else defaults["slide_editing_instructions"]
-        )
-        return {
-            "system_prompt": config.system_prompt,
-            "slide_editing_instructions": slide_editing_instructions,
-            "deck_prompt": deck_prompt,
-            "slide_style": slide_style,
-            "image_guidelines": image_guidelines,
-            "pre_assembled": False,
-        }
-
-    # No custom override — use modular prompt_modules assembly
+    # --- Modular assembly is the ONLY path ---
+    #
+    # The per-profile ``system_prompt`` / ``slide_editing_instructions`` override
+    # fields are RETIRED, so there is no longer a branch that returns
+    # ``pre_assembled: False``. This function's RETURN KEYS keep those names —
+    # they are the assembled-prompt contract ``agent.py::_create_prompt``
+    # consumes — but no config field is read to produce them.
     if mode == "edit":
         assembled = build_editing_system_prompt(
             slide_style=slide_style,
@@ -501,8 +487,6 @@ def build_agent_for_request(
         extra={
             "session_id": session_data.get("session_id"),
             "tool_count": len(config.tools),
-            "has_custom_system_prompt": config.system_prompt is not None,
-            "has_custom_editing_instructions": config.slide_editing_instructions is not None,
             "slide_style_id": config.slide_style_id,
             "design_system_id": config.design_system_id,
             "deck_prompt_id": config.deck_prompt_id,
