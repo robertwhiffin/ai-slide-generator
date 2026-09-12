@@ -24,6 +24,14 @@ Design notes
 
 - **No postgres marker needed**: the tested schemas are pure Pydantic with no
   database imports (src/domain/skill_io.py, finding.py, deck_spec.py).
+
+- **architect.json carries both deck_spec AND data_request** — this is
+  intentional coverage, not redundancy.  ``ArchitectOutput._intent_payload_consistency``
+  requires the *relevant* payload to be present for each intent but does NOT
+  forbid the others.  Keeping ``data_request`` null everywhere would leave all
+  five ``DataRequest`` fields (``metric``, ``time_bound``, ``grouping``,
+  ``units``, ``tool_preferences``) without any parse coverage, letting a type
+  regression on any of them ship undetected.  Do not set it back to null.
 """
 from __future__ import annotations
 

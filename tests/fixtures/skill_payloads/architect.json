@@ -21,12 +21,36 @@
     "resolved_data": {
       "synthesis": "The streaming migration reduced median end-to-end latency from 4.8 h to 1.8 h (62%) and dropped data-loss incidents from 11 in H1 to 0 in Q3. Infrastructure cost per job fell 18% due to reduced reprocessing overhead. No single source covers all four metrics; synthesis across three sources is required.",
       "figures": [
-        {"key": "latency_before_hours", "value": "4.8 h", "source": "pipeline-metrics-dashboard/Q1-Q2-baseline"},
-        {"key": "latency_after_hours", "value": "1.8 h", "source": "pipeline-metrics-dashboard/2024-Q3-report"},
-        {"key": "latency_reduction_pct", "value": "62%", "source": "pipeline-metrics-dashboard/2024-Q3-report"},
-        {"key": "incidents_h1", "value": "11", "source": "incident-tracker/Q1-Q2-summary"},
-        {"key": "incidents_q3", "value": "0", "source": "incident-tracker/Q3-summary"},
-        {"key": "cost_reduction_pct", "value": "18%", "source": "cloud-cost-report-2024Q3"}
+        {
+          "key": "latency_before_hours",
+          "value": "4.8 h",
+          "source": "pipeline-metrics-dashboard/Q1-Q2-baseline"
+        },
+        {
+          "key": "latency_after_hours",
+          "value": "1.8 h",
+          "source": "pipeline-metrics-dashboard/2024-Q3-report"
+        },
+        {
+          "key": "latency_reduction_pct",
+          "value": "62%",
+          "source": "pipeline-metrics-dashboard/2024-Q3-report"
+        },
+        {
+          "key": "incidents_h1",
+          "value": "11",
+          "source": "incident-tracker/Q1-Q2-summary"
+        },
+        {
+          "key": "incidents_q3",
+          "value": "0",
+          "source": "incident-tracker/Q3-summary"
+        },
+        {
+          "key": "cost_reduction_pct",
+          "value": "18%",
+          "source": "cloud-cost-report-2024Q3"
+        }
       ],
       "gaps": [
         "Latency for the legacy domain has not yet been measured post-migration; it completed in week 9 of the quarter"
@@ -39,7 +63,10 @@
         "content_brief": "Fragmented pipelines: 3 batch domains, average 4.8 h latency, 11 data-loss incidents in H1. Show the pipeline topology map.",
         "assumes": "Audience knows what a data pipeline is but does not know our specific topology or incident history.",
         "hands_off": "Establishes the baseline latency and incident count the results slide will reference.",
-        "data_references": ["latency_before_hours", "incidents_h1"],
+        "data_references": [
+          "latency_before_hours",
+          "incidents_h1"
+        ],
         "template_section_index": 0
       },
       {
@@ -57,7 +84,14 @@
         "content_brief": "62% latency reduction, 0 incidents in Q3, 18% cost-per-job reduction. Side-by-side before/after table with source attributions.",
         "assumes": "Audience has seen the before-state and migration approach slides.",
         "hands_off": "Provides the evidence base for the investment ask on slide 3.",
-        "data_references": ["latency_before_hours", "latency_after_hours", "latency_reduction_pct", "incidents_h1", "incidents_q3", "cost_reduction_pct"],
+        "data_references": [
+          "latency_before_hours",
+          "latency_after_hours",
+          "latency_reduction_pct",
+          "incidents_h1",
+          "incidents_q3",
+          "cost_reduction_pct"
+        ],
         "template_section_index": 2
       },
       {
@@ -71,7 +105,16 @@
       }
     ]
   },
-  "data_request": null,
+  "data_request": {
+    "metric": "monthly active teams using the streaming pipeline",
+    "time_bound": "Q3 2024 (2024-07-01 to 2024-09-30)",
+    "grouping": "by data domain (payments, logistics, identity)",
+    "units": "unique team count per domain per month",
+    "tool_preferences": [
+      "warehouse_sql",
+      "semantic_layer"
+    ]
+  },
   "target_positions": [],
   "proposed_design_contract": null
 }
