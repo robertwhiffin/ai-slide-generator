@@ -589,6 +589,12 @@ def _run_migrations(engine, schema: str | None = None):
         # so the table is re-homed onto the shared owner in the same boot.
         _migrate_deck_reviews(conn, schema)
 
+        # --- spec-dirty marker: three columns + partial index on session_slide_decks ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the partial index created by this step is re-homed onto the shared owner
+        # in the same boot instead of being left owned by the app's service principal.
+        _migrate_spec_dirty_marker(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
@@ -686,6 +692,104 @@ def _migrate_deck_reviews(conn, schema: str | None = None) -> None:
     table.create(bind=conn, checkfirst=True)
 
     logger.info("Migration: deck_reviews table ensured")
+
+
+def _migrate_spec_dirty_marker(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add the three spec-dirty columns to ``session_slide_decks`` (idempotent).
+
+    Adds ``spec_dirty_at``, ``spec_dirty_by``, and ``spec_dirty_claimed_at`` — all
+    nullable — to an already-provisioned ``session_slide_decks`` table.  Also creates
+    the partial index ``ix_session_slide_decks_spec_dirty_at`` on PostgreSQL so the
+    sweeper's "find dirty decks" query touches only the small dirty subset rather than
+    the full table.
+
+    Unlike its two siblings :func:`_migrate_graph_checkpoints` and
+    :func:`_migrate_deck_reviews`, this helper genuinely is the only thing that adds
+    these columns to an already-provisioned database.  Both siblings create brand-new
+    tables, so ``create_all`` runs first and their helpers always short-circuit on
+    ``checkfirst``.  ``create_all`` does NOT ALTER existing tables — it only creates
+    missing ones — so for a database provisioned before B2.3 landed, the columns are
+    absent until this migration runs.  On a fresh install ``create_all`` adds them
+    via the ORM model and the ``ALTER`` statements below are no-ops (the idempotence
+    guard skips them).
+
+    Why three columns, why here.  The marker lives on ``session_slide_decks`` because
+    it never needs to outlive the deck row.  ``spec_dirty_by`` is the identity
+    decision: a sweeper tick has no HTTP request, so ``get_current_user()`` returns
+    ``None`` and the Databricks client factory fails closed in production (SDR-4437
+    HIGH-6 removed the SP fallback outside non-prod).  Recording the marker's author
+    gives the arc review's write a real ``modified_by``, gives cost attribution a real
+    user (PRD §8.1), and carries a permission provenance that was already checked on
+    that human's route — with no new identity concept and no stored credential.
+    ``spec_dirty_claimed_at`` is the worker lease: ``UVICORN_WORKERS`` defaults to 4,
+    so anything periodic runs in all four workers and must claim its work atomically or
+    four workers sweep one deck.
+
+    NOT deck presentation state: these columns are deliberately absent from
+    ``get_slide_deck``'s returned dict.
+
+    The partial index (PostgreSQL only) is also declared on the ORM model in
+    ``src/database/models/session.py`` with both ``postgresql_where`` and
+    ``sqlite_where`` so ``create_all`` emits it on fresh databases of either dialect.
+    This helper creates it on already-provisioned PostgreSQL databases only.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)}
+    except Exception:
+        cols = set()
+
+    if cols:
+        qualified = _qual("session_slide_decks")
+        for col_name, col_def in (
+            ("spec_dirty_at", "TIMESTAMP NULL"),
+            ("spec_dirty_by", "VARCHAR(255) NULL"),
+            ("spec_dirty_claimed_at", "TIMESTAMP NULL"),
+        ):
+            if col_name not in cols:
+                logger.info("Migration: adding %s to session_slide_decks", col_name)
+                conn.execute(text(
+                    f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"
+                ))
+
+    # --- Partial index (PostgreSQL only) ---
+    # SQLite: the ORM model's sqlite_where declaration already builds the index via
+    # create_all on fresh databases; altering an existing SQLite DB to add a partial
+    # index requires recreating the table, which is not worth doing here.
+    if is_sqlite:
+        return
+
+    # Use a FRESH inspector: the shared one caches its reflection from before the
+    # columns may have been added earlier in this same migration transaction.
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        insp = sa_inspect(conn)
+        indexes = insp.get_indexes("session_slide_decks", schema=schema)
+    except Exception:
+        return  # table absent on this deploy
+
+    if any(ix.get("name") == _SPEC_DIRTY_INDEX for ix in indexes):
+        return  # already present
+
+    logger.info("Migration: creating partial index %s on session_slide_decks", _SPEC_DIRTY_INDEX)
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"CREATE INDEX {_SPEC_DIRTY_INDEX} "
+                f"ON {_qual('session_slide_decks')} (spec_dirty_at) "
+                f"WHERE spec_dirty_at IS NOT NULL"
+            ))
+    except Exception:
+        logger.warning(
+            "Migration: could not create %s; dirty-deck sweeper will fall back to a "
+            "full-table scan until the index is created",
+            _SPEC_DIRTY_INDEX,
+            exc_info=True,
+        )
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
@@ -975,6 +1079,12 @@ def _migrate_uncap_brand_text_columns(
 #: name on fresh installs and this migration builds it under the same name on
 #: already-provisioned ones, so the two paths converge on one schema.
 _DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
+
+#: Partial index name used by :func:`_migrate_spec_dirty_marker`.
+#: ``src/database/models/session.py`` — ``create_all`` builds it under this name on
+#: fresh installs and the migration builds it under the same name on already-provisioned
+#: databases, so both paths converge on one schema.
+_SPEC_DIRTY_INDEX = "ix_session_slide_decks_spec_dirty_at"
 
 
 def _migrate_design_system_partial_name_index(
