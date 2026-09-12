@@ -13,6 +13,10 @@ from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
+from src.database.models.graph_checkpoint import (
+    GraphCheckpoint,
+    GraphCheckpointWrite,
+)
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
 from src.database.models.profile import ConfigProfile
@@ -55,6 +59,8 @@ __all__ = [
     "FeedbackConversation",
     "GoogleGlobalCredentials",
     "GoogleOAuthToken",
+    "GraphCheckpoint",
+    "GraphCheckpointWrite",
     "IdentityType",
     "ImageAsset",
     "PermissionLevel",

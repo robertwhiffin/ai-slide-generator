@@ -578,10 +578,85 @@ def _run_migrations(engine, schema: str | None = None):
         # --- row-per-slide schema: session_slides table + deck_spec columns ---
         _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- LangGraph checkpointer: graph_checkpoints + graph_checkpoint_writes ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the raw CREATE INDEX objects this step can emit are re-homed onto the
+        # shared owner in the same boot instead of being left owned by the app's
+        # service principal.
+        _migrate_graph_checkpoints(conn, schema, _qual)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_graph_checkpoints(conn, schema, _qual) -> None:
+    """Ensure the LangGraph checkpoint tables and their lookup indexes exist.
+
+    ``graph_checkpoints`` and ``graph_checkpoint_writes`` persist LangGraph graph
+    state between supersteps. :mod:`src.core.checkpointer` is the saver that reads
+    and writes them; the two ORM models live in
+    ``src/database/models/graph_checkpoint.py``.
+
+    NOT the thing that creates the tables in production. ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and both tables are
+    ORM models, so on every real deployment ``create_all`` has already made them
+    and this helper short-circuits on ``checkfirst``. That is accepted and has
+    precedent — :func:`_migrate_design_system_tables`' own docstring says the same.
+    What it still earns: databases provisioned before these tables existed, test
+    paths that drive the migration on its own, and explicitness about what the
+    checkpointer depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled for
+    both PostgreSQL/Lakebase and the SQLite used in tests. The lookup indexes are
+    then ensured separately with raw ``CREATE INDEX IF NOT EXISTS``, because
+    ``Table.create`` emits an ORM-declared index only when it also creates the
+    table: on a database that already carries the tables from an earlier deploy a
+    newly added index would otherwise never appear. Their names and column lists
+    are read back off the ``Index`` objects, so the raw SQL cannot drift from the
+    models.
+
+    The raw SQL here IS ``_qual()``-qualified, like every sibling helper in this
+    module — ``_run_migrations`` threads ``_qual`` in precisely for that. The
+    saver's raw SQL in ``src/core/checkpointer.py`` is deliberately UNQUALIFIED
+    instead, for the reason spelled out in the NOTE in ``src/core/encryption.py``:
+    it must also run against SQLite and schema-less local Postgres, and it has no
+    schema handed to it. The two rules are different on purpose.
+
+    Idempotent, and dialect-safe: ``CREATE INDEX IF NOT EXISTS`` is supported by
+    both PostgreSQL and SQLite, so no ``is_sqlite`` branch is needed.
+    """
+    from sqlalchemy import text
+
+    from src.database.models.graph_checkpoint import (
+        GraphCheckpoint,
+        GraphCheckpointWrite,
+    )
+
+    for model in (GraphCheckpoint, GraphCheckpointWrite):
+        table = model.__table__
+        # Match init_db()'s schema handling so a qualified deployment creates the
+        # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        # NOTE: this mutates the module-global Table.schema on the shared ORM
+        # metadata — intentional, and identical to what init_db() already does.
+        if schema and table.schema is None:
+            table.schema = schema
+        table.create(bind=conn, checkfirst=True)
+
+    for model in (GraphCheckpoint, GraphCheckpointWrite):
+        table = model.__table__
+        for index in table.indexes:
+            columns = ", ".join(f'"{column.name}"' for column in index.columns)
+            # An index name is never schema-qualified — PostgreSQL puts the index
+            # in the schema of its table — but the TABLE reference is.
+            conn.execute(text(
+                f'CREATE INDEX IF NOT EXISTS "{index.name}" '
+                f"ON {_qual(table.name)} ({columns})"
+            ))
+
+    logger.info("Migration: graph checkpoint tables ensured")
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
