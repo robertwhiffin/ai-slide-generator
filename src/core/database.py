@@ -584,6 +584,11 @@ def _run_migrations(engine, schema: str | None = None):
         # same boot instead of being left owned by the app's service principal.
         _migrate_graph_checkpoints(conn, schema)
 
+        # --- deck review storage: deck_reviews table ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the table is re-homed onto the shared owner in the same boot.
+        _migrate_deck_reviews(conn, schema)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
@@ -639,6 +644,48 @@ def _migrate_graph_checkpoints(conn, schema: str | None = None) -> None:
         table.create(bind=conn, checkfirst=True)
 
     logger.info("Migration: graph checkpoint tables ensured")
+
+
+def _migrate_deck_reviews(conn, schema: str | None = None) -> None:
+    """Ensure the ``deck_reviews`` table exists (idempotent, dialect-safe).
+
+    ``deck_reviews`` stores content-addressed deck-level review verdicts, keyed
+    by ``(deck_id, deck_digest)``.  The store functions live in
+    :mod:`src.services.deck_review_store`; the ORM model is in
+    :mod:`src.database.models.deck_review`.
+
+    NOT the thing that creates the table in production.  ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and the table is
+    an ORM model, so on every real deployment ``create_all`` has already made
+    it and this helper short-circuits on ``checkfirst``.  That is accepted and
+    has precedent — :func:`_migrate_design_system_tables`' own docstring says
+    the same.  What it still earns: databases provisioned before this table
+    existed, test paths that drive the migration on its own, and explicitness
+    about what the store depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled
+    for both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    This helper emits no raw SQL — which is why it takes ``(conn, schema)``
+    rather than the full five-argument sibling signature, matching
+    :func:`_migrate_graph_checkpoints`' shape.  Schema qualification comes from
+    ``Table.schema`` below.  Should a raw statement ever be needed HERE, it
+    must take ``_qual`` and use it, like every other sibling in this module that
+    does emit raw SQL.
+    """
+    from src.database.models.deck_review import DeckReview
+
+    table = DeckReview.__table__
+    # Match init_db()'s schema handling so a qualified deployment creates the
+    # table in the Lakebase schema; guarded so it stays a no-op on repeat.
+    # NOTE: mutates the module-global Table.schema on the shared ORM metadata —
+    # intentional, and identical to what init_db() already does.
+    if schema and table.schema is None:
+        table.schema = schema
+    table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: deck_reviews table ensured")
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:

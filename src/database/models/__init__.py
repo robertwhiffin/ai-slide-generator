@@ -1,6 +1,7 @@
 """Database models."""
 
 from src.database.models.deck_contributor import DeckContributor
+from src.database.models.deck_review import DeckReview
 from src.database.models.design_system import (
     DesignSystem,
     DesignSystemAsset,
@@ -46,6 +47,7 @@ __all__ = [
     "ChatRequest",
     "ConfigGenieSpace",
     "DeckContributor",
+    "DeckReview",
     "EncryptionKey",
     "ConfigProfile",
     "ConfigProfileContributor",
