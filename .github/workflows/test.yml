@@ -450,6 +450,7 @@ jobs:
             tests/integration/test_savepoint_e2e.py \
             tests/integration/test_slide_row_identity_and_verdicts.py \
             tests/integration/test_task7_verification_and_restore.py \
+            tests/integration/test_ws4b_fixture_contracts.py \
             -v --tb=short --junitxml=test-results/general-results.xml -m "not live"
       - uses: actions/upload-artifact@v4
         if: always()
