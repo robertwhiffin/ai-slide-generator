@@ -305,18 +305,13 @@ class TestDeckWithMarker:
         result = deck_with_marker.restore_version(1)
         assert isinstance(result, dict)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="set_marker requires migration B2.3 (spec_dirty_at column not yet added); "
-               "strict=True so the suite goes RED when B2.3 lands, forcing conversion to "
-               "a passing test"
-    )
     def test_set_marker_sets_dirty_columns(self, deck_with_marker):
-        """After B2.3: set_marker writes spec_dirty_at and spec_dirty_by.
+        """set_marker writes spec_dirty_at and spec_dirty_by with the injected age.
 
-        The assertions below will pass once the columns exist.  Until then
-        set_marker() raises OperationalError (column not found), the xfail
-        catches it, and strict=True means an unexpected pass turns red.
+        Reads via raw SQL to verify the write path directly.  SQLite stores
+        DATETIME columns as ISO-8601 strings; a raw Session.execute() bypasses
+        SQLAlchemy's type processor and returns a str, so we coerce before
+        doing datetime arithmetic.
         """
         from src.database.models.session import SessionSlideDeck
 
@@ -334,23 +329,22 @@ class TestDeckWithMarker:
             ).one()
             assert row.spec_dirty_by == "dirty@example.com"
             assert row.spec_dirty_at is not None
-            # age_seconds=30.0: the dirty timestamp must be at most ~35s in the past
+            # age_seconds=30.0: the dirty timestamp must be at most ~35s in the past.
+            # Coerce str→datetime because SQLite returns DATETIME as text over raw SQL.
             from datetime import datetime
-            age = (datetime.utcnow() - row.spec_dirty_at).total_seconds()
+            ts = datetime.fromisoformat(row.spec_dirty_at) if isinstance(row.spec_dirty_at, str) else row.spec_dirty_at
+            age = (datetime.utcnow() - ts).total_seconds()
             assert 0 <= age < 35, f"spec_dirty_at age {age:.1f}s outside expected range"
         finally:
             db.close()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="set_claim requires migration B2.3 (spec_dirty_claimed_at column not yet added); "
-               "strict=True so the suite goes RED when B2.3 lands, forcing conversion"
-    )
     def test_set_claim_sets_claimed_column(self, deck_with_marker):
-        """After B2.3: set_claim writes spec_dirty_claimed_at.
+        """set_claim writes spec_dirty_claimed_at with the injected age.
 
-        The assertion below passes once the column exists.  Until then strict
-        xfail catches the OperationalError.
+        Reads via raw SQL to verify the write path directly.  SQLite stores
+        DATETIME columns as ISO-8601 strings; a raw Session.execute() bypasses
+        SQLAlchemy's type processor and returns a str, so we coerce before
+        doing datetime arithmetic.
         """
         deck_with_marker.set_claim(age_seconds=10.0)
 
@@ -365,8 +359,11 @@ class TestDeckWithMarker:
                 {"sid": owner_id},
             ).one()
             assert row.spec_dirty_claimed_at is not None
+            # age_seconds=10.0: the claimed timestamp must be at most ~15s in the past.
+            # Coerce str→datetime because SQLite returns DATETIME as text over raw SQL.
             from datetime import datetime
-            age = (datetime.utcnow() - row.spec_dirty_claimed_at).total_seconds()
+            ts = datetime.fromisoformat(row.spec_dirty_claimed_at) if isinstance(row.spec_dirty_claimed_at, str) else row.spec_dirty_claimed_at
+            age = (datetime.utcnow() - ts).total_seconds()
             assert 0 <= age < 15, f"spec_dirty_claimed_at age {age:.1f}s outside expected range"
         finally:
             db.close()
