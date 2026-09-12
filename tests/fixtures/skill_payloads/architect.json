@@ -1,0 +1,77 @@
+{
+  "intent": "build",
+  "message": "I have designed a 4-slide deck for the Q3 data platform review. Each slide delivers one element of the argument against the resolved data.",
+  "deck_spec": {
+    "title": "Q3 Data Platform Review",
+    "audience": "Engineering leadership and product stakeholders",
+    "purpose": "Demonstrate the reliability and throughput gains from the unified pipeline rollout",
+    "argument": "Migrating batch jobs to the streaming-first architecture cut end-to-end latency by 62% and eliminated two classes of data-loss incident.",
+    "call_to_action": "Approve the Q4 budget to extend streaming coverage to the remaining three data domains.",
+    "narrative_arc": [
+      "Before state: fragmented batch pipelines with known failure modes",
+      "Migration: what we changed and why it was safe to do incrementally",
+      "Results: latency, reliability, and cost figures with sources",
+      "Ask: what approval unlocks and what happens if deferred"
+    ],
+    "design_contract": {
+      "design_system_id": 7,
+      "template_id": 14,
+      "slide_style_id": null
+    },
+    "resolved_data": {
+      "synthesis": "The streaming migration reduced median end-to-end latency from 4.8 h to 1.8 h (62%) and dropped data-loss incidents from 11 in H1 to 0 in Q3. Infrastructure cost per job fell 18% due to reduced reprocessing overhead. No single source covers all four metrics; synthesis across three sources is required.",
+      "figures": [
+        {"key": "latency_before_hours", "value": "4.8 h", "source": "pipeline-metrics-dashboard/Q1-Q2-baseline"},
+        {"key": "latency_after_hours", "value": "1.8 h", "source": "pipeline-metrics-dashboard/2024-Q3-report"},
+        {"key": "latency_reduction_pct", "value": "62%", "source": "pipeline-metrics-dashboard/2024-Q3-report"},
+        {"key": "incidents_h1", "value": "11", "source": "incident-tracker/Q1-Q2-summary"},
+        {"key": "incidents_q3", "value": "0", "source": "incident-tracker/Q3-summary"},
+        {"key": "cost_reduction_pct", "value": "18%", "source": "cloud-cost-report-2024Q3"}
+      ],
+      "gaps": [
+        "Latency for the legacy domain has not yet been measured post-migration; it completed in week 9 of the quarter"
+      ]
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Establish the before-state problem",
+        "content_brief": "Fragmented pipelines: 3 batch domains, average 4.8 h latency, 11 data-loss incidents in H1. Show the pipeline topology map.",
+        "assumes": "Audience knows what a data pipeline is but does not know our specific topology or incident history.",
+        "hands_off": "Establishes the baseline latency and incident count the results slide will reference.",
+        "data_references": ["latency_before_hours", "incidents_h1"],
+        "template_section_index": 0
+      },
+      {
+        "position": 1,
+        "purpose": "Describe the migration approach",
+        "content_brief": "Incremental domain-by-domain rollout over 9 weeks. Shadow mode first, cutover once parity proven. No big-bang risk.",
+        "assumes": "Audience understands the before-state problem from slide 0.",
+        "hands_off": "Primes the audience to expect hard numbers on the results slide.",
+        "data_references": [],
+        "template_section_index": 1
+      },
+      {
+        "position": 2,
+        "purpose": "Show the results with sourced figures",
+        "content_brief": "62% latency reduction, 0 incidents in Q3, 18% cost-per-job reduction. Side-by-side before/after table with source attributions.",
+        "assumes": "Audience has seen the before-state and migration approach slides.",
+        "hands_off": "Provides the evidence base for the investment ask on slide 3.",
+        "data_references": ["latency_before_hours", "latency_after_hours", "latency_reduction_pct", "incidents_h1", "incidents_q3", "cost_reduction_pct"],
+        "template_section_index": 2
+      },
+      {
+        "position": 3,
+        "purpose": "State the ask and the cost of deferral",
+        "content_brief": "Q4 budget to migrate remaining 3 domains. Timeline: 12 weeks. Risk of deferral: re-exposure to the incident classes we just eliminated.",
+        "assumes": "Audience trusts the results evidence and understands the migration model.",
+        "hands_off": "Final slide; no subsequent slide receives a hand-off.",
+        "data_references": [],
+        "template_section_index": 3
+      }
+    ]
+  },
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}
