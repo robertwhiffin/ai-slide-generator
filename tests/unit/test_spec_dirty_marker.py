@@ -396,6 +396,65 @@ class TestPostgresPartialIndex:
             ).scalar()
         assert count == 1, f"Expected exactly 1 index named {_SPEC_DIRTY_INDEX!r}, got {count}"
 
+    def test_migration_creates_partial_index_on_existing_table(self, pg_engine_with_dirty_marker):
+        """Migration's CREATE INDEX path fires when the index is absent but columns exist.
+
+        create_all builds the index from the ORM model's postgresql_where declaration,
+        so by the time _run_migrations runs its idempotency guard always matches and the
+        migration's own CREATE INDEX SQL never executes in the fixture-based tests.  This
+        test isolates that path: drop the index (columns stay), call the migration helper
+        directly, and assert the index returns as a partial index with the correct
+        WHERE predicate.  A whole-table index created by a broken statement would carry
+        the same name and pass tests that only check presence.
+        """
+        from sqlalchemy import inspect as _inspect
+
+        # Drop just the index — columns stay, matching the production state where a
+        # database was provisioned before B2.3 but after the three columns were added
+        # by some earlier mechanism.
+        with pg_engine_with_dirty_marker.begin() as conn:
+            conn.execute(text(f'DROP INDEX IF EXISTS "{_SPEC_DIRTY_INDEX}"'))
+
+        # Confirm the index is genuinely absent before calling the migration.
+        with pg_engine_with_dirty_marker.connect() as check_conn:
+            pre_count = check_conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_indexes "
+                    "WHERE tablename = 'session_slide_decks' AND indexname = :ix"
+                ),
+                {"ix": _SPEC_DIRTY_INDEX},
+            ).scalar()
+        assert pre_count == 0, f"{_SPEC_DIRTY_INDEX!r} was not dropped before the migration call"
+
+        # Call the migration directly — the same call _run_migrations makes in production.
+        # No schema: _qual quotes just the table name, matching _run_migrations' lambda.
+        _qual = lambda t: f'"{t}"'
+        with pg_engine_with_dirty_marker.begin() as conn:
+            insp = _inspect(conn)
+            _migrate_spec_dirty_marker(conn, insp, schema=None, _qual=_qual, is_sqlite=False)
+
+        # Assert the index is back and is a partial index with the correct predicate.
+        # A whole-table index would have no WHERE clause in pg_indexes.indexdef.
+        with pg_engine_with_dirty_marker.connect() as check_conn:
+            row = check_conn.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE tablename = 'session_slide_decks' AND indexname = :ix"
+                ),
+                {"ix": _SPEC_DIRTY_INDEX},
+            ).fetchone()
+        assert row is not None, (
+            f"{_SPEC_DIRTY_INDEX!r} not found in pg_indexes after _migrate_spec_dirty_marker — "
+            f"the migration's CREATE INDEX path did not run"
+        )
+        assert "where" in row.indexdef.lower(), (
+            f"index has no WHERE clause — migration created a full-table index, not a partial one: "
+            f"{row.indexdef!r}"
+        )
+        assert "spec_dirty_at is not null" in row.indexdef.lower(), (
+            f"index WHERE clause does not match expected predicate: {row.indexdef!r}"
+        )
+
     def test_sqlite_early_return_does_not_create_index(self, sqlite_engine_with_decks):
         """The is_sqlite early return in _migrate_spec_dirty_marker skips the index path.
 

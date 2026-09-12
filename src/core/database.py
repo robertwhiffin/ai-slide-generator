@@ -694,6 +694,14 @@ def _migrate_deck_reviews(conn, schema: str | None = None) -> None:
     logger.info("Migration: deck_reviews table ensured")
 
 
+#: Partial index over ``spec_dirty_at IS NOT NULL`` on ``session_slide_decks``.
+#: Must match the ``Index(...)`` declared in ``src/database/models/session.py`` —
+#: ``create_all`` builds it under this name on fresh installs and
+#: :func:`_migrate_spec_dirty_marker` builds it under the same name on
+#: already-provisioned databases, so both paths converge on one schema.
+_SPEC_DIRTY_INDEX = "ix_session_slide_decks_spec_dirty_at"
+
+
 def _migrate_spec_dirty_marker(
     conn, inspector, schema, _qual, is_sqlite
 ) -> None:
@@ -723,9 +731,12 @@ def _migrate_spec_dirty_marker(
     gives the arc review's write a real ``modified_by``, gives cost attribution a real
     user (PRD §8.1), and carries a permission provenance that was already checked on
     that human's route — with no new identity concept and no stored credential.
-    ``spec_dirty_claimed_at`` is the worker lease: ``UVICORN_WORKERS`` defaults to 4,
-    so anything periodic runs in all four workers and must claim its work atomically or
-    four workers sweep one deck.
+    ``spec_dirty_claimed_at`` is the storage slot for the worker lease: the sweeper
+    claims a deck by writing this timestamp, and a later worker skips any deck where it
+    is already set.  The column alone does not provide mutual exclusion — that requires
+    a conditional ``UPDATE … WHERE id = ? AND spec_dirty_claimed_at IS NULL`` in the
+    sweeper, where a rowcount of 0 means another worker already claimed the deck.  That
+    write belongs to the sweeper implementation (a later PR), not to this schema.
 
     NOT deck presentation state: these columns are deliberately absent from
     ``get_slide_deck``'s returned dict.
@@ -1080,11 +1091,6 @@ def _migrate_uncap_brand_text_columns(
 #: already-provisioned ones, so the two paths converge on one schema.
 _DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
 
-#: Partial index name used by :func:`_migrate_spec_dirty_marker`.
-#: ``src/database/models/session.py`` — ``create_all`` builds it under this name on
-#: fresh installs and the migration builds it under the same name on already-provisioned
-#: databases, so both paths converge on one schema.
-_SPEC_DIRTY_INDEX = "ix_session_slide_decks_spec_dirty_at"
 
 
 def _migrate_design_system_partial_name_index(
