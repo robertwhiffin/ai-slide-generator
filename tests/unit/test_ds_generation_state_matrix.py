@@ -212,7 +212,7 @@ class TestStateTemplateHook:
 
         config = AgentConfig(design_system_id=5)
         with patch(
-            "src.services.agent_factory._design_system_is_active", return_value=True
+            "src.services.agent_resolution._design_system_is_active", return_value=True
         ):
             assert "search_brand_assets" in [t.name for t in _build_tools(config, {})]
 
