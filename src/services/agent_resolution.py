@@ -52,8 +52,11 @@ logger = logging.getLogger(__name__)
 class ResolvedStyle(NamedTuple):
     """Everything the slide-style branch produces — not just the bytes.
 
-    Immutable by construction (a ``NamedTuple``), because callers pass these four
-    facts on to prompt assembly and must not be able to disagree about them.
+    Immutable by construction (a ``NamedTuple``), because callers pass all FIVE of
+    these facts on to prompt assembly and must not be able to disagree about them.
+    Five, not four: ``image_guidelines`` is produced by the branch's legacy limb and
+    an extraction that returns only the other four drops a legacy slide-style row's
+    image guidance out of every prompt.
 
     Attributes:
         slide_style: The MODEL-FACING style text. Control sentinels stripped; a
