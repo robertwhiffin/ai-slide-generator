@@ -26,6 +26,30 @@ import pytest
 MOVED_NAMES = ("_get_prompt_content", "_build_tools", "_design_system_is_active")
 STAYED_NAMES = ("_create_model", "build_agent_for_request")
 
+# The names ``_build_tools`` resolves in its own module namespace. Ruling C-20 keeps
+# every one of them OFF the shim, so a stale ``patch("src.services.agent_factory.X")``
+# raises instead of applying to an attribute the moved code no longer reads.
+WITHHELD_FROM_SHIM = (
+    "build_genie_tool",
+    "build_vector_tool",
+    "build_mcp_tools",
+    "build_model_endpoint_tool",
+    "build_agent_bricks_tool",
+    "build_ds_asset_tool",
+    "search_images",
+)
+
+# The coupling guards below run over BOTH limbs of the branch. A guard that only ever
+# passes ``AgentConfig()`` exercises the legacy two-line lookup and is blind to the
+# design-system limb — the limb carrying the tombstone case, the sentinel-bearing
+# compiled copy, the lazy recompile and the pinned-template block, i.e. every shipped
+# defect. Measured: a byte-identical second copy of the DS limb alone passed 466/466
+# against the single-config version of these guards.
+BOTH_LIMBS = [
+    pytest.param({}, id="no-design-system-limb"),
+    pytest.param({"design_system_id": 7}, id="design-system-limb"),
+]
+
 
 # ---------------------------------------------------------------------------
 # The move itself
@@ -78,6 +102,10 @@ class TestTheMove:
         )
         assert list(inspect.signature(resolve_style_source).parameters) == ["config"]
         assert list(inspect.signature(resolve_slide_style).parameters) == ["config"]
+        # The docstring must not restate the miscount the type exists to correct.
+        doc = ResolvedStyle.__doc__ or ""
+        assert "FIVE" in doc
+        assert "these four facts" not in doc
 
     def test_sole_production_importer_still_resolves(self):
         """``chat_service`` imports ``build_agent_for_request`` from ``agent_factory``
@@ -115,13 +143,17 @@ class TestPatchTargetNamespaces:
         mock_build.assert_called_once_with(99)
         assert marker in tools
 
-    def test_the_old_target_fails_loudly_instead_of_silently(self):
-        """The tool builders are deliberately NOT re-exported by the shim, so a stale
-        patch target raises rather than applying to an attribute nothing reads. A
-        patch that applies and intercepts nothing is how a test starts passing
-        vacuously against real tool construction."""
+    @pytest.mark.parametrize("name", WITHHELD_FROM_SHIM)
+    def test_the_old_target_fails_loudly_instead_of_silently(self, name):
+        """Every one of the seven names Ruling C-20 withheld, not just a sample: any
+        of them could be re-exported later and nothing else would notice.
+
+        The names ``_build_tools`` resolves internally are deliberately NOT
+        re-exported by the shim, so a stale patch target raises rather than applying
+        to an attribute nothing reads. A patch that applies and intercepts nothing is
+        how a test starts passing vacuously against real tool construction."""
         with pytest.raises(AttributeError):
-            with patch("src.services.agent_factory.build_ds_asset_tool"):
+            with patch(f"src.services.agent_factory.{name}"):
                 pass
 
     def test_the_surviving_targets_still_intercept_build_agent_for_request(self):
@@ -449,6 +481,9 @@ class TestPromptContentGoesThroughTheExtractedBranch:
     _get_prompt_content(config)["slide_style"]`` — both sides are ``None`` on every
     config, so it could not fail. These two can: they pin that there is ONE
     implementation of the branch and that prompt assembly goes through it.
+
+    Each runs over BOTH limbs (see ``BOTH_LIMBS``), so neither is blind to a second
+    copy of the design-system limb specifically.
     """
 
     _MARKER = "MOVE-TEST-STYLE-MARKER-9f3a"
@@ -464,9 +499,17 @@ class TestPromptContentGoesThroughTheExtractedBranch:
             image_guidelines=None,
         )
 
-    def test_the_resolved_style_reaches_the_assembled_system_prompt(self):
-        """Re-inlining the branch inside ``_get_prompt_content`` — "optimising away
-        the delegation" — makes this red."""
+    @pytest.mark.parametrize("config_kwargs", BOTH_LIMBS)
+    def test_the_resolved_style_reaches_the_assembled_system_prompt(self, config_kwargs):
+        """Re-inlining EITHER limb of the branch inside ``_get_prompt_content`` —
+        "optimising away the delegation" — makes this red.
+
+        Both limbs, because that is the whole point: with only ``AgentConfig()`` this
+        guard sees the legacy ``slide_style_id`` lookup and a second copy of the
+        design-system limb slips past it silently. Setting ``design_system_id`` needs
+        no database here — the patch replaces the entire branch — but a re-inlined DS
+        limb WOULD reach for one and never produce the marker.
+        """
         from src.api.schemas.agent_config import AgentConfig
         from src.services.agent_resolution import _get_prompt_content
 
@@ -474,13 +517,15 @@ class TestPromptContentGoesThroughTheExtractedBranch:
             "src.services.agent_resolution.resolve_style_source",
             return_value=self._marker_style(),
         ):
-            result = _get_prompt_content(AgentConfig())
+            result = _get_prompt_content(AgentConfig(**config_kwargs))
 
         assert self._MARKER in result["system_prompt"]
 
-    def test_resolve_slide_style_is_a_wrapper_over_the_same_one_branch(self):
-        """A second copy of the branch behind ``resolve_slide_style`` — the outcome
-        §33 forbids — makes this red."""
+    @pytest.mark.parametrize("config_kwargs", BOTH_LIMBS)
+    def test_resolve_slide_style_is_a_wrapper_over_the_same_one_branch(self, config_kwargs):
+        """A second copy of EITHER limb behind ``resolve_slide_style`` — the outcome
+        §33 forbids — makes this red. Same blind spot, same fix: a wrapper that
+        re-implements only the design-system limb passes the ``AgentConfig()`` case."""
         from src.api.schemas.agent_config import AgentConfig
         from src.services.agent_resolution import resolve_slide_style
 
@@ -488,7 +533,7 @@ class TestPromptContentGoesThroughTheExtractedBranch:
             "src.services.agent_resolution.resolve_style_source",
             return_value=self._marker_style(),
         ):
-            assert resolve_slide_style(AgentConfig()) == self._MARKER
+            assert resolve_slide_style(AgentConfig(**config_kwargs)) == self._MARKER
 
     def test_the_returned_dict_still_pins_slide_style_to_none(self):
         """The extraction must not "helpfully" fill the key in: the null is a pinned
