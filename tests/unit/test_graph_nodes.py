@@ -1041,6 +1041,77 @@ class TestFixReviewerNode:
             == "surfaced"
         )
 
+    def test_a_persisting_finding_ships_the_originals_own_findings(self, graph_env):
+        """The verdict must describe the content the row was written with.
+
+        The ``still_open`` branch used to persist the fix reviewer's findings
+        about the **rejected candidate**: ids minted from that candidate's hash,
+        written into a record keyed on the ORIGINAL's hash, with the shipped
+        slide's own findings dropped.  Three consequences — a finding id whose
+        subject is content nobody can see (breaking ``make_finding_id``'s
+        contract), drawer text describing markup that was never shipped, and the
+        silent loss of the non-objective findings that ARE the drawer's content.
+
+        Two findings on the entry, one objective and one not, so the loss is
+        visible: the previous behaviour persisted exactly one finding, the
+        candidate's.
+        """
+        original = "<p>original</p>"
+        entry = _fix_entry(0, html=original)
+        entry["in_flight"] = True
+        # Stamped exactly as `build_reviewer_node` stamped them — against the
+        # ORIGINAL's hash — because that is what the entry really carries.  Using
+        # the production stamper is what makes the id assertion below a statement
+        # about the node rather than about this fixture.
+        entry["findings"] = [
+            f.model_dump()
+            for f in nodes._stamp_findings(
+                [
+                    finding("overflow", message="BUILDREVIEWER-SAW-THIS-IN-THE-ORIGINAL"),
+                    finding("brief_not_delivered", message="the brief is not delivered"),
+                ],
+                subject_hash=compute_slide_hash(original),
+                slide_index=0,
+            )
+        ]
+        state = graph_env.state(
+            turn_id=TURN,
+            fix_target=0,
+            fix_map=scoped(TURN, {0: entry}),
+            fixed=scoped(TURN, {0: {"html": "<p>fixed</p>", "scripts": "", "changed": True}}),
+        )
+        graph_env.skills.set(
+            "fix_reviewer",
+            lambda payload: review_out(
+                0,
+                [finding("overflow", message="FIXREVIEWER-SAW-THIS-IN-THE-CANDIDATE")],
+            ),
+        )
+
+        updates = fix_reviewer_node(state)
+
+        assert graph_env.rows()[0].html == original
+        persisted = json.loads(graph_env.rows()[0].verification_record)[
+            compute_slide_hash(original)
+        ][VERDICT_KEY]["findings"]
+
+        # Nothing about the rejected candidate is persisted...
+        messages = [f["message"] for f in persisted]
+        assert "FIXREVIEWER-SAW-THIS-IN-THE-CANDIDATE" not in messages
+        # ...the shipped slide's OWN findings are, both of them...
+        assert messages == [
+            "BUILDREVIEWER-SAW-THIS-IN-THE-ORIGINAL",
+            "the brief is not delivered",
+        ]
+        # ...and every id's subject hash is the hash of the HTML that shipped.
+        assert [f["id"] for f in persisted] == [
+            make_finding_id("overflow", compute_slide_hash(original), 0),
+            make_finding_id("brief_not_delivered", compute_slide_hash(original), 0),
+        ]
+        # The `findings` channel carries the same list the row carries.
+        assert [f.id for f in updates["findings"]] == [f["id"] for f in persisted]
+        assert [f.status for f in updates["findings"]] == ["open", "open"]
+
     def test_the_tombstone_clears_has_pending_fix(self, graph_env):
         graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
         state = self._state(graph_env)
@@ -1065,6 +1136,134 @@ class TestFixReviewerNode:
 
     def test_no_fix_target_is_a_no_op(self, graph_env):
         assert fix_reviewer_node(graph_env.state(turn_id=TURN, fix_target=None)) == {}
+
+
+class TestFixReviewerUndeliverableRowIsTerminalNotFatal:
+    """An undeliverable row used to kill the turn, exactly as a raising build
+    reviewer once did.
+
+    Measured through the compiled graph with a transient failure on this node's
+    row write: ``RuntimeError`` uncaught, deck reviewer never invoked, rows
+    ``[0, 2]`` committed with position 1 lost, ``slide_count = 0``,
+    ``html_content`` empty and **nothing in chat** — the *"deck reads as ``0
+    slides``, silently"* outcome corrections §48 names as unacceptable, and one
+    nothing recovers: ``slide_count`` and ``html_content`` have exactly one
+    writer, in the last node of the turn.
+
+    The same failure in ``build_reviewer_node`` placeholds the position and the
+    turn completes.  Two nodes, one failure, opposite outcomes — so these tests
+    are the ones from ``TestBuildReviewerFailureIsTerminalNotFatal``, pointed at
+    the other node.
+    """
+
+    def _state(self, graph_env):
+        entry = _fix_entry(0, html="<p>original</p>")
+        entry["in_flight"] = True
+        return graph_env.state(
+            turn_id=TURN,
+            fix_target=0,
+            fix_map=scoped(TURN, {0: entry}),
+            fixed=scoped(TURN, {0: {"html": "<p>fixed</p>", "scripts": "", "changed": True}}),
+        )
+
+    def _row_write_explodes(self, monkeypatch):
+        monkeypatch.setattr(
+            nodes,
+            "_write_reviewed_row",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("db exploded")),
+        )
+
+    def test_the_position_is_placeheld_and_never_landed(self, graph_env, monkeypatch):
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+        self._row_write_explodes(monkeypatch)
+
+        updates = fix_reviewer_node(self._state(graph_env))
+
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+        assert "landed_positions" not in updates
+        assert "findings" not in updates
+        assert is_placeholder_record(
+            json.loads(graph_env.rows()[0].verification_record)
+        )
+
+    def test_the_fix_is_tombstoned_so_the_foreman_does_not_return_to_the_fixer(
+        self, graph_env, monkeypatch
+    ):
+        """Leaving the entry ``in_flight`` sends the foreman back to the fixer,
+        whose stale-fix branch would then claim ``landed_positions`` for a
+        position this writer just failed to write."""
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+        self._row_write_explodes(monkeypatch)
+        state = self._state(graph_env)
+
+        updates = fix_reviewer_node(state)
+        merged = turn_scoped_merge(state["fix_map"], updates["fix_map"])
+
+        assert updates["fix_target"] is None
+        assert not has_pending_fix({"turn_id": TURN, "fix_map": merged})
+
+    def test_the_failure_is_surfaced_durably_and_in_error_state(
+        self, graph_env, monkeypatch
+    ):
+        """A caught-and-forgotten failure is worse than the crash: the deck would
+        look complete.  This node is edge-reached and strictly sequential, so
+        unlike the two fanned reviewers it may write ``error_state`` as well."""
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+        self._row_write_explodes(monkeypatch)
+
+        updates = fix_reviewer_node(self._state(graph_env))
+
+        assert updates["error_state"]["node"] == "fix_reviewer"
+        assert updates["error_state"]["code"] == "fix_review_delivery_failed"
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert len(info) == 1
+        assert "Slide 0" in info[0]["content"]
+        assert "fix_reviewer" in info[0]["content"]
+
+    def test_an_unvalidatable_prior_finding_is_inside_the_handler_too(
+        self, graph_env
+    ):
+        """The other proven raise site: the prior-findings validation, which sits
+        above the model call and therefore above the inner handler."""
+        entry = _fix_entry(0, html="<p>original</p>")
+        entry["in_flight"] = True
+        entry["findings"] = [{"criterion": "not-a-criterion"}]
+        state = graph_env.state(
+            turn_id=TURN,
+            fix_target=0,
+            fix_map=scoped(TURN, {0: entry}),
+            fixed=scoped(TURN, {0: {"html": "<p>fixed</p>", "scripts": ""}}),
+        )
+
+        updates = fix_reviewer_node(state)
+
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+        assert updates["fix_map"]["vals"][0] is None
+        assert graph_env.skills.calls_for("fix_reviewer") == [], (
+            "the validation raised before the model call, so no model call "
+            "should have been made"
+        )
+
+    def test_an_unplaceholdable_position_claims_nothing_but_still_tombstones(
+        self, graph_env, monkeypatch
+    ):
+        """Claiming placeheld without a row makes ``all_positions_committed`` lie.
+        The tombstone still happens, so the foreman reconciles the position
+        through ``stalled_positions`` rather than bouncing off the fixer."""
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+        self._row_write_explodes(monkeypatch)
+        monkeypatch.setattr(
+            nodes.SlideWriter,
+            "commit_placeholder",
+            lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("no db")),
+        )
+
+        updates = fix_reviewer_node(self._state(graph_env))
+
+        assert "placeheld_positions" not in updates
+        assert "landed_positions" not in updates
+        assert updates["fix_map"]["vals"][0] is None
+        assert graph_env.rows() == []
 
 
 # ===========================================================================
@@ -1114,6 +1313,57 @@ class TestPlaceholderNode:
         )
         assert placeholder_node(state) == {}
         assert graph_env.rows() == []
+        assert graph_env.messages() == []
+
+    def test_every_placeheld_position_leaves_a_durable_chat_notice(self, graph_env):
+        """The stall path used to be SILENT.
+
+        Measured on the compiled graph: position 1 placeheld, and the only
+        ``info`` message the user received was *"Deck review complete: no
+        narrative issues found across the deck."*  The ``ERROR`` stream event is
+        not a substitute — it does not survive a reload, and it does not exist at
+        all on the ``emitter=None`` path (the sweeper, and every test in this
+        file).  One notice per position, exactly as the two fanned failure paths
+        produce.
+        """
+        state = graph_env.state(
+            turn_id=TURN,
+            deck_spec=make_spec((0, 1, 2)),
+            foreman_wakes=scoped(TURN, [[0, 1, 2], []]),
+            dispatched_at=scoped(TURN, {1: time.time(), 2: time.time()}),
+            landed_positions=scoped(TURN, {0}),
+        )
+
+        updates = placeholder_node(state)
+
+        assert updates["placeheld_positions"] == scoped(TURN, {1, 2})
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert len(info) == 2
+        assert [m["role"] for m in info] == ["assistant", "assistant"]
+        assert "Slide 1" in info[0]["content"]
+        assert "Slide 2" in info[1]["content"]
+        # The reason names the STALL path, not an exception type, which is what
+        # distinguishes a foreman-reconciled placeholder from a node's own.
+        assert "(placeholder: Slide generation did not complete)" in info[0]["content"]
+
+    def test_a_read_back_failure_leaves_the_position_for_the_foreman(
+        self, graph_env, monkeypatch
+    ):
+        """``get_slide``'s read-back was outside this node's copy of the ``try``,
+        so a read failure killed the turn where the shared helper survives it."""
+        monkeypatch.setattr(
+            nodes.SlideWriter,
+            "get_slide",
+            lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("read exploded")),
+        )
+        state = graph_env.state(
+            turn_id=TURN,
+            deck_spec=make_spec((0,)),
+            foreman_wakes=scoped(TURN, [[0], []]),
+            dispatched_at=scoped(TURN, {0: time.time()}),
+        )
+
+        assert placeholder_node(state) == {}
 
 
 # ===========================================================================
@@ -1164,6 +1414,119 @@ class TestDeckReviewerDeckLevelWrite:
         assert "color: red" in css
         assert "#123456" in css
         assert "--brand" in css
+
+
+class TestDeckReviewerWriteInputsAreInsideTheHandler:
+    """The write's INPUTS are guarded, not only the write call.
+
+    Measured through the compiled graph with ``aggregate_deck_css`` raising while
+    the five statements computing the write's inputs sat ABOVE the ``try``: every
+    row committed, ``slide_count = 0``, ``html_content`` and ``scripts_content``
+    empty, nothing in chat, ``RuntimeError`` uncaught.  That is the *"deck reads
+    as ``0 slides``, silently"* outcome corrections §48 names as unacceptable,
+    and this node's docstring claimed the opposite guarantee.
+
+    Nothing recovers it: ``slide_count`` and ``html_content`` have exactly one
+    writer, this one, with no compensating write anywhere.
+    """
+
+    def _seeded(self, graph_env):
+        graph_env.seed_slides(
+            [
+                ("<div class='slide'>a</div>", "renderChartA();"),
+                ("<div class='slide'>b</div>", "renderChartB();"),
+            ]
+        )
+        graph_env.skills.set("deck_reviewer", DeckReviewOutput(findings=[]))
+
+    def test_a_failure_in_the_last_derivation_still_writes_the_earlier_columns(
+        self, graph_env, monkeypatch
+    ):
+        """``css`` is derived last, so the three columns before it are written and
+        only ``css`` is left as it stands — the writer's ``_UNSET`` default means
+        omitting it erases nothing."""
+        self._seeded(graph_env)
+        monkeypatch.setattr(
+            nodes,
+            "aggregate_deck_css",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("css exploded")),
+        )
+
+        updates = deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        deck = graph_env.deck_row()
+        assert deck.slide_count == 2, "the deck still reads as an empty deck"
+        assert deck.html_content
+        assert "renderChartA();" in deck.scripts_content
+        assert updates["error_state"]["code"] == "deck_level_derivation_failed"
+        assert updates["error_state"]["message"] == "RuntimeError"
+
+    def test_that_failure_is_surfaced_and_no_model_call_is_wasted(
+        self, graph_env, monkeypatch
+    ):
+        """A review of a deck this node could not fully read would come back with
+        no findings and tell the user the deck is fine.  So the review is skipped
+        and the advisory carries the failure — one honest line, no model call."""
+        self._seeded(graph_env)
+        monkeypatch.setattr(
+            nodes,
+            "aggregate_deck_css",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("css exploded")),
+        )
+
+        deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert len(info) == 1
+        assert "could not be updated this turn" in info[0]["content"]
+        assert "no narrative issues" not in info[0]["content"]
+        assert graph_env.skills.calls_for("deck_reviewer") == []
+
+    def test_an_unreadable_deck_row_neither_raises_nor_reports_a_clean_review(
+        self, graph_env, monkeypatch
+    ):
+        """The one failure no column write can survive — and the residual limit
+        worth pinning: ``slide_count`` cannot be derived if the rows cannot be
+        read, so it is left untouched rather than written as ``0``, the turn
+        survives, and the user is told."""
+        self._seeded(graph_env)
+        monkeypatch.setattr(
+            nodes.SlideDeck,
+            "from_dict",
+            classmethod(
+                lambda cls, *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable"))
+            ),
+        )
+
+        updates = deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        assert updates["error_state"]["code"] == "deck_level_derivation_failed"
+        assert "knitted_html" not in updates
+        assert "scripts_content" not in updates
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert len(info) == 1
+        assert "no narrative issues" not in info[0]["content"]
+
+    def test_a_write_failure_is_surfaced_durably_not_only_in_error_state(
+        self, graph_env, monkeypatch
+    ):
+        """``error_state`` has no consumer in ws4c, so on its own it is silence:
+        the review would still run and the user would be told the deck is fine
+        while its columns were never written."""
+        self._seeded(graph_env)
+        monkeypatch.setattr(
+            nodes,
+            "write_deck_level_columns",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("write exploded")),
+        )
+
+        updates = deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        assert updates["error_state"]["code"] == "deck_level_write_failed"
+        contents = [
+            m["content"] for m in graph_env.messages() if m["message_type"] == "info"
+        ]
+        assert any("could not be updated this turn" in c for c in contents), contents
 
 
 class TestDeckReviewerReview:
@@ -1389,8 +1752,12 @@ _EXPECTED_NODE_WRITES = {
     "fixer_node": {
         "findings", "fix_map", "fix_target", "fixed", "landed_positions",
     },
+    # error_state and placeheld_positions are the undeliverable-row path: unlike
+    # the two FANNED reviewers this node is strictly sequential, so error_state
+    # is available to it.
     "fix_reviewer_node": {
-        "findings", "fix_map", "fix_target", "landed_positions",
+        "error_state", "findings", "fix_map", "fix_target", "landed_positions",
+        "placeheld_positions",
     },
     "placeholder_node": {"placeheld_positions"},
     "deck_reviewer_node": {"error_state", "knitted_html", "scripts_content"},

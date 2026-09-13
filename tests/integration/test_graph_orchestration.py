@@ -49,6 +49,17 @@ from tests.integration.conftest_stub_skills import (
 AUTHOR = "graph-user@example.com"
 
 
+class _ProcessDied(BaseException):
+    """A worker going away mid-turn, modelled as what a node would actually see.
+
+    Deliberately NOT an ``Exception``: every node's failure handler catches
+    ``Exception``, which is the point of the non-fatal discipline, so an
+    ``Exception`` can no longer leave a turn half-finished.  A SIGTERM'd worker,
+    an OOM kill or a redeploy is a ``BaseException`` from inside a node, and that
+    is the only thing that still crosses a superstep boundary uncaught.
+    """
+
+
 def _prefix_sequence(snapshots):
     """The committed prefix after each superstep, in order."""
     return [releasable_positions(snapshot) for snapshot in snapshots]
@@ -595,6 +606,66 @@ def test_a_position_left_uncommitted_by_a_completed_batch_is_placeheld_by_the_st
     assert prefixes[-1] == [0, 1, 2]
 
 
+def test_an_edit_turn_dispatches_only_its_target_positions(graph_turn_env):
+    """An EDIT turn covers ``target_positions``, not the whole ``deck_spec``.
+
+    Recorded by review as the suite's one coverage hole: **no compiled-graph test
+    exercised an edit turn at all**, and 15 of 15 passed with
+    ``_covered_positions``' precedence INVERTED (``deck_spec`` winning over
+    ``target_positions``).  Every function in ``foreman_service`` derives its
+    coverage from that one helper, so under the inversion an edit of one slide
+    re-dispatches the whole deck — N model calls and N overwritten rows for a
+    one-slide edit — and nothing in this suite noticed.
+
+    The unit suite could not reach it either: its ``_state`` fixture sets
+    ``target_positions`` and ``deck_spec`` in an ``elif``, so the two keys can
+    never both be set, and the multi-target case is exactly the case where they
+    both are.  Here they both are for real — the architect stub returns
+    ``intent="edit"`` with no ``deck_spec``, so ``architect_node`` reads turn 1's
+    persisted spec back and commits it to state alongside ``target_positions``.
+
+    Stated as DISPATCH and INVOKED, never as a landed set: turn 1 landed
+    ``{0, 1, 2}`` and an inverted turn 2 would land the same three, so a
+    landed-set assertion would pass under the very bug this test exists for.
+    """
+    env = graph_turn_env
+    env.recorder.configure(slide_count=3)
+
+    env.run()
+    assert env.recorder.counts("builder") == 3
+    turn_one_htmls = {p: row.html for p, row in env.rows_by_position().items()}
+
+    env.recorder.reset_observations()
+    env.recorder.configure(slide_count=3, edit_target_positions={1})
+
+    final = env.run()
+
+    # The turn really is an edit over a spec it did not author: both keys are set.
+    assert final["architect_intent"] == "edit"
+    assert final["target_positions"] == [1]
+    assert final["deck_spec"] is not None
+    assert [s.position for s in final["deck_spec"].slides] == [0, 1, 2]
+
+    assert env.wakes(final)[0] == [1], (
+        "the edit turn dispatched a batch other than its target positions"
+    )
+    assert env.recorder.positions("builder") == [1]
+    assert env.recorder.counts("builder") == 1, (
+        "the edit turn re-built slides it was not asked to touch"
+    )
+    assert env.recorder.counts("build_reviewer") == 1
+    assert scoped_vals(final, "landed_positions") == {1}
+    assert env.recorder.counts("deck_reviewer") == 1
+
+    # The untouched slides are still the deck, and the deck still knows it has
+    # three of them: coverage narrows the TURN, never the deck.
+    rows = env.rows_by_position()
+    assert sorted(rows) == [0, 1, 2]
+    assert rows[0].html == turn_one_htmls[0]
+    assert rows[2].html == turn_one_htmls[2]
+    assert env.deck_row().slide_count == 3
+
+
 def test_the_checkpointer_serde_round_trips_deck_spec_and_finding_as_themselves():
     """Ruling C-25 / corrections §55 — the tripwire for the two unregistered types.
 
@@ -664,14 +735,25 @@ def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(
     tombstones its entry on every path including its own exception.  So this
     drives the case the marker actually exists for.
 
-    Turn 1 dies mid-fix — the fix reviewer's row write raises after the fixer has
-    already marked the entry ``in_flight`` and the superstep was checkpointed.
-    The same turn is then re-entered on the same thread, so ``scoped_vals`` reads
-    that entry back (a FRESH turn id would discard it by design, which is why
-    ``invoke_graph``'s per-turn id makes this reachable only for a caller
-    resuming the same turn).  ``_reconcile_stale_fixes`` must then land the
-    ORIGINAL slide, tombstone the entry and let the turn finish — costing NO
-    model call, which is what keeps "one fix round" true.
+    Turn 1 dies mid-fix — the process goes away in the fix reviewer, after the
+    fixer has already marked the entry ``in_flight`` and the superstep was
+    checkpointed.  The same turn is then re-entered on the same thread, so
+    ``scoped_vals`` reads that entry back (a FRESH turn id would discard it by
+    design, which is why ``invoke_graph``'s per-turn id makes this reachable only
+    for a caller resuming the same turn).  ``_reconcile_stale_fixes`` must then
+    land the ORIGINAL slide, tombstone the entry and let the turn finish —
+    costing NO model call, which is what keeps "one fix round" true.
+
+    **Why a ``BaseException`` and not a ``RuntimeError``.**  This used to fail the
+    fix reviewer's row write with a ``RuntimeError``, which killed the turn — the
+    F1a defect: rows committed, ``slide_count = 0``, nothing in chat.  That is now
+    guarded, so an ordinary write failure placeholds the position and the turn
+    finishes, and it can no longer leave a fix ``in_flight``.  What still can is
+    the process going away between the fixer's superstep landing and the fix
+    reviewer finishing — a SIGTERM'd worker, an OOM kill, a redeploy — and from
+    inside a node that looks like a ``BaseException``, which no ``except
+    Exception`` handler catches.  So the scenario is unchanged and the mechanism
+    is now the one that actually produces it in production.
 
     Without ``in_flight`` the resumed fixer sees a fresh candidate and re-fixes
     the position: ``counts("fixer") == 0`` is the assertion that catches it.
@@ -683,7 +765,7 @@ def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(
 
     def die_on_the_fixed_row(self, session_id, position, html, **kwargs):
         if html == fixed_html(position):
-            raise RuntimeError("row write died mid-fix")
+            raise _ProcessDied("the worker died mid-fix")
         return real_write_slide(
             self, session_id, position, html=html, **kwargs
         )
@@ -691,7 +773,7 @@ def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(
     monkeypatch.setattr(SlideWriter, "write_slide", die_on_the_fixed_row)
 
     turn_id = "turn-that-dies-mid-fix"
-    with pytest.raises(RuntimeError, match="died mid-fix"):
+    with pytest.raises(_ProcessDied, match="died mid-fix"):
         env.run(turn_id=turn_id)
 
     # The checkpoint really holds an in-flight fix for this turn.

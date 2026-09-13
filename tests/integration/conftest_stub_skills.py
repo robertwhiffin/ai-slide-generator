@@ -139,6 +139,15 @@ class SkillRecorder:
         Positions whose ``fix_reviewer`` reports the SAME criterion again, so the
         fix does not survive re-review and the original must be written back
         with the finding surfaced.
+    edit_target_positions
+        Non-empty makes the architect return ``intent="edit"`` over those
+        positions and **no** ``deck_spec``, which is the real shape of an edit
+        turn: the architect edits the spec the previous turn persisted, so
+        ``architect_node`` reads it back through ``read_deck_spec`` and the turn
+        runs with ``target_positions`` AND ``deck_spec`` both populated.  That
+        combination is what makes the turn-coverage precedence observable —
+        neither key alone can distinguish it.  Empty (the default) means a build
+        turn.
 
     There is deliberately no deck-findings knob: what the deck reviewer DOES with
     its findings (they never enter the ``findings`` channel — §9) is pinned by
@@ -169,6 +178,7 @@ class SkillRecorder:
         self.slow_positions: Set[int] = set()
         self.objective_findings_at: Set[int] = set()
         self.surviving_defect_at: Set[int] = set()
+        self.edit_target_positions: Set[int] = set()
 
         self.calls: List[Dict[str, Any]] = []
         self.peak_concurrent: int = 0
@@ -188,6 +198,7 @@ class SkillRecorder:
         slow_positions: Iterable[int] = (),
         objective_findings_at: Iterable[int] = (),
         surviving_defect_at: Iterable[int] = (),
+        edit_target_positions: Iterable[int] = (),
         slow_seconds: Optional[float] = None,
     ) -> "SkillRecorder":
         """Set every knob in one call and return self, for readable tests."""
@@ -199,6 +210,7 @@ class SkillRecorder:
         self.slow_positions = set(slow_positions)
         self.objective_findings_at = set(objective_findings_at)
         self.surviving_defect_at = set(surviving_defect_at)
+        self.edit_target_positions = set(edit_target_positions)
         return self
 
     def reset_observations(self) -> None:
@@ -255,6 +267,16 @@ class SkillRecorder:
     # -- per-skill handlers -------------------------------------------------
 
     def _skill_architect(self, payload: dict) -> ArchitectOutput:
+        if self.edit_target_positions:
+            # An edit turn carries target_positions and NO deck_spec: the deck it
+            # edits is the one the previous turn persisted, which architect_node
+            # reads back with read_deck_spec.  ArchitectOutput's own validator
+            # rejects intent="edit" with an empty target_positions list.
+            return ArchitectOutput(
+                intent="edit",
+                message=f"Editing slide(s) {sorted(self.edit_target_positions)}.",
+                target_positions=sorted(self.edit_target_positions),
+            )
         return ArchitectOutput(
             intent="build",
             message=f"Building {self.slide_count} slide(s).",
