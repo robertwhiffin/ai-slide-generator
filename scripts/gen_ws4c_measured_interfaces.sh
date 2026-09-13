@@ -44,15 +44,20 @@ say ''
 say '---'
 say ''
 say '## C3 / C8 — prompt resolution, and the defect at the centre of both'
-grepn 'Every module-level symbol in `agent_factory.py` (522 lines) — there are only FIVE functions' '^def |^class |^logger|^from |^import ' src/services/agent_factory.py
-defof '`_get_prompt_content` — signature' src/services/agent_factory.py _get_prompt_content 14
-region 'THE STYLE-RESOLUTION BRANCH — a BRANCH, not a ladder. C8 moves this; C3 consumes it.' src/services/agent_factory.py 133 232
-region 'What `_get_prompt_content` actually RETURNS — every part is None but `system_prompt`' src/services/agent_factory.py 291 298
+grepn 'POST-C8: `agent_factory.py` is now a re-export SHIM — every module-level symbol' '^def |^class |^logger|^from |^import |^    _' src/services/agent_factory.py
+grepn 'POST-C8: `agent_resolution.py` — every module-level symbol' '^def |^class |^logger|^from |^import ' src/services/agent_resolution.py
+defof '`_get_prompt_content` — signature (MOVED to agent_resolution by C8)' src/services/agent_resolution.py _get_prompt_content 14
+region 'THE STYLE-RESOLUTION BRANCH — a BRANCH, not a ladder. Now in agent_resolution (C8).' src/services/agent_resolution.py 84 127
+grepn 'What `_get_prompt_content` RETURNS — every part is None but `system_prompt` (the pinned null)' '"slide_style": None|"pre_assembled": True|"system_prompt": assembled' src/services/agent_resolution.py
 grepn 'A TEST PINS THE NULL. This is why the null cannot simply be filled in.' 'result\["slide_style"\] is None' tests/unit/test_agent_factory.py
 grepn 'The only other reader of the key — the monolith dead branch, R2-barred anyway' 'prompts.get\("slide_style"\)' src/services/agent.py
-defof '`_build_tools` — the brand gate lives here, with BOTH halves' src/services/agent_factory.py _build_tools 60
-defof '`_design_system_is_active` — fails CLOSED' src/services/agent_factory.py _design_system_is_active 36
-defof '`build_agent_for_request` — STAYS in agent_factory (it is agent construction, not resolution)' src/services/agent_factory.py build_agent_for_request 62
+defof '`_build_tools` — the brand gate, BOTH halves (MOVED by C8)' src/services/agent_resolution.py _build_tools 60
+defof '`_design_system_is_active` — fails CLOSED (MOVED by C8)' src/services/agent_resolution.py _design_system_is_active 36
+defof '`ResolvedStyle` — the FIVE-field extraction C8 added (corrections 33 + 40.1)' src/services/agent_resolution.py ResolvedStyle 30
+defof '`resolve_style_source` — the extracted branch itself' src/services/agent_resolution.py resolve_style_source 46
+defof '`resolve_slide_style` — the thin wrapper C3 consumes' src/services/agent_resolution.py resolve_slide_style 12
+defof '`build_agent_for_request` — STAYS in agent_factory (construction, not resolution)' src/services/agent_factory.py build_agent_for_request 62
+grepn 'The SHIM re-export list — Ruling C-20: these three ONLY' 'from src.services.agent_resolution import|^    _' src/services/agent_factory.py
 defof '`_create_model` — the client path C3 must follow, not invent' src/services/agent_factory.py _create_model 24
 defof '`resolve_agent_config`' src/api/schemas/agent_config.py resolve_agent_config 6
 grepn '`get_system_client`' 'def get_system_client' src/core/databricks_client.py
