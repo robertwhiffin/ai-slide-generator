@@ -9,7 +9,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
@@ -28,6 +28,7 @@ from src.database.models.session import (
     SlideDeckVersion,
     UserSession,
 )
+from src.domain.finding import findings_from_record
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,76 @@ def _read_head_meta(deck: Any) -> Dict[str, str]:
             pass
 
     return {}
+
+
+def _read_deck_spec(deck: Any) -> Optional[Dict[str, Any]]:
+    """Read a deck's parsed ``deck_spec`` for the read paths (B3.2).
+
+    Returns ``None`` when ``deck_spec_json`` is absent, empty, not valid JSON, or
+    does not parse to a JSON object.  It NEVER raises, for the same reason
+    ``_read_head_meta`` never raises: this runs on every deck read, and a
+    malformed spec blob must degrade the spec view alone, not fail the whole
+    deck read for every consumer of the dict.
+
+    ``getattr`` is used for the column so that pre-existing unit-test mocks of
+    ``SessionSlideDeck`` (which predate this column) keep working.
+    """
+    raw = getattr(deck, "deck_spec_json", None)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):  # ValueError covers json.JSONDecodeError
+        logger.warning("Invalid deck_spec_json — serving deck_spec as None")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _finding_to_camel(finding: Any) -> Dict[str, Any]:
+    """Project one domain ``Finding`` onto the frontend ``SlideFinding`` shape.
+
+    snake_case -> camelCase is done generically over ``model_dump()`` so a field
+    added to ``Finding`` mirrors automatically;
+    ``tests/unit/test_finding_conformance.py`` is the guard that the TypeScript
+    declaration gained the same field.
+    """
+    camel: Dict[str, Any] = {}
+    for key, value in finding.model_dump().items():
+        head, *rest = key.split("_")
+        camel[head + "".join(part.capitalize() for part in rest)] = value
+    return camel
+
+
+def _deck_findings(pairs: List[Tuple[Any, str]]) -> List[Dict[str, Any]]:
+    """Flatten review findings out of ``(record, content_hash)`` pairs (B3.2).
+
+    Returns ONE FLAT deck-level list of ``SlideFinding``-shaped dicts, never a
+    per-position index.  The flat shape is forced three ways: each entry already
+    carries its own ``slideIndex`` (``Finding.slide_index``), the legacy read
+    path has no ``slides`` array to key an index against, and the feedback drawer
+    holds a single flat list which it filters by ``slideIndex``.
+
+    ``slideIndex`` is projected verbatim from what the reviewer stamped — no
+    index rewriting, because a deck-level finding's ``-1`` sentinel has to
+    survive the projection.  A consequence, stated because it is a real limit
+    rather than a measured behaviour of any current writer: a finding whose slide
+    was reordered after the review carries the index it was stamped with.
+
+    Two slides with identical HTML share a content hash, so on the ``deck_json``
+    blob path (where one deck-wide ``verification_map`` is consulted per slide)
+    their findings appear once per such slide.
+
+    It NEVER raises: an unreadable record contributes nothing rather than failing
+    the deck read.
+    """
+    findings: List[Dict[str, Any]] = []
+    for record, content_hash in pairs:
+        try:
+            for finding in findings_from_record(record, content_hash):
+                findings.append(_finding_to_camel(finding))
+        except Exception:
+            logger.warning("findings: unreadable verification record, skipping")
+    return findings
 
 
 def _parse_record(raw: Optional[str]) -> Dict[str, Any]:
@@ -1473,11 +1544,20 @@ class SessionManager:
         For contributor sessions, follows parent_session_id to read the
         shared slide deck from the owner's session.
 
+        All THREE dict-returning paths — row-read, deck_json blob, and the legacy
+        row-less fallback — emit ``deck_spec`` and ``findings`` unconditionally.
+        Omitting either on one path would make the shape of the dict depend on
+        which path a given deck happens to take, and a consumer would see
+        ``undefined`` for a deck it can read perfectly well.
+
         Args:
             session_id: Session to get deck for
 
         Returns:
-            Full SlideDeck dictionary (with slides array and verification) or None
+            Full SlideDeck dictionary (with slides array and verification) or
+            None.  ``deck_spec`` is the parsed deck_spec_json (``None`` when
+            absent or unparseable) and ``findings`` is one flat deck-level list of
+            SlideFinding-shaped dicts (``[]`` when there are none).
         """
         from src.utils.slide_hash import compute_slide_hash
 
@@ -1503,6 +1583,10 @@ class SessionManager:
 
             if slides_from_rows:
                 slides_list = []
+                # (record, content_hash) per slide, feeding the deck-level
+                # `findings` key below.  Collected here because this is the only
+                # place both halves are in hand.
+                row_finding_pairs: List[Tuple[Any, str]] = []
                 for list_index, slide_row in enumerate(slides_from_rows):
                     content_hash = compute_slide_hash(slide_row.html or "")
                     slide_dict: Dict[str, Any] = {
@@ -1540,6 +1624,14 @@ class SessionManager:
                         except json.JSONDecodeError:
                             pass  # leave verification=None
 
+                    # `verification` above stays canonical and per-slide; this is
+                    # a second, additive projection of the same blob into the
+                    # SlideFinding shape the drawer consumes.  _parse_record
+                    # never raises, so a corrupt record yields no findings.
+                    row_finding_pairs.append(
+                        (_parse_record(slide_row.verification_record), content_hash)
+                    )
+
                     slides_list.append(slide_dict)
 
                 deck_dict: Dict[str, Any] = {
@@ -1568,6 +1660,12 @@ class SessionManager:
                         else None
                     ),
                     "version": deck.version,
+                    # B3.2: both keys are emitted on EVERY dict-returning path of
+                    # this method, unconditionally, so no consumer ever sees
+                    # `undefined` — a specless deck reports None, a findingless
+                    # deck reports [].
+                    "deck_spec": _read_deck_spec(deck),
+                    "findings": _deck_findings(row_finding_pairs),
                 }
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
@@ -1608,6 +1706,12 @@ class SessionManager:
                 needs_persist = False
                 created_at_fallback = deck.created_at.isoformat() + "Z" if deck.created_at else None
 
+                # (record, content_hash) per slide for the deck-level `findings`
+                # key.  There are no slide rows on this path, so the record IS the
+                # deck-wide verification_map — itself a {content_hash: verdict}
+                # dict, exactly the shape findings_from_record expects.
+                blob_finding_pairs: List[Tuple[Any, str]] = []
+
                 # Merge verification and backfill metadata
                 for slide_index, slide in enumerate(deck_dict.get("slides", [])):
                     # F5 key parity: `index` is part of the per-slide contract.
@@ -1616,6 +1720,7 @@ class SessionManager:
                         content_hash = compute_slide_hash(slide["html"])
                         slide["verification"] = verification_map.get(content_hash)
                         slide["content_hash"] = content_hash
+                        blob_finding_pairs.append((verification_map, content_hash))
 
                     if not slide.get("created_by") and fallback_user:
                         slide["created_by"] = fallback_user
@@ -1638,6 +1743,19 @@ class SessionManager:
                 deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
                 deck_dict["version"] = deck.version
 
+                # B3.2 key parity, the same requirement the head_meta setdefault
+                # above serves — but by ASSIGNMENT, not setdefault.  head_meta
+                # genuinely lives inside the blob, so a blob copy is authoritative
+                # for it.  These two do not: deck_spec's authority is the
+                # deck_spec_json column and findings' is the verification records.
+                # A setdefault would let a stale copy inside deck_json win — and a
+                # stale copy is reachable, because the needs_persist branch a few
+                # lines up re-dumps this very dict back into deck.deck_json.  These
+                # assignments run AFTER that write so the derived keys are never
+                # persisted into the blob in the first place.
+                deck_dict["deck_spec"] = _read_deck_spec(deck)
+                deck_dict["findings"] = _deck_findings(blob_finding_pairs)
+
                 self._resolve_deck_display_names(deck_dict)
                 return deck_dict
 
@@ -1652,6 +1770,20 @@ class SessionManager:
                 "modified_by": deck.modified_by or deck_owner.created_by,
                 "modified_at": deck.updated_at.isoformat() + "Z" if deck.updated_at else None,
                 "version": deck.version,
+                # B3.2: the third dict-returning path, and the one the parity
+                # comment above does NOT already cover.  It is reachable on a live
+                # session — the pre-fan-out deck write creates a deck row with no
+                # deck_json and no slide rows, so the first read after the
+                # architecture turn lands here and the spec view would render null.
+                #
+                # There is no `slides` array here to key a per-position index
+                # against, which is the concrete reason `findings` is a flat
+                # deck-level list: every content hash in the verification_map is
+                # consulted, and each finding carries its own slideIndex.
+                "deck_spec": _read_deck_spec(deck),
+                "findings": _deck_findings(
+                    [(verification_map, content_hash) for content_hash in verification_map]
+                ),
             }
             self._resolve_deck_display_names(result)
             return result

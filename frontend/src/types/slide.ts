@@ -1,4 +1,5 @@
 import type { VerificationResult } from './verification';
+import type { SlideFinding } from './finding';
 
 export interface Slide {
   index: number;
@@ -26,6 +27,13 @@ export interface SlideDeck {
   modified_by?: string;
   modified_at?: string;
   version?: number;  // Server-side optimistic lock version from SessionSlideDeck
+  /**
+   * One FLAT deck-level list of review findings, each carrying its own
+   * slideIndex — not a per-slide index.  get_slide_deck emits it on all three
+   * of its read paths, so it is never undefined on a deck read from the API;
+   * optional only because decks constructed client-side do not carry it.
+   */
+  findings?: SlideFinding[];
 }
 
 export interface SlideContext {

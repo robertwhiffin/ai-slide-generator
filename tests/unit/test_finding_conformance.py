@@ -202,3 +202,103 @@ class TestFindingConformance:
             f"Expected:\n  {expected}\n"
             f"Diff keys: {set(camel_dumped) ^ set(expected)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# B3.2 — the deck read path's `findings` key, conformed to the same declaration
+# ---------------------------------------------------------------------------
+#
+# `get_slide_deck` emits a deck-level `findings` list that the frontend reads as
+# `SlideDeck.findings?: SlideFinding[]`.  There is no runtime bridge between the
+# emitted dicts and that TypeScript declaration either — the same absence that
+# let Finding and SlideFinding drift once already — so the entries the READ PATH
+# actually produces are conformed here, not just Finding.model_dump().
+#
+# The distinction matters: model_dump() is snake_case.  Something in the read
+# path has to convert it, and a test against model_dump() alone would stay green
+# while the read path shipped `slide_index` to a frontend reading `slideIndex`.
+
+
+def _camel_to_snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+class TestReadPathFindingsConformance:
+    """The read path's findings entries vs the declared SlideFinding interface."""
+
+    def test_read_path_entry_keys_are_exactly_the_declared_slidefinding_fields(
+        self, deck_with_spec
+    ) -> None:
+        """Every emitted key is declared, and every declared field is emitted.
+
+        Fails if the read path drops a field the frontend declares (the consumer
+        reads undefined) or emits one it does not (dead data, and a sign the two
+        declarations have drifted again).
+        """
+        from tests.unit.test_deck_read_path_keys import _write_findings
+
+        rows = deck_with_spec.rows()
+        _write_findings(deck_with_spec, deck_with_spec.session_id, 0, rows[0].html, count=2)
+        findings = deck_with_spec.get_slide_deck()["findings"]
+        assert findings, "read path produced no findings — the fixture write did not land"
+
+        ts_fields = set(_extract_interface_fields(_read_ts(), "SlideFinding"))
+        for entry in findings:
+            assert set(entry) == ts_fields, (
+                f"read-path findings entry keys {sorted(entry)} != declared "
+                f"SlideFinding fields {sorted(ts_fields)}. "
+                f"Missing from the entry: {sorted(ts_fields - set(entry))}. "
+                f"Not declared in TS: {sorted(set(entry) - ts_fields)}."
+            )
+
+    def test_read_path_emits_camelcase_slide_index_not_snake_case(
+        self, deck_with_spec
+    ) -> None:
+        """`slideIndex`, explicitly — the one renamed field, and the drift that bites.
+
+        Finding.slide_index is snake_case in Python and slideIndex in TS.  A read
+        path that forwarded model_dump() verbatim would pass every other test in
+        this file and still give the drawer `undefined` for the field it filters on.
+        """
+        from tests.unit.test_deck_read_path_keys import _write_findings
+
+        rows = deck_with_spec.rows()
+        _write_findings(deck_with_spec, deck_with_spec.session_id, 1, rows[1].html, count=1)
+        entry = deck_with_spec.get_slide_deck()["findings"][0]
+
+        assert "slideIndex" in entry, f"no slideIndex in {entry!r}"
+        assert "slide_index" not in entry, (
+            f"read path emitted snake_case slide_index alongside/instead of "
+            f"slideIndex: {entry!r}"
+        )
+        assert entry["slideIndex"] == 1
+
+    def test_read_path_entry_round_trips_back_into_a_domain_finding(
+        self, deck_with_spec
+    ) -> None:
+        """camelCase entry -> snake_case -> Finding == the Finding that was stored.
+
+        This is the field-for-field mapping assertion: names AND values survive
+        the projection in both directions, so no field is silently renamed,
+        dropped, or coerced on the way out.
+        """
+        from src.domain.finding import Finding
+
+        from tests.unit.test_deck_read_path_keys import _findings_for, _write_findings
+
+        rows = deck_with_spec.rows()
+        html = rows[2].html
+        _write_findings(deck_with_spec, deck_with_spec.session_id, 2, html, count=2)
+        expected = _findings_for(html, 2, 2)
+
+        entries = deck_with_spec.get_slide_deck()["findings"]
+        assert len(entries) == len(expected)
+
+        rebuilt = [
+            Finding(**{_camel_to_snake(k): v for k, v in entry.items()})
+            for entry in entries
+        ]
+        assert rebuilt == expected, (
+            f"read-path findings do not round-trip.\n  from read path: {rebuilt}\n"
+            f"  as stored:      {expected}"
+        )
