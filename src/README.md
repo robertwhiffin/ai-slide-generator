@@ -150,7 +150,9 @@ Database-backed session persistence:
 
 **YAML files** (`config/`):
 - `config.yaml` - LLM endpoint, Genie space, defaults (used for initial profile seeding)
-- `seed_profiles.yaml` - Seed profiles for development (uses defaults from `src/core/defaults.py`)
+- `seed_profiles.yaml` - Seed profiles for development (a `prompts:` block is no longer read:
+  the per-profile `system_prompt` / `slide_editing_instructions` overrides are retired and
+  prompts are assembled from `src/core/prompt_modules.py`)
 
 **Environment variables** (override YAML):
 - `DATABRICKS_HOST`, `DATABRICKS_TOKEN` - Auth

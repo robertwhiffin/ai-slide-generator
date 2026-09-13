@@ -339,23 +339,31 @@ test.describe('flip-through viewer', () => {
   // ── Apply/Dismiss/Discuss actions ─────────────────────────────────────────
 
   test('dismiss removes a finding from the drawer', async ({ page }) => {
+    // Uses f2 (open) — f1 is fixed and a later task removes its action buttons.
     await openDeck(page);
     await thumbClick(page, 'ribbon-thumb-1');
-    await expect(page.getByTestId('finding-f1')).toBeVisible();
-
-    await page.getByTestId('finding-dismiss-f1').click();
-    await expect(page.getByTestId('finding-f1')).toHaveCount(0);
-
-    // f2 is still present (only f1 was dismissed).
     await expect(page.getByTestId('finding-f2')).toBeVisible();
+
+    await page.getByTestId('finding-dismiss-f2').click();
+    await expect(page.getByTestId('finding-f2')).toHaveCount(0);
+
+    // f1 is still present (only f2 was dismissed).
+    await expect(page.getByTestId('finding-f1')).toBeVisible();
   });
 
-  test('Apply and Discuss buttons are present on each finding', async ({ page }) => {
+  test('fixed finding renders read-only; open finding shows all actions', async ({ page }) => {
+    // f1 is status:'fixed' — no action buttons, a "Fixed" status marker must appear.
+    // f2 is status:'open' — all three action buttons (Apply, Dismiss, Discuss) must appear.
+    // The action-button branch is implemented by a later task; this test sets the contract.
     await openDeck(page);
     await thumbClick(page, 'ribbon-thumb-1');
-    await expect(page.getByTestId('finding-apply-f1')).toBeVisible();
-    await expect(page.getByTestId('finding-discuss-f1')).toBeVisible();
+    // f1 (fixed): action buttons absent, Fixed marker present.
+    await expect(page.getByTestId('finding-apply-f1')).toHaveCount(0);
+    await expect(page.getByTestId('finding-discuss-f1')).toHaveCount(0);
+    await expect(page.getByTestId('finding-status-f1')).toContainText('Fixed');
+    // f2 (open): all three action buttons present.
     await expect(page.getByTestId('finding-apply-f2')).toBeVisible();
+    await expect(page.getByTestId('finding-dismiss-f2')).toBeVisible();
     await expect(page.getByTestId('finding-discuss-f2')).toBeVisible();
   });
 

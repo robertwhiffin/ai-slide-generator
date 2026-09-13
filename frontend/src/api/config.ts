@@ -80,8 +80,6 @@ export interface PromptsConfig {
   profile_id: number;
   selected_deck_prompt_id: number | null;
   selected_slide_style_id: number | null;
-  system_prompt: string;
-  slide_editing_instructions: string;
   created_at: string;
   updated_at: string;
 }
@@ -89,8 +87,6 @@ export interface PromptsConfig {
 export interface PromptsConfigUpdate {
   selected_deck_prompt_id?: number | null;
   selected_slide_style_id?: number | null;
-  system_prompt?: string;
-  slide_editing_instructions?: string;
 }
 
 // Deck Prompt Library types

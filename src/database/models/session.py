@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.orm import backref, relationship
 
@@ -312,12 +313,51 @@ class SessionSlideDeck(Base):
     # Authorship
     modified_by = Column(String(255), nullable=True)
 
+    # Spec-dirty marker — the arc-review sweeper's work queue (B2.3).
+    #
+    # spec_dirty_at is set when an out-of-graph edit makes the committed spec stale;
+    # cleared when the sweeper finishes its re-review.
+    #
+    # spec_dirty_by records the human whose edit triggered the mark.  The sweeper tick
+    # has no HTTP request, so get_current_user() returns None and the Databricks client
+    # factory fails closed in production (SDR-4437 HIGH-6 removed the SP fallback
+    # outside non-prod).  Recording the author here gives the arc review's write a real
+    # modified_by, gives cost attribution a real user (PRD §8.1), and carries a
+    # permission provenance that was already checked on that human's route — with no new
+    # identity concept and no stored credential.
+    #
+    # spec_dirty_claimed_at is the worker lease.  UVICORN_WORKERS defaults to 4, so any
+    # periodic sweeper runs in all four workers simultaneously.  One worker claims the
+    # deck atomically by writing spec_dirty_claimed_at; the others see it and skip.
+    # A claim expires by age on the next sweep tick so a crashed worker does not block
+    # the deck permanently.
+    #
+    # NOT deck presentation state: deliberately absent from get_slide_deck's returned
+    # dict.  These fields drive internal sweep scheduling only.
+    spec_dirty_at = Column(DateTime, nullable=True)
+    spec_dirty_by = Column(String(255), nullable=True)
+    spec_dirty_claimed_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationship
     session = relationship("UserSession", back_populates="slide_deck")
+
+    # Partial index: the sweeper's "find dirty decks" query touches only the small
+    # subset where spec_dirty_at IS NOT NULL, so a whole-table index would be
+    # wasteful.  Declared on both dialects: SQLite has supported partial indexes
+    # since 3.8, so the unit suite exercises the same rule as PostgreSQL/Lakebase.
+    # _migrate_spec_dirty_marker creates it on already-provisioned databases.
+    __table_args__ = (
+        Index(
+            "ix_session_slide_decks_spec_dirty_at",
+            "spec_dirty_at",
+            postgresql_where=text("spec_dirty_at IS NOT NULL"),
+            sqlite_where=text("spec_dirty_at IS NOT NULL"),
+        ),
+    )
 
     def __repr__(self):
         return f"<SessionSlideDeck(session_id={self.session_id}, title='{self.title}')>"

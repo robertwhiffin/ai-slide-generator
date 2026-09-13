@@ -39,11 +39,11 @@ profiles:
       space_name: "Your Space"
     mlflow:
       experiment_name: "/Users/{username}/ai-slide-generator"
-    prompts:
-      system_prompt: "..."
-      slide_editing_instructions: "..."
-      user_prompt_template: "..."
 ```
+
+A `prompts:` block is no longer read: the per-profile `system_prompt` /
+`slide_editing_instructions` overrides are retired and prompts are assembled from
+`src/core/prompt_modules.py`.
 
 The `{username}` placeholder is replaced with the current Databricks user.
 

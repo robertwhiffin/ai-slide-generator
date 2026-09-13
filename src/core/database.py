@@ -578,10 +578,304 @@ def _run_migrations(engine, schema: str | None = None):
         # --- row-per-slide schema: session_slides table + deck_spec columns ---
         _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- LangGraph checkpointer: graph_checkpoints + graph_checkpoint_writes ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so any table this step creates is re-homed onto the shared owner in the
+        # same boot instead of being left owned by the app's service principal.
+        _migrate_graph_checkpoints(conn, schema)
+
+        # --- deck review storage: deck_reviews table ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the table is re-homed onto the shared owner in the same boot.
+        _migrate_deck_reviews(conn, schema)
+
+        # --- spec-dirty marker: three columns + partial index on session_slide_decks ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the partial index created by this step is re-homed onto the shared owner
+        # in the same boot instead of being left owned by the app's service principal.
+        _migrate_spec_dirty_marker(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- retired prompt overrides: drop config_prompts.system_prompt and
+        # --- .slide_editing_instructions ---
+        # ORDERING: must stay INSIDE _run_migrations (i.e. before seed_defaults(),
+        # which init_database calls after init_db()) — see the helper's docstring.
+        # Also stays BEFORE _reassign_new_objects_to_shared_owner below, like its
+        # three siblings.
+        _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_graph_checkpoints(conn, schema: str | None = None) -> None:
+    """Ensure the two LangGraph checkpoint tables exist (idempotent, dialect-safe).
+
+    ``graph_checkpoints`` and ``graph_checkpoint_writes`` persist LangGraph graph
+    state between supersteps. :mod:`src.core.checkpointer` is the saver that reads
+    and writes them; the two ORM models live in
+    ``src/database/models/graph_checkpoint.py``.
+
+    NOT the thing that creates the tables in production. ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and both tables are
+    ORM models, so on every real deployment ``create_all`` has already made them
+    and this helper short-circuits on ``checkfirst``. That is accepted and has
+    precedent — :func:`_migrate_design_system_tables`' own docstring says the same.
+    What it still earns: databases provisioned before these tables existed, test
+    paths that drive the migration on its own, and explicitness about what the
+    checkpointer depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled for
+    both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    Neither table declares a secondary index, so there is no raw ``CREATE INDEX``
+    pass and this helper emits no raw SQL at all — which is why it takes no
+    ``_qual``, matching :func:`_migrate_design_system_tables`' ``(conn, schema)``
+    shape rather than the five-argument one. Schema qualification comes from
+    ``Table.schema`` below. (Every lookup the saver makes is a leading-column
+    prefix of a primary key, which the PK btree already serves.) The saver's own
+    raw SQL in ``src/core/checkpointer.py`` is deliberately UNQUALIFIED, for the
+    reason spelled out in the NOTE in ``src/core/encryption.py``: it must also run
+    against SQLite and schema-less local Postgres, and it has no schema handed to
+    it. Should a raw statement ever be needed HERE, it must take ``_qual`` and use
+    it, like every other sibling in this module.
+    """
+    from src.database.models.graph_checkpoint import (
+        GraphCheckpoint,
+        GraphCheckpointWrite,
+    )
+
+    for model in (GraphCheckpoint, GraphCheckpointWrite):
+        table = model.__table__
+        # Match init_db()'s schema handling so a qualified deployment creates the
+        # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        # NOTE: this mutates the module-global Table.schema on the shared ORM
+        # metadata — intentional, and identical to what init_db() already does.
+        if schema and table.schema is None:
+            table.schema = schema
+        table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: graph checkpoint tables ensured")
+
+
+def _migrate_deck_reviews(conn, schema: str | None = None) -> None:
+    """Ensure the ``deck_reviews`` table exists (idempotent, dialect-safe).
+
+    ``deck_reviews`` stores content-addressed deck-level review verdicts, keyed
+    by ``(deck_id, deck_digest)``.  The store functions live in
+    :mod:`src.services.deck_review_store`; the ORM model is in
+    :mod:`src.database.models.deck_review`.
+
+    NOT the thing that creates the table in production.  ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and the table is
+    an ORM model, so on every real deployment ``create_all`` has already made
+    it and this helper short-circuits on ``checkfirst``.  That is accepted and
+    has precedent — :func:`_migrate_design_system_tables`' own docstring says
+    the same.  What it still earns: databases provisioned before this table
+    existed, test paths that drive the migration on its own, and explicitness
+    about what the store depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled
+    for both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    This helper emits no raw SQL — which is why it takes ``(conn, schema)``
+    rather than the full five-argument sibling signature, matching
+    :func:`_migrate_graph_checkpoints`' shape.  Schema qualification comes from
+    ``Table.schema`` below.  Should a raw statement ever be needed HERE, it
+    must take ``_qual`` and use it, like every other sibling in this module that
+    does emit raw SQL.
+    """
+    from src.database.models.deck_review import DeckReview
+
+    table = DeckReview.__table__
+    # Match init_db()'s schema handling so a qualified deployment creates the
+    # table in the Lakebase schema; guarded so it stays a no-op on repeat.
+    # NOTE: mutates the module-global Table.schema on the shared ORM metadata —
+    # intentional, and identical to what init_db() already does.
+    if schema and table.schema is None:
+        table.schema = schema
+    table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: deck_reviews table ensured")
+
+
+#: Partial index over ``spec_dirty_at IS NOT NULL`` on ``session_slide_decks``.
+#: Must match the ``Index(...)`` declared in ``src/database/models/session.py`` —
+#: ``create_all`` builds it under this name on fresh installs and
+#: :func:`_migrate_spec_dirty_marker` builds it under the same name on
+#: already-provisioned databases, so both paths converge on one schema.
+_SPEC_DIRTY_INDEX = "ix_session_slide_decks_spec_dirty_at"
+
+
+def _migrate_spec_dirty_marker(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add the three spec-dirty columns to ``session_slide_decks`` (idempotent).
+
+    Adds ``spec_dirty_at``, ``spec_dirty_by``, and ``spec_dirty_claimed_at`` — all
+    nullable — to an already-provisioned ``session_slide_decks`` table.  Also creates
+    the partial index ``ix_session_slide_decks_spec_dirty_at`` on PostgreSQL so the
+    sweeper's "find dirty decks" query touches only the small dirty subset rather than
+    the full table.
+
+    Unlike its two siblings :func:`_migrate_graph_checkpoints` and
+    :func:`_migrate_deck_reviews`, this helper genuinely is the only thing that adds
+    these columns to an already-provisioned database.  Both siblings create brand-new
+    tables, so ``create_all`` runs first and their helpers always short-circuit on
+    ``checkfirst``.  ``create_all`` does NOT ALTER existing tables — it only creates
+    missing ones — so for a database provisioned before B2.3 landed, the columns are
+    absent until this migration runs.  On a fresh install ``create_all`` adds them
+    via the ORM model and the ``ALTER`` statements below are no-ops (the idempotence
+    guard skips them).
+
+    Why three columns, why here.  The marker lives on ``session_slide_decks`` because
+    it never needs to outlive the deck row.  ``spec_dirty_by`` is the identity
+    decision: a sweeper tick has no HTTP request, so ``get_current_user()`` returns
+    ``None`` and the Databricks client factory fails closed in production (SDR-4437
+    HIGH-6 removed the SP fallback outside non-prod).  Recording the marker's author
+    gives the arc review's write a real ``modified_by``, gives cost attribution a real
+    user (PRD §8.1), and carries a permission provenance that was already checked on
+    that human's route — with no new identity concept and no stored credential.
+    ``spec_dirty_claimed_at`` is the storage slot for the worker lease: the sweeper
+    claims a deck by writing this timestamp, and a later worker skips any deck where it
+    is already set.  The column alone does not provide mutual exclusion — that requires
+    a conditional ``UPDATE … WHERE id = ? AND spec_dirty_claimed_at IS NULL`` in the
+    sweeper, where a rowcount of 0 means another worker already claimed the deck.  That
+    write belongs to the sweeper implementation (a later PR), not to this schema.
+
+    NOT deck presentation state: these columns are deliberately absent from
+    ``get_slide_deck``'s returned dict.
+
+    The partial index (PostgreSQL only) is also declared on the ORM model in
+    ``src/database/models/session.py`` with both ``postgresql_where`` and
+    ``sqlite_where`` so ``create_all`` emits it on fresh databases of either dialect.
+    This helper creates it on already-provisioned PostgreSQL databases only.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)}
+    except Exception:
+        cols = set()
+
+    if cols:
+        qualified = _qual("session_slide_decks")
+        for col_name, col_def in (
+            ("spec_dirty_at", "TIMESTAMP NULL"),
+            ("spec_dirty_by", "VARCHAR(255) NULL"),
+            ("spec_dirty_claimed_at", "TIMESTAMP NULL"),
+        ):
+            if col_name not in cols:
+                logger.info("Migration: adding %s to session_slide_decks", col_name)
+                conn.execute(text(
+                    f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"
+                ))
+
+    # --- Partial index (PostgreSQL only) ---
+    # SQLite: the ORM model's sqlite_where declaration already builds the index via
+    # create_all on fresh databases; altering an existing SQLite DB to add a partial
+    # index requires recreating the table, which is not worth doing here.
+    if is_sqlite:
+        return
+
+    # Use a FRESH inspector: the shared one caches its reflection from before the
+    # columns may have been added earlier in this same migration transaction.
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        insp = sa_inspect(conn)
+        indexes = insp.get_indexes("session_slide_decks", schema=schema)
+    except Exception:
+        return  # table absent on this deploy
+
+    if any(ix.get("name") == _SPEC_DIRTY_INDEX for ix in indexes):
+        return  # already present
+
+    logger.info("Migration: creating partial index %s on session_slide_decks", _SPEC_DIRTY_INDEX)
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"CREATE INDEX {_SPEC_DIRTY_INDEX} "
+                f"ON {_qual('session_slide_decks')} (spec_dirty_at) "
+                f"WHERE spec_dirty_at IS NOT NULL"
+            ))
+    except Exception:
+        logger.warning(
+            "Migration: could not create %s; dirty-deck sweeper will fall back to a "
+            "full-table scan until the index is created",
+            _SPEC_DIRTY_INDEX,
+            exc_info=True,
+        )
+
+
+#: The two retired per-profile prompt-override columns on ``config_prompts``.
+#: Prompts are assembled from ``src.core.prompt_modules``; a per-profile override no
+#: longer takes effect, and the ORM declarations were removed in the task before this
+#: one (see ``src/database/models/prompts.py``).
+_RETIRED_CONFIG_PROMPT_COLUMNS = ("system_prompt", "slide_editing_instructions")
+
+
+def _migrate_drop_config_prompt_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Drop the two retired override columns from ``config_prompts`` (idempotent).
+
+    Removes ``system_prompt`` and ``slide_editing_instructions``. Unlike
+    :func:`_migrate_graph_checkpoints` and :func:`_migrate_deck_reviews` — which
+    create brand-new tables that ``create_all`` has already made in production, so
+    their helpers short-circuit there — this helper is the ONLY thing that removes
+    these columns from an already-provisioned database. ``create_all`` creates
+    missing TABLES; it neither alters nor drops, so it cannot retire a column. On a
+    fresh database the columns were never created (the ORM no longer declares them)
+    and the presence guard below makes this a no-op.
+
+    WHY IT MUST RUN HERE, AND MUST NOT BE MOVED LATER IN STARTUP. Both columns are
+    ``Text NOT NULL`` with NO DEFAULT, and the ORM declarations are gone, so nothing
+    supplies a value any more: on a database that still HAS them, every profile
+    insert raises ``IntegrityError: NOT NULL constraint failed:
+    config_prompts.system_prompt`` on SQLite, and ``IntegrityError
+    (psycopg2.errors.NotNullViolation) null value in column "system_prompt"`` on
+    PostgreSQL — both measured, the latter against local PostgreSQL 14.20 on a
+    throwaway database. The drop therefore has to happen
+    before anything creates a profile. Inside ``_run_migrations`` it does:
+    ``_run_migrations`` is reached from :func:`init_db`, which
+    ``run.py::init_database`` calls before ``seed_defaults()``. Relocating this step
+    to any point after seeding would fail on the first boot against an existing
+    database. (The companion blob strip, ``src.core.strip_retired_prompt_keys``, is
+    a different step and deliberately runs LAST in ``init_database``; the two
+    orderings hold simultaneously.)
+
+    A failed DROP is deliberately NOT swallowed. If the columns survive, every
+    profile insert on that database is broken, so a loud ``SystemExit(1)`` at
+    startup is better than a boot that looks healthy and then 500s on the first
+    profile write.
+
+    ``is_sqlite`` is accepted for the five-argument house signature and is
+    deliberately unused: ``ALTER TABLE … DROP COLUMN`` is valid on PostgreSQL and on
+    SQLite >= 3.35 (this environment ships 3.51.0), and neither column is indexed,
+    which is the one case SQLite refuses. Schema qualification comes from ``_qual``
+    like every other raw-SQL helper in this module.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist. The
+    # shared inspector is safe here: no earlier step in _run_migrations reflects or
+    # alters config_prompts, so this reflection is read fresh inside the migration
+    # transaction rather than from a stale cache.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("config_prompts", schema=schema)}
+    except Exception:
+        cols = set()
+
+    for col_name in _RETIRED_CONFIG_PROMPT_COLUMNS:
+        if col_name in cols:
+            logger.info("Migration: dropping config_prompts.%s", col_name)
+            conn.execute(text(
+                f"ALTER TABLE {_qual('config_prompts')} DROP COLUMN {col_name}"
+            ))
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
@@ -871,6 +1165,7 @@ def _migrate_uncap_brand_text_columns(
 #: name on fresh installs and this migration builds it under the same name on
 #: already-provisioned ones, so the two paths converge on one schema.
 _DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
+
 
 
 def _migrate_design_system_partial_name_index(

@@ -200,7 +200,7 @@ const ViewerBody = forwardRef<
 
   const unseenSlideIndices = useMemo(() => {
     const set = new Set<number>();
-    for (const f of visible) if (!seen.has(f.id)) set.add(f.slideIndex);
+    for (const f of visible) if (f.status !== 'fixed' && !seen.has(f.id)) set.add(f.slideIndex);
     return set;
   }, [visible, seen]);
 
@@ -522,7 +522,7 @@ const ViewerBody = forwardRef<
         </div>
         <FeedbackDrawer
           findings={currentFindings}
-          hasUnseen={currentFindings.some(f => !seen.has(f.id))}
+          hasUnseen={currentFindings.some(f => f.status !== 'fixed' && !seen.has(f.id))}
           callbacks={{ ...callbacks, onDismissFinding: handleDismiss }}
         />
       </div>

@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.defaults import DEFAULT_CONFIG
 from src.core.permission_context import get_permission_context
 from src.database.models import (
     ConfigGenieSpace,
@@ -203,8 +202,6 @@ class ProfileService:
         # Use default prompts with default slide style
         prompts = ConfigPrompts(
             profile_id=profile.id,
-            system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
-            slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
             selected_slide_style_id=default_style.id if default_style else None,
         )
         self.db.add(prompts)
@@ -408,8 +405,6 @@ class ProfileService:
         prompts_config = prompts or {}
         prompts_record = ConfigPrompts(
             profile_id=profile.id,
-            system_prompt=prompts_config.get("system_prompt") or DEFAULT_CONFIG["prompts"]["system_prompt"],
-            slide_editing_instructions=prompts_config.get("slide_editing_instructions") or DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
             selected_deck_prompt_id=prompts_config.get("selected_deck_prompt_id"),
             selected_slide_style_id=prompts_config.get("selected_slide_style_id"),
         )
@@ -489,8 +484,6 @@ class ProfileService:
         # Copy prompts
         prompts = ConfigPrompts(
             profile_id=profile.id,
-            system_prompt=source_profile.prompts.system_prompt,
-            slide_editing_instructions=source_profile.prompts.slide_editing_instructions,
             selected_deck_prompt_id=source_profile.prompts.selected_deck_prompt_id,
             selected_slide_style_id=source_profile.prompts.selected_slide_style_id,
         )

@@ -1,0 +1,26 @@
+{
+  "slide_index": 0,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "overflow:a3f8b2c1d4e5f6a7:0",
+      "slide_index": 0,
+      "category": "design",
+      "criterion": "overflow",
+      "message": "The pipeline topology map extends 8px beyond the right edge of the slide frame (frame width 1920px, element right edge 1928px). Scale or clip the map to fit within the frame.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    },
+    {
+      "id": "brief_not_delivered:a3f8b2c1d4e5f6a7:0",
+      "slide_index": 0,
+      "category": "content",
+      "criterion": "brief_not_delivered",
+      "message": "The content brief asked for the per-domain incident breakdown (3 domains, H1 counts). The current slide shows only the aggregate total of 11 incidents without the domain-level split.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

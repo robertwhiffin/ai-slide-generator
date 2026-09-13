@@ -7,7 +7,6 @@ from typing import Annotated, Any, Final, Literal, Optional, Union
 from pydantic import (
     BaseModel,
     Field,
-    field_validator,
     model_serializer,
     model_validator,
 )
@@ -94,15 +93,10 @@ class AgentConfig(BaseModel):
     # to that design system, so a stale pin can never fail a request.
     template_id: Optional[int] = None
     deck_prompt_id: Optional[int] = None
-    system_prompt: Optional[str] = None
-    slide_editing_instructions: Optional[str] = None
-
-    @field_validator("system_prompt", "slide_editing_instructions")
-    @classmethod
-    def must_be_nonempty_if_set(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and v.strip() == "":
-            raise ValueError("Must be non-empty if provided")
-        return v
+    # RETIRED: system_prompt / slide_editing_instructions per-profile overrides.
+    # Prompts are assembled from src.core.prompt_modules; a stored override no
+    # longer takes effect. Unknown keys on an older persisted blob are ignored
+    # by this model, so no read path breaks.
 
     @model_validator(mode="after")
     def no_duplicate_tools(self) -> "AgentConfig":

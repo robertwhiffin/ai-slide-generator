@@ -120,6 +120,28 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to ensure encryption key: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Retired prompt overrides: strip 'system_prompt' and
+    # 'slide_editing_instructions' out of every stored agent_config blob. The
+    # physical columns are dropped inside init_db()'s migration chain, early,
+    # because a database that still has them cannot insert a profile; the BLOB
+    # strip runs LAST, deliberately — it is the one position no later step can
+    # undo by writing a fresh blob (seed_defaults above creates profiles).
+    # A blob that will not parse is logged and skipped, never raised, so one bad
+    # row cannot abort startup; anything else here is SystemExit(1) like the five
+    # steps above.
+    logger.info("Stripping retired prompt keys from agent_config blobs...")
+    try:
+        from src.core.database import get_session_local
+        from src.core.strip_retired_prompt_keys import strip_retired_prompt_keys
+
+        stripped = strip_retired_prompt_keys(get_session_local())
+        if stripped:
+            logger.info(f"Stripped retired prompt keys from {stripped} row(s)")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to strip retired prompt keys from agent_config: {e}\n{tb}")
+        raise SystemExit(1) from e
+
 
 def main() -> None:
     """Start the uvicorn server."""

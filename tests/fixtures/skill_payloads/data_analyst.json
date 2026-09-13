@@ -1,0 +1,14 @@
+{
+  "outcome": "success",
+  "synthesis": "The streaming migration reduced median end-to-end latency from 4.8 h to 1.8 h (62% reduction) in Q3. Two sources corroborate: the pipeline metrics dashboard shows 1.8 h median for Q3 against a Q1-Q2 baseline of 4.8 h, and the cloud cost report attributes the 18% per-job spend reduction largely to eliminated reprocessing triggered by missed SLAs. The incident tracker independently confirms 0 data-loss incidents in Q3 versus 11 in H1. No single source covers all four metrics, so synthesis across three sources is required.",
+  "sources": [
+    "pipeline-metrics-dashboard/Q1-Q2-baseline",
+    "pipeline-metrics-dashboard/2024-Q3-report",
+    "cloud-cost-report-2024Q3",
+    "incident-tracker/Q1-Q2-summary",
+    "incident-tracker/Q3-summary"
+  ],
+  "gap": "The legacy domain migration completed in week 9 of Q3; its post-migration latency measurement covers only 3 of 13 weeks and may not represent steady-state performance.",
+  "tried_tools": ["query_sql_warehouse", "read_lakeview_dashboard"],
+  "reason": null
+}
