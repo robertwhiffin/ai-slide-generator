@@ -467,6 +467,82 @@ class TestExtractSection:
         # Must NOT have a second <section> wrapping the first
         assert result.count("<section") == 1
 
+    def test_promoting_tag_parent_of_multiple_slides_not_added_as_wrapper(self):
+        """A promoting tag (<article>) with MULTIPLE slide children is not added.
+
+        When <article> contains more than one class='slide' element, find_slide_roots
+        does NOT promote (the sole-child precondition fails).  The individual
+        <section class='slide'> roots are returned, and their parent (<article>) is
+        in SLIDE_WRAPPER_TAGS — so _reparent_if_needed must stop before adding it.
+
+        Without the `if el.name in SLIDE_WRAPPER_TAGS: break` guard, `<article>` is
+        incorrectly added as a non-promoting wrapper.  This test goes red when those
+        two lines are deleted from _reparent_if_needed.
+
+        Sabotage target: delete `if el.name in SLIDE_WRAPPER_TAGS: break` from the
+        `while` loop body.  The guard is at the FIRST check inside the loop, on the
+        executed path for any root whose immediate parent is a promoting tag.
+
+        Expected values measured against shipped code (coordinator-verified):
+        """
+        from src.services.template_sections import extract_section
+
+        # Two slides under <article> — article has multiple children, no promotion
+        article_multi = (
+            "<article>"
+            "<section class='slide'>S1</section>"
+            "<section class='slide'>S2</section>"
+            "</article>"
+        )
+
+        r0 = extract_section(article_multi, 0)
+        r1 = extract_section(article_multi, 1)
+
+        # Must be bare sections — <article> must NOT appear
+        assert r0 == "<section class='slide'>S1</section>", (
+            f"slide 0 must be bare (no <article>), got: {r0!r}"
+        )
+        assert r1 == "<section class='slide'>S2</section>", (
+            f"slide 1 must be bare (no <article>), got: {r1!r}"
+        )
+
+    def test_non_promoting_tag_with_multiple_slides_is_added_as_wrapper(self):
+        """<main> with multiple slides IS added (contrast to <article> case above).
+
+        <main> is NOT in SLIDE_WRAPPER_TAGS, so the guard does not fire.
+        The slide is re-parented inside <main> with siblings stripped.
+        """
+        from src.services.template_sections import extract_section
+
+        main_multi = (
+            "<main>"
+            "<section class='slide'>S1</section>"
+            "<section class='slide'>S2</section>"
+            "</main>"
+        )
+        r0 = extract_section(main_multi, 0)
+        assert r0 == "<main><section class='slide'>S1</section></main>", (
+            f"slide 0 must include <main> wrapper, got: {r0!r}"
+        )
+
+    def test_promoting_tag_sole_child_is_promoted_root_returned_verbatim(self):
+        """<article> wrapping a sole slide IS the promoted root; returned verbatim.
+
+        find_slide_roots promotes the <article> to the root (sole-child rule).
+        No re-parenting is needed — the root itself has no non-promoting ancestors.
+        """
+        from src.services.template_sections import extract_section
+
+        article_sole = (
+            "<article>"
+            "<section class='slide'>Only</section>"
+            "</article>"
+        )
+        result = extract_section(article_sole, 0)
+        assert result == article_sole, (
+            f"Expected verbatim <article>...</article>, got: {result!r}"
+        )
+
     def test_promoted_wrapper_extracted_verbatim(self):
         """A <section> that wraps a sole <div class='slide'> is promoted.
 
