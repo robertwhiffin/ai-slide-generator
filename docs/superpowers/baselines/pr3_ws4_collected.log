@@ -96,8 +96,8 @@ SECTION 2b — POST-ws4b  (THIS is what ws4c, ws4d and ws4e build on)
 Measured 2026-09-13 on branch `feat/ws4b-contracts-and-schema` with all of ws4b applied,
 with no application server running (same conditions as Sections 1 and 2).
 
-    3 failed, 4570 passed, 8 skipped, 135 warnings in 437.32s
-    COLLECTED: 4581
+    3 failed, 4578 passed, 8 skipped, 135 warnings in 407.90s
+    COLLECTED: 4589
 
 CAUSES: IDENTICAL to Sections 1 and 2. Same three tests, same four assertion strings, verbatim.
   No new cause. No change to the deploy-autoscaling cause. Both of its DISTINCT assertion
@@ -105,7 +105,7 @@ CAUSES: IDENTICAL to Sections 1 and 2. Same three tests, same four assertion str
     assert 'provisioned' == 'autoscaling'
     Expected '_get_or_create_lakebase_provisioned' to have been called once. Called 0 times.
 
-DELTA: +358 collected (4223 -> 4581), reconciled EXACTLY. Counts taken per file with
+DELTA: +366 collected (4223 -> 4589), reconciled EXACTLY. Counts taken per file with
 `--collect-only -q`, as this file requires:
     + 31  tests/unit/test_finding_schema.py                 (B1.1)
     + 32  tests/unit/test_deck_spec.py                      (B1.4)
@@ -123,10 +123,14 @@ DELTA: +358 collected (4223 -> 4581), reconciled EXACTLY. Counts taken per file 
     + 21  tests/unit/test_deck_css_aggregator.py            (B3.3)
     + 20  tests/unit/test_deck_read_path_keys.py            (B3.2)
     ----
-    +367  added across 15 new files
+    +  4  tests/unit/test_verification_conformance.py   (final-review fix C1, shared verdict slot)
+    +  3  tests/unit/test_deck_css_aggregator.py        (final-review fix C2, single-quoted at-rules)
+    +  1  tests/unit/test_deck_level_writer.py          (final-review fix, stale-lock split)
+    ----
+    +375  added across 15 new files, including the final-review fix wave
     -  9  DELETED, every one named below
     ----
-    +358  net, matching the measured delta exactly
+    +366  net, matching the measured delta exactly (4223 -> 4589)
 
   CLAUSE 3 CHECKED PROPERLY, not by count. The nine deletions were enumerated by diffing the
   test tree for removed `def test_` lines; ZERO test files were deleted. All nine are named in

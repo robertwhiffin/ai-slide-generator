@@ -397,6 +397,87 @@ class TestTopOfSheetRehoist:
         assert aggregate_deck_css(legacy_stored_css, [], None) == legacy_stored_css
 
 
+class TestRehoistWhenTheBlockIsNotLocatableVerbatim:
+    """The not-locatable path must still hoist, not hand back the broken sheet.
+
+    Measured trigger: ``block.text`` is tinycss2's RE-SERIALISATION, and a
+    single-quoted string comes back double-quoted, so ``remainder.find(block.text)``
+    misses.  Probed on this fixture before the fix, ``aggregate_deck_css`` returned
+    the sheet unchanged: ``@import`` at index 129, the prepended ``:root { ... }``
+    at 100 — i.e. the ``@import`` sat AFTER a qualified rule, the exact ordering a
+    browser silently ignores, losing the brand stylesheet.  The double-quoted twin
+    hoisted to index 0.
+
+    The fold is what normalises the quotes, so the trigger needs a sheet that
+    reaches the re-hoist unmerged: STORED css with nothing emitted this turn (a
+    legacy deck's save), plus a ``token_css`` that makes the backstop prepend.
+    """
+
+    SINGLE_TOKEN_CSS = ":root { --brand-fg: #111; }"
+    STORED_SINGLE_QUOTED = (
+        "@import url('brand.css');\n"
+        "section.slide { padding: 64px; color: var(--brand-fg); }"
+    )
+    STORED_DOUBLE_QUOTED = (
+        '@import url("brand.css");\n'
+        "section.slide { padding: 64px; color: var(--brand-fg); }"
+    )
+
+    def test_a_single_quoted_import_is_prepended_ahead_of_every_rule(self, caplog):
+        with caplog.at_level(logging.WARNING, logger=deck_css_aggregator.__name__):
+            result = aggregate_deck_css(
+                self.STORED_SINGLE_QUOTED, [], self.SINGLE_TOKEN_CSS
+            )
+
+        # The backstop really did prepend — otherwise this proves nothing.
+        assert _TOKEN_CSS_REEMIT_MARKER in result
+        assert "--brand-fg: #111" in result
+
+        import_pos = result.index("@import")
+        assert import_pos == 0, f"@import is not first:\n{result}"
+        # Ahead of the backstop's comment marker, its :root rule, AND the deck's
+        # own qualified rule. Each of the three is enough to make a browser drop
+        # the @import.
+        assert import_pos < result.index(_TOKEN_CSS_REEMIT_MARKER)
+        assert import_pos < result.index(":root")
+        assert import_pos < result.index("section.slide")
+
+        # The brand stylesheet is still referenced and the deck CSS survived.
+        assert "brand.css" in result
+        assert "padding: 64px" in result
+
+        # Not silent: it says what it did, not that it gave up.
+        assert "prepended a normalised copy" in caplog.text
+
+    def test_the_double_quoted_twin_still_hoists_by_excision(self, caplog):
+        """The locatable path is unchanged: hoisted, and NOT duplicated."""
+        with caplog.at_level(logging.WARNING, logger=deck_css_aggregator.__name__):
+            result = aggregate_deck_css(
+                self.STORED_DOUBLE_QUOTED, [], self.SINGLE_TOKEN_CSS
+            )
+
+        assert result.index("@import") == 0, f"@import is not first:\n{result}"
+        assert result.index("@import") < result.index(_TOKEN_CSS_REEMIT_MARKER)
+        assert result.index("@import") < result.index("section.slide")
+        assert result.count("@import") == 1, (
+            f"the locatable block was excised, so it must appear once:\n{result}"
+        )
+        assert caplog.text == ""
+
+    def test_a_single_quoted_charset_is_prepended_too(self, caplog):
+        stored = (
+            "@charset 'utf-8';\n"
+            "section.slide { padding: 64px; color: var(--brand-fg); }"
+        )
+        with caplog.at_level(logging.WARNING, logger=deck_css_aggregator.__name__):
+            result = aggregate_deck_css(stored, [], self.SINGLE_TOKEN_CSS)
+
+        assert result.index("@charset") == 0, f"@charset is not first:\n{result}"
+        assert result.index("@charset") < result.index(_TOKEN_CSS_REEMIT_MARKER)
+        assert result.index("@charset") < result.index("section.slide")
+        assert "prepended a normalised copy" in caplog.text
+
+
 class TestSemanticIdempotence:
     """Re-running the pipeline on its own output is stable — SEMANTICALLY.
 

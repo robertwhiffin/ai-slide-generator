@@ -8,12 +8,13 @@ carries only what ws4b changed, decided, or measured, all of which your plan pre
 
 ## 1. Where things stand
 
-- **ws4b is complete: 28 commits, all 16 tasks built, reviewed and fixed**, on
-  `feat/ws4b-contracts-and-schema`. It is merged into `feat/langgraph-core` (see §7 for the merge
-  commit, which carries the Definition-of-Done record).
+- **ws4b is complete: 31 commits, all 16 tasks built, reviewed and fixed**, on
+  `feat/ws4b-contracts-and-schema`. It is merged into `feat/langgraph-core` with `--no-ff`, and
+  **that merge commit carries ws4b's Definition-of-Done record** -- the obligations a PR description
+  would normally hold. Read `git show <merge> --no-patch`.
 - **This branch WAS pushed** — the first ws4 branch to be. That was needed to publish a dev wheel;
   see §6.
-- Suite: **3 failed, 4570 passed, 8 skipped, 4581 collected.** The three failures are the two
+- Suite: **3 failed, 4578 passed, 8 skipped, 4589 collected.** The three failures are the two
   pre-existing causes recorded in `docs/superpowers/baselines/pr3_ws4_collected.log`, whose
   **Section 2b is now your baseline** — Section 2 is ws4b's, and its header says so.
 - **ws4b was verified against real Lakebase**, the first in this workstream. §6.
