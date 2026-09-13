@@ -377,19 +377,24 @@ class TestTopOfSheetRehoist:
             < result.index(_TOKEN_CSS_REEMIT_MARKER)
         )
 
-    def test_a_sheet_already_in_order_is_returned_byte_identical(self):
-        """The re-hoist is a no-op unless the backstop moved something.
+    def test_an_already_ordered_sheet_is_not_reformatted(self):
+        """The no-op guard, asserted where its firing IS observable.
 
-        (The compliant-deck test asserts the same thing end-to-end; this one
-        names the reason, so a re-hoist that reformatted every save would fail
-        here with a clear cause.)
+        A save with nothing emitted and no token stylesheet (a legacy deck) hands
+        the deck's STORED CSS straight to the re-hoist, whitespace and all. This
+        fixture separates its blocks with single newlines, which the excision-and-
+        reconstruction path cannot reproduce — it joins with a blank line — so
+        bypassing the guard rewrites the bytes of a sheet that needed no change.
+        A merged sheet is already "\\n\\n"-separated and would round-trip either
+        way, which is why this test does not use one.
         """
-        already_ordered = merge_css(DECK_CSS_WITHOUT_TOKENS, EMITTED_STYLE_BLOCK)
-
-        assert already_ordered.startswith('@import url("brand.css");')
-        assert aggregate_deck_css(DECK_CSS_WITHOUT_TOKENS, [EMITTED_STYLE_BLOCK], None) == (
-            already_ordered
+        legacy_stored_css = (
+            '@charset "utf-8";\n'
+            '@import url("brand.css");\n'
+            "section.slide { color: red; }"
         )
+
+        assert aggregate_deck_css(legacy_stored_css, [], None) == legacy_stored_css
 
 
 class TestSemanticIdempotence:
