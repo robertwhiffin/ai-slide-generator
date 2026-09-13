@@ -595,6 +595,14 @@ def _run_migrations(engine, schema: str | None = None):
         # in the same boot instead of being left owned by the app's service principal.
         _migrate_spec_dirty_marker(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- retired prompt overrides: drop config_prompts.system_prompt and
+        # --- .slide_editing_instructions ---
+        # ORDERING: must stay INSIDE _run_migrations (i.e. before seed_defaults(),
+        # which init_database calls after init_db()) — see the helper's docstring.
+        # Also stays BEFORE _reassign_new_objects_to_shared_owner below, like its
+        # three siblings.
+        _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
@@ -801,6 +809,73 @@ def _migrate_spec_dirty_marker(
             _SPEC_DIRTY_INDEX,
             exc_info=True,
         )
+
+
+#: The two retired per-profile prompt-override columns on ``config_prompts``.
+#: Prompts are assembled from ``src.core.prompt_modules``; a per-profile override no
+#: longer takes effect, and the ORM declarations were removed in the task before this
+#: one (see ``src/database/models/prompts.py``).
+_RETIRED_CONFIG_PROMPT_COLUMNS = ("system_prompt", "slide_editing_instructions")
+
+
+def _migrate_drop_config_prompt_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Drop the two retired override columns from ``config_prompts`` (idempotent).
+
+    Removes ``system_prompt`` and ``slide_editing_instructions``. Unlike
+    :func:`_migrate_graph_checkpoints` and :func:`_migrate_deck_reviews` — which
+    create brand-new tables that ``create_all`` has already made in production, so
+    their helpers short-circuit there — this helper is the ONLY thing that removes
+    these columns from an already-provisioned database. ``create_all`` creates
+    missing TABLES; it neither alters nor drops, so it cannot retire a column. On a
+    fresh database the columns were never created (the ORM no longer declares them)
+    and the presence guard below makes this a no-op.
+
+    WHY IT MUST RUN HERE, AND MUST NOT BE MOVED LATER IN STARTUP. Both columns are
+    ``Text NOT NULL`` with NO DEFAULT, and the ORM declarations are gone, so nothing
+    supplies a value any more: on a database that still HAS them, every profile
+    insert raises ``IntegrityError: NOT NULL constraint failed:
+    config_prompts.system_prompt`` on SQLite, and ``IntegrityError
+    (psycopg2.errors.NotNullViolation) null value in column "system_prompt"`` on
+    PostgreSQL — both measured, the latter against local PostgreSQL 14.20 on a
+    throwaway database. The drop therefore has to happen
+    before anything creates a profile. Inside ``_run_migrations`` it does:
+    ``_run_migrations`` is reached from :func:`init_db`, which
+    ``run.py::init_database`` calls before ``seed_defaults()``. Relocating this step
+    to any point after seeding would fail on the first boot against an existing
+    database. (The companion blob strip, ``src.core.strip_retired_prompt_keys``, is
+    a different step and deliberately runs LAST in ``init_database``; the two
+    orderings hold simultaneously.)
+
+    A failed DROP is deliberately NOT swallowed. If the columns survive, every
+    profile insert on that database is broken, so a loud ``SystemExit(1)`` at
+    startup is better than a boot that looks healthy and then 500s on the first
+    profile write.
+
+    ``is_sqlite`` is accepted for the five-argument house signature and is
+    deliberately unused: ``ALTER TABLE … DROP COLUMN`` is valid on PostgreSQL and on
+    SQLite >= 3.35 (this environment ships 3.51.0), and neither column is indexed,
+    which is the one case SQLite refuses. Schema qualification comes from ``_qual``
+    like every other raw-SQL helper in this module.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist. The
+    # shared inspector is safe here: no earlier step in _run_migrations reflects or
+    # alters config_prompts, so this reflection is read fresh inside the migration
+    # transaction rather than from a stale cache.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("config_prompts", schema=schema)}
+    except Exception:
+        cols = set()
+
+    for col_name in _RETIRED_CONFIG_PROMPT_COLUMNS:
+        if col_name in cols:
+            logger.info("Migration: dropping config_prompts.%s", col_name)
+            conn.execute(text(
+                f"ALTER TABLE {_qual('config_prompts')} DROP COLUMN {col_name}"
+            ))
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
