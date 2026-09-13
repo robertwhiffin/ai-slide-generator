@@ -137,3 +137,30 @@ def test_safety_rebuild_notice_message_has_timestamp():
     # ...and every message validates against MessageResponse (timestamp required).
     for m in result["messages"]:
         MessageResponse(**m)  # raises ValidationError if timestamp is missing
+
+
+# ---------------------------------------------------------------------------
+# Graph-path equivalents — gate_emitted_html (AISEC-248)
+# ---------------------------------------------------------------------------
+
+def test_graph_gate_hard_fail_raises_unsafe_content_error():
+    """Graph-path: hard-fail surfaces as UnsafeContentError (same as monolith)."""
+    from src.services.agent import UnsafeContentError
+    from src.utils.graph_safety import gate_emitted_html
+
+    unsafe = '<script>fetch("https://evil")</script>'
+    with pytest.raises(UnsafeContentError):
+        gate_emitted_html(unsafe, regenerate=lambda: unsafe, session_id="s1")
+
+
+def test_graph_gate_unsafe_content_error_message_is_generic():
+    """Graph-path: UnsafeContentError message names no payload detail."""
+    from src.services.agent import UnsafeContentError
+    from src.utils.graph_safety import gate_emitted_html
+
+    unsafe = '<script>fetch("https://evil")</script>'
+    try:
+        gate_emitted_html(unsafe, regenerate=lambda: unsafe, session_id="s1")
+    except UnsafeContentError as e:
+        assert "disallowed content" in str(e)
+        assert "evil" not in str(e)  # no payload echoed back
