@@ -7,8 +7,22 @@ backend silently omits.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+
+from src.api.services.session_manager import (
+    _merge_verdict_slots,
+    _merge_verification_record,
+)
+from src.api.services.slide_repository import is_placeholder_record
+from src.domain.finding import (
+    VERDICT_KEY,
+    Finding,
+    build_verification_record,
+    findings_from_record,
+    make_finding_id,
+)
 
 REPO_ROOT = Path(__file__).parents[2]
 VERIFICATION_TS = REPO_ROOT / "frontend" / "src" / "types" / "verification.ts"
@@ -17,6 +31,23 @@ VERIFICATION_TS = REPO_ROOT / "frontend" / "src" / "types" / "verification.ts"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _judge_payload() -> dict:
+    """The flat LLM-judge verdict — every field VerificationResult requires.
+
+    Not a pydantic model: a plain dict, exactly as the judge path serialises it
+    into the per-hash slot of a verification record.
+    """
+    return {
+        "score": 0.9,
+        "rating": "green",
+        "explanation": "No issues detected.",
+        "issues": [],
+        "duration_ms": 150,
+        "error": False,
+    }
+
 
 def _read_ts() -> str:
     return VERIFICATION_TS.read_text()
@@ -121,31 +152,31 @@ class TestVerificationConformance:
         Simulates what get_slide_deck would produce and confirms the frontend's
         required fields are all present.  Fails when a new required field is added
         to VerificationResult without a matching backend emit.
-        """
-        from src.domain.finding import VERDICT_KEY
 
+        RESOLVED WHERE THE READ PATH RESOLVES — ``record[content_hash]``, which is
+        what ``get_slide_deck`` assigns to ``slide["verification"]`` (the row branch
+        does ``verification_data.get(content_hash)``; the blob branch does
+        ``verification_map.get(content_hash)``).  An earlier version of this test
+        resolved at ``record[content_hash][VERDICT_KEY]`` — one level BELOW the read
+        path — and therefore passed while the record the frontend actually received
+        supplied none of the required fields.
+        """
         ts_src = _read_ts()
         fields = _extract_interface_fields(ts_src, "VerificationResult")
         required_fields = {name for name, req in fields.items() if req}
 
-        # Minimal payload: the keys the backend emits into a verification record.
-        # This is NOT a pydantic model — it is a plain dict that represents what
-        # session_manager serialises into verification_map and the frontend reads.
-        minimal_payload = {
-            "score": 0.9,
-            "rating": "green",
-            "explanation": "No issues detected.",
-            "issues": [],
-            "duration_ms": 150,
-            "error": False,
-        }
-
-        # Wrap in the {content_hash: {VERDICT_KEY: {...}}} shape.
         content_hash = "deadbeef"
-        record = {content_hash: {VERDICT_KEY: {"verdict": "clean", "findings": [], **minimal_payload}}}
+        record = _merge_verdict_slots(
+            {content_hash: _judge_payload()},
+            build_verification_record(
+                content_hash=content_hash,
+                findings=[],
+                verdict="clean",
+            ),
+        )
 
-        # Resolve: the frontend reads the payload from the VERDICT_KEY entry.
-        resolved_payload = record[content_hash][VERDICT_KEY]
+        # Resolve exactly as the read path does.
+        resolved_payload = record[content_hash]
 
         missing = required_fields - set(resolved_payload.keys())
         assert not missing, (
@@ -153,3 +184,133 @@ class TestVerificationConformance:
             f"Backend payload keys: {sorted(resolved_payload.keys())}.\n"
             f"The backend must emit these fields or the frontend will receive undefined."
         )
+
+
+# ---------------------------------------------------------------------------
+# The per-hash slot is SHARED — judge payload and review payload must coexist
+# ---------------------------------------------------------------------------
+
+class TestSharedPerHashVerdictSlot:
+    """``record[content_hash]`` is written by TWO producers and must keep both.
+
+    * the LLM judge writes the flat payload ``frontend/src/types/verification.ts``
+      requires (score/rating/explanation/issues/duration_ms/error);
+    * the graph reviewer writes ``build_verification_record``'s
+      ``{VERDICT_KEY: {verdict, findings}}``.
+
+    Both land in the SAME slot, because the read path assigns the whole per-hash
+    dict to ``slide["verification"]``.  A hash-level ``dict.update`` therefore let
+    whichever producer wrote second delete the other's payload outright: a review
+    write left the slot with keys ``['tellr_review']`` (``rating`` gone), and a
+    judge write after a review left it with no ``tellr_review`` and no findings.
+
+    These tests drive the PRODUCTION merge (``_merge_verdict_slots``, which backs
+    both ``_merge_verification_record`` and ``write_slide_verification``) in BOTH
+    orderings, and assert after each write that BOTH producers' payloads survive.
+    Sabotaging that helper back to ``merged.update(incoming)`` turns both red.
+    """
+
+    CONTENT_HASH = "cafebabe"
+
+    def _review_record(self) -> dict:
+        return build_verification_record(
+            content_hash=self.CONTENT_HASH,
+            findings=[
+                Finding(
+                    id=make_finding_id("contrast_failure", self.CONTENT_HASH, 0),
+                    slide_index=0,
+                    category="design",
+                    criterion="contrast_failure",
+                    message="Body text fails 4.5:1 against the panel.",
+                    objective=True,
+                )
+            ],
+            verdict="surfaced",
+        )
+
+    def _assert_both_survive(self, record: dict, ordering: str) -> None:
+        # Resolve where the read path resolves: the WHOLE per-hash dict.
+        slot = record[self.CONTENT_HASH]
+
+        assert slot.get("rating") == "green", (
+            f"{ordering}: the judge's `rating` did not survive. "
+            f"Slot keys: {sorted(slot.keys())}"
+        )
+        assert slot.get("score") == 0.9, (
+            f"{ordering}: the judge's `score` did not survive. "
+            f"Slot keys: {sorted(slot.keys())}"
+        )
+        assert VERDICT_KEY in slot, (
+            f"{ordering}: `{VERDICT_KEY}` did not survive. "
+            f"Slot keys: {sorted(slot.keys())}"
+        )
+        assert slot[VERDICT_KEY]["verdict"] == "surfaced", (
+            f"{ordering}: the review verdict did not survive."
+        )
+        # Findings survive, and survive the documented reader too.
+        assert len(slot[VERDICT_KEY]["findings"]) == 1, (
+            f"{ordering}: the review findings did not survive."
+        )
+        reread = findings_from_record(record, self.CONTENT_HASH)
+        assert [f.criterion for f in reread] == ["contrast_failure"], (
+            f"{ordering}: findings_from_record could not read the findings back; "
+            f"got {reread!r}"
+        )
+
+    def test_judge_then_review_keeps_both(self) -> None:
+        record = _merge_verdict_slots(
+            {self.CONTENT_HASH: _judge_payload()}, self._review_record()
+        )
+        self._assert_both_survive(record, "judge-then-review")
+
+    def test_review_then_judge_keeps_both(self) -> None:
+        record = _merge_verdict_slots(
+            self._review_record(), {self.CONTENT_HASH: _judge_payload()}
+        )
+        self._assert_both_survive(record, "review-then-judge")
+
+    def test_the_json_round_trip_writer_keeps_both_orderings(self) -> None:
+        """Same two orderings through ``_merge_verification_record``'s JSON form.
+
+        This is the function the deck-save path calls (and it shares
+        ``_merge_verdict_slots`` with ``write_slide_verification``), so the
+        guarantee is proved on the serialised shape actually persisted.
+        """
+        judge = {self.CONTENT_HASH: _judge_payload()}
+
+        forward = _merge_verification_record(
+            _merge_verification_record(None, judge), self._review_record()
+        )
+        self._assert_both_survive(json.loads(forward), "judge-then-review (JSON)")
+
+        backward = _merge_verification_record(
+            _merge_verification_record(None, self._review_record()), judge
+        )
+        self._assert_both_survive(json.loads(backward), "review-then-judge (JSON)")
+
+    def test_a_review_write_does_not_turn_a_slide_into_a_placeholder(self) -> None:
+        """The nesting under VERDICT_KEY stays load-bearing after the deeper merge.
+
+        ``is_placeholder_record`` scans every value of the per-hash slot for
+        ``error is True``.  The judge's payload carries ``error: False``, and the
+        review's payload is nested, so a merged slot must still not read as a
+        placeholder — in either order.
+        """
+        for ordering, record in (
+            (
+                "judge-then-review",
+                _merge_verdict_slots(
+                    {self.CONTENT_HASH: _judge_payload()}, self._review_record()
+                ),
+            ),
+            (
+                "review-then-judge",
+                _merge_verdict_slots(
+                    self._review_record(), {self.CONTENT_HASH: _judge_payload()}
+                ),
+            ),
+        ):
+            assert is_placeholder_record(record) is False, f"{ordering}: {record!r}"
+            assert (
+                is_placeholder_record(record[self.CONTENT_HASH]) is False
+            ), f"{ordering} (resolved verdict): {record[self.CONTENT_HASH]!r}"

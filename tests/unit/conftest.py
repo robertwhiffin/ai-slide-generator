@@ -857,12 +857,13 @@ class _DeckWithMarker(_FixtureBase):
     something to restore to.
 
     DIRTY-COLUMN STATUS: spec_dirty_at / spec_dirty_by / spec_dirty_claimed_at
-    do NOT exist yet — they are added by a later migration task (B2.3).
-    set_marker() and set_claim() are implemented against those column names with
-    raw SQL.  Until B2.3 lands they will raise an OperationalError (column not
-    found).  Tests calling set_marker() or set_claim() must be marked xfail
-    until that migration is applied.  The fixture itself needs NO changes when
-    the migration lands — once the columns exist the raw SQL succeeds.
+    EXIST.  This same PR added them — declared on SessionSlideDeck
+    (src/database/models/session.py) and added to already-provisioned databases
+    by _migrate_spec_dirty_marker (src/core/database.py) — so set_marker() and
+    set_claim() work against a live schema and their raw SQL succeeds.  Do NOT
+    mark tests that call them xfail: they pass.  (An earlier revision of this
+    docstring said the columns were still pending migration task B2.3 and told
+    callers to xfail; that instruction is obsolete and was wrong to follow.)
 
     restore_latest_version() and restore_version(n) work right now.
     require_editing_lock passes when no lock is held (locked_by IS NULL).
@@ -896,8 +897,7 @@ class _DeckWithMarker(_FixtureBase):
     def set_marker(self, age_seconds: float = 0.0, author: str = "marker-user@example.com") -> None:
         """Set spec_dirty_at and spec_dirty_by on the deck row.
 
-        REQUIRES MIGRATION B2.3: raises OperationalError until the columns exist.
-        Tests calling this must be marked xfail until that migration lands.
+        The columns exist (see the class docstring); this works and needs no xfail.
         """
         db = self._factory()
         try:
@@ -926,8 +926,7 @@ class _DeckWithMarker(_FixtureBase):
     def set_claim(self, age_seconds: float = 0.0) -> None:
         """Set spec_dirty_claimed_at on the deck row.
 
-        REQUIRES MIGRATION B2.3: raises OperationalError until the column exists.
-        Tests calling this must be marked xfail until that migration lands.
+        The column exists (see the class docstring); this works and needs no xfail.
         """
         db = self._factory()
         try:
@@ -992,9 +991,9 @@ class _DeckWithMarker(_FixtureBase):
 def deck_with_marker():
     """UserSession + SessionSlideDeck + one committed version.
 
-    restore_latest_version() and restore_version(n) work immediately.
-    set_marker() and set_claim() require migration B2.3 — mark consuming tests
-    xfail until that migration lands.
+    restore_latest_version() and restore_version(n) work immediately.  So do
+    set_marker() and set_claim(): the three spec_dirty_* columns exist (this PR
+    added them) — do NOT mark consuming tests xfail.
 
     Surface: set_marker(age_seconds, author), set_claim(age_seconds),
              deck_row(), restore_latest_version(), restore_version(n)

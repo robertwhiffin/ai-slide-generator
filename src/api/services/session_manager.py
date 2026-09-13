@@ -234,6 +234,53 @@ def _parse_record(raw: Optional[str]) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _merge_verdict_slots(
+    base: Optional[Dict[str, Any]],
+    incoming: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge ``{content_hash: verdict}`` dicts ONE LEVEL DEEPER than ``dict.update``.
+
+    THE PER-HASH SLOT IS SHARED, AND THAT IS WHY THIS IS NOT A PLAIN UPDATE
+    -----------------------------------------------------------------------
+    Two independent producers write into ``record[content_hash]``:
+
+    * the LLM judge, whose verdict is the flat payload the frontend requires —
+      ``score``, ``rating``, ``explanation``, ``issues``, ``duration_ms``,
+      ``error`` (``frontend/src/types/verification.ts``); and
+    * the graph reviewer, whose payload is ``{VERDICT_KEY: {...}}``
+      (``build_verification_record`` in ``src/domain/finding.py``).
+
+    The read path assigns the WHOLE per-hash dict to ``slide["verification"]``,
+    so both producers' keys have to survive in it.  A hash-level
+    ``merged.update(incoming)`` replaced the whole slot, so a review write
+    deleted the judge's ``rating`` and a judge write deleted ``tellr_review``
+    (and every finding with it) — silently, and in whichever order the two
+    arrived.  Merging the slot's keys instead makes the slot genuinely shared:
+    each producer overwrites only what it actually emits.
+
+    The nesting under VERDICT_KEY is deliberately NOT flattened: it is what keeps
+    ``is_placeholder_record`` — which scans each verdict value for ``error is
+    True`` — from reading a review as a placeholder.
+
+    Within one hash the incoming keys win, which preserves the old
+    last-writer-wins semantics per key (same HTML → same judge result).  A
+    non-dict on either side is not merged, it is replaced, so a corrupt slot
+    cannot make this raise.
+
+    Returns a new dict; neither argument is mutated.
+    """
+    merged: Dict[str, Any] = dict(base or {})
+    for content_hash, verdict in (incoming or {}).items():
+        current = merged.get(content_hash)
+        if isinstance(current, dict) and isinstance(verdict, dict):
+            slot = dict(current)
+            slot.update(verdict)
+            merged[content_hash] = slot
+        else:
+            merged[content_hash] = verdict
+    return merged
+
+
 def _merge_verification_record(
     base_raw: Optional[str],
     incoming: Optional[Dict[str, Any]],
@@ -244,8 +291,11 @@ def _merge_verification_record(
     semantics.  Entries at other content-hash keys survive, so editing a slide
     (new hash) and reverting it (old hash) still finds the original verdict; and
     two concurrent verification writes for the same slide cannot lose each
-    other's work beyond the same-hash key (where the verdicts are identical
-    anyway: same HTML → same judge result).
+    other's work beyond a single key of a single hash's verdict.
+
+    The merge runs one level deeper than the content hash — see
+    :func:`_merge_verdict_slots` — because the per-hash slot is SHARED between
+    the LLM judge's flat payload and the graph reviewer's ``VERDICT_KEY`` entry.
 
     ``base_raw`` is the record ATTRIBUTED TO THIS SLIDE by
     ``_attribute_slide_records`` — not simply whatever happened to be sitting on
@@ -256,9 +306,7 @@ def _merge_verification_record(
         JSON string, or None when the result is empty (column stays NULL rather
         than holding ``"{}"``).
     """
-    merged = dict(_parse_record(base_raw))
-    if incoming:
-        merged.update(incoming)
+    merged = _merge_verdict_slots(_parse_record(base_raw), incoming)
     return json.dumps(merged) if merged else None
 
 
@@ -1834,8 +1882,11 @@ class SessionManager:
         A whole-field assignment would also create a lost-update race when two
         verification writes arrive concurrently for the same slide (e.g. the user
         clicks Verify while an auto-verify is running).  The merge limits the damage
-        to writes for the same content-hash key; the last writer for a given hash
-        wins, which is acceptable because the verdicts for that hash are identical
+        to a single KEY of a single hash's verdict — the per-hash slot is merged too
+        (``_merge_verdict_slots``), because it is shared between the LLM judge's flat
+        payload and the graph reviewer's ``tellr_review`` entry.  The last writer for
+        a given key wins, which is acceptable because the two producers write
+        disjoint keys, and a repeat from the same producer is identical anyway
         (same HTML → same judge result).
 
         Args:
@@ -1872,7 +1923,9 @@ class SessionManager:
                         blob = json.loads(deck.verification_map)
                     except json.JSONDecodeError:
                         pass
-                blob.update(verification_record)
+                # Per-hash slot merge, not dict.update: the slot is shared with
+                # the other producer's payload (_merge_verdict_slots).
+                blob = _merge_verdict_slots(blob, verification_record)
                 deck.verification_map = json.dumps(blob)
                 logger.info(
                     "write_slide_verification: legacy session — wrote to blob",
@@ -1914,7 +1967,10 @@ class SessionManager:
                         "write_slide_verification: invalid JSON in row, starting fresh"
                     )
 
-            existing.update(verification_record)
+            # Per-hash slot merge, not dict.update: a review write must not
+            # delete the judge's rating, nor a judge write the reviewer's
+            # findings (_merge_verdict_slots).
+            existing = _merge_verdict_slots(existing, verification_record)
             row.verification_record = json.dumps(existing)
 
             content_hash = next(iter(verification_record), None)

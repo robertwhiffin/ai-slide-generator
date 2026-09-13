@@ -50,7 +50,12 @@ Calling ``merge_css(result, "")`` to re-trigger its hoist does NOT work — that
 is the same empty-replacement early return that shapes the fold above.  The
 re-hoist below is a post-pass on the string: it locates the hoistable blocks
 with ``parse_css_blocks``, moves their verbatim text to the front, and leaves
-everything else — including the backstop's comment marker — untouched.
+everything else — including the backstop's comment marker — untouched.  When a
+block is not locatable verbatim (tinycss2 re-serialises quotes, so a
+single-quoted ``@import`` never matches its own source) the normalised copy is
+PREPENDED and the original left in place: a duplicate at-rule is inert, whereas
+handing back the unhoisted sheet would emit exactly the ignored-``@import``
+defect this post-pass exists to prevent.
 
 **Not fixed here, and not solved anywhere: the monolith path has the same latent
 defect.**  It also runs a hoisting merge (``SlideDeck.update_css`` ->
@@ -118,6 +123,7 @@ def _rehoist_top_of_sheet_at_rules(css: str) -> str:
 
     remainder = css
     hoisted: list[str] = []
+    not_excised: list[str] = []
     # sorted() is stable, so @charset blocks keep their relative order and so do
     # @import blocks.
     for _, block in sorted(
@@ -126,13 +132,20 @@ def _rehoist_top_of_sheet_at_rules(css: str) -> str:
     ):
         index = remainder.find(block.text)
         if index == -1:
-            # Cannot locate the block verbatim, so it cannot be moved without
-            # risking the sheet. Leave the CSS exactly as it is.
-            logger.warning(
-                "Could not re-hoist a top-of-sheet at-rule (%s); leaving deck CSS as merged",
-                block.key[0],
-            )
-            return css
+            # ``block.text`` is tinycss2's RE-SERIALISATION, which does not always
+            # match the source: a single-quoted string comes back double-quoted, so
+            # ``@import url('brand.css')`` is not findable in the sheet it came from.
+            #
+            # Returning the sheet unchanged here — the original behaviour — emitted
+            # the very defect this function exists to prevent: an @import sitting
+            # after a qualified rule (a token-backstop prepend), which a browser
+            # silently ignores, losing the brand stylesheet. So the block is emitted
+            # at the FRONT anyway and its original occurrence is left in place. A
+            # duplicate @import/@charset later in the sheet is inert (the second is
+            # ignored); a mis-ordered one is not. Strictly better than known-broken.
+            not_excised.append(block.key[0])
+            hoisted.append(block.text)
+            continue
         head, tail = remainder[:index], remainder[index + len(block.text):]
         if head.endswith("\n") and tail.startswith("\n"):
             # Both sides of the excision carry a block separator; keep one.
@@ -140,6 +153,14 @@ def _rehoist_top_of_sheet_at_rules(css: str) -> str:
             tail = tail.lstrip("\n")
         remainder = head + tail
         hoisted.append(block.text)
+
+    if not_excised:
+        logger.warning(
+            "Could not locate a top-of-sheet at-rule verbatim in the deck CSS (%s) — "
+            "tinycss2 re-serialises quotes; prepended a normalised copy to keep it "
+            "ahead of the rules and left the original in place",
+            ", ".join(sorted(set(not_excised))),
+        )
 
     remainder = remainder.strip()
     parts = hoisted + ([remainder] if remainder else [])
