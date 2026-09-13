@@ -101,6 +101,13 @@ _DEFAULT_HEAD_META = {
     "viewport": "width=device-width, initial-scale=1.0",
 }
 
+# The reason recorded on a placeholder the FOREMAN reconciled (the stall path),
+# as against one a failing node wrote for itself — those pass the exception's
+# type name.  The two texts are load-bearing: they are the only way an
+# integration test can tell the two call sites of `commit_placeholder` apart, so
+# the stall reason is a named constant rather than a literal at the call site.
+_STALL_REASON = "Slide generation did not complete"
+
 # Conversation roles/types worth replaying to a skill, mirroring
 # chat_service._hydrate_chat_history: `info` is deliberately excluded, which is
 # what keeps deck_reviewer_node's advisory message out of the architect's input.
@@ -462,19 +469,34 @@ def _placehold_failed_position(
     returns no state at all and the foreman reconciles the position through
     ``stalled_positions``.
 
-    **Both fanned failure paths — the builder's and the build reviewer's — take
-    this one function and get the same three surfaces**: the row's error marker,
-    an ``ERROR`` stream event, and a durable ``info`` chat line.  There is no
-    flag to make one quieter than the other, deliberately: the emitter is
-    optional and is ``None`` on the sweeper path (and in every layer-1 state
-    test), so an event-only surface would let a failed builder leave a silently
-    missing slide.  The chat notice is the only surface that survives
-    ``emitter=None``, and ``error_state`` is unavailable to either path — it is
-    single-writer with no reducer, and two branches failing in one superstep
-    would raise ``InvalidUpdateError`` and kill the turn (measured).
+    **Every path that placeholds a position takes this one function and gets the
+    same three surfaces**: the row's error marker, an ``ERROR`` stream event, and
+    a durable ``info`` chat line.  All four of them — the two fanned nodes
+    (``builder``, ``build_reviewer``), ``fix_reviewer``'s undeliverable-row path,
+    and ``placeholder_node``'s stall path.  There is no flag to make one quieter
+    than another, deliberately: the emitter is optional and is ``None`` on the
+    sweeper path (and in every layer-1 state test), so an event-only surface
+    would let a failed position leave a silently missing slide.  The chat notice
+    is the only surface that survives ``emitter=None``, and ``error_state`` is
+    unavailable to the two FANNED paths — it is single-writer with no reducer,
+    and two branches failing in one superstep would raise
+    ``InvalidUpdateError`` and kill the turn (measured).  The two edge-reached
+    callers may record it and ``fix_reviewer`` does; that is the only difference
+    between the callers, and it is a difference in what the *caller* returns,
+    never in what this function surfaces.
 
-    So the failure is never silent, whichever fanned node hit it, and the
-    exception is logged with its traceback either way.
+    ``placeholder_node`` used to carry a hand-written copy of this call and
+    diverged three ways — a different ``error_message``, the ``ERROR`` event
+    after the commit rather than before, and **no durable chat notice at all**,
+    so a stalled position was placeheld silently and the only line the user
+    received was the deck reviewer's "no narrative issues found".  Hence one
+    implementation and a ``reason`` parameter, rather than a fourth copy.
+
+    The ``ERROR`` event is emitted **before** the commit is attempted, so a
+    position that cannot even be placeheld is still surfaced.
+
+    So the failure is never silent, whichever node hit it, and the exception is
+    logged with its traceback either way.
 
     ``commit_placeholder`` takes neither ``modified_by`` nor ``deck_spec_slide``
     (Ruling C-15), so these rows ship with a NULL author here too.
@@ -1443,10 +1465,24 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
     predicate about the criterion and ``status`` is state about whether a fixer
     handled it, and they are independent.
 
+    When the candidate loses, the findings written with the original are the
+    original's own (``prior_findings``) — never the re-review's, which are
+    stamped against the candidate's hash.  A verdict must describe the content
+    the row is written with; see the comment on that branch.
+
     The ``fix_map`` entry is **tombstoned** (``{position: None}``), which is what
     makes ``has_pending_fix`` go False once every entry is decided;
     ``turn_scoped_merge`` cannot delete a key, and a truthiness test on the dict
-    would route to the fixer forever.
+    would route to the fixer forever.  It is tombstoned on **every** path,
+    including the two failure paths, for that reason.
+
+    **Non-fatal throughout, and the guarantee is the row write's, not only the
+    model call's.**  A failing re-review keeps the original.  A failure that
+    prevents a row being delivered at all — an unvalidatable prior finding, or
+    the write itself — placeholds the position through
+    ``_placehold_failed_position``, exactly as a failed build reviewer's is, and
+    records ``error_state``.  The turn continues to deck review either way, so
+    the deck never comes back with rows committed and ``slide_count = 0``.
     """
     turn_id = state["turn_id"]
     session_id = state["session_id"]
@@ -1462,68 +1498,124 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
 
     original_finding = entry.get("finding") or {}
     criterion = original_finding.get("criterion")
-    prior_findings = [
-        Finding.model_validate(f) for f in (entry.get("findings") or [])
-    ]
 
-    fixed_html = fixed.get("html") or ""
-    fixed_scripts = fixed.get("scripts") or ""
+    try:
+        prior_findings = [
+            Finding.model_validate(f) for f in (entry.get("findings") or [])
+        ]
 
-    verdict = "surfaced"
-    winner_html = entry.get("original_html", "")
-    winner_scripts = entry.get("original_scripts", "")
-    findings = prior_findings
+        fixed_html = fixed.get("html") or ""
+        fixed_scripts = fixed.get("scripts") or ""
 
-    if fixed_html:
-        review_payload = {
-            "position": position,
-            "finding": original_finding,
-            "change_summary": fixed.get("change_summary", ""),
-            "html": fixed_html,
-            "scripts": fixed_scripts,
-            "slide_spec": payload.get("slide_spec"),
-            "resolved_style": payload.get("resolved_style"),
-            "section_css": payload.get("section_css"),
+        verdict = "surfaced"
+        winner_html = entry.get("original_html", "")
+        winner_scripts = entry.get("original_scripts", "")
+        findings = prior_findings
+
+        if fixed_html:
+            review_payload = {
+                "position": position,
+                "finding": original_finding,
+                "change_summary": fixed.get("change_summary", ""),
+                "html": fixed_html,
+                "scripts": fixed_scripts,
+                "slide_spec": payload.get("slide_spec"),
+                "resolved_style": payload.get("resolved_style"),
+                "section_css": payload.get("section_css"),
+            }
+            try:
+                out = call_skill(
+                    "fix_reviewer",
+                    review_payload,
+                    bool(payload.get("design_system_active")),
+                )
+                re_findings = _stamp_findings(
+                    _skill_findings(out),
+                    subject_hash=compute_slide_hash(fixed_html),
+                    slide_index=position,
+                )
+                still_open = [f for f in re_findings if f.criterion == criterion]
+                if not still_open:
+                    winner_html = fixed_html
+                    winner_scripts = fixed_scripts
+                    verdict = "fixed"
+                    findings = [
+                        f.model_copy(update={"status": "fixed"})
+                        if f.criterion == criterion and f.objective
+                        else f
+                        for f in prior_findings
+                    ]
+                else:
+                    # The candidate LOST, so the ORIGINAL is what ships — and the
+                    # findings written with it must be the ones stamped against
+                    # the original's own hash, which is what `prior_findings`
+                    # are.  `re_findings` describe the rejected candidate: their
+                    # ids are minted from ITS hash, so persisting them here
+                    # attaches a verdict to content nobody can see, breaks
+                    # `make_finding_id`'s contract that the subject is the
+                    # content hash, puts markup that was never shipped in the
+                    # drawer, and silently drops the shipped slide's own
+                    # findings.  The surviving objective finding is already in
+                    # `prior_findings` with `status="open"`, which is exactly
+                    # what "the fix did not hold" means; the re-review's own
+                    # findings inform only that decision.  Same shape as
+                    # `_land_original`, deliberately.
+                    findings = prior_findings
+            except Exception:
+                logger.exception(
+                    "Fix review failed at position %s; keeping the original",
+                    position,
+                )
+
+        _write_reviewed_row(
+            session_id=session_id,
+            position=position,
+            html=winner_html,
+            scripts=winner_scripts,
+            findings=findings,
+            verdict=verdict,
+            slide_spec=payload.get("slide_spec"),
+            initiated_by=initiated_by,
+        )
+    except Exception as exc:
+        # The row could not be delivered at all — the prior findings would not
+        # validate, or the write itself failed.  Unguarded, this killed the turn
+        # (measured: rows [0, 2] committed, `slide_count = 0`, no deck review and
+        # nothing in chat), which is the outcome §48 names as unacceptable and
+        # which nothing recovers, because `slide_count` and `html_content` have
+        # exactly one writer, in the last node of the turn.  So the position is
+        # placeheld exactly as a failed build reviewer's is and the turn
+        # continues to deck review.
+        #
+        # The fix_map entry is tombstoned on this path too: leaving it in_flight
+        # sends the foreman back to the fixer, whose stale-fix branch would then
+        # claim `landed_positions` for a row this writer just failed to write.
+        logger.exception(
+            "Fix review could not deliver a row at position %s; placeholding it",
+            position,
+        )
+        updates: Dict[str, Any] = {
+            "fix_map": scoped(turn_id, {position: None}),
+            "fix_target": None,
+            # Unlike the two FANNED failure paths this node may write
+            # `error_state`: `fixer -> fix_reviewer -> foreman` is strictly
+            # sequential, so no second writer can share its superstep and
+            # `InvalidUpdateError` is unreachable here.
+            "error_state": {
+                "node": "fix_reviewer",
+                "code": "fix_review_delivery_failed",
+                "message": type(exc).__name__,
+            },
         }
-        try:
-            out = call_skill(
-                "fix_reviewer",
-                review_payload,
-                bool(payload.get("design_system_active")),
-            )
-            re_findings = _stamp_findings(
-                _skill_findings(out),
-                subject_hash=compute_slide_hash(fixed_html),
-                slide_index=position,
-            )
-            still_open = [f for f in re_findings if f.criterion == criterion]
-            if not still_open:
-                winner_html = fixed_html
-                winner_scripts = fixed_scripts
-                verdict = "fixed"
-                findings = [
-                    f.model_copy(update={"status": "fixed"})
-                    if f.criterion == criterion and f.objective
-                    else f
-                    for f in prior_findings
-                ]
-            else:
-                findings = re_findings
-        except Exception:
-            logger.exception(
-                "Fix review failed at position %s; keeping the original", position
-            )
+        if _placehold_failed_position(
+            position,
+            session_id=session_id,
+            node="fix_reviewer",
+            reason=type(exc).__name__,
+        ):
+            updates["placeheld_positions"] = scoped(turn_id, {position})
+        return updates
 
-    _write_reviewed_row(
-        session_id=session_id,
-        position=position,
-        html=winner_html,
-        scripts=winner_scripts,
-        findings=findings,
-        verdict=verdict,
-        slide_spec=payload.get("slide_spec"),
-        initiated_by=initiated_by,
-    )
     _emit(
         StreamEventType.ASSISTANT,
         content=f"Slide {position} fix reviewed: {verdict}.",
@@ -1546,11 +1638,34 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
 def placeholder_node(state: dict) -> Dict[str, Any]:
     """Commit a terminal placeholder for every stalled position.
 
+    **Every position placeheld here goes through
+    ``_placehold_failed_position``, the same function the two fanned failure
+    paths use**, so a stalled position gets the same three surfaces they do: the
+    row's error marker, an ``ERROR`` stream event and a **durable ``info`` chat
+    notice**.  This node used to carry a hand-written copy of that call and the
+    notice was the part it omitted, so on the stall path — the primary
+    production failure limb 1 exists for, *"a branch that hung or died [and]
+    never returns"* — the deck came back missing slides and the only chat line
+    the user received was the deck reviewer's "no narrative issues found".  The
+    stream event does not cover it: it is not durable across a reload and does
+    not exist at all on the ``emitter=None`` path (the sweeper, and every
+    layer-1 state test).
+
+    The copy also left ``get_slide``'s read-back outside its ``try``, so a read
+    failure killed the turn where the shared helper survives it.  Sharing the
+    implementation fixes that by construction rather than by a second edit.
+
+    ``_STALL_REASON`` is what distinguishes a foreman-reconciled placeholder from
+    one a failing node wrote for itself — see that constant.
+
     Failure detection is ``is_placeholder_record`` — a **module-level function**
     in ``slide_repository``, not a method, and never an HTML class check: the
     marker lives in the row's ``verification_record`` as ``{content_hash:
     {"error": True, ...}}`` and the class is an implementation detail of the
-    placeholder HTML.
+    placeholder HTML.  It is applied inside the helper, and a position whose row
+    does not read back as a placeholder is **not** claimed in
+    ``placeheld_positions``: claiming it would make ``all_positions_committed``
+    true for a position with no usable row.
 
     **``commit_placeholder`` takes NEITHER ``modified_by`` NOR
     ``deck_spec_slide``, and ws4c does not widen it (Ruling C-15).**  Placeholder
@@ -1565,32 +1680,15 @@ def placeholder_node(state: dict) -> Dict[str, Any]:
     session_id = state["session_id"]
     positions = stalled_positions(state, time.time())
 
-    writer = SlideWriter()
     placeheld: set = set()
     for position in positions:
-        try:
-            writer.commit_placeholder(
-                session_id,
-                position,
-                error_message="Slide generation did not complete",
-            )
-        except Exception:
-            logger.exception("commit_placeholder failed at position %s", position)
-            continue
-        row = writer.get_slide(session_id, position) or {}
-        if not is_placeholder_record(row.get("verification_record")):
-            logger.error(
-                "Placeholder row at position %s does not read back as a "
-                "placeholder; the foreman will see it as uncommitted",
-                position,
-            )
-            continue
-        placeheld.add(position)
-        _emit(
-            StreamEventType.ERROR,
-            error=f"Slide {position} could not be generated.",
-            metadata={"node": "placeholder", "position": position},
-        )
+        if _placehold_failed_position(
+            position,
+            session_id=session_id,
+            node="placeholder",
+            reason=_STALL_REASON,
+        ):
+            placeheld.add(position)
 
     if not placeheld:
         return {}
@@ -1608,6 +1706,31 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     The write comes FIRST and the review second, because a review failure must
     never invalidate a delivered deck: it clears out with a notice, and the deck
     keeps its columns.
+
+    **The guarantee covers the write's INPUTS, not only the write call**, and
+    that is the whole reason the derivation sits inside the handler.  Measured
+    when the five statements that compute them sat ABOVE the ``try``, with
+    ``aggregate_deck_css`` failing: every row committed, ``slide_count = 0``,
+    ``html_content`` and ``scripts_content`` empty, nothing in chat and the turn
+    dead — the *"deck reads as ``0 slides``, silently"* outcome §48 names as
+    unacceptable, reached through a door nothing guarded, in the node whose
+    entire design rationale is ordering-for-robustness.  Nothing recovers it:
+    ``slide_count`` and ``html_content`` have exactly one writer, here, with no
+    compensating write anywhere.
+
+    So each column is derived and added to the write dict **as soon as it
+    exists**, and ``slide_count`` is derived first: a failure part-way through
+    still writes what was already derived, and every column parameter defaults to
+    _UNSET ("leave the stored value alone"), so the columns that were not derived
+    are left as they stand rather than erased.  On the same measured failure the
+    deck now keeps ``slide_count``, ``html_content`` and ``scripts_content`` and
+    only ``css`` is left untouched.
+
+    If even the row read fails there is nothing to review, so the review is
+    **skipped** rather than run over zero slides — a review of nothing returns no
+    findings and would tell the user "no narrative issues found across the deck"
+    about a deck this node could not read.  The advisory carries the failure
+    instead, so the user gets exactly one honest line on that path.
 
     Post-commit columns are ``slide_count``, ``html_content``,
     ``scripts_content`` plus the aggregated ``css``.  The middle two are
@@ -1653,81 +1776,118 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     initiated_by = state.get("initiated_by")
 
     manager = get_session_manager()
-    deck_dict = manager.get_slide_deck(session_id) or {}
-    deck = SlideDeck.from_dict(deck_dict)
-    slide_htmls = [slide.html for slide in deck.slides]
+    updates: Dict[str, Any] = {}
+    slide_htmls: List[str] = []
 
-    knitted_html = deck.knit()
-    scripts_content = deck.scripts
-    css = aggregate_deck_css(
-        deck_dict.get("css"),
-        scoped_vals(state, "emitted_style_blocks"),
-        state.get("token_css"),
-    )
-
-    updates: Dict[str, Any] = {
-        "knitted_html": knitted_html,
-        "scripts_content": scripts_content,
-    }
-
+    # Every input to the post-commit write is derived INSIDE a handler, and each
+    # derived column is added to `deck_write` as soon as it exists, so a failure
+    # part-way through still writes the columns already derived.  `slide_count`
+    # is derived first deliberately: it is the column whose absence makes a deck
+    # whose slides exist read as `0 slides` (§48), and it survives every failure
+    # except the row read itself.  Every column parameter defaults to _UNSET
+    # ("leave the stored value alone"), so omitting one erases nothing.
+    deck_write: Dict[str, Any] = {}
+    derivation_error: Optional[str] = None
     try:
-        write_deck_level_columns(
-            session_id,
-            slide_count=len(deck.slides),
-            html_content=knitted_html,
-            scripts_content=scripts_content,
-            css=css,
-            modified_by=initiated_by,
+        deck_dict = manager.get_slide_deck(session_id) or {}
+        deck = SlideDeck.from_dict(deck_dict)
+        slide_htmls = [slide.html for slide in deck.slides]
+        deck_write["slide_count"] = len(deck.slides)
+        deck_write["html_content"] = deck.knit()
+        deck_write["scripts_content"] = deck.scripts
+        deck_write["css"] = aggregate_deck_css(
+            deck_dict.get("css"),
+            scoped_vals(state, "emitted_style_blocks"),
+            state.get("token_css"),
         )
     except Exception as exc:
-        logger.exception("Post-commit deck-level write failed")
+        logger.exception("Post-commit deck-level derivation failed")
+        derivation_error = type(exc).__name__
         updates["error_state"] = {
             "node": "deck_reviewer",
-            "code": "deck_level_write_failed",
-            "message": type(exc).__name__,
+            "code": "deck_level_derivation_failed",
+            "message": derivation_error,
         }
 
-    try:
-        digest = compute_deck_digest(slide_htmls)
-        review_payload = {
-            "session_id": session_id,
-            "narrative_arc": (
-                state["deck_spec"].narrative_arc if state.get("deck_spec") else []
-            ),
-            "call_to_action": (
-                state["deck_spec"].call_to_action if state.get("deck_spec") else None
-            ),
-            "slide_count": len(slide_htmls),
-            "slides": spotlight_prior_slides(slide_htmls, session_id),
-        }
-        out = call_skill(
-            "deck_reviewer",
-            review_payload,
-            bool(state.get("design_system_active")),
-        )
-        findings = _stamp_findings(
-            _skill_findings(out), subject_hash=digest, slide_index=-1
-        )
-        with get_db_session() as db:
-            deck_id = _resolve_deck_id(db, session_id)
-            if deck_id is None:
-                raise ValueError(
-                    f"No deck row for session {session_id}; cannot persist the "
-                    "deck review"
-                )
-            save_deck_review(db, deck_id, digest, findings, initiated_by)
-        advisory = _advisory_text(findings)
-    except Exception as exc:
-        logger.exception("Deck review failed; the delivered deck stands")
+    if "html_content" in deck_write:
+        updates["knitted_html"] = deck_write["html_content"]
+    if "scripts_content" in deck_write:
+        updates["scripts_content"] = deck_write["scripts_content"]
+
+    if deck_write:
+        try:
+            write_deck_level_columns(
+                session_id, modified_by=initiated_by, **deck_write
+            )
+        except Exception as exc:
+            logger.exception("Post-commit deck-level write failed")
+            updates["error_state"] = {
+                "node": "deck_reviewer",
+                "code": "deck_level_write_failed",
+                "message": type(exc).__name__,
+            }
+            _surface_notice(
+                session_id,
+                "The deck's slides were saved, but the deck's own record of them "
+                "could not be updated this turn "
+                f"(deck_reviewer: {type(exc).__name__}).",
+            )
+
+    if derivation_error is not None:
+        # There is nothing to review: the slides could not be read.  Calling the
+        # reviewer with zero slides would spend a model call and then tell the
+        # user "no narrative issues found across the deck" about a deck this node
+        # could not read — the misleading half of the F1b outcome.  The advisory
+        # IS the notice on this path, so the user gets exactly one honest line.
         advisory = (
-            "The deck is complete, but the deck-level review could not be "
-            "completed this turn."
+            "Your slides were saved, but the deck's own record of them could not "
+            "be updated this turn, so the deck-level review was skipped "
+            f"(deck_reviewer: {derivation_error})."
         )
-        updates["error_state"] = {
-            "node": "deck_reviewer",
-            "code": "deck_review_failed",
-            "message": type(exc).__name__,
-        }
+    else:
+        try:
+            digest = compute_deck_digest(slide_htmls)
+            review_payload = {
+                "session_id": session_id,
+                "narrative_arc": (
+                    state["deck_spec"].narrative_arc if state.get("deck_spec") else []
+                ),
+                "call_to_action": (
+                    state["deck_spec"].call_to_action
+                    if state.get("deck_spec")
+                    else None
+                ),
+                "slide_count": len(slide_htmls),
+                "slides": spotlight_prior_slides(slide_htmls, session_id),
+            }
+            out = call_skill(
+                "deck_reviewer",
+                review_payload,
+                bool(state.get("design_system_active")),
+            )
+            findings = _stamp_findings(
+                _skill_findings(out), subject_hash=digest, slide_index=-1
+            )
+            with get_db_session() as db:
+                deck_id = _resolve_deck_id(db, session_id)
+                if deck_id is None:
+                    raise ValueError(
+                        f"No deck row for session {session_id}; cannot persist the "
+                        "deck review"
+                    )
+                save_deck_review(db, deck_id, digest, findings, initiated_by)
+            advisory = _advisory_text(findings)
+        except Exception as exc:
+            logger.exception("Deck review failed; the delivered deck stands")
+            advisory = (
+                "The deck is complete, but the deck-level review could not be "
+                "completed this turn."
+            )
+            updates["error_state"] = {
+                "node": "deck_reviewer",
+                "code": "deck_review_failed",
+                "message": type(exc).__name__,
+            }
 
     try:
         manager.add_message(
