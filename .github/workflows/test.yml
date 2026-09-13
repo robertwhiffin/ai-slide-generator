@@ -970,6 +970,7 @@ jobs:
                         "${{ needs.integration-export.result }}" \
                         "${{ needs.integration-streaming.result }}" \
                         "${{ needs.integration-slides.result }}" \
+                        "${{ needs.integration-graph.result }}" \
                         "${{ needs.integration-genie.result }}" \
                         "${{ needs.integration-general.result }}" \
                         "${{ needs.e2e-tests.result }}"; do
