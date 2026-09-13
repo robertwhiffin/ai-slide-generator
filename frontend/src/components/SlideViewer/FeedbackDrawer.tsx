@@ -1,7 +1,7 @@
 import React, { useCallback, useRef } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/ui/button';
-import type { DrawerCallbacks, SlideFinding } from '../../types/finding';
+import { CATEGORY_LABEL, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
 import { useViewer } from '../../contexts/ViewerContext';
 
 interface FeedbackDrawerProps {
@@ -9,12 +9,6 @@ interface FeedbackDrawerProps {
   callbacks: DrawerCallbacks;
   hasUnseen: boolean;
 }
-
-const CATEGORY_LABEL: Record<SlideFinding['category'], string> = {
-  content: 'Content',
-  design: 'Design',
-  narrative: 'Narrative',
-};
 
 export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callbacks, hasUnseen }) => {
   const { drawerOpen, setDrawerOpen, drawerHeight, setDrawerHeight, activeTab, setActiveTab } = useViewer();
@@ -132,32 +126,41 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
                     </span>
                   </div>
                   <p className="mb-2 text-xs text-foreground">{f.message}</p>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      data-testid={`finding-apply-${f.id}`}
-                      onClick={() => callbacks.onApplyFinding(f.id)}
+                  {f.status === 'fixed' ? (
+                    <span
+                      data-testid={`finding-status-${f.id}`}
+                      className="inline-block rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground"
                     >
-                      Apply
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      data-testid={`finding-dismiss-${f.id}`}
-                      onClick={() => callbacks.onDismissFinding(f.id)}
-                    >
-                      Dismiss
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      data-testid={`finding-discuss-${f.id}`}
-                      onClick={() => callbacks.onDiscussFinding(f.id)}
-                    >
-                      Discuss
-                    </Button>
-                  </div>
+                      Fixed
+                    </span>
+                  ) : (
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        data-testid={`finding-apply-${f.id}`}
+                        onClick={() => callbacks.onApplyFinding(f.id)}
+                      >
+                        Apply
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        data-testid={`finding-dismiss-${f.id}`}
+                        onClick={() => callbacks.onDismissFinding(f.id)}
+                      >
+                        Dismiss
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        data-testid={`finding-discuss-${f.id}`}
+                        onClick={() => callbacks.onDiscussFinding(f.id)}
+                      >
+                        Discuss
+                      </Button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
