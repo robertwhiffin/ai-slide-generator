@@ -1,11 +1,16 @@
 """Unit tests for src.services.template_sections.
 
 Coverage:
-  section_inventory   — deck skeleton, single-slide, affordances, no-markup,
-                        size guard, zero-roots named outcome
-  extract_section     — verbatim (byte-for-byte), out-of-range, <main> wrapper
-  resolve_template_bytes — inactive DS, unknown DS, valid template, unwrapped
-                           CSS text (§17/§31)
+  section_inventory   — deck skeleton, single-slide, affordances, no-markup
+                        (all values in every dict), size guard, zero-roots named
+                        outcome
+  extract_section     — verbatim (byte-for-byte), out-of-range, re-parenting
+                        (<main>, sibling stripping, verbatim inside wrapper,
+                        promoting ancestors not re-added)
+  resolve_template_bytes — inactive DS (active-gate mock), unknown DS, valid
+                           template, unwrapped CSS text (§17/§31), session
+                           boundary (normalisation persisted), normalisation
+                           applied (Fix 5)
 
 All mocks patch ``src.core.database.get_db_session`` — the import happens
 inside each function (lazy pattern from agent_factory) so patching the source
@@ -63,11 +68,26 @@ MAIN_WRAPPED_HTML = (
     "</main>"
 )
 
+# Multiple slides inside <main> (for sibling-stripping test)
+MAIN_MULTI_HTML = (
+    "<main>"
+    "<div class='slide'>S1</div>"
+    "<div class='slide'>S2</div>"
+    "</main>"
+)
+
 # Layout where <section> wraps a sole <div class='slide'> → promotion fires
 PROMOTED_WRAPPER_HTML = (
     "<section>"
     "<div class='slide'><h1>Promoted</h1></div>"
     "</section>"
+)
+
+# Verbatim preservation test: single-quoted attributes inside a non-promoting wrapper
+MAIN_SINGLE_QUOTE_HTML = (
+    "<main>"
+    "<section class='slide cover'><h1>Title</h1></section>"
+    "</main>"
 )
 
 # Layout with a <style> block for the resolve_template_bytes tests
@@ -82,6 +102,13 @@ LAYOUT_WITH_STYLE = (
 # Layout with no <style> block
 LAYOUT_NO_STYLE = (
     "<section class='slide cover'><h1>Title</h1></section>"
+)
+
+# Un-normalised layout: tag-keyed CSS for a section.slide root.
+# normalize_root_tag_selectors adds ".slide" to the "section" selector.
+UNNORMALISED_LAYOUT = (
+    '<style>section { color: red; font-family: Georgia, serif; }</style>'
+    '<section class="slide"><h1>T</h1></section>'
 )
 
 
@@ -135,6 +162,23 @@ def _make_template_mock(*, layout_html: str, token_css: str | None) -> MagicMock
     t.layout_html = layout_html
     t.token_css = token_css
     return t
+
+
+def _make_real_db_session(engine):
+    """Return a get_db_session-compatible CM backed by the given SQLAlchemy engine."""
+    from sqlalchemy.orm import Session
+
+    @contextmanager
+    def _cm():
+        with Session(engine) as s:
+            try:
+                yield s
+                s.commit()
+            except Exception:
+                s.rollback()
+                raise
+
+    return _cm
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -202,17 +246,30 @@ class TestSectionInventory:
         assert "list" not in inv[0]["affordances"]
 
     def test_inventory_contains_no_markup(self):
-        """Each entry's values must be free of HTML tags."""
+        """Every value in every dict must be free of HTML tags.
+
+        Checks ALL values across ALL keys (using isinstance recursion) so a new
+        field cannot smuggle markup past this test undetected.
+        """
+        import json
         from src.services.template_sections import section_inventory
 
         inv = section_inventory(DECK_HTML)
-        for entry in inv:
-            assert "<" not in entry["text_snippet"], "text_snippet contains markup"
-            assert "<" not in entry["tag"], "tag contains markup"
-            for cls in entry["classes"]:
-                assert "<" not in cls, "classes contains markup"
-            for aff in entry["affordances"]:
-                assert "<" not in aff, "affordances contains markup"
+
+        def _no_markup(value, path):
+            if isinstance(value, str):
+                assert "<" not in value, (
+                    f"Markup found in inventory at {path}: {value!r}"
+                )
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    _no_markup(item, f"{path}[{i}]")
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    _no_markup(v, f"{path}.{k}")
+
+        for i, entry in enumerate(inv):
+            _no_markup(entry, f"inv[{i}]")
 
     def test_inventory_smaller_than_layout(self):
         """The inventory (serialised) should be smaller than the layout bytes.
@@ -333,20 +390,82 @@ class TestExtractSection:
         with pytest.raises(IndexError):
             extract_section(NO_SLIDE_CLASS_HTML, 0)
 
-    def test_main_wrapper_does_not_promote(self):
-        """<main> is not in SLIDE_WRAPPER_TAGS; the slide is not promoted.
+    # ── Re-parenting tests (Playwright probe confirmed divergence) ────────────
 
-        Without re-parenting (probe not run), the extracted section is the
-        inner <div class='slide'>, not the <main> wrapper.
+    def test_main_wrapper_included_in_extracted_section(self):
+        """A <main> wrapper (non-promoting) is included in the returned markup.
+
+        Probe measured: color, font-family, and custom-property-backed padding and
+        background-color are all lost when the section is extracted without its
+        <main> ancestor.  Re-parenting restores the inheritance context.
         """
         from src.services.template_sections import extract_section
 
         result = extract_section(MAIN_WRAPPED_HTML, 0)
-        # Must be the inner div, not the <main>
-        assert result.startswith("<div"), (
-            f"Expected the inner <div class='slide'>, got: {result[:50]!r}"
+        # The <main> wrapper must be present
+        assert result.startswith("<main"), (
+            f"Expected <main> wrapper in result, got: {result[:80]!r}"
         )
+        # The section itself must be inside
         assert "class='slide'" in result
+        assert "<h1>Wrapped</h1>" in result
+
+    def test_main_wrapper_reparented_equals_full_layout(self):
+        """Single slide in <main>: re-parented result equals the full layout."""
+        from src.services.template_sections import extract_section
+
+        result = extract_section(MAIN_WRAPPED_HTML, 0)
+        assert result == MAIN_WRAPPED_HTML
+
+    def test_sibling_slides_stripped_from_wrapper(self):
+        """When multiple slides share a non-promoting wrapper, siblings are stripped."""
+        from src.services.template_sections import extract_section
+
+        r0 = extract_section(MAIN_MULTI_HTML, 0)
+        r1 = extract_section(MAIN_MULTI_HTML, 1)
+
+        # Slide 0 must not contain Slide 1's content
+        assert "S2" not in r0, "Slide 0 should not include sibling S2"
+        # Slide 1 must not contain Slide 0's content
+        assert "S1" not in r1, "Slide 1 should not include sibling S1"
+        # Both must include the <main> wrapper
+        assert r0.startswith("<main")
+        assert r1.startswith("<main")
+
+    def test_section_markup_verbatim_inside_reparented_wrapper(self):
+        """The section element itself is byte-for-byte verbatim inside the wrapper.
+
+        Fixture uses single-quoted attributes in the slide element; BS4 would
+        normalise these to double quotes.  The wrapper (reconstructed) may use
+        double quotes, but the slide content must be the original bytes.
+        """
+        from src.services.template_sections import extract_section
+
+        result = extract_section(MAIN_SINGLE_QUOTE_HTML, 0)
+
+        # The result must contain the verbatim section with single-quoted attributes
+        assert "class='slide cover'" in result, (
+            f"Expected verbatim single-quoted attrs in result: {result!r}"
+        )
+        # The wrapper must be present
+        assert "<main" in result
+
+    def test_promoting_ancestors_not_rewrapped(self):
+        """A section whose ancestors are all promoting tags is returned unwrapped.
+
+        <section> wrapping a sole <div class='slide'> is promoted by
+        find_slide_roots.  The promoted <section> has no non-promoting ancestors,
+        so no additional wrapper is added.
+        """
+        from src.services.template_sections import extract_section
+
+        result = extract_section(PROMOTED_WRAPPER_HTML, 0)
+        # Must be the promoted <section>, verbatim
+        assert result == PROMOTED_WRAPPER_HTML, (
+            f"Expected promoted wrapper verbatim, got: {result!r}"
+        )
+        # Must NOT have a second <section> wrapping the first
+        assert result.count("<section") == 1
 
     def test_promoted_wrapper_extracted_verbatim(self):
         """A <section> that wraps a sole <div class='slide'> is promoted.
@@ -562,6 +681,90 @@ class TestResolveTemplateBytes:
         assert isinstance(a, str)
         assert isinstance(b, str)
         assert isinstance(c, str)
+
+    def test_normalisation_is_applied_and_persisted(self):
+        """get_template_for_generation must be called INSIDE get_db_session.
+
+        materialize_templates self-heals by assigning ``template.layout_html``
+        with normalised root-tag selectors; SQLAlchemy commits that write when
+        the session context exits.  If the call is moved outside the ``with``
+        block, the design-system object is detached, the assignment is made on
+        a dead object, and nothing is committed.
+
+        Two guarantees tested:
+        1. The returned layout_html IS normalised (not the raw row value).
+        2. The normalised value IS persisted — survives a fresh-session re-read.
+
+        Sabotage for (1): return the template's layout_html DIRECTLY (bypass
+        get_template_for_generation) so normalisation never runs → the returned
+        value is the un-normalised raw form → assertion fails.
+
+        Sabotage for (2): move get_template_for_generation OUTSIDE the session
+        → detached row → normalisation is either not applied (DetachedInstanceError)
+        or not committed → re-read shows un-normalised → assertion fails.
+        """
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+        from sqlalchemy.pool import StaticPool
+
+        import src.database.models  # noqa: F401 — register all ORM models
+        from src.core.database import Base
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+
+        from src.database.models import DesignSystem
+        from src.database.models.design_system import DesignSystemTemplate
+
+        # Seed: DS with an EXISTING template row that has un-normalised layout_html.
+        # normalize_root_tag_selectors turns "section { color: red; }" into
+        # "section, .slide { color: red; }" for a template with <section class="slide">.
+        with Session(engine) as s:
+            ds = DesignSystem(name="boundary-test-ds", is_active=True)
+            tmpl = DesignSystemTemplate(
+                name="test-tmpl",
+                entry_path="templates/test/index.html",
+                layout_html=UNNORMALISED_LAYOUT,
+                token_css=None,
+            )
+            ds.templates.append(tmpl)
+            s.add(ds)
+            s.commit()
+            ds_id, tmpl_id = ds.id, tmpl.id
+
+        # Verify the seeded layout is actually un-normalised (guard against bad fixture)
+        with Session(engine) as s:
+            row = s.get(DesignSystemTemplate, tmpl_id)
+            assert ".slide" not in row.layout_html, (
+                "Fixture defect: seeded layout is already normalised"
+            )
+
+        from src.services.template_sections import resolve_template_bytes
+
+        with patch("src.core.database.get_db_session", _make_real_db_session(engine)):
+            layout_html, _, _ = resolve_template_bytes(ds_id, tmpl_id)
+
+        # (1) The returned value must be normalised.
+        assert ".slide" in layout_html, (
+            "Returned layout was not normalised — get_template_for_generation "
+            "must route through materialize_templates"
+        )
+
+        # (2) The normalised value must be persisted to the DB.
+        with Session(engine) as s2:
+            reloaded = s2.get(DesignSystemTemplate, tmpl_id)
+            assert reloaded is not None
+            assert ".slide" in reloaded.layout_html, (
+                "Normalisation was not persisted: get_template_for_generation "
+                "must be called INSIDE the get_db_session context so the "
+                "session commits the self-heal write"
+            )
+
+        engine.dispose()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -7,7 +7,8 @@ section_inventory(layout_html) -> list[dict]
     Never contains markup; safe to inject into a model context.
 
 extract_section(layout_html, index) -> str
-    Verbatim markup of slide section at 0-based *index*.
+    Verbatim markup of slide section at 0-based *index*, re-parented in its
+    non-promoted ancestor chain so CSS inheritance is preserved.
 
 resolve_template_bytes(design_system_id, template_id) -> tuple[str, str, str]
     (normalized_layout_html, style_block_css_text, token_css)
@@ -19,16 +20,22 @@ deterministic code EXTRACTS its HTML and CSS byte-for-byte.  The architect
 never rewrites layout HTML or CSS.  A model retyping brand markup has no
 backstop, and this is the failure ``ensure_deck_token_css`` was built to catch.
 
-Re-parenting (promotion probe) — NOT IMPLEMENTED
--------------------------------------------------
-The brief requires running a Playwright probe before implementing re-parenting
-(wrapping an extracted section in its non-promoting ancestor chain).  That
-probe requires a live browser and dev server, which are not available in this
-agent context.  ``extract_section`` therefore does NOT implement re-parenting.
-If computed styles diverge between an extracted section and the same section
-in situ (expected to affect ``padding``, ``font-family``, ``background-color``,
-``color`` when the template wraps slides in ``<main>`` or ``<div>``), that is
-left as unverified behaviour — see C6 report for details.
+Re-parenting
+------------
+``SLIDE_WRAPPER_TAGS`` is ``{"section", "article"}`` only.  A template that
+wraps its slides in a non-promoting tag (``<main>``, ``<div>``) keeps that
+wrapper's inheritable styles outside the extracted section: ``color``,
+``font-family``, and any ``var(--…)`` the section consumes via inheritance all
+fall back or reset once the wrapper is absent.
+
+``extract_section`` therefore re-parents: it wraps the verbatim section in its
+non-promoted ancestor chain, with those ancestors' other children stripped.
+This is not a CSS rewrite (§M5 forbids pruning CSS); it is a markup rewrap that
+restores the inheritance context the section depends on.
+
+A section whose ancestors are all promoting tags (``section``, ``article``) is
+returned unwrapped — ``find_slide_roots`` already promoted the wrapper to the
+root, so there is no non-promoting ancestor to add.
 
 Return values of ``resolve_template_bytes``
 -------------------------------------------
@@ -47,11 +54,10 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from src.utils.html_utils import find_slide_roots
+from src.utils.html_utils import SLIDE_WRAPPER_TAGS, find_slide_roots
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +201,86 @@ def _verbatim_slices(layout_html: str, soup: BeautifulSoup, roots: list) -> list
     return result
 
 
+def _verbatim_open_tag(layout_html: str, soup: BeautifulSoup, el) -> str:
+    """Return the verbatim opening tag of ``el`` from ``layout_html``.
+
+    Uses the same ordinal-position approach as ``_verbatim_slices``: finds
+    which occurrence of the tag in BS4's tree corresponds to ``el``, then
+    slices up to the first ``>`` in the original HTML.
+
+    Assumes attribute values do not contain unquoted ``>``.  Falls back to a
+    constructed ``<tag>`` on any mismatch.
+    """
+    tag = el.name
+    all_of_tag = list(soup.find_all(tag))
+    ordinal = next((i for i, e in enumerate(all_of_tag) if e is el), None)
+    if ordinal is None:
+        return f"<{tag}>"
+
+    open_pattern = re.compile(r"<" + re.escape(tag) + r"(?=[\s>])", re.IGNORECASE)
+    matches = list(open_pattern.finditer(layout_html))
+    if ordinal >= len(matches):
+        return f"<{tag}>"
+
+    start = matches[ordinal].start()
+    # Find the end of the opening tag's `>` (assumes no `>` in attribute values)
+    end = layout_html.index(">", start) + 1
+    return layout_html[start:end]
+
+
+def _reparent_if_needed(
+    layout_html: str,
+    soup: BeautifulSoup,
+    root,
+    verbatim_section: str,
+) -> str:
+    """Wrap ``verbatim_section`` in its non-promoting ancestor chain, if any.
+
+    Walk up from ``root`` through ancestors that are NOT in
+    ``SLIDE_WRAPPER_TAGS`` (i.e. non-promoting tags like ``<main>`` or
+    ``<div>``).  For each such ancestor, prepend its verbatim opening tag and
+    append the corresponding closing tag, with all other children of that
+    ancestor stripped.
+
+    Stops when: the ancestor tag is in ``SLIDE_WRAPPER_TAGS`` (promoting:
+    ``section`` or ``article``), or the ancestor has no name (document root).
+
+    A section whose immediate ancestors are all promoting tags is returned
+    unchanged — ``find_slide_roots`` already promoted those wrappers to the
+    root, so there is nothing to add.
+
+    Args:
+        layout_html: Original, unparsed HTML string.
+        soup: Parsed BS4 document.
+        root: BS4 Tag returned by ``find_slide_roots`` (possibly promoted).
+        verbatim_section: The verbatim HTML slice of the root element.
+
+    Returns:
+        The section, wrapped in its non-promoting ancestor chain (innermost to
+        outermost), with sibling children stripped.
+    """
+    ancestors = []
+    el = root.parent
+    # isinstance(el, BeautifulSoup) identifies the document root ([document]).
+    # Its name is '[document]', not None — check the type, not the name.
+    while el is not None and not isinstance(el, BeautifulSoup):
+        if el.name in SLIDE_WRAPPER_TAGS:
+            break  # promoting ancestor — don't add a promoting wrapper
+        ancestors.append(el)
+        el = el.parent
+
+    if not ancestors:
+        return verbatim_section
+
+    # Wrap from innermost ancestor outward.
+    result = verbatim_section
+    for anc in ancestors:
+        open_tag = _verbatim_open_tag(layout_html, soup, anc)
+        result = open_tag + result + f"</{anc.name}>"
+
+    return result
+
+
 def _detect_affordances(root_soup) -> list[str]:
     """Return structural affordances present in the element.
 
@@ -227,7 +313,7 @@ def _text_snippet(root_soup, max_len: int = 80) -> str:
 def section_inventory(layout_html: str) -> list[dict]:
     """Return a compact structural inventory of each slide section.
 
-    Each entry is a plain dict with:
+    Each entry is a plain dict with exactly these keys:
         index (int): 0-based position in document order
         tag (str): element tag name (e.g. ``"section"``, ``"div"``)
         classes (list[str]): the element's class tokens
@@ -276,26 +362,32 @@ def section_inventory(layout_html: str) -> list[dict]:
 
 
 def extract_section(layout_html: str, index: int) -> str:
-    """Return the **verbatim** markup of the slide section at 0-based *index*.
+    """Return the **verbatim** markup of the slide section at 0-based *index*,
+    wrapped in its non-promoting ancestor chain.
 
     Uses ``find_slide_roots`` to identify each section (applying wrapper
-    promotion for ``SLIDE_WRAPPER_TAGS``), then returns the **original bytes**
-    of that element from ``layout_html`` — not a BS4 re-serialization.
-    BS4's serializer normalises attribute quoting (single → double) and
-    self-closing-tag syntax; returning the verbatim slice preserves the
-    template author's exact markup.
+    promotion for ``SLIDE_WRAPPER_TAGS``), extracts the verbatim HTML of the
+    root element, then wraps it in any non-promoting ancestor tags (``<main>``,
+    ``<div>``, etc.) so that inherited CSS properties — ``color``,
+    ``font-family``, and custom properties consumed via ``var(--…)`` — are
+    preserved.  Siblings of this section are stripped from each ancestor.
 
-    Re-parenting is NOT implemented.  If a template wraps slides in a
-    non-promoting tag (``<main>``, ``<div>``), the extracted section is the
-    slide element itself, without the wrapper.  Whether computed styles diverge
-    in that case is unverified (no Playwright probe was run — see report).
+    A section whose immediate ancestors are all promoting tags (``section``,
+    ``article``) is returned without additional wrapping — ``find_slide_roots``
+    already promoted those wrappers.
+
+    The section element's own markup (and its descendants) is byte-for-byte
+    verbatim from ``layout_html``: BS4's serializer normalises attribute quoting
+    (single → double) and self-closing-tag syntax; the verbatim approach
+    preserves the template author's exact markup.
 
     Args:
         layout_html: Full HTML of the design-system template layout.
         index: 0-based section index.
 
     Returns:
-        Verbatim HTML string of the section element (with all descendants).
+        Verbatim HTML string of the section element, optionally wrapped in its
+        non-promoting ancestor chain with siblings stripped.
 
     Raises:
         IndexError: when ``index >= number of slide roots`` or the layout has
@@ -310,8 +402,9 @@ def extract_section(layout_html: str, index: int) -> str:
             f"layout has {len(roots)} slide root(s)."
         )
 
-    slices = _verbatim_slices(layout_html, soup, roots)
-    return slices[index]
+    root = roots[index]
+    verbatim = _verbatim_slices(layout_html, soup, [root])[0]
+    return _reparent_if_needed(layout_html, soup, root, verbatim)
 
 
 # No-template sentinel — returned instead of (None, None, None) so callers
@@ -354,6 +447,9 @@ def resolve_template_bytes(
           assigns ``template.layout_html`` with normalised selectors.  Reading
           ``layout_html`` before that pass yields selectors that never match
           generated ``<div class="slide">`` roots — a silent styling loss.
+        * ``get_template_for_generation`` MUST be called inside the same
+          ``get_db_session`` context so SQLAlchemy can commit the self-heal
+          write when the context exits.
 
     Args:
         design_system_id: Primary key of the DesignSystem row.
@@ -386,9 +482,9 @@ def resolve_template_bytes(
                 return _EMPTY
 
             # (b) Route through get_template_for_generation, which calls
-            # materialize_templates.  Must be inside the same session so the
-            # self-heal normalization write is persisted (the docstring of
-            # materialize_templates leaves persistence to the calling session).
+            # materialize_templates.  MUST be inside the same session so the
+            # self-heal normalisation write is committed when the context exits
+            # (materialize_templates leaves persistence to the calling session).
             template = get_template_for_generation(design_system, template_id)
 
             if template is None:
