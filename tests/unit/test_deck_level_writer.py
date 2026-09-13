@@ -161,11 +161,9 @@ class TestOptimisticLock:
         assert result["version"] == current + 1
         assert deck_with_three_rows.deck_row().css == _CSS
 
-    def test_stale_expected_version_is_rejected_and_writes_nothing(
-        self, deck_with_three_rows
-    ):
+    def test_stale_expected_version_raises(self, deck_with_three_rows):
+        """Property one, on its own: a stale write is rejected loudly."""
         current = deck_with_three_rows.version()
-        css_before = deck_with_three_rows.deck_row().css
 
         with _patched(deck_with_three_rows._factory):
             with pytest.raises(VersionConflictError) as exc:
@@ -177,8 +175,64 @@ class TestOptimisticLock:
 
         assert exc.value.current_version == current
         assert exc.value.expected_version == current - 1
-        assert deck_with_three_rows.version() == current, "version moved on a rejected write"
-        assert deck_with_three_rows.deck_row().css == css_before, "rejected write persisted"
+
+    def test_a_stale_write_persists_nothing(self, deck_with_three_rows):
+        """Property two, INDEPENDENTLY falsifiable.
+
+        The state comparison runs OUTSIDE the exception handling, so it is
+        evaluated whether or not the conflict fired.  That is the point: a writer
+        that raises correctly and has *already* mutated the row is the more
+        insidious failure — the caller sees a clean rejection and the data has
+        moved anyway — and a `pytest.raises` block with the assertions inside it
+        cannot see that case at all.
+        """
+        before_version = deck_with_three_rows.version()
+        _columns = (
+            "version",
+            "title",
+            "css",
+            "external_scripts_json",
+            "head_meta_json",
+            "deck_spec_json",
+            "slide_count",
+            "html_content",
+            "scripts_content",
+            "modified_by",
+            "deck_json",
+        )
+        before_deck = deck_with_three_rows.deck_row()
+        before = {name: getattr(before_deck, name) for name in _columns}
+        before_session_title = deck_with_three_rows.session_row().title
+        before_rows = deck_with_three_rows.row_snapshot()
+
+        with _patched(deck_with_three_rows._factory):
+            try:
+                write_deck_level_columns(
+                    deck_with_three_rows.session_id,
+                    title="Stale title",
+                    css="/* stale writer */",
+                    external_scripts=["https://example.invalid/stale.js"],
+                    head_meta={"viewport": "stale"},
+                    deck_spec={"title": "stale spec"},
+                    slide_count=99,
+                    html_content="<html>stale</html>",
+                    scripts_content="/* stale scripts */",
+                    modified_by="stale@example.com",
+                    expected_version=before_version - 1,
+                )
+            except VersionConflictError:
+                # Whether it raises is test_stale_expected_version_raises's
+                # business.  Swallowed here so the state assertions below run in
+                # BOTH worlds.
+                pass
+
+        after_deck = deck_with_three_rows.deck_row()
+        after = {name: getattr(after_deck, name) for name in _columns}
+        assert after == before, "a rejected write persisted deck-level state"
+        assert (
+            deck_with_three_rows.session_row().title == before_session_title
+        ), "a rejected write persisted the session row's title"
+        assert deck_with_three_rows.row_snapshot() == before_rows
 
 
 # ---------------------------------------------------------------------------
