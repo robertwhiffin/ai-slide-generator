@@ -2,8 +2,9 @@
 
 This module is the single source of truth for the seven skill definitions
 (name, version, instructions, output schema, tool grants).  Every graph node
-calls :func:`call_skill`; the skill prose bodies are placeholders replaced by
-C9.
+calls :func:`call_skill`.  C9 split the seven prose bodies into per-skill
+sub-modules (Ruling C-22); this module keeps the registry machinery and
+imports each body.
 
 Contract ownership
 ------------------
@@ -87,7 +88,7 @@ def _register(
 
 
 # ---------------------------------------------------------------------------
-# Skill registrations — PLACEHOLDER BODIES.  C9 replaces the prose.
+# Skill bodies — imported from per-skill sub-modules (Ruling C-22, C9).
 #
 # Rules (§15, §16, Ruling C-10, C-11):
 #   1. All seven are registered here so C4 can invoke them.
@@ -99,82 +100,28 @@ def _register(
 #   4. data_analyst is the ONLY skill with non-empty tool_grants.
 # ---------------------------------------------------------------------------
 
-_register(
-    "architect",
-    version=1,
-    instructions=(
-        "Architect: analyse the user request and produce a structured deck "
-        "specification with slide sections, section types, and a narrative arc. "
-        "Return an ArchitectOutput that captures the intent and, for 'build' "
-        "intent, a complete DeckSpec."
-    ),
-    tool_grants=[],
-)
+from .architect import INSTRUCTIONS as _architect_instructions
+from .architect import TOOL_GRANTS as _architect_grants
+from .data_analyst import INSTRUCTIONS as _data_analyst_instructions
+from .data_analyst import TOOL_GRANTS as _data_analyst_grants
+from .builder import INSTRUCTIONS as _builder_instructions
+from .builder import TOOL_GRANTS as _builder_grants
+from .fixer import INSTRUCTIONS as _fixer_instructions
+from .fixer import TOOL_GRANTS as _fixer_grants
+from .build_reviewer import INSTRUCTIONS as _build_reviewer_instructions
+from .build_reviewer import TOOL_GRANTS as _build_reviewer_grants
+from .fix_reviewer import INSTRUCTIONS as _fix_reviewer_instructions
+from .fix_reviewer import TOOL_GRANTS as _fix_reviewer_grants
+from .deck_reviewer import INSTRUCTIONS as _deck_reviewer_instructions
+from .deck_reviewer import TOOL_GRANTS as _deck_reviewer_grants
 
-_register(
-    "data_analyst",
-    version=1,
-    instructions=(
-        "Data analyst: query the available tools for the metrics described in "
-        "the data_request payload, synthesise the results, and return an "
-        "AnalystOutput with outcome, synthesis, and sources."
-    ),
-    tool_grants=["genie", "vector_index"],
-)
-
-_register(
-    "builder",
-    version=1,
-    instructions=(
-        "Builder: generate a single, well-structured slide in HTML for the "
-        "given section brief. Return valid HTML only; do NOT emit a <style> "
-        "element — deck-level CSS has a single writer."
-    ),
-    tool_grants=[],
-)
-
-_register(
-    "fixer",
-    version=1,
-    instructions=(
-        "Fixer: apply the reported objective finding to the slide HTML. "
-        "Return the corrected HTML, a change_summary, and a changed flag. "
-        "Do NOT emit a <style> element."
-    ),
-    tool_grants=[],
-)
-
-_register(
-    "build_reviewer",
-    version=1,
-    instructions=(
-        "Build reviewer: inspect the built slide against the objective design "
-        "criteria (overflow, contrast, colour fidelity, image distortion, "
-        "source fidelity). Return a SlideReviewOutput with a findings list."
-    ),
-    tool_grants=[],
-)
-
-_register(
-    "fix_reviewer",
-    version=1,
-    instructions=(
-        "Fix reviewer: verify that the fixer addressed the reported finding "
-        "and return a new review of the corrected slide as a SlideReviewOutput."
-    ),
-    tool_grants=[],
-)
-
-_register(
-    "deck_reviewer",
-    version=1,
-    instructions=(
-        "Deck reviewer: review the complete deck for narrative arc, cross-slide "
-        "repetition, and presence of a conclusion. Return a DeckReviewOutput "
-        "with a findings list."
-    ),
-    tool_grants=[],
-)
+_register("architect", version=2, instructions=_architect_instructions, tool_grants=_architect_grants)
+_register("data_analyst", version=2, instructions=_data_analyst_instructions, tool_grants=_data_analyst_grants)
+_register("builder", version=2, instructions=_builder_instructions, tool_grants=_builder_grants)
+_register("fixer", version=2, instructions=_fixer_instructions, tool_grants=_fixer_grants)
+_register("build_reviewer", version=2, instructions=_build_reviewer_instructions, tool_grants=_build_reviewer_grants)
+_register("fix_reviewer", version=2, instructions=_fix_reviewer_instructions, tool_grants=_fix_reviewer_grants)
+_register("deck_reviewer", version=2, instructions=_deck_reviewer_instructions, tool_grants=_deck_reviewer_grants)
 
 
 # ---------------------------------------------------------------------------
