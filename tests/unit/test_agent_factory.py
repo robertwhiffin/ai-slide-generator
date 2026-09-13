@@ -164,7 +164,7 @@ def test_mcp_tool_builds_tools(default_prompts):
 
     with patch("src.services.agent_factory._create_model") as mock_model, \
          patch("src.services.agent_factory._get_prompt_content") as mock_prompts, \
-         patch("src.services.agent_factory.build_mcp_tools") as mock_build_mcp, \
+         patch("src.services.agent_resolution.build_mcp_tools") as mock_build_mcp, \
          patch("src.services.agent.get_settings") as mock_settings, \
          patch("src.services.agent.get_databricks_client") as mock_client:
         mock_model.return_value = MagicMock()
@@ -549,7 +549,7 @@ def test_backward_compatible_init():
 
 
 class TestBuildToolsNewTypes:
-    @patch("src.services.agent_factory.build_vector_tool")
+    @patch("src.services.agent_resolution.build_vector_tool")
     def test_build_tools_includes_vector(self, mock_build):
         from src.api.schemas.agent_config import AgentConfig, VectorIndexTool
         from src.services.agent_factory import _build_tools
@@ -563,7 +563,7 @@ class TestBuildToolsNewTypes:
         assert any(t.name == "search_vector_index" for t in tools)
         mock_build.assert_called_once()
 
-    @patch("src.services.agent_factory.build_model_endpoint_tool")
+    @patch("src.services.agent_resolution.build_model_endpoint_tool")
     def test_build_tools_includes_model_endpoint(self, mock_build):
         from src.api.schemas.agent_config import AgentConfig, ModelEndpointTool
         from src.services.agent_factory import _build_tools
@@ -577,7 +577,7 @@ class TestBuildToolsNewTypes:
         assert any(t.name == "query_model_endpoint" for t in tools)
         mock_build.assert_called_once()
 
-    @patch("src.services.agent_factory.build_agent_bricks_tool")
+    @patch("src.services.agent_resolution.build_agent_bricks_tool")
     def test_build_tools_includes_agent_bricks(self, mock_build):
         from src.api.schemas.agent_config import AgentConfig, AgentBricksTool
         from src.services.agent_factory import _build_tools
@@ -591,7 +591,7 @@ class TestBuildToolsNewTypes:
         assert any(t.name == "query_agent" for t in tools)
         mock_build.assert_called_once()
 
-    @patch("src.services.agent_factory.build_mcp_tools")
+    @patch("src.services.agent_resolution.build_mcp_tools")
     def test_build_tools_includes_mcp(self, mock_build):
         from src.api.schemas.agent_config import AgentConfig, MCPTool
         from src.services.agent_factory import _build_tools
@@ -619,7 +619,7 @@ class TestBrandAssetToolRegistration:
 
     @staticmethod
     def _active():
-        return patch("src.services.agent_factory._design_system_is_active", return_value=True)
+        return patch("src.services.agent_resolution._design_system_is_active", return_value=True)
 
     def test_no_design_system_no_brand_asset_tool(self):
         from src.api.schemas.agent_config import AgentConfig
@@ -643,7 +643,7 @@ class TestBrandAssetToolRegistration:
         from src.services import agent_factory
 
         with self._active(), patch(
-            "src.services.agent_factory.build_ds_asset_tool"
+            "src.services.agent_resolution.build_ds_asset_tool"
         ) as mock_build:
             marker = MagicMock()
             marker.name = "search_brand_assets"
@@ -657,15 +657,15 @@ class TestBrandAssetToolRegistration:
         from src.api.schemas.agent_config import AgentConfig
         from src.services import agent_factory
 
-        with patch("src.services.agent_factory.build_ds_asset_tool") as mock_build:
+        with patch("src.services.agent_resolution.build_ds_asset_tool") as mock_build:
             agent_factory._build_tools(AgentConfig(), {})
         mock_build.assert_not_called()
 
-    @patch("src.services.agent_factory.build_agent_bricks_tool")
-    @patch("src.services.agent_factory.build_model_endpoint_tool")
-    @patch("src.services.agent_factory.build_vector_tool")
-    @patch("src.services.agent_factory.build_mcp_tools")
-    @patch("src.services.agent_factory.build_genie_tool")
+    @patch("src.services.agent_resolution.build_agent_bricks_tool")
+    @patch("src.services.agent_resolution.build_model_endpoint_tool")
+    @patch("src.services.agent_resolution.build_vector_tool")
+    @patch("src.services.agent_resolution.build_mcp_tools")
+    @patch("src.services.agent_resolution.build_genie_tool")
     def test_build_tools_all_types_together(self, mock_genie, mock_mcp, mock_vector, mock_model, mock_agent):
         from src.api.schemas.agent_config import (
             AgentConfig, GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
