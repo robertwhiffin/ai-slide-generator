@@ -456,21 +456,15 @@ class TestContributorSessionWithSpec:
         assert spec["audience"] == "Test audience"
         assert len(spec["slides"]) == 3
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="get_slide_deck() does not emit a deck_spec key yet — PR3 Task 3.3 "
-               "('Serve the deck spec through the read path') adds it, and src/ is "
-               "frozen by this PR.  strict=True so this goes RED when Task 3.3 "
-               "lands, forcing conversion to a passing test."
-    )
     def test_the_spec_reaches_the_contributor_in_the_deck_dict(
         self, contributor_session_with_spec
     ):
         """§7.5 in full: spec visibility equals deck visibility.
 
         The owner's spec must arrive IN the dict the contributor reads, not just
-        be reachable on the owner's row.  Until Task 3.3 serves it, the key is
-        absent and this xfails on KeyError.
+        be reachable on the owner's row.  The strict xfail this test carried has
+        been removed: B3.2 serves the deck_spec key through all three read paths,
+        so this now passes, and a strict xfail would fail the suite on the XPASS.
         """
         result = contributor_session_with_spec.get_slide_deck_as_contributor()
         assert result["deck_spec"]["audience"] == "Test audience"
