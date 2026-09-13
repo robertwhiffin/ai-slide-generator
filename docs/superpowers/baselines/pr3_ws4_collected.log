@@ -62,7 +62,7 @@ CAUSE 2 — stale stored Genie space id. ENVIRONMENTAL: depends on a local `.env
     E   src.services.tools.genie_tool.GenieToolError: Failed to query Genie space after 3 attempts: ...
 
 --------------------------------------------------------------------------------
-SECTION 2 — POST-ws4a  (THIS is what ws4b, ws4c, ws4d and ws4e build on)
+SECTION 2 — POST-ws4a  (what ws4b was measured against; SUPERSEDED by 2b for ws4c/d/e)
 --------------------------------------------------------------------------------
 
 Measured 2026-09-10 on branch `feat/ws4a-shipped-defects` with all of ws4a applied, with no
@@ -88,6 +88,69 @@ DELTA: +35 collected (4188 -> 4223).
   NOTE: an earlier revision of this file recorded 4221 / +33. That was measured before the final
   whole-branch review's fix wave, which added one nested-path assertion to EACH guard (bringing them
   to 4 and 3 tests respectively). The figures above are the authoritative post-review measurement.
+
+--------------------------------------------------------------------------------
+SECTION 2b — POST-ws4b  (THIS is what ws4c, ws4d and ws4e build on)
+--------------------------------------------------------------------------------
+
+Measured 2026-09-13 on branch `feat/ws4b-contracts-and-schema` with all of ws4b applied,
+with no application server running (same conditions as Sections 1 and 2).
+
+    3 failed, 4570 passed, 8 skipped, 135 warnings in 437.32s
+    COLLECTED: 4581
+
+CAUSES: IDENTICAL to Sections 1 and 2. Same three tests, same four assertion strings, verbatim.
+  No new cause. No change to the deploy-autoscaling cause. Both of its DISTINCT assertion
+  strings were re-measured, not grepped for one:
+    assert 'provisioned' == 'autoscaling'
+    Expected '_get_or_create_lakebase_provisioned' to have been called once. Called 0 times.
+
+DELTA: +358 collected (4223 -> 4581), reconciled EXACTLY. Counts taken per file with
+`--collect-only -q`, as this file requires:
+    + 31  tests/unit/test_finding_schema.py                 (B1.1)
+    + 32  tests/unit/test_deck_spec.py                      (B1.4)
+    + 37  tests/unit/test_skill_io.py                       (B1.5)
+    +  9  tests/unit/test_finding_conformance.py            (B1.2, extended by B3.2)
+    +  3  tests/unit/test_verification_conformance.py       (B1.2)
+    + 69  tests/unit/test_conftest_fixtures.py              (B1.7, +B2.3 and B3.2 conversions)
+    + 16  tests/integration/test_ws4b_fixture_contracts.py  (B1.7)
+    + 31  tests/unit/test_skill_schema_smoke.py             (B1.6)
+    + 27  tests/unit/test_checkpointer.py                   (B2.1)
+    + 25  tests/unit/test_deck_review_store.py              (B2.2)
+    + 15  tests/unit/test_spec_dirty_marker.py              (B2.3)
+    + 11  tests/unit/test_drop_config_prompt_columns.py     (B2.5)
+    + 20  tests/unit/test_deck_level_writer.py              (B3.1)
+    + 21  tests/unit/test_deck_css_aggregator.py            (B3.3)
+    + 20  tests/unit/test_deck_read_path_keys.py            (B3.2)
+    ----
+    +367  added across 15 new files
+    -  9  DELETED, every one named below
+    ----
+    +358  net, matching the measured delta exactly
+
+  CLAUSE 3 CHECKED PROPERLY, not by count. The nine deletions were enumerated by diffing the
+  test tree for removed `def test_` lines; ZERO test files were deleted. All nine are named in
+  commit 73deeeaf and all nine assert behaviour that no longer exists (the retired
+  system_prompt / slide_editing_instructions override):
+    test_load_prompts_missing_required_prompts, test_load_prompts_validates_all_required,
+    test_prompts_config, test_system_prompt_must_be_nonempty_if_set,
+    test_slide_editing_instructions_must_be_nonempty_if_set,
+    test_get_prompt_content_uses_config_overrides, test_update_prompts_config,
+    test_custom_prompts_preserved, test_default_prompts_become_none
+  Seven further tests were KEPT with the retired kwarg or assertion dropped, per ruling R1:
+  a test asserting the retired BEHAVIOUR goes; one merely CONSTRUCTING the field incidentally stays.
+
+  NOT IN ANY COUNT ABOVE: ws4b also adds 8 vitest tests (frontend/src/**/*.test.tsx). Playwright
+  and vitest are not in the pytest suite. `npm run test:unit` is the gate for those.
+
+VERIFIED AGAINST REAL LAKEBASE, 2026-09-13 — the first time in this workstream:
+  devloop fork `projects/db-tellr/branches/dev-ws4b-verify`, app db-tellr-dev-ws4b-verify from
+  PyPI 0.4.3.dev20, reached ACTIVE | RUNNING. Because every migration step raises SystemExit(1)
+  on failure, RUNNING is itself the proof — but the fork's schema was queried directly rather
+  than inferred: graph_checkpoints, graph_checkpoint_writes and deck_reviews PRESENT; all three
+  spec_dirty_* columns and ix_session_slide_decks_spec_dirty_at PRESENT; config_prompts'
+  two retired columns GONE. The checkpointer's live suite run against that fork's endpoint:
+  2 passed.
 
 --------------------------------------------------------------------------------
 SECTION 3 — WHAT THIS FILE DOES *NOT* COVER
