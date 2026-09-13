@@ -745,6 +745,91 @@ class TestBuildReviewerFixPath:
         ]
 
 
+class TestBuildReviewerFailureIsTerminalNotFatal:
+    """A raising reviewer used to kill the turn: no placeholder, no deck-level
+    write, nothing in chat.  It must now placehold exactly as a failed builder
+    does, so the turn still reaches deck review."""
+
+    def _boom(self, payload):
+        raise RuntimeError("reviewer exploded")
+
+    def test_the_position_is_placeheld_and_never_landed(self, graph_env):
+        graph_env.skills.set("build_reviewer", self._boom)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert updates == {
+            "placeheld_positions": scoped(TURN, {0}),
+            "reviewed_positions": scoped(TURN, {0}),
+        }
+        assert "landed_positions" not in updates
+        assert "fix_map" not in updates
+
+    def test_the_row_is_the_sanctioned_placeholder_marker(self, graph_env):
+        """``commit_placeholder`` + ``is_placeholder_record``, never a second
+        marker and never an HTML class check."""
+        graph_env.skills.set("build_reviewer", self._boom)
+
+        build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        rows = graph_env.rows()
+        assert len(rows) == 1
+        assert is_placeholder_record(json.loads(rows[0].verification_record))
+
+    def test_the_failure_is_surfaced_not_swallowed(self, graph_env):
+        """A caught-and-forgotten reviewer exception is worse than the crash: the
+        deck would look complete."""
+        graph_env.skills.set("build_reviewer", self._boom)
+
+        build_reviewer_node(_branch_payload(graph_env, 2, html="<p>a</p>",
+                                            spec=make_spec((2,))))
+
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert len(info) == 1
+        assert "Slide 2" in info[0]["content"]
+        assert "build_reviewer" in info[0]["content"]
+
+    def test_it_writes_no_error_state(self, graph_env):
+        """Measured: two fanned branches writing error_state raise
+        ``InvalidUpdateError: At key 'error_state': Can receive only one value
+        per step`` — killing the turn this handler exists to save."""
+        graph_env.skills.set("build_reviewer", self._boom)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert "error_state" not in updates
+
+    def test_a_row_write_failure_also_placeholds(self, graph_env, monkeypatch):
+        """The row write is inside the handler's reach, not only the model call."""
+        graph_env.skills.set("build_reviewer", lambda payload: review_out(0))
+        monkeypatch.setattr(
+            nodes,
+            "_write_reviewed_row",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("db exploded")),
+        )
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+        assert is_placeholder_record(
+            json.loads(graph_env.rows()[0].verification_record)
+        )
+
+    def test_an_unplaceholdable_position_claims_nothing(self, graph_env, monkeypatch):
+        """Claiming placeheld without a row makes all_positions_committed lie and
+        the deck goes to review incomplete; returning nothing leaves the position
+        for the foreman to reconcile."""
+        graph_env.skills.set("build_reviewer", self._boom)
+        monkeypatch.setattr(
+            nodes.SlideWriter,
+            "commit_placeholder",
+            lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("no db")),
+        )
+
+        assert build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>")) == {}
+        assert graph_env.rows() == []
+
+
 class TestFindingStamping:
     def test_two_findings_of_one_criterion_get_distinct_ordinals(self, graph_env):
         graph_env.skills.set(
@@ -1167,6 +1252,31 @@ class TestDeckReviewerReview:
 # ===========================================================================
 
 
+def _own_nodes(func: ast.AST):
+    """Walk *func*'s own body, NOT the bodies of functions nested inside it.
+
+    ``builder_node`` and ``fixer_node`` both define a ``_regenerate`` closure for
+    the safety gate; a plain ``ast.walk`` attributes that closure's ``return`` to
+    the node.
+    """
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _node_functions():
+    tree = ast.parse(inspect.getsource(nodes))
+    return [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name.endswith("_node")
+    ]
+
+
 def _state_write_keys() -> dict:
     """Every state key this module's nodes write, found by AST.
 
@@ -1174,14 +1284,11 @@ def _state_write_keys() -> dict:
     up in a local variable (``updates[...] = ...`` / ``updates.update({...})``)
     that is then returned.
     """
-    tree = ast.parse(inspect.getsource(nodes))
     found: dict = {}
-    for func in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
-        if not func.name.endswith("_node"):
-            continue
+    for func in _node_functions():
         keys: set = set()
         returned_names: set = set()
-        for node in ast.walk(func):
+        for node in _own_nodes(func):
             if isinstance(node, ast.Return) and node.value is not None:
                 if isinstance(node.value, ast.Dict):
                     keys |= {
@@ -1191,7 +1298,7 @@ def _state_write_keys() -> dict:
                     }
                 elif isinstance(node.value, ast.Name):
                     returned_names.add(node.value.id)
-        for node in ast.walk(func):
+        for node in _own_nodes(func):
             # Both assignment forms: `updates = {...}` and the ANNOTATED
             # `updates: Dict[str, Any] = {...}`, which is an AnnAssign and was
             # invisible to an earlier version of this scan — the nodes that build
@@ -1253,15 +1360,70 @@ def test_no_node_returns_a_key_graphstate_does_not_declare():
     assert undeclared == {}, f"undeclared state keys returned: {undeclared}"
 
 
-def test_the_exhaustiveness_scan_finds_keys_in_every_node():
-    """A scan that reached a node but found none of its keys passes vacuously.
+# The state keys each node writes, pinned EXACTLY.
+#
+# A non-empty-per-node assertion is not enough and this is measured, not
+# supposed: the scan was once blind to the annotated assignment form
+# (``updates: Dict[str, Any] = {...}``), which costs a handful of keys spread
+# across three nodes and empties none of them, so "every node yields at least one
+# key" stayed green with the blindness in place.  Pinning the SET makes the
+# missing keys the failure message.
+#
+# Editing this table is part of changing what a node writes — which is the point:
+# the change becomes visible in review instead of silent.
+_EXPECTED_NODE_WRITES = {
+    "architect_node": {
+        "architect_intent", "architect_message", "deck_spec",
+        "design_system_active", "deterministic_css", "emitted_style_blocks",
+        "error_state", "external_scripts", "fix_target", "head_meta",
+        "resolved_style", "target_positions", "template_layout_html", "title",
+        "token_css",
+    },
+    "data_analyst_node": {"architect_message"},
+    "foreman_node": {"dispatched_at", "error_state", "foreman_wakes"},
+    "builder_node": {"placeheld_positions", "slides"},
+    "build_reviewer_node": {
+        "findings", "fix_map", "landed_positions", "placeheld_positions",
+        "reviewed_positions",
+    },
+    "fixer_node": {
+        "findings", "fix_map", "fix_target", "fixed", "landed_positions",
+    },
+    "fix_reviewer_node": {
+        "findings", "fix_map", "fix_target", "landed_positions",
+    },
+    "placeholder_node": {"placeheld_positions"},
+    "deck_reviewer_node": {"error_state", "knitted_html", "scripts_content"},
+}
 
-    Every one of the nine writes at least one state key on some path, so an empty
-    set means the scan did not understand how that node builds its return.
+
+def test_the_scan_finds_exactly_the_keys_each_node_writes():
+    """Pins the scan's coverage per node, not merely that it found something.
+
+    Fails in both directions: a node that starts writing a new key (the table is
+    then stale, and the reviewer sees the new write), and a scan that stops
+    seeing a write it used to see (a helper that returns a state dict, an
+    assignment form the walker does not understand).
     """
     writes = _state_write_keys()
-    empty = sorted(name for name, keys in writes.items() if not keys)
-    assert empty == [], f"the scan found no state keys in: {empty}"
+    assert set(writes) == set(_EXPECTED_NODE_WRITES)
+    lost = {
+        name: sorted(expected - writes[name])
+        for name, expected in _EXPECTED_NODE_WRITES.items()
+        if expected - writes[name]
+    }
+    new_keys = {
+        name: sorted(found - _EXPECTED_NODE_WRITES[name])
+        for name, found in writes.items()
+        if found - _EXPECTED_NODE_WRITES[name]
+    }
+    assert lost == {}, (
+        f"the scan no longer sees these writes (a blind spot, or a node stopped "
+        f"writing them): {lost}"
+    )
+    assert new_keys == {}, (
+        f"these nodes write state keys the table does not list: {new_keys}"
+    )
 
 
 def test_the_exhaustiveness_scan_reaches_every_node():
@@ -1277,6 +1439,35 @@ def test_the_exhaustiveness_scan_reaches_every_node():
         "placeholder_node",
         "deck_reviewer_node",
     }
+
+
+def test_no_node_returns_a_dict_a_helper_built():
+    """Every node's state update must be visible IN the node.
+
+    Found by sabotaging the guard above rather than by reasoning: moving
+    ``fixer_node``'s stale-fix keys into a helper and returning its dict left the
+    pinned table GREEN, because the node's other paths write the same four keys,
+    so the per-node UNION did not change.  A union cannot see a loss another path
+    covers — so the invisible construct is forbidden outright instead.
+
+    Allowed return shapes: a dict literal, or a local name holding a dict the node
+    built.  A ``Call`` (``return _helper(...)``) is not.
+    """
+    offenders = {}
+    for func in _node_functions():
+        bad = [
+            type(node.value).__name__
+            for node in _own_nodes(func)
+            if isinstance(node, ast.Return)
+            and node.value is not None
+            and not isinstance(node.value, (ast.Dict, ast.Name))
+        ]
+        if bad:
+            offenders[func.name] = bad
+    assert offenders == {}, (
+        "these nodes return something other than a dict literal or a local dict, "
+        f"which hides their state keys from the exhaustiveness scan: {offenders}"
+    )
 
 
 def test_the_scan_would_catch_an_undeclared_key():

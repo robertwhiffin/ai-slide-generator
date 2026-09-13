@@ -444,6 +444,67 @@ class TestARealTurn:
         assert len(env.skills.calls_for("build_reviewer")) == 2
         assert len(env.skills.calls_for("deck_reviewer")) == 1
 
+    def test_a_failed_build_reviewer_is_placeheld_and_the_turn_still_completes(
+        self, graph_env_threadsafe
+    ):
+        """Before the handler existed this turn DIED: no placeholder, no
+        deck-level write, nothing in chat."""
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+
+        def reviewer(payload):
+            if payload["position"] == 1:
+                raise RuntimeError("reviewer exploded")
+            return review_out(payload["position"])
+
+        env.skills.set("build_reviewer", reviewer)
+
+        final = _run(env)
+
+        import json
+
+        from src.api.services.slide_repository import is_placeholder_record
+
+        rows = {r.position: r for r in env.rows()}
+        assert sorted(rows) == [0, 1, 2]
+        assert is_placeholder_record(json.loads(rows[1].verification_record))
+        assert rows[0].modified_by == "graph-user@example.com"
+        # The deck-level write happened and the deck reached review exactly once.
+        assert env.deck_row().slide_count == 3
+        assert env.deck_row().scripts_content == final["scripts_content"]
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+        # …and the failure is visible in chat, not swallowed.
+        info = [m for m in env.messages() if m["message_type"] == "info"]
+        assert any("Slide 1" in m["content"] for m in info)
+
+    def test_two_reviewers_failing_in_one_superstep_do_not_kill_the_turn(
+        self, graph_env_threadsafe
+    ):
+        """The concurrency half: two branches writing ``error_state`` in one
+        superstep raise ``InvalidUpdateError`` and the turn dies, which is why the
+        handler surfaces an ``info`` notice instead."""
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+
+        def reviewer(payload):
+            if payload["position"] in (0, 1):
+                raise RuntimeError("reviewer exploded")
+            return review_out(payload["position"])
+
+        env.skills.set("build_reviewer", reviewer)
+
+        _run(env)
+
+        import json
+
+        from src.api.services.slide_repository import is_placeholder_record
+
+        rows = {r.position: r for r in env.rows()}
+        assert sorted(rows) == [0, 1, 2]
+        assert is_placeholder_record(json.loads(rows[0].verification_record))
+        assert is_placeholder_record(json.loads(rows[1].verification_record))
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+
     def test_a_discuss_turn_ends_without_dispatching_anything(
         self, graph_env_threadsafe
     ):
