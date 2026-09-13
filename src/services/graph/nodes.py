@@ -417,6 +417,105 @@ def _write_reviewed_row(
     return content_hash
 
 
+def _surface_notice(session_id: str, message: str) -> None:
+    """Persist a machine-generated advisory as an ``info`` chat message.
+
+    The shipped channel for advisories the user must see.  Used by every
+    non-fatal failure path a **fanned** node can take, because those paths
+    cannot write ``error_state``: it is single-writer with no reducer, and two
+    branches failing in the same superstep then raise — measured on the
+    installed langgraph::
+
+        InvalidUpdateError: At key 'error_state': Can receive only one value per
+        step. Use an Annotated key to handle multiple values.
+
+    which would kill the turn, exactly the failure the handler exists to
+    prevent.  A chat message is per-row and concurrency-safe, and unlike a
+    stream event it survives ``emitter=None`` (the sweeper path).
+    """
+    try:
+        get_session_manager().add_message(
+            session_id, role="assistant", content=message, message_type="info"
+        )
+    except Exception:
+        logger.warning("Could not surface a failure notice", exc_info=True)
+
+
+def _placehold_failed_position(
+    position: int,
+    *,
+    session_id: str,
+    node: str,
+    reason: str,
+    notice: bool,
+) -> bool:
+    """Commit a terminal placeholder for one failed branch, visibly.
+
+    The single sanctioned way a fanned node marks a position it could not
+    deliver: ``commit_placeholder`` (never a hand-rolled marker), detection
+    through ``is_placeholder_record`` (never an HTML class), and an ``ERROR``
+    stream event.
+
+    Returns ``True`` when the row reads back as a placeholder, which is the only
+    case in which the caller may claim ``placeheld_positions``: claiming it
+    otherwise would make ``all_positions_committed`` true for a position with no
+    row, and the deck would go to review incomplete.  On ``False`` the caller
+    returns no state at all and the foreman reconciles the position through
+    ``stalled_positions``.
+
+    ``notice`` adds a durable ``info`` chat line, and the two callers pass
+    different values **deliberately**:
+
+    * ``build_reviewer_node`` passes ``True``.  Its failure is new behaviour and
+      needs a surface beyond the row, and ``error_state`` is unavailable to it
+      (see that node's docstring).
+    * ``builder_node`` passes ``False``.  The plan gives its exception path a
+      placeholder and an event, nothing more, and C5's
+      ``test_deck_review_fires_once_on_a_turn_where_a_builder_fails`` counts
+      ``info`` messages to prove the deck reviewer ran once — a second notice on
+      that turn breaks that assertion.  **Do not "fix" the asymmetry by passing
+      ``True`` here without changing that assertion to match on the advisory's
+      text.**
+
+    Either way the failure is never silent: the row carries the error marker the
+    UI badges, the branch returns ``placeheld_positions``, and the exception is
+    logged with its traceback.
+
+    ``commit_placeholder`` takes neither ``modified_by`` nor ``deck_spec_slide``
+    (Ruling C-15), so these rows ship with a NULL author here too.
+    """
+    _emit(
+        StreamEventType.ERROR,
+        error=f"Slide {position} could not be generated.",
+        metadata={"node": node, "position": position},
+    )
+    writer = SlideWriter()
+    try:
+        writer.commit_placeholder(session_id, position, error_message=reason)
+        row = writer.get_slide(session_id, position) or {}
+    except Exception:
+        logger.exception(
+            "commit_placeholder failed at position %s; the foreman will "
+            "reconcile it",
+            position,
+        )
+        return False
+    if not is_placeholder_record(row.get("verification_record")):
+        logger.error(
+            "Placeholder row at position %s does not read back as a "
+            "placeholder; the foreman will reconcile it",
+            position,
+        )
+        return False
+    if notice:
+        _surface_notice(
+            session_id,
+            f"Slide {position} could not be generated and has been left as a "
+            f"placeholder ({node}: {reason}). The rest of the deck is unaffected.",
+        )
+    return True
+
+
 def _advisory_text(findings: List[Finding]) -> str:
     """Compose the deck-review advisory from findings alone (§5, Ruling C-3).
 
@@ -947,7 +1046,12 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     On any exception the position is **placeheld**, never landed:
     ``commit_placeholder`` writes a terminal marker so the reorder buffer and
     the all-committed trigger can proceed, and ``placeheld_positions`` (not
-    ``landed_positions``) records it.
+    ``landed_positions``) records it.  The failure is surfaced through an
+    ``ERROR`` stream event, the row's own error marker and a logged traceback —
+    and NOT through ``error_state``: that key is single-writer with no reducer,
+    and two branches failing in one superstep would raise ``InvalidUpdateError``
+    and kill the whole turn (measured).  It adds no chat notice; see
+    ``_placehold_failed_position`` for why that differs from the reviewer's path.
     """
     position = payload["position"]
     session_id = payload["session_id"]
@@ -980,21 +1084,16 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         )
     except Exception as exc:
         logger.exception("Builder failed at position %s", position)
-        _emit(
-            StreamEventType.ERROR,
-            error=f"Slide {position} could not be generated.",
-            metadata={"node": "builder", "position": position},
-        )
-        try:
-            SlideWriter().commit_placeholder(
-                session_id, position, error_message=type(exc).__name__
-            )
-        except Exception:
-            logger.exception(
-                "commit_placeholder failed at position %s; the foreman will "
-                "reconcile it",
-                position,
-            )
+        if not _placehold_failed_position(
+            position,
+            session_id=session_id,
+            node="builder",
+            reason=type(exc).__name__,
+            # No chat notice: see _placehold_failed_position's docstring — C5's
+            # deck-review-fires-once assertion counts info messages on exactly
+            # this turn.
+            notice=False,
+        ):
             return {}
         return {"placeheld_positions": scoped(turn_id, {position})}
 
@@ -1030,6 +1129,24 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     entry instead — ``findings`` is ``operator.add`` and NOT turn-scoped, so
     every entry lives forever and a duplicate "open" copy of a finding that is
     about to be fixed would never be superseded.
+
+    **On any exception the position is placeheld, exactly as a failed builder's
+    is, and the turn continues.**  Measured before this handler existed: a
+    raising ``build_reviewer`` produced **no placeholder, no deck-level write and
+    nothing in chat** — the turn simply died, so §I's terminal-failure rule was
+    unreachable through this node and so was the foreman's own rule that
+    reaching ``END`` with an uncommitted position must record an error and
+    surface a notice.  The handler uses the one sanctioned marker
+    (``commit_placeholder``, detected with ``is_placeholder_record``), so the
+    one-reviewer-writes-one-row invariant is untouched: this branch writes the
+    placeholder row instead of a reviewed row, never both.
+
+    It writes no ``error_state``.  That key is single-writer with no reducer, and
+    two reviewers failing in the same superstep would raise
+    ``InvalidUpdateError: At key 'error_state': Can receive only one value per
+    step`` (measured) — killing the turn, which is the failure being fixed.  The
+    failure is surfaced through the ``info`` chat notice instead, which is
+    per-row, concurrency-safe, and survives ``emitter=None``.
     """
     position = payload["position"]
     session_id = payload["session_id"]
@@ -1038,66 +1155,83 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     scripts = payload.get("scripts") or ""
     initiated_by = payload.get("initiated_by")
 
-    content_hash = compute_slide_hash(html)
-    review_payload = {
-        "position": position,
-        "slide_spec": payload.get("slide_spec"),
-        "resolved_style": payload.get("resolved_style"),
-        "section_css": payload.get("section_css"),
-        "resolved_data": payload.get("resolved_data"),
-        "html": html,
-        "scripts": scripts,
-    }
-    out = call_skill(
-        "build_reviewer",
-        review_payload,
-        bool(payload.get("design_system_active")),
-    )
-
-    findings = _stamp_findings(
-        _skill_findings(out), subject_hash=content_hash, slide_index=position
-    )
-    objective = [f for f in findings if f.objective]
-
-    if not objective:
-        verdict = "surfaced" if findings else "clean"
-        _write_reviewed_row(
-            session_id=session_id,
-            position=position,
-            html=html,
-            scripts=scripts,
-            findings=findings,
-            verdict=verdict,
-            slide_spec=payload.get("slide_spec"),
-            initiated_by=initiated_by,
-        )
-        _emit(
-            StreamEventType.ASSISTANT,
-            content=f"Slide {position} reviewed: {verdict}.",
-            metadata={"node": "build_reviewer", "position": position,
-                      "verdict": verdict},
-        )
-        return {
-            "landed_positions": scoped(turn_id, {position}),
-            "reviewed_positions": scoped(turn_id, {position}),
-            "findings": findings,
+    try:
+        content_hash = compute_slide_hash(html)
+        review_payload = {
+            "position": position,
+            "slide_spec": payload.get("slide_spec"),
+            "resolved_style": payload.get("resolved_style"),
+            "section_css": payload.get("section_css"),
+            "resolved_data": payload.get("resolved_data"),
+            "html": html,
+            "scripts": scripts,
         }
+        out = call_skill(
+            "build_reviewer",
+            review_payload,
+            bool(payload.get("design_system_active")),
+        )
 
-    return {
-        "fix_map": scoped(
-            turn_id,
-            {
-                position: {
-                    "original_html": html,
-                    "original_scripts": scripts,
-                    "finding": objective[0].model_dump(),
-                    "findings": [f.model_dump() for f in findings],
-                    "payload": payload,
-                }
-            },
-        ),
-        "reviewed_positions": scoped(turn_id, {position}),
-    }
+        findings = _stamp_findings(
+            _skill_findings(out), subject_hash=content_hash, slide_index=position
+        )
+        objective = [f for f in findings if f.objective]
+
+        if not objective:
+            verdict = "surfaced" if findings else "clean"
+            _write_reviewed_row(
+                session_id=session_id,
+                position=position,
+                html=html,
+                scripts=scripts,
+                findings=findings,
+                verdict=verdict,
+                slide_spec=payload.get("slide_spec"),
+                initiated_by=initiated_by,
+            )
+            _emit(
+                StreamEventType.ASSISTANT,
+                content=f"Slide {position} reviewed: {verdict}.",
+                metadata={"node": "build_reviewer", "position": position,
+                          "verdict": verdict},
+            )
+            return {
+                "landed_positions": scoped(turn_id, {position}),
+                "reviewed_positions": scoped(turn_id, {position}),
+                "findings": findings,
+            }
+
+        return {
+            "fix_map": scoped(
+                turn_id,
+                {
+                    position: {
+                        "original_html": html,
+                        "original_scripts": scripts,
+                        "finding": objective[0].model_dump(),
+                        "findings": [f.model_dump() for f in findings],
+                        "payload": payload,
+                    }
+                },
+            ),
+            "reviewed_positions": scoped(turn_id, {position}),
+        }
+    except Exception as exc:
+        logger.exception("Build review failed at position %s", position)
+        if not _placehold_failed_position(
+            position,
+            session_id=session_id,
+            node="build_reviewer",
+            reason=type(exc).__name__,
+            notice=True,
+        ):
+            return {}
+        # reviewed_positions too: the position is committed as a placeholder, so
+        # a resumed re-fan must not review it again.
+        return {
+            "placeheld_positions": scoped(turn_id, {position}),
+            "reviewed_positions": scoped(turn_id, {position}),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1131,11 +1265,15 @@ def _land_original(
 def _reconcile_stale_fixes(
     stale: Dict[int, dict],
     *,
-    turn_id: str,
     session_id: str,
     initiated_by: Optional[str],
-) -> Dict[str, Any]:
+) -> List[Finding]:
     """Land the originals for fixes left ``in_flight`` by a dead process.
+
+    Returns the findings it persisted; the CALLER assembles the state update, so
+    every state key a node writes stays inside that node's body where the
+    exhaustiveness scan can see it.  A helper returning a state dict is
+    invisible to that scan.
 
     Reached only on a resumed checkpoint: within a turn the fixer and the fix
     reviewer are strictly sequential (``fixer -> fix_reviewer -> foreman``), and
@@ -1178,12 +1316,7 @@ def _reconcile_stale_fixes(
                 "reconcile it",
                 position,
             )
-    return {
-        "fix_target": None,
-        "fix_map": scoped(turn_id, {position: None for position in stale}),
-        "landed_positions": scoped(turn_id, set(stale)),
-        "findings": findings,
-    }
+    return findings
 
 
 def fixer_node(state: dict) -> Dict[str, Any]:
@@ -1226,12 +1359,15 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             if entry is not None and entry.get("in_flight")
         }
         if stale:
-            return _reconcile_stale_fixes(
-                stale,
-                turn_id=turn_id,
-                session_id=session_id,
-                initiated_by=initiated_by,
+            reconciled = _reconcile_stale_fixes(
+                stale, session_id=session_id, initiated_by=initiated_by
             )
+            return {
+                "fix_target": None,
+                "fix_map": scoped(turn_id, {p: None for p in stale}),
+                "landed_positions": scoped(turn_id, set(stale)),
+                "findings": reconciled,
+            }
         return {"fix_target": None}
 
     position = min(candidates)
