@@ -208,6 +208,16 @@ class GraphState(TypedDict, total=False):
     template_layout_html: Optional[str]
     resolved_style: Optional[str]
 
+    # True when a design system resolved to compiled content this turn.
+    # Written once by architect_node from resolve_style_source(...).design_system_active.
+    # Single-writer, NO reducer.  Must be a plain bool (not a NamedTuple) because
+    # GraphState crosses the SqlAlchemyCheckpointSaver on turn 2, and langgraph
+    # warns on — and will eventually block — deserialising unregistered types
+    # from checkpoint (Ruling C-21, corrections §46).  build_branch_payload
+    # copies this scalar into the Send payload so fanned branches can call
+    # call_skill / assemble_skill_prompt without touching the DB again.
+    design_system_active: Optional[bool]
+
     # Set by architect_node; resolved deterministically before fan-out.
     # Chart.js CDN default and deck <meta> are known before any builder runs.
     external_scripts: Optional[list[str]]
