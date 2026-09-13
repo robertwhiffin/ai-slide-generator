@@ -347,6 +347,9 @@ class TestGraphStateAnnotations:
         "deck_spec", "architect_intent", "architect_message",
         "target_positions", "title",
         "token_css", "deterministic_css", "template_layout_html", "resolved_style",
+        # Added by C3 (Ruling C-21): plain bool so it never crosses a checkpoint
+        # boundary as a NamedTuple (langgraph deprecation path for unregistered types).
+        "design_system_active",
         "external_scripts", "head_meta",
         "scripts_content", "knitted_html",
         "error_state",
@@ -386,6 +389,25 @@ class TestGraphStateAnnotations:
         """
         hints = get_type_hints(GraphState, include_extras=True)
         assert "retry_count" not in hints
+
+    def test_design_system_active_is_declared_single_writer(self):
+        """C3 / Ruling C-21: design_system_active is in GraphState and carries no reducer.
+
+        A NamedTuple (ResolvedStyle) in checkpointed state triggers langgraph's
+        "unregistered type" deserialisation warning and will be blocked in a
+        future version.  The flag is therefore a plain Optional[bool], written
+        once by architect_node, and it must travel as a scalar — not a NamedTuple
+        — through both GraphState and the Send payload that fanned branches read.
+        """
+        hints = get_type_hints(GraphState, include_extras=True)
+        assert "design_system_active" in hints, (
+            "design_system_active must be declared in GraphState so fanned builder "
+            "branches can call assemble_skill_prompt without re-resolving from the DB"
+        )
+        hint = hints["design_system_active"]
+        assert not hasattr(hint, "__metadata__"), (
+            "design_system_active is a single-writer key and must carry NO reducer"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -500,3 +500,131 @@ def _build_tools(
             )
 
     return tools
+
+
+# ---------------------------------------------------------------------------
+# Skill prompt assembly and model binding — C3
+#
+# These two functions are appended here (not inlined into src/core/skills/)
+# because they depend on ResolvedStyle, DEFAULT_CONFIG, and the Databricks
+# client path that already live in this module's sibling imports.  Placing
+# them here avoids duplicating those imports and keeps the circular-import
+# surface small: src.core.skills imports nothing from this module at module
+# level, only locally inside call_skill.
+# ---------------------------------------------------------------------------
+
+
+def assemble_skill_prompt(skill: Any, payload: dict, design_system_active: bool) -> str:
+    """Assemble the full system prompt for a single skill invocation.
+
+    Both conditionals are decided from ``design_system_active`` for this
+    request, not from the skill definition.  The payload is serialised as JSON
+    and appended so every skill receives its task-specific data — without this
+    the builder never receives its section brief, the reviewer never receives
+    the HTML it is reviewing, and the fixer never receives the finding.
+
+    Why a ``bool``, not a ``ResolvedStyle`` (Ruling C-21):
+
+    The function reads **exactly one field** of ``ResolvedStyle`` at two lines.
+    The style *prose* already reaches the skill through ``json.dumps(payload)``,
+    which is what the plan intended when ``build_branch_payload`` copies
+    ``resolved_style`` text into the payload.  Passing the whole NamedTuple as a
+    parameter would force every call site to construct three dummy values it does
+    not have; and a ``ResolvedStyle`` in checkpointed ``GraphState`` is on a
+    deprecation path — langgraph warns on deserialisation of unregistered types
+    and will block in a future version.  A plain ``bool`` never crosses a
+    checkpoint boundary as an object.
+
+    Three style cases (§L5 / brief table) — collapsed to one flag:
+
+    * **Case 1 — design system active** (``design_system_active=True``): the
+      compiler already emits ``_SLIDE_FRAME_CONSTRAINTS`` inside the compiled
+      style.  Do **not** inject them again.  Inject ``DESIGN_SYSTEM_PRECEDENCE``
+      so the model follows the brand.
+    * **Cases 2 and 3** (``design_system_active=False``): either
+      ``DEFAULT_SLIDE_STYLE`` (no safe-area numbers at all) or a legacy library
+      style (opaque, usually no numbers).  Inject ``_SLIDE_FRAME_CONSTRAINTS``.
+
+    Cases 2 and 3 both have ``design_system_active == False``, so the three-case
+    table collapses to one boolean.  A content sniff of the style text would be
+    more robust against a library style that happens to carry the numbers, but
+    the plan does not ask for that; a false negative costs a duplicated block,
+    not a wrong prompt.
+
+    Not injecting in case 1 is not cosmetic: ``overflow`` is on the build
+    reviewer's objective criteria and the criterion instructs it to judge
+    against these exact numbers.  A builder that never received them would be
+    judged against numbers it was never shown — unfair by construction.
+
+    ``_SLIDE_FRAME_CONSTRAINTS`` is imported under its private name — reading a
+    private constant is legal and changes no existing file.  Retyping the
+    numbers would create exactly the divergence the ``COMPILER_VERSION``
+    currency contract exists to prevent.
+
+    Args:
+        skill: The loaded :class:`~src.core.skills.Skill` for this invocation.
+        payload: Task-specific dict — builder section brief, reviewer HTML,
+            fixer finding, etc.  Serialised as JSON and appended.
+        design_system_active: ``True`` when a design system resolved to compiled
+            content for this request.  Written to
+            :attr:`~src.services.graph.state.GraphState.design_system_active`
+            by ``architect_node`` from ``resolve_style_source(...).design_system_active``.
+
+    Returns:
+        Assembled prompt string ready for the structured model.
+    """
+    import json
+
+    from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
+    from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+
+    parts: list[str] = [skill.instructions]
+
+    # Inject frame constraints when the resolved style does NOT already carry
+    # them.  The design-system compiler emits them; the default style and legacy
+    # library styles do not.
+    if not design_system_active:
+        parts.append(_SLIDE_FRAME_CONSTRAINTS)
+
+    # Design-system precedence only when a design system is active — it
+    # declares that the compiled brand tokens override any generic aesthetic.
+    if design_system_active:
+        parts.append(DESIGN_SYSTEM_PRECEDENCE)
+
+    # Serialise the payload so the skill receives its task-specific inputs.
+    parts.append(json.dumps(payload, indent=2, default=str))
+
+    return "\n\n".join(parts)
+
+
+def get_structured_model(schema: type[Any]):
+    """Return a ChatDatabricks model bound to *schema* for structured output.
+
+    Follows the same client path as ``_create_model`` in
+    ``src.services.agent_factory`` — system client, ``DEFAULT_CONFIG["llm"]``
+    endpoint — so the structured and monolith paths point at the same backend.
+    Do **not** invent a new client here.
+
+    Args:
+        schema: A pydantic ``BaseModel`` subclass.  The returned runnable's
+            ``.invoke()`` returns a *schema* instance.
+
+    Returns:
+        A LangChain runnable (``ChatDatabricks.with_structured_output(schema)``)
+        whose invocation parses model output into *schema*.
+    """
+    from databricks_langchain import ChatDatabricks
+
+    from src.core.databricks_client import get_system_client
+    from src.core.defaults import DEFAULT_CONFIG
+
+    llm_config = DEFAULT_CONFIG["llm"]
+    system_client = get_system_client()
+    model = ChatDatabricks(
+        endpoint=llm_config["endpoint"],
+        temperature=llm_config["temperature"],
+        max_tokens=llm_config["max_tokens"],
+        top_p=0.95,
+        workspace_client=system_client,
+    )
+    return model.with_structured_output(schema)
