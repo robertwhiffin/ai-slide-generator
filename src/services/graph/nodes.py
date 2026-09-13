@@ -447,7 +447,6 @@ def _placehold_failed_position(
     session_id: str,
     node: str,
     reason: str,
-    notice: bool,
 ) -> bool:
     """Commit a terminal placeholder for one failed branch, visibly.
 
@@ -463,23 +462,19 @@ def _placehold_failed_position(
     returns no state at all and the foreman reconciles the position through
     ``stalled_positions``.
 
-    ``notice`` adds a durable ``info`` chat line, and the two callers pass
-    different values **deliberately**:
+    **Both fanned failure paths — the builder's and the build reviewer's — take
+    this one function and get the same three surfaces**: the row's error marker,
+    an ``ERROR`` stream event, and a durable ``info`` chat line.  There is no
+    flag to make one quieter than the other, deliberately: the emitter is
+    optional and is ``None`` on the sweeper path (and in every layer-1 state
+    test), so an event-only surface would let a failed builder leave a silently
+    missing slide.  The chat notice is the only surface that survives
+    ``emitter=None``, and ``error_state`` is unavailable to either path — it is
+    single-writer with no reducer, and two branches failing in one superstep
+    would raise ``InvalidUpdateError`` and kill the turn (measured).
 
-    * ``build_reviewer_node`` passes ``True``.  Its failure is new behaviour and
-      needs a surface beyond the row, and ``error_state`` is unavailable to it
-      (see that node's docstring).
-    * ``builder_node`` passes ``False``.  The plan gives its exception path a
-      placeholder and an event, nothing more, and C5's
-      ``test_deck_review_fires_once_on_a_turn_where_a_builder_fails`` counts
-      ``info`` messages to prove the deck reviewer ran once — a second notice on
-      that turn breaks that assertion.  **Do not "fix" the asymmetry by passing
-      ``True`` here without changing that assertion to match on the advisory's
-      text.**
-
-    Either way the failure is never silent: the row carries the error marker the
-    UI badges, the branch returns ``placeheld_positions``, and the exception is
-    logged with its traceback.
+    So the failure is never silent, whichever fanned node hit it, and the
+    exception is logged with its traceback either way.
 
     ``commit_placeholder`` takes neither ``modified_by`` nor ``deck_spec_slide``
     (Ruling C-15), so these rows ship with a NULL author here too.
@@ -507,12 +502,11 @@ def _placehold_failed_position(
             position,
         )
         return False
-    if notice:
-        _surface_notice(
-            session_id,
-            f"Slide {position} could not be generated and has been left as a "
-            f"placeholder ({node}: {reason}). The rest of the deck is unaffected.",
-        )
+    _surface_notice(
+        session_id,
+        f"Slide {position} could not be generated and has been left as a "
+        f"placeholder ({node}: {reason}). The rest of the deck is unaffected.",
+    )
     return True
 
 
@@ -1050,8 +1044,9 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     ``ERROR`` stream event, the row's own error marker and a logged traceback —
     and NOT through ``error_state``: that key is single-writer with no reducer,
     and two branches failing in one superstep would raise ``InvalidUpdateError``
-    and kill the whole turn (measured).  It adds no chat notice; see
-    ``_placehold_failed_position`` for why that differs from the reviewer's path.
+    and kill the whole turn (measured).  It also persists a durable ``info``
+    notice, exactly as the build reviewer's failure path does — the two are
+    symmetric by construction, through ``_placehold_failed_position``.
     """
     position = payload["position"]
     session_id = payload["session_id"]
@@ -1089,10 +1084,6 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="builder",
             reason=type(exc).__name__,
-            # No chat notice: see _placehold_failed_position's docstring — C5's
-            # deck-review-fires-once assertion counts info messages on exactly
-            # this turn.
-            notice=False,
         ):
             return {}
         return {"placeheld_positions": scoped(turn_id, {position})}
@@ -1223,7 +1214,6 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="build_reviewer",
             reason=type(exc).__name__,
-            notice=True,
         ):
             return {}
         # reviewed_positions too: the position is committed as a placeholder, so

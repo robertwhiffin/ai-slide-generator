@@ -338,31 +338,54 @@ def test_exactly_one_fixer_invocation_per_position_needing_a_fix(graph_turn_env)
     assert [f["status"] for f in env.verdict_for(0)["findings"]] == ["fixed"]
 
 
-def test_deck_review_fires_once_on_a_turn_where_a_builder_fails(graph_turn_env):
-    """One deck review on a FAILING-builder turn — corrections §48.
+def test_deck_review_fires_once_on_a_turn_where_two_builders_fail(graph_turn_env):
+    """One deck review on a turn where TWO builders fail — corrections §48.
 
     A builder branch with nothing to review falls through to ``placeholder``, not
     to ``foreman``.  A router fall-through runs concurrently with its siblings'
     ``Send``s, so a fall-through to the foreman wakes it MID-BATCH: measured on
-    exactly this scenario, two paths then reach deck review and the deck reviewer
-    runs TWICE — two deck-level writes, two ``deck_reviews`` rows and two
-    ``info`` chat messages for one turn.  A clean turn cannot see it, which is
-    why this assertion is made on a failing-builder turn.
+    this scenario, two paths then reach deck review and the deck reviewer runs
+    TWICE — two deck-level writes and two ``deck_reviews`` rows for one turn.  A
+    clean turn cannot see it, which is why this is asserted on a failing turn —
+    and with **two** failures, so two fall-through branches must still collapse
+    to one foreman wake, however the branches split.
+
+    The advisory assertion matches **the deck reviewer's own text**, composed by
+    the production ``_advisory_text``.  Counting all ``info`` messages instead
+    would be a proxy for deck review rather than deck review itself: it moves
+    when any other node surfaces a notice (both failing builders do, below) and —
+    measured by review — it did **not** move on a turn where deck review really
+    did fire twice.  The recorder count is the real observation; this one pins
+    the user-visible surface.
     """
+    from src.services.graph.nodes import _advisory_text
+
     env = graph_turn_env
-    env.recorder.configure(slide_count=3, fail_positions={1})
+    env.recorder.configure(slide_count=6, fail_positions={1, 4})
 
     env.run()
 
     assert env.recorder.counts("deck_reviewer") == 1
-    assert env.recorder.counts("build_reviewer") == 2  # position 1 never built
-    assert env.is_placeholder(1)
-    assert not env.is_placeholder(0) and not env.is_placeholder(2)
+    assert env.recorder.counts("build_reviewer") == 4  # 1 and 4 never built
+    assert env.is_placeholder(1) and env.is_placeholder(4)
+    assert not any(env.is_placeholder(p) for p in (0, 2, 3, 5))
 
-    advisories = [m for m in env.messages() if m.get("message_type") == "info"]
-    assert len(advisories) == 1, (
-        f"expected exactly one deck-review advisory, got {advisories}"
+    messages = env.messages()
+    deck_advisories = [
+        m for m in messages if m.get("content") == _advisory_text([])
+    ]
+    assert len(deck_advisories) == 1, (
+        "expected exactly one deck-review advisory; got "
+        f"{[m.get('content') for m in deck_advisories]}"
     )
+    assert all(m.get("message_type") == "info" for m in deck_advisories)
+
+    # The two failed builders' own notices are separate, durable, and outside
+    # the count above — the failure paths are symmetric with the reviewer's.
+    builder_notices = [
+        m for m in messages if "(builder:" in (m.get("content") or "")
+    ]
+    assert len(builder_notices) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +434,12 @@ def test_a_terminal_failure_is_placeheld_and_release_proceeds_past_it(graph_turn
     ``len(landed) == len(spec.slides)`` would be the wrong predicate: one
     terminal failure would freeze the prefix, deck review would never fire and
     the turn would never end.
+
+    One failure mid-deck, so the placeholder sits INSIDE the prefix and the
+    release has to proceed through it — distinct from the two-failure §48
+    scenario above, which is about how many times the deck reviewer runs.  The
+    last assertion pins the durable surface: a stream event is not enough,
+    because the emitter is ``None`` on the sweeper path and in this test.
     """
     env = graph_turn_env
     env.recorder.configure(slide_count=3, fail_positions={1})
@@ -428,6 +457,16 @@ def test_a_terminal_failure_is_placeheld_and_release_proceeds_past_it(graph_turn
     deck = env.deck_row()
     assert deck.slide_count == 3
     assert deck.html_content, "the post-commit deck-level write did not happen"
+
+    notices = [
+        m
+        for m in env.messages()
+        if "Slide 1" in (m.get("content") or "") and "(builder:" in m["content"]
+    ]
+    assert len(notices) == 1, (
+        "a terminal builder failure must leave a durable notice, not only a "
+        f"stream event; info messages were {[m.get('content') for m in env.messages()]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -454,15 +493,24 @@ def test_turn_2_dispatches_builders_rather_than_going_straight_to_deck_review(
     env = graph_turn_env
     env.recorder.configure(slide_count=3)
 
-    first = env.run()
+    env.run()
     turn_one = env.last_turn_id
     assert env.recorder.counts("builder") == 3
+
+    # The state turn 2 must discard was really carried forward: the checkpointer
+    # holds turn 1's complete turn, under turn 1's id.  Without this the test
+    # would be green against a graph compiled with no saver at all — i.e. it
+    # would prove nothing about turn scoping, only that a fresh state builds.
+    carried = env.graph.get_state(
+        {"configurable": {"thread_id": env.session_id}}
+    ).values
+    assert carried["turn_id"] == turn_one
+    assert scoped_vals(carried, "landed_positions") == {0, 1, 2}
 
     env.recorder.reset_observations()
     second = env.run()
 
-    assert env.last_turn_id != turn_one
-    assert second["turn_id"] != first["turn_id"]
+    assert second["turn_id"] != turn_one
 
     assert env.recorder.counts("builder") == 3, (
         "turn 2 dispatched no builders — it went straight to deck review on "
@@ -545,6 +593,64 @@ def test_a_position_left_uncommitted_by_a_completed_batch_is_placeheld_by_the_st
         f"position 2 committed; saw {prefixes}"
     )
     assert prefixes[-1] == [0, 1, 2]
+
+
+def test_the_checkpointer_serde_round_trips_deck_spec_and_finding_as_themselves():
+    """Ruling C-25 / corrections §55 — the tripwire for the two unregistered types.
+
+    ``GraphState`` declares two pydantic types that cross the checkpointer:
+    ``deck_spec: Optional[DeckSpec]`` and ``findings: Annotated[list[Finding],
+    operator.add]``.  langgraph's ``JsonPlusSerializer`` carries both today, and
+    logs ``Deserializing unregistered type … This will be blocked in a future
+    version`` once per type per process while it does.
+
+    **The failure that is coming is not an exception.**  Measured with
+    ``LANGGRAPH_STRICT_MSGPACK=true``: the refusal is only LOGGED and the value
+    comes back as a plain ``dict``.  So nothing raises at the seam — instead
+    ``_covered_positions``' ``spec.slides`` and every other attribute access on a
+    spec or a finding breaks somewhere downstream, with nothing pointing at
+    serialisation.  This assertion is the early warning: under strict mode both
+    types come back as ``dict`` and it goes red at the seam itself.
+
+    No graph run, no database, no fixture — the serde is the whole subject, which
+    is why the tripwire can be this cheap.  Constructing the saver deliberately
+    builds no engine (that is its documented contract), so this touches nothing.
+
+    Restructuring the two channels into JSON-native shapes is ws4d's work
+    (corrections §55); until then, this is what fails first.
+    """
+    from src.core.checkpointer import SqlAlchemyCheckpointSaver
+    from src.domain.deck_spec import DeckSpec
+    from src.domain.finding import Finding
+    from tests.integration.conftest_stub_skills import (
+        make_deck_spec,
+        objective_finding,
+    )
+
+    serde = SqlAlchemyCheckpointSaver().serde
+    channel_values = {
+        "deck_spec": make_deck_spec(2),
+        "findings": [objective_finding(0)],
+    }
+
+    restored = serde.loads_typed(serde.dumps_typed(channel_values))
+
+    spec = restored["deck_spec"]
+    assert type(spec) is DeckSpec, (
+        f"deck_spec came back as {type(spec).__name__}, not DeckSpec — the "
+        "checkpoint serialisation of an unregistered type has changed.  Every "
+        "attribute access on the spec (spec.slides in _covered_positions, "
+        "spec.slide_at in build_branch_payload) now breaks downstream instead of "
+        "here.  See corrections §55 / Ruling C-25."
+    )
+    assert [slide.position for slide in spec.slides] == [0, 1]
+
+    finding = restored["findings"][0]
+    assert type(finding) is Finding, (
+        f"findings came back as [{type(finding).__name__}], not [Finding] — same "
+        "cause as above; every f.criterion / f.objective read breaks downstream."
+    )
+    assert finding.criterion == OBJECTIVE_CRITERION
 
 
 def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(

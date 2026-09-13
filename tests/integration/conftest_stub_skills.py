@@ -56,9 +56,6 @@ from src.domain.skill_io import ArchitectOutput, BuilderOutput, FixerOutput
 #: ``objective=True`` in ``CRITERIA``, which is what opens the fix path.
 OBJECTIVE_CRITERION = "overflow"
 
-#: A deck-level (subjective) criterion, for deck-review scenarios.
-DECK_CRITERION = "arc_gap"
-
 
 def make_deck_spec(slide_count: int, *, title: str = "Layer-1 Stub Deck") -> DeckSpec:
     """A valid, UNPINNED ``DeckSpec`` over positions ``0..slide_count-1``.
@@ -113,18 +110,6 @@ def objective_finding(position: int, message: str = "content overflows the frame
     )
 
 
-def deck_finding(message: str = "the arc jumps") -> Finding:
-    """One deck-level narrative finding, for deck-review scenarios."""
-    return Finding(
-        id="stub-unstamped",
-        slide_index=-1,
-        category=CRITERIA[DECK_CRITERION].category,
-        criterion=DECK_CRITERION,
-        message=message,
-        objective=CRITERIA[DECK_CRITERION].objective,
-    )
-
-
 def builder_html(position: int) -> str:
     """The canned body HTML a stub builder emits for *position*."""
     return f"<div class='slide'><h1>Slide {position}</h1></div>"
@@ -154,8 +139,11 @@ class SkillRecorder:
         Positions whose ``fix_reviewer`` reports the SAME criterion again, so the
         fix does not survive re-review and the original must be written back
         with the finding surfaced.
-    deck_findings
-        Findings the ``deck_reviewer`` returns.
+
+    There is deliberately no deck-findings knob: what the deck reviewer DOES with
+    its findings (they never enter the ``findings`` channel — §9) is pinned by
+    C4's unit suite, and an unused knob here would read as coverage this suite
+    does not provide.
 
     Observations
     ------------
@@ -181,7 +169,6 @@ class SkillRecorder:
         self.slow_positions: Set[int] = set()
         self.objective_findings_at: Set[int] = set()
         self.surviving_defect_at: Set[int] = set()
-        self.deck_findings: List[Finding] = []
 
         self.calls: List[Dict[str, Any]] = []
         self.peak_concurrent: int = 0
@@ -201,7 +188,6 @@ class SkillRecorder:
         slow_positions: Iterable[int] = (),
         objective_findings_at: Iterable[int] = (),
         surviving_defect_at: Iterable[int] = (),
-        deck_findings: Iterable[Finding] = (),
         slow_seconds: Optional[float] = None,
     ) -> "SkillRecorder":
         """Set every knob in one call and return self, for readable tests."""
@@ -213,7 +199,6 @@ class SkillRecorder:
         self.slow_positions = set(slow_positions)
         self.objective_findings_at = set(objective_findings_at)
         self.surviving_defect_at = set(surviving_defect_at)
-        self.deck_findings = list(deck_findings)
         return self
 
     def reset_observations(self) -> None:
@@ -331,7 +316,8 @@ class SkillRecorder:
         return SlideReviewOutput(slide_index=position, verdict="clean", findings=[])
 
     def _skill_deck_reviewer(self, payload: dict) -> DeckReviewOutput:
-        return DeckReviewOutput(findings=list(self.deck_findings))
+        """No findings: every scenario here is about orchestration, not the arc."""
+        return DeckReviewOutput(findings=[])
 
     def _skill_data_analyst(self, payload: dict) -> Any:
         raise AssertionError(
