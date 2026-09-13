@@ -8,8 +8,6 @@ def test_profile_with_genie_space_migrates():
         "prompts": {
             "selected_slide_style_id": 3,
             "selected_deck_prompt_id": 7,
-            "system_prompt": None,
-            "slide_editing_instructions": None,
         },
         "genie_spaces": [
             {"space_id": "abc", "space_name": "Sales", "description": "Revenue data"}
@@ -30,8 +28,6 @@ def test_profile_without_genie_space_migrates():
         "prompts": {
             "selected_slide_style_id": None,
             "selected_deck_prompt_id": None,
-            "system_prompt": None,
-            "slide_editing_instructions": None,
         },
         "genie_spaces": [],
     }

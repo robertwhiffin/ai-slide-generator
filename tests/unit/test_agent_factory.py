@@ -8,9 +8,11 @@ from unittest.mock import MagicMock, patch
 def default_prompts():
     """Standard prompt dict returned by mocked _get_prompt_content.
 
-    Uses pre_assembled=True to exercise the new modular path in
-    _create_prompt.  Tests that need the legacy concatenation path
-    should override pre_assembled to False and supply slide_style.
+    ``pre_assembled=True`` is the ONLY shape _get_prompt_content can now return:
+    the retired per-profile prompt overrides were the sole producer of
+    ``pre_assembled=False``, so agent.py's legacy concatenation branch is dead in
+    production. Do not set it False here to reach that branch — it no longer
+    corresponds to anything the factory can build.
     """
     return {
         "system_prompt": "default prompt",
@@ -73,55 +75,78 @@ def test_build_agent_with_genie_tool(default_prompts):
     assert "search_images" in tool_names
 
 
-def test_custom_system_prompt_overrides_default(default_prompts):
-    """Custom system_prompt in config overrides the backend default."""
+# RENAMED with B2.4 (were test_custom_system_prompt_overrides_default and
+# test_custom_editing_instructions_override). Both were titled and docstring'd as
+# proving that a custom ``AgentConfig.system_prompt`` / ``.slide_editing_instructions``
+# OVERRIDES the backend default. That behaviour is RETIRED, and the old tests could
+# not have detected its loss: the retired kwargs were silently dropped by pydantic
+# (``extra='ignore'``, so ``AgentConfig(system_prompt=...).model_dump()`` equals
+# ``AgentConfig().model_dump()``), and ``_get_prompt_content`` was mocked wholesale,
+# so the assertion was met by the mock's own return value. They passed VACUOUSLY.
+#
+# What they do cover, and what they are now named for, is the Role B seam: the
+# factory hands ``_get_prompt_content``'s ASSEMBLED PROMPT DICT to the agent
+# unchanged. That seam matters MORE after this change, not less — with
+# ``pre_assembled`` always True it is the only channel from factory to agent.
+
+
+def test_the_assembled_system_prompt_reaches_the_agent(default_prompts):
+    """``SlideGeneratorAgent.system_prompt`` is the introspection view of the
+    assembled dict's ``system_prompt`` key, carried through unaltered."""
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import build_agent_for_request
 
-    config = AgentConfig(system_prompt="You are a custom assistant")
+    config = AgentConfig()
     session_data = {"session_id": "test-123", "genie_conversation_id": None}
+    # A sentinel, not an override: it stands in for whatever prompt_modules
+    # assembled, and pins that the factory does not rebuild or discard it.
+    assembled = {**default_prompts, "system_prompt": "ASSEMBLED-BY-PROMPT-MODULES"}
 
     with patch("src.services.agent_factory._create_model") as mock_model, \
          patch("src.services.agent_factory._get_prompt_content") as mock_prompts, \
          patch("src.services.agent.get_settings") as mock_settings, \
          patch("src.services.agent.get_databricks_client") as mock_client:
         mock_model.return_value = MagicMock()
-        # The factory should pass the custom prompt through to the agent
-        custom_prompts = {**default_prompts, "system_prompt": "You are a custom assistant"}
-        mock_prompts.return_value = custom_prompts
+        mock_prompts.return_value = assembled
         mock_settings.return_value = MagicMock()
         mock_client.return_value = MagicMock()
 
         agent = build_agent_for_request(config, session_data)
 
-    assert agent.system_prompt == "You are a custom assistant"
+    assert agent.system_prompt == "ASSEMBLED-BY-PROMPT-MODULES"
 
 
-def test_custom_editing_instructions_override(default_prompts):
-    """Custom slide_editing_instructions in config overrides the default."""
+def test_the_whole_assembled_prompt_dict_reaches_the_agent(default_prompts):
+    """Every key of the assembled dict arrives as ``_pre_built_prompts``.
+
+    Asserted on the WHOLE dict rather than one key: ``_create_prompt`` reads
+    ``pre_assembled`` to pick its path and ``system_prompt`` for the text, so a
+    factory that forwarded a partial dict would break prompt assembly.
+    """
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import build_agent_for_request
 
-    config = AgentConfig(slide_editing_instructions="Custom editing rules")
+    config = AgentConfig()
     session_data = {"session_id": "test-123", "genie_conversation_id": None}
+    assembled = {
+        **default_prompts,
+        "system_prompt": "ASSEMBLED-BY-PROMPT-MODULES",
+        "slide_editing_instructions": None,
+    }
 
     with patch("src.services.agent_factory._create_model") as mock_model, \
          patch("src.services.agent_factory._get_prompt_content") as mock_prompts, \
          patch("src.services.agent.get_settings") as mock_settings, \
          patch("src.services.agent.get_databricks_client") as mock_client:
         mock_model.return_value = MagicMock()
-        custom_prompts = {
-            **default_prompts,
-            "slide_editing_instructions": "Custom editing rules",
-        }
-        mock_prompts.return_value = custom_prompts
+        mock_prompts.return_value = assembled
         mock_settings.return_value = MagicMock()
         mock_client.return_value = MagicMock()
 
         agent = build_agent_for_request(config, session_data)
 
-    # The pre_built_prompts should contain the custom editing instructions
-    assert agent._pre_built_prompts["slide_editing_instructions"] == "Custom editing rules"
+    assert agent._pre_built_prompts == assembled
+    assert agent._pre_built_prompts["pre_assembled"] is True
 
 
 def test_mcp_tool_builds_tools(default_prompts):
@@ -167,8 +192,8 @@ def test_mcp_tool_builds_tools(default_prompts):
 
 
 def test_get_prompt_content_generate_mode_uses_modules():
-    """Without custom overrides, generate mode produces a pre-assembled prompt
-    that includes generation rules and excludes editing rules."""
+    """Generate mode produces a pre-assembled prompt that includes generation
+    rules and excludes editing rules."""
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import _get_prompt_content
 
@@ -184,8 +209,8 @@ def test_get_prompt_content_generate_mode_uses_modules():
 
 
 def test_get_prompt_content_edit_mode_uses_modules():
-    """Without custom overrides, edit mode produces a pre-assembled prompt
-    that includes editing rules and excludes generation-only rules."""
+    """Edit mode produces a pre-assembled prompt that includes editing rules and
+    excludes generation-only rules."""
     from src.api.schemas.agent_config import AgentConfig
     from src.services.agent_factory import _get_prompt_content
 
