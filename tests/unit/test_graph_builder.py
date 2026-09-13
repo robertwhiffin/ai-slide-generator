@@ -1,0 +1,461 @@
+"""C4 — graph assembly, ``invoke_graph`` and the emitter lifecycle.
+
+The topology assertions read the assembled ``StateGraph`` (``compiled.builder``)
+rather than a drawing, so they fail if a static edge is added alongside a
+conditional set — the duplicate-conflicting-edge shape that ends in
+``GraphRecursionError``.
+
+The three run-the-graph tests compile with ``checkpointer=False`` and drive a
+real three-slide turn through the real nodes against a real (file-backed)
+database.  They are here, not in C5's layer-1 suite, because the emitter contract
+this task owns is only meaningful if the graph actually builds: "with
+``emitter=None`` nothing is emitted" is satisfied vacuously by a turn that
+dispatches nothing.
+"""
+
+from __future__ import annotations
+
+import inspect
+import queue
+from typing import Any, Dict
+
+import pytest
+from langgraph.graph import END, START
+
+from src.services.foreman_service import CAP
+from src.services.graph import builder as builder_module
+from src.services.graph.builder import build_graph, invoke_graph
+from src.services.graph.event_emitter import (
+    get_event_emitter,
+    set_event_emitter,
+)
+from tests.unit.conftest_graph import (  # noqa: F401 — fixtures
+    architect_build,
+    builder_out,
+    finding,
+    fixer_out,
+    graph_env,
+    graph_env_threadsafe,
+    make_spec,
+    review_out,
+)
+
+NODE_NAMES = {
+    "architect",
+    "data_analyst",
+    "foreman",
+    "builder",
+    "build_reviewer",
+    "fixer",
+    "fix_reviewer",
+    "placeholder",
+    "deck_reviewer",
+}
+
+
+@pytest.fixture
+def assembled():
+    """The assembled StateGraph behind a compiled graph."""
+    return build_graph(checkpointer=False).builder
+
+
+# ---------------------------------------------------------------------------
+# Topology
+# ---------------------------------------------------------------------------
+
+
+class TestTopology:
+    def test_exactly_nine_nodes_and_no_tenth(self, assembled):
+        assert set(assembled.nodes) == NODE_NAMES
+
+    def test_the_static_edges_are_exactly_these_six(self, assembled):
+        assert set(assembled.edges) == {
+            (START, "architect"),
+            ("data_analyst", "architect"),
+            ("build_reviewer", "foreman"),
+            ("fix_reviewer", "foreman"),
+            ("placeholder", "foreman"),
+            ("deck_reviewer", END),
+        }
+
+    def test_build_reviewer_to_foreman_is_static(self, assembled):
+        """Measured: wiring a router here raises InvalidUpdateError on fix_target."""
+        assert ("build_reviewer", "foreman") in assembled.edges
+        assert "build_reviewer" not in assembled.branches
+
+    def test_the_four_conditionally_routed_nodes(self, assembled):
+        assert set(assembled.branches) == {"architect", "foreman", "builder", "fixer"}
+
+    @pytest.mark.parametrize(
+        "node", ["architect", "foreman", "builder", "fixer"]
+    )
+    def test_no_static_edge_leaves_a_conditionally_routed_node(self, assembled, node):
+        """One conditional-edge set per node.
+
+        A static ``add_edge`` alongside gives duplicate conflicting edges and a
+        ``GraphRecursionError`` at run time — nothing at assembly time complains.
+        """
+        assert [edge for edge in assembled.edges if edge[0] == node] == []
+
+    def test_the_sentinels_are_used_not_the_strings(self):
+        source = inspect.getsource(builder_module)
+        assert 'add_edge("START"' not in source
+        assert '"__end__"' not in source
+        assert "add_edge(START" in source
+
+    def test_build_graph_uses_the_shared_checkpointer_by_default(self, monkeypatch):
+        calls = []
+
+        def fake_get_checkpointer():
+            calls.append(True)
+            return False  # a valid "no saver" value for compile()
+
+        monkeypatch.setattr(builder_module, "get_checkpointer", fake_get_checkpointer)
+
+        build_graph()
+
+        assert calls == [True]
+
+    def test_an_explicit_checkpointer_overrides_the_shared_one(self, monkeypatch):
+        """C5's compiled-graph suite needs a file-backed saver of its own."""
+        monkeypatch.setattr(
+            builder_module,
+            "get_checkpointer",
+            lambda: pytest.fail("the override was ignored"),
+        )
+        assert build_graph(checkpointer=False) is not None
+
+    def test_the_graph_is_compiled_once_per_process(self, monkeypatch):
+        monkeypatch.setattr(builder_module, "get_checkpointer", lambda: False)
+        monkeypatch.setattr(builder_module, "_compiled_graph", None)
+
+        first = builder_module.get_graph()
+        second = builder_module.get_graph()
+
+        assert first is second
+
+    def test_no_reviewer_router_is_defined_or_imported(self):
+        names = [name for name in dir(builder_module) if name.endswith("_router")]
+        assert "reviewer_router" not in names
+        assert sorted(names) == [
+            "architect_router",
+            "build_reviewer_refan_router",
+            "fixer_router",
+            "foreman_router",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# invoke_graph
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompiled:
+    """Records what ``invoke_graph`` hands the compiled graph."""
+
+    def __init__(self):
+        self.calls = []
+        self.emitter_during_invoke = "not-invoked"
+
+    def invoke(self, state, config):
+        self.emitter_during_invoke = get_event_emitter()
+        self.calls.append({"state": dict(state), "config": dict(config)})
+        return {"ok": True}
+
+
+@pytest.fixture
+def fake_graph(monkeypatch):
+    fake = _FakeCompiled()
+    monkeypatch.setattr(builder_module, "_compiled_graph", fake)
+    yield fake
+    set_event_emitter(None)
+
+
+class TestInvokeGraphConfig:
+    def test_passes_thread_id_and_max_concurrency_and_no_recursion_limit(
+        self, fake_graph
+    ):
+        """Omitting thread_id raises ValueError out of the checkpointer.
+
+        The recursion limit is deliberately unset: the installed default is
+        10007, and a low value makes the graph fail EARLIER.
+        """
+        invoke_graph("sess-42", {})
+
+        config = fake_graph.calls[0]["config"]
+        assert config["configurable"]["thread_id"] == "sess-42"
+        assert config["max_concurrency"] == CAP == 15
+        assert "recursion_limit" not in config
+
+    def test_mints_a_fresh_turn_id_per_turn(self, fake_graph):
+        invoke_graph("sess-42", {})
+        invoke_graph("sess-42", {})
+
+        first, second = (call["state"]["turn_id"] for call in fake_graph.calls)
+        assert first != second
+        assert first and second
+
+    def test_the_thread_id_is_stable_across_turns(self, fake_graph):
+        """Turn 2 must resume the same thread; turn_id is what resets turn state."""
+        invoke_graph("sess-42", {})
+        invoke_graph("sess-42", {})
+        assert {
+            call["config"]["configurable"]["thread_id"] for call in fake_graph.calls
+        } == {"sess-42"}
+
+    def test_seeds_the_caller_s_initial_state(self, fake_graph):
+        invoke_graph("sess-42", {"architect_message": "build me a deck"})
+        assert fake_graph.calls[0]["state"]["architect_message"] == "build me a deck"
+
+    def test_session_id_always_wins_over_the_initial_state(self, fake_graph):
+        invoke_graph("sess-42", {"session_id": "someone-elses-session"})
+        assert fake_graph.calls[0]["state"]["session_id"] == "sess-42"
+
+
+class TestInvokeGraphPrincipal:
+    def test_an_explicit_principal_becomes_initiated_by(self, fake_graph):
+        """For callers with no request context — ws4d's sweeper passes a marker."""
+        from src.core.user_context import get_current_user
+
+        assert get_current_user() is None
+        invoke_graph("sess-42", {}, principal="sweeper@example.com")
+        assert fake_graph.calls[0]["state"]["initiated_by"] == "sweeper@example.com"
+
+    def test_the_request_user_is_resolved_once_when_no_principal_is_given(
+        self, fake_graph, monkeypatch
+    ):
+        monkeypatch.setattr(
+            builder_module, "get_current_user", lambda: "web@example.com"
+        )
+        invoke_graph("sess-42", {})
+        assert fake_graph.calls[0]["state"]["initiated_by"] == "web@example.com"
+
+    def test_no_node_calls_get_current_user_itself(self):
+        """It works today and breaks the first time the graph runs on a bare thread.
+
+        Checked on the AST, not the text: ``nodes.py``'s docstrings discuss
+        ``get_current_user`` deliberately, and a substring check would pass or
+        fail on prose.
+        """
+        import ast
+
+        from src.services.graph import nodes
+
+        tree = ast.parse(inspect.getsource(nodes))
+        called = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert "get_current_user" not in called
+        assert "get_current_user" not in [
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        ]
+
+
+class TestEmitterLifecycle:
+    def test_the_emitter_is_live_before_invoke_runs(self, fake_graph):
+        emitter: queue.Queue = queue.Queue()
+        invoke_graph("sess-42", {}, emitter=emitter)
+        assert fake_graph.emitter_during_invoke is emitter
+
+    def test_no_emitter_resets_a_var_left_by_an_earlier_turn(self, fake_graph):
+        """Otherwise a resumed turn queues into the first process's queue forever."""
+        first: queue.Queue = queue.Queue()
+        invoke_graph("sess-42", {}, emitter=first)
+        assert fake_graph.emitter_during_invoke is first
+
+        invoke_graph("sess-42", {})
+        assert fake_graph.emitter_during_invoke is None
+
+    def test_a_second_turn_gets_its_own_emitter(self, fake_graph):
+        first: queue.Queue = queue.Queue()
+        second: queue.Queue = queue.Queue()
+        invoke_graph("sess-42", {}, emitter=first)
+        invoke_graph("sess-42", {}, emitter=second)
+        assert fake_graph.emitter_during_invoke is second
+
+
+# ---------------------------------------------------------------------------
+# A real three-slide turn through the compiled graph
+# ---------------------------------------------------------------------------
+
+
+def _wire_three_slide_turn(env, *, findings_for=()):
+    """Stub the five skills a clean three-slide build needs."""
+    spec = make_spec((0, 1, 2))
+    env.skills.set("architect", architect_build(spec))
+    env.skills.set("builder", builder_out)
+    env.skills.set(
+        "build_reviewer",
+        lambda payload: review_out(
+            payload["position"],
+            [finding("overflow", slide_index=payload["position"])]
+            if payload["position"] in findings_for
+            else [],
+        ),
+    )
+    env.skills.set("fixer", fixer_out)
+    env.skills.set("fix_reviewer", lambda payload: review_out(payload["position"]))
+    from src.domain.finding import DeckReviewOutput
+
+    env.skills.set("deck_reviewer", DeckReviewOutput(findings=[]))
+    return spec
+
+
+def _run(env, state_overrides: Dict[str, Any] = None):
+    graph = build_graph(checkpointer=False)
+    state = env.state(turn_id="turn-run")
+    state.update(state_overrides or {})
+    return graph.invoke(state, {"max_concurrency": CAP})
+
+
+class TestARealTurn:
+    def test_the_graph_builds_a_deck_with_no_emitter_and_emits_nothing(
+        self, graph_env_threadsafe, monkeypatch
+    ):
+        """Both halves matter: emission is optional, and the turn really builds.
+
+        The spy makes "emits nothing" observable rather than assumed: nodes DO
+        reach the emission path (so the test is not vacuous) and every attempt
+        queues nothing and raises nothing.
+        """
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+        set_event_emitter(None)
+
+        from src.services.graph import event_emitter as event_emitter_module
+
+        real_emit = event_emitter_module.emit_event
+        queued = []
+
+        def spy(event):
+            result = real_emit(event)
+            queued.append(result)
+            return result
+
+        monkeypatch.setattr("src.services.graph.nodes.emit_event", spy)
+
+        final = _run(env)
+
+        assert queued, "no node reached the emission path — the test is vacuous"
+        assert not any(queued)
+
+        assert sorted(r.position for r in env.rows()) == [0, 1, 2]
+        assert all(r.modified_by == "graph-user@example.com" for r in env.rows())
+        assert env.deck_row().slide_count == 3
+        assert final["knitted_html"]
+        assert len(env.skills.calls_for("build_reviewer")) == 3
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+        assert get_event_emitter() is None
+
+    def test_one_reviewer_per_slide_each_with_its_own_position(
+        self, graph_env_threadsafe
+    ):
+        """A static edge here would collapse three branches into ONE invocation."""
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+
+        _run(env)
+
+        positions = sorted(
+            call["payload"]["position"]
+            for call in env.skills.calls_for("build_reviewer")
+        )
+        assert positions == [0, 1, 2]
+        for call in env.skills.calls_for("build_reviewer"):
+            assert call["payload"]["html"].endswith(
+                f"slide {call['payload']['position']}</div>"
+            )
+
+    def test_every_fanned_node_queues_into_the_one_emitter(
+        self, graph_env_threadsafe
+    ):
+        """ContextVars survive the thread boundary AND the fan-out (measured)."""
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        try:
+            _run(env)
+        finally:
+            set_event_emitter(None)
+
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+
+        by_node: Dict[str, list] = {}
+        for event in events:
+            by_node.setdefault(event.metadata["node"], []).append(event)
+
+        assert sorted(
+            e.metadata["position"] for e in by_node["build_reviewer"]
+        ) == [0, 1, 2]
+        assert by_node["architect"]
+        assert by_node["foreman"]
+        assert by_node["deck_reviewer"]
+
+    def test_one_fix_round_per_position_then_deck_review_once(
+        self, graph_env_threadsafe
+    ):
+        """Without ``in_flight`` every position above the minimum is re-fixed."""
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env, findings_for=(0, 1))
+
+        _run(env)
+
+        fixer_positions = sorted(
+            call["payload"]["position"] for call in env.skills.calls_for("fixer")
+        )
+        assert fixer_positions == [0, 1]
+        assert len(env.skills.calls_for("fix_reviewer")) == 2
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+        assert sorted(r.position for r in env.rows()) == [0, 1, 2]
+        rows = {r.position: r.html for r in env.rows()}
+        assert rows[0] == "<div class='slide'>fixed 0</div>"
+        assert rows[2] == "<div class='slide'>slide 2</div>"
+
+    def test_a_failed_builder_is_placeheld_and_the_turn_still_completes(
+        self, graph_env_threadsafe
+    ):
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+
+        def builder_handler(payload):
+            if payload["position"] == 1:
+                raise RuntimeError("model exploded")
+            return builder_out(payload)
+
+        env.skills.set("builder", builder_handler)
+
+        _run(env)
+
+        import json
+
+        from src.api.services.slide_repository import is_placeholder_record
+
+        rows = {r.position: r for r in env.rows()}
+        assert sorted(rows) == [0, 1, 2]
+        assert is_placeholder_record(json.loads(rows[1].verification_record))
+        assert len(env.skills.calls_for("build_reviewer")) == 2
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+
+    def test_a_discuss_turn_ends_without_dispatching_anything(
+        self, graph_env_threadsafe
+    ):
+        env = graph_env_threadsafe
+        from src.domain.skill_io import ArchitectOutput
+
+        env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Let's talk.")
+        )
+
+        final = _run(env)
+
+        assert final["architect_intent"] == "discuss"
+        assert env.rows() == []
+        assert env.skills.calls_for("builder") == []
