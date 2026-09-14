@@ -51,6 +51,7 @@ import asyncio
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import threading
 import tokenize
@@ -1111,20 +1112,37 @@ class TestTheMarkerOutcomes:
         assert row.spec_dirty_by is None
         assert row.spec_dirty_claimed_at is None
 
-    def test_a_failing_review_keeps_the_marker_and_releases_only_the_claim(
-        self, owner_deck
-    ):
-        """Fail-open: the deck retries on the next sweep instead of wedging."""
+    @staticmethod
+    def _a_claimed_deck_whose_review_fails(owner_deck, exc=None):
+        """Claim the marker, then run a review that raises. Returns the result."""
         owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
         with _patched(owner_deck._factory):
             assert claim_due_marker(datetime.utcnow()) is not None
             assert owner_deck.row().spec_dirty_claimed_at is not None
 
-            spy = _GraphSpy(raises=RuntimeError("model unavailable"))
+            spy = _GraphSpy(raises=exc or RuntimeError("model unavailable"))
             with patch(_INVOKE_GRAPH, spy):
-                # Never raises: it runs on a background tick with no caller to
-                # tell, and a raise here would take the loop's iteration out.
-                assert run_arc_review(owner_deck.session_id, _AUTHOR) is False
+                return run_arc_review(owner_deck.session_id, _AUTHOR)
+
+    def test_a_failing_review_reports_failure_without_raising(self, owner_deck):
+        """C-6: never raises. It runs on a background tick with no caller to tell,
+        and a raise would take the loop's iteration out.
+
+        Split from the row assertions below, per the standing rule: leading with
+        this assertion masked them, so a fix that returned the right value while
+        wrecking the row read as green on one line of output.
+        """
+        assert self._a_claimed_deck_whose_review_fails(owner_deck) is False
+
+    def test_a_failing_review_keeps_the_marker_and_releases_only_the_claim(
+        self, owner_deck
+    ):
+        """Fail-open: the deck retries on the next sweep instead of wedging.
+
+        No return-value assertion here — it lives in its sibling above, so these
+        three can each fire on their own.
+        """
+        self._a_claimed_deck_whose_review_fails(owner_deck)
 
         row = owner_deck.row()
         assert row.spec_dirty_at is not None, (
@@ -1139,6 +1157,36 @@ class TestTheMarkerOutcomes:
             "the lease survived the failure; the deck is unreviewable until the "
             "TTL expires"
         )
+
+    def test_a_review_whose_GRAPH_IMPORT_fails_also_releases_the_claim(
+        self, owner_deck
+    ):
+        """The deferred `from ... import invoke_graph` must not escape the except.
+
+        The graph package pulls in the nodes, the skills and the session manager,
+        so this import can genuinely fail — a circular import was hit while
+        probing it.  Escaping, it propagates out of a function C-6 says never
+        raises, and `_release_claim` never runs: the deck stays leased for the
+        full CLAIM_TTL_SECONDS instead of retrying on the next 60-second tick.
+        """
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        with _patched(owner_deck._factory):
+            assert claim_due_marker(datetime.utcnow()) is not None
+
+            # Break the import the way a circular import would.
+            import src.services.graph.builder as builder_mod
+
+            with patch.dict(sys.modules, {"src.services.graph.builder": None}):
+                assert builder_mod is not None  # the module object still exists
+                result = run_arc_review(owner_deck.session_id, _AUTHOR)
+
+        assert result is False, "an unimportable graph did not report failure"
+        row = owner_deck.row()
+        assert row.spec_dirty_claimed_at is None, (
+            "the lease survived an import failure; this deck is unreviewable for "
+            "the full CLAIM_TTL_SECONDS instead of retrying in 60 seconds"
+        )
+        assert row.spec_dirty_at is not None, "the marker was discarded"
 
     def test_the_marker_kept_after_a_failure_is_claimable_again(self, owner_deck):
         """The point of keeping it: the next sweep must actually pick it up."""
@@ -1252,6 +1300,47 @@ class TestSweepOnce:
         ]
 
 
+async def _cancel_within_a_bounded_wait(task, seconds: float = 5.0) -> None:
+    """Cancel *task* and require it to STOP, without ever hanging.
+
+    Why this is not `with pytest.raises(CancelledError): await task`.  Measured:
+    a loop that swallows `CancelledError` and CONTINUES makes that form reden
+    nothing — the whole run **hangs** (`timeout` exit 124, zero output), because
+    `pytest.raises` can only fire if the task terminates.  In CI a hung test burns
+    the job's entire timeout and yields no signal at all, which is strictly worse
+    than a red.
+
+    So the wait is bounded by polling rather than by `asyncio.wait_for`, whose
+    own cancellation semantics would have to be reasoned about on top of the
+    behaviour under test.  Three outcomes, three distinct messages:
+
+    * the task ends cancelled — correct;
+    * the task never ends — **fails** with a readable message rather than hanging;
+    * the task ends without raising (swallow-and-return) — fails, because the
+      lifespan awaits this task on shutdown and a loop that returns quietly on
+      cancel is indistinguishable from one that crashed.
+    """
+    task.cancel()
+    for _ in range(int(seconds / 0.01)):
+        if task.done():
+            break
+        await asyncio.sleep(0.01)
+
+    assert task.done(), (
+        f"the loop did not stop within {seconds}s of being cancelled. It is "
+        "swallowing CancelledError and continuing, so shutdown would hang — and "
+        "a test that merely awaited it would hang with it instead of failing"
+    )
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    raise AssertionError(
+        "the loop returned instead of propagating CancelledError; the lifespan "
+        "cannot tell a clean shutdown from a crashed loop"
+    )
+
+
 class TestTheLoop:
     @pytest.mark.asyncio
     async def test_the_loop_survives_a_failing_tick_and_re_raises_on_cancel(self):
@@ -1273,9 +1362,7 @@ class TestTheLoop:
                 if len(calls) >= 3:
                     break
                 await asyncio.sleep(0.01)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            await _cancel_within_a_bounded_wait(task)
 
         assert len(calls) >= 3, (
             f"the loop stopped after {len(calls)} tick(s); it did not survive "
@@ -1414,13 +1501,6 @@ class TestRequireEditingLockHasNoCallerOnTheGraphPath:
         "src/api/routes/slides.py",
         "src/api/routes/chat.py",
     }
-    _GRAPH_PATH = [
-        "src/services/graph/nodes.py",
-        "src/services/graph/builder.py",
-        "src/api/services/deck_level_writer.py",
-        "src/api/services/slide_repository.py",
-        "src/api/services/chat_service.py",
-    ]
 
     @staticmethod
     def _files_referencing(token: str) -> set:
@@ -1440,12 +1520,28 @@ class TestRequireEditingLockHasNoCallerOnTheGraphPath:
             f"the scan missed known callers: {sorted(self._ALLOWED - found)}"
         )
 
-    def test_no_module_on_the_graph_path_calls_require_editing_lock(self):
+    def test_no_module_OUTSIDE_THE_ALLOWLIST_calls_require_editing_lock(self):
+        """Derived, not enumerated — and the difference was measured.
+
+        An earlier version of this test intersected the scan with a hand-list of
+        five files it guessed the graph might reach.  A reviewer added a REAL
+        caller to `src/services/graph/routers.py` and got `2 passed`: the list
+        did not name it, so the tripwire was blind to `routers.py`, `state.py`,
+        `event_emitter.py`, `foreman_service.py` and every skill module.  That is
+        the same shape as asserting set-containment where equality is needed — the
+        assertion is true and says nothing about what was not listed.
+
+        So the scan now walks all of `src/` and asserts the found set is a SUBSET
+        of the allowlist.  Any new caller anywhere reddens, and the failure names
+        the file.
+        """
         found = self._files_referencing("require_editing_lock")
-        on_path = found & set(self._GRAPH_PATH)
-        assert not on_path, (
-            f"{sorted(on_path)} now calls require_editing_lock, so a sweeper "
-            "tick's identity binding is load-bearing on the real graph path — "
-            "update the reasoning in run_arc_review's docstring and give this "
-            "property a test that drives the real graph"
+        unexpected = found - self._ALLOWED
+        assert not unexpected, (
+            f"{sorted(unexpected)} now references require_editing_lock. If any of "
+            "these is reachable from invoke_graph, a sweeper tick's identity "
+            "binding is load-bearing on the real graph path: update the reasoning "
+            "in run_arc_review's docstring and give the property a test that "
+            "drives the real graph. If the caller is a new route, add it to "
+            "_ALLOWED deliberately."
         )

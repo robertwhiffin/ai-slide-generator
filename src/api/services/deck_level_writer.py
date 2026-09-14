@@ -189,14 +189,17 @@ def write_deck_level_columns(
             created at ``version=1``.
         user_visible: Whether this write is a change the client should see.
             Default ``True``, which is every user-driven write.  ``False``
-            suppresses **both** signals a client reads as "this deck changed":
-            the ``version`` bump and the ``updated_at`` touch.
+            suppresses **all three** signals a client reads as "this deck
+            changed": the ``version`` bump, the ``updated_at`` touch and the
+            ``UserSession.last_activity`` touch.
 
-            **It is ONE parameter on purpose.**  Two would let a caller suppress
-            one and not the other, and that half-state is worse than either
-            choice made consistently: a client would render "modified just now"
-            beside an *unchanged* optimistic-lock token.  Making the divergence
-            inexpressible is the point.
+            **It is ONE parameter on purpose.**  Separate flags would let a caller
+            suppress some and not others, and that half-state is worse than any
+            choice made consistently: a client would render "modified just now",
+            or re-sort its session list, beside an *unchanged* optimistic-lock
+            token.  Making the divergence inexpressible is the point — and
+            ``last_activity`` is the proof that it matters, because it escaped an
+            earlier version of this flag that governed only the first two.
 
             **ws4d passes ``False`` for the sweeper's describe-only arc review**,
             and the reason is a measured user-visible bug rather than tidiness.
@@ -226,9 +229,15 @@ def write_deck_level_columns(
             ``flag_modified`` puts it in the clause at its loaded value, which
             does.
 
-            Neither suppression applies on the CREATE branch: a created row is
-            born at ``version=1`` with no bump to skip, and its ``updated_at`` is
-            genuinely its creation time.
+            ``last_activity`` orders the session list
+            (``sessions.py:207``, returned at ``:232``), so a sweeper write moving
+            it re-sorts the human's list minutes after they stopped editing.
+
+            The ``version`` and ``updated_at`` suppressions do not apply on the
+            CREATE branch: a created row is born at ``version=1`` with no bump to
+            skip, and its ``updated_at`` is genuinely its creation time.
+            ``last_activity`` is suppressed on both branches, because a session
+            row created by a describe-only write is not activity either.
 
     Returns:
         dict with ``session_id``, ``deck_owner_session_id``, ``title``,
@@ -315,10 +324,19 @@ def write_deck_level_columns(
             # deck-only title write leaves an untitled session row behind.
             deck_owner.title = supplied["title"]
 
-        now = datetime.utcnow()
-        deck_owner.last_activity = now
-        if session.id != deck_owner.id:
-            session.last_activity = now
+        if user_visible:
+            # The THIRD client-visible signal, and the one that escaped the flag
+            # on the first pass. `sessions.py:207` orders the session list by
+            # `last_activity.desc()` and `:232` returns it, so a sweeper write
+            # that moved it would silently RE-SORT the human's session list about
+            # three minutes after they stopped editing — on a deck whose version
+            # and updated_at both say nothing changed. That is exactly the
+            # incoherence one flag governing everything exists to prevent; it just
+            # escaped through a third column.
+            now = datetime.utcnow()
+            deck_owner.last_activity = now
+            if session.id != deck_owner.id:
+                session.last_activity = now
 
         db.flush()
 

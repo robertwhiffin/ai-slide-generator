@@ -75,8 +75,16 @@ Why the version counter is NOT bumped
 edit set this marker is holding the version their edit produced; a marker write
 that bumped it again would 409 their very next save.  The marker is internal sweep
 scheduling, not deck state (see the column comments in
-``src/database/models/session.py``), so no function here touches ``version``,
+``src/database/models/session.py``), so no marker write here touches ``version``,
 ``modified_by`` or ``last_activity``.
+
+:func:`run_arc_review` is the exception worth stating, because it is in this
+module and it does reach all three — not itself, but through the graph turn it
+invokes, whose ``architect_node`` calls ``write_deck_level_columns``.  That write
+is made with ``user_visible=False`` on a describe-only turn, which is what keeps
+the ``version`` bump, the ``updated_at`` touch and the ``last_activity`` touch
+from firing.  Without it a sweeper review 409s the editing human's next save and
+re-sorts their session list.
 
 ``updated_at`` needs one caveat, measured rather than assumed.  It carries
 ``Column(onupdate=datetime.utcnow)`` and is surfaced to the client as the deck's
@@ -567,12 +575,18 @@ def run_arc_review(session_id: str, author: str) -> bool:
     previous_user = get_current_user()
     set_current_user(author)
     try:
-        # Imported here, as chat_service does: the graph package pulls in the
-        # nodes, the skills and the session manager, and spec_sync is imported
-        # by the slide routes on every human edit.
-        from src.services.graph.builder import invoke_graph
-
         try:
+            # Imported INSIDE this try, not above it, and that placement is the
+            # whole point. The graph package pulls in the nodes, the skills and
+            # the session manager, so this import can genuinely fail — a
+            # circular import was hit while probing exactly this. Above the try
+            # (whose enclosing block has a `finally` but no `except`) the
+            # ImportError propagates out of a function C-6 says never raises:
+            # the loop survives and the ContextVar is restored, but
+            # `_release_claim` never runs and the deck stays LEASED for the full
+            # CLAIM_TTL_SECONDS instead of retrying on the next 60-second tick.
+            from src.services.graph.builder import invoke_graph
+
             invoke_graph(
                 session_id,
                 {"architect_message": ARC_REVIEW_MESSAGE},
