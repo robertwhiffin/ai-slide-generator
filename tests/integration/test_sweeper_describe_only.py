@@ -218,47 +218,106 @@ class TestASweeperTurnDoesNotRebuildTheDeck:
 
 
 class TestTheFlagDoesNotOutliveItsTurn:
-    def test_the_sweeper_turn_does_not_bar_the_users_NEXT_turn_on_the_same_thread(
-        self, sweeper_env
-    ):
-        """THE test. Three turns, one thread_id, one checkpointer.
+    """THE tests. Three turns, one thread_id, one checkpointer.
 
-        Turn state accumulates across a thread — turn 2 passing a fresh empty
-        value still saw turn 1's, measured — so the flag the sweeper turn wrote
-        is physically still in the channel when the user's next turn resumes.  If
-        it were not turn-scoped, that turn would route to END and this deck would
-        silently stop building, for ever, with nothing to explain it.
+    Turn state accumulates across a thread — turn 2 passing a fresh empty value
+    still saw turn 1's, measured — so the flag the sweeper turn wrote is
+    physically still in the channel when the user's next turn resumes.  If it
+    were not turn-scoped, that turn would route to END and this deck would
+    silently stop building, for ever, with nothing to explain it.  A version of
+    these tests using a fresh thread per turn would prove nothing.
 
-        A version of this test that used a fresh thread per turn would pass with
-        an unscoped flag and prove nothing.
-        """
-        env = sweeper_env
+    TWO turn-3 variants, and the split is load-bearing rather than tidy.
+    `invoke_graph` writes the flag on EVERY invocation, `False` included, so on
+    that path a stale unscoped value would be overwritten anyway and the
+    turn-scoping never tested — measured by sabotage, which is how this gap was
+    found.  The scoping is what saves a turn that writes NO `describe_only` key
+    at all, and there are two of those in the tree today: any caller that
+    invokes the compiled graph directly rather than through `invoke_graph` (every
+    test in test_graph_orchestration.py, and `env.run()` here), and a turn
+    resumed from a checkpoint with no fresh input.  So variant 1 is the one that
+    reddens when the flag is made a plain unscoped bool.
+    """
+
+    def _two_turns_then(self, env):
+        """Turn 1 (user build) then turn 2 (the sweeper), on the same thread."""
         env.recorder.slide_count = 2
-
-        # Turn 1 — a normal user build.
         env.run()
-        assert len(_builder_calls(env.recorder)) == 2
+        assert len(_builder_calls(env.recorder)) == 2, "turn 1 built nothing"
 
-        # Turn 2 — the sweeper's describe-only turn, on the same thread.
         mark_dirty(env.session_id, _AUTHOR)
         after_turn_1 = len(_builder_calls(env.recorder))
         assert run_arc_review(env.session_id, _AUTHOR) is True
         assert len(_builder_calls(env.recorder)) == after_turn_1, (
             "the sweeper turn built, so turn 3's count cannot be attributed"
         )
-
-        # Turn 3 — the user again, SAME thread_id, resuming the same checkpoint.
         env.recorder.slide_count = 2
+        return after_turn_1
+
+    def test_a_turn_3_that_writes_NO_FLAG_still_dispatches_builders(
+        self, sweeper_env
+    ):
+        """The variant that tests the turn-scoping itself.
+
+        `env.run()` seeds no `describe_only` key, exactly like every direct
+        `graph.invoke` caller in the tree, so the ONLY thing standing between the
+        sweeper's `True` and a permanently unbuildable deck is `scoped_vals`
+        discarding a wrapper from another turn.
+        """
+        env = sweeper_env
+        after_turn_1 = self._two_turns_then(env)
+
+        env.run()
+
+        assert len(_builder_calls(env.recorder)) > after_turn_1, (
+            "a turn after the sweeper's dispatched NO builders — the "
+            "describe-only flag outlived its turn and this deck has silently "
+            "stopped building, with nothing to explain it"
+        )
+
+    def test_a_turn_3_through_invoke_graph_also_dispatches_builders(
+        self, sweeper_env
+    ):
+        """The user's real path, belt and braces.
+
+        Here the flag is also overwritten by `invoke_graph`'s own `False` write,
+        so this passes for two independent reasons.  It is the path a user
+        actually takes, so it is worth pinning — but the sibling above is the one
+        that fails when the scoping is removed.
+        """
+        env = sweeper_env
+        after_turn_1 = self._two_turns_then(env)
+
         final = invoke_graph(
             env.session_id, {"architect_message": "now add the closing slide"}
         )
 
         assert len(_builder_calls(env.recorder)) > after_turn_1, (
-            "the user's turn after a sweeper turn dispatched NO builders — the "
-            "describe-only flag survived its turn and this deck has silently "
-            "stopped building"
+            "the user's turn after a sweeper turn dispatched no builders"
         )
-        # And the flag the third turn reads is its own, and it is False.
+        # Kept in its own test below rather than here: a shape assertion that
+        # raises would mask the behavioural one above.
+        assert final["turn_id"]
+
+    def test_the_flag_in_the_channel_after_a_user_turn_is_that_turns_own(
+        self, sweeper_env
+    ):
+        """The structural half, deliberately separated.
+
+        When this lived at the end of the behavioural test it was the assertion
+        that caught an unscoped-flag sabotage, by raising TypeError — masking the
+        fact that the behavioural assertion above it had passed. A shape check
+        and a behaviour check must not share a test.
+        """
+        env = sweeper_env
+        self._two_turns_then(env)
+
+        final = invoke_graph(env.session_id, {"architect_message": "one more"})
+
+        assert isinstance(final["describe_only"], dict), (
+            f"describe_only is {type(final['describe_only']).__name__}, not a "
+            "scoped wrapper; it cannot be discarded on a later turn"
+        )
         assert final["describe_only"]["turn"] == final["turn_id"]
         assert final["describe_only"]["vals"] is False
 
