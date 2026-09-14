@@ -7,6 +7,26 @@ Slide access is controlled by session permissions:
 - CAN_VIEW: Can view slides (via get_slides)
 - CAN_EDIT: Can modify slides (reorder, update, duplicate, delete)
 - CAN_MANAGE: Full control (same as owner)
+
+The spec-dirty trigger lives in THIS module and nowhere else
+------------------------------------------------------------
+Four handlers below call ``spec_sync.mark_dirty`` after their mutation commits:
+reorder, update, duplicate and delete.  That is the whole of the trigger surface —
+the LangGraph deck build calls the ``chat_service`` / ``slide_repository`` /
+``deck_level_writer`` methods these handlers wrap, and never issues an HTTP
+request, so "arrived via a route" *means* "a human did this" by construction.  No
+``origin=`` parameter to forget, no ContextVar to leak.
+``tests/unit/test_spec_sync_placement.py`` fails if any other module under ``src/``
+references the name, and pins which routes do and do not trigger.  Read
+``src/services/spec_sync.py``'s module docstring before adding or moving a call.
+
+``get_current_user()`` is read in the handler's own request context and the author
+passed explicitly into the worker thread — never re-read inside the thread.
+
+Deliberately NOT triggers: the two verification routes and the three version
+routes (a version save does not change the live deck; a restore cancels the
+pending review instead), and session-duplicate in ``sessions.py`` (a copied spec
+is already correct for the HTML it carries).
 """
 
 import asyncio
@@ -28,6 +48,7 @@ from src.core.database import get_db
 from src.core.permission_context import get_permission_context  # noqa: F401 — patched by integration-test fixtures
 from src.core.user_context import get_current_user  # noqa: F401 — patched by integration-test fixtures
 from src.database.models.profile_contributor import PermissionLevel
+from src.services.spec_sync import mark_dirty
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +177,9 @@ async def reorder_slides(request: ReorderRequest, db: Session = Depends(get_db))
             "Reordered slides",
             extra={"new_order": request.new_order, "session_id": request.session_id},
         )
+        # A reorder mutates the narrative arc with NO HTML change, so a
+        # content-hash trigger would miss it entirely.
+        await asyncio.to_thread(mark_dirty, request.session_id, get_current_user())
         return result
 
     except VersionConflictError as e:
@@ -224,6 +248,8 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
             "Updated slide",
             extra={"index": index, "session_id": request.session_id},
         )
+        # The human HTML edit — the reason the marker exists.
+        await asyncio.to_thread(mark_dirty, request.session_id, get_current_user())
         return result
 
     except VersionConflictError as e:
@@ -292,6 +318,8 @@ async def duplicate_slide(index: int, request: SlideActionRequest, db: Session =
             "Duplicated slide",
             extra={"index": index, "session_id": request.session_id},
         )
+        # A slide was added: the deck's slide list no longer matches the spec's.
+        await asyncio.to_thread(mark_dirty, request.session_id, get_current_user())
         return result
 
     except VersionConflictError as e:
@@ -366,6 +394,9 @@ async def delete_slide(
             "Deleted slide",
             extra={"index": index, "session_id": session_id},
         )
+        # A slide was removed.  Note this handler takes session_id from the query
+        # string, not a request body.
+        await asyncio.to_thread(mark_dirty, session_id, get_current_user())
         return result
 
     except VersionConflictError as e:
