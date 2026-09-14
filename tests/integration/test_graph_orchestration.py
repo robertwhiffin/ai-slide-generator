@@ -26,19 +26,26 @@ two passing *vacuously*.  Nothing here adds a key to ``GraphState``.
 
 What this suite does not cover
 ------------------------------
-Emission of slide releases (``slides_since_cursor``, ``emit_slide_ready``) is
-ws4d's; the committed-prefix test asserts the PREFIX, never its emission.
 ``next_dispatch_batch``'s rule 3 (in-flight subtraction from the cap) has no
 reachable layer-1 scenario — see
 ``test_peak_concurrent_builders_never_exceeds_the_cap_over_40_positions``.
+
+Emission of slide releases was ws4d's and section **14** now covers it: those two
+tests install an emitter and assert ``slide_ready`` order over a real turn.  The
+committed-prefix test in section 5 still asserts the PREFIX only, never its
+emission.
 """
 
 from __future__ import annotations
 
+import queue
+
 import pytest
 
+from src.api.schemas.streaming import StreamEventType
 from src.api.services.slide_repository import SlideWriter
 from src.services.foreman_service import CAP, releasable_positions
+from src.services.graph.event_emitter import set_event_emitter
 from src.services.graph.state import scoped_vals
 from tests.integration.conftest_stub_skills import (
     OBJECTIVE_CRITERION,
@@ -801,3 +808,84 @@ def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(
     assert env.rows_by_position()[0].html == builder_html(0)
     assert env.verdict_for(0)["verdict"] == "surfaced"
     assert env.recorder.counts("deck_reviewer") == 1
+
+
+# ---------------------------------------------------------------------------
+# 14 — ws4d D3: slide_ready travels the queue in ascending order (SSE transport)
+# ---------------------------------------------------------------------------
+
+
+def _slide_ready_events(emitter):
+    """Every ``slide_ready`` event on the queue, in the order it was queued."""
+    events = []
+    while not emitter.empty():
+        event = emitter.get_nowait()
+        if event.type is StreamEventType.SLIDE_READY:
+            events.append(event)
+    return events
+
+
+def test_no_slide_is_released_before_a_lower_position_across_a_real_turn(
+    graph_turn_env,
+):
+    """ws4d D3's headline property, against the REAL compiled graph.
+
+    An objective finding at position 0 is what makes this falsifiable.  Positions
+    1 and 2 land in the first batch; position 0 does not — it goes to the fixer
+    and is written a whole fix round later.  So a release that emitted whatever
+    was committed would put 1 and 2 on the queue FIRST and the order would be
+    ``[1, 2, 0]``.  The reorder buffer has to hold them until 0 lands.
+
+    This is the layer the unit suite cannot reach: the release runs inside a node
+    of a turn whose builders are ``Send``-fanned across Pregel worker threads,
+    each wrapped in ``copy_context().run(...)``, and the cursor that prevents
+    re-emission is a ``ContextVar``.  ``env.run`` calls ``graph.invoke`` directly
+    rather than ``invoke_graph``, so the emitter is installed here.
+    """
+    env = graph_turn_env
+    env.recorder.configure(slide_count=3, objective_findings_at={0})
+
+    emitter: queue.Queue = queue.Queue()
+    set_event_emitter(emitter)
+    try:
+        final = env.run()
+    finally:
+        set_event_emitter(None)
+
+    # ENTRY assertions: the fix round really happened, so position 0 really did
+    # commit after positions 1 and 2.
+    assert env.recorder.counts("fixer") == 1
+    assert env.rows_by_position()[0].html == fixed_html(0)
+    assert releasable_positions(final) == [0, 1, 2]
+
+    events = _slide_ready_events(emitter)
+    assert [event.position for event in events] == [0, 1, 2], (
+        "slide_ready events arrived out of order or were duplicated; position 0 "
+        "commits a fix round after 1 and 2, so anything but [0, 1, 2] means the "
+        "reorder buffer released a position over a gap"
+    )
+    assert events[0].html == fixed_html(0)
+    assert events[2].html == builder_html(2)
+    assert [event.slide_cursor for event in events] == [1, 2, 3]
+
+
+def test_a_placeheld_position_is_released_like_any_other_across_a_real_turn(
+    graph_turn_env,
+):
+    """A terminal builder failure must not freeze the queue: the placeholder is
+    released at its own position and the slides above it follow."""
+    env = graph_turn_env
+    env.recorder.configure(slide_count=3, fail_positions={1})
+
+    emitter: queue.Queue = queue.Queue()
+    set_event_emitter(emitter)
+    try:
+        final = env.run()
+    finally:
+        set_event_emitter(None)
+
+    assert scoped_vals(final, "placeheld_positions") == {1}
+    events = _slide_ready_events(emitter)
+    assert [event.position for event in events] == [0, 1, 2]
+    assert "slide-placeholder-error" in events[1].html
+    assert events[2].html == builder_html(2)
