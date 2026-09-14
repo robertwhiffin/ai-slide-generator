@@ -256,6 +256,132 @@ class TestTheClientVisibleModifiedTimestamp:
             "a user-driven deck write no longer moves modified_at"
         )
 
+
+class TestTheSessionListOrdering:
+    """`user_visible=False` also leaves `UserSession.last_activity` alone.
+
+    The THIRD client-visible signal, and the one that escaped an earlier version
+    of this flag that governed only `version` and `updated_at`.  The session list
+    is ORDERED by `last_activity.desc()` (`sessions.py:207`) and returns it
+    (`:232`), so a sweeper write that moved it would silently re-sort the human's
+    session list about three minutes after they stopped editing — on a deck whose
+    other two signals both say nothing changed.
+
+    Kept in its own class per the standing rule: it is a distinct property of the
+    same write, and a shared test would report one failure for any of the three.
+    """
+
+    @staticmethod
+    def _backdate_session(fixture, seconds: float = 3600.0) -> datetime:
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        db = fixture._factory()
+        try:
+            db.execute(
+                sa_text(
+                    "UPDATE user_sessions SET last_activity = :at "
+                    "WHERE session_id = :sid"
+                ),
+                {"at": stamp, "sid": fixture.session_id},
+            )
+            db.commit()
+        finally:
+            db.close()
+        assert TestTheSessionListOrdering._session_row(fixture).last_activity == stamp
+        return stamp
+
+    @staticmethod
+    def _session_row(fixture) -> UserSession:
+        db = fixture._factory()
+        try:
+            row = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == fixture.session_id)
+                .one()
+            )
+            db.expunge(row)
+            return row
+        finally:
+            db.close()
+
+    def test_a_write_the_client_should_not_see_leaves_last_activity_alone(
+        self, deck_with_three_rows
+    ):
+        """The absence half — PAIRED, per the standing rule, with proof the write
+        happened at all: "the timestamp did not move" is equally true of a call
+        that did nothing."""
+        planted = self._backdate_session(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(
+                deck_with_three_rows.session_id, css=_CSS, user_visible=False
+            )
+
+        assert deck_with_three_rows.deck_row().css == _CSS, (
+            "the write did not happen, so an unmoved timestamp proves nothing"
+        )
+        assert self._session_row(deck_with_three_rows).last_activity == planted, (
+            "a sweeper write moved last_activity; the human's session list "
+            "re-sorts minutes after they stopped editing, on a deck whose version "
+            "and modified_at both say nothing changed"
+        )
+
+    def test_the_DEFAULT_still_moves_last_activity(self, deck_with_three_rows):
+        """The paired direction, on the default rather than an explicit True.
+
+        Suppressing everywhere would satisfy the test above while freezing the
+        session list's ordering for every real edit.
+        """
+        planted = self._backdate_session(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
+
+        assert self._session_row(deck_with_three_rows).last_activity > planted, (
+            "a user-driven deck write no longer moves last_activity; the session "
+            "list will not re-order after a real edit"
+        )
+
+    def test_a_contributors_own_session_row_is_left_alone_too(
+        self, contributor_session
+    ):
+        """The writer touches TWO rows on a contributor write — the owner's and
+        the contributor's — so a suppression covering only the owner would leave
+        the contributor's list re-sorting. The single-direction trap."""
+        stamp = datetime.utcnow() - timedelta(seconds=3600)
+        db = contributor_session._factory()
+        try:
+            db.execute(
+                sa_text("UPDATE user_sessions SET last_activity = :at"),
+                {"at": stamp},
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        with _patched(contributor_session._factory):
+            write_deck_level_columns(
+                contributor_session.contributor_session_id,
+                css=_CSS,
+                user_visible=False,
+            )
+
+        assert contributor_session.owner_deck_row().css == _CSS, (
+            "the contributor's write did not land, so nothing below is tested"
+        )
+        db = contributor_session._factory()
+        try:
+            moved = [
+                r.session_id
+                for r in db.query(UserSession).all()
+                if r.last_activity != stamp
+            ]
+        finally:
+            db.close()
+        assert not moved, (
+            f"{moved} had last_activity moved by a write the client should not "
+            "see; a contributor's session list re-sorts too"
+        )
+
     def test_matching_expected_version_is_accepted(self, deck_with_three_rows):
         current = deck_with_three_rows.version()
 
