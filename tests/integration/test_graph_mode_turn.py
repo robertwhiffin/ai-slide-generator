@@ -991,8 +991,17 @@ class TestAGraphTurnCreatesExactlyOneSavePoint:
     def test_a_failing_save_point_does_not_fail_the_turn(
         self, graph_chat_env, monkeypatch
     ):
-        """The deck is already committed when this runs, so it must not raise."""
+        """The deck is already committed when this runs, so it must not raise.
+
+        `attempts` is not decoration.  Asserting only "no versions exist" would
+        pass with the save-point call REMOVED ENTIRELY — measured: this test was
+        the one member of its class that stayed green under the remove-the-call
+        sabotage.  So the failure path has to be shown to have been entered.
+        """
+        attempts: List[tuple] = []
+
         def boom(*args, **kwargs):
+            attempts.append((args, kwargs))
             raise RuntimeError("the version table is unavailable")
 
         monkeypatch.setattr(ChatService, "create_save_point", boom)
@@ -1001,6 +1010,10 @@ class TestAGraphTurnCreatesExactlyOneSavePoint:
 
         events = env.run()
 
+        assert len(attempts) == 1, (
+            f"create_save_point was called {len(attempts)} times, so the "
+            f"failure path under test was not the one exercised"
+        )
         assert StreamEventType.COMPLETE in _types(events), (
             "the turn did not complete: a save-point failure must not fail it"
         )
