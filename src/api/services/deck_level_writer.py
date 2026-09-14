@@ -273,7 +273,9 @@ def write_deck_level_columns(
                 "session_id": session_id,
                 "deck_owner_session_id": deck_owner.session_id,
                 "columns": sorted(supplied),
-                "created": created,
+                # NOT "created": that is a reserved LogRecord attribute and
+                # logging raises KeyError when extra= tries to overwrite one.
+                "row_created": created,
                 "version": deck.version,
             },
         )
