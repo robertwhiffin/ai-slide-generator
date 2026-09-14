@@ -351,6 +351,24 @@ class TestClearAndClaimAgreeOnTheKey:
     """
 
     def test_a_contributor_can_clear_the_marker_it_set(self, contributor_session):
+        """DO NOT deduplicate this against its sibling below. It looks redundant
+        beside `test_the_owner_id_clears_a_marker_a_contributor_set` and is not:
+        this is the ONLY test in the suite that can see a mis-keyed `clear_marker`.
+
+        Measured by sabotage: replace `clear_marker`'s owner resolution with the
+        requesting session's own row and this test fails (`clear_marker(...)`
+        returns False, the owner's marker survives) while the sibling stays GREEN —
+        because an owner id resolves to its own row either way, so the sweeper's own
+        path cannot detect the defect.
+
+        The two tests cover different directions on purpose:
+          this one  — a CONTRIBUTOR clears; catches missing owner resolution.
+          sibling   — the OWNER id clears what a contributor set; pins agreement
+                      with the id Task 5's `claim_due_marker` returns.
+
+        Merging them, or deleting this one as duplicative, silently removes the
+        guard on the "markers never cleared, deck re-claimed forever" defect.
+        """
         with _patched(contributor_session._factory):
             mark_dirty(contributor_session.contributor_session_id, _AUTHOR)
             assert contributor_session.owner_deck_row().spec_dirty_at is not None
