@@ -43,6 +43,13 @@ from src.utils.image_utils import substitute_deck_dict_images, substitute_image_
 
 logger = logging.getLogger(__name__)
 
+#: The slide ``insert_slide`` adds when the caller supplies no HTML.
+#: The wrapper is not decoration: ``has_slide_wrapper`` is what the parser, the
+#: frontend thumbnail panel and every export path use to recognise a slide, so an
+#: empty slide still has to carry it.  Left otherwise bare deliberately — the deck's
+#: own CSS styles it, and any content here would be content nobody asked for.
+BLANK_SLIDE_HTML = '<div class="slide"></div>'
+
 
 def resolve_active_design_system_id(session_id: Optional[str]) -> Optional[int]:
     """The session's pinned/active design-system id, or None.
@@ -3420,6 +3427,223 @@ class ChatService:
 
         deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
+
+    def insert_slide(
+        self,
+        session_id: str,
+        position: int,
+        *,
+        html: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Insert a new slide at *position*, shifting every higher slide up.
+
+        Follows ``duplicate_slide``'s shape (insert, ``_reindex_slide_ids``,
+        ``save_slide_deck``, ONE save point) and adds the deck-spec half: the spec
+        gains an entry for the new position and every entry above it shifts, so
+        spec positions stay contiguous and keep describing the right slides.
+
+        WHICH LAYER OWNS THE OUT-OF-RANGE CLAMP
+        ---------------------------------------
+        The DOMAIN does, and this method deliberately does not re-implement it.
+        ``SlideDeck.insert_slide`` delegates to ``list.insert``, which clamps: a
+        position past the end appends rather than raising, whatever that method's
+        docstring used to claim about ``IndexError``.  So "insert beyond the end
+        appends" is free, and the only thing left to decide here is the LOWER
+        bound — where ``list.insert`` would silently count backwards from the end
+        (``insert(-1, x)`` lands second-to-last, not last).  A negative position is
+        therefore rejected rather than clamped: it almost certainly means the
+        caller computed it wrongly, and quietly inserting somewhere else is worse
+        than a 400.
+
+        ``landed_at`` is computed BEFORE the insert precisely because of that
+        clamp — after it, ``position`` may not be where the slide actually is, and
+        the deck-spec entry has to go where the slide really landed.
+
+        Args:
+            session_id: Session ID.  A contributor session resolves to its deck
+                owner in the layers below, exactly as every other mutation does.
+            position: 0-based position to insert at.  Beyond the end appends.
+            html: HTML for the new slide.  Must carry a ``<div class="slide">``
+                wrapper.  Omitted, an empty slide is inserted for a human or the
+                architect to fill.
+            expected_version: If provided, reject the write when the deck has moved on.
+
+        Returns:
+            Updated slide deck dictionary.
+
+        Raises:
+            ValueError: If no slide deck exists, position is negative, or the
+                supplied HTML has no slide wrapper.
+        """
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
+            raise ValueError("No slide deck available")
+
+        if position < 0:
+            raise ValueError(f"Invalid slide position: {position}")
+
+        slide_html = html if html is not None else BLANK_SLIDE_HTML
+        if not has_slide_wrapper(slide_html):
+            raise ValueError("HTML must contain <div class='slide'> wrapper")
+
+        # Where the slide will ACTUALLY be, given the domain's clamp.
+        landed_at = min(position, len(current_deck.slides))
+
+        new_slide = Slide(html=slide_html)
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+        if _user:
+            new_slide.stamp_created(_user)
+
+        current_deck.insert_slide(new_slide, position)
+
+        self._reindex_slide_ids(current_deck)
+
+        # Persist to database
+        deck_dict = current_deck.to_dict()
+        session_manager = get_session_manager()
+        save_result = session_manager.save_slide_deck(
+            session_id=session_id,
+            title=current_deck.title,
+            html_content=current_deck.knit(),
+            scripts_content=current_deck.scripts,
+            slide_count=len(current_deck.slides),
+            deck_dict=deck_dict,
+            expected_version=expected_version,
+        )
+        self._record_deck_version(session_id, save_result)
+
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._insert_deck_spec_slide(session_id, landed_at)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
+
+        # ONE save point for the whole operation, after the work commits.
+        # VERSION_LIMIT evicts the OLDEST version, so a save point per shifted
+        # position would delete real history rather than merely bloat it.
+        try:
+            self.create_save_point(
+                session_id=session_id,
+                description=f"Inserted slide {landed_at + 1}",
+                deck=current_deck,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create save point (insert_slide): {e}")
+
+        logger.info(
+            "Inserted slide",
+            extra={
+                "requested_position": position,
+                "position": landed_at,
+                "new_count": len(current_deck.slides),
+                "session_id": session_id,
+            },
+        )
+
+        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
+        return deck_dict
+
+    def _insert_deck_spec_slide(
+        self,
+        session_id: str,
+        position: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Give the deck spec an entry at *position* and shift the entries above it.
+
+        A deck spec describes the deck slide by slide, keyed on ``position``
+        (``SlideSpec.position`` is the canonical identity, looked up by
+        ``DeckSpec.slide_at`` and never by list index).  Inserting a slide without
+        renumbering would leave every entry above the insertion point describing
+        its neighbour.
+
+        The new entry is a PLACEHOLDER — empty purpose and brief.  The route that
+        reaches this fires the spec-dirty marker, and the arc-review sweeper is
+        what actually describes the new slide; inventing a purpose here would put
+        words in the architect's mouth, and leaving the entry out entirely would
+        break the contiguity ``slide_at`` depends on.
+
+        Operates on the RAW spec dict rather than parsing a ``DeckSpec``: a spec
+        that no longer validates (an older shape, a hand-edited column) must not be
+        destroyed by a renumber, and this only touches ``slides[*].position``.
+
+        Returns:
+            The writer's result dict (carrying the new deck ``version``), or None
+            when there was no spec to shift — a deck built before the spec existed
+            is not an error.
+        """
+        # Imported here, not at module scope: src.api.services.__init__ imports
+        # chat_service, so a module-level import of a sibling service is circular.
+        from src.api.services.deck_level_writer import (
+            read_deck_spec,
+            write_deck_level_columns,
+        )
+
+        try:
+            spec = read_deck_spec(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to read deck spec (insert_slide): {e}")
+            return None
+
+        if not spec:
+            return None
+
+        slides = spec.get("slides")
+        if not isinstance(slides, list):
+            logger.warning(
+                "deck_spec_json has no slides list; leaving it untouched",
+                extra={"session_id": session_id},
+            )
+            return None
+
+        shifted: List[Dict[str, Any]] = []
+        for entry in slides:
+            if not isinstance(entry, dict):
+                shifted.append(entry)
+                continue
+            entry = dict(entry)
+            entry_position = entry.get("position")
+            if isinstance(entry_position, int) and entry_position >= position:
+                entry["position"] = entry_position + 1
+            shifted.append(entry)
+
+        shifted.append(
+            {
+                "position": position,
+                "purpose": "",
+                "content_brief": "",
+                "assumes": "",
+                "hands_off": "",
+                "data_references": [],
+            }
+        )
+        shifted.sort(
+            key=lambda e: e.get("position", 0) if isinstance(e, dict) else 0
+        )
+
+        spec = dict(spec)
+        spec["slides"] = shifted
+
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+
+        try:
+            return write_deck_level_columns(
+                session_id,
+                deck_spec=spec,
+                modified_by=_user,
+            )
+        except Exception as e:
+            # The slide is already saved and the marker will still fire, so a spec
+            # write that fails must not fail the insert.
+            logger.warning(f"Failed to shift deck spec (insert_slide): {e}")
+            return None
 
     def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Delete a slide.
