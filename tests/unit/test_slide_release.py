@@ -25,6 +25,7 @@ the next.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import queue
@@ -35,6 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import get_session_manager
@@ -79,17 +81,44 @@ def _slide_ready(events) -> list:
     return [e for e in events if e.type is StreamEventType.SLIDE_READY]
 
 
-def _commit(env, *positions, scripts: str = "") -> None:
-    """Write a real committed row at each position, through the shipped writer."""
+def _commit(env, *positions, scripts: str = "", per_position_scripts=False) -> None:
+    """Write a real committed row at each position, through the shipped writer.
+
+    ``per_position_scripts`` gives every row a DISTINCT non-empty ``scripts``.
+    That is load-bearing rather than decorative: with every row's scripts equal to
+    `""` — the previous default everywhere in this suite — dropping the payload on
+    the way to `emit_slide_ready` is indistinguishable from delivering it, and a
+    missing scripts payload is silent (no exception, blank charts in every export).
+    """
     writer = SlideWriter()
     for position in positions:
         writer.write_slide(
             session_id=env.session_id,
             position=position,
             html=f"<div class='slide'>slide {position}</div>",
-            scripts=scripts,
+            scripts=_scripts_for(position) if per_position_scripts else scripts,
             modified_by="build_reviewer",
         )
+
+
+@contextlib.contextmanager
+def _recorded_sql(engine):
+    """Every SQL statement the engine executes inside the block."""
+    statements: list = []
+
+    def _record(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+
+def _scripts_for(position: int) -> str:
+    """Distinct per-position JavaScript, so a dropped OR swapped payload shows."""
+    return f"new Chart(ctx, {{position: {position}}});"
 
 
 def _release_state(env, *, covered, landed=(), placeheld=()):
@@ -398,6 +427,103 @@ class TestSlidesSinceCursor:
         assert is_placeholder_record(placeholder_row["verification_record"])
         assert released[1]["html"] == placeholder_row["html"]
 
+    def test_the_returned_payload_is_pinned_exactly(self, graph_env):
+        """A golden shape, pinned so the query's SHAPE can change and its RESULT
+        cannot.
+
+        The first form of this method loaded every row of the deck — `html`
+        included — and then discarded the rows below the cursor in Python.  On the
+        Databricks Apps path that is a whole deck's HTML pulled every three
+        seconds by a polling client that already has all of it, in an app already
+        timing out under load.  The prefix rule genuinely must scan from position 0
+        to detect gaps, so a SQL `position >= cursor` filter would be WRONG (see
+        `test_a_later_position_landing_first_releases_nothing_above_the_gap`) — but
+        the scan needs only POSITIONS, not payloads.
+
+        This test states the entire observable contract in one literal: released
+        set, order, every field value, and the exact key set.  A deck with a
+        placeholder inside the prefix, a real slide with per-slide JavaScript, a
+        gap, and a row stranded above the gap.
+        """
+        _commit(graph_env, 0, per_position_scripts=True)
+        SlideWriter().commit_placeholder(
+            graph_env.session_id, 1, error_message="builder exploded"
+        )
+        _commit(graph_env, 2, per_position_scripts=True)
+        _commit(graph_env, 4, per_position_scripts=True)  # stranded above a gap at 3
+
+        placeholder_html = SlideWriter().get_slide(graph_env.session_id, 1)["html"]
+        released = get_session_manager().slides_since_cursor(graph_env.session_id, 1)
+
+        assert released == [
+            {
+                "position": 1,
+                "html": placeholder_html,
+                "scripts": "",
+                # A placeholder is written with no author, so attribution is None
+                # rather than a fabricated agent name.
+                "agent": None,
+            },
+            {
+                "position": 2,
+                "html": "<div class='slide'>slide 2</div>",
+                "scripts": _scripts_for(2),
+                "agent": "build_reviewer",
+            },
+        ]
+        assert "slide-placeholder-error" in placeholder_html  # ENTRY
+        assert [set(row) for row in released] == [
+            {"position", "html", "scripts", "agent"}
+        ] * 2
+
+    def test_a_re_poll_of_a_finished_deck_fetches_no_slide_payload(self, graph_env):
+        """The performance property, asserted in SQL rather than in prose.
+
+        A client polling a finished deck every three seconds must cost a read of
+        integers, not of every slide's HTML.  The contiguity scan needs positions
+        from 0; nothing needs a payload the caller already has.
+        """
+        _commit(graph_env, 0, 1, 2, per_position_scripts=True)
+
+        with _recorded_sql(graph_env.engine) as statements:
+            assert (
+                get_session_manager().slides_since_cursor(graph_env.session_id, 3)
+                == []
+            )
+
+        slide_queries = [s for s in statements if "session_slides" in s]
+        # ENTRY: the release query really did hit the table, so "no payload was
+        # fetched" is not "no query ran".
+        assert slide_queries, f"no session_slides query ran at all; saw {statements}"
+        payload_queries = [s for s in slide_queries if "session_slides.html" in s]
+        assert payload_queries == [], (
+            "a re-poll that releases nothing still fetched slide HTML: "
+            f"{payload_queries}"
+        )
+
+    def test_only_the_released_window_is_fetched_with_its_payload(self, graph_env):
+        """The payload read is windowed, not a full-table scan.
+
+        Position 2 alone is released, so exactly one statement may select `html`
+        and it must be bounded by an `IN` over the window — not `SELECT ... FROM
+        session_slides WHERE session_id = ?` over the whole deck.
+        """
+        _commit(graph_env, 0, 1, 2, per_position_scripts=True)
+
+        with _recorded_sql(graph_env.engine) as statements:
+            released = get_session_manager().slides_since_cursor(
+                graph_env.session_id, 2
+            )
+
+        assert [row["position"] for row in released] == [2]  # ENTRY
+        assert released[0]["scripts"] == _scripts_for(2)
+        payload_queries = [s for s in statements if "session_slides.html" in s]
+        assert len(payload_queries) == 1, payload_queries
+        assert "IN (" in payload_queries[0].upper(), (
+            "the payload read is not bounded to the released window: "
+            f"{payload_queries[0]}"
+        )
+
     def test_a_negative_cursor_is_read_as_zero(self, graph_env):
         """Positions are 0-based, so a client that mirrors `after_message_id`'s
         exclusive-after convention would start at -1.  Both -1 and 0 must
@@ -445,20 +571,39 @@ class TestTheTwoPrefixRulesAgree:
     def test_the_same_position_set_gives_the_same_prefix(
         self, graph_env, covered, committed
     ):
+        """Swept over EVERY cursor, not only 0.
+
+        Measured: at cursor 0 the two rules agree even when `slides_since_cursor`
+        filters rows to `position >= cursor` BEFORE scanning for the gap — the
+        floor is 0, so the filter is a no-op.  That break only shows at a cursor
+        sitting above a gap, so a cursor-0-only agreement test is blind to
+        cursor-dependent divergence, which is the one dimension in which the two
+        implementations differ structurally: the row rule takes a cursor and the
+        state rule does not.
+        """
         _commit(graph_env, *committed)
-        by_state = releasable_positions(
+        prefix = releasable_positions(
             _release_state(graph_env, covered=covered, landed=committed)
         )
-        by_rows = [
-            row["position"]
-            for row in get_session_manager().slides_since_cursor(
-                graph_env.session_id, 0
+        manager = get_session_manager()
+        checked = []
+        for cursor in range(-1, max(covered) + 2):
+            by_rows = [
+                row["position"]
+                for row in manager.slides_since_cursor(graph_env.session_id, cursor)
+            ]
+            by_state = [p for p in prefix if p >= max(0, cursor)]
+            checked.append(cursor)
+            assert by_rows == by_state, (
+                f"at cursor {cursor} the row-derived release {by_rows} and the "
+                f"state-derived prefix {by_state} disagree for "
+                f"committed={sorted(committed)}"
             )
-        ]
-        assert by_rows == by_state, (
-            f"the row-derived prefix {by_rows} and the state-derived prefix "
-            f"{by_state} disagree for committed={sorted(committed)}"
-        )
+        # ENTRY assertion: the sweep really ran over every cursor, so a loop that
+        # silently collapsed to one iteration cannot pass as a sweep.  This is the
+        # assertion whose absence let a claimed sweep go unnoticed.
+        assert checked == list(range(-1, max(covered) + 2)), checked
+        assert len(checked) >= 4
 
     def test_they_agree_when_the_committed_position_is_a_placeholder(self, graph_env):
         """A placeholder is inside `releasable_positions`' committed set
@@ -513,7 +658,7 @@ class TestTheForemanWakeReleasesSlides:
         """An ENTRY assertion on the emitter, not on the queue.  Rewriting
         `_release_slides` to call `emit_event` with a hand-built event would
         leave every ordering assertion above green and this spy empty."""
-        _commit(graph_env, 0, 1)
+        _commit(graph_env, 0, 1, per_position_scripts=True)
         calls = []
 
         def spy(**kwargs):
@@ -530,8 +675,45 @@ class TestTheForemanWakeReleasesSlides:
 
         assert [call["position"] for call in calls] == [0, 1]
         assert calls[0]["html"] == "<div class='slide'>slide 0</div>"
-        assert calls[0]["scripts"] == ""
         assert calls[0]["agent"] == "build_reviewer"
+        # Every kwarg of this call is asserted, `scripts` included.  Asserting it
+        # against `""` — as this test first did, because every row in the suite
+        # had empty scripts — cannot tell "delivered the row's scripts" from
+        # "hardcoded empty", and dropping the payload one hop up passed 40 tests.
+        assert [call["scripts"] for call in calls] == [
+            _scripts_for(0),
+            _scripts_for(1),
+        ]
+
+    def test_the_released_event_carries_each_row_s_own_scripts(self, graph_env):
+        """The per-slide JavaScript has to survive the whole release path.
+
+        A `slide_ready` that loses `scripts` fails SILENTLY — no exception, and
+        the symptom is blank Chart.js canvases in the deck and in every export.
+        Distinct values per position, so a dropped payload and a swapped one are
+        both visible; asserted on the QUEUED EVENT, one layer past the kwargs the
+        spy test checks.
+        """
+        _commit(graph_env, 0, 1, 2, per_position_scripts=True)
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        try:
+            foreman_node(
+                _release_state(graph_env, covered=(0, 1, 2), landed=(0, 1, 2))
+            )
+        finally:
+            set_event_emitter(None)
+
+        events = _slide_ready(_drain(emitter))
+        assert [e.position for e in events] == [0, 1, 2]  # ENTRY
+        assert [e.scripts for e in events] == [
+            _scripts_for(0),
+            _scripts_for(1),
+            _scripts_for(2),
+        ]
+        # And it survives serialisation, which is what actually reaches the client.
+        payload = json.loads(events[1].to_sse().split("data: ", 1)[1].strip())
+        assert payload["scripts"] == _scripts_for(1)
 
     def test_a_later_position_landing_first_is_not_emitted_over_the_gap(
         self, graph_env
