@@ -148,6 +148,46 @@ class TestOptimisticLock:
         assert deck_with_three_rows.version() == start + 2
         assert second["version"] == start + 2
 
+    def test_bump_version_false_writes_the_columns_but_leaves_the_token(
+        self, deck_with_three_rows
+    ):
+        """ws4d: a write that changes nothing the client's token guards.
+
+        `deck.version` is the optimistic-lock token a WYSIWYG client holds between
+        saves, and the slide routes turn a mismatch into HTTP 409.  The arc-review
+        sweeper is the first writer that runs outside a user turn, and it runs
+        BECAUSE the human is editing — so a bump there rejects that human's very
+        next save.
+        """
+        start = deck_with_three_rows.version()
+
+        with _patched(deck_with_three_rows._factory):
+            result = write_deck_level_columns(
+                deck_with_three_rows.session_id, css=_CSS, bump_version=False
+            )
+
+        assert deck_with_three_rows.version() == start, (
+            "the token moved on a write that guards nothing; the editing human's "
+            "next save is a 409"
+        )
+        assert result["version"] == start
+        # The write itself must still have happened: a "fix" that skipped the
+        # write entirely would satisfy the assertion above.
+        assert deck_with_three_rows.deck_row().css == _CSS
+
+    def test_the_default_still_bumps_so_a_real_edit_invalidates_the_token(
+        self, deck_with_three_rows
+    ):
+        """The paired direction, asserted on the DEFAULT rather than on True.
+
+        A default flipped to False would break the optimistic lock for every
+        user-driven write, and passing True explicitly here would not notice.
+        """
+        start = deck_with_three_rows.version()
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
+        assert deck_with_three_rows.version() == start + 1
+
     def test_matching_expected_version_is_accepted(self, deck_with_three_rows):
         current = deck_with_three_rows.version()
 

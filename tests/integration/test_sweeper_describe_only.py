@@ -445,12 +445,16 @@ class TestTheVersionColumnItself:
             f"{env.deck_row().version}; the editing human's next save is a 409"
         )
 
-    def test_a_NORMAL_user_turn_still_bumps_it(self, sweeper_env):
-        """The paired direction.
+    def test_a_NORMAL_user_turn_bumps_it_TWICE_once_per_deck_level_write(
+        self, sweeper_env
+    ):
+        """The paired direction, and the count is what makes it load-bearing.
 
-        `bump_version=False` everywhere would satisfy the test above while
-        breaking the optimistic lock for every real edit, which is the whole
-        point of the column.
+        A turn calls `write_deck_level_columns` twice — `architect_node` before
+        fan-out and `deck_reviewer_node` after commit — so `> before` is satisfied
+        by EITHER of them.  Measured: sabotaging only the architect's bump left
+        `> before` green, because the deck reviewer's still fired.  Asserting the
+        exact +2 is what distinguishes "both writes bump" from "one of them does".
         """
         env = sweeper_env
         env.recorder.slide_count = 3
@@ -459,9 +463,10 @@ class TestTheVersionColumnItself:
 
         invoke_graph(env.session_id, {"architect_message": "add another slide"})
 
-        assert env.deck_row().version > before, (
-            "a normal user turn no longer bumps the version; the optimistic lock "
-            "can no longer detect a stale write"
+        assert env.deck_row().version == before + 2, (
+            f"a normal user turn moved the version {before} -> "
+            f"{env.deck_row().version}; expected +2, one per deck-level write. "
+            "A suppressed bump means the optimistic lock can miss a stale write"
         )
 
 
