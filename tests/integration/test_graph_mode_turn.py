@@ -45,7 +45,11 @@ import pytest
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.chat_service import ChatService
-from src.database.models.session import SessionSlide, SessionSlideDeck
+from src.database.models.session import (
+    SessionSlide,
+    SessionSlideDeck,
+    SlideDeckVersion,
+)
 from tests.integration.conftest_stub_skills import builder_html
 
 AUTHOR = "graph-caller@example.com"
@@ -173,6 +177,31 @@ class _GraphChatEnv:
     def deck_version(self) -> Optional[int]:
         deck = self.deck_row()
         return None if deck is None else deck.version
+
+    def versions(self) -> List[SlideDeckVersion]:
+        """Every save point on this deck, oldest first.
+
+        Read off `SlideDeckVersion` rather than through `list_versions`, because
+        the assertion is about how many rows a turn MINTED — a reader that
+        paginated or filtered could hide a multiplication.
+        """
+        from src.database.models.session import UserSession
+
+        db = self._env.factory()
+        try:
+            owner = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == self.session_id)
+                .one()
+            )
+            return (
+                db.query(SlideDeckVersion)
+                .filter(SlideDeckVersion.session_id == owner.id)
+                .order_by(SlideDeckVersion.version_number)
+                .all()
+            )
+        finally:
+            db.close()
 
     def session_title(self) -> Optional[str]:
         """`UserSession.title` — what the session list renders."""
@@ -891,6 +920,95 @@ class TestTheCompleteEvent:
 # ---------------------------------------------------------------------------
 
 
+class TestAGraphTurnCreatesExactlyOneSavePoint:
+    """A graph-built deck must have version history, and EXACTLY one entry per turn.
+
+    Nothing under `src/services/graph/` touches `create_save_point`,
+    `create_version` or `SlideDeckVersion` — zero matches, against eight call
+    sites in `chat_service.py`. So before this the graph limb left a deck with
+    empty version history: the same class of silent end-of-turn bypass the plan
+    flagged for titles, and the plan names only titles, so nobody owned it.
+    Task 6's "restore cancels a pending review" would pass VACUOUSLY on a deck
+    with no versions to restore.
+
+    "Exactly one" is the load-bearing word, not "at least one".  The save point
+    lives in `_send_message_streaming_graph` after the worker thread finishes,
+    NOT in a node: nodes fan out per slide, so a save point inside one would mint
+    a version per slide and `SessionManager.VERSION_LIMIT` (40) would be
+    exhausted by three turns of a 15-slide deck.  An "at least one" assertion
+    would pass with fifteen.
+    """
+
+    def test_a_completed_turn_leaves_exactly_one_new_version(self, graph_chat_env):
+        env = graph_chat_env
+        assert env.versions() == [], "the session must start with no save points"
+        env.recorder.configure(slide_count=3)
+
+        env.run()
+
+        versions = env.versions()
+        assert len(versions) == 1, (
+            f"expected exactly ONE save point for one turn, got "
+            f"{[v.version_number for v in versions]} — more than one means the "
+            f"save point is being made per slide rather than per turn"
+        )
+        assert versions[0].version_number == 1
+
+    def test_the_save_point_describes_the_deck_it_saved(self, graph_chat_env):
+        """A version whose description says 0 slides is not a usable history."""
+        env = graph_chat_env
+        env.recorder.configure(slide_count=3)
+
+        env.run()
+
+        assert env.versions()[0].description == "Generated 3 slide(s)"
+
+    def test_the_save_point_snapshots_the_slides(self, graph_chat_env):
+        """The snapshot has to hold the deck, or restore has nothing to restore."""
+        import json
+
+        env = graph_chat_env
+        env.recorder.configure(slide_count=3)
+
+        env.run()
+
+        snapshot = json.loads(env.versions()[0].deck_json)
+        assert len(snapshot["slides"]) == 3
+        assert snapshot["slides"][0]["html"] == builder_html(0)
+
+    def test_a_second_turn_adds_exactly_one_more(self, graph_chat_env):
+        """Per TURN, not per session and not per slide."""
+        env = graph_chat_env
+        env.recorder.configure(slide_count=2)
+
+        env.run()
+        env.recorder.reset_observations()
+        env.run(message=PLAIN_MESSAGE, is_first_message=False)
+
+        numbers = [v.version_number for v in env.versions()]
+        assert numbers == [1, 2], f"expected two save points over two turns, got {numbers}"
+
+    def test_a_failing_save_point_does_not_fail_the_turn(
+        self, graph_chat_env, monkeypatch
+    ):
+        """The deck is already committed when this runs, so it must not raise."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("the version table is unavailable")
+
+        monkeypatch.setattr(ChatService, "create_save_point", boom)
+        env = graph_chat_env
+        env.recorder.configure(slide_count=2)
+
+        events = env.run()
+
+        assert StreamEventType.COMPLETE in _types(events), (
+            "the turn did not complete: a save-point failure must not fail it"
+        )
+        assert StreamEventType.ERROR not in _types(events)
+        assert len(env.rows()) == 2
+        assert env.versions() == []
+
+
 class TestGraphModeSessionsAreTitled:
     """A graph branch that bypasses the monolith bypasses title generation.
 
@@ -1027,6 +1145,31 @@ class TestTheMonolithIsUnaffected:
             graph_chat_env.run(engine_mode=None, message=PLAIN_MESSAGE)
 
         assert graph_chat_env.recorder.counts("architect") == 0
+
+    def test_omitting_the_parameter_on_a_request_id_path_reaches_the_monolith(
+        self, graph_chat_env
+    ):
+        """THE shape the `engine_mode` default is load-bearing in, and MCP's shape.
+
+        On the SSE path the re-resolve makes the default unobservable, so the only
+        place it decides anything is a call that sets a `request_id` and passes no
+        `engine_mode` — which is exactly how an MCP job arrives at this method:
+        `job_queue.process_chat_request` reads `payload.get("engine_mode",
+        "monolith")` and MCP's payload has no such key.
+
+        Without this, flipping the default to `"graph"` reddened only the
+        signature guard while all 29 integration tests stayed green.  This is the
+        behavioural half of the defence protecting MCP.
+        """
+        env = graph_chat_env
+        env.seed_user_message(MESSAGE)   # the transcript MCP persisted upstream
+        env.recorder.configure(slide_count=1)
+
+        with pytest.raises(_MonolithReached):
+            env.run(engine_mode=None, request_id="req-default-decides")
+
+        assert env.recorder.counts("architect") == 0
+        assert env.rows() == []
 
     def test_an_unknown_mode_string_reaches_the_monolith(self, graph_chat_env):
         """Fail closed: only the exact string `"graph"` selects the graph.

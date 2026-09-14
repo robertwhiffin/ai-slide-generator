@@ -1926,6 +1926,40 @@ class ChatService:
         # so drop the cached deck rather than serve a deck that predates the turn.
         self._invalidate_deck_cache(session_id)
 
+        # ONE save point per completed turn, matching the monolith — which makes
+        # one here too, at `send_message_streaming`'s own post-persist step.
+        # Without it a graph-built deck has EMPTY version history: nothing under
+        # `src/services/graph/` touches `create_save_point`, `create_version` or
+        # `SlideDeckVersion`, against eight call sites in this module.  Same class
+        # of silent end-of-turn bypass as the title, and the plan names only the
+        # title, so nobody owned it.  Task 6's "restore cancels a pending review"
+        # would pass VACUOUSLY on a graph deck that has no versions to restore.
+        #
+        # PLACEMENT IS LOAD-BEARING: here, after the worker thread has finished
+        # and the deck is committed — never inside a node.  Nodes fan out per
+        # slide, so a save point in one would mint a version PER SLIDE, and
+        # `SessionManager.VERSION_LIMIT` is 40: three turns of a 15-slide deck
+        # would exhaust the whole history and start evicting the oldest.
+        #
+        # A save-point failure must not fail the turn, exactly as on the monolith
+        # path — the deck is already committed by the time this runs.
+        try:
+            deck_for_save_point = self._get_or_load_deck(session_id)
+            if deck_for_save_point is not None:
+                self.create_save_point(
+                    session_id=session_id,
+                    description=(
+                        f"Generated {len(deck_for_save_point.slides)} slide(s)"
+                    ),
+                    deck=deck_for_save_point,
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to create save point (graph): {e}",
+                extra={"session_id": session_id},
+                exc_info=True,
+            )
+
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
             slides=self.get_slides(session_id),
