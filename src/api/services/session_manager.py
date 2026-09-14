@@ -9,7 +9,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
@@ -310,11 +310,46 @@ def _merge_verification_record(
     return json.dumps(merged) if merged else None
 
 
+class SlideAttribution(NamedTuple):
+    """The per-slide state that FOLLOWED a slide to its new position.
+
+    Both fields are raw column values (JSON strings or None), not parsed objects:
+    they are carried from an old row to ``_upsert_slide_row`` untouched, and
+    re-encoding them would be a chance to change them.
+
+    Two fields, not one, because both answer the same question — "which slide does
+    this belong to?" — and the answer must be the same for both.  When only the
+    verification record was mapped, a shift moved the verdict and left the spec
+    fragment behind on the position, where it then described a different slide.
+    """
+
+    verification_record: Optional[str]
+    deck_spec_slide: Optional[str]
+
+
+#: What a position with no attributable predecessor gets: nothing, in both fields.
+#: Used as the ``.get`` default so a caller cannot accidentally read a missing
+#: attribution as "leave whatever is there alone".
+NO_ATTRIBUTION = SlideAttribution(verification_record=None, deck_spec_slide=None)
+
+
+def _attribution_from(row: SessionSlide) -> SlideAttribution:
+    """Everything that belongs to the SLIDE this row currently holds.
+
+    One function, called by all three attribution passes, so a field can never be
+    carried by one pass and dropped by another.
+    """
+    return SlideAttribution(
+        verification_record=row.verification_record,
+        deck_spec_slide=row.deck_spec_slide,
+    )
+
+
 def _attribute_slide_records(
     old_rows: List[SessionSlide],
     new_slides: List[Dict[str, Any]],
-) -> Dict[int, Optional[str]]:
-    """Decide which existing verification_record belongs to each NEW position.
+) -> Dict[int, SlideAttribution]:
+    """Decide which existing row's per-slide state belongs to each NEW position.
 
     THE VERDICT-VS-POSITION PROBLEM (F2), AND HOW THIS RESOLVES IT
     --------------------------------------------------------------
@@ -337,6 +372,22 @@ def _attribute_slide_records(
     function re-attaches each whole record to the slide it belongs to, wherever
     that slide has moved to.  The record then travels intact, history and all.
 
+    ``deck_spec_slide`` IS THE SAME PROBLEM AND TRAVELS THE SAME WAY
+    ----------------------------------------------------------------
+    A per-slide spec fragment is no more a property of a position than a verdict
+    is, so it is attributed by the same three passes and returned in the same
+    :class:`SlideAttribution` — one decision per slide, never two that can
+    disagree.  Before this it was not mapped at all: a shift moved the verdict and
+    left the fragment on the position, describing whichever slide had arrived
+    there.  That was live behaviour, not a latent risk — ``graph/nodes.py``
+    writes the column on every reviewed slide, so every graph-built deck carried
+    fragments that any reorder, duplicate or insert mis-attributed.
+
+    Note this only works because ``_upsert_slide_row`` writes the attributed
+    fragment even when it is None on its full-identity path: "no fragment
+    followed this slide" has to CLEAR the displaced occupant's fragment, not be
+    read as "leave it alone".
+
     Attribution runs in three passes, most reliable evidence first.  Each old row
     can be claimed at most once, and a later pass may only claim a row no earlier
     pass took:
@@ -354,13 +405,14 @@ def _attribute_slide_records(
          nothing else claims it, so the slide keeps its history.
 
     Returns:
-        ``{new_position: attributed_record_json_or_None}``.  Positions absent
-        from the mapping have no attributable prior record.
+        ``{new_position: SlideAttribution}``.  Positions absent from the mapping
+        have no attributable predecessor at all; read them through
+        ``.get(position, NO_ATTRIBUTION)`` so the absence stays explicit.
     """
     from src.utils.slide_hash import compute_slide_hash
 
     claimed: set[int] = set()  # indices into old_rows
-    result: Dict[int, Optional[str]] = {}
+    result: Dict[int, SlideAttribution] = {}
 
     old_by_slide_id: Dict[str, List[int]] = {}
     old_by_hash: Dict[str, List[int]] = {}
@@ -382,7 +434,7 @@ def _attribute_slide_records(
         candidates = old_by_slide_id.get(slide_id) or []
         if len(candidates) == 1 and candidates[0] not in claimed:
             claimed.add(candidates[0])
-            result[position] = old_rows[candidates[0]].verification_record
+            result[position] = _attribution_from(old_rows[candidates[0]])
 
     # Pass 2: identical content.
     for position, slide_hash in enumerate(new_hashes):
@@ -391,7 +443,7 @@ def _attribute_slide_records(
         for idx in old_by_hash.get(slide_hash) or []:
             if idx not in claimed:
                 claimed.add(idx)
-                result[position] = old_rows[idx].verification_record
+                result[position] = _attribution_from(old_rows[idx])
                 break
 
     # Pass 3: same position, but only if unclaimed (the in-place-edit case).
@@ -401,7 +453,7 @@ def _attribute_slide_records(
         idx = old_by_position.get(position)
         if idx is not None and idx not in claimed:
             claimed.add(idx)
-            result[position] = old_rows[idx].verification_record
+            result[position] = _attribution_from(old_rows[idx])
 
     return result
 
@@ -416,6 +468,7 @@ def _upsert_slide_row(
     author_fallback: Optional[str] = None,
     verification: Optional[Dict[str, Any]] = None,
     base_record: Optional[str] = None,
+    base_spec: Optional[str] = None,
     deck_spec_slide: Optional[Dict[str, Any]] = None,
     partial: bool = False,
 ) -> SessionSlide:
@@ -448,6 +501,13 @@ def _upsert_slide_row(
             THE SLIDE here, which is not necessarily the one already sitting on
             this position's row.  Callers that mutate deck order MUST pass this;
             omitting it means "this slide brings no prior record".
+        base_spec: the ``deck_spec_slide`` JSON this slide is entitled to, from the
+            same attribution decision as ``base_record`` — a RAW column string,
+            not a parsed fragment.  On the full-identity path it is written even
+            when None, because "no fragment followed this slide" must CLEAR the
+            fragment the position's previous occupant left behind; a caller that
+            mutates deck order and omits it silently keeps the stale one.
+            ``deck_spec_slide`` wins over it when both are supplied.
         deck_spec_slide: parsed spec fragment to store, or None.
         partial: PARTIAL-UPDATE MODE, used only by ``SlideWriter.write_slide``.
             When True:
@@ -516,8 +576,12 @@ def _upsert_slide_row(
             existing.verification_record = _merge_verification_record(
                 base_record, verification
             )
-            if spec_json is not None:
-                existing.deck_spec_slide = spec_json
+            # UNCONDITIONAL, unlike the partial branch above: this row now
+            # describes a different slide, so an attributed None means "this slide
+            # brought no fragment" and MUST clear the previous occupant's.
+            # Treating None as "leave unchanged" here is precisely how a shift
+            # stranded a fragment on the slide that replaced its owner.
+            existing.deck_spec_slide = spec_json if spec_json is not None else base_spec
         return existing
 
     # INSERT.  id is a fresh uuid4, NOT slide_id: `id` is String(64) UNIQUE
@@ -535,7 +599,7 @@ def _upsert_slide_row(
         modified_by=modified_by,
         modified_at=modified_at,
         verification_record=_merge_verification_record(base_record, verification),
-        deck_spec_slide=spec_json,
+        deck_spec_slide=spec_json if spec_json is not None else base_spec,
     )
     db.add(row)
     return row
@@ -1554,6 +1618,7 @@ class SessionManager:
                 attributed = _attribute_slide_records(old_rows, slides)
 
                 for position, slide_dict in enumerate(slides):
+                    attribution = attributed.get(position, NO_ATTRIBUTION)
                     _upsert_slide_row(
                         db,
                         deck_owner.id,
@@ -1565,7 +1630,10 @@ class SessionManager:
                         # no writer identity); a live save always knows who is
                         # writing.  Do NOT "harmonise" these to None.
                         author_fallback=modified_by,
-                        base_record=attributed.get(position),
+                        base_record=attribution.verification_record,
+                        # Both halves of the attribution, or the spec fragment
+                        # stays on the position while the verdict moves.
+                        base_spec=attribution.deck_spec_slide,
                     )
 
                 # 3. Orphan pruning (shared strategy — see _prune_slide_rows_beyond).
@@ -2639,6 +2707,7 @@ class SessionManager:
                         else None
                     )
 
+                    attribution_r = attributed_r.get(position, NO_ATTRIBUTION)
                     _upsert_slide_row(
                         db,
                         deck_owner.id,
@@ -2649,7 +2718,8 @@ class SessionManager:
                         # and has no "current writer" to attribute slides to.
                         author_fallback=None,
                         verification=incoming,
-                        base_record=attributed_r.get(position),
+                        base_record=attribution_r.verification_record,
+                        base_spec=attribution_r.deck_spec_slide,
                     )
 
                 # Prune phantom rows beyond the restored slide count (shared
