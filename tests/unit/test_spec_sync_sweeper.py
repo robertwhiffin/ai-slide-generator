@@ -1348,9 +1348,42 @@ async def _cancel_within_a_bounded_wait(task, seconds: float = 5.0) -> None:
     )
 
 
+def _run_on_a_private_loop(coro_factory):
+    """Drive ``coro_factory()`` on an event loop we own and always CLOSE.
+
+    Not pytest-asyncio's shared loop, and the reason is measured.  That loop is
+    torn down by cancelling every pending task and **awaiting** them — and
+    awaiting a task that swallows ``CancelledError`` hangs for ever.  Even
+    ``asyncio.wait_for`` on it hangs, because the timeout's own cancellation is
+    swallowed too:
+
+        A: attempting the standard cancel-all-then-gather cleanup, 3s budget...
+        (never returned; timeout exit 124)
+
+    So bounding the wait *inside* the test is necessary but NOT sufficient — the
+    subject of these tests is a loop that may refuse to stop, and leaving such a
+    task on a loop anyone will await turns a clean failure into a hung job. It bit
+    exactly that way here: the first test failed with a readable message and the
+    run then hung before printing a summary.
+
+    ``loop.close()`` with an immortal pending task returns cleanly (measured), so
+    a private loop contains it with no cleverness.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro_factory())
+    finally:
+        loop.close()
+
+
 class TestTheLoop:
-    @pytest.mark.asyncio
-    async def test_the_loop_survives_a_failing_tick_and_re_raises_on_cancel(self):
+    def test_the_loop_survives_a_failing_tick_and_re_raises_on_cancel(self):
+        _run_on_a_private_loop(self._survives_a_failing_tick)
+
+    def test_the_loop_sleeps_before_its_first_tick(self):
+        _run_on_a_private_loop(self._sleeps_before_its_first_tick)
+
+    async def _survives_a_failing_tick(self):
         """One transient DB failure must not take the loop down for the life of
         the process, and cancellation must still stop it cleanly."""
         calls: List[int] = []
@@ -1376,8 +1409,7 @@ class TestTheLoop:
             "the first failure"
         )
 
-    @pytest.mark.asyncio
-    async def test_the_loop_sleeps_before_its_first_tick(self):
+    async def _sleeps_before_its_first_tick(self):
         """The interval is read from the module, not captured at import: a test
         that could not change it would prove nothing about the real value."""
         calls: List[int] = []
