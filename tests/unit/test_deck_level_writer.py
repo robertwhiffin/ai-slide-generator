@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import text as sa_text
 from unittest.mock import patch
 
 from src.api.services.deck_level_writer import (
@@ -148,7 +150,7 @@ class TestOptimisticLock:
         assert deck_with_three_rows.version() == start + 2
         assert second["version"] == start + 2
 
-    def test_bump_version_false_writes_the_columns_but_leaves_the_token(
+    def test_user_visible_false_writes_the_columns_but_leaves_the_token(
         self, deck_with_three_rows
     ):
         """ws4d: a write that changes nothing the client's token guards.
@@ -163,7 +165,7 @@ class TestOptimisticLock:
 
         with _patched(deck_with_three_rows._factory):
             result = write_deck_level_columns(
-                deck_with_three_rows.session_id, css=_CSS, bump_version=False
+                deck_with_three_rows.session_id, css=_CSS, user_visible=False
             )
 
         assert deck_with_three_rows.version() == start, (
@@ -187,6 +189,72 @@ class TestOptimisticLock:
         with _patched(deck_with_three_rows._factory):
             write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
         assert deck_with_three_rows.version() == start + 1
+
+
+class TestTheClientVisibleModifiedTimestamp:
+    """`user_visible=False` also leaves `updated_at` alone.
+
+    ONE flag governs both signals, so a caller cannot produce the half-state:
+    "modified just now" rendered beside an *unchanged* optimistic-lock token.
+
+    The suppression is measured, not assumed: `Column(onupdate=)` applies to any
+    column not already in the UPDATE's SET clause, and an ORM attribute with no
+    net change never reaches that clause — so `deck.updated_at = deck.updated_at`
+    suppresses nothing.  `flag_modified` puts it in the clause at its loaded
+    value, which does.
+
+    A timestamp planted an hour back rather than whatever the INSERT wrote, so
+    neither direction is a microsecond-resolution race with the UPDATE under test.
+    """
+
+    @staticmethod
+    def _backdate(fixture, seconds: float = 3600.0) -> datetime:
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        db = fixture._factory()
+        try:
+            db.execute(
+                sa_text(
+                    "UPDATE session_slide_decks SET updated_at = :at WHERE id = :id"
+                ),
+                {"at": stamp, "id": fixture.deck_row().id},
+            )
+            db.commit()
+        finally:
+            db.close()
+        assert fixture.deck_row().updated_at == stamp, "the backdate did not take"
+        return stamp
+
+    def test_a_write_the_client_should_not_see_leaves_modified_at_alone(
+        self, deck_with_three_rows
+    ):
+        planted = self._backdate(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(
+                deck_with_three_rows.session_id, css=_CSS, user_visible=False
+            )
+
+        assert deck_with_three_rows.deck_row().updated_at == planted, (
+            "the deck shows as modified just now beside an unchanged version "
+            "token — the half-state this flag exists to prevent"
+        )
+        # The columns really were written, so this is not a no-op passing.
+        assert deck_with_three_rows.deck_row().css == _CSS
+
+    def test_the_DEFAULT_still_moves_modified_at(self, deck_with_three_rows):
+        """The paired direction, on the default rather than an explicit True.
+
+        Suppressing everywhere would satisfy the test above while making every
+        real edit invisible in the session list.
+        """
+        planted = self._backdate(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
+
+        assert deck_with_three_rows.deck_row().updated_at > planted, (
+            "a user-driven deck write no longer moves modified_at"
+        )
 
     def test_matching_expected_version_is_accepted(self, deck_with_three_rows):
         current = deck_with_three_rows.version()

@@ -85,6 +85,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from sqlalchemy.orm.attributes import flag_modified
+
 from src.api.services.session_manager import (
     VersionConflictError,
     get_session_manager,
@@ -157,7 +159,7 @@ def write_deck_level_columns(
     html_content: Any = _UNSET,
     modified_by: Optional[str] = None,
     expected_version: Optional[int] = None,
-    bump_version: bool = True,
+    user_visible: bool = True,
 ) -> Dict[str, Any]:
     """Write only deck-level columns on a session's slide deck.
 
@@ -185,8 +187,16 @@ def write_deck_level_columns(
             ``save_slide_deck``, the check applies only to an EXISTING row: a row
             that does not yet exist has no version to be stale against, and is
             created at ``version=1``.
-        bump_version: Whether this write invalidates the client's optimistic-lock
-            token.  Default ``True``, which is every user-driven write.
+        user_visible: Whether this write is a change the client should see.
+            Default ``True``, which is every user-driven write.  ``False``
+            suppresses **both** signals a client reads as "this deck changed":
+            the ``version`` bump and the ``updated_at`` touch.
+
+            **It is ONE parameter on purpose.**  Two would let a caller suppress
+            one and not the other, and that half-state is worse than either
+            choice made consistently: a client would render "modified just now"
+            beside an *unchanged* optimistic-lock token.  Making the divergence
+            inexpressible is the point.
 
             **ws4d passes ``False`` for the sweeper's describe-only arc review**,
             and the reason is a measured user-visible bug rather than tidiness.
@@ -202,10 +212,23 @@ def write_deck_level_columns(
             human's next save is rejected.**  Edit a deck, wait three minutes,
             your next save fails.
 
-            An arc re-description changes no slide, so it must not invalidate that
-            token — the same principle by which the marker writes leave the deck's
-            ``modified_at`` alone.  ``False`` never applies on the CREATE branch:
-            a created row is born at ``version=1`` and there is no bump to skip.
+            ``updated_at`` is suppressed by the same rule the marker writes
+            follow: it is what a client renders as ``modified_at``, and an arc
+            re-description changes no slide.  **Accepted cost:** a client relying
+            on ``modified_at`` to notice a *spec* change will not see one until the
+            deck's next real change — the same cost already taken on ``version``.
+
+            The suppression uses ``flag_modified`` rather than assigning the
+            column to itself, and that is measured: ``Column(onupdate=)`` is
+            applied to any column NOT already in the UPDATE's SET clause, and an
+            ORM attribute with no net change never reaches that clause — so
+            ``deck.updated_at = deck.updated_at`` does not suppress anything.
+            ``flag_modified`` puts it in the clause at its loaded value, which
+            does.
+
+            Neither suppression applies on the CREATE branch: a created row is
+            born at ``version=1`` with no bump to skip, and its ``updated_at`` is
+            genuinely its creation time.
 
     Returns:
         dict with ``session_id``, ``deck_owner_session_id``, ``title``,
@@ -270,11 +293,19 @@ def write_deck_level_columns(
             else:
                 setattr(deck, _PLAIN_COLUMNS[key], value)
 
-        if not created and bump_version:
+        if not created and user_visible:
             # Exactly one bump per accepted call (session_manager.py:1328).
-            # Skipped only for a write that changes nothing the client's
-            # optimistic-lock token guards — see bump_version in the docstring.
+            # Skipped only for a write the client should not see as a change —
+            # see user_visible in the docstring.
             deck.version += 1
+
+        if not created and not user_visible:
+            # Keep updated_at, which the client renders as modified_at. Naming the
+            # column in the SET clause is what beats Column(onupdate=); a
+            # no-net-change assignment never reaches that clause and suppresses
+            # nothing. Paired with the version branch above deliberately: the two
+            # signals must not diverge on one write.
+            flag_modified(deck, "updated_at")
 
         if modified_by:
             deck.modified_by = modified_by
