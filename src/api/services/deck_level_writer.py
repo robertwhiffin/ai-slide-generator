@@ -157,6 +157,7 @@ def write_deck_level_columns(
     html_content: Any = _UNSET,
     modified_by: Optional[str] = None,
     expected_version: Optional[int] = None,
+    bump_version: bool = True,
 ) -> Dict[str, Any]:
     """Write only deck-level columns on a session's slide deck.
 
@@ -184,6 +185,27 @@ def write_deck_level_columns(
             ``save_slide_deck``, the check applies only to an EXISTING row: a row
             that does not yet exist has no version to be stale against, and is
             created at ``version=1``.
+        bump_version: Whether this write invalidates the client's optimistic-lock
+            token.  Default ``True``, which is every user-driven write.
+
+            **ws4d passes ``False`` for the sweeper's describe-only arc review**,
+            and the reason is a measured user-visible bug rather than tidiness.
+            ``deck.version`` is the token a WYSIWYG client holds between saves,
+            and the slide routes send it back as ``expected_version``
+            (``slides.py:173``, ``:244``, ``:314``, ``:390``), where a mismatch
+            becomes **HTTP 409** (``slides.py:186``).  Before ws4d nothing invoked
+            the graph outside a user turn, so a bump always coincided with the
+            user's own turn and their client refreshed the token from the
+            response.  The arc-review sweeper is the first out-of-band writer, and
+            it runs *because* the human is editing: human edits -> marker -> 180 s
+            -> sweeper claims -> architect writes -> version bumps -> **the
+            human's next save is rejected.**  Edit a deck, wait three minutes,
+            your next save fails.
+
+            An arc re-description changes no slide, so it must not invalidate that
+            token — the same principle by which the marker writes leave the deck's
+            ``modified_at`` alone.  ``False`` never applies on the CREATE branch:
+            a created row is born at ``version=1`` and there is no bump to skip.
 
     Returns:
         dict with ``session_id``, ``deck_owner_session_id``, ``title``,
@@ -248,8 +270,10 @@ def write_deck_level_columns(
             else:
                 setattr(deck, _PLAIN_COLUMNS[key], value)
 
-        if not created:
+        if not created and bump_version:
             # Exactly one bump per accepted call (session_manager.py:1328).
+            # Skipped only for a write that changes nothing the client's
+            # optimistic-lock token guards — see bump_version in the docstring.
             deck.version += 1
 
         if modified_by:
