@@ -487,55 +487,76 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
 
     A graph turn has TWO title writers and no ordering between them:
 
-      `run_title_gen`      -> `rename_session` -> `update_session`, which sets
-                              `UserSession.title` AND `slide_deck.title`
-      `architect_node`     -> `write_deck_level_columns(title=spec.title)`, which
-                              sets `deck.title` AND the deck owner's
-                              `UserSession.title` (deck_level_writer.py:258-261,
-                              deliberately — the session list renders that row)
+      `run_title_gen`   -> `rename_session` -> `update_session`, which sets
+                           `UserSession.title` AND `slide_deck.title`
+      `architect_node`  -> `write_deck_level_columns(title=spec.title)`, which
+                           sets `deck.title` AND the deck owner's
+                           `UserSession.title` (deck_level_writer.py:258-261,
+                           deliberately — the session list renders that row)
 
-    They run on different threads, so which one lands last is scheduling.  In
+    They run on different threads, so which lands last is scheduling.  In
     production the naming call is one small model call and the architect's is a
-    large one, so naming lands FIRST and the architect's spec title survives —
+    large one, so naming lands FIRST and the architect's spec title survives,
     which is the ruled-correct outcome.  A test that merely observed today's
-    timing would pass by luck, so the ordering is imposed here with a barrier
-    and asserted, and `naming_first=False` is the sabotage that reverses it.
+    timing would pass by luck, so the ordering is imposed here and
+    `naming_first=False` is the sabotage that reverses it.
 
-    The barrier is on `rename_session` and on the architect's `call_skill`, both
-    of which are strictly upstream of the two writes being ordered — so this
-    constrains WHEN each write happens, never WHAT it writes.
+    **Both barriers hang off the WRITES, not off anything upstream of them, and
+    that correction came out of the sabotage.**  An earlier version signalled the
+    architect's side from its `call_skill` return, which is BEFORE
+    `architect_node` performs its write — so the reversed case released the
+    naming thread while the architect's write was still pending, the two writes
+    raced again, and the architect still usually won.  The sabotage produced NO
+    red: the test passed with the order reversed, for a reason unrelated to what
+    it claimed to prove.  `write_deck_level_columns` itself is the only honest
+    signal for "the architect's title has landed", so it is what is wrapped.
     """
     import threading
 
     from src.api.services.session_manager import SessionManager
+    from src.services.graph import nodes
 
-    renamed = threading.Event()
-    architect_done = threading.Event()
+    naming_wrote = threading.Event()
+    architect_wrote = threading.Event()
+
     real_rename = SessionManager.rename_session
+    real_deck_write = nodes.write_deck_level_columns
     recorder = env.recorder
 
     def rename_session(self, session_id, title):
         if not naming_first:
-            # Reversed: the architect's write must land first.
-            architect_done.wait(timeout=10)
+            # Reversed: the architect's title write must have LANDED first.
+            assert architect_wrote.wait(timeout=15), (
+                "the architect never wrote a title, so the ordering under test "
+                "was never established"
+            )
         result = real_rename(self, session_id, title)
-        renamed.set()
+        naming_wrote.set()
+        return result
+
+    def write_deck_level_columns(session_id, **kwargs):
+        result = real_deck_write(session_id, **kwargs)
+        if "title" in kwargs:
+            architect_wrote.set()
         return result
 
     def call_skill(name, payload, design_system_active):
         if name == "architect" and naming_first:
-            # The naming write must land first.
-            renamed.wait(timeout=10)
-        out = recorder(name, payload, design_system_active)
-        if name == "architect":
-            # Set AFTER call_skill returns but BEFORE architect_node's
-            # write_deck_level_columns, which is the caller's next step.
-            architect_done.set()
-        return out
+            # The naming write must have LANDED before the architect resolves
+            # the spec whose title it is about to write.
+            assert naming_wrote.wait(timeout=15), (
+                "the naming step never wrote a title, so the ordering under "
+                "test was never established"
+            )
+        return recorder(name, payload, design_system_active)
 
     monkeypatch.setattr(SessionManager, "rename_session", rename_session)
+    monkeypatch.setattr(
+        "src.services.graph.nodes.write_deck_level_columns",
+        write_deck_level_columns,
+    )
     monkeypatch.setattr("src.services.graph.nodes.call_skill", call_skill)
-    return renamed, architect_done
+    return naming_wrote, architect_wrote
 
 
 def _types(events: List[StreamEvent]) -> List[StreamEventType]:
