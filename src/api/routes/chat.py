@@ -691,18 +691,36 @@ async def submit_chat_async(
 async def poll_chat(
     request_id: str,
     after_message_id: int = Query(default=0, description="Return messages after this ID"),
+    slide_cursor: int = Query(
+        default=0, description="Lowest slide position not yet delivered"
+    ),
 ):
-    """Poll for chat request status and new messages.
+    """Poll for chat request status, new messages, and newly released slides.
 
-    Returns the current request status and any new messages since
-    the last poll (based on after_message_id).
+    Returns the current request status, any new messages since the last poll
+    (based on after_message_id), and any slides the reorder buffer has released
+    since ``slide_cursor``.
+
+    **The slides do NOT come through ``msg_to_stream_event``.**  ws4d D3 does not
+    persist slide-ready as a ``SessionMessage``: that converter returns a fixed
+    six-key dict with nowhere to put ``position``/``html``/``scripts``, so a
+    converter that learned the type still could not carry the data — and build
+    mechanics in the transcript pollute a view that is now user-visible and
+    clearable.  This reads **committed rows** instead, via
+    ``SessionManager.slides_since_cursor``, which is the same reorder-buffer prefix
+    rule the graph applies to state on the SSE transport.
 
     Args:
         request_id: Request ID from submit_chat_async
         after_message_id: Return messages with ID greater than this
+        slide_cursor: Lowest slide position the caller has NOT been sent.  ``0``
+            (the default) asks for every released slide.  Positions are 0-based,
+            so this is inclusive — unlike ``after_message_id``, whose ids start
+            at 1.  Hand back the ``slide_cursor`` from the previous response.
 
     Returns:
-        Dictionary with status, events, last_message_id, and result
+        Dictionary with status, events, last_message_id, result, error, slides
+        and slide_cursor
 
     Raises:
         HTTPException: 404 if request not found
@@ -743,10 +761,33 @@ async def poll_chat(
         if m["role"] != "user"
     ]
 
+    # ws4d D3 — incremental slides on the polling transport.  Projected into an
+    # explicit response shape rather than returned as-is: the row query knows
+    # about columns this endpoint has no business shipping, and the four keys
+    # below are the contract ws4e consumes.
+    released_slides = [
+        {
+            "position": row["position"],
+            "html": row["html"],
+            "scripts": row["scripts"],
+            "agent": row["agent"],
+        }
+        for row in await asyncio.to_thread(
+            session_manager.slides_since_cursor, session_id, slide_cursor
+        )
+    ]
+
     return {
         "status": chat_request["status"],
         "events": events,
         "last_message_id": messages[-1]["id"] if messages else after_message_id,
         "result": chat_request.get("result") if chat_request["status"] == "completed" else None,
         "error": chat_request.get("error_message") if chat_request["status"] == "error" else None,
+        "slides": released_slides,
+        # The next position NOT yet delivered.  Unchanged when nothing was
+        # released, so a client that keeps handing this back never re-receives a
+        # slide it already has.
+        "slide_cursor": (
+            released_slides[-1]["position"] + 1 if released_slides else slide_cursor
+        ),
     }

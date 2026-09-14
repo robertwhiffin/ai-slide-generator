@@ -2028,6 +2028,89 @@ class SessionManager:
                 },
             )
 
+    def slides_since_cursor(
+        self, session_id: str, cursor: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Committed slides the reorder buffer has released at or above *cursor*.
+
+        **The reorder buffer is a query, not a data structure** (spec §6.2):
+        position *n* is released once every position below *n* is committed.  The
+        truth is the ``session_slides`` rows, so this is inherently multi-worker
+        safe — an in-process buffer would be invisible to the worker serving the
+        next poll, and ``poll_chat`` may well be served by a different uvicorn
+        worker from the one running the graph.
+
+        **The prefix scan always starts at position 0, never at ``cursor``**, and
+        that is the whole correctness argument.  Filtering to ``position >=
+        cursor`` first and *then* scanning would make the first surviving row look
+        like the start of the deck: with rows at 0, 1 and 3 and a cursor of 3,
+        position 3 would be released while position 2 is still missing — a slide
+        arriving out of order, which is exactly what this query exists to prevent.
+        So the contiguous committed prefix is computed over every row, and
+        ``cursor`` only decides how much of that prefix the caller has already
+        seen.
+
+        A **placeholder releases like any other position**: ``commit_placeholder``
+        writes a real ``session_slides`` row, so it is committed here by exactly
+        the same test as a real slide (the row's existence) with no special case.
+
+        This re-implements the prefix rule that ``foreman_service``'s
+        ``releasable_positions`` applies to GRAPH STATE; it does not and cannot
+        call it.  ``releasable_positions(state)`` reads ``landed_positions`` /
+        ``placeheld_positions`` off a turn's state, and the polling path has no
+        graph state at all.  The two must agree, and
+        ``test_slide_release.py::TestTheTwoPrefixRulesAgree`` drives the same
+        position set through both and compares.
+
+        Cursor semantics: ``cursor`` is the lowest position the caller has **not**
+        yet been sent, so ``0`` (the default) means "send me everything released".
+        A negative cursor is treated as ``0``.  Positions are 0-based, so a caller
+        that mirrors ``after_message_id``'s exclusive-after convention and passes
+        the last position it received would lose position 0 — hence the inclusive
+        reading, which is correct for both ``0`` and ``-1`` as an initial value.
+
+        Args:
+            session_id: Session (a contributor session resolves to the deck owner).
+            cursor: Lowest position not yet delivered to this caller.
+
+        Returns:
+            Ascending list of ``{"position", "html", "scripts", "agent"}`` dicts —
+            JSON-native scalars only, so the same value serialises onto a
+            ``poll_chat`` response and a ``StreamEvent``.
+
+        Raises:
+            SessionNotFoundError: if session_id does not match any session.
+        """
+        floor = max(0, int(cursor))
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+
+            rows = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            )
+
+            released: List[Dict[str, Any]] = []
+            expected = 0
+            for row in rows:
+                if row.position != expected:
+                    break  # gap: nothing past this point is releasable
+                expected += 1
+                if row.position < floor:
+                    continue  # already delivered to this caller
+                released.append(
+                    {
+                        "position": row.position,
+                        "html": row.html or "",
+                        "scripts": row.scripts or "",
+                        "agent": row.modified_by or row.created_by,
+                    }
+                )
+            return released
+
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
         """Aggregate the verification map from per-row session_slides records.
 
