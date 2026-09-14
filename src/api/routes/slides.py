@@ -83,9 +83,11 @@ class InsertSlideRequest(BaseModel):
 
     ``position`` is 0-based and NOT bounded above: a position past the end appends,
     which is `SlideDeck.insert_slide`'s own behaviour and is deliberately not
-    re-implemented here. The lower bound IS enforced (`ge=0` in the service, which
-    returns 400), because `list.insert` would read a negative position as counting
-    backwards from the end and land the slide somewhere the caller did not ask for.
+    re-implemented here. The lower bound IS enforced — not by a pydantic
+    constraint, but by `chat_service.insert_slide` raising ValueError, which this
+    handler turns into a 400 — because `list.insert` would read a negative position
+    as counting backwards from the end and land the slide somewhere the caller did
+    not ask for.
 
     ``html`` is optional: omitted, an empty slide is inserted for a human or the
     architect to fill.
