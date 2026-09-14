@@ -10,8 +10,8 @@ Slide access is controlled by session permissions:
 
 The spec-dirty trigger lives in THIS module and nowhere else
 ------------------------------------------------------------
-Four handlers below call ``spec_sync.mark_dirty`` after their mutation commits:
-reorder, update, duplicate and delete.  That is the whole of the trigger surface —
+Five handlers below call ``spec_sync.mark_dirty`` after their mutation commits:
+insert, reorder, update, duplicate and delete.  That is the whole of the trigger surface —
 the LangGraph deck build calls the ``chat_service`` / ``slide_repository`` /
 ``deck_level_writer`` methods these handlers wrap, and never issues an HTTP
 request, so "arrived via a route" *means* "a human did this" by construction.  No
@@ -78,6 +78,25 @@ class SlideActionRequest(BaseModel):
     expected_version: Optional[int] = None
 
 
+class InsertSlideRequest(BaseModel):
+    """Request to insert a new slide at a position.
+
+    ``position`` is 0-based and NOT bounded above: a position past the end appends,
+    which is `SlideDeck.insert_slide`'s own behaviour and is deliberately not
+    re-implemented here. The lower bound IS enforced (`ge=0` in the service, which
+    returns 400), because `list.insert` would read a negative position as counting
+    backwards from the end and land the slide somewhere the caller did not ask for.
+
+    ``html`` is optional: omitted, an empty slide is inserted for a human or the
+    architect to fill.
+    """
+
+    session_id: str
+    position: int
+    html: Optional[str] = None
+    expected_version: Optional[int] = None
+
+
 class UpdateVerificationRequest(BaseModel):
     """Request to update a slide's verification result."""
 
@@ -127,6 +146,83 @@ async def get_slides(
     except Exception as e:
         logger.error(f"Failed to get slides: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("")
+async def insert_slide(request: InsertSlideRequest, db: Session = Depends(get_db)):
+    """Insert a new slide, shifting every slide above the insertion point up.
+
+    Requires CAN_EDIT permission — the level is pinned by
+    ``tests/unit/test_authz_slides_insert.py``, not by
+    ``test_route_authz_coverage.py``, which checks that a route has *a* check and
+    cannot detect a wrong LEVEL.
+    Uses session locking to prevent concurrent modifications.
+
+    Args:
+        request: InsertSlideRequest with session_id, position and optional html
+
+    Returns:
+        Updated slide deck
+
+    Raises:
+        HTTPException: 403 if no permission, 400 for validation errors, 409 if
+            session busy or version conflict, 423 if another user holds the
+            editing lock, 500 on error
+    """
+    _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
+
+    session_manager = get_session_manager()
+
+    try:
+        await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
+
+    locked = await asyncio.to_thread(
+        session_manager.acquire_session_lock,
+        request.session_id,
+    )
+    if not locked:
+        raise HTTPException(
+            status_code=409,
+            detail="Session is currently processing another request. Please wait.",
+        )
+
+    try:
+        chat_service = get_chat_service()
+        result = await asyncio.to_thread(
+            chat_service.insert_slide,
+            request.session_id,
+            request.position,
+            html=request.html,
+            expected_version=request.expected_version,
+        )
+
+        logger.info(
+            "Inserted slide",
+            extra={"position": request.position, "session_id": request.session_id},
+        )
+        # A slide was added: the deck's slide list no longer matches the spec's.
+        # The service gave the new position a PLACEHOLDER spec entry with no
+        # purpose, so this is also what schedules the description of it.
+        await asyncio.to_thread(mark_dirty, request.session_id, get_current_user())
+        return result
+
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
+    except ValueError as e:
+        logger.warning(f"Validation error in insert_slide: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to insert slide: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        await asyncio.to_thread(
+            session_manager.release_session_lock,
+            request.session_id,
+        )
 
 
 @router.put("/reorder")

@@ -180,11 +180,16 @@ class TestOnlyTheRouteModuleReferencesTheTrigger:
 # a later PR that wires a trigger into one of the False rows without thinking
 # reddens this test instead of silently changing debounce behaviour.
 #
-# POST /slides (insert) is deliberately ABSENT: it does not exist yet.  The task
-# that adds it adds its own trigger and its own row here.
+# `POST ` is the insert route (`@router.post("")` on a router whose prefix is
+# /api/slides, so the decorator's path is the empty string).  It was deliberately
+# ABSENT from this table while the route did not exist, so that whoever added it
+# could not do so without meeting the trigger obligation; the task that added it
+# retired `test_no_insert_route_exists_yet` and added this row and its positive
+# counterpart below.
 _EXPECTED_TRIGGERS: Dict[str, bool] = {
     # (verb, path): triggers?
     "GET ": False,
+    "POST ": True,                    # slide inserted
     "PUT /reorder": True,             # narrative arc changes with NO html change
     "PATCH /{index}": True,           # the human HTML edit
     "POST /{index}/duplicate": True,  # slide added
@@ -254,27 +259,45 @@ class TestEveryMutatingRouteIsPinned:
     def test_each_route_triggers_exactly_as_the_table_says(self):
         assert _route_table() == _EXPECTED_TRIGGERS
 
-    def test_four_routes_trigger_and_nine_do_not(self):
+    def test_five_routes_trigger_and_nine_do_not(self):
         """The counts, stated separately so a wholesale table edit is visible.
 
-        Four, not the plan's five: `POST /slides` is Task 6's and does not exist
-        yet (brief C-4).
+        Five: the plan's full set, now that `POST /slides` (insert) exists.  The
+        list is spelled out rather than counted so a SIXTH triggering route added
+        later reddens here instead of quietly changing debounce behaviour for a
+        route nobody reviewed.
         """
         found = _route_table()
         triggering = sorted(k for k, v in found.items() if v)
         assert triggering == [
             "DELETE /{index}",
             "PATCH /{index}",
+            "POST ",
             "POST /{index}/duplicate",
             "PUT /reorder",
         ]
         assert len([k for k, v in found.items() if not v]) == 9
 
-    def test_no_insert_route_exists_yet(self):
-        """C-4: POST /slides is a later task's. Do not pre-wire it."""
-        assert "POST " not in _route_table(), (
-            "POST /slides now exists — that task must add its own mark_dirty call "
-            "and its own row in _EXPECTED_TRIGGERS"
+    def test_the_insert_route_exists_and_fires_the_trigger(self):
+        """Replaces `test_no_insert_route_exists_yet`, which was its negative form.
+
+        That test asserted `"POST " not in _route_table()` so that the task adding
+        the insert route had to confront the trigger obligation rather than ship a
+        mutating route the sweeper never hears about.  It has done its job and is
+        retired; this is the same claim in the direction that now holds.
+
+        Kept as its own named test, and not left to the table equality above,
+        because an absence-shaped predecessor deserves a successor that says out
+        loud which route is being pinned and why.
+        """
+        table = _route_table()
+        assert "POST " in table, (
+            "the insert route POST /api/slides has disappeared: it is a human "
+            "mutation route and its trigger is what keeps the committed spec honest"
+        )
+        assert table["POST "] is True, (
+            "POST /api/slides exists but its handler does not call mark_dirty — a "
+            "human can now add a slide and the committed spec will never learn of it"
         )
 
 
@@ -298,8 +321,8 @@ class TestTheAuthorIsPassedFromTheRequestContext:
                 isinstance(a, ast.Name) and a.id == _TRIGGER for a in node.args
             )
         ]
-        assert len(calls) == 4, (
-            f"expected 4 to_thread(mark_dirty, ...) calls, found {len(calls)}"
+        assert len(calls) == 5, (
+            f"expected 5 to_thread(mark_dirty, ...) calls, found {len(calls)}"
         )
         for call in calls:
             arg_src = {
