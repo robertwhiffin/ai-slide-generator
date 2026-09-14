@@ -297,6 +297,70 @@ def clear_marker(session_id: str) -> bool:
         return True
 
 
+def discard_marker(session_id: str) -> bool:
+    """Unconditionally discard the pending spec-review marker on restore.
+
+    Called by ``restore_version`` after a successful restore commits.  The deck
+    those pending edits described no longer exists — the restored version carries
+    its own ``deck_spec_json`` snapshot which is now authoritative — so the
+    marker is meaningless regardless of its timestamps.
+
+    Unlike :func:`clear_marker` there is **no re-dirty rule**: a marker that was
+    re-marked after the sweeper's claim is still discarded, because the restored
+    deck has replaced the whole deck and the sweeper should not re-describe it.
+
+    Swallows exceptions rather than raising: the restore has already committed
+    when this runs, so a marker-discard failure must not turn a successful
+    restore into an error for the user.  A stuck marker costs one extra
+    re-description; a crashed restore response confuses the user far more.
+
+    Args:
+        session_id: Any session id sharing the deck — owner or contributor.
+
+    Returns:
+        ``True`` when a marker was discarded; ``False`` when there was nothing
+        to discard (no deck row, no marker, or the write failed).
+    """
+    try:
+        with get_db_session() as db:
+            deck_owner, deck = _resolve_owner_deck(db, session_id)
+
+            if deck is None:
+                logger.info(
+                    "spec_sync.discard_marker: no deck row; nothing to discard",
+                    extra={"session_id": session_id},
+                )
+                return False
+
+            if deck.spec_dirty_at is None and deck.spec_dirty_claimed_at is None:
+                return False
+
+            _marker_write(
+                db,
+                deck.id,
+                spec_dirty_at=None,
+                spec_dirty_by=None,
+                spec_dirty_claimed_at=None,
+            )
+
+            logger.info(
+                "spec_sync.discard_marker: marker discarded unconditionally on restore",
+                extra={
+                    "session_id": session_id,
+                    "deck_owner_session_id": deck_owner.session_id,
+                },
+            )
+            return True
+    except Exception:
+        # The restore already committed.  Never turn a successful restore into an
+        # error — see the module docstring on mark_dirty's swallowing rationale.
+        logger.exception(
+            "spec_sync.discard_marker failed; the spec-review marker may linger",
+            extra={"session_id": session_id},
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # The sweeper: claim a due marker, re-describe the arc, clear the marker.
 # ---------------------------------------------------------------------------
