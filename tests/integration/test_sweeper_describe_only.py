@@ -39,6 +39,8 @@ Two additions it does not know about:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 from sqlalchemy import text
 
@@ -467,6 +469,83 @@ class TestTheVersionColumnItself:
             f"a normal user turn moved the version {before} -> "
             f"{env.deck_row().version}; expected +2, one per deck-level write. "
             "A suppressed bump means the optimistic lock can miss a stale write"
+        )
+
+
+class TestTheDecksClientVisibleModifiedTimestamp:
+    """A describe-only arc review leaves `modified_at` alone, like `version`.
+
+    Kept in its own class rather than added to `TestTheVersionColumnItself`
+    because the two are separate properties of the same write and a shared test
+    would report one failure for either.
+
+    The deciding argument is the incoherence of the half-state, not the principle
+    alone: `version` is already suppressed on this write, so a bumped
+    `modified_at` would show a client "modified just now" beside an UNCHANGED
+    optimistic-lock token.
+
+    ACCEPTED COST, recorded: a client relying on `modified_at` to notice a *spec*
+    change will not see one until the deck's next real change — the same cost
+    already taken on `version`.
+    """
+
+    @staticmethod
+    def _backdate(env, seconds: float = 3600.0) -> datetime:
+        """Plant a known-old timestamp, so neither direction is a clock race."""
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        db = env.factory()
+        try:
+            db.execute(
+                text("UPDATE session_slide_decks SET updated_at = :at"),
+                {"at": stamp},
+            )
+            db.commit()
+        finally:
+            db.close()
+        assert env.deck_row().updated_at == stamp, "the backdate did not take"
+        return stamp
+
+    def test_a_describe_only_review_leaves_the_decks_modified_at_alone(
+        self, sweeper_env
+    ):
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        mark_dirty(env.session_id, _AUTHOR)
+
+        # Make the re-described spec DIFFER, so "the timestamp did not move" is
+        # not equally true of a turn that wrote nothing at all.
+        spec_before = env.deck_row().deck_spec_json
+        env.recorder.slide_count = 4
+        planted = self._backdate(env)
+
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+
+        assert env.deck_row().deck_spec_json != spec_before, (
+            "the arc review wrote no new spec, so an unchanged timestamp proves "
+            "nothing about suppression"
+        )
+        assert env.deck_row().updated_at == planted, (
+            f"the arc review moved modified_at to "
+            f"{env.deck_row().updated_at}; the client shows this deck as just "
+            "modified beside an unchanged version token"
+        )
+
+    def test_a_NORMAL_user_turn_still_moves_it(self, sweeper_env):
+        """The paired direction.
+
+        Suppressing on every turn would satisfy the test above while making every
+        real deck change invisible in the session list.
+        """
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        planted = self._backdate(env)
+
+        invoke_graph(env.session_id, {"architect_message": "add another slide"})
+
+        assert env.deck_row().updated_at > planted, (
+            "a normal user turn no longer moves the deck's modified_at"
         )
 
 

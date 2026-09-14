@@ -915,12 +915,15 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # deck's stylesheet, and the post-commit aggregate_deck_css would then
     # preserve the erasure. Omitting it is the writer's own documented way to
     # say "this turn resolved no deterministic CSS".
-    # A describe-only turn (ws4d's arc-review sweeper) must not invalidate the
-    # client's optimistic-lock token: it re-describes the narrative and changes no
-    # slide, but deck.version is what the WYSIWYG client sends back as
-    # expected_version, and a bump turns the human's very next save into a 409.
-    # The sweeper runs BECAUSE that human is editing, so the bump would fire on
-    # exactly the deck whose editor is mid-session.
+    # A describe-only turn (ws4d's arc-review sweeper) is not a change the client
+    # should see. It re-describes the narrative and changes no slide, but
+    # deck.version is what the WYSIWYG client sends back as expected_version, and
+    # a bump turns the human's very next save into a 409 — on exactly the deck
+    # whose editor is mid-session, because the sweeper runs BECAUSE they are
+    # editing. deck.updated_at, which the client renders as modified_at, is
+    # suppressed by the same flag: leaving it bumped beside an unchanged version
+    # token would show "modified just now" against a deck whose lock says nothing
+    # changed, and that half-state is worse than either choice made consistently.
     describe_only = bool(scoped_vals(state, "describe_only"))
 
     deck_write: Dict[str, Any] = {
@@ -929,7 +932,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "head_meta": head_meta,
         "deck_spec": spec.to_json(),
         "modified_by": initiated_by,
-        "bump_version": not describe_only,
+        "user_visible": not describe_only,
     }
     if brand["deterministic_css"]:
         deck_write["css"] = brand["deterministic_css"]
