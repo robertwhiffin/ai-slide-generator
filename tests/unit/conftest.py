@@ -1267,13 +1267,25 @@ def session_with_messages(_session_unit_engine):
 
     Usage: session_id = session_with_messages(["user msg 1", "user msg 2"])
            session_id = session_with_messages(["q"], assistant_messages=["a"])
+           session_id = session_with_messages(["q"], message_type="user_query")
 
     Returns the string session_id.
     ws4d's engine-mode resolution reads the earliest role='user' row.
+
+    ``message_type`` stamps every user row with one type.  The two live paths
+    write DIFFERENT types for the same user turn ("user_input" on the
+    sync/streaming path, "user_query" on the async route and MCP), and mode
+    resolution must filter on ``role`` alone — so a test that pins that has to
+    be able to set the type.  Default ``None`` keeps every existing caller's
+    rows exactly as they were.
     """
     factory = _make_factory(_session_unit_engine)
 
-    def _make(user_msgs: List[str], assistant_messages: Optional[List[str]] = None) -> str:
+    def _make(
+        user_msgs: List[str],
+        assistant_messages: Optional[List[str]] = None,
+        message_type: Optional[str] = None,
+    ) -> str:
         from datetime import timedelta as _td
         sid = _new_session_id()
         db = factory()
@@ -1288,6 +1300,7 @@ def session_with_messages(_session_unit_engine):
                         session_id=us.id,
                         role="user",
                         content=msg,
+                        message_type=message_type,
                         created_at=base + _td(seconds=i),
                     )
                 )
