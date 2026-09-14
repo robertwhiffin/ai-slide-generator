@@ -58,7 +58,11 @@ from sqlalchemy.pool import StaticPool
 from src.api.main import app
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services import job_queue
-from src.api.services.chat_service import AGENT_MODE_PHRASE, ChatService
+from src.api.services.chat_service import (
+    AGENT_MODE_PHRASE,
+    ChatService,
+    resolve_engine_mode_or,
+)
 from src.core.database import Base, get_db
 from tests.unit.conftest import _make_factory, _make_fake_db
 
@@ -260,26 +264,27 @@ class TestStreamingRoute:
         assert "engine_mode" in call.kwargs
 
 
-class TestStreamingRouteFirstTurnGap:
-    """RECORDED GAP, measured here rather than left invisible.
+class TestStreamingRouteCannotSeeTurnOne:
+    """What the ROUTE can know on turn 1 — which is nothing, by construction.
 
-    On `POST /chat/stream` the user message is persisted DOWNSTREAM, inside
-    `send_message_streaming`'s `if not request_id:` block — not by the route.
-    So when the route resolves the mode there is no `role='user'` row yet on a
-    brand-new session, and `resolve_engine_mode` fails closed to monolith: the
-    phrase in the very FIRST message of an SSE session does not take effect
-    until turn 2.  (`POST /chat/async` is unaffected: it persists the row
-    itself, before it resolves.)
+    `POST /chat/stream` does not persist the user message; `send_message_streaming`
+    does it on the route's behalf, DOWNSTREAM.  So at the route's resolution
+    point a brand-new session has no `role='user'` row and `resolve_engine_mode`
+    fails closed to monolith.  This test pins that as a property of the route,
+    because it is what makes the seventh edit point necessary rather than
+    redundant.
 
-    This test records the measured behaviour so the gap is visible and so a
-    future fix fails loudly here rather than silently changing the contract.
-    The candidate fix, if the operator wants it: `request_id is None` is
-    exactly the SSE path — MCP and the async route always carry one — so a
-    post-persistence re-resolve guarded on `not request_id` would close it
-    without putting MCP on the graph.
+    The GAP this used to record is now CLOSED, one layer down:
+    `send_message_streaming` re-resolves after its persist block, guarded on
+    `not request_id` so MCP cannot reach it.  The behaviour that matters to a
+    user — turn 1 of an SSE session carrying the phrase runs the graph — is
+    pinned by
+    `tests/integration/test_graph_mode_turn.py::TestTheSseTurnOneReResolve`.
+    Do not "fix" the assertion below to `"graph"`: the route genuinely cannot
+    return that, and pretending otherwise would hide why the re-resolve exists.
     """
 
-    def test_turn_one_of_a_new_sse_session_cannot_see_the_phrase_yet(
+    def test_the_route_still_resolves_monolith_for_a_new_session(
         self, route_env
     ):
         sid = _seed_session(route_env["factory"], [])
@@ -328,7 +333,7 @@ class TestAsyncRoute:
     def test_turn_one_of_a_new_session_DOES_see_the_phrase(self, route_env):
         """The async route persists the user turn BEFORE it resolves — ORDER.
 
-        The counterpart to `TestStreamingRouteFirstTurnGap`.  The session starts
+        The counterpart to `TestStreamingRouteCannotSeeTurnOne`.  The session starts
         with ZERO user rows and the mocked `add_message` really inserts one, so
         the only way the phrase can be seen is if resolution runs AFTER that
         call.  Moving the resolve above it reddens this test.
@@ -544,6 +549,77 @@ class TestDefaultsFailClosed:
     def test_the_engine_mode_parameter_defaults_to_monolith(self, func):
         param = inspect.signature(func).parameters["engine_mode"]
         assert param.default == "monolith"
+
+
+class TestResolutionFailureNeverFailsATurn:
+    """Mode resolution must never be the thing that fails a turn (Task 1's own
+    contract, quoted from `resolve_engine_mode`'s docstring).
+
+    `resolve_engine_mode` returns monolith for its three "no answer" cases but
+    lets an unexpected database error propagate, and every call site sits on the
+    request path of a turn that would otherwise have run fine.  Measured while
+    adding the seventh edit point: a bare re-resolve killed three pre-existing
+    monolith tests with `psycopg2.ProgrammingError`, which is the same shape a
+    transient database error takes in production — a monolith turn that
+    previously needed no database read at all would 500.
+
+    So every call site goes through `resolve_engine_mode_or`, and these are the
+    assertions that it is a fail-OPEN and not a fail-loud.
+    """
+
+    _BOOM = "src.api.services.chat_service.resolve_engine_mode"
+
+    def test_a_raising_resolver_returns_the_callers_value(self):
+        def boom(session_id):
+            raise RuntimeError("the database went away")
+
+        with patch(self._BOOM, boom):
+            assert resolve_engine_mode_or("s-1", "graph") == "graph"
+
+    def test_the_fallback_defaults_to_monolith(self):
+        def boom(session_id):
+            raise RuntimeError("the database went away")
+
+        with patch(self._BOOM, boom):
+            assert resolve_engine_mode_or("s-1") == "monolith"
+
+    def test_a_successful_resolution_is_passed_straight_through(self):
+        """The wrapper must not swallow the answer as well as the error."""
+        with patch(self._BOOM, lambda session_id: "graph"):
+            assert resolve_engine_mode_or("s-1", "monolith") == "graph"
+
+    def test_the_streaming_route_still_serves_the_turn(self, route_env):
+        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+
+        def boom(session_id):
+            raise RuntimeError("the database went away")
+
+        with patch(self._BOOM, boom):
+            response = route_env["client"].post(
+                "/api/chat/stream",
+                json={"session_id": sid, "message": _PLAIN_MESSAGE},
+            )
+            assert response.status_code == 200, response.text
+            response.read()
+
+        call = route_env["service"].send_message_streaming.call_args
+        assert call.kwargs["engine_mode"] == "monolith"
+
+    def test_the_async_route_still_enqueues_the_job(self, route_env):
+        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+
+        def boom(session_id):
+            raise RuntimeError("the database went away")
+
+        with patch(self._BOOM, boom):
+            response = route_env["client"].post(
+                "/api/chat/async",
+                json={"session_id": sid, "message": _PLAIN_MESSAGE},
+            )
+            assert response.status_code == 200, response.text
+
+        payload = route_env["enqueue"].await_args.args[1]
+        assert payload["engine_mode"] == "monolith"
 
 
 class TestSendMessageNeverReferencesTheGraph:

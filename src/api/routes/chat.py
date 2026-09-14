@@ -26,7 +26,7 @@ from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.routes._authz import _check_deck_permission_for_session
-from src.api.services.chat_service import get_chat_service, resolve_engine_mode
+from src.api.services.chat_service import get_chat_service, resolve_engine_mode_or
 from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
@@ -459,7 +459,9 @@ async def send_message_streaming(
     # MCP's enqueue_create_job drains through the same worker as POST
     # /chat/async, so a resolution downstream of enqueue_job would put MCP on
     # the graph.  Resolution reads the database, so it runs off the event loop.
-    engine_mode = await asyncio.to_thread(resolve_engine_mode, request.session_id)
+    engine_mode = await asyncio.to_thread(
+        resolve_engine_mode_or, request.session_id
+    )
 
     async def generate_events() -> AsyncGenerator[str, None]:
         """Generate SSE events from the chat service."""
@@ -650,7 +652,7 @@ async def submit_chat_async(
         # message: on turn 1 that row has to exist already or the phrase in the
         # very first message would resolve to monolith.
         engine_mode = await asyncio.to_thread(
-            resolve_engine_mode, request.session_id
+            resolve_engine_mode_or, request.session_id
         )
 
         # Queue for processing

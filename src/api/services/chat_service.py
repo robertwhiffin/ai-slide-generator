@@ -189,6 +189,40 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
     return mode
 
 
+def resolve_engine_mode_or(
+    session_id: Optional[str], fallback: str = "monolith"
+) -> str:
+    """:func:`resolve_engine_mode`, where a FAILURE to resolve never fails the turn.
+
+    ``resolve_engine_mode`` handles its three "no answer" cases itself and
+    returns monolith for them, but an unexpected database error propagates —
+    and every call site sits on the request path of a turn that would otherwise
+    have run perfectly well.  Measured: with the re-resolve in
+    ``send_message_streaming`` calling it bare, three pre-existing monolith
+    tests died with ``psycopg2.ProgrammingError: can't adapt type 'MagicMock'``,
+    which is the same shape a transient database error takes in production — a
+    monolith turn that used to need no database read at all now 500s.
+
+    Task 1's own contract is that mode resolution "is a test affordance and must
+    never be the thing that fails a turn".  This is where that promise is kept:
+    on any exception the caller's existing value stands.
+
+    Args:
+        session_id: Session whose turn is about to run.
+        fallback: What to return if resolution raises — the mode the caller
+            already had, so a failure is a no-op rather than a downgrade.
+    """
+    try:
+        return resolve_engine_mode(session_id)
+    except Exception:
+        logger.warning(
+            "Engine-mode resolution failed; keeping the mode already in hand",
+            extra={"session_id": session_id, "engine_mode": fallback},
+            exc_info=True,
+        )
+        return fallback
+
+
 class ChatService:
     """Service for managing chat interactions with the AI agent.
 
@@ -1019,6 +1053,38 @@ class ChatService:
                 "Persisted user message",
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
+
+        # ws4d D2, seventh edit point — the SSE path RE-RESOLVES here, and only
+        # the SSE path.  Resolving a mode in this method is otherwise forbidden
+        # (that is what keeps MCP off the graph), so the guard is the whole point
+        # of these three lines:
+        #
+        # `POST /chat/stream` does NOT persist the user message — the block
+        # immediately above does it on the route's behalf.  So the streaming
+        # route's own resolution necessarily ran BEFORE the deck had any
+        # `role='user'` row, and `resolve_engine_mode` fails closed to monolith
+        # for a deck with no user turn: turn 1 of a new SSE session ran the
+        # monolith however the message read, and turn 2 onward ran the graph.
+        # One deck written by both engines is the divergence stickiness exists
+        # to prevent.
+        #
+        # `not request_id` IS the SSE path, structurally:
+        # `job_queue._run_streaming_generator` always passes
+        # `request_id=request_id`, and `enqueue_job(request_id: str, ...)` types
+        # it non-optional and keys `jobs[request_id]` on it — so the async route
+        # and MCP can never reach this branch, and neither can ever be
+        # re-resolved onto the graph.
+        #
+        # IDEMPOTENT on turn 2 and after: the resolver reads the deck's EARLIEST
+        # `role='user'` row, which the insert above cannot change once one
+        # exists.  A re-resolve able to flip an established deck's engine would
+        # be worse than the gap it closes.
+        #
+        # The plan contradicts itself here — D1 asserts the row exists before
+        # mode resolution on this path while D0 mandates resolving in the route —
+        # so this resolves a plan defect rather than deviating from the plan.
+        if not request_id:
+            engine_mode = resolve_engine_mode_or(session_id, engine_mode)
 
         # ws4d D2 — the graph branch.  Placed AFTER the user message is
         # persisted (the resolver upstream reads that row) and BEFORE anything
