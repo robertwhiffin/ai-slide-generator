@@ -83,6 +83,112 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
     return sanitized
 
 
+# ---------------------------------------------------------------------------
+# Engine-mode selection (ws4d D1)
+# ---------------------------------------------------------------------------
+
+# The chat-input trigger that puts a deck on the LangGraph engine.
+#
+# Deliberately NOT hardened (plan D0): a loose, case-sensitive substring match
+# anywhere in the deck's first user message, with no authorisation check.  The
+# switch exists so one developer can exercise both engines in one deployment;
+# if it ever outlives testing it needs a strict form (exact prefix, first
+# message only) plus an authorisation check, because a phrase matched anywhere
+# in user text can be tripped by pasted content.  Recorded, not built.
+AGENT_MODE_PHRASE = "USE AGENT MODE"
+
+
+def _selects_agent_mode(content: Optional[str]) -> bool:
+    """Whether one message's text selects the graph engine.
+
+    The single authority for the match, shared with
+    ``SessionManager.duplicate_session``'s marker carry so the two cannot
+    disagree about what a marker is.
+    """
+    return bool(content) and AGENT_MODE_PHRASE in content
+
+
+def resolve_engine_mode(session_id: Optional[str]) -> str:
+    """Return the engine this deck's turns run on: ``"graph"`` or ``"monolith"``.
+
+    **Sticky, and derived from the transcript.**  Evaluated per message, only
+    turn 1 would carry the phrase and turn 2 would fall back — a deck written
+    alternately by both engines diverges between ``session_slides`` rows and
+    ``deck_json``, and the architect's own conversation lives in the
+    checkpointer under a ``thread_id``.  So the answer is a property of the
+    deck, read off the **earliest** ``role='user'`` message.  A later message
+    carrying the phrase must not switch a monolith deck, and assistant messages
+    are ignored so echoed tool output cannot flip the engine.
+
+    **Resolved on the OWNER DECK's session, not the calling session** (ruling
+    W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
+    per-session while divergence is per-DECK, so a contributor carrying the
+    phrase would write rows while a contributor without it wrote ``deck_json``
+    on the same deck — exactly the divergence stickiness exists to prevent.
+    The owner is resolved with the same ``_get_deck_owner_session`` hop
+    ``read_deck_spec`` uses, so a contributor inherits the owner's engine.
+
+    **Filters on ``role`` only, never on ``message_type``.**  The two live
+    paths write different types for the same user turn (``"user_input"`` on the
+    sync/streaming path, ``"user_query"`` on the async route and MCP), so a
+    ``message_type`` filter would see half the traffic.
+
+    Nothing about mode is stored: the answer is derived from the database on
+    every call, so there is nothing to keep in sync and it is multi-worker safe
+    by construction.
+
+    Args:
+        session_id: The session whose turn is about to run.  May be a
+            contributor session, an owner session, or ``None``.
+
+    Returns:
+        ``"graph"`` when the owner deck's first user message carries
+        :data:`AGENT_MODE_PHRASE`, else ``"monolith"``.  A missing session, a
+        deck with no user turn yet, and an empty first message all resolve to
+        ``"monolith"`` — mode resolution is a test affordance and must never be
+        the thing that fails a turn.
+    """
+    from src.core.database import get_db_session
+    from src.database.models.session import SessionMessage
+
+    if not session_id:
+        return "monolith"
+
+    session_manager = get_session_manager()
+    try:
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+            deck_owner = session_manager._get_deck_owner_session(db, session)
+            earliest_user_message = (
+                db.query(SessionMessage)
+                .filter(
+                    SessionMessage.session_id == deck_owner.id,
+                    SessionMessage.role == "user",
+                )
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .first()
+            )
+            content = earliest_user_message.content if earliest_user_message else None
+            owner_session_id = deck_owner.session_id
+    except SessionNotFoundError:
+        logger.warning(
+            "Engine-mode resolution found no session; defaulting to monolith",
+            extra={"session_id": session_id},
+        )
+        return "monolith"
+
+    mode = "graph" if _selects_agent_mode(content) else "monolith"
+    logger.info(
+        "Resolved engine mode",
+        extra={
+            "session_id": session_id,
+            "deck_owner_session_id": owner_session_id,
+            "engine_mode": mode,
+        },
+    )
+    return mode
+
+
 class ChatService:
     """Service for managing chat interactions with the AI agent.
 
@@ -1564,6 +1670,94 @@ class ChatService:
                     type=StreamEventType.SESSION_TITLE,
                     session_title=title_container["title"],
                 )
+
+    def clear_context(self, session_id: str) -> Dict[str, Any]:
+        """Drop this session's conversation context, keeping the deck and its spec.
+
+        The deck spec is a structured compaction of the conversation: once it
+        holds what was decided, the transcript is only the path taken to get
+        there.  So clearing drops the transcript and the graph thread, keeps the
+        deck and ``deck_spec_json``, and loses nothing that was agreed.
+
+        **The earliest ``role='user'`` row survives.**  Engine mode is derived
+        from it (:func:`resolve_engine_mode`), so deleting it would silently
+        revert a graph-mode deck to the monolith on the next turn — the two
+        halves of this PR would contradict each other.  There is precedent:
+        ``restore_version`` also prunes messages selectively, and preserving the
+        first user row is safe for that pruning too because it predates every
+        save point.  It is preserved unconditionally, in both modes, so clearing
+        never *changes* the mode in either direction.
+
+        **The graph thread is deleted** through the repo's own
+        ``SqlAlchemyCheckpointSaver.delete_thread``, whose ``thread_id`` is the
+        session id ``invoke_graph`` runs under.  ``BaseCheckpointSaver``'s method
+        body is ``raise NotImplementedError``, not a no-op, so a saver that
+        cannot delete surfaces as a 500 on the route rather than skipping
+        quietly — and because the call sits inside this transaction, a raise
+        rolls the transcript prune back rather than leaving a half-cleared
+        session.
+
+        No hidden agent state can survive: every non-architect agent is built
+        fresh per invocation and the monolith's history is hydrated from these
+        rows.
+
+        Args:
+            session_id: The session to clear.  A contributor session clears its
+                own transcript; the owner's marker (and so the deck's mode) is
+                untouched, because a contributor's rows are its own.
+
+        Returns:
+            ``{"status": "cleared", "session_id": ..., "deleted_messages": N,
+            "preserved_message_id": id-or-None}``
+
+        Raises:
+            SessionNotFoundError: session_id does not exist.
+        """
+        from src.core.database import get_db_session
+        from src.database.models.session import SessionMessage
+
+        session_manager = get_session_manager()
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+
+            marker = (
+                db.query(SessionMessage)
+                .filter(
+                    SessionMessage.session_id == session.id,
+                    SessionMessage.role == "user",
+                )
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .first()
+            )
+            marker_id = marker.id if marker is not None else None
+
+            doomed = db.query(SessionMessage).filter(
+                SessionMessage.session_id == session.id
+            )
+            if marker_id is not None:
+                doomed = doomed.filter(SessionMessage.id != marker_id)
+            deleted_messages = doomed.delete(synchronize_session=False)
+
+            # Inside the transaction on purpose — see the docstring.
+            from src.core.checkpointer import get_checkpointer
+
+            get_checkpointer().delete_thread(session_id)
+
+        logger.info(
+            "Cleared session context",
+            extra={
+                "session_id": session_id,
+                "deleted_messages": deleted_messages,
+                "preserved_message_id": marker_id,
+            },
+        )
+
+        return {
+            "status": "cleared",
+            "session_id": session_id,
+            "deleted_messages": deleted_messages,
+            "preserved_message_id": marker_id,
+        }
 
     def _ensure_user_experiment(
         self, session_id: str, username: str
