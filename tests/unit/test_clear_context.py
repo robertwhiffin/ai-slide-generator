@@ -34,7 +34,7 @@ from src.api.services.deck_level_writer import read_deck_spec
 from src.api.services.session_manager import SessionNotFoundError
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import SessionMessage, SessionSlideDeck, UserSession
-from tests.unit.conftest import _make_fake_db, _make_factory
+from tests.unit.conftest import _make_factory, _make_fake_db
 
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
