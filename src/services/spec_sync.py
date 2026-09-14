@@ -10,6 +10,15 @@ Public API
 :func:`mark_dirty`        ``(session_id, author) -> bool`` — set/refresh the marker
 :func:`clear_marker`      ``(session_id) -> bool`` — the review is done; dequeue
 
+and the sweeper that drains the queue those three define:
+
+:data:`SWEEP_INTERVAL_SECONDS`   how often the loop wakes
+:data:`CLAIM_TTL_SECONDS`        how long a worker's lease is honoured
+:func:`claim_due_marker`         ``(now) -> (owner_session_id, author) | None``
+:func:`run_arc_review`           ``(session_id, author) -> bool`` — never raises
+:func:`sweep_once`               one tick: claim at most one marker and review it
+:func:`spec_review_sweeper_loop` the periodic loop, started in the FastAPI lifespan
+
 The placement rule IS the design
 --------------------------------
 ``mark_dirty`` is called from the route handlers in ``src/api/routes/slides.py``
@@ -66,8 +75,18 @@ Why the version counter is NOT bumped
 edit set this marker is holding the version their edit produced; a marker write
 that bumped it again would 409 their very next save.  The marker is internal sweep
 scheduling, not deck state (see the column comments in
-``src/database/models/session.py``), so neither function touches ``version``,
-``modified_by``, ``updated_at`` or ``last_activity``.
+``src/database/models/session.py``), so no function here touches ``version``,
+``modified_by`` or ``last_activity``.
+
+``updated_at`` needs one caveat, measured rather than assumed.  It carries
+``Column(onupdate=datetime.utcnow)`` and is surfaced to the client as the deck's
+``modified_at``, and SQLAlchemy fires that ``onupdate`` on **any** UPDATE of the
+row — an ORM attribute assignment plus ``flush`` included.  So ``mark_dirty`` and
+``clear_marker`` do in fact bump it.  On ``mark_dirty`` that is at worst harmless
+(a human really did just edit the deck).  :func:`claim_due_marker` suppresses it
+explicitly, by assigning the column to itself, because a sweeper taking a lease
+is not a modification and would otherwise show as "modified just now" on a deck
+nobody touched.
 
 Why ``mark_dirty`` swallows and ``clear_marker`` raises
 -------------------------------------------------------
@@ -83,13 +102,17 @@ to mislead and swallowing would hide a stuck queue, so it raises.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
+
+from sqlalchemy import or_, select, update
 
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
-from src.database.models.session import SessionSlideDeck
+from src.core.user_context import get_current_user, set_current_user
+from src.database.models.session import SessionSlideDeck, UserSession
 
 logger = logging.getLogger(__name__)
 
@@ -258,3 +281,352 @@ def clear_marker(session_id: str) -> bool:
             },
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# The sweeper: claim a due marker, re-describe the arc, clear the marker.
+# ---------------------------------------------------------------------------
+#
+# The queue this drains is a DB column, not ``enqueue_job``.
+# ``src/api/services/job_queue.py`` is an in-process ``asyncio.Queue`` drained
+# FIFO with no delay or at-time primitive, so a 180 s coalescing window has
+# nothing to hang off.  What IS reusable is its *shape*:
+# ``mark_timed_out_jobs_once`` + ``mark_timed_out_jobs_loop`` with a 60 s
+# interval — a periodic loop that reads DB state and acts on whatever is due.
+# ``sweep_once``/``spec_review_sweeper_loop`` below are that pair.
+
+# How often the loop wakes.  60 s, matching TIMEOUT_SWEEP_INTERVAL_SECONDS: the
+# debounce window is 180 s, so a tick every minute adds at most a third of a
+# window to a marker's wait.
+SWEEP_INTERVAL_SECONDS = 60
+
+# How long a claim is honoured before another worker may take the deck.  A
+# worker that dies mid-review (deploy, OOM, crash) leaves its lease behind; a
+# bare ``spec_dirty_claimed_at IS NULL`` predicate would then wedge that deck
+# permanently.  900 s is comfortably longer than an arc review and short enough
+# that a wedged deck recovers within a quarter of an hour without a human.
+CLAIM_TTL_SECONDS = 900
+
+# What the sweeper asks the architect for.  The turn exists to make the
+# committed spec describe the deck as a human left it, NOT to rebuild it.
+ARC_REVIEW_MESSAGE = (
+    "A person edited this deck by hand, outside the build, so the committed "
+    "deck specification no longer describes what the deck actually says. "
+    "Re-read the slides as they now stand and re-describe the deck's narrative "
+    "arc so the specification matches them again. Describe what is there — do "
+    "not rewrite, add, remove or reorder slides."
+)
+
+
+def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
+    """Atomically take one due marker, or return ``None``.
+
+    Returns ``(owner_session_id, author)`` where ``owner_session_id`` is the
+    **string** id of the session that OWNS the deck — the id
+    :func:`clear_marker` keys on — and ``author`` is the marker's recorded
+    ``spec_dirty_by``.
+
+    Why the claim is required and not defensive
+    ------------------------------------------
+    ``UVICORN_WORKERS`` defaults to **4** (``run.py``), and the loop below runs
+    in every worker.  Four loops reading the same due marker with no lease means
+    one WYSIWYG session pays for up to four identical LLM arc reviews per
+    window — precisely the cost :data:`DEBOUNCE_SECONDS` exists to avoid.  The
+    exclusivity comes from a **conditional UPDATE**: the ``unclaimed`` predicate
+    appears both in the candidate subquery AND in the UPDATE's own WHERE, so a
+    second worker that blocks on the row lock re-evaluates it against the
+    committed row and matches nothing.  Dropping the outer copy makes the
+    statement "claim whatever the subquery saw", which is a read-then-write race.
+
+    Why it returns the string id and not what ``RETURNING`` hands back
+    -----------------------------------------------------------------
+    ``session_slide_decks.session_id`` is the INTEGER FK to ``user_sessions.id``;
+    the string id lives on ``user_sessions.session_id``.  So ``RETURNING
+    session_id`` yields an **int**, while :func:`clear_marker` (and
+    ``read_deck_spec``, and every ``SessionManager`` helper) filters on the
+    string.  Returning the int matches no row on the clear, the marker is never
+    cleared, and the deck is re-claimed every :data:`CLAIM_TTL_SECONDS`
+    **forever** — invisibly, because nothing raises.  Hence the second SELECT
+    that maps the FK before returning.
+
+    Three conditions gate a claim:
+
+    * ``spec_dirty_at`` is set and at least :data:`DEBOUNCE_SECONDS` old — a
+      burst of edits coalesces into one review.
+    * ``spec_dirty_by`` is NOT NULL.  **A marker with no author is not
+      claimed**: with no identity there is no attribution for the write, no cost
+      attribution, and no permission provenance, and inventing a system identity
+      was the rejected alternative.  Such a marker rests until a later
+      authenticated edit refreshes its author.
+    * the deck is unclaimed, or its claim is older than
+      :data:`CLAIM_TTL_SECONDS`.
+
+    Args:
+        now: The instant to measure both windows against.  Passed in rather than
+            read from the clock so a test can place a marker either side of a
+            boundary without sleeping.
+
+    Returns:
+        ``(owner_session_id, author)``, or ``None`` when nothing is due, nothing
+        is claimable, or the claimed row's owner session has vanished.
+    """
+    due_before = now - timedelta(seconds=DEBOUNCE_SECONDS)
+    stale_before = now - timedelta(seconds=CLAIM_TTL_SECONDS)
+
+    deck_table = SessionSlideDeck.__table__
+    # The lease test, used TWICE on purpose — see the docstring.
+    unclaimed = or_(
+        deck_table.c.spec_dirty_claimed_at.is_(None),
+        deck_table.c.spec_dirty_claimed_at <= stale_before,
+    )
+
+    candidate = (
+        select(deck_table.c.id)
+        .where(
+            deck_table.c.spec_dirty_at.isnot(None),
+            deck_table.c.spec_dirty_at <= due_before,
+            deck_table.c.spec_dirty_by.isnot(None),
+            unclaimed,
+        )
+        # Oldest marker first: the deck that has waited longest gets reviewed
+        # first, so a busy deck cannot starve a quiet one.
+        .order_by(deck_table.c.spec_dirty_at)
+        .limit(1)
+        .scalar_subquery()
+    )
+
+    claim = (
+        update(deck_table)
+        .where(deck_table.c.id == candidate)
+        .where(unclaimed)
+        .values(
+            spec_dirty_claimed_at=now,
+            # A lease is not a deck modification.  updated_at is surfaced to the
+            # client as the deck's `modified_at`, and Column(onupdate=) would
+            # fire on this UPDATE, so a sweeper taking a lease would show as
+            # "modified just now" on a deck nobody touched.  Assigning the
+            # column to itself suppresses the onupdate without changing it.
+            updated_at=deck_table.c.updated_at,
+        )
+        .returning(deck_table.c.session_id, deck_table.c.spec_dirty_by)
+    )
+
+    with get_db_session() as db:
+        row = db.execute(claim).fetchone()
+        if row is None:
+            return None
+
+        owner_pk, author = row[0], row[1]
+
+        # The FK -> string mapping. Without it the caller gets an int and every
+        # downstream lookup silently matches nothing.
+        owner_session_id = db.execute(
+            select(UserSession.session_id).where(UserSession.id == owner_pk)
+        ).scalar()
+
+        if owner_session_id is None:
+            # The deck row outlived its session (the FK is ON DELETE CASCADE, so
+            # this should be unreachable). The lease is deliberately LEFT IN
+            # PLACE: releasing it would re-claim the orphan every tick, whereas
+            # the TTL retries it at most once every CLAIM_TTL_SECONDS.
+            logger.error(
+                "spec_sync.claim_due_marker: claimed a deck whose owner session "
+                "is missing; leaving the lease so the TTL rate-limits the retry",
+                extra={"deck_owner_pk": owner_pk},
+            )
+            return None
+
+        logger.info(
+            "spec_sync.claim_due_marker: claimed",
+            extra={
+                "deck_owner_session_id": owner_session_id,
+                "author": author,
+                "claimed_at": now.isoformat(),
+            },
+        )
+        return (owner_session_id, author)
+
+
+def _release_claim(session_id: str) -> bool:
+    """Release the lease and KEEP the marker, so the next sweep retries.
+
+    The difference from :func:`clear_marker` is the whole point: this is the
+    failure path, and clearing ``spec_dirty_at`` here would drop a review that
+    never ran.  Never raises — it is called from an ``except`` block on a
+    background tick, where raising would replace the real failure with this one.
+    """
+    try:
+        with get_db_session() as db:
+            deck_owner, deck = _resolve_owner_deck(db, session_id)
+            if deck is None:
+                return False
+            deck.spec_dirty_claimed_at = None
+            db.flush()
+            logger.info(
+                "spec_sync._release_claim: lease released, marker kept for retry",
+                extra={"deck_owner_session_id": deck_owner.session_id},
+            )
+            return True
+    except Exception:
+        logger.exception(
+            "spec_sync._release_claim failed; the lease expires by TTL instead",
+            extra={"target_session_id": session_id},
+        )
+        return False
+
+
+def run_arc_review(session_id: str, author: str) -> bool:
+    """Re-describe the deck's narrative arc as *author*, then clear the marker.
+
+    **Never raises.**  A failure releases the **claim** and keeps the
+    **marker**, so the next sweep retries rather than the deck wedging — the
+    same fail-open direction as the rest of this PR's identity and mode
+    resolution.
+
+    Identity is BOUND, not merely stamped.  Two separate mechanisms, both
+    needed:
+
+    * ``principal=author`` is passed to ``invoke_graph``, which resolves
+      ``principal or get_current_user()`` once into ``initiated_by``; every node
+      reads it from state, and it is what lands in ``modified_by`` on the
+      deck-level write.  A sweeper tick has no request, so the second half of
+      that ``or`` is ``None`` — this caller is why the argument exists.
+    * ``set_current_user(author)`` is bound for the duration, so anything on the
+      turn that reads the ContextVar itself (``require_editing_lock`` is the
+      motivating example) sees the human, not ``None``.  With ``None`` a deck
+      whose editing lock a human currently holds would raise — and that is
+      exactly the deck an arc review exists for, so it would degrade safely,
+      silently, and forever.
+
+    The ContextVar is **restored** afterwards.  This function runs inside a
+    long-lived loop, not a request, so a ``set`` with no restore leaks one
+    tick's author into the next tick's — and into anything else sharing that
+    context.
+
+    No ``emitter`` is passed: a sweeper tick has no SSE stream, and the graph's
+    ``emit_event`` returns ``False`` rather than raising when the emitter is
+    ``None``.
+
+    Args:
+        session_id: The **owner** session's string id, as
+            :func:`claim_due_marker` returns it.
+        author: The marker's recorded ``spec_dirty_by``.
+
+    Returns:
+        ``True`` when the review ran and the marker was dealt with — cleared,
+        or deliberately kept by :func:`clear_marker`'s re-dirty rule.
+        ``False`` when the review failed and the marker was left queued.
+
+        **A ``False`` from :func:`clear_marker` is not a failure.**  It means
+        "kept, still queued" — the deck was marked again after this claim was
+        taken, so the later human edit gets its own review on a later tick.
+        Treating it as an error would log a human's mid-review edit as a fault
+        and, if that reading ever drove a retry-or-drop decision, lose it.
+    """
+    # Restore rather than reset-to-None: this is a plain value save/restore, so
+    # it is correct whether or not something upstream had bound a user.
+    previous_user = get_current_user()
+    set_current_user(author)
+    try:
+        # Imported here, as chat_service does: the graph package pulls in the
+        # nodes, the skills and the session manager, and spec_sync is imported
+        # by the slide routes on every human edit.
+        from src.services.graph.builder import invoke_graph
+
+        try:
+            invoke_graph(
+                session_id,
+                {"architect_message": ARC_REVIEW_MESSAGE},
+                principal=author,
+            )
+        except Exception:
+            logger.exception(
+                "spec_sync.run_arc_review: the arc review failed; marker kept "
+                "for the next sweep",
+                extra={"deck_owner_session_id": session_id, "author": author},
+            )
+            _release_claim(session_id)
+            return False
+
+        try:
+            cleared = clear_marker(session_id)
+        except Exception:
+            # clear_marker raises by design (a swallowed failure would hide a
+            # stuck queue). Releasing the lease turns a stuck queue into a
+            # retried one.
+            logger.exception(
+                "spec_sync.run_arc_review: the review ran but the marker could "
+                "not be cleared; lease released so the next sweep retries",
+                extra={"deck_owner_session_id": session_id, "author": author},
+            )
+            _release_claim(session_id)
+            return False
+
+        logger.info(
+            "spec_sync.run_arc_review: review complete",
+            extra={
+                "deck_owner_session_id": session_id,
+                "author": author,
+                # False here means the deck was re-dirtied during the review and
+                # the newer marker was KEPT. Not an error.
+                "marker_cleared": cleared,
+            },
+        )
+        return True
+    finally:
+        set_current_user(previous_user)
+
+
+def sweep_once(now: Optional[datetime] = None) -> int:
+    """One tick: claim at most one due marker and review it.
+
+    One marker per tick, deliberately.  An arc review is an LLM turn measured in
+    tens of seconds, so draining a backlog inside a single tick would hold the
+    loop for minutes and make the next tick's timing unpredictable.  With four
+    workers each taking one per interval the queue still drains at four decks a
+    minute, and the oldest marker is always the one taken.
+
+    Returns:
+        1 when a marker was claimed (whether or not its review succeeded), 0
+        when nothing was due.
+    """
+    claimed = claim_due_marker(now or datetime.utcnow())
+    if claimed is None:
+        return 0
+
+    session_id, author = claimed
+    run_arc_review(session_id, author)
+    return 1
+
+
+async def spec_review_sweeper_loop() -> None:
+    """Background loop: runs :func:`sweep_once` every 60 seconds.
+
+    Started in the FastAPI **lifespan** beside ``mark_timed_out_jobs_loop`` and
+    ``request_log_cleanup_loop`` — **not** in ``run.py::init_database``.  The
+    pre-fork rule there is about migrations and backfills, which must run
+    exactly once; a periodic loop is the opposite case, and one that ran only in
+    the pre-fork step would die with it.
+
+    Survives its own exceptions so one transient DB failure does not take the
+    loop down for the life of the process, and re-raises
+    ``asyncio.CancelledError`` for clean shutdown.  Shape copied from
+    ``mark_timed_out_jobs_loop``.
+
+    ``sweep_once`` is synchronous and does blocking DB and LLM work, so it runs
+    on a worker thread rather than on the event loop.
+    """
+    while True:
+        try:
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+            swept = await asyncio.to_thread(sweep_once)
+            if swept:
+                logger.info("Spec-review sweep reviewed %d deck(s)", swept)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Spec-review sweep iteration failed",
+                exc_info=True,
+                extra={"sweep_error": str(e)},
+            )
