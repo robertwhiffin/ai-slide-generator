@@ -275,14 +275,48 @@ class TestScopedVals:
         state = {"turn_id": "t1"}
         assert scoped_vals(state, "fix_map") == {}
 
-    def test_all_nine_keys_are_registered(self):
-        """_EMPTY_FOR covers exactly the nine keys read through scoped_vals."""
+    def test_all_ten_keys_are_registered(self):
+        """_EMPTY_FOR covers exactly the keys read through scoped_vals.
+
+        ws4d added the tenth, ``describe_only`` — the turn-scoped flag
+        ``architect_router`` reads to end a sweeper turn instead of dispatching
+        builders over a human's hand-edits.  The mapping is CLOSED, so a key read
+        through ``scoped_vals`` and missing here raises ``KeyError``; this test is
+        what makes adding one a deliberate act.
+        """
         expected = {
+            "describe_only",
             "landed_positions", "placeheld_positions", "reviewed_positions",
             "slides", "dispatched_at", "fix_map", "fixed",
             "emitted_style_blocks", "foreman_wakes",
         }
         assert set(_EMPTY_FOR.keys()) == expected
+
+    def test_describe_only_defaults_to_the_SAFE_value(self):
+        """It gates a destructive branch, so "no flag" must mean "may build".
+
+        If the default were None the router's `if` would still be falsey, but a
+        future `is False` comparison would silently invert; and if it were True
+        every turn with no flag would stop building.
+        """
+        assert _EMPTY_FOR["describe_only"] is False
+
+    def test_a_describe_only_flag_from_a_PREVIOUS_turn_reads_as_false(self):
+        """The turn-2 accumulation trap, on the read side.
+
+        Turn state accumulates across a thread, so the flag a sweeper turn wrote
+        is still in the channel on the user's next turn.  scoped_vals compares
+        the wrapper's turn BEFORE any reducer fires, which is what keeps a
+        sweeper turn from barring every later build on that deck.
+        """
+        stale = {"turn_id": "turn-2", "describe_only": scoped("turn-1", True)}
+        assert scoped_vals(stale, "describe_only") is False
+
+        live = {"turn_id": "turn-2", "describe_only": scoped("turn-2", True)}
+        assert scoped_vals(live, "describe_only") is True, (
+            "the read discards the flag even within its own turn, so the "
+            "previous assertion says nothing about turn scoping"
+        )
 
 
 # ---------------------------------------------------------------------------

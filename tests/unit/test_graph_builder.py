@@ -212,6 +212,54 @@ class TestInvokeGraphConfig:
         assert fake_graph.calls[0]["state"]["session_id"] == "sess-42"
 
 
+class TestInvokeGraphDescribeOnly:
+    """ws4d: the flag that lets a sweeper turn describe a deck without rebuilding.
+
+    `invoke_graph` wraps it because `invoke_graph` is the only thing that knows
+    `turn_id`, and it must be turn-scoped: turn state accumulates across a
+    thread, so a plain bool set on a sweeper turn would still read True on the
+    user's next turn and silently bar every later build for that deck.
+    """
+
+    def test_it_defaults_to_false_so_a_normal_turn_still_builds(self, fake_graph):
+        invoke_graph("sess-42", {})
+        assert fake_graph.calls[0]["state"]["describe_only"]["vals"] is False
+
+    def test_an_explicit_flag_is_wrapped_with_THIS_turns_id(self, fake_graph):
+        invoke_graph("sess-42", {}, describe_only=True)
+        state = fake_graph.calls[0]["state"]
+        wrapper = state["describe_only"]
+        assert wrapper["vals"] is True
+        assert wrapper["turn"] == state["turn_id"], (
+            "the flag is not stamped with this turn, so scoped_vals cannot "
+            "discard it on the next turn"
+        )
+
+    def test_each_turn_stamps_its_own_id_so_the_flag_cannot_outlive_its_turn(
+        self, fake_graph
+    ):
+        invoke_graph("sess-42", {}, describe_only=True)
+        invoke_graph("sess-42", {}, describe_only=False)
+
+        first, second = fake_graph.calls
+        assert first["state"]["describe_only"]["turn"] != (
+            second["state"]["describe_only"]["turn"]
+        )
+        assert second["state"]["describe_only"]["vals"] is False, (
+            "the second turn did not overwrite the flag; on a real thread the "
+            "sweeper's True would still be in the channel"
+        )
+
+    def test_the_wrapper_is_json_native(self, fake_graph):
+        """Ruling W-8(b): a new GraphState key carries JSON-native scalars only,
+        because state crosses the checkpointer's serde on turn 2."""
+        import json
+
+        invoke_graph("sess-42", {}, describe_only=True)
+        wrapper = fake_graph.calls[0]["state"]["describe_only"]
+        assert json.loads(json.dumps(wrapper)) == wrapper
+
+
 class TestInvokeGraphPrincipal:
     def test_an_explicit_principal_becomes_initiated_by(self, fake_graph):
         """For callers with no request context — ws4d's sweeper passes a marker."""

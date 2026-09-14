@@ -155,6 +155,21 @@ class _Deck:
             {"by": user, "at": datetime.utcnow(), "id": self.deck_id},
         )
 
+    def backdate_updated_at(self, seconds: float = 3600.0) -> datetime:
+        """Plant a known-old ``updated_at`` and return it.
+
+        Reading the value the INSERT happened to write and asserting it is
+        unchanged would be a microsecond-resolution race with the very UPDATE
+        under test.  A timestamp an hour old makes both directions exact.
+        """
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        self._exec(
+            "UPDATE session_slide_decks SET updated_at = :at WHERE id = :id",
+            {"at": stamp, "id": self.deck_id},
+        )
+        assert self.row().updated_at == stamp, "the backdate did not take"
+        return stamp
+
     def row(self) -> SessionSlideDeck:
         db = self._factory()
         try:
@@ -236,13 +251,22 @@ class _GraphSpy:
         self._raises = raises
         self._side_effect = side_effect
 
-    def __call__(self, session_id, initial=None, *, emitter=None, principal=None):
+    def __call__(
+        self,
+        session_id,
+        initial=None,
+        *,
+        emitter=None,
+        principal=None,
+        describe_only=False,
+    ):
         self.calls.append(
             {
                 "session_id": session_id,
                 "initial": initial,
                 "emitter": emitter,
                 "principal": principal,
+                "describe_only": describe_only,
             }
         )
         self.identities.append(get_current_user())
@@ -511,6 +535,132 @@ class TestTheLease:
 
         assert owner_deck.row().updated_at == before, (
             "claiming a lease showed the deck as modified; nobody touched it"
+        )
+
+
+class TestWhoseActionBumpsTheDecksModifiedTimestamp:
+    """The rule: a HUMAN action bumps ``modified_at``; a SWEEPER action does not.
+
+    ``updated_at`` carries ``Column(onupdate=datetime.utcnow)`` and is surfaced to
+    every client as the deck's ``modified_at``.  SQLAlchemy fires that
+    ``onupdate`` on any UPDATE of the row, an ORM flush included — measured, and
+    contrary to what this module's docstring said before ws4d — so without a
+    deliberate suppression a sweeper finishing a review it alone scheduled shows
+    every client that the deck was just modified.
+
+    Both directions are here on purpose.  An implementation that suppressed the
+    bump everywhere would satisfy every sweeper assertion below while making a
+    real human edit invisible in the session list, so ``mark_dirty``'s bump is
+    asserted too.
+    """
+
+    def test_mark_dirty_DOES_bump_it_because_a_human_edited_the_deck(
+        self, owner_deck
+    ):
+        planted = owner_deck.backdate_updated_at()
+        with _patched(owner_deck._factory):
+            assert mark_dirty(owner_deck.session_id, _AUTHOR) is True
+        assert owner_deck.row().updated_at > planted, (
+            "a human's hand-edit left the deck's modified_at untouched; the "
+            "session list will show stale activity"
+        )
+
+    def test_claiming_the_lease_does_not_bump_it(self, owner_deck):
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        planted = owner_deck.backdate_updated_at()
+        with _patched(owner_deck._factory):
+            assert claim_due_marker(datetime.utcnow()) is not None
+        assert owner_deck.row().updated_at == planted
+
+    def test_clearing_the_marker_does_not_bump_it(self, owner_deck):
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        with _patched(owner_deck._factory):
+            claim_due_marker(datetime.utcnow())
+            planted = owner_deck.backdate_updated_at()
+            assert clear_marker(owner_deck.session_id) is True
+
+        row = owner_deck.row()
+        assert row.spec_dirty_at is None, "the clear did not happen"
+        assert row.updated_at == planted, (
+            "the sweeper finished its own review and every client now sees this "
+            "deck as modified just now"
+        )
+
+    def test_the_re_dirty_branchs_lease_release_does_not_bump_it_either(
+        self, owner_deck
+    ):
+        """`clear_marker`'s OTHER branch — the one that keeps the marker.
+
+        A test covering only the full clear leaves this path unguarded, and it is
+        the path a human editing during a review takes.
+        """
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        with _patched(owner_deck._factory):
+            claim_due_marker(datetime.utcnow())
+            # Re-dirty AFTER the claim, which is what makes clear_marker keep it.
+            assert mark_dirty(owner_deck.session_id, _SECOND_AUTHOR) is True
+            planted = owner_deck.backdate_updated_at()
+            assert clear_marker(owner_deck.session_id) is False, (
+                "the re-dirty branch did not fire, so this test is exercising "
+                "the full-clear path instead"
+            )
+
+        row = owner_deck.row()
+        assert row.spec_dirty_at is not None
+        assert row.spec_dirty_claimed_at is None
+        assert row.updated_at == planted
+
+    def test_releasing_the_claim_after_a_failure_does_not_bump_it(self, owner_deck):
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        with _patched(owner_deck._factory):
+            claim_due_marker(datetime.utcnow())
+            planted = owner_deck.backdate_updated_at()
+            with patch(_INVOKE_GRAPH, _GraphSpy(raises=RuntimeError("boom"))):
+                assert run_arc_review(owner_deck.session_id, _AUTHOR) is False
+
+        row = owner_deck.row()
+        assert row.spec_dirty_claimed_at is None, "the lease was not released"
+        assert row.updated_at == planted
+
+    def test_none_of_the_sweeper_writes_touch_the_optimistic_lock_version(
+        self, owner_deck
+    ):
+        """The sibling invariant Task 4 pinned for mark_dirty, over the new writes.
+
+        The human whose edit set the marker holds the version their edit
+        produced; a bump from a sweeper write would 409 their very next save.
+        """
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        before = owner_deck.row().version
+        with _patched(owner_deck._factory):
+            claim_due_marker(datetime.utcnow())
+            assert owner_deck.row().version == before
+            with patch(_INVOKE_GRAPH, _GraphSpy(raises=RuntimeError("boom"))):
+                run_arc_review(owner_deck.session_id, _AUTHOR)
+            assert owner_deck.row().version == before
+            claim_due_marker(datetime.utcnow())
+            assert clear_marker(owner_deck.session_id) is True
+        assert owner_deck.row().version == before
+
+
+class TestTheSweeperTurnIsDescribeOnly:
+    def test_the_review_declares_its_turn_describe_only(self, owner_deck):
+        """The enforcement half of ARC_REVIEW_MESSAGE.
+
+        The message ASKS the architect not to rebuild; intent is model output, so
+        asking is not a control.  `_INTENT_ROUTES` sends both "build" and "edit"
+        to the foreman, whose builders' reviewers overwrite slide rows — with no
+        emitter, so nobody watching.  The router's own behaviour is pinned in
+        tests/unit/test_graph_routers.py and end to end in
+        tests/integration/test_sweeper_describe_only.py.
+        """
+        spy = _GraphSpy()
+        with _patched(owner_deck._factory), patch(_INVOKE_GRAPH, spy):
+            assert run_arc_review(owner_deck.session_id, _AUTHOR) is True
+
+        assert spy.calls[0]["describe_only"] is True, (
+            "the sweeper turn did not declare itself describe-only; a build or "
+            "edit intent will dispatch builders over the human's hand-edits"
         )
 
 

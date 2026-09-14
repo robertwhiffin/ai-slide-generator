@@ -89,6 +89,73 @@ class TestArchitectRouter:
         assert architect_router({"architect_intent": intent}) is END
 
 
+class TestADescribeOnlyTurnNeverReachesTheForeman:
+    """ws4d: the sweeper's arc-review turn may re-describe but never rebuild.
+
+    `_INTENT_ROUTES` sends both "build" and "edit" to the foreman, which fans out
+    builders whose reviewers OVERWRITE slide rows.  A sweeper turn runs with no
+    emitter and nobody watching, so reaching the foreman there would silently
+    overwrite the very hand-edits that scheduled the review.  A post-hoc check
+    cannot help: `invoke_graph` is synchronous and the rows land before it
+    returns, so this edge is the only place the turn can be stopped.
+    """
+
+    @staticmethod
+    def _state(intent, flag, turn=TURN):
+        state = {"session_id": "sess-1", "turn_id": TURN, "architect_intent": intent}
+        if flag is not None:
+            state["describe_only"] = scoped(turn, flag)
+        return state
+
+    @pytest.mark.parametrize("intent", ["build", "edit"])
+    def test_a_destructive_intent_ends_the_turn_when_describe_only_is_set(
+        self, intent
+    ):
+        assert architect_router(self._state(intent, True)) is END, (
+            f"intent {intent!r} reached the foreman on a describe-only turn; "
+            "builders will overwrite the human edits that scheduled the review"
+        )
+
+    @pytest.mark.parametrize("intent", ["build", "edit"])
+    def test_the_same_intent_DOES_reach_the_foreman_without_the_flag(self, intent):
+        """The paired entry assertion: a router that ended every turn would pass
+        the test above while breaking every normal build."""
+        assert architect_router(self._state(intent, False)) == "foreman"
+        assert architect_router(self._state(intent, None)) == "foreman"
+
+    def test_a_flag_from_a_PREVIOUS_turn_does_not_block_this_turn(self):
+        """The turn-2 accumulation trap at the router.
+
+        Turn state accumulates across a thread, so the wrapper a sweeper turn
+        wrote is still in the channel on the user's next turn.  An unscoped flag
+        would bar every subsequent build for that deck, silently and for ever.
+        """
+        stale = self._state("build", True, turn="a-previous-turn")
+        assert architect_router(stale) == "foreman", (
+            "a describe-only flag left by an earlier turn is still blocking; "
+            "this deck has silently stopped building"
+        )
+
+    def test_a_describe_only_turn_still_routes_discuss_and_ask_data_normally(self):
+        """The flag gates the DESTRUCTIVE destination only.  Over-blocking would
+        stop the architect getting the data it asked for, which builds nothing."""
+        assert architect_router(self._state("discuss", True)) is END
+        assert architect_router(self._state("ask_data", True)) == "data_analyst"
+
+    def test_the_gate_is_on_the_destination_not_the_intent_literal(self):
+        """So a sixth intent routed to the foreman is covered the day it lands.
+
+        Read off `_INTENT_ROUTES` rather than a hardcoded pair, so this test
+        fails if a new foreman-bound intent is added without being blocked.
+        """
+        foreman_bound = [
+            i for i, d in routers._INTENT_ROUTES.items() if d == "foreman"
+        ]
+        assert foreman_bound, "no intent routes to the foreman; the map changed"
+        for intent in foreman_bound:
+            assert architect_router(self._state(intent, True)) is END, intent
+
+
 # ---------------------------------------------------------------------------
 # foreman_router — blocking correction 1
 # ---------------------------------------------------------------------------

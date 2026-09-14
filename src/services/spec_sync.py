@@ -82,11 +82,15 @@ scheduling, not deck state (see the column comments in
 ``Column(onupdate=datetime.utcnow)`` and is surfaced to the client as the deck's
 ``modified_at``, and SQLAlchemy fires that ``onupdate`` on **any** UPDATE of the
 row — an ORM attribute assignment plus ``flush`` included.  So ``mark_dirty`` and
-``clear_marker`` do in fact bump it.  On ``mark_dirty`` that is at worst harmless
-(a human really did just edit the deck).  :func:`claim_due_marker` suppresses it
-explicitly, by assigning the column to itself, because a sweeper taking a lease
-is not a modification and would otherwise show as "modified just now" on a deck
-nobody touched.
+``clear_marker`` do in fact bump it.  The rule, applied deliberately: **a human action bumps
+the deck's ``modified_at``; a sweeper action does not.**  So ``mark_dirty``
+keeps its bump — a human really did just edit the deck — while
+:func:`claim_due_marker`, :func:`_release_claim` and :func:`clear_marker` write
+through :func:`_marker_write`, which names ``updated_at`` as itself and so
+suppresses the ``onupdate``.  A no-net-change ORM assignment does NOT suppress
+it: an attribute with no net change never reaches the SET clause.  Without this,
+a sweeper finishing a review it alone scheduled shows every client that the deck
+was modified just now.
 
 Why ``mark_dirty`` swallows and ``clear_marker`` raises
 -------------------------------------------------------
@@ -256,8 +260,7 @@ def clear_marker(session_id: str) -> bool:
         )
         if re_dirtied:
             # Release the lease only; keep the newer marker for the next tick.
-            deck.spec_dirty_claimed_at = None
-            db.flush()
+            _marker_write(db, deck.id, spec_dirty_claimed_at=None)
             logger.info(
                 "spec_sync.clear_marker: re-dirtied after the claim; "
                 "marker kept, lease released",
@@ -268,10 +271,13 @@ def clear_marker(session_id: str) -> bool:
             )
             return False
 
-        deck.spec_dirty_at = None
-        deck.spec_dirty_by = None
-        deck.spec_dirty_claimed_at = None
-        db.flush()
+        _marker_write(
+            db,
+            deck.id,
+            spec_dirty_at=None,
+            spec_dirty_by=None,
+            spec_dirty_claimed_at=None,
+        )
 
         logger.info(
             "spec_sync.clear_marker: marker cleared",
@@ -401,11 +407,9 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
         .where(unclaimed)
         .values(
             spec_dirty_claimed_at=now,
-            # A lease is not a deck modification.  updated_at is surfaced to the
-            # client as the deck's `modified_at`, and Column(onupdate=) would
-            # fire on this UPDATE, so a sweeper taking a lease would show as
-            # "modified just now" on a deck nobody touched.  Assigning the
-            # column to itself suppresses the onupdate without changing it.
+            # A lease is not a deck modification — see _marker_write for the
+            # measured rule: a human action bumps the deck's client-visible
+            # modified_at, a sweeper action does not.
             updated_at=deck_table.c.updated_at,
         )
         .returning(deck_table.c.session_id, deck_table.c.spec_dirty_by)
@@ -447,6 +451,33 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
         return (owner_session_id, author)
 
 
+def _marker_write(db, deck_id: int, **values) -> None:
+    """UPDATE the marker columns on *deck_id* and leave ``updated_at`` alone.
+
+    A Core UPDATE rather than an ORM attribute assignment, and the reason is
+    measured rather than stylistic.  ``updated_at`` carries
+    ``Column(onupdate=datetime.utcnow)`` and is surfaced to every client as the
+    deck's ``modified_at``; SQLAlchemy fires that ``onupdate`` on any UPDATE of
+    the row, an ORM flush included, and a no-net-change assignment does NOT
+    suppress it because an attribute with no net change never reaches the SET
+    clause.  Naming the column explicitly does suppress it, and only a Core
+    statement can name it as itself.
+
+    The rule this enforces: **a human action bumps the deck's ``modified_at``; a
+    sweeper action does not.**  So :func:`mark_dirty` keeps its bump — a human
+    genuinely did edit the deck — while :func:`claim_due_marker`,
+    :func:`_release_claim` and :func:`clear_marker` suppress it.  Without this a
+    sweeper finishing a review it alone scheduled shows every client that the
+    deck was modified just now.
+    """
+    table = SessionSlideDeck.__table__
+    db.execute(
+        update(table)
+        .where(table.c.id == deck_id)
+        .values(updated_at=table.c.updated_at, **values)
+    )
+
+
 def _release_claim(session_id: str) -> bool:
     """Release the lease and KEEP the marker, so the next sweep retries.
 
@@ -460,8 +491,7 @@ def _release_claim(session_id: str) -> bool:
             deck_owner, deck = _resolve_owner_deck(db, session_id)
             if deck is None:
                 return False
-            deck.spec_dirty_claimed_at = None
-            db.flush()
+            _marker_write(db, deck.id, spec_dirty_claimed_at=None)
             logger.info(
                 "spec_sync._release_claim: lease released, marker kept for retry",
                 extra={"deck_owner_session_id": deck_owner.session_id},
@@ -507,6 +537,15 @@ def run_arc_review(session_id: str, author: str) -> bool:
     ``emit_event`` returns ``False`` rather than raising when the emitter is
     ``None``.
 
+    ``describe_only=True`` is passed, and it is the difference between a review
+    and a silent overwrite.  :data:`ARC_REVIEW_MESSAGE` asks the architect not to
+    rewrite the deck, but intent is model output and asking is not a control: a
+    ``build`` or ``edit`` intent routes to the foreman, which dispatches builders
+    whose reviewers rewrite slide rows.  The flag makes ``architect_router`` end
+    the turn instead.  The architect's own deck-level write still happens, which
+    is the point — the re-described spec is persisted and no slide row is
+    touched.
+
     Args:
         session_id: The **owner** session's string id, as
             :func:`claim_due_marker` returns it.
@@ -538,6 +577,13 @@ def run_arc_review(session_id: str, author: str) -> bool:
                 session_id,
                 {"architect_message": ARC_REVIEW_MESSAGE},
                 principal=author,
+                # The message ASKS the architect not to rebuild; this ENFORCES
+                # it. Intent is model output, so asking is not a control:
+                # _INTENT_ROUTES maps both "build" and "edit" to the foreman,
+                # and a sweeper turn that reached it would dispatch builders
+                # whose reviewers overwrite the hand-edits that scheduled this
+                # review — with no emitter, so nobody watching.
+                describe_only=True,
             )
         except Exception:
             logger.exception(

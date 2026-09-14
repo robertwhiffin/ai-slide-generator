@@ -409,6 +409,7 @@ jobs:
           pytest tests/integration/test_graph_orchestration.py \
             tests/integration/test_graph_mode_turn.py \
             tests/integration/test_spec_dirty_marker_routes.py \
+            tests/integration/test_sweeper_describe_only.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live"
       - uses: actions/upload-artifact@v4
         if: always()
