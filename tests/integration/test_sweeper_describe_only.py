@@ -42,6 +42,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+from src.api.services.session_manager import VersionConflictError, get_session_manager
 from src.database.models.session import SessionSlide, UserSession
 from src.services.graph.builder import invoke_graph
 from src.services.spec_sync import claim_due_marker, mark_dirty, run_arc_review
@@ -320,6 +321,148 @@ class TestTheFlagDoesNotOutliveItsTurn:
         )
         assert final["describe_only"]["turn"] == final["turn_id"]
         assert final["describe_only"]["vals"] is False
+
+
+class TestTheArcReviewDoesNotInvalidateTheClientsVersionToken:
+    """The 409 the sweeper would otherwise cause on the human's very next save.
+
+    `deck.version` is the optimistic-lock token a WYSIWYG client holds between
+    saves.  All four human slide routes send it back as `expected_version`
+    (`slides.py:173`, `:244`, `:314`, `:390`) and a mismatch becomes **HTTP 409**
+    (`slides.py:186`).  Before ws4d nothing invoked the graph outside a user turn,
+    so a `write_deck_level_columns` bump always coincided with the user's own turn
+    and their client refreshed the token from the response.
+
+    The arc-review sweeper is the first out-of-band writer, and it runs BECAUSE
+    the human is editing.  So the collision is the expected sequence, not an edge
+    case: human edits -> marker -> 180 s -> sweeper claims -> architect writes ->
+    version bumps -> **the human's next save is rejected.**  Edit a deck, wait
+    three minutes, your next save fails.
+
+    Driven through `SessionManager.save_slide_deck`, which is the single function
+    that raises `VersionConflictError` for every one of those four routes — so a
+    save that succeeds here is a 409 that does not happen.
+    """
+
+    @staticmethod
+    def _a_deck_the_human_is_editing(env):
+        """Build a deck, mark it dirty, and return the token the client holds."""
+        env.recorder.slide_count = 3
+        env.run()
+        assert len(_builder_calls(env.recorder)) == 3, "turn 1 built nothing"
+        assert mark_dirty(env.session_id, _AUTHOR) is True
+        return env.deck_row().version
+
+    @staticmethod
+    def _the_humans_next_save(env, held_version: int):
+        """The save the route makes, with the token the client is holding."""
+        return get_session_manager().save_slide_deck(
+            session_id=env.session_id,
+            title="Edited by the human after the sweeper ran",
+            html_content="",
+            scripts_content="",
+            slide_count=3,
+            deck_dict={
+                "title": "Edited by the human after the sweeper ran",
+                "css": "",
+                "external_scripts": [],
+                "scripts": "",
+                "slides": [
+                    {"html": _HAND_EDITED, "scripts": "", "slide_id": "s0"},
+                ],
+            },
+            expected_version=held_version,
+        )
+
+    def test_the_humans_held_token_still_saves_after_a_full_arc_review(
+        self, sweeper_env
+    ):
+        """The property, in the shape a user would report it."""
+        env = sweeper_env
+        held = self._a_deck_the_human_is_editing(env)
+
+        # Make the re-described spec DIFFER from the committed one, so "the spec
+        # was written" cannot be satisfied by a turn that wrote nothing.
+        spec_before = env.deck_row().deck_spec_json
+        env.recorder.slide_count = 4
+        architect_before = env.recorder.counts("architect")
+
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+
+        # Entry assertions: the review really ran and really wrote a NEW spec.
+        assert env.recorder.counts("architect") == architect_before + 1, (
+            "the sweeper turn never reached the architect"
+        )
+        assert env.deck_row().deck_spec_json != spec_before, (
+            "the arc review wrote no new spec — a fix that skips the deck-level "
+            "write entirely would pass the assertion below while doing nothing"
+        )
+
+        # The one that matters.
+        self._the_humans_next_save(env, held)
+
+    def test_a_genuinely_stale_token_IS_still_rejected(self, sweeper_env):
+        """The paired half, so the test above cannot pass on a disabled lock.
+
+        Without this, "the save succeeded" is equally true of a harness where
+        optimistic locking never fires at all.
+        """
+        env = sweeper_env
+        held = self._a_deck_the_human_is_editing(env)
+
+        with pytest.raises(VersionConflictError):
+            self._the_humans_next_save(env, held + 7)
+
+    def test_the_arc_review_still_stamps_the_author_on_the_deck(self, sweeper_env):
+        """Suppressing the bump must not suppress the attribution with it."""
+        env = sweeper_env
+        self._a_deck_the_human_is_editing(env)
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+        assert env.deck_row().modified_by == _AUTHOR
+
+
+class TestTheVersionColumnItself:
+    """The shape half of the class above, kept separate per the standing rule.
+
+    A shape assertion that raises is indistinguishable in the summary from the
+    behaviour assertion failing, and it conceals that the behaviour one passed —
+    which is exactly how an earlier version of this suite hid a real gap.
+    """
+
+    def test_a_describe_only_turn_leaves_the_version_column_untouched(
+        self, sweeper_env
+    ):
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        mark_dirty(env.session_id, _AUTHOR)
+        before = env.deck_row().version
+
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+
+        assert env.deck_row().version == before, (
+            f"the arc review moved the deck version {before} -> "
+            f"{env.deck_row().version}; the editing human's next save is a 409"
+        )
+
+    def test_a_NORMAL_user_turn_still_bumps_it(self, sweeper_env):
+        """The paired direction.
+
+        `bump_version=False` everywhere would satisfy the test above while
+        breaking the optimistic lock for every real edit, which is the whole
+        point of the column.
+        """
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        before = env.deck_row().version
+
+        invoke_graph(env.session_id, {"architect_message": "add another slide"})
+
+        assert env.deck_row().version > before, (
+            "a normal user turn no longer bumps the version; the optimistic lock "
+            "can no longer detect a stale write"
+        )
 
 
 class TestTheMarkerIsStillDequeued:
