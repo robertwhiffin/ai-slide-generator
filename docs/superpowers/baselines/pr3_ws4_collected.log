@@ -157,6 +157,92 @@ VERIFIED AGAINST REAL LAKEBASE, 2026-09-13 — the first time in this workstream
   2 passed.
 
 --------------------------------------------------------------------------------
+SECTION 2c — POST-ws4c  (THIS is what ws4d and ws4e build on)
+--------------------------------------------------------------------------------
+
+Measured 2026-09-14 on branch `feat/ws4c-graph-core` with all of ws4c applied, with no
+application server running (same conditions as Sections 1, 2 and 2b).
+
+    3 failed, 4977 passed, 8 skipped, 572 warnings in 142.08s
+    COLLECTED: 4988
+
+CAUSES: IDENTICAL to Sections 1, 2 and 2b. Same three tests, same four assertion strings.
+  No new cause. No change to the deploy-autoscaling cause. All FOUR strings were checked
+  INDIVIDUALLY with `grep -cF`, never as one pattern (occurrence counts 1 / 2 / 4 / 1):
+    assert 'provisioned' == 'autoscaling'
+    Expected '_get_or_create_lakebase_provisioned' to have been called once. Called 0 times.
+    NotFound: Space with id 01effebcc2781b6bbb749077a55d31e3 not found
+    GenieToolError: Failed to query Genie space after 3 attempts
+
+  A NOTE ON WHY THAT MATTERS, learned twice on this PR: two separate full-suite runs during
+  ws4c showed a FOURTH failure that was not a new cause at all -- once it was a reviewer's own
+  probe file, caught by ws4a's collection guard. A count comparison would have sent someone
+  hunting a phantom. Delete probe files before measuring, and compare causes.
+
+DELTA: +399 collected (4589 -> 4988), reconciled EXACTLY. Counts per file with
+`--collect-only -q`, as this file requires:
+    + 40  tests/unit/test_graph_state.py                    (C1)
+    + 44  tests/unit/test_foreman_service.py                (C2)
+    + 10  tests/unit/test_skills.py                         (C3)
+    +  9  tests/unit/test_agent_resolution_prompt.py        (C3)
+    + 95  tests/unit/test_graph_nodes.py                    (C4, incl. fix rounds)
+    + 44  tests/unit/test_graph_routers.py                  (C4)
+    + 32  tests/unit/test_graph_builder.py                  (C4)
+    + 16  tests/integration/test_graph_orchestration.py     (C5, incl. fix rounds)
+    +  4  tests/unit/test_ci_test_summary_gates_every_job.py (C5 fix round)
+    + 41  tests/unit/test_template_sections.py              (C6, incl. 2 fix rounds)
+    + 18  tests/unit/test_graph_safety.py                   (C7)
+    + 30  tests/unit/test_agent_resolution_move.py          (C8, incl. fix round)
+    +  7  tests/unit/test_skill_prose.py                    (C9)
+    ----
+    +390  across 13 new files
+    +  9  graph-path cases added by C7 to the three PRE-EXISTING security suites
+          (test_agent_safety_gate.py, test_safety_gate_http.py, test_slide_context_injection.py)
+    ----
+    +399  net, matching the measured delta exactly
+
+  CLAUSE 3 CHECKED THE WAY THIS FILE DEMANDS, not by count: the test tree was diffed against
+  the merge base for removed `def test_` / `async def test_` / `class Test` lines -> NONE, and
+  ZERO test files were deleted. ws4c deletes no test.
+  One intra-branch deletion exists and does not appear against the merge base because its file
+  is new on this branch: `test_main_wrapper_does_not_promote` (C6 fix round 1), which pinned a
+  defect under a neutral name and is named in its commit, per ruling R1.
+
+  A COUNT NOTE for whoever greps next: `grep -rln 'src\.services\.agent\b' tests/` now returns
+  FIFTEEN files, not the thirteen the ws4c plan names. That is correct and additive -- ws4c added
+  test_agent_resolution_move.py and test_graph_safety.py, which legitimately reference the module.
+  The DoD requires the ORIGINAL THIRTEEN to still collect and pass where they already live; all
+  thirteen do (203 passed). Check per-file presence, never the count.
+
+REAL-MODEL RUN: DONE, 2026-09-14, and the DoD item is MET.
+  tests/integration/test_graph_live_real_model.py (opt-in, `live`-marked, excluded from CI)
+  drove the COMPILED graph against databricks-claude-opus-4-6 on a 3-slide deck. 12 model
+  calls, 116s. Recorded call shape:
+
+      architect 1 | builder 3 | build_reviewer 3 | fixer 2 | fix_reviewer 2 | deck_reviewer 1
+
+  Read against the invariants: THREE reviewers for THREE builders, i.e. one per SLIDE and not
+  one per BATCH -- the re-fan holding against real model output, where a static edge collapses
+  N branches to 1. Two positions genuinely needed a fix (the real reviewers found objective
+  defects on 2 of 3 slides), and each entered the fixer EXACTLY ONCE. Deck review fired ONCE.
+  Ascending release asserted as a prefix. Every assertion is made from the recorded calls and
+  the committed rows, never from anything the model said about itself.
+
+  What it still does NOT prove: prose quality. The seven skills ship deliberate placeholder
+  prompts and real authoring is a separate track.
+
+NOT VERIFIED BY THIS SECTION, and deliberately not inferred:
+  * No CI observation. CI has never completed a run on ws4a or ws4b either, so ws4c's
+    integration-graph job has never executed on a runner. Note the job was ALSO not gating
+    anything until late in the build -- it sat in test-summary's `needs:` and echo block but not
+    its failure loop, so a red suite exited 0. Fixed, and guarded by
+    tests/unit/test_ci_test_summary_gates_every_job.py.
+  * Everything here ran on SQLite. Two ws4c behaviours are uncharacterised on PostgreSQL:
+    concurrent failing builders writing two chat messages in one superstep, and checkpoint
+    growth (measured 538 KB across 14 rows for 31 slides with brand bytes EMPTY; ~8 MB per turn
+    is realistic, `findings` is unbounded, and nothing calls `delete_thread`).
+
+--------------------------------------------------------------------------------
 SECTION 3 — WHAT THIS FILE DOES *NOT* COVER
 --------------------------------------------------------------------------------
 
