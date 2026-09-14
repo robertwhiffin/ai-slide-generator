@@ -45,7 +45,7 @@ import queue
 from contextvars import ContextVar
 from typing import Optional
 
-from src.api.schemas.streaming import StreamEvent
+from src.api.schemas.streaming import StreamEvent, StreamEventType
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +59,68 @@ event_emitter_var: ContextVar[Optional[queue.Queue]] = ContextVar(
     "graph_event_emitter", default=None
 )
 
+#: The SSE transport's slide cursor: the lowest position NOT yet released to this
+#: turn's queue.  Held in a **one-element mutable list**, and that is load-bearing
+#: (see :func:`advance_slide_cursor`).  Turn-scoped and in-process, exactly like
+#: the queue it feeds — the polling transport's cursor is the client's instead,
+#: which is why the release *rule* lives in a query over committed rows
+#: (``SessionManager.slides_since_cursor``) and not in either cursor.
+slide_cursor_var: ContextVar[Optional[list]] = ContextVar(
+    "graph_slide_cursor", default=None
+)
+
 
 def set_event_emitter(emitter: Optional[queue.Queue]) -> None:
-    """Install *emitter* as this context's event queue.
+    """Install *emitter* as this context's event queue, and reset the slide cursor.
 
-    ``None`` clears it, which is how ``invoke_graph`` resets a var inherited
-    from an earlier turn in the same process.
+    ``None`` clears the queue, which is how ``invoke_graph`` resets a var
+    inherited from an earlier turn in the same process.
+
+    The slide cursor is reset **here** because this function is called on every
+    ``invoke_graph`` invocation and nowhere else, so it is the one point that
+    coincides exactly with a turn boundary.  Leaving a previous turn's cursor in
+    place would mean turn 2 released nothing at all: its cursor already sits past
+    every position turn 1 delivered.
     """
     event_emitter_var.set(emitter)
+    slide_cursor_var.set([0])
 
 
 def get_event_emitter() -> Optional[queue.Queue]:
     """Return this context's event queue, or ``None`` when nothing is emitting."""
     return event_emitter_var.get()
+
+
+def get_slide_cursor() -> int:
+    """Return the lowest slide position not yet released on this turn's queue.
+
+    ``0`` when no turn has been started in this context, so a caller that never
+    went through ``invoke_graph`` releases from the top of the deck rather than
+    silently releasing nothing.
+    """
+    holder = slide_cursor_var.get()
+    if not holder:
+        return 0
+    return int(holder[0])
+
+
+def advance_slide_cursor(next_cursor: int) -> None:
+    """Move the cursor forward to *next_cursor*; never backwards.
+
+    **Mutates the holder in place and MUST keep doing so.**  LangChain fans nodes
+    out through ``ContextThreadPoolExecutor``, whose ``submit`` wraps every task
+    in ``copy_context().run(...)``, and LangGraph runs ordinary nodes through the
+    same executor.  A ``ContextVar.set()`` inside a node therefore dies with that
+    node's context copy — so ``slide_cursor_var.set([next_cursor])`` here would
+    leave every wake reading ``0`` and re-emitting every slide released so far,
+    once per foreman wake.  A copy shares the *object*, so ``holder[0] = ...``
+    is visible to the parent context and to every sibling.
+    """
+    holder = slide_cursor_var.get()
+    if holder is None:
+        slide_cursor_var.set([int(next_cursor)])
+        return
+    holder[0] = max(int(holder[0]), int(next_cursor))
 
 
 def emit_event(event: StreamEvent) -> bool:
@@ -92,3 +141,46 @@ def emit_event(event: StreamEvent) -> bool:
     except Exception:  # pragma: no cover - a full/closed queue must not fail a turn
         logger.warning("Graph event emission failed; continuing", exc_info=True)
         return False
+
+
+def emit_slide_ready(
+    position: int, html: str, scripts: str = "", agent: Optional[str] = None
+) -> bool:
+    """Queue one ``slide_ready`` event for a committed slide; never raise.
+
+    The whole point of ws4d D3: a fifteen-slide deck used to appear all at once
+    because ``slides`` rides only on the terminal ``COMPLETE`` event.  This is the
+    per-slide event that travels on the queue ``invoke_graph`` was handed.
+
+    **Takes no queue.**  No graph node holds one and none can be given one — a
+    ``queue.Queue`` is not serialisable through the checkpointer and ``GraphState``
+    silently discards undeclared keys — so the queue reaches nodes through
+    :data:`event_emitter_var` and by no other route.
+
+    ``slide_cursor`` is stamped as ``position + 1``: the next position the client
+    has NOT been sent.  That is the same number ``GET /chat/poll`` returns in its
+    own ``slide_cursor`` field, so a client that starts on SSE and falls back to
+    polling hands the value straight back without re-deriving it.
+
+    ``metadata["node"]`` is stamped ``"release"`` because every other event the
+    graph queues names the node that produced it, and ``tests/unit/
+    test_graph_builder.py::test_every_fanned_node_queues_into_the_one_emitter``
+    groups the whole turn's events by that key — an event without it made the
+    turn's event stream un-attributable.  ``"release"`` names the reorder-buffer
+    release rather than a node, which stays true whichever node calls this.
+
+    Returns what :func:`emit_event` returns — ``True`` when the event was queued,
+    ``False`` when there was no emitter.  Callers ignore it; emission is an
+    optional side channel, never a precondition for building a deck.
+    """
+    return emit_event(
+        StreamEvent(
+            type=StreamEventType.SLIDE_READY,
+            position=position,
+            html=html,
+            scripts=scripts,
+            agent=agent,
+            slide_cursor=position + 1,
+            metadata={"node": "release"},
+        )
+    )

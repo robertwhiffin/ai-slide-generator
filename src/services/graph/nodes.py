@@ -70,9 +70,16 @@ from src.services.foreman_service import (
     all_positions_committed,
     next_dispatch_batch,
     outstanding_positions,
+    releasable_positions,
     stalled_positions,
 )
-from src.services.graph.event_emitter import emit_event
+from src.services.graph.event_emitter import (
+    advance_slide_cursor,
+    emit_event,
+    emit_slide_ready,
+    get_event_emitter,
+    get_slide_cursor,
+)
 from src.services.graph.state import has_pending_fix, scoped, scoped_vals
 from src.services.template_sections import (
     extract_section,
@@ -137,6 +144,85 @@ def _emit(
             type=event_type, content=content, error=error, metadata=metadata
         )
     )
+
+
+def _release_slides(state: dict) -> List[int]:
+    """Emit ``slide_ready`` for every position the reorder buffer NEWLY releases.
+
+    This is ws4d D3's SSE half.  Called from ``foreman_node`` and from nowhere
+    else, for one reason: the foreman is the only node that runs **alone, after
+    the superstep barrier**.  Emitting from ``build_reviewer_node`` instead would
+    put the decision inside the fan-out, where N reviewers run concurrently — two
+    of them would compute overlapping prefixes, and position 3's reviewer
+    finishing before position 2's would send slide 3 first.  Ascending order is
+    the feature; the barrier is what guarantees it.
+
+    ``releasable_positions(state)`` decides WHAT is releasable, not
+    ``slides_since_cursor``, and the difference matters on an edit turn: the rows
+    for every untouched position already exist from a previous turn, so a
+    row-derived prefix would "release" the whole deck's stale HTML on the first
+    foreman wake — before the targeted builders had run — and the cursor would
+    then sit past the positions this turn actually rewrites.  Graph state knows
+    what THIS turn committed (``landed_positions`` / ``placeheld_positions`` are
+    turn-scoped); rows do not.  The polling path has no graph state and so uses
+    the row-derived twin, ``SessionManager.slides_since_cursor``; the two prefix
+    rules are pinned against each other by a test.
+
+    A **placeholder releases like any other position**: ``placeheld_positions`` is
+    inside ``releasable_positions``' committed set and ``commit_placeholder``
+    writes a real row, so there is no special case here either.
+
+    Returns the positions emitted (ascending), for the tests and for the caller's
+    logging — never raises, because emission is an optional side channel.
+    """
+    if get_event_emitter() is None:
+        return []  # sweeper tick / layer-1 state test: nothing to emit into
+    session_id = state.get("session_id")
+    if not session_id:
+        return []
+
+    cursor = get_slide_cursor()
+    pending = [p for p in releasable_positions(state) if p >= cursor]
+    if not pending:
+        return []
+
+    try:
+        rows = {
+            row["position"]: row
+            for row in SlideWriter().list_slides_in_position_order(
+                session_id, from_position=pending[0]
+            )
+        }
+    except Exception:
+        logger.warning(
+            "Could not read committed slides for release; skipping this wake",
+            exc_info=True,
+        )
+        return []
+
+    released: List[int] = []
+    for position in pending:
+        row = rows.get(position)
+        if row is None:
+            # State says committed but no row is readable.  STOP rather than skip:
+            # releasing the next position would deliver it ahead of this one.
+            logger.warning(
+                "Position %s is releasable but has no committed row; "
+                "holding the release here",
+                position,
+            )
+            break
+        emit_slide_ready(
+            position=position,
+            html=row["html"] or "",
+            scripts=row["scripts"] or "",
+            agent=row.get("modified_by") or row.get("created_by"),
+        )
+        released.append(position)
+
+    if released:
+        advance_slide_cursor(released[-1] + 1)
+    return released
 
 
 def _agent_config_for(contract: Optional[DesignContractRef]) -> AgentConfig:
@@ -977,6 +1063,13 @@ def foreman_node(state: dict) -> Dict[str, Any]:
       mutation of checkpointed state.
     """
     turn_id = state["turn_id"]
+
+    # 0. ws4d D3 — release committed slides BEFORE the ladder, so every wake
+    #    delivers what the previous superstep committed no matter which limb this
+    #    wake then takes.  Inside the ladder it would sit on one branch and miss
+    #    the others: the pending-fix limb returns immediately, and the
+    #    all-committed limb is the wake that carries the LAST slide of the deck.
+    _release_slides(state)
 
     # 1. A pending fix preempts dispatch entirely. A 31-slide deck stops
     #    dispatching new builders until every fix completes; fix rounds
