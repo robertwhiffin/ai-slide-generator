@@ -1300,6 +1300,13 @@ class TestSweepOnce:
         ]
 
 
+#: Captured at import, because `test_the_loop_sleeps_before_its_first_tick`
+#: patches `src.services.spec_sync.asyncio.sleep` — and `spec_sync.asyncio` IS the
+#: asyncio module, so that patch is GLOBAL for the duration of the with-block. A
+#: bounded wait built on the patched sleep would not wait at all.
+_REAL_ASYNC_SLEEP = asyncio.sleep
+
+
 async def _cancel_within_a_bounded_wait(task, seconds: float = 5.0) -> None:
     """Cancel *task* and require it to STOP, without ever hanging.
 
@@ -1324,7 +1331,7 @@ async def _cancel_within_a_bounded_wait(task, seconds: float = 5.0) -> None:
     for _ in range(int(seconds / 0.01)):
         if task.done():
             break
-        await asyncio.sleep(0.01)
+        await _REAL_ASYNC_SLEEP(0.01)
 
     assert task.done(), (
         f"the loop did not stop within {seconds}s of being cancelled. It is "
@@ -1389,9 +1396,10 @@ class TestTheLoop:
                 if calls:
                     break
                 await real_sleep(0.01)
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            # Bounded, for the same reason as its sibling: `suppress` around
+            # `await task` waits FOREVER on a loop that swallows the cancel, so
+            # this test hung rather than failed until it used the helper too.
+            await _cancel_within_a_bounded_wait(task)
 
         assert calls, "the loop never reached a tick"
         assert sleeps and sleeps[0] == 41, (
