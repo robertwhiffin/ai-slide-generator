@@ -28,6 +28,8 @@ from __future__ import annotations
 import contextvars
 import json
 import queue
+import re
+from pathlib import Path
 from typing import get_type_hints
 from unittest.mock import MagicMock
 
@@ -55,6 +57,10 @@ from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
 )
 
 TURN = "turn-release"
+
+#: Anchored from this file, never cwd-relative (the CI-collection guard's rule).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_API_TS = REPO_ROOT / "frontend" / "src" / "services" / "api.ts"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +180,53 @@ class TestTheSlideReadyEvent:
             assert payload["agent"] is None
             assert payload["slide_cursor"] is None
         assert [e.content for e in shipped[:1]] == ["hello"]
+
+
+class TestTheFrontendUnionMatchesTheEnum:
+    """The one guard the TypeScript change itself cannot provide.
+
+    Measured while sabotage-verifying this task: deleting `'slide_ready'` from
+    `frontend/src/services/api.ts`'s `StreamEventType` union produces **no red at
+    all** — `npm run typecheck` exits 0, because nothing consumes the member yet
+    (`handleStreamEvent` already has seven cases and rendering is ws4e's).  So the
+    union can silently go stale against the backend enum, and the symptom would be
+    a ws4e `case 'slide_ready'` that does not compile, or a live event the client
+    types as impossible.
+
+    Read as text on purpose: TypeScript types are erased at runtime, so there is
+    nothing to import.
+    """
+
+    def test_every_backend_event_type_is_in_the_typescript_union(self):
+        source = FRONTEND_API_TS.read_text()
+        match = re.search(
+            r"export type StreamEventType\s*=\s*([^;]+);", source
+        )
+        assert match, (
+            f"could not find the StreamEventType union in {FRONTEND_API_TS}; if it "
+            "moved, this guard needs its new home rather than deleting"
+        )
+        union = set(re.findall(r"'([a-z_]+)'", match.group(1)))
+        backend = {member.value for member in StreamEventType}
+        assert union == backend, (
+            f"the frontend union and the backend enum disagree: only in TS "
+            f"{sorted(union - backend)}, only in Python {sorted(backend - union)}"
+        )
+
+    def test_the_slide_ready_payload_fields_are_declared_on_the_ts_interface(self):
+        source = FRONTEND_API_TS.read_text()
+        interface = source.split("export interface StreamEvent {", 1)[1].split("}", 1)[0]
+        for declaration in (
+            "position?: number;",
+            "html?: string;",
+            "scripts?: string;",
+            "agent?: string;",
+            "slide_cursor?: number;",
+        ):
+            assert declaration in interface, (
+                f"{declaration!r} is missing from the StreamEvent interface; a "
+                "ws4e consumer reading it would not compile"
+            )
 
 
 # ===========================================================================

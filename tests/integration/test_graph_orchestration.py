@@ -889,3 +889,41 @@ def test_a_placeheld_position_is_released_like_any_other_across_a_real_turn(
     assert [event.position for event in events] == [0, 1, 2]
     assert "slide-placeholder-error" in events[1].html
     assert events[2].html == builder_html(2)
+
+
+def test_a_31_slide_turn_releases_every_position_once_across_three_batches(
+    graph_turn_env,
+):
+    """Three releasing wakes, so re-emission is observable.
+
+    The two tests above each have exactly ONE wake that releases anything, so
+    neither can see a cursor that fails to persist between wakes — verified by
+    sabotage: replacing ``advance_slide_cursor``'s in-place mutation with
+    ``ContextVar.set()`` left both of them green.  With 31 positions and position
+    1 slow the turn spans three batches (15, 15, 1), so a lost cursor re-emits
+    the whole released prefix on every wake and the count alone catches it.
+
+    ``max_concurrency=31`` matches the sibling prefix test: it throttles Pregel's
+    worker pool, not ``next_dispatch_batch``, which is capped at ``CAP``.
+    """
+    env = graph_turn_env
+    env.recorder.configure(slide_count=31, slow_positions={1}, slow_seconds=0.1)
+
+    emitter: queue.Queue = queue.Queue()
+    set_event_emitter(emitter)
+    try:
+        final = env.run(max_concurrency=31)
+    finally:
+        set_event_emitter(None)
+
+    assert releasable_positions(final) == list(range(31))
+
+    positions = [event.position for event in _slide_ready_events(emitter)]
+    assert positions == list(range(31)), (
+        f"expected each of 31 positions released exactly once, ascending; got "
+        f"{positions}"
+    )
+    assert len(env.wakes(final)) > 3, (
+        "the turn did not span multiple batches, so this scenario cannot see a "
+        f"cursor that fails to persist between wakes; wakes were {env.wakes(final)}"
+    )
