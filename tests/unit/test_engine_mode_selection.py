@@ -27,7 +27,7 @@ from src.api.services.chat_service import (
     resolve_engine_mode,
 )
 from src.database.models.session import SessionMessage, UserSession
-from tests.unit.conftest import _make_fake_db, _make_factory
+from tests.unit.conftest import _make_factory, _make_fake_db
 
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
@@ -78,6 +78,15 @@ def _add_message(factory, session_id: str, *, role: str, content: str,
 
 
 class TestThePhraseSelectsTheEngine:
+    def test_the_phrase_is_exactly_the_agreed_string(self):
+        """Pinned verbatim: the whole switch is this literal, typed by a human.
+
+        Every other test in this file builds its messages FROM the constant, so
+        they would all follow a changed value silently — this is the one that
+        would not.
+        """
+        assert AGENT_MODE_PHRASE == "USE AGENT MODE"
+
     @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
     def test_phrase_in_first_user_message_selects_graph(
         self, session_with_messages, _session_unit_engine, message_type
@@ -164,6 +173,28 @@ class TestStickiness:
         sid = session_with_messages([], assistant_messages=[_PHRASE_MESSAGE])
         with _patched(_make_factory(_session_unit_engine)):
             assert resolve_engine_mode(sid) == "monolith"
+
+    def test_an_assistant_message_that_predates_the_first_user_turn_is_ignored(
+        self, empty_session, _session_unit_engine
+    ):
+        """The version of the test above that a dropped `role` filter fails.
+
+        Sabotage found this: with the assistant row LATER than the user's, the
+        earliest-row rule alone still returns the user's message, so dropping
+        the role filter changes nothing.  An assistant/info row written before
+        the user's first turn is the shape that actually needs the filter.
+        """
+        factory = _make_factory(_session_unit_engine)
+        _add_message(
+            factory, empty_session, role="assistant", content=_PHRASE_MESSAGE,
+            message_type="llm_response", offset_seconds=-30,
+        )
+        _add_message(
+            factory, empty_session, role="user", content=_PLAIN_MESSAGE,
+            message_type="user_input",
+        )
+        with _patched(factory):
+            assert resolve_engine_mode(empty_session) == "monolith"
 
     def test_a_system_role_message_carrying_the_phrase_is_ignored(
         self, empty_session, _session_unit_engine
