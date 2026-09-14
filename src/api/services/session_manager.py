@@ -2666,7 +2666,7 @@ class SessionManager:
                 },
             )
 
-            return {
+            _restore_result = {
                 "version_number": version_number,
                 "description": version.description,
                 "deck": deck_dict,
@@ -2675,6 +2675,16 @@ class SessionManager:
                 "deleted_versions": deleted_count,
                 "deleted_messages": deleted_messages,
             }
+
+        # D6a: discard the pending spec-review marker unconditionally, AFTER the
+        # restore has committed.  The deck those pending edits described no longer
+        # exists; the restored version carries its own authoritative deck_spec_json
+        # snapshot.  discard_marker swallows exceptions so a marker-discard failure
+        # cannot undo the restore's successful response.
+        from src.services.spec_sync import discard_marker  # local: avoids circular import
+        discard_marker(session_id)
+
+        return _restore_result
 
     def get_current_version_number(self, session_id: str) -> Optional[int]:
         """Get the current (latest) version number for a session's slide deck.
