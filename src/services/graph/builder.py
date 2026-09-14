@@ -91,7 +91,7 @@ from src.services.graph.routers import (
     fixer_router,
     foreman_router,
 )
-from src.services.graph.state import GraphState
+from src.services.graph.state import GraphState, scoped
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,7 @@ def invoke_graph(
     *,
     emitter: Any = None,
     principal: Optional[str] = None,
+    describe_only: bool = False,
 ) -> Dict[str, Any]:
     """Run one turn of the graph for *session_id*.
 
@@ -204,6 +205,19 @@ def invoke_graph(
             channel, never a precondition for building a deck.
         principal: The acting user, for callers with no request context (ws4d's
             sweeper passes the marker's ``spec_dirty_by``).
+        describe_only: When true, a ``build`` or ``edit`` intent **ends the turn**
+            instead of routing to the foreman — see ``architect_router``.  ws4d's
+            arc-review sweeper passes it: that turn exists to re-describe the
+            deck a human hand-edited, and dispatching builders would overwrite
+            the very edits that scheduled it.
+
+    ``describe_only`` is turn-scoped, and it is wrapped HERE because this is the
+    only place that knows ``turn_id``.  It is written on **every** invocation,
+    ``False`` included, for the same reason the emitter is: turn state
+    accumulates across a thread, so a flag left from an earlier turn would
+    otherwise still read ``True`` and silently bar every later build on that
+    deck.  Belt and braces — ``scoped_vals`` also discards a wrapper whose turn
+    is not this one, so both the write and the read are turn-bounded.
 
     A fresh ``turn_id`` is minted per turn — it is the discriminator every
     turn-scoped reducer compares, so reusing one would let turn 2 inherit turn
@@ -230,6 +244,7 @@ def invoke_graph(
             "session_id": session_id,
             "turn_id": turn_id,
             "initiated_by": initiated_by,
+            "describe_only": scoped(turn_id, bool(describe_only)),
         }
     )
 
@@ -244,6 +259,7 @@ def invoke_graph(
             "session_id": session_id,
             "turn_id": turn_id,
             "has_emitter": emitter is not None,
+            "describe_only": bool(describe_only),
         },
     )
     return get_graph().invoke(state, config)
