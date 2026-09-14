@@ -2086,21 +2086,57 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            rows = (
-                db.query(SessionSlide)
+            # PHASE 1 — positions only.  The contiguity scan must start at
+            # position 0 to find a gap, but it does not need a single byte of
+            # payload to do it: this is an int column covered by
+            # ``ix_session_slides_session_position``.  Selecting whole rows here
+            # (the first form of this method) pulled every slide's HTML on every
+            # poll and then discarded the sub-cursor ones in Python — a whole deck
+            # over the wire every three seconds, on an app already timing out
+            # under load.  A SQL ``position >= cursor`` filter would be WRONG, not
+            # merely different: the lowest surviving row would read as the start of
+            # the deck and release over a gap.
+            positions = [
+                position
+                for (position,) in db.query(SessionSlide.position)
                 .filter(SessionSlide.session_id == deck_owner.id)
                 .order_by(SessionSlide.position)
                 .all()
-            )
+            ]
 
-            released: List[Dict[str, Any]] = []
+            window: List[int] = []
             expected = 0
-            for row in rows:
-                if row.position != expected:
+            for position in positions:
+                if position != expected:
                     break  # gap: nothing past this point is releasable
                 expected += 1
-                if row.position < floor:
+                if position < floor:
                     continue  # already delivered to this caller
+                window.append(position)
+
+            if not window:
+                return []
+
+            # PHASE 2 — payloads for the released window ONLY.  A client re-polling
+            # a finished 31-slide deck now costs 31 integers and no payload at all.
+            rows = {
+                row.position: row
+                for row in db.query(SessionSlide)
+                .filter(
+                    SessionSlide.session_id == deck_owner.id,
+                    SessionSlide.position.in_(window),
+                )
+                .all()
+            }
+
+            released: List[Dict[str, Any]] = []
+            for position in window:
+                row = rows.get(position)
+                if row is None:
+                    # Phase 1 saw it and phase 2 did not.  STOP rather than skip:
+                    # returning the next position would deliver it out of order,
+                    # which is the one thing this query exists to prevent.
+                    break
                 released.append(
                     {
                         "position": row.position,
