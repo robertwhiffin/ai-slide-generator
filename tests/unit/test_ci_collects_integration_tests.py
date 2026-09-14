@@ -32,7 +32,15 @@ INTEGRATION_DIR = REPO_ROOT / "tests" / "integration"
 # conditions unavailable in CI.  Each must have a non-empty reason; an empty
 # reason fails the test.
 # ---------------------------------------------------------------------------
-DELIBERATE_EXCLUSIONS: dict[str, str] = {}
+DELIBERATE_EXCLUSIONS: dict[str, str] = {
+    "test_graph_live_real_model.py": (
+        "ws4c's real-model Definition-of-done run. Marked `live` and MUST NOT run in CI: "
+        "it calls a Databricks serving endpoint with real spend, and the `unit-tests` job "
+        "applies no `-m` filter, so being named in any job would run it on every PR. It "
+        "self-skips without both a reachable PostgreSQL and Databricks credentials, and its "
+        "spend is bounded by an explicit call budget rather than a recursion limit."
+    ),
+}
 
 
 def _collect_run_blocks() -> list[str]:
