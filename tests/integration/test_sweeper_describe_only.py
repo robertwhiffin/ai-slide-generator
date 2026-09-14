@@ -555,6 +555,16 @@ class TestTheHumansSessionListOrdering:
     `sessions.py:207` orders by `last_activity.desc()` and `:232` returns it.
     Through the real graph, since it is `architect_node`'s deck-level write that
     reaches the column, not anything in `spec_sync`.
+
+    One residual, measured and recorded rather than fixed here: the deck-level
+    write is not the only writer of that column.  `SessionManager.add_message`
+    moves it too, and the graph calls that from `foreman_node` (never reached on a
+    describe-only turn) and from the failure-notice helper at `nodes.py:529` —
+    whose own docstring notes it "survives ``emitter=None`` (the sweeper path)".
+    So a describe-only turn whose node RAISES would still move `last_activity`,
+    and would post a chat message into the human's session besides.  The
+    suppressed-direction test below is the guard that would catch it becoming true
+    on the success path.
     """
 
     @staticmethod
@@ -604,7 +614,21 @@ class TestTheHumansSessionListOrdering:
             "the human's session list re-sorts minutes after they stopped editing"
         )
 
-    def test_a_NORMAL_user_turn_still_moves_it(self, sweeper_env):
+    def test_a_NORMAL_user_turn_still_moves_it_end_to_end(self, sweeper_env):
+        """The end-to-end property, and it claims LESS than it looks like it does.
+
+        MEASURED: suppressing the writer's `last_activity` touch on EVERY write
+        left this test green, because `SessionManager.add_message`
+        (`session_manager.py:1377`) also moves the column and `foreman_node` calls
+        it on a build turn.  So a normal turn has at least two independent writers
+        of it and this test cannot attribute the movement to the writer.
+
+        It is kept because the user-facing property is worth pinning — the session
+        list must re-order after a real turn — but **the load-bearing paired
+        direction for the writer's own contribution is
+        `test_the_DEFAULT_still_moves_last_activity` in
+        tests/unit/test_deck_level_writer.py**, which is where that sabotage fires.
+        """
         env = sweeper_env
         env.recorder.slide_count = 3
         env.run()
@@ -613,7 +637,8 @@ class TestTheHumansSessionListOrdering:
         invoke_graph(env.session_id, {"architect_message": "add another slide"})
 
         assert self._last_activity(env) > planted, (
-            "a normal user turn no longer moves last_activity"
+            "a normal user turn no longer moves last_activity at all — neither "
+            "the deck-level write nor add_message"
         )
 
 
