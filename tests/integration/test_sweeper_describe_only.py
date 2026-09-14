@@ -549,6 +549,74 @@ class TestTheDecksClientVisibleModifiedTimestamp:
         )
 
 
+class TestTheHumansSessionListOrdering:
+    """A describe-only arc review does not re-sort the human's session list.
+
+    `sessions.py:207` orders by `last_activity.desc()` and `:232` returns it.
+    Through the real graph, since it is `architect_node`'s deck-level write that
+    reaches the column, not anything in `spec_sync`.
+    """
+
+    @staticmethod
+    def _backdate_sessions(env, seconds: float = 3600.0) -> datetime:
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        db = env.factory()
+        try:
+            db.execute(
+                text("UPDATE user_sessions SET last_activity = :at"), {"at": stamp}
+            )
+            db.commit()
+        finally:
+            db.close()
+        return stamp
+
+    @staticmethod
+    def _last_activity(env) -> datetime:
+        db = env.factory()
+        try:
+            return (
+                db.query(UserSession)
+                .filter(UserSession.session_id == env.session_id)
+                .one()
+                .last_activity
+            )
+        finally:
+            db.close()
+
+    def test_a_describe_only_review_does_not_move_last_activity(self, sweeper_env):
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        mark_dirty(env.session_id, _AUTHOR)
+
+        spec_before = env.deck_row().deck_spec_json
+        env.recorder.slide_count = 4
+        planted = self._backdate_sessions(env)
+
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+
+        assert env.deck_row().deck_spec_json != spec_before, (
+            "the arc review wrote no new spec, so an unmoved timestamp proves "
+            "nothing about suppression"
+        )
+        assert self._last_activity(env) == planted, (
+            f"the arc review moved last_activity to {self._last_activity(env)}; "
+            "the human's session list re-sorts minutes after they stopped editing"
+        )
+
+    def test_a_NORMAL_user_turn_still_moves_it(self, sweeper_env):
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        planted = self._backdate_sessions(env)
+
+        invoke_graph(env.session_id, {"architect_message": "add another slide"})
+
+        assert self._last_activity(env) > planted, (
+            "a normal user turn no longer moves last_activity"
+        )
+
+
 class TestTheMarkerIsStillDequeued:
     def test_a_describe_only_review_clears_the_marker(self, sweeper_env):
         """Blocking the foreman must not block the queue: if the marker survived
