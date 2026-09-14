@@ -214,9 +214,24 @@ DELTA: +399 collected (4589 -> 4988), reconciled EXACTLY. Counts per file with
   The DoD requires the ORIGINAL THIRTEEN to still collect and pass where they already live; all
   thirteen do (203 passed). Check per-file presence, never the count.
 
+REAL-MODEL RUN: DONE, 2026-09-14, and the DoD item is MET.
+  tests/integration/test_graph_live_real_model.py (opt-in, `live`-marked, excluded from CI)
+  drove the COMPILED graph against databricks-claude-opus-4-6 on a 3-slide deck. 12 model
+  calls, 116s. Recorded call shape:
+
+      architect 1 | builder 3 | build_reviewer 3 | fixer 2 | fix_reviewer 2 | deck_reviewer 1
+
+  Read against the invariants: THREE reviewers for THREE builders, i.e. one per SLIDE and not
+  one per BATCH -- the re-fan holding against real model output, where a static edge collapses
+  N branches to 1. Two positions genuinely needed a fix (the real reviewers found objective
+  defects on 2 of 3 slides), and each entered the fixer EXACTLY ONCE. Deck review fired ONCE.
+  Ascending release asserted as a prefix. Every assertion is made from the recorded calls and
+  the committed rows, never from anything the model said about itself.
+
+  What it still does NOT prove: prose quality. The seven skills ship deliberate placeholder
+  prompts and real authoring is a separate track.
+
 NOT VERIFIED BY THIS SECTION, and deliberately not inferred:
-  * No run against a real model. The plan's DoD asks for a multi-slide deck built end to end
-    against a live model; ws4c ships stub-agent coverage of the compiled graph only.
   * No CI observation. CI has never completed a run on ws4a or ws4b either, so ws4c's
     integration-graph job has never executed on a runner. Note the job was ALSO not gating
     anything until late in the build -- it sat in test-summary's `needs:` and echo block but not

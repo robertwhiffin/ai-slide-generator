@@ -149,8 +149,19 @@ test it promised could actually fail. Treat every ruling as a claim.
 
 ## 7. What ws4c leaves open
 
-- **No run against a real model.** The DoD asks for a multi-slide deck built end to end against a live
-  model; ws4c ships stub-agent coverage of the compiled graph only. **Reported as NOT met.**
+- **The real-model run is DONE and the DoD item is MET** (2026-09-14).
+  `tests/integration/test_graph_live_real_model.py` — opt-in via `TELLR_LIVE_GRAPH_RUN=1`, `live`-marked,
+  in ws4a's `DELIBERATE_EXCLUSIONS` because it must never run in CI. It drove the compiled graph against
+  `databricks-claude-opus-4-6` on a 3-slide deck: 12 calls, 116s,
+  `architect 1 | builder 3 | build_reviewer 3 | fixer 2 | fix_reviewer 2 | deck_reviewer 1`.
+  **Three reviewers for three builders is the re-fan holding against real output** — a static edge gives 1.
+  Two positions genuinely needed a fix and each entered the fixer once; deck review fired once.
+  **It does not prove prose quality** — the skills ship placeholder prompts by design.
+  Spend is bounded by a call-budget wrapper rather than a recursion limit, because `ask_data` has no round
+  bound and `tool_grants` is dead metadata, so an architect/analyst ping-pong is more likely, not less.
+  **Run stage 1 first** (one call) — it asks whether a real model on placeholder prose returns a
+  `DeckSpec` that survives its validators, which is the question that decides whether stage 2 is worth
+  paying for.
 - **No CI observation.** CI has never completed a run on ws4a or ws4b either, so `integration-graph` has
   never executed on a runner. **Reported as NOT met.**
 - **Everything ran on SQLite.** Two behaviours are uncharacterised on PostgreSQL: concurrent failing
