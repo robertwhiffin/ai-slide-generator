@@ -642,6 +642,10 @@ class TestTheCompleteEvent:
         events = graph_chat_env.run(is_first_message=False)
 
         assert events[-1].type == StreamEventType.COMPLETE
+        assert _types(events).count(StreamEventType.COMPLETE) == 1, (
+            "more than one COMPLETE: the graph branch fell through into the "
+            "monolith path, which yields a second one"
+        )
         slides = events[-1].slides
         assert slides is not None, "COMPLETE carried no deck"
         assert len(slides["slides"]) == 3
