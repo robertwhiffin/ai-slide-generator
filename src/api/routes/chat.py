@@ -26,7 +26,7 @@ from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.routes._authz import _check_deck_permission_for_session
-from src.api.services.chat_service import get_chat_service
+from src.api.services.chat_service import get_chat_service, resolve_engine_mode
 from src.api.services.job_queue import enqueue_job
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
@@ -454,6 +454,13 @@ async def send_message_streaming(
             detail="Session is currently processing another request. Please wait.",
         )
 
+    # ws4d D2 — the engine for this turn is resolved HERE, in the chat route,
+    # and passed down.  Not in send_message_streaming and not in the job queue:
+    # MCP's enqueue_create_job drains through the same worker as POST
+    # /chat/async, so a resolution downstream of enqueue_job would put MCP on
+    # the graph.  Resolution reads the database, so it runs off the event loop.
+    engine_mode = await asyncio.to_thread(resolve_engine_mode, request.session_id)
+
     async def generate_events() -> AsyncGenerator[str, None]:
         """Generate SSE events from the chat service."""
         import queue
@@ -484,6 +491,7 @@ async def send_message_streaming(
                     if request.slide_context
                     else None,
                     image_ids=request.image_ids,
+                    engine_mode=engine_mode,
                 ):
                     event_queue.put(event)
             except Exception as e:
@@ -637,6 +645,14 @@ async def submit_chat_async(
             request_id=request_id,
         )
 
+        # ws4d D2 — resolved AFTER the user message is persisted just above,
+        # because resolve_engine_mode reads the deck's EARLIEST role='user'
+        # message: on turn 1 that row has to exist already or the phrase in the
+        # very first message would resolve to monolith.
+        engine_mode = await asyncio.to_thread(
+            resolve_engine_mode, request.session_id
+        )
+
         # Queue for processing
         await enqueue_job(
             request_id,
@@ -648,6 +664,10 @@ async def submit_chat_async(
                 ),
                 "is_first_message": is_first_message,
                 "image_ids": request.image_ids,
+                # `engine_mode`, NEVER `mode`: `mode` is already MCP's
+                # generate/edit flag in this same payload (mcp_server.py), whose
+                # values are neither "graph" nor "monolith".
+                "engine_mode": engine_mode,
             },
         )
 

@@ -936,6 +936,7 @@ class ChatService:
         request_id: Optional[str] = None,
         image_ids: Optional[List[str]] = None,
         is_first_message_override: Optional[bool] = None,
+        engine_mode: str = "monolith",
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -953,6 +954,12 @@ class ChatService:
             is_first_message_override: If set, overrides the DB-based first-message
                 detection. Used by the async path where the user message is
                 persisted before the job runs.
+            engine_mode: ``"graph"`` runs the turn on the LangGraph engine,
+                ``"monolith"`` (the default) on the shipped agent. Resolved by
+                the CHAT ROUTES and passed in — never resolved here. The default
+                is what keeps MCP on the monolith: MCP reaches this method
+                through the same job queue as ``POST /chat/async`` but builds a
+                payload with no ``engine_mode`` key.
 
         Yields:
             StreamEvent objects for real-time display
@@ -1012,6 +1019,27 @@ class ChatService:
                 "Persisted user message",
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
+
+        # ws4d D2 — the graph branch.  Placed AFTER the user message is
+        # persisted (the resolver upstream reads that row) and BEFORE anything
+        # monolith-specific runs, so intent detection, the clarification
+        # checks and `_build_agent_for_session` are all skipped on a graph turn
+        # and the monolith path below is left byte-identical: it is this PR's
+        # comparison baseline.
+        #
+        # `engine_mode` arrives as a parameter and is never resolved here.  It
+        # defaults to "monolith", which is what excludes MCP structurally.
+        if engine_mode == "graph":
+            logger.info(
+                "Routing this turn through the LangGraph engine",
+                extra={"session_id": session_id, "request_id": request_id},
+            )
+            yield from self._send_message_streaming_graph(
+                session_id,
+                message,
+                is_first_message=is_first_message,
+            )
+            return
 
         # Issue 2 FIX: Detect intent ONCE and store for reuse throughout the function
         _is_edit = self._detect_edit_intent(message)
@@ -1660,6 +1688,187 @@ class ChatService:
                 "has_slide_deck": slide_deck_dict is not None,
                 "had_conflict_note": conflict_note is not None,
             },
+        )
+
+        # Collect title generated in parallel (if applicable)
+        if title_thread is not None:
+            title_thread.join(timeout=10)
+            if "title" in title_container:
+                yield StreamEvent(
+                    type=StreamEventType.SESSION_TITLE,
+                    session_title=title_container["title"],
+                )
+
+    def _send_message_streaming_graph(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        is_first_message: bool = False,
+    ) -> Generator[StreamEvent, None, None]:
+        """Run one turn on the LangGraph engine, yielding events as they arrive.
+
+        The graph limb of :meth:`send_message_streaming` (ws4d D2), reached only
+        when the caller resolved ``engine_mode == "graph"``.
+
+        Three things here are load-bearing, and each of the three fails
+        SILENTLY when it is dropped — no exception, nothing in the logs:
+
+        **``invoke_graph`` runs in a worker thread.**  It is synchronous and
+        blocks until the whole turn completes, so calling it inline would mean
+        this generator could yield nothing at all until the deck was finished:
+        no event could reach the client as it happened, and incremental slide
+        delivery would be impossible by construction.  The thread pushes into
+        ``event_queue`` and signals completion with a ``None`` sentinel, which
+        is exactly the shape the monolith's ``run_agent`` uses.
+
+        **The context is copied BEFORE the thread is spawned.**  ``contextvars``
+        do not cross a bare ``threading.Thread``, so without the copy
+        ``get_current_user()`` inside ``invoke_graph`` returns ``None``,
+        ``initiated_by`` is ``None``, and every ``session_slides`` row this turn
+        INSERTs carries a NULL author.  (An UPDATE would *preserve* the author
+        already on the row, so only a fresh INSERT shows the damage.)
+        ``copy_context()`` snapshots at SPAWN — anything set after it is
+        invisible inside the thread.
+
+        **The title thread takes its OWN copy.**  One ``Context`` object cannot
+        be entered by two threads at once, which is why the monolith takes a
+        second copy for precisely this thread.
+
+        The queue is created HERE and handed in as ``invoke_graph(emitter=...)``
+        rather than installed in the ContextVar directly: ``invoke_graph`` owns
+        that var's lifecycle and resets it on every invocation.  A
+        ``queue.Queue`` also cannot travel through ``GraphState`` — it is not
+        serialisable through the checkpointer, and undeclared state keys are
+        silently dropped.
+
+        Args:
+            session_id: Session whose deck this turn builds.  Also the
+                checkpointer's ``thread_id``.
+            message: The user's request, seeded onto ``architect_message`` — the
+                ONLY key this path puts in the initial state.  ``GraphState`` is
+                an exhaustive contract: an undeclared key would be discarded
+                silently, and nothing brand-related is resolved here because
+                ``architect_node`` is the sole resolver of the design contract
+                and the template bytes.
+            is_first_message: Whether to generate a session title this turn.
+
+        Yields:
+            Every ``StreamEvent`` the graph emits, then ``COMPLETE`` carrying
+            the deck, then ``SESSION_TITLE`` when a title was generated.
+        """
+        from src.services.graph.builder import invoke_graph
+
+        session_manager = get_session_manager()
+
+        event_queue: queue.Queue = queue.Queue()
+        error_container: Dict[str, Exception] = {}
+        title_container: Dict[str, str] = {}
+
+        # Capture context BEFORE starting thread to preserve user auth
+        ctx = contextvars.copy_context()
+
+        def run_graph():
+            """Run the graph in a separate thread, pushing events to the queue."""
+            try:
+                invoke_graph(
+                    session_id,
+                    {"architect_message": message},
+                    emitter=event_queue,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Graph turn failed: {e}",
+                    extra={"session_id": session_id},
+                    exc_info=True,
+                )
+                error_container["error"] = e
+                event_queue.put(
+                    StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                )
+            finally:
+                # Signal completion by putting None
+                event_queue.put(None)
+
+        def run_title_gen():
+            """Generate a session title in parallel with the graph turn.
+
+            The same step the monolith runs at its own first message.  Without
+            it a graph-mode session would stay untitled forever, because the
+            graph branch bypasses the monolith entirely.  Failing to name a
+            session must never fail the turn, so this catches and logs.
+            """
+            try:
+                from databricks_langchain import ChatDatabricks
+
+                from src.core.databricks_client import get_user_client
+                from src.core.defaults import DEFAULT_CONFIG
+
+                naming_model = ChatDatabricks(
+                    endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
+                    max_tokens=50,
+                    temperature=0.3,
+                    workspace_client=get_user_client(),
+                )
+                generated_title = generate_session_title(message, naming_model)
+                if generated_title:
+                    session_manager.rename_session(session_id, generated_title)
+                    title_container["title"] = generated_title
+                    logger.info(
+                        "Auto-named graph-mode session from first message",
+                        extra={
+                            "session_id": session_id,
+                            "generated_title": generated_title,
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to auto-name session",
+                    extra={"session_id": session_id},
+                    exc_info=True,
+                )
+
+        # Start the graph thread with context preserved for user auth
+        graph_thread = threading.Thread(
+            target=lambda: ctx.run(run_graph), daemon=True
+        )
+        graph_thread.start()
+
+        # Start title generation in parallel on first message.
+        # Uses a separate context copy since ctx.run() can only be entered by
+        # one thread at a time.
+        title_thread: Optional[threading.Thread] = None
+        if is_first_message:
+            title_ctx = contextvars.copy_context()
+            title_thread = threading.Thread(
+                target=lambda: title_ctx.run(run_title_gen), daemon=True
+            )
+            title_thread.start()
+
+        # Yield events as they arrive
+        while True:
+            event = event_queue.get()
+            if event is None:
+                break
+            yield event
+
+        # Check for errors
+        if "error" in error_container:
+            raise error_container["error"]
+
+        # The graph wrote session_slides rows behind this process's deck cache,
+        # so drop the cached deck rather than serve a deck that predates the turn.
+        self._invalidate_deck_cache(session_id)
+
+        yield StreamEvent(
+            type=StreamEventType.COMPLETE,
+            slides=self.get_slides(session_id),
+            metadata={"engine_mode": "graph"},
+        )
+
+        logger.info(
+            "Graph-mode streaming message completed",
+            extra={"session_id": session_id},
         )
 
         # Collect title generated in parallel (if applicable)
