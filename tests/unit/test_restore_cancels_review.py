@@ -1,12 +1,15 @@
 """D6a: restoring a save point discards the pending spec-review marker.
 
-Three test intents (from the task brief):
+Test intents:
   1. Restoring discards the marker — including one re-dirtied AFTER a sweeper
      claim, which clear_marker would KEEP.  Both directions pinned, one test each.
   2. Restoring does NOT call run_arc_review (absence assertion, paired with a
      positive assertion that the restore actually happened).
   3. The restored spec comes from the VERSION's snapshot, not the live deck's
      pre-restore value (both sides use DISTINCTIVE, different values).
+  4. discard_marker runs AFTER the restore transaction commits, not inside it.
+     A restore that fails mid-transaction must not clear the marker.
+  5. A contributor-session restore discards the OWNER's marker (owner resolution).
 
 All tests drive the real in-memory SQLite engine through SessionManager, the same
 way test_spec_sync_marker.py does.  Both get_db_session references are patched to
@@ -51,15 +54,14 @@ _LIVE_SPEC = '{"arc": "live-deck-pre-restore-distinctive-bbb222"}'
 
 @contextlib.contextmanager
 def _patched_both(factory):
-    """Patch both get_db_session refs so restore_version and discard_marker share one DB."""
-    fake = _make_fake_db(factory)
-    with patch(_SPEC_SYNC_DB, fake), patch(_MANAGER_DB, fake):
-        yield
+    """Patch both get_db_session refs so restore_version and discard_marker share one DB.
 
-
-@contextlib.contextmanager
-def _patched_spec_only(factory):
-    """Patch only spec_sync's get_db_session — for calling spec_sync functions directly."""
+    Used for all tests that call either restore_version or spec_sync functions.
+    Patching _MANAGER_DB is harmless for pure spec_sync calls since _resolve_owner_deck
+    passes the already-open db session directly (no second get_db_session call inside it).
+    One function, one behaviour — _patched_spec_only was a duplicate with a misleading
+    name and has been folded here.
+    """
     fake = _make_fake_db(factory)
     with patch(_SPEC_SYNC_DB, fake), patch(_MANAGER_DB, fake):
         yield
@@ -195,7 +197,7 @@ class TestDiscardVsClearOnReDirtiedMarker:
         )
         marker_at = row.spec_dirty_at
 
-        with _patched_spec_only(deck_with_marker._factory):
+        with _patched_both(deck_with_marker._factory):
             result = clear_marker(deck_with_marker.session_id)
 
         assert result is False, (
@@ -357,4 +359,168 @@ class TestRestoredSpecFromVersionSnapshot:
         assert _LIVE_SPEC != _VERSION_SPEC, (
             "the test spec constants are equal — the equality/inequality assertions "
             "above cannot distinguish a restore from a no-op"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test intent 4 — discard_marker runs AFTER the restore transaction commits
+# ---------------------------------------------------------------------------
+#
+# Moving discard_marker inside the with get_db_session() block leaves all six
+# original tests green, because discard_marker opens its own session and commits
+# independently.  The risk is concrete: a restore that fails mid-transaction
+# leaves the marker cleared (discard committed) while the deck is unrestored
+# (outer transaction rolled back).  This test pins that scenario.
+
+
+class TestDiscardOrderedAfterCommit:
+    """discard_marker must run after the restore's DB transaction commits."""
+
+    def test_marker_survives_a_failed_restore(self, deck_with_marker):
+        """If the restore fails inside its transaction, the marker must not be cleared.
+
+        Injection point: _prune_slide_rows_beyond is patched to raise.  This
+        function is called at the END of the restore's with get_db_session() block,
+        after all deck and slide-row writes, so it fails as late as possible
+        inside the transaction.
+
+        Under the CORRECT ordering (discard after the with block):
+          - _prune_slide_rows_beyond raises → transaction rolls back
+          - discard_marker is never reached (exception propagates through restore_version)
+          - marker is still present ✓
+
+        Under the SABOTAGE (discard moved inside the with block, before
+        _prune_slide_rows_beyond):
+          - discard_marker opens its own session, clears the marker, commits
+          - _prune_slide_rows_beyond raises → outer transaction rolls back (deck unchanged)
+          - marker is gone, deck is unrestored
+          - this test goes red on: assert deck_row().spec_dirty_at is not None
+
+        The reviewer confirmed this sabotage: it leaves all six original tests
+        green while this test turns red.
+        """
+        deck_with_marker.set_marker(age_seconds=300, author=_AUTHOR)
+        assert deck_with_marker.deck_row().spec_dirty_at is not None, (
+            "precondition: marker is present before the (failed) restore"
+        )
+
+        with patch(
+            "src.api.services.session_manager._prune_slide_rows_beyond",
+            side_effect=RuntimeError("forced failure inside restore transaction"),
+        ):
+            with _patched_both(deck_with_marker._factory):
+                with pytest.raises(
+                    RuntimeError, match="forced failure inside restore transaction"
+                ):
+                    deck_with_marker._sm.restore_version(
+                        deck_with_marker.session_id, 1
+                    )
+
+        # The restore raised — so only the marker assertion can redden this test.
+        # If discard_marker ran inside the transaction (mis-ordered), the marker
+        # committed in its own session while the deck changes rolled back.
+        assert deck_with_marker.deck_row().spec_dirty_at is not None, (
+            "marker was cleared even though the restore failed: discard_marker ran "
+            "inside the restore transaction instead of after it committed — the deck "
+            "is unrestored but the sweeper will never re-describe it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test intent 5 — contributor-session restore discards the OWNER's marker
+# ---------------------------------------------------------------------------
+#
+# This is the workstream's signature blind spot: standalone-session tests
+# cannot distinguish "resolved the owner" from "happened to be the owner".
+# A restore called with a contributor's session_id must discard the OWNER's
+# marker, not the contributor's (which does not exist).
+
+
+_MINIMAL_DECK_DICT = {
+    "title": "Contributor Test Deck",
+    "css": "",
+    "external_scripts": [],
+    "scripts": "",
+    "slides": [],
+}
+
+
+class TestContributorSessionDiscardMarker:
+    """A restore through a contributor session discards the owner's marker."""
+
+    def test_contributor_restore_discards_owner_marker(self, contributor_session):
+        """Restore via a contributor session_id clears the OWNER's marker.
+
+        The contributor's own slide_deck is None.  If discard_marker resolved
+        the CALLER's deck instead of following the FK to the owner's deck, it
+        would find no deck and return False — the owner's marker would survive.
+
+        Sabotage: replace _resolve_owner_deck in discard_marker with a direct
+        caller-deck lookup:
+            return session, session.slide_deck  # no FK walk
+        For a contributor, session.slide_deck is None → discard_marker returns
+        False → owner's marker survives → this test goes red.
+        """
+        # Create a version via the contributor's session_id so there is something
+        # to restore to.  create_version resolves to the owner's deck, so the
+        # version is stored there.
+        with _patched_both(contributor_session._factory):
+            contributor_session._sm.create_version(
+                session_id=contributor_session.contributor_session_id,
+                description="initial contributor snapshot",
+                deck_dict=_MINIMAL_DECK_DICT,
+            )
+
+        # Set the owner's marker directly (bypassing mark_dirty to avoid the
+        # route-only placement rule and to control the timestamp precisely).
+        db = contributor_session._factory()
+        try:
+            owner_pk = contributor_session._owner_pk(
+                contributor_session._owner_session_id
+            )
+            deck = (
+                db.query(SessionSlideDeck)
+                .filter(SessionSlideDeck.session_id == owner_pk)
+                .one()
+            )
+            db.execute(
+                text(
+                    "UPDATE session_slide_decks "
+                    "SET spec_dirty_at = :at, spec_dirty_by = :by "
+                    "WHERE id = :id"
+                ),
+                {
+                    "at": datetime.utcnow() - timedelta(seconds=300),
+                    "by": _AUTHOR,
+                    "id": deck.id,
+                },
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        # Confirm the marker is on the OWNER's deck before the restore.
+        assert contributor_session.owner_deck_row().spec_dirty_at is not None, (
+            "precondition: the owner's deck has a marker"
+        )
+
+        # Restore through the contributor's session_id.
+        with _patched_both(contributor_session._factory):
+            result = contributor_session._sm.restore_version(
+                contributor_session.contributor_session_id, 1
+            )
+
+        # The restore must have succeeded (paired assertion).
+        assert result["version_number"] == 1, (
+            "restore_version returned no result via the contributor's session_id"
+        )
+
+        # The owner's marker must be gone.
+        assert contributor_session.owner_deck_row().spec_dirty_at is None, (
+            "the owner's marker survived a restore via the contributor's session_id: "
+            "discard_marker resolved the contributor's own deck (None) instead of "
+            "the owner's deck — the sweeper will re-describe a replaced deck"
         )
