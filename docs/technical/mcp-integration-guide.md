@@ -1,6 +1,6 @@
 # Tellr MCP Integration Guide
 
-**One-line:** How to call tellr's deck-generation tools from another app or from an MCP-compatible agent, with the gotchas we learned the hard way.
+**One-line:** How to call tellr's deck-generation tools from another app, from an MCP-compatible agent, or from Genie One, with the gotchas we learned the hard way.
 
 This is a **how-to** for builders. For the protocol-level reference (tool schemas, JSON-RPC shapes, response payloads) see [`mcp-server.md`](./mcp-server.md).
 
@@ -8,14 +8,15 @@ This is a **how-to** for builders. For the protocol-level reference (tool schema
 
 ## 1. Which integration pattern is yours?
 
-Two distinct patterns, different auth, different code:
+Three distinct patterns, different auth, different setup:
 
 | Pattern | When to use | Auth source |
 |---|---|---|
 | **A. Databricks App → tellr** (in-workspace) | You're building another Databricks App that should create decks on behalf of the signed-in user. | Identity headers injected by the Databricks Apps proxy (`x-forwarded-email`, `x-forwarded-user`). No token — tellr trusts the proxy. |
 | **B. External agent → tellr** (laptop / CI / CLI) | You're wiring tellr into an MCP client like Claude Code, Claude Desktop, or Cursor, or calling from a script outside Databricks Apps. | User OAuth (U2M) access token from a `databricks-cli` profile, sent as `Authorization: Bearer`. **PATs do not work against Databricks Apps** — see §3.1. |
+| **C. Genie One → tellr** (Unity Catalog connection) | You want Genie One users to create decks by asking for them in natural language. | OAuth user-to-machine (per user), configured on a metastore-level Unity Catalog HTTP connection with the MCP flag set — no client-side config. See §4. |
 
-Pick one and jump to its section. If you need both (e.g., a tool that runs in an app but also has a local-dev mode), build each path separately rather than trying to unify them — the auth models are fundamentally different.
+Pick one and jump to its section. If you need more than one (e.g., a tool that runs in an app but also has a local-dev mode), build each path separately rather than trying to unify them — the auth models are fundamentally different.
 
 ---
 
@@ -407,9 +408,98 @@ For unattended runs longer than an hour (CI, background agents):
 
 ---
 
-## 4. Reference appendix
+## 4. Part C — Genie One → tellr (via a Unity Catalog connection)
 
-### 4.1 Tool catalog summary
+Genie One reaches tellr through a **Unity Catalog HTTP connection** that is flagged as an MCP connection — there is no client-side config file to edit. Once the connection exists and is enabled, a Genie One user can simply ask for a deck and Genie calls tellr's MCP tools for them.
+
+Auth is **OAuth user-to-machine (per user)**: each Genie user consents once, and tellr sees that user's own identity. Decks are therefore attributed to the person who asked, and tellr's permissions model applies unchanged.
+
+Setup has four stages — an account-level OAuth app, the workspace connection, grants, then enabling the connector in Genie One. Do them in order: the connection needs the client ID and secret minted in stage 1.
+
+### 4.1 Stage 1 — Create the OAuth app in the account console
+
+1. Sign in to the **account console** and go to **Settings → App connections → Create new connection**.
+2. **Redirect URL:** the workspace URL where the tellr app is deployed.
+3. **OAuth scope:** `all-apis`.
+4. Create the connection, then **note the client ID and client secret** — both are needed in stage 2, and the secret is shown only once.
+
+### 4.2 Stage 2 — Create the Unity Catalog connection in the workspace
+
+In the workspace, go to **Catalog** and create a new connection.
+
+> **The connection must be created at the metastore level, not inside a schema.** A schema-scoped connection does not offer the "is MCP connection" option needed on page 3 below. If that checkbox is missing later, this is the reason — start again at the metastore level.
+
+**Page 1 — connection basics**
+
+| Field | Value |
+|---|---|
+| Connection type | **HTTP** |
+| Connection auth | **OAuth user to machine (per user)** |
+| Provider | **Manual configuration** |
+
+**Page 2 — host and OAuth**
+
+| Field | Value |
+|---|---|
+| Host | tellr's app URL, e.g. `https://<tellr-app>.databricksapps.com` |
+| Client ID | from stage 1 |
+| Client secret | from stage 1 |
+| Authorization endpoint | `https://<your-workspace-url>/oidc/v1/authorize` |
+| OAuth scope | `all-apis` |
+
+**Page 3 — MCP settings**
+
+| Field | Value |
+|---|---|
+| Is MCP connection | **ticked** |
+| Token endpoint | `https://<your-workspace-url>/oidc/v1/token` |
+| Base path | `/mcp` |
+
+Click **Create connection**.
+
+### 4.3 Stage 3 — Grant access to the connection
+
+Everyone who should call tellr from Genie One needs **`USE CONNECTION`** on the connection. Grant it in Catalog Explorer (select the connection → **Permissions** → **Grant**), or in SQL:
+
+```sql
+GRANT USE CONNECTION ON CONNECTION <connection_name> TO `<group-or-user>`;
+```
+
+### 4.4 Stage 4 — Enable the connector in Genie One
+
+1. Confirm the **Third Party Connectors for Agents** preview is enabled for the workspace (workspace settings → **Previews**).
+2. In Genie One, open the **Customizations** menu → **Connectors**.
+3. Find the tellr connection created in stage 2 and **enable** it.
+
+That completes the setup.
+
+### 4.5 Verify
+
+In Genie One, ask:
+
+> make a test deck in tellr
+
+Genie should call the tellr MCP tools. The first call sends you through OAuth consent in the browser; after that it is silent. The finished deck appears in tellr's UI attributed to you.
+
+### 4.6 Gotchas
+
+**No "is MCP connection" checkbox.** The connection was created inside a schema. It has to be a metastore-level connection — go back to page 1 and start again.
+
+**`USE CONNECTION` is not app access.** The grant lets a user use the connection; the Databricks Apps proxy separately checks that the user is on tellr's app user list. If Genie surfaces a 403 from tellr, ask tellr's app owner to grant that user access to the app itself.
+
+**Host and base path are separate fields.** Put the bare app URL in **Host** and `/mcp` in **Base path**. Pasting `https://<tellr-app>.databricksapps.com/mcp` into Host sends requests to `/mcp/mcp`.
+
+**The OAuth endpoints belong to the workspace, not to tellr.** Authorization and token endpoints are `/oidc/v1/authorize` and `/oidc/v1/token` on your *workspace* URL. Only **Host** points at tellr.
+
+**The client secret is shown once.** If it is lost, mint a new one in the account console and update the connection.
+
+**Ask for small decks first.** `create_deck` returns immediately and the caller must poll `get_deck_status`; a single-slide deck is ready in ~10-30s but a 10-slide deck takes 3-8 minutes (§2.4, Gotcha 4). Keep the first test small so the round-trip completes quickly.
+
+---
+
+## 5. Reference appendix
+
+### 5.1 Tool catalog summary
 
 | Tool | Purpose | Key inputs | Key outputs |
 |---|---|---|---|
@@ -420,7 +510,7 @@ For unattended runs longer than an hour (CI, background agents):
 
 Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 
-### 4.2 Common errors
+### 5.2 Common errors
 
 | Error text | Cause | Fix |
 |---|---|---|
@@ -430,21 +520,23 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 | `HTTP 404 {"message": "Session not found"}` | Your client is echoing an `mcp-session-id` against tellr's stateless endpoint while the request is routed to a different worker than the one that (historically) issued the id. Should not occur with current tellr builds. | Treat `mcp-session-id` as optional — read with `.get()`, only echo when present. Upgrade to a current tellr build if calls against a prior deployment produce this error. |
 | `create_deck tool error: ...` | Tool execution failed after auth succeeded (LLM error, input validation, etc.). | Read the error text — it's the underlying reason. |
 | `Deck not found or you do not have permission to view it` | Your identity doesn't match the deck's creator and you're not a contributor. | Check `created_by` on the deck; use the creator's identity or share the deck. |
+| Genie One's **Connectors** list doesn't show the tellr connection | Either the **Third Party Connectors for Agents** preview is off for the workspace, or the connection isn't flagged as an MCP connection (which a schema-scoped connection can't be). | Enable the preview, and confirm the connection was created at the metastore level with "is MCP connection" ticked — see §4.2. |
+| Genie One reports 403 from tellr although `USE CONNECTION` is granted | The Apps proxy checks app-level access separately from the Unity Catalog grant. | Ask tellr's app owner to grant that user access to the app — see §4.6. |
 
-### 4.3 v1 limitations
+### 5.3 v1 limitations
 
-- **Prompt-only generation.** The agent does not call Genie, Vector Search, or other data tools on your behalf. If you want data-backed decks, gather the data yourself and include it in the prompt.
+- **Prompt-only generation.** The agent does not call Genie, Vector Search, or other data tools on your behalf. If you want data-backed decks, gather the data yourself and include it in the prompt. (This is about tellr calling *out* to data tools; Genie One calling *in* to tellr is Part C and is supported.)
 - **No exports over MCP.** `export_pptx` / `export_google_slides` are v1.1; for now, hand users to `deck_url` for exports in the tellr UI.
 - **No structural edits.** Reorder / delete / duplicate slides are v1.1.
 - **No cancellation.** There's a 10-minute hard timeout but no way to abort an in-flight generation.
 - **No streaming progress.** Status transitions are polling-based; `notifications/progress` is v1.1.
 
-### 4.4 Further reading
+### 5.4 Further reading
 
 - [`mcp-server.md`](./mcp-server.md) — protocol-level reference, full tool schemas, transport details.
 - [`permissions-model.md`](./permissions-model.md) — `can_view_deck` / `can_edit_deck` semantics.
 
-### 4.5 Getting help
+### 5.5 Getting help
 
 - Something broken? Include the `correlation_id` from your tool error — server logs are keyed on it.
 - Design question / feature request? Open a PR against the design spec v1.1 roadmap section.
