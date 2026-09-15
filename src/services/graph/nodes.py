@@ -364,6 +364,162 @@ def _slide_style_being_dropped(
     return None
 
 
+def rereview_committed_slides(
+    session_id: str,
+    spec: DeckSpec,
+    brand: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Score every committed slide against the **new** spec, serially, here.
+
+    §4.6's re-review pass.  It runs inside ``architect_node`` — **Option 2** —
+    because the two-pass turn the plan imagined cannot exist on this topology.
+    Measured on the compiled graph, in both directions:
+
+    * A turn that reviews a position before building it puts the position in
+      ``reviewed_positions``, ``build_reviewer_refan_router`` then skips its
+      builder's re-fan, and a three-slide deck came back with **three
+      placeholders and ``error_state`` None** — builders paid for, output
+      discarded, silently.
+    * Landing in the review pass instead makes ``all_positions_committed`` true
+      on the first wake, so the turn dispatched **zero** builders and went
+      straight to deck review — and it rewrites the very rows a hand-edit lives
+      in, which is the thing §4.6 is organised around preserving.
+
+    Both channels are turn-scoped **sets** with union reducers and there is no
+    tombstone for set membership, so neither can be un-set within a turn: **in
+    this graph reviews come after builds by construction.**  Running the pass
+    here touches no reducer, no router, no foreman and not
+    ``build_reviewer_node``; the failing positions then travel on
+    ``target_positions`` and the shipped ``builder -> build_reviewer -> land``
+    path rebuilds exactly those.
+
+    The cost, stated rather than hidden: this is **serial**, so §4.6's "cheap,
+    parallel" becomes "cheap, serial" — one review call per committed slide,
+    inside one architect turn.
+
+    Three judgement calls, each recorded because a reviewer may want to overrule
+    one:
+
+    **A placeholder fails by definition and costs no model call.**  There is no
+    slide there to preserve, so asking a model whether it still fits the brief
+    would be paying to be told what its own marker already says.
+
+    **A position whose review RAISES is left alone, not rebuilt.**  Both
+    directions are wrong in some way: leaving it risks one stale slide, and
+    rebuilding it risks overwriting a manual edit we could not judge.  §4.6
+    rejected the blanket rebuild-all as *"expensive and destructive"* and named
+    preserving manual edits as the reason, so the tie breaks toward preservation.
+    The position is logged and reported in ``unreviewable``.
+
+    **"Contradicts the new spec" means at least one OBJECTIVE finding**, decided
+    exactly as ``build_reviewer_node`` decides it — ``_stamp_findings``
+    re-derives ``objective`` from ``CRITERIA`` before it is read, so a model
+    returning ``objective=False`` for ``overflow`` cannot quietly suppress a
+    rebuild.  A subjective finding is surfaced, never acted on, on both paths.
+
+    **Nothing is written.**  No row, and nothing on the ``findings`` channel:
+    that channel's contract is *"exactly what this node persisted into a row"*,
+    and this pass persists nothing, so an entry here would be an "open" finding
+    that nothing ever supersedes.  This is a decision procedure, not a review of
+    record.
+
+    Returns a dict of plain sets: ``committed`` (positions the spec covers that
+    have a row), ``reviewed`` (positions a model actually scored), ``failing``,
+    ``unreviewable``, ``placeheld``.
+    """
+    empty = {
+        "committed": set(),
+        "reviewed": set(),
+        "failing": set(),
+        "unreviewable": set(),
+        "placeheld": set(),
+    }
+    try:
+        rows = SlideWriter().list_slides_in_position_order(session_id)
+    except Exception:
+        logger.warning(
+            "Could not read the committed slides to re-review them; leaving this "
+            "turn's coverage as the architect set it",
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        return empty
+
+    spec_positions = {slide.position for slide in spec.slides}
+    by_position = {
+        row.get("position"): row
+        for row in rows
+        if row.get("position") in spec_positions
+    }
+    if not by_position:
+        return empty
+
+    resolved_style = brand.get("resolved_style") or ""
+    section_css = brand.get("deterministic_css") or ""
+    design_system_active = bool(brand.get("design_system_active"))
+
+    committed: set = set()
+    reviewed: set = set()
+    failing: set = set()
+    unreviewable: set = set()
+    placeheld: set = set()
+
+    for position in sorted(by_position):
+        row = by_position[position]
+        committed.add(position)
+
+        if is_placeholder_record(row.get("verification_record")):
+            placeheld.add(position)
+            failing.add(position)
+            continue
+
+        slide_spec = spec.slide_at(position)
+        if slide_spec is None:  # unreachable: by_position is filtered to the spec
+            continue
+
+        html = row.get("html") or ""
+        # The SAME payload shape build_reviewer_node builds, key for key, so the
+        # skill is judged on the input it was written against.
+        review_payload = {
+            "position": position,
+            "slide_spec": slide_spec.model_dump(),
+            "resolved_style": resolved_style,
+            "section_css": section_css,
+            "resolved_data": spec.resolved_data.model_dump(),
+            "html": html,
+            "scripts": row.get("scripts") or "",
+        }
+        try:
+            out = call_skill("build_reviewer", review_payload, design_system_active)
+            findings = _stamp_findings(
+                _skill_findings(out),
+                subject_hash=compute_slide_hash(html),
+                slide_index=position,
+            )
+        except Exception:
+            logger.warning(
+                "Re-review failed at position %s; treating the slide as still "
+                "valid rather than overwriting work we could not judge",
+                position,
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+            unreviewable.add(position)
+            continue
+
+        reviewed.add(position)
+        if any(finding.objective for finding in findings):
+            failing.add(position)
+
+    return {
+        "committed": committed,
+        "reviewed": reviewed,
+        "failing": failing,
+        "unreviewable": unreviewable,
+        "placeheld": placeheld,
+    }
+
+
 def _design_system_library() -> List[dict]:
     """Every live design system with its templates — §M1, delivered as payload.
 
@@ -961,10 +1117,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
     ``design_contract`` change forces coverage to every position — the one place
     a rebuild-all is correct — and a ``confirm_design_contract`` turn's message
     is augmented to name the slide style that confirming would drop (§L4).  The
-    third case, a ``deck_level`` change, is classified and logged but **not
-    acted on**: re-reviewing every slide before rebuilding the failures cannot be
-    done inside one turn on this topology, measured, and the branch below records
-    why.
+    third case, a ``deck_level`` change, re-reviews every committed slide against
+    the new spec — SERIALLY, here, see ``rereview_committed_slides`` for the
+    measurement of why it cannot be a two-pass turn — and narrows coverage to the
+    slides that contradict it, so still-valid work including manual edits
+    survives.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
@@ -1132,28 +1289,66 @@ def architect_node(state: dict) -> Dict[str, Any]:
             extra={"session_id": session_id},
         )
     elif spec_change == "deck_level":
-        # §4.6's OTHER half — re-review every slide against the new spec and
-        # rebuild only the ones that contradict it — is NOT implemented, and the
-        # reason is the topology rather than the effort.  Measured on this branch:
-        # a turn that reviews a position before building it places the position
-        # in `reviewed_positions`, `build_reviewer_refan_router` then skips its
-        # builder's re-fan, and all three positions of a three-slide deck were
-        # PLACEHELD with `error_state` None — builders paid for, output discarded,
-        # silently.  Landing them in the review pass instead makes
-        # `all_positions_committed` true, and the turn dispatched ZERO builders
-        # and went straight to deck review.  Both channels are turn-scoped sets
-        # with union reducers, so neither can be un-set within a turn: reviews
-        # come AFTER builds here by construction.  The mechanism therefore needs
-        # a ruling, not a local edit — see task-8-report.md.  Until then this
-        # turn covers what the architect targeted, which changes no slide it was
-        # not asked to change.
-        logger.warning(
-            "Deck-level spec change committed (audience/purpose/argument/"
-            "call_to_action/narrative_arc): §4.6's re-review-all and "
-            "rebuild-only-failures pass is not implemented, so this turn covers "
-            "only the positions the architect targeted",
-            extra={"session_id": session_id},
-        )
+        # §4.6's other half: re-review ALL, rebuild only what fails.  A new
+        # audience logically invalidates every slide, but a blanket rebuild-all
+        # was rejected as expensive and destructive, so every committed slide is
+        # scored against the NEW spec and only the ones that contradict it are
+        # rebuilt — which is what preserves still-valid work INCLUDING manual
+        # user edits.  The pass runs serially inside rereview_committed_slides;
+        # its docstring carries the measurement of why it cannot be the two-pass
+        # turn the plan imagined.
+        verdicts = rereview_committed_slides(session_id, spec, brand)
+        if not verdicts["committed"]:
+            # Nothing committed to score (an unbuilt deck, or the row read
+            # failed).  Coverage is left exactly as the architect set it: writing
+            # an empty target list here would make the turn cover NOTHING and
+            # complete vacuously, which is worse than building what was asked.
+            logger.warning(
+                "Deck-level spec change with no committed slide to re-review; "
+                "leaving this turn's coverage as the architect set it",
+                extra={"session_id": session_id},
+            )
+        else:
+            # A position the new spec declares but no row covers cannot be
+            # "still valid" — there is nothing there — so it joins the rebuild
+            # set.  Without this a deck-level change that also ADDS a slide would
+            # silently never build the new one.
+            uncovered = {
+                slide.position for slide in spec.slides
+            } - verdicts["committed"]
+            # An explicit edit request is honoured whatever the review said: the
+            # user asked for that slide, so "it still fits the brief" is not a
+            # reason to refuse.
+            requested = set(out.target_positions) if intent == "edit" else set()
+            rebuild = sorted(verdicts["failing"] | uncovered | requested)
+            updates["target_positions"] = rebuild
+            logger.info(
+                "Deck-level spec change: re-reviewed %d slide(s), rebuilding %s "
+                "(unreviewable: %s)",
+                len(verdicts["committed"]),
+                rebuild,
+                sorted(verdicts["unreviewable"]),
+                extra={"session_id": session_id},
+            )
+            _emit(
+                StreamEventType.ASSISTANT,
+                content=(
+                    f"The deck's brief changed, so I re-checked all "
+                    f"{len(verdicts['committed'])} slide(s) against it. "
+                    + (
+                        f"Rebuilding {len(rebuild)}: {rebuild}."
+                        if rebuild
+                        else "Every slide still fits, so I am rebuilding none."
+                    )
+                ),
+                metadata={
+                    "node": "architect",
+                    "spec_change": "deck_level",
+                    "reviewed": sorted(verdicts["committed"]),
+                    "rebuilding": rebuild,
+                    "unreviewable": sorted(verdicts["unreviewable"]),
+                },
+            )
 
     external_scripts = [SlideDeck.CHART_JS_URL]
     head_meta = json.dumps(_DEFAULT_HEAD_META)

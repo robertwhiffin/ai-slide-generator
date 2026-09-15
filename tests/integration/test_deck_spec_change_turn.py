@@ -206,3 +206,194 @@ def test_an_edit_turn_with_no_contract_change_rebuilds_only_its_target(
     assert state["target_positions"] == [1]
     assert env.recorder.positions("builder") == [1]
     assert sorted(env.rows_by_position()) == [1]
+
+
+# ---------------------------------------------------------------------------
+# A deck-level change: re-review all, rebuild only failures (Option 2)
+# ---------------------------------------------------------------------------
+
+HAND_EDITED = "<div class='slide'><h1>HAND EDITED BY A HUMAN</h1></div>"
+COMMITTED = {
+    0: HAND_EDITED,
+    1: "<div class='slide'><h1>COMMITTED ONE</h1></div>",
+    2: "<div class='slide'><h1>COMMITTED TWO</h1></div>",
+}
+
+
+def _seed_committed_rows(env) -> None:
+    """Three committed rows with distinctive HTML, position 0 hand-edited.
+
+    Distinctive per position on purpose: "rebuilt only failures" is an IDENTITY
+    claim, and a marker per row is what makes a wrong-set-of-the-right-size
+    substitution visible.
+    """
+    import uuid
+
+    from src.database.models.session import SessionSlide, UserSession
+
+    db = env.factory()
+    try:
+        owner = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == env.session_id)
+            .one()
+        )
+        for position, html in COMMITTED.items():
+            db.add(
+                SessionSlide(
+                    session_id=owner.id,
+                    position=position,
+                    id=str(uuid.uuid4()),
+                    slide_id=str(uuid.uuid4()),
+                    html=html,
+                    scripts="",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _review_committed_html_as_failing(env, failing) -> None:
+    """Fail the RE-REVIEW at *failing*, and pass every post-build review.
+
+    Keyed on the html, which is the only honest discriminator: the re-review sees
+    the COMMITTED markup and a post-build review sees ``builder_html(position)``.
+    Keying on the position instead would make a rebuilt slide fail its own review
+    too, opening a fix round and confusing "which positions rebuilt" with "which
+    positions were fixed".
+    """
+    from tests.integration.conftest_stub_skills import objective_finding
+    from src.domain.finding import SlideReviewOutput
+
+    committed_htmls = set(COMMITTED.values())
+
+    def _review(payload):
+        position = payload["position"]
+        is_rereview = payload.get("html") in committed_htmls
+        findings = (
+            [objective_finding(position)]
+            if is_rereview and position in failing
+            else []
+        )
+        return SlideReviewOutput(
+            slide_index=position,
+            verdict="surfaced" if findings else "clean",
+            findings=findings,
+        )
+
+    env.recorder._skill_build_reviewer = _review
+
+
+def _rereviewed_positions(env) -> list:
+    """Positions whose review payload carried COMMITTED html — i.e. the re-review."""
+    committed_htmls = set(COMMITTED.values())
+    return sorted(
+        call["payload"]["position"]
+        for call in env.recorder.calls_for("build_reviewer")
+        if call["payload"].get("html") in committed_htmls
+    )
+
+
+def _audience_changed_build(env) -> None:
+    _architect_returns(
+        env,
+        ArchitectOutput(
+            intent="build",
+            message="Retargeting the whole deck at the CFO.",
+            deck_spec=_spec().model_copy(update={"audience": "the CFO, not engineers"}),
+        ),
+    )
+
+
+def test_a_deck_level_change_re_reviews_all_and_rebuilds_only_failures(
+    graph_turn_env, stub_style
+):
+    """The headline behaviour, asserted three ways at once.
+
+    The re-review ran over EVERY position — without that, "rebuilt only failures"
+    is vacuously true because a pass that reviews nothing has no failures.  Only
+    position 2 rebuilt, by identity.  And positions 0 and 1 are BYTE-IDENTICAL
+    afterwards, position 0 being the hand-edited one, which is the whole reason
+    §4.6 rejected a blanket rebuild-all.
+    """
+    env = graph_turn_env
+    _persist_spec(env.session_id, _spec())
+    _seed_committed_rows(env)
+    _review_committed_html_as_failing(env, {2})
+    _audience_changed_build(env)
+
+    state = env.run(initial={"architect_message": "this is for the CFO now"})
+
+    assert _rereviewed_positions(env) == [0, 1, 2], "the re-review skipped a slide"
+    assert state["target_positions"] == [2]
+    assert env.recorder.positions("builder") == [2]
+
+    rows = env.rows_by_position()
+    assert rows[0].html == HAND_EDITED
+    assert rows[1].html == COMMITTED[1]
+    assert rows[2].html == builder_html(2)
+
+
+def test_a_deck_level_change_nothing_contradicts_rebuilds_nothing_and_completes(
+    graph_turn_env, stub_style
+):
+    """Every slide still fits: no builder runs, every row is byte-identical, and
+    the turn still reaches deck review rather than hanging or erroring."""
+    env = graph_turn_env
+    _persist_spec(env.session_id, _spec())
+    _seed_committed_rows(env)
+    _review_committed_html_as_failing(env, set())
+    _audience_changed_build(env)
+
+    state = env.run(initial={"architect_message": "this is for the CFO now"})
+
+    assert _rereviewed_positions(env) == [0, 1, 2]
+    assert state["target_positions"] == []
+    assert env.recorder.counts("builder") == 0
+    assert env.recorder.counts("deck_reviewer") == 1
+    assert state.get("error_state") is None
+
+    rows = env.rows_by_position()
+    for position, html in COMMITTED.items():
+        assert rows[position].html == html
+
+
+def test_a_deck_level_change_everything_contradicts_rebuilds_every_position(
+    graph_turn_env, stub_style
+):
+    """The other extreme: when every slide really does contradict the new brief,
+    the selective path converges on the rebuild-all it refused to assume."""
+    env = graph_turn_env
+    _persist_spec(env.session_id, _spec())
+    _seed_committed_rows(env)
+    _review_committed_html_as_failing(env, {0, 1, 2})
+    _audience_changed_build(env)
+
+    state = env.run(initial={"architect_message": "this is for the CFO now"})
+
+    assert _rereviewed_positions(env) == [0, 1, 2]
+    assert state["target_positions"] == [0, 1, 2]
+    assert env.recorder.positions("builder") == [0, 1, 2]
+    rows = env.rows_by_position()
+    for position in (0, 1, 2):
+        assert rows[position].html == builder_html(position)
+
+
+def test_the_re_review_costs_one_model_call_per_committed_slide(graph_turn_env, stub_style):
+    """The accepted cost of Option 2, pinned as a number so a regression that
+    turned it quadratic would be visible.
+
+    Serial and linear: N committed slides means N review calls inside the one
+    architect turn, before any builder runs.
+    """
+    env = graph_turn_env
+    _persist_spec(env.session_id, _spec())
+    _seed_committed_rows(env)
+    _review_committed_html_as_failing(env, set())
+    _audience_changed_build(env)
+
+    env.run(initial={"architect_message": "this is for the CFO now"})
+
+    assert len(_rereviewed_positions(env)) == len(COMMITTED)
+    assert env.recorder.counts("build_reviewer") == len(COMMITTED)
