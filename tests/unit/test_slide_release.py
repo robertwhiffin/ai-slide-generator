@@ -553,7 +553,23 @@ class TestTheTwoPrefixRulesAgree:
     COMMITTED ROWS.  The polling path has no graph state and a poll may be served
     by a different uvicorn worker, so the rule genuinely has two
     implementations — and two prefix rules that can disagree are worse than one,
-    because the divergence is otherwise invisible."""
+    because the divergence is otherwise invisible.
+
+    **The scope of "agree", stated because these tests once claimed more than they
+    established.**  The two rules agree on the position set a turn COVERS.  They
+    do not, and must not, return the same list on an **edit turn**: the SSE rule
+    is turn-scoped (`_covered_positions` returns `sorted(target_positions)`, which
+    need not start at 0) while the polling rule deliberately serves the whole
+    committed prefix from position 0, because a poll knows nothing about which
+    turn built which row and a client that reconnects must be able to fetch the
+    slides it missed.  Every case in the parametrised sweep below covers a
+    contiguous set starting at 0 — a build turn — so `test_an_edit_turn_is_where_
+    the_two_rules_deliberately_differ` is the case that drives the one shape in
+    which they structurally differ, and it asserts the real relationship instead
+    of blanket equality.  Neither side is the wrong one: a "fix" that narrowed
+    polling to a turn's targets would lose the reconnect case, and one that
+    widened the SSE release to the whole deck would re-emit slides this turn never
+    touched."""
 
     @pytest.mark.parametrize(
         "covered,committed",
@@ -604,6 +620,63 @@ class TestTheTwoPrefixRulesAgree:
         # assertion whose absence let a claimed sweep go unnoticed.
         assert checked == list(range(-1, max(covered) + 2)), checked
         assert len(checked) >= 4
+
+    def test_an_edit_turn_is_where_the_two_rules_deliberately_differ(self, graph_env):
+        """The shape the eight parametrised cases cannot reach.
+
+        An edit turn covers `target_positions`, which need not start at 0.  On a
+        ten-slide deck whose rows all exist, the SSE rule releases the two
+        positions this turn rebuilt and the polling rule releases all ten — and
+        that is the DESIGN, not a defect (see the class docstring).  So the
+        assertion is the relationship the two really hold:
+
+            the polling release, narrowed to this turn's coverage,
+            IS the SSE release
+
+        which holds for every case in the sweep above as well (there, coverage is
+        everything, so the narrowing is a no-op) and is the form that survives an
+        edit turn.  The two blanket assertions before it are what make the
+        relationship meaningful rather than vacuous: without them, `by_state ==
+        []` and `by_rows == []` would satisfy it.
+        """
+        _commit(graph_env, *range(10))
+        covered = (5, 6)
+        state = _release_state(graph_env, covered=covered, landed=covered)
+        # The real edit-turn shape: the spec still describes the whole deck and
+        # `target_positions` narrows the turn.  `_covered_positions` prefers the
+        # target list, so this is what an edit turn's release actually reads.
+        state["deck_spec"] = make_spec(tuple(range(10)))
+        state["target_positions"] = list(covered)
+
+        by_state = releasable_positions(state)
+        manager = get_session_manager()
+        by_rows = [
+            row["position"]
+            for row in manager.slides_since_cursor(graph_env.session_id, 0)
+        ]
+
+        # Both sides are non-empty and each is exactly what its own rule says.
+        assert by_state == [5, 6], "the SSE release is not turn-scoped"
+        assert by_rows == list(range(10)), (
+            "the polling release stopped serving the whole committed prefix"
+        )
+
+        checked = []
+        for cursor in range(-1, max(covered) + 2):
+            rows_at_cursor = [
+                row["position"]
+                for row in manager.slides_since_cursor(graph_env.session_id, cursor)
+            ]
+            checked.append(cursor)
+            assert [p for p in rows_at_cursor if p in set(covered)] == [
+                p for p in by_state if p >= max(0, cursor)
+            ], (
+                f"at cursor {cursor} the row-derived release {rows_at_cursor} "
+                f"narrowed to {sorted(covered)} is not the state-derived "
+                f"{by_state}"
+            )
+        # ENTRY assertion, as in the sweep above: the loop really ran.
+        assert checked == list(range(-1, max(covered) + 2)), checked
 
     def test_they_agree_when_the_committed_position_is_a_placeholder(self, graph_env):
         """A placeholder is inside `releasable_positions`' committed set
