@@ -69,6 +69,46 @@ slide_cursor_var: ContextVar[Optional[list]] = ContextVar(
     "graph_slide_cursor", default=None
 )
 
+#: The ``ChatRequest.request_id`` this turn is running under, or ``None``.
+#:
+#: **This is not an emission concern, and it is here because the LIFECYCLE is the
+#: same one.**  ``GET /chat/poll`` reads a turn's assistant text out of
+#: ``get_messages_for_request``, which filters ``SessionMessage.request_id ==
+#: request_id`` — so a chat row written by a node with no request id is invisible
+#: to every polling client, which is the transport the deployed app uses.  The id
+#: cannot travel in ``GraphState`` (undeclared keys are silently dropped and
+#: declaring it would put a transport detail in the graph's contract) and it
+#: cannot be re-derived inside a node, so it rides the same ``ContextVar``
+#: mechanism the emitter does, is set by ``invoke_graph`` on **every** invocation,
+#: and is ``None`` on the SSE path (which has no request row) and on the sweeper.
+chat_request_id_var: ContextVar[Optional[str]] = ContextVar(
+    "graph_chat_request_id", default=None
+)
+
+
+def set_chat_request_id(request_id: Optional[str]) -> None:
+    """Bind *request_id* for this turn's context; ``None`` clears it.
+
+    Called by ``invoke_graph`` unconditionally, for the reason
+    :func:`set_event_emitter` is: a value left over from an earlier turn in the
+    same process would tag turn 2's rows with turn 1's request, and turn 1's
+    poll — which a client may still be draining — would then receive turn 2's
+    reply while turn 2's own poll never saw it.
+    """
+    chat_request_id_var.set(request_id)
+
+
+def get_chat_request_id() -> Optional[str]:
+    """The request id this turn runs under, or ``None`` when there is no request.
+
+    ``None`` is a normal, correct answer on two paths: the SSE transport (which
+    persists no ``ChatRequest`` row at all) and the arc-review sweeper (which has
+    no request). A row written with ``None`` is still a durable transcript row and
+    still reaches ``_conversation``; it is only the *polling* projection that
+    needs the id.
+    """
+    return chat_request_id_var.get()
+
 
 def set_event_emitter(emitter: Optional[queue.Queue]) -> None:
     """Install *emitter* as this context's event queue, and reset the slide cursor.
