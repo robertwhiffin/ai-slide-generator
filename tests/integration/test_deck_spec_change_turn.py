@@ -439,3 +439,47 @@ def test_the_re_review_costs_one_model_call_per_committed_slide(
 
     assert len(_rereviewed_positions(env)) == len(COMMITTED)
     assert env.recorder.counts("build_reviewer") == len(COMMITTED)
+
+
+def test_both_of_the_architects_utterances_are_persisted_on_a_deck_level_turn(
+    graph_turn_env, stub_style
+):
+    """A deck-level turn is the one turn where the architect speaks TWICE.
+
+    Its reply lands before the spec is classified; the re-review summary is
+    composed after, and it is the only place the user is told what the re-review
+    decided.  Both take the same two surfaces — a stream event and a persisted
+    row — because persisting one and not the other would make the architect
+    audible on a plain build turn and mute on a deck-level one, which is the
+    original defect moved rather than fixed.
+
+    Both are asserted through ``_conversation``, not merely through the rows: that
+    is the architect's own memory, so this pins that next turn it can see both of
+    the things it said rather than only the first.
+    """
+    from src.services.graph.nodes import _conversation
+
+    env = graph_turn_env
+    _persist_spec(env.session_id, _spec())
+    _seed_committed_rows(env)
+    _brief_aware_reviewer(env, {2})
+    _audience_changed_build(env)
+
+    env.run(initial={"architect_message": "this is for the CFO now"})
+
+    replayed = [
+        turn["content"]
+        for turn in _conversation(env.session_id)
+        if turn["role"] == "assistant"
+    ]
+    # ENTRY: the re-review really ran, so "the summary is missing" cannot be
+    # confused with "there was no summary to persist".
+    assert _rereviewed_positions(env) == [0, 1, 2]
+    assert "Retargeting the whole deck at the CFO." in replayed, (
+        f"the architect's reply is not in its replayable conversation: {replayed!r}"
+    )
+    summaries = [text for text in replayed if "re-checked all" in text]
+    assert summaries, (
+        f"the deck-level re-review summary was never persisted: {replayed!r}"
+    )
+    assert "Rebuilding 1: [2]" in summaries[0], summaries[0]
