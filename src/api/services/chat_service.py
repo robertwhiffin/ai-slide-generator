@@ -3418,10 +3418,18 @@ class ChatService:
         # Clone slide and stamp as newly created by current user
         cloned = current_deck.slides[index].clone()
         # A clone is a NEW slide, so it gets an identity of its own.  `Slide.clone()`
-        # copies slide_id, and this used to rely on `_reindex_slide_ids` rewriting
-        # every id to pull the two apart again — which is exactly the rewrite that
-        # destroyed durability.  Assigned here, at the point the new slide is
-        # created, rather than left for a later pass to notice as a collision.
+        # copies slide_id (deliberately — it is a deep copy, and two tests pin that),
+        # and this used to rely on `_reindex_slide_ids` rewriting every id to pull the
+        # two apart again, which is the rewrite that destroyed durability.
+        #
+        # MEASURED REDUNDANT, KEPT DELIBERATELY: removing this line reddens nothing,
+        # because the clone is inserted at index+1 and `_reindex_slide_ids` resolves a
+        # collision in favour of the FIRST holder — so the source keeps its id and the
+        # clone is minted anyway.  That outcome depends entirely on the clone landing
+        # AFTER its source: insert it before, and the collision pass would take the id
+        # off the existing slide and leave it on the copy.  Assigning here states the
+        # fact `duplicate_slide` actually knows — which of the two is new — instead of
+        # leaving it to be inferred from list order.
         cloned.slide_id = str(uuid.uuid4())
         try:
             _user = get_current_username()
