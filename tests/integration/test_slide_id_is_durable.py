@@ -32,6 +32,7 @@ an id a slide already has is never taken away from it.**
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 from unittest.mock import patch
@@ -110,6 +111,31 @@ def _stamp_each_row_with_its_own_marker(test_db_factory, session_id: str):
             row.deck_spec_slide = json.dumps({"purpose": marker})
         db.commit()
         return owned
+    finally:
+        db.close()
+
+
+def _give_the_rows_durable_ids(test_db_factory, session_id):
+    """Replace the parse-time `slide_<idx>` ids with ids that are NOT positional.
+
+    A freshly parsed deck's ids happen to equal their positions, which makes a
+    positional stamp a silent no-op — the blindness that let `update_slide`'s stamp
+    survive a route-level uniqueness test with a `patch` case in it.  Tests about
+    identity being PRESERVED need ids that cannot be reproduced by accident.
+    """
+    db = test_db_factory()
+    try:
+        owner = (
+            db.query(UserSession).filter(UserSession.session_id == session_id).one()
+        )
+        for row in (
+            db.query(SessionSlide)
+            .filter(SessionSlide.session_id == owner.id)
+            .order_by(SessionSlide.position)
+            .all()
+        ):
+            row.slide_id = f"durable-{uuid.uuid4().hex[:8]}"
+        db.commit()
     finally:
         db.close()
 
@@ -274,9 +300,11 @@ class TestSlideIdsAreDurableAndUnique:
         "mutate",
         [
             pytest.param(
+                # FOUR indices: every case below runs after the composing insert, so
+                # the deck is four slides deep by the time the mutation arrives.
                 lambda api, sid: api.put(
                     "/api/slides/reorder",
-                    json={"session_id": sid, "new_order": [1, 2, 0]},
+                    json={"session_id": sid, "new_order": [1, 2, 3, 0]},
                 ),
                 id="reorder",
             ),
@@ -325,8 +353,29 @@ class TestSlideIdsAreDurableAndUnique:
         id, where a collision breaks drag-and-drop outright.  Asserted for every
         route that changes the slide list, because "unique" has to survive the
         duplicate and insert paths that MINT ids, not just the ones that move them.
+
+        EVERY CASE IS COMPOSED, and that is the repair of this test's own blindness.
+        It previously ran ONE mutation against a freshly seeded deck and passed while
+        `update_slide` was stamping `slide_<index>` on every edit — because on a
+        freshly parsed deck the row at index 1 already carries `slide_1`, so the
+        stamp is a no-op and a single PATCH cannot expose it.  The defect is a
+        COMPOSITION: an insert first shifts the slides, so the stamp then writes an
+        id that belongs to a DIFFERENT slide further down the deck.  So each case
+        now runs after an insert.
         """
         session_id = _seeded(api, test_db_factory)
+
+        # The composition: shift the deck before mutating it, so a positional stamp
+        # lands on an id that belongs to another slide.
+        pre = api.post(
+            "/api/slides",
+            json={
+                "session_id": session_id,
+                "position": 1,
+                "html": '<div class="slide"><h2>Shifter</h2></div>',
+            },
+        )
+        assert pre.status_code == 200, pre.text
 
         resp = mutate(api, session_id)
         assert resp.status_code == 200, resp.text
@@ -366,3 +415,182 @@ class TestSlideIdsAreDurableAndUnique:
         )
         ids = [r["slide_id"] for r in rows]
         assert len(ids) == len(set(ids)), f"duplicate slide_id after clone: {ids}"
+
+
+# ---------------------------------------------------------------------------
+# An EDIT must preserve identity, and a positional stamp must never impersonate
+# ---------------------------------------------------------------------------
+
+
+class TestAnEditPreservesTheEditedSlidesIdentity:
+    """`update_slide` stamped `slide_<index>` on every WYSIWYG edit.
+
+    That is the one mutation that most obviously must NOT change identity: the
+    slide is the same slide, with new HTML.  `SlideViewer.tsx:117` tracks per-slide
+    staleness in a Set of slide_ids across exactly this operation, so an edit that
+    renames its own slide loses the "edited since last verified" flag as well as the
+    verdict.
+
+    `update_slide` is also the only one of the ten `_reindex_slide_ids` call sites
+    that has NO reindex after it, so its stamp went straight to the database with
+    nothing to resolve the collision it could create.
+    """
+
+    def test_a_patch_does_not_change_the_edited_slides_id(
+        self, api, test_db_factory, mock_user
+    ):
+        session_id = _seeded(api, test_db_factory)
+        _give_the_rows_durable_ids(test_db_factory, session_id)
+        before = _rows(test_db_factory, session_id)
+
+        resp = api.patch(
+            "/api/slides/1",
+            json={
+                "session_id": session_id,
+                "html": '<div class="slide"><h2>Edited by a human</h2></div>',
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        after = _rows(test_db_factory, session_id)
+        assert after[1]["slide_id"] == before[1]["slide_id"], (
+            "the edited slide was given a new id, so every downstream consumer that "
+            "keyed on the old one — its verdict, its staleness flag — is now orphaned:"
+            f" {before[1]['slide_id']!r} -> {after[1]['slide_id']!r}"
+        )
+        # PAIRED: the slides nobody touched kept theirs too, so the assertion above
+        # is not satisfied by a route that rewrote every id to the same thing.
+        assert [r["slide_id"] for r in after] == [r["slide_id"] for r in before]
+
+    def test_the_patch_response_reports_the_slides_real_id(
+        self, api, test_db_factory, mock_user
+    ):
+        """The response used to return `f"slide_{index}"` regardless.
+
+        A caller told a positional id will store it and hand it back later, which
+        reintroduces the impersonation from outside the backend entirely.
+        """
+        session_id = _seeded(api, test_db_factory)
+        _give_the_rows_durable_ids(test_db_factory, session_id)
+        expected = _rows(test_db_factory, session_id)[1]["slide_id"]
+
+        resp = api.patch(
+            "/api/slides/1",
+            json={
+                "session_id": session_id,
+                "html": '<div class="slide"><h2>Edited</h2></div>',
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["slide_id"] == expected, (
+            "the PATCH response reported an id the slide does not have: "
+            f"{resp.json()['slide_id']!r} vs {expected!r}"
+        )
+
+    def test_insert_then_edit_leaves_no_duplicate_id_and_loses_no_verdict(
+        self, api, test_db_factory, mock_user
+    ):
+        """THE composition, on the deck shape that makes it bite: monolith ids.
+
+        A freshly parsed deck carries `slide_0..slide_N` (`from_html_string`).  Insert
+        a slide at 1 and the slide holding `slide_1` moves to index 2.  Editing index
+        2 then stamped it `slide_2` — an id that belongs to the LAST slide — so two
+        rows carried `slide_2`, the edited slide was handed the last slide's verdict
+        and spec fragment by attribution tier 1, and the last slide lost both.
+
+        Measured against the pre-fix tree, which is why the assertions below name
+        both halves: the duplicate AND the theft.
+        """
+        session_id = _seeded(api, test_db_factory)
+        owned = _stamp_each_row_with_its_own_marker(test_db_factory, session_id)
+        last_html = list(owned)[2]
+
+        resp = api.post(
+            "/api/slides",
+            json={
+                "session_id": session_id,
+                "position": 1,
+                "html": '<div class="slide">TAG-INSERTED</div>',
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        resp = api.patch(
+            "/api/slides/2",
+            json={"session_id": session_id, "html": '<div class="slide">TAG-EDITED</div>'},
+        )
+        assert resp.status_code == 200, resp.text
+
+        rows = _rows(test_db_factory, session_id)
+        ids = [r["slide_id"] for r in rows]
+        assert len(ids) == len(set(ids)), (
+            "two slides share an id after insert-then-edit: duplicate React keys and "
+            f"duplicate dnd-kit sortable ids, and tier 1 cannot resolve either: {ids}"
+        )
+
+        # The untouched last slide must still hold its OWN verdict and fragment.
+        last = [r for r in rows if r["html"] == last_html]
+        assert len(last) == 1, "fixture precondition: the last slide is still present"
+        assert _verdict(last[0]) == owned[last_html], (
+            "the untouched last slide lost its verdict to the slide that was edited "
+            f"two positions above it: expected {owned[last_html]}, got {_verdict(last[0])}"
+        )
+        assert _fragment(last[0]) == owned[last_html], (
+            "the untouched last slide lost its spec fragment the same way: expected "
+            f"{owned[last_html]}, got {_fragment(last[0])}"
+        )
+
+        # And the edited slide did not inherit someone else's verdict.
+        edited = [r for r in rows if "TAG-EDITED" in (r["html"] or "")]
+        assert len(edited) == 1
+        assert _verdict(edited[0]) != owned[last_html], (
+            "the edited slide is carrying the last slide's verdict"
+        )
+
+
+class TestNoPathStampsAPositionalId:
+    """A structural guard over the layer that merges slides into an EXISTING deck.
+
+    Seven sites in `chat_service.py` assigned `f"slide_{...}"` to a slide_id.  While
+    `_reindex_slide_ids` renumbered everything, those stamps were merely vestigial.
+    Once identity became durable they turned ACTIVELY HARMFUL: a stamped positional
+    id can collide with a real slide's id, and the uniqueness pass resolves a
+    collision in favour of the FIRST holder — so a newcomer stamped `slide_1` and
+    inserted above the real `slide_1` keeps that identity, is handed its verdict and
+    spec fragment by tier 1, and the real slide is re-minted with neither.  Measured.
+
+    This is scoped to `chat_service.py` deliberately and carries no allowlist.
+    `SlideDeck.from_html_string`/`from_dict` legitimately assign `slide_<idx>` when
+    PARSING, where every slide is new and there is nothing to impersonate — and every
+    chat_service path that merges parsed slides into an existing deck now overrides
+    those ids, which is the property this guard keeps true.
+    """
+
+    def test_chat_service_never_assigns_a_positional_slide_id(self):
+        import re
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "api"
+            / "services"
+            / "chat_service.py"
+        )
+        text = source.read_text()
+        assert "def _reindex_slide_ids" in text, (
+            "anchor drifted: this is no longer the module that owns slide ids"
+        )
+
+        offenders = [
+            (n, line.strip())
+            for n, line in enumerate(text.splitlines(), 1)
+            if re.search(r'slide_id\s*=\s*f?["\']slide_\{', line)
+        ]
+        assert not offenders, (
+            "chat_service.py assigns a POSITIONAL slide_id. A positional id can "
+            "impersonate an existing slide and steal its verdict and spec fragment; "
+            "new slides must be left without an id so _reindex_slide_ids mints one, "
+            "and edits must preserve the id they already have.\n  "
+            + "\n  ".join(f"line {n}: {line}" for n, line in offenders)
+        )
