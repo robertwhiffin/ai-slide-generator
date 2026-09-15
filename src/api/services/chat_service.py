@@ -759,7 +759,12 @@ class ChatService:
                             _add_user = None
 
                         for idx, slide in enumerate(new_deck.slides):
-                            slide.slide_id = f"slide_{insert_position + idx}"
+                            # A NEW slide gets no id here: _reindex_slide_ids
+                            # below mints a unique one.  A POSITIONAL id would
+                            # collide with a real slide further down the deck
+                            # and, being earlier in the list, would WIN the
+                            # collision and steal that slide's verdict.
+                            slide.slide_id = None
                             if _add_user:
                                 slide.stamp_created(_add_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
@@ -1556,7 +1561,9 @@ class ChatService:
                             _rc9_user = None
                         
                         for idx, slide in enumerate(new_deck.slides):
-                            slide.slide_id = f"slide_{insert_position + idx}"
+                            # A NEW slide gets no id here (see _reindex_slide_ids):
+                            # a positional id can impersonate an existing slide.
+                            slide.slide_id = None
                             if _rc9_user:
                                 slide.stamp_created(_rc9_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
@@ -1608,7 +1615,9 @@ class ChatService:
                         _stream_add_user = None
                     
                     for idx, slide in enumerate(new_deck.slides):
-                        slide.slide_id = f"slide_{insert_position + idx}"
+                        # A NEW slide gets no id here (see _reindex_slide_ids):
+                        # a positional id can impersonate an existing slide.
+                        slide.slide_id = None
                         if _stream_add_user:
                             slide.stamp_created(_stream_add_user)
                         existing_deck.insert_slide(slide, insert_position + idx)
@@ -2999,7 +3008,9 @@ class ChatService:
             
             # Insert new slides at the calculated position
             for idx, slide in enumerate(replacement_slides):
-                slide.slide_id = f"slide_{insert_position + idx}"
+                # A NEW slide gets no id here (see _reindex_slide_ids):
+                # a positional id can impersonate an existing slide.
+                slide.slide_id = None
                 if _user:
                     slide.stamp_created(_user)
                 current_deck.insert_slide(slide, insert_position + idx)
@@ -3038,12 +3049,19 @@ class ChatService:
 
         # Capture original authorship before removal so replacements inherit it
         original_authors = []
+        # The identities being replaced, captured index-wise alongside the authors and
+        # for the same reason: a REPLACEMENT of slide N is an edit of slide N, so it
+        # must carry slide N's identity forward.  Losing it orphans that slide's
+        # verdict, its spec fragment and the frontend's per-slide staleness flag —
+        # which is the whole point of the id being durable.
+        original_slide_ids = []
         for i in range(original_count):
             orig = current_deck.slides[start_idx + i]
             original_authors.append({
                 "created_by": orig.created_by,
                 "created_at": orig.created_at,
             })
+            original_slide_ids.append(orig.slide_id)
 
         # Preserve scripts from original slides before removal
         # Map canvas IDs to their scripts for later re-attachment
@@ -3075,7 +3093,14 @@ class ChatService:
         # Insert replacement slides and preserve scripts if canvas IDs match
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
-            slide.slide_id = f"slide_{start_idx + idx}"
+            # Carry the replaced slide's identity forward; a replacement beyond the
+            # originals is a genuinely new slide, so it gets no id here and
+            # _reindex_slide_ids mints a unique one below.  NEVER a positional id:
+            # that can collide with a real slide and, winning the collision by being
+            # earlier in the list, steal its verdict and spec fragment.
+            slide.slide_id = (
+                original_slide_ids[idx] if idx < len(original_slide_ids) else None
+            )
 
             # Preserve original creator, stamp current user as modifier
             if idx < len(original_authors):
@@ -3348,10 +3373,23 @@ class ChatService:
         original_slide = current_deck.slides[index]
         original_scripts = original_slide.scripts
 
-        # Update slide with preserved scripts and original creation metadata
+        # Update slide with preserved scripts, original creation metadata AND ITS
+        # OWN IDENTITY.  An edit is the same slide with new HTML, so it must keep its
+        # slide_id — this stamped `f"slide_{index}"` and was the most damaging of the
+        # positional stamps for two compounding reasons:
+        #
+        #   * this is the ONLY one of the ten `_reindex_slide_ids` call sites with no
+        #     reindex after it, so the stamp reached the database unresolved.  After an
+        #     insert has shifted the deck, `slide_{index}` is an id belonging to a
+        #     DIFFERENT slide further down: two rows then carried it, attribution
+        #     tier 1 handed the edited slide the other slide's verdict and spec
+        #     fragment, and that other slide lost both.  Measured end to end.
+        #   * `SlideViewer.tsx:117` tracks per-slide staleness in a Set of slide_ids
+        #     across exactly this operation, so renaming the slide mid-edit also drops
+        #     its "edited since last verified" flag.
         new_slide = Slide(
             html=html,
-            slide_id=f"slide_{index}",
+            slide_id=original_slide.slide_id,
             scripts=original_scripts,
             created_by=original_slide.created_by,
             created_at=original_slide.created_at,
@@ -3393,7 +3431,9 @@ class ChatService:
             extra={"index": index, "session_id": session_id},
         )
 
-        return {"index": index, "slide_id": f"slide_{index}", "html": html}
+        # The slide's REAL id, not its position: a caller handed a positional id will
+        # store it and send it back, reintroducing the impersonation from outside.
+        return {"index": index, "slide_id": new_slide.slide_id, "html": html}
 
     def duplicate_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Duplicate a slide.

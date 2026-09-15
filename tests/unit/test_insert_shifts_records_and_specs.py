@@ -411,3 +411,73 @@ def test_an_ordinary_in_place_save_keeps_every_fragment(three_marked_rows, facto
         "B": ("VERDICT-B", "FRAGMENT-B"),
         "C": ("VERDICT-C", "FRAGMENT-C"),
     }, f"a save that moved nothing lost or moved something: {attributed}"
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 of the matcher — the case that DISTINGUISHES it from tiers 2 and 3
+# ---------------------------------------------------------------------------
+
+
+def test_a_save_that_both_reorders_and_edits_needs_durable_identity(
+    three_marked_rows, factory
+):
+    """The only shape in which `_attribute_slide_records` tier 1 is load-bearing.
+
+    Disabling tier 1 (match by ``slide_id``) entirely used to leave the whole suite
+    green: every other attribution assertion is satisfied by tier 2's content hash,
+    because in those tests the moved slides' HTML is unchanged and hashes still
+    match.  So the tier documented as "durable per-slide identity" — the one this
+    round's defect corrupted — had no test that could fail.
+
+    This is the case that separates the tiers.  One save both REORDERS the deck and
+    EDITS one slide's HTML:
+
+      * tier 2 cannot resolve the edited slide — its content changed, so no hash
+        matches;
+      * tier 3 cannot either — the old row at the edited slide's NEW position has
+        already been claimed by whichever slide moved into it;
+      * only tier 1, matching the id the slide still carries, can.
+
+    So the edited slide keeps its own verdict here if and only if tier 1 works.
+    """
+    edited_html = _html("B-EDITED")
+
+    deck = SlideDeck(
+        slides=[
+            Slide(html=_html(marker), slide_id=three_marked_rows[i], scripts="")
+            for i, marker in enumerate(_MARKERS)
+        ]
+    )
+    # Reorder to C, B, A *and* rewrite B's HTML — both in the one save.
+    deck.slides = [deck.slides[2], deck.slides[1], deck.slides[0]]
+    deck.slides[1].html = edited_html
+    ChatService._reindex_slide_ids(deck)
+
+    with patch("src.api.services.session_manager.get_db_session", _fake_db(factory)):
+        SessionManager().save_slide_deck(
+            session_id=_OWNER_SID,
+            title="Marked deck",
+            html_content="<html></html>",
+            slide_count=3,
+            deck_dict={
+                "title": "Marked deck",
+                "css": "",
+                "external_scripts": [],
+                "scripts": "",
+                "slides": deck.to_dict()["slides"],
+            },
+        )
+
+    attributed = _attribution_by_marker(factory)
+
+    # The edited slide is the one only tier 1 can place.
+    assert attributed["B-EDITED"] == ("VERDICT-B", "FRAGMENT-B"), (
+        "the edited slide lost its own verdict and spec fragment: its content hash "
+        "no longer matches (so tier 2 cannot find it) and its old position is taken "
+        "(so tier 3 cannot either), which leaves tier 1 — matching the id it still "
+        f"carries — as the only thing that can. Got {attributed['B-EDITED']}"
+    )
+    # PAIRED: the two slides that only MOVED are placed correctly too, so the
+    # assertion above cannot pass on a save that attributed nothing at all.
+    assert attributed["A"] == ("VERDICT-A", "FRAGMENT-A")
+    assert attributed["C"] == ("VERDICT-C", "FRAGMENT-C")
