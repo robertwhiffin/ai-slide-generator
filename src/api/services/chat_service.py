@@ -1117,6 +1117,7 @@ class ChatService:
                 session_id,
                 message,
                 is_first_message=is_first_message,
+                request_id=request_id,
             )
             return
 
@@ -1788,6 +1789,7 @@ class ChatService:
         message: str,
         *,
         is_first_message: bool = False,
+        request_id: Optional[str] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Run one turn on the LangGraph engine, yielding events as they arrive.
 
@@ -1835,6 +1837,14 @@ class ChatService:
                 ``architect_node`` is the sole resolver of the design contract
                 and the template bytes.
             is_first_message: Whether to generate a session title this turn.
+            request_id: The async transport's ``ChatRequest.request_id``, handed
+                to ``invoke_graph`` so a node persisting a chat message tags the
+                row with it.  ``GET /chat/poll`` reads assistant text through
+                ``get_messages_for_request``, which filters on that column, so
+                without it the architect's reply is written but no polling client
+                can see it — and polling is the transport the deployed app uses.
+                ``None`` on the SSE path, which persists no request row: that
+                client is reading the yielded events instead.
 
         Yields:
             Every ``StreamEvent`` the graph emits, then ``COMPLETE`` carrying
@@ -1858,6 +1868,7 @@ class ChatService:
                     session_id,
                     {"architect_message": message},
                     emitter=event_queue,
+                    request_id=request_id,
                 )
             except Exception as e:
                 logger.error(

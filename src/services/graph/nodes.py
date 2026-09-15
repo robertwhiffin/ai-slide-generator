@@ -78,6 +78,7 @@ from src.services.graph.event_emitter import (
     advance_slide_cursor,
     emit_event,
     emit_slide_ready,
+    get_chat_request_id,
     get_event_emitter,
     get_slide_cursor,
 )
@@ -158,6 +159,72 @@ def _emit(
             type=event_type, content=content, error=error, metadata=metadata
         )
     )
+
+
+def _say(state: dict, message: str, *, message_type: str = "llm_response") -> None:
+    """Persist one assistant utterance so it survives the turn.  Never raises.
+
+    **The durable half of speaking to the user, and it is not optional.**  An
+    ``_emit`` alone reaches the SSE client and NOBODY ELSE:
+    ``job_queue.process_chat_request`` handles only ``COMPLETE`` and
+    ``SESSION_TITLE`` and discards every other event, and ``GET /chat/poll`` reads
+    a turn's assistant text out of **persisted rows**
+    (``get_messages_for_request``).  So on the polling transport — the one the
+    deployed app uses — an emit-only reply is dropped between the job and the
+    poll, and the user is shown silence for a turn that completed and called the
+    model.  Measured live before this existed.
+
+    The second consumer is the architect itself.  ``_conversation`` builds the
+    architect's history from these rows and admits an assistant turn only when
+    ``message_type`` is in :data:`_AI_TYPES`, so a reply that is not persisted
+    with a replayable type leaves the architect able to ask a clarifying question
+    and, next turn, unable to remember asking.  ``llm_response`` is the type that
+    replays; ``info`` deliberately does not (that exclusion is what keeps the deck
+    reviewer's advisory out of the architect's prose — see :data:`_AI_TYPES`), so
+    ``info`` is the right type for an utterance the user should SEE but the
+    architect must not read back as its own words.
+
+    ``request_id`` comes from the turn's ``ContextVar``, not from state: the
+    polling projection filters on that column, and a row without it is durable but
+    invisible to the client waiting on it.  ``None`` (the SSE path, the sweeper) is
+    correct and still writes the row.
+
+    Not to be used for a machine advisory: :func:`_surface_notice` is the ungated
+    writer for those, and it stays ungated because a failure notice's value is that
+    it lands on every turn.  This one is for a node's own conversational turn.
+
+    **A describe-only turn writes nothing.**  ws4d's arc-review sweeper invokes
+    the graph with ``describe_only=True``, no emitter and no human waiting; its
+    reply is addressed to nobody.  Persisting it would put machine-generated prose
+    in a human's transcript AND — worse — feed it into ``_conversation``, so the
+    human's next turn would find the architect apparently having said something
+    they never saw, in answer to a question they never asked.  Suppression is
+    keyed on the same turn-scoped flag ``architect_router`` gates dispatch on, and
+    it is read HERE rather than passed by each caller so a new caller cannot
+    forget it.
+
+    Never raises: like emission, a transcript write must not be the thing that
+    fails a turn that has otherwise produced a deck.
+    """
+    if bool(scoped_vals(state, "describe_only")):
+        return
+    session_id = state.get("session_id")
+    if not session_id or not message:
+        return
+    try:
+        get_session_manager().add_message(
+            session_id,
+            role="assistant",
+            content=message,
+            message_type=message_type,
+            request_id=get_chat_request_id(),
+        )
+    except Exception:
+        logger.warning(
+            "Could not persist an assistant turn; the user may see silence on "
+            "the polling transport",
+            exc_info=True,
+        )
 
 
 def _release_slides(state: dict) -> List[int]:
@@ -953,8 +1020,12 @@ def _write_reviewed_row(
 def _surface_notice(session_id: str, message: str) -> None:
     """Persist a machine-generated advisory as an ``info`` chat message.
 
-    The shipped channel for advisories the user must see.  Used by every
-    non-fatal failure path a **fanned** node can take, because those paths
+    The shipped channel for advisories the user must see, and the graph's ONE
+    **ungated** chat writer: it writes on every turn, describe-only included.
+    That is the line between this and :func:`_say` — ``_say`` carries a node's
+    conversational turn and suppresses it when nobody is listening; this carries a
+    machine advisory whose whole value is that it is durable regardless.  Used by
+    every non-fatal failure path a **fanned** node can take, because those paths
     cannot write ``error_state``: it is single-writer with no reducer, and two
     branches failing in the same superstep then raise — measured on the
     installed langgraph::
@@ -965,10 +1036,29 @@ def _surface_notice(session_id: str, message: str) -> None:
     which would kill the turn, exactly the failure the handler exists to
     prevent.  A chat message is per-row and concurrency-safe, and unlike a
     stream event it survives ``emitter=None`` (the sweeper path).
+
+    Two non-fanned callers use it too — ``foreman_node``'s unreconciled-END notice
+    and ``deck_reviewer_node``'s review advisory — because they want exactly these
+    semantics and each previously carried its own copy of this write, which is how
+    one of them ended up untagged and invisible to the polling client.
+
+    ``request_id`` is stamped because "an advisory the user must see" was only
+    half true before it was: ``GET /chat/poll`` reads a turn's chat text through
+    ``get_messages_for_request``, which filters on that column, so an untagged
+    row was durable and **invisible to every polling client** — the transport the
+    deployed app uses.  The value comes from the turn's ``ContextVar``, which
+    survives the ``Send`` fan-out this helper is reached from, and is ``None`` on
+    the SSE path and the sweeper.  The ``info`` TYPE is unchanged and must stay:
+    it is what keeps these notices out of ``_conversation``, so the architect
+    never reads a machine advisory back as its own prose.
     """
     try:
         get_session_manager().add_message(
-            session_id, role="assistant", content=message, message_type="info"
+            session_id,
+            role="assistant",
+            content=message,
+            message_type="info",
+            request_id=get_chat_request_id(),
         )
     except Exception:
         logger.warning("Could not surface a failure notice", exc_info=True)
@@ -1316,8 +1406,14 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "fix_target": None,
         "error_state": None,
     }
+    # BOTH surfaces, and the pairing is the fix.  The event is what an SSE client
+    # sees as it happens; the row is what a POLLING client sees at all, and what
+    # the architect reads back next turn as its own words.  An emit without a row
+    # is the shape that shipped: the model was called, the turn completed, and the
+    # user saw nothing.
     _emit(StreamEventType.ASSISTANT, content=message,
           metadata={"node": "architect", "intent": intent})
+    _say(state, message)
 
     if intent == "ask_data":
         # GraphState declares no analyst channel and undeclared keys are
@@ -1534,6 +1630,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     "stale": judged_nothing,
                 },
             )
+            # The architect's SECOND utterance of the same turn, and it takes the
+            # same pair of surfaces as its first for one reason: this is the only
+            # place a user is told what the re-review decided.  Persisting the
+            # reply above while leaving this one emit-only would make the
+            # architect audible on a plain build turn and mute on a deck-level
+            # one — the same defect, moved rather than fixed.
+            _say(state, message)
 
     external_scripts = [SlideDeck.CHART_JS_URL]
     head_meta = json.dumps(_DEFAULT_HEAD_META)
@@ -1668,6 +1771,18 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         content=message,
         metadata={"node": "data_analyst", "outcome": out.outcome},
     )
+    # Persisted as ``info``, NOT ``llm_response``, and the difference is not
+    # cosmetic.  This is user-facing prose from a node that speaks to the user, so
+    # it needs a durable row or the polling transport shows the user nothing where
+    # the SSE transport showed them the analyst's answer.  But it must NOT replay:
+    # ``_conversation`` has only ``user`` and ``assistant`` roles, so an
+    # ``llm_response`` here would come back to the architect next turn as the
+    # ARCHITECT's own words — and it would arrive twice on THIS turn, because the
+    # analyst also hands the same text to the architect on ``architect_message``
+    # (GraphState declares no analyst channel, Ruling C-7), which is the field the
+    # architect answers from.  ``info`` is the shipped type for exactly this:
+    # durable and visible, deliberately outside ``_AI_TYPES``.
+    _say(state, message, message_type="info")
 
     return {"architect_message": message}
 
@@ -1781,15 +1896,12 @@ def foreman_node(state: dict) -> Dict[str, Any]:
     )
     logger.error("Foreman reached END with uncommitted positions: %s", outstanding)
     _emit(StreamEventType.ERROR, error=message, metadata={"node": "foreman"})
-    try:
-        get_session_manager().add_message(
-            state["session_id"],
-            role="assistant",
-            content=message,
-            message_type="info",
-        )
-    except Exception:
-        logger.warning("Could not surface the unreconciled-END notice", exc_info=True)
+    # Through `_surface_notice`, the shipped ungated writer, rather than a
+    # hand-rolled `add_message`: that is where the request-id tag lives, and an
+    # untagged row never reaches `GET /chat/poll`.  NOT through `_say` — this
+    # notice is a machine advisory that must be durable on every turn, and `_say`
+    # suppresses a describe-only one.
+    _surface_notice(state["session_id"], message)
     updates["error_state"] = {
         "node": "foreman",
         "code": "end_with_outstanding_positions",
@@ -2664,15 +2776,16 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 "message": type(exc).__name__,
             }
 
-    try:
-        manager.add_message(
-            session_id,
-            role="assistant",
-            content=advisory,
-            message_type="info",
-        )
-    except Exception:
-        logger.warning("Could not persist the deck-review advisory", exc_info=True)
+    # Through `_surface_notice`, the shipped ungated writer, rather than a
+    # hand-rolled `add_message`: that is where the request-id tag lives, and an
+    # untagged row never reaches `GET /chat/poll`.  NOT through `_say`, which
+    # suppresses a describe-only turn's write — a describe-only turn cannot reach
+    # this node today (`architect_router` ends it first) but the unit suite calls
+    # this node directly with the flag set and PINS that the advisory still lands,
+    # deliberately: "gating the advisory is a change to what the user is told".
+    # The `info` TYPE is load-bearing and unchanged — its exclusion from
+    # `_AI_TYPES` keeps this advisory out of the architect's replayed conversation.
+    _surface_notice(session_id, advisory)
     _emit(
         StreamEventType.ASSISTANT,
         content=advisory,
