@@ -397,3 +397,43 @@ def test_a_contributor_session_classifies_the_owners_spec(graph_env):
     )
 
     assert updates["target_positions"] == [0, 1, 2]
+
+
+def test_the_notice_fires_when_agent_config_has_already_dropped_the_style(graph_env):
+    """The case the persisted-spec fallback exists for, and the only one that can
+    catch its removal.
+
+    ``AgentConfig``'s serializer ALREADY nulls ``slide_style_id`` the moment a
+    design system is selected on the session, so the inbound contract this turn's
+    brand was resolved from carries no style while the persisted spec still does.
+    That deck is exactly one whose style is about to be dropped — and reading only
+    the inbound contract would say nothing at all.
+    """
+    from src.database.models.session import UserSession
+
+    env = graph_env
+    _persist(env, make_spec(slide_style_id=5))
+
+    db = env.factory()
+    try:
+        session = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == env.session_id)
+            .one()
+        )
+        session.agent_config = {"design_system_id": 9}
+        db.commit()
+    finally:
+        db.close()
+
+    updates = _run_architect(
+        env,
+        ArchitectOutput(
+            intent="confirm_design_contract",
+            message="Switch this deck to Acme?",
+            proposed_design_contract=DesignContractRef(design_system_id=9),
+        ),
+    )
+
+    assert "slide style" in updates["architect_message"].lower()
+    assert "5" in updates["architect_message"]
