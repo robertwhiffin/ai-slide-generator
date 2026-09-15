@@ -91,6 +91,48 @@ describe('neither panel is unmounted by the toggle', () => {
     ).toContain("className={showSpec ? 'hidden'");
   });
 
+  it('neither pane wrapper is a flex container', () => {
+    // LAYOUT SYMMETRY, pinned on the MECHANISM rather than on a measurement.
+    //
+    // The right-hand column is a flex column, so a pane wrapper that is itself a
+    // flex container turns the panel inside it into a flex item with the default
+    // min-width:auto — which refuses to shrink below content width. That is the
+    // measured regression that pushed the slide stage to 1694px inside a 1400px
+    // viewport, and `slide-viewer.spec.ts:217` ("the viewer fits the viewport")
+    // catches it for the slide pane.
+    //
+    // The SPEC pane has no such geometric test, and cannot usefully have one:
+    // SpecView's root carries `w-full`, so flexing its wrapper reddens nothing
+    // today. An overflow assertion there would be a guard that cannot fail — the
+    // shape this branch has paid for five times. So the invariant the pane
+    // comments claim is asserted here instead, where it CAN fail: both wrappers
+    // stay block-level, and the day one of them gains `w-full`-less content the
+    // mechanism is already pinned.
+    //
+    // Scoped to the className expression on purpose: the slide pane's comment
+    // quotes `flex h-full min-h-0 flex-1` as prose, and a scan over the whole
+    // attribute list would match that and pass for the wrong reason.
+    for (const testId of ['slide-viewer-pane', 'spec-view-pane']) {
+      const match = new RegExp(
+        `data-testid="${testId}"[\\s\\S]{0,2000}?className=\\{([^}]*)\\}`,
+      ).exec(appLayoutSource);
+      expect(match, `no className found for the ${testId} wrapper`).not.toBeNull();
+
+      const tokens = [...match![1].matchAll(/'([^']*)'/g)]
+        .flatMap((m) => m[1].split(/\s+/))
+        .filter(Boolean);
+
+      // Precondition: we parsed real Tailwind classes, not an empty string.
+      expect(tokens, `${testId}: no classes parsed`).toContain('flex-1');
+      expect(
+        tokens,
+        `${testId} must stay a BLOCK wrapper. Making it a flex container turns the `
+        + 'panel inside it into a flex item with min-width:auto, which overflows its '
+        + 'column — measured at 1072px inside 778px for the slide pane.',
+      ).not.toContain('flex');
+    }
+  });
+
   it('showSpec never gates a render', () => {
     // `showSpec && <X/>` and `showSpec ? <X/> : <Y/>` both UNMOUNT the branch that
     // is not taken. Hiding is the only permitted mechanism, so a JSX-valued

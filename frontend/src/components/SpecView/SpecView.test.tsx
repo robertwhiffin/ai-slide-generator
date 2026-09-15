@@ -27,7 +27,7 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react';
 import { SpecView } from './SpecView';
-import type { DeckSpec, SlideDeck } from '../../types/slide';
+import type { DeckSpec, SlideDeck, SlideSpec } from '../../types/slide';
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -98,6 +98,25 @@ function makeSpec(overrides: Partial<DeckSpec> = {}): DeckSpec {
       },
     ],
     ...overrides,
+  };
+}
+
+/**
+ * One brief at an arbitrary position, for the ordering test.
+ *
+ * Positions need not be contiguous or list-ordered: `position` is the slide's
+ * canonical identity and diverges from list index after a delete or a partial
+ * rebuild, which is why `DeckSpec.slide_at` looks up by the field and never by index.
+ */
+function makeSlide(position: number): SlideSpec {
+  return {
+    position,
+    purpose: `Purpose of the brief at position ${position}.`,
+    content_brief: `Content brief for position ${position}.`,
+    assumes: `What position ${position} inherits.`,
+    hands_off: `What position ${position} leaves the reader.`,
+    data_references: [],
+    template_section_index: null,
   };
 }
 
@@ -175,6 +194,98 @@ describe('SpecView — per-slide briefs', () => {
     // "Slide 3".  A component labelling by list index would say "Slide 2".
     renderSpec(makeSpec());
     expect(screen.getByTestId('spec-slide-2')).toHaveTextContent('Slide 3');
+  });
+
+  it('renders the briefs in the order the spec gives, not reversed or re-sorted', () => {
+    // ORDER IS MEANING HERE TOO — the same reason the narrative arc's order is
+    // asserted. The briefs are that arc made concrete, and a reversed list renders
+    // "Slide 6, Slide 3, Slide 1" to the reader.
+    //
+    // Every other per-slide assertion in this file is keyed by `position` and
+    // reads a label of `position + 1`, so expected and actual move together and a
+    // reversal is invisible to all of them. Measured: reversing the render order
+    // left 42/42 vitest and 18/18 e2e green.
+    //
+    // THE INVOLUTION TRAP (§29). The fixture is deliberately NOT symmetric:
+    // positions 0, 2, 5 with three entries, so a reversal is not its own inverse
+    // and a rotation does not reproduce it either. Asserting the SEQUENCE as
+    // rendered — not the set — is what makes that reachable.
+    renderSpec(makeSpec({ slides: [makeSlide(0), makeSlide(2), makeSlide(5)] }));
+
+    const rendered = screen
+      .getAllByTestId(/^spec-slide-\d+$/)
+      .map((li) => li.dataset.testid);
+
+    expect(rendered).toEqual(['spec-slide-0', 'spec-slide-2', 'spec-slide-5']);
+  });
+});
+
+// ── the rendered spec FOLLOWS the deck ────────────────────────────────────────
+//
+// This is the feature's central loop and it had no guard. The spec is read-only,
+// so the ONLY way it ever changes is a chat turn replacing the deck: the user asks
+// the architect to tighten the arc, the deck comes back, and the open spec pane
+// must show the new plan. A component that renders the spec once and then never
+// follows the deck fails at exactly that, silently — the pane keeps showing a plan
+// the deck no longer has.
+//
+// Sabotage target: derive `spec` from anything other than the current props —
+// `useState(slideDeck?.deck_spec ?? null)` (captured on mount), or a `useRef` that
+// latches the first NON-null spec and ignores every later one. The second is the
+// realistic staleness: the pane mounts before the deck arrives, so a mount-capture
+// latches `null` and is caught by half the suite, while a first-non-null latch left
+// 42/42 vitest and 18/18 e2e green. Both are caught here, because the sequence
+// below starts at null and then changes TWICE.
+
+describe('SpecView — the rendered spec follows the deck', () => {
+  /** The spec after a later chat turn: the architect narrowed the audience. */
+  const REVISED_AUDIENCE =
+    'The board only — the regional leads were briefed separately on the second turn.';
+
+  it('follows the deck through null, then a spec, then a revised spec', () => {
+    const first = makeSpec();
+    const { rerender } = render(<SpecView slideDeck={makeDeck(null)} onDiscuss={noop} />);
+    // Phase 1 — the pane mounts before the deck arrives. Production order.
+    expect(screen.getByTestId('spec-view-empty')).toBeInTheDocument();
+
+    // Phase 2 — the first spec lands.
+    rerender(<SpecView slideDeck={makeDeck(first)} onDiscuss={noop} />);
+    expect(screen.getByTestId('spec-audience')).toHaveTextContent(first.audience);
+
+    // Phase 3 — a later turn revises it. THIS is the change a first-non-null latch
+    // swallows, and the one nothing asserted before.
+    const revised = makeSpec({ audience: REVISED_AUDIENCE });
+    rerender(<SpecView slideDeck={makeDeck(revised)} onDiscuss={noop} />);
+
+    expect(screen.getByTestId('spec-audience')).toHaveTextContent(REVISED_AUDIENCE);
+    // And the superseded value is GONE, not merely joined by the new one — a
+    // component that appended rather than replaced would satisfy the line above.
+    expect(screen.queryByText(first.audience)).not.toBeInTheDocument();
+  });
+
+  it('replaces the narrative arc and the slide briefs when the spec is revised', () => {
+    // A DISTINCT SECTION from the test above, on purpose: a partial staleness that
+    // froze only the list-rendered sections (arc, briefs) while the deck-level
+    // fields still tracked would pass the audience test and fail here.
+    const first = makeSpec();
+    const { rerender } = render(<SpecView slideDeck={makeDeck(first)} onDiscuss={noop} />);
+    expect(screen.getByTestId('spec-slide-2')).toBeInTheDocument();
+
+    const revisedArc = ['One beat only, after the architect collapsed the middle.'];
+    rerender(
+      <SpecView
+        slideDeck={makeDeck(makeSpec({ narrative_arc: revisedArc, slides: [makeSlide(0)] }))}
+        onDiscuss={noop}
+      />,
+    );
+
+    expect(
+      screen.getAllByTestId(/^spec-arc-beat-/).map((li) => li.textContent),
+    ).toEqual(revisedArc);
+    // The brief the revised spec dropped is gone, so this is not passing because
+    // the new content was appended alongside the old.
+    expect(screen.queryByTestId('spec-slide-2')).not.toBeInTheDocument();
+    expect(screen.getByTestId('spec-slide-0')).toBeInTheDocument();
   });
 });
 

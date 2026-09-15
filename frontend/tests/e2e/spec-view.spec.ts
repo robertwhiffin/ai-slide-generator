@@ -101,6 +101,20 @@ const DECK_SPEC = {
 };
 
 /**
+ * The spec as a later chat turn leaves it: the architect narrowed the audience and
+ * collapsed the arc to two beats. Used by `the open spec pane follows a revised
+ * deck_spec` — the feature's central loop.
+ */
+const REVISED_AUDIENCE =
+  'The board only — the regional leads were briefed separately on the second turn.';
+
+const REVISED_DECK_SPEC = {
+  ...DECK_SPEC,
+  audience: REVISED_AUDIENCE,
+  narrative_arc: [NARRATIVE_ARC[0], NARRATIVE_ARC[2]],
+};
+
+/**
  * Two open findings on slide 0, for the dismissed-findings round trip.
  *
  * The shared `mockFindings` fixture puts its open finding on slideIndex 1, and its
@@ -152,6 +166,33 @@ async function mockDeckSpec(page: Page, deckSpec: unknown) {
       }),
     });
   });
+}
+
+/**
+ * Same as `mockDeckSpec`, but the served spec can be REVISED mid-test — the way a
+ * chat turn revises it in production. Returns the setter.
+ *
+ * Deliberately not a call counter: AppLayout's own reads of `getSlides` (initial
+ * load, and again after `complete`) would make a counter's behaviour depend on how
+ * many times the app happens to fetch. An explicit flip is deterministic.
+ */
+async function mockRevisableDeckSpec(page: Page, initial: unknown) {
+  const state: { spec: unknown } = { spec: initial };
+  await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/slides`), (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...mockSlidesResponse,
+        slide_deck: {
+          ...mockSlidesResponse.slide_deck,
+          css: COMPILED_DECK_CSS,
+          deck_spec: state.spec,
+        },
+      }),
+    });
+  });
+  return (next: unknown) => { state.spec = next; };
 }
 
 async function openDeck(page: Page, route: 'edit' | 'view' = 'edit') {
@@ -233,6 +274,45 @@ test.describe('spec view toggle', () => {
       .toContainText(DECK_SPEC.call_to_action);
   });
 
+  test('the open spec pane follows a revised deck_spec after a chat turn', async ({ page }) => {
+    // THE FEATURE'S CENTRAL LOOP, and it had no guard. The spec is read-only, so a
+    // chat turn is the ONLY thing that ever changes it: the user asks the architect
+    // to narrow the audience, the deck comes back, and the spec pane — still open —
+    // must show the new plan rather than the one it first rendered.
+    //
+    // The whole production path runs here: chat stream -> `complete` carrying
+    // slides -> ChatPanel re-reads getSlides -> onSlidesGenerated ->
+    // setSlideDeckGated -> SpecView's props change. A SpecView that latched its
+    // first non-null spec passes every other test in this file and fails here.
+    const revise = await mockRevisableDeckSpec(page, DECK_SPEC);
+    await page.route(apiPath('/api/chat/stream'), (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type": "assistant", "content": "Narrowed the audience to the board."}\n\n'
+          + `data: {"type": "complete", "slides": ${JSON.stringify(mockSlidesResponse.slide_deck)}}\n\n`,
+      });
+    });
+
+    await openDeck(page);
+    await showSpec(page);
+    await expect(page.getByTestId('spec-audience')).toContainText(DECK_SPEC.audience);
+
+    // The architect's next commit lands on the server...
+    revise(REVISED_DECK_SPEC);
+    // ...and the user asks for it through the one write path.
+    await page.getByTestId('chat-input').fill('narrow the audience to the board only');
+    await page.getByRole('button', { name: 'Send' }).click();
+
+    await expect(page.getByTestId('spec-audience'))
+      .toContainText(REVISED_AUDIENCE, { timeout: 15000 });
+    // The superseded value is GONE, not merely joined by the new one.
+    await expect(page.getByTestId('spec-audience')).not.toContainText(DECK_SPEC.audience);
+    // And the pane did not switch itself back to the slides on the deck update:
+    // `showSpec` is the user's choice, not a function of the deck.
+    await expect(page.getByTestId('spec-view')).toBeVisible();
+  });
+
   test('the narrative arc renders in order', async ({ page }) => {
     await openDeck(page);
     await showSpec(page);
@@ -256,6 +336,27 @@ test.describe('spec view toggle', () => {
       await expect(page.getByTestId(`spec-slide-hands-off-${slide.position}`))
         .toContainText(slide.hands_off);
     }
+  });
+
+  test('the slide briefs render in the order the spec gives', async ({ page }) => {
+    // Its own test, because every assertion in the one above is keyed by
+    // `position` and reads a label of `position + 1` — expected and actual move
+    // together, so a reversal is invisible to all of them. Measured: reversing the
+    // render order left 42/42 vitest and 18/18 e2e green.
+    //
+    // Order is meaning here for the same reason it is for the narrative arc: the
+    // briefs are that arc made concrete, and a reversed list renders
+    // "Slide 3, Slide 2, Slide 1" to the reader. Asserted as a SEQUENCE, not a set.
+    await openDeck(page);
+    await showSpec(page);
+
+    const rendered = await page.getByTestId(/^spec-slide-\d+$/)
+      .evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.testid));
+
+    // Spelled out rather than derived from DECK_SPEC.slides: an expectation built
+    // from the same array the component maps over would move with a fixture
+    // reorder, and both sides moving together is no assertion at all (§32).
+    expect(rendered).toEqual(['spec-slide-0', 'spec-slide-1', 'spec-slide-2']);
   });
 
   test('the design contract shows which brand, by id', async ({ page }) => {
@@ -296,6 +397,9 @@ test.describe('spec view toggle', () => {
     const pane = page.getByTestId('spec-view');
     await expect(pane.locator('input')).toHaveCount(0);
     await expect(pane.locator('textarea')).toHaveCount(0);
+    // `select` is an edit affordance too, and read-only here is structural rather
+    // than styling — so this list must match the component test's exactly.
+    await expect(pane.locator('select')).toHaveCount(0);
     await expect(pane.locator('[contenteditable]')).toHaveCount(0);
   });
 
