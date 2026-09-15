@@ -284,6 +284,23 @@ _DECK_LEVEL_FIELDS = (
 )
 
 
+#: Criteria that mark a slide as no longer serving the deck's brief on §4.6's
+#: RE-REVIEW pass, in addition to the objective ones.
+#:
+#: ``brief_not_delivered`` is the ONLY criterion in the registry that can express
+#: "this slide no longer serves the brief", and it is ``objective=False``
+#: (``finding.py``: *"The one subjective slide criterion"*).  So the build path's
+#: objective-only rule — right there, because an objective finding is what a fixer
+#: can act on — is exactly wrong here, where the whole question is subjective.
+#: Counting objective findings alone made the pass unable to fail for the one
+#: reason it exists: it shipped once returning ``set()`` for a
+#: ``brief_not_delivered`` finding.
+#:
+#: The build path is untouched: ``build_reviewer_node`` still branches on
+#: ``objective`` alone.
+_REREVIEW_FAILING_CRITERIA = frozenset({"brief_not_delivered"})
+
+
 def classify_spec_change(
     new_spec: Optional[DeckSpec], persisted: Optional[DeckSpec]
 ) -> str:
@@ -433,6 +450,7 @@ def rereview_committed_slides(
         "failing": set(),
         "unreviewable": set(),
         "placeheld": set(),
+        "surfaced": [],
     }
     try:
         rows = SlideWriter().list_slides_in_position_order(session_id)
@@ -457,12 +475,14 @@ def rereview_committed_slides(
     resolved_style = brand.get("resolved_style") or ""
     section_css = brand.get("deterministic_css") or ""
     design_system_active = bool(brand.get("design_system_active"))
+    deck_brief = {field: getattr(spec, field) for field in _DECK_LEVEL_FIELDS}
 
     committed: set = set()
     reviewed: set = set()
     failing: set = set()
     unreviewable: set = set()
     placeheld: set = set()
+    surfaced: List[dict] = []
 
     for position in sorted(by_position):
         row = by_position[position]
@@ -488,6 +508,16 @@ def rereview_committed_slides(
             "resolved_data": spec.resolved_data.model_dump(),
             "html": html,
             "scripts": row.get("scripts") or "",
+            # The five deck-level fields, WITHOUT WHICH THIS PASS CANNOT WORK.
+            # Built from _DECK_LEVEL_FIELDS — the same tuple classify_spec_change
+            # watches — so the fields that TRIGGER a re-review and the fields the
+            # reviewer is SHOWN can never drift apart.  Neither the reviewer's own
+            # payload nor SlideSpec carries any of them, so without this key the
+            # reviewer is asked whether a slide still serves a brief it was never
+            # told, and can only answer with rendering findings that no spec edit
+            # can cause.  Its presence is also what adds DECK_BRIEF_REVIEW to the
+            # instructions (see call_skill._with_conditional_instructions).
+            "deck_brief": deck_brief,
         }
         try:
             out = call_skill("build_reviewer", review_payload, design_system_active)
@@ -508,7 +538,22 @@ def rereview_committed_slides(
             continue
 
         reviewed.add(position)
-        if any(finding.objective for finding in findings):
+        for item in findings:
+            # Surfaced, not discarded. Given brief_not_delivered is subjective,
+            # dropping non-objective findings threw away the only signal this pass
+            # can produce — and left the notice claiming every slide still fit.
+            surfaced.append(
+                {
+                    "position": position,
+                    "criterion": item.criterion,
+                    "message": item.message,
+                    "objective": bool(item.objective),
+                }
+            )
+        if any(
+            item.objective or item.criterion in _REREVIEW_FAILING_CRITERIA
+            for item in findings
+        ):
             failing.add(position)
 
     return {
@@ -517,6 +562,7 @@ def rereview_committed_slides(
         "failing": failing,
         "unreviewable": unreviewable,
         "placeheld": placeheld,
+        "surfaced": surfaced,
     }
 
 
@@ -1322,17 +1368,37 @@ def architect_node(state: dict) -> Dict[str, Any]:
             requested = set(out.target_positions) if intent == "edit" else set()
             rebuild = sorted(verdicts["failing"] | uncovered | requested)
             updates["target_positions"] = rebuild
-            logger.info(
-                "Deck-level spec change: re-reviewed %d slide(s), rebuilding %s "
-                "(unreviewable: %s)",
-                len(verdicts["committed"]),
-                rebuild,
-                sorted(verdicts["unreviewable"]),
-                extra={"session_id": session_id},
-            )
-            _emit(
-                StreamEventType.ASSISTANT,
-                content=(
+
+            # Could the pass judge ANYTHING?  Every position unreviewable means
+            # the deck is now stale against a brief nothing checked it against,
+            # and the tie-break that leaves unreviewable slides alone gives that
+            # staleness no retry path.  So it must not read as a successful
+            # re-review: it is recorded on error_state (single-writer, and this
+            # node is its writer) and SAID in the notice, rather than reported as
+            # "every slide still fits".
+            judged_nothing = bool(verdicts["committed"]) and not verdicts["reviewed"]
+            if judged_nothing:
+                message = (
+                    f"The deck's brief changed, but I could not check any of its "
+                    f"{len(verdicts['committed'])} slide(s) against it — every "
+                    f"re-review failed. The slides are unchanged, so the deck may "
+                    f"no longer match its brief. Ask me again to re-check it."
+                )
+                logger.error(
+                    "Deck-level spec change: every re-review failed for %d "
+                    "committed slide(s); the deck is stale against its new brief "
+                    "and nothing will be rebuilt to fix it",
+                    len(verdicts["committed"]),
+                    extra={"session_id": session_id},
+                )
+                updates["error_state"] = {
+                    "node": "architect",
+                    "code": "rereview_judged_nothing",
+                    "message": message,
+                    "positions": sorted(verdicts["unreviewable"]),
+                }
+            else:
+                message = (
                     f"The deck's brief changed, so I re-checked all "
                     f"{len(verdicts['committed'])} slide(s) against it. "
                     + (
@@ -1340,13 +1406,30 @@ def architect_node(state: dict) -> Dict[str, Any]:
                         if rebuild
                         else "Every slide still fits, so I am rebuilding none."
                     )
-                ),
+                )
+                logger.info(
+                    "Deck-level spec change: re-reviewed %d slide(s), rebuilding "
+                    "%s (unreviewable: %s, surfaced: %s)",
+                    len(verdicts["committed"]),
+                    rebuild,
+                    sorted(verdicts["unreviewable"]),
+                    verdicts["surfaced"],
+                    extra={"session_id": session_id},
+                )
+            _emit(
+                StreamEventType.ASSISTANT,
+                content=message,
                 metadata={
                     "node": "architect",
                     "spec_change": "deck_level",
-                    "reviewed": sorted(verdicts["committed"]),
+                    "reviewed": sorted(verdicts["reviewed"]),
                     "rebuilding": rebuild,
                     "unreviewable": sorted(verdicts["unreviewable"]),
+                    # Every finding the pass produced, objective or not. The
+                    # subjective ones ARE the signal here, so dropping them left
+                    # the pass with nothing to report.
+                    "surfaced": verdicts["surfaced"],
+                    "stale": judged_nothing,
                 },
             )
 

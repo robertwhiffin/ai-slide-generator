@@ -447,7 +447,52 @@ def test_the_notice_fires_when_agent_config_has_already_dropped_the_style(graph_
 
 # ---------------------------------------------------------------------------
 # 4. The serial re-review pass (Option 2)
+#
+# THE GUARD THAT WAS MISSING, and why this section is shaped around it.
+#
+# The first version of this suite was green over a mechanism that could not work.
+# Every "failing" stub returned `overflow` — an OBJECTIVE, DESIGN criterion about
+# where pixels land.  No edit to a deck's audience or argument can cause an
+# overflow finding, so the suite proved the plumbing while the production path
+# could never produce the verdict it was plumbing.  Two real defects hid under it:
+# the five deck-level fields never reached the reviewer at all, and the only
+# criterion that CAN express "no longer serves the brief" is
+# `brief_not_delivered`, which is objective=False and so was not counted.
+#
+# Two things fix that permanently:
+#
+#   * SPEC_REACHABLE_CRITERIA is DERIVED from the registry, not listed by hand: a
+#     slide-level criterion whose category is not "design".  `rereview_finding`
+#     refuses anything outside it AND refuses a criterion the production rule
+#     would not count — so a stub cannot manufacture an unreachable failure mode,
+#     and cannot assert a reachable one the code ignores.
+#   * `brief_aware_reviewer` keys its verdict on the NEW brief being visible IN
+#     THE PAYLOAD.  A pass that shows the reviewer nothing, or shows it the OLD
+#     spec, produces no finding and reddens — which is what makes "scored against
+#     the new spec" a testable claim rather than a comment.
 # ---------------------------------------------------------------------------
+
+from src.domain.finding import CRITERIA  # noqa: E402
+from src.services.graph.nodes import (  # noqa: E402
+    _DECK_LEVEL_FIELDS,
+    _REREVIEW_FAILING_CRITERIA,
+    rereview_committed_slides,
+)
+
+NEW_AUDIENCE = "the CFO, not engineers"
+OLD_AUDIENCE = "Stub audience"  # what make_spec() sets
+
+#: The criteria a change to the deck's SPEC can actually cause on one slide:
+#: slide-level, and not about rendering.  Derived from the registry so a new
+#: criterion is classified the day it lands.  `overflow`, `contrast_failure`,
+#: `rogue_colour` and `distorted_image` are all category="design" — the pixels do
+#: not move when the audience changes — and the three narrative criteria are
+#: level="deck", which belongs to the deck reviewer, not to this per-slide pass.
+SPEC_REACHABLE_CRITERIA = frozenset(
+    name
+    for name, criterion in CRITERIA.items()
+    if criterion.level == "slide" and criterion.category != "design"
+)
 
 REVIEWER_PAYLOAD_KEYS = {
     "position",
@@ -458,6 +503,52 @@ REVIEWER_PAYLOAD_KEYS = {
     "html",
     "scripts",
 }
+
+
+def rereview_finding(position, criterion="brief_not_delivered"):
+    """A finding a SPEC change can produce AND that the pass counts as failing.
+
+    Both assertions are the guard.  The first is what was missing: a stub using
+    ``overflow`` manufactures a failure mode the production path cannot reach, and
+    every test over it is vacuous.  The second catches the mirror defect that
+    actually shipped: a reachable criterion the production rule ignores, which is
+    exactly ``brief_not_delivered`` under an objective-only rule.
+    """
+    assert criterion in SPEC_REACHABLE_CRITERIA, (
+        f"{criterion!r} is not reachable from a spec change "
+        f"(reachable: {sorted(SPEC_REACHABLE_CRITERIA)}). A stub that fails a "
+        f"slide for an unreachable reason makes every test over it vacuous."
+    )
+    item = finding(criterion, slide_index=position)
+    assert item.objective or criterion in _REREVIEW_FAILING_CRITERIA, (
+        f"{criterion!r} is reachable but the re-review's failing rule would not "
+        f"count it, so this stub asserts a verdict the code cannot produce."
+    )
+    return item
+
+
+def brief_aware_reviewer(failing_positions, *, expect_audience=NEW_AUDIENCE):
+    """A reviewer that can only fail a slide when it was SHOWN the new brief.
+
+    Keyed on ``payload["deck_brief"]["audience"]``, never on the position alone.
+    That is what makes two separate defects observable: a payload carrying no
+    deck brief at all, and a pass scored against the OLD spec.  Both leave the
+    reviewer unable to tell the brief changed, so it returns nothing and every
+    "rebuilt only failures" assertion reddens.
+    """
+
+    def _review(payload):
+        position = payload["position"]
+        brief = payload.get("deck_brief") or {}
+        saw_the_new_brief = brief.get("audience") == expect_audience
+        findings = (
+            [rereview_finding(position)]
+            if saw_the_new_brief and position in failing_positions
+            else []
+        )
+        return review_out(position, findings)
+
+    return _review
 
 
 def _seed_rows(env, htmls, placeheld=()):
@@ -507,98 +598,201 @@ def _brand():
     }
 
 
-def test_the_re_review_scores_the_committed_html_with_the_reviewers_own_payload(
-    graph_env,
-):
-    """The pass must judge what is ON THE DECK, against the NEW spec, using the
-    shape ``build_reviewer_node`` builds — key for key, or the skill is scored on
-    an input it was never written against."""
-    from src.services.graph.nodes import rereview_committed_slides
+def _new_spec(positions=(0, 1, 2)):
+    """The spec AFTER a deck-level change — a new audience."""
+    return make_spec(positions=positions).model_copy(
+        update={"audience": NEW_AUDIENCE}
+    )
 
+
+# -- the reachability guard has teeth ---------------------------------------
+
+
+def test_a_rendering_criterion_is_not_reachable_from_a_spec_change():
+    """The guard that would have caught the whole defect.
+
+    ``overflow`` is objective, so the old rule DID count it — which is why the
+    suite was green.  What made it vacuous is that no spec edit can cause it.
+    """
+    assert "overflow" not in SPEC_REACHABLE_CRITERIA
+    assert "brief_not_delivered" in SPEC_REACHABLE_CRITERIA
+    with pytest.raises(AssertionError, match="not reachable from a spec change"):
+        rereview_finding(0, criterion="overflow")
+
+
+def test_the_production_rule_counts_the_criterion_the_stubs_use():
+    """The mirror guard: a reachable criterion the code ignores.
+
+    This is the defect that shipped — ``brief_not_delivered`` is the only
+    criterion that can say "no longer serves the brief" and the objective-only
+    rule dropped it on the floor.
+    """
+    assert "brief_not_delivered" in _REREVIEW_FAILING_CRITERIA
+    assert CRITERIA["brief_not_delivered"].objective is False
+
+
+# -- the reviewer is shown the new brief ------------------------------------
+
+
+def test_the_re_review_shows_the_reviewer_the_new_deck_brief(graph_env):
+    """All five deck-level fields, carrying the NEW values, in the payload.
+
+    Without them the reviewer is asked whether a slide still serves a brief it
+    was never told — measured: every one of the five absent from the serialised
+    payload, and the pass rebuilt nothing for N serial model calls.
+    """
     env = graph_env
     _seed_rows(env, ["<div>COMMITTED ZERO</div>", "<div>COMMITTED ONE</div>"])
-    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    new_spec = make_spec(positions=(0, 1)).model_copy(
-        update={"audience": "the CFO, not engineers"}
-    )
-    verdicts = rereview_committed_slides(env.session_id, new_spec, _brand())
+    rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+
+    payload = env.skills.calls_for("build_reviewer")[0]["payload"]
+    assert set(payload) == REVIEWER_PAYLOAD_KEYS | {"deck_brief"}
+    brief = payload["deck_brief"]
+    assert brief["audience"] == NEW_AUDIENCE, "the reviewer got the OLD audience"
+    for field in _DECK_LEVEL_FIELDS:
+        assert field in brief, f"{field} is not shown to the reviewer"
+        assert brief[field] == getattr(_new_spec((0, 1)), field)
+
+
+def test_the_brief_shown_is_exactly_the_fields_that_trigger_a_re_review(graph_env):
+    """The fields that TRIGGER the pass and the fields the reviewer is SHOWN are
+    one tuple, so they cannot drift: a sixth deck-level field added to the
+    classifier would otherwise trigger re-reviews the reviewer cannot judge."""
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>"])
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
+
+    rereview_committed_slides(env.session_id, _new_spec((0,)), _brand())
+
+    brief = env.skills.calls_for("build_reviewer")[0]["payload"]["deck_brief"]
+    assert set(brief) == set(_DECK_LEVEL_FIELDS)
+
+
+def test_the_re_review_scores_the_committed_html_against_the_new_spec(graph_env):
+    """What is ON the deck, judged against where the deck is GOING."""
+    env = graph_env
+    _seed_rows(env, ["<div>COMMITTED ZERO</div>", "<div>COMMITTED ONE</div>"])
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
+
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
 
     calls = env.skills.calls_for("build_reviewer")
     assert [c["payload"]["position"] for c in calls] == [0, 1]
-    assert set(calls[0]["payload"]) == REVIEWER_PAYLOAD_KEYS
-    # The committed HTML, not the spec's or the builder's.
     assert calls[0]["payload"]["html"] == "<div>COMMITTED ZERO</div>"
     assert calls[1]["payload"]["html"] == "<div>COMMITTED ONE</div>"
-    # ...judged against the NEW spec's slide brief and resolved data.
     assert calls[0]["payload"]["slide_spec"]["position"] == 0
     assert verdicts["reviewed"] == {0, 1}
     assert verdicts["failing"] == set()
 
 
-def test_only_an_objective_finding_marks_a_slide_as_contradicting_the_spec(graph_env):
-    """A subjective finding is surfaced, never acted on — the same rule
-    ``build_reviewer_node`` applies, and ``_stamp_findings`` re-derives
-    ``objective`` from CRITERIA so a model cannot suppress a rebuild by lying."""
-    from src.services.graph.nodes import rereview_committed_slides
+# -- the failing rule -------------------------------------------------------
 
+
+def test_brief_not_delivered_marks_a_slide_as_no_longer_serving_the_brief(graph_env):
+    """The verdict this whole pass exists to act on."""
     env = graph_env
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set("build_reviewer", brief_aware_reviewer({1}))
 
-    def _review(payload):
-        position = payload["position"]
-        if position == 1:
-            return review_out(position, [finding("overflow", slide_index=1)])
-        if position == 2:
-            # `arc_gap` is a SUBJECTIVE criterion: surfaced, not acted on.
-            return review_out(position, [finding("arc_gap", slide_index=2)])
-        return review_out(position)
-
-    env.skills.set("build_reviewer", _review)
-    verdicts = rereview_committed_slides(
-        env.session_id, make_spec(positions=(0, 1, 2)), _brand()
-    )
+    verdicts = rereview_committed_slides(env.session_id, _new_spec(), _brand())
 
     assert verdicts["failing"] == {1}
     assert verdicts["reviewed"] == {0, 1, 2}
 
 
+def test_an_objective_finding_still_marks_a_slide_for_rebuild(graph_env):
+    """The build path's rule is KEPT, not replaced: an objectively broken slide is
+    rebuilt too while we are rebuilding anyway."""
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+    env.skills.set(
+        "build_reviewer",
+        lambda payload: review_out(
+            payload["position"],
+            [finding("overflow", slide_index=1)] if payload["position"] == 1 else [],
+        ),
+    )
+
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+
+    assert verdicts["failing"] == {1}
+
+
+def test_an_unrelated_subjective_finding_does_not_force_a_rebuild(graph_env):
+    """Only ``brief_not_delivered`` joins the objective rule. ``arc_gap`` is a
+    deck-level narrative observation — surfaced, never a reason to discard a
+    slide a human may have edited."""
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+    env.skills.set(
+        "build_reviewer",
+        lambda payload: review_out(
+            payload["position"],
+            [finding("arc_gap", slide_index=1)] if payload["position"] == 1 else [],
+        ),
+    )
+
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+
+    assert verdicts["failing"] == set()
+    assert [f["criterion"] for f in verdicts["surfaced"]] == ["arc_gap"]
+
+
+def test_every_finding_is_surfaced_including_the_subjective_ones(graph_env):
+    """Given the criterion that matters here is subjective, discarding
+    non-objective findings threw away the only signal the pass can produce."""
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+    env.skills.set("build_reviewer", brief_aware_reviewer({1}))
+
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+
+    assert verdicts["surfaced"] == [
+        {
+            "position": 1,
+            "criterion": "brief_not_delivered",
+            "message": "stub finding",
+            "objective": False,
+        }
+    ]
+
+
+# -- the three judgement calls ----------------------------------------------
+
+
 def test_a_placeholder_fails_by_definition_and_costs_no_model_call(graph_env):
     """There is nothing there to preserve, so paying a model to confirm what the
     row's own marker says would be waste."""
-    from src.services.graph.nodes import rereview_committed_slides
-
     env = graph_env
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>"], placeheld={1})
-    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    verdicts = rereview_committed_slides(
-        env.session_id, make_spec(positions=(0, 1)), _brand()
-    )
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
 
     assert verdicts["placeheld"] == {1}
     assert verdicts["failing"] == {1}
-    assert [c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")] == [0]
+    assert [
+        c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")
+    ] == [0]
 
 
 def test_an_unreviewable_slide_is_left_alone_rather_than_overwritten(graph_env):
     """The recorded tie-break: §4.6 rejected the blanket rebuild-all as
     "expensive and destructive" *because* manual edits matter, so a slide we
     could not judge is preserved rather than rebuilt."""
-    from src.services.graph.nodes import rereview_committed_slides
-
     env = graph_env
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+    passing = brief_aware_reviewer(set())
 
     def _review(payload):
         if payload["position"] == 1:
             raise RuntimeError("the reviewer is down")
-        return review_out(payload["position"])
+        return passing(payload)
 
     env.skills.set("build_reviewer", _review)
-    verdicts = rereview_committed_slides(
-        env.session_id, make_spec(positions=(0, 1)), _brand()
-    )
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
 
     assert verdicts["unreviewable"] == {1}
     assert verdicts["failing"] == set()
@@ -608,36 +802,27 @@ def test_an_unreviewable_slide_is_left_alone_rather_than_overwritten(graph_env):
 
 def test_a_row_the_new_spec_does_not_cover_is_not_re_reviewed(graph_env):
     """A shorter new spec must not pay to review slides it no longer declares."""
-    from src.services.graph.nodes import rereview_committed_slides
-
     env = graph_env
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
-    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    verdicts = rereview_committed_slides(
-        env.session_id, make_spec(positions=(0, 1)), _brand()
-    )
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
 
     assert verdicts["committed"] == {0, 1}
-    assert [c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")] == [0, 1]
+    assert [
+        c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")
+    ] == [0, 1]
 
 
 # -- and the narrowing the node does with those verdicts ---------------------
 
 
-def _deck_level_turn(env, out, emitter=None):
-    return _run_architect(env, out, emitter=emitter)
-
-
 def _audience_changed(positions=(0, 1, 2), targets=None):
-    spec = make_spec(positions=positions).model_copy(
-        update={"audience": "the CFO, not engineers"}
-    )
     return ArchitectOutput(
         intent="edit" if targets else "build",
         message="Retargeting the deck at the CFO.",
         target_positions=list(targets or []),
-        deck_spec=spec,
+        deck_spec=_new_spec(positions),
     )
 
 
@@ -645,17 +830,9 @@ def test_a_deck_level_change_rebuilds_only_the_slides_that_contradict_it(graph_e
     env = graph_env
     _persist(env, make_spec(positions=(0, 1, 2)))
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
-    env.skills.set(
-        "build_reviewer",
-        lambda payload: review_out(
-            payload["position"],
-            [finding("overflow", slide_index=payload["position"])]
-            if payload["position"] == 2
-            else [],
-        ),
-    )
+    env.skills.set("build_reviewer", brief_aware_reviewer({2}))
 
-    updates = _deck_level_turn(env, _audience_changed())
+    updates = _run_architect(env, _audience_changed())
 
     assert updates["target_positions"] == [2]
 
@@ -666,9 +843,9 @@ def test_a_deck_level_change_that_nothing_contradicts_rebuilds_nothing(graph_env
     env = graph_env
     _persist(env, make_spec(positions=(0, 1, 2)))
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
-    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    updates = _deck_level_turn(env, _audience_changed())
+    updates = _run_architect(env, _audience_changed())
 
     assert updates["target_positions"] == []
 
@@ -679,9 +856,9 @@ def test_a_spec_position_with_no_committed_row_joins_the_rebuild_set(graph_env):
     env = graph_env
     _persist(env, make_spec(positions=(0, 1)))
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
-    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    updates = _deck_level_turn(env, _audience_changed(positions=(0, 1, 2)))
+    updates = _run_architect(env, _audience_changed(positions=(0, 1, 2)))
 
     assert updates["target_positions"] == [2]
 
@@ -692,9 +869,9 @@ def test_an_explicit_edit_target_is_rebuilt_even_when_it_passed_review(graph_env
     env = graph_env
     _persist(env, make_spec(positions=(0, 1, 2)))
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
-    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    updates = _deck_level_turn(env, _audience_changed(targets=[1]))
+    updates = _run_architect(env, _audience_changed(targets=[1]))
 
     assert updates["target_positions"] == [1]
 
@@ -705,25 +882,171 @@ def test_the_user_is_told_what_was_re_checked_and_what_is_being_rebuilt(graph_en
     env = graph_env
     _persist(env, make_spec(positions=(0, 1, 2)))
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
-    env.skills.set(
-        "build_reviewer",
-        lambda payload: review_out(
-            payload["position"],
-            [finding("overflow", slide_index=payload["position"])]
-            if payload["position"] == 2
-            else [],
-        ),
-    )
+    env.skills.set("build_reviewer", brief_aware_reviewer({2}))
     emitter = queue.Queue()
 
-    _deck_level_turn(env, _audience_changed(), emitter=emitter)
+    _run_architect(env, _audience_changed(), emitter=emitter)
 
     notices = [
         e
         for e in _drain(emitter)
         if (e.metadata or {}).get("spec_change") == "deck_level"
     ]
-    assert len(notices) == 1, [e.metadata for e in _drain(emitter)]
+    assert len(notices) == 1
     assert notices[0].metadata["reviewed"] == [0, 1, 2]
     assert notices[0].metadata["rebuilding"] == [2]
+    assert notices[0].metadata["stale"] is False
+    # The subjective finding IS the signal here, so it has to be reportable.
+    assert notices[0].metadata["surfaced"] == [
+        {
+            "position": 2,
+            "criterion": "brief_not_delivered",
+            "message": "stub finding",
+            "objective": False,
+        }
+    ]
     assert "re-checked all 3" in notices[0].content
+
+
+def test_a_pass_that_could_judge_nothing_says_so_and_records_the_deck_as_stale(
+    graph_env,
+):
+    """Every re-review failed. The deck is now stale against a brief nothing
+    checked it against, and the tie-break that preserves unjudged slides gives
+    that staleness no retry path — so it must not read as "every slide still
+    fits"."""
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+
+    def _always_raises(payload):
+        raise RuntimeError("the reviewer is down")
+
+    env.skills.set("build_reviewer", _always_raises)
+    emitter = queue.Queue()
+
+    updates = _run_architect(env, _audience_changed(positions=(0, 1)), emitter=emitter)
+
+    assert updates["target_positions"] == []
+    assert updates["error_state"]["code"] == "rereview_judged_nothing"
+    assert updates["error_state"]["positions"] == [0, 1]
+
+    notice = [
+        e
+        for e in _drain(emitter)
+        if (e.metadata or {}).get("spec_change") == "deck_level"
+    ][0]
+    assert notice.metadata["stale"] is True
+    assert notice.metadata["reviewed"] == []
+    assert "could not check any" in notice.content
+    assert "still fits" not in notice.content
+
+
+def test_a_contributor_session_re_reviews_the_owners_committed_slides(graph_env):
+    """Decks are SHARED and a contributor session's own ``slide_deck`` is None.
+
+    The pass reads rows through ``list_slides_in_position_order``, which resolves
+    the OWNER's deck — but the axis was untested, and on ws4d Task 4 nineteen
+    standalone-session tests stayed green with owner resolution removed.  A
+    contributor turn that read no rows would silently re-review nothing, find no
+    failures, and report that every slide still fits.
+    """
+    from src.database.models.session import UserSession
+
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+
+    contributor_sid = f"{env.session_id}-contrib"
+    db = env.factory()
+    try:
+        owner = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == env.session_id)
+            .one()
+        )
+        db.add(
+            UserSession(
+                session_id=contributor_sid,
+                created_by="contributor@example.com",
+                parent_session_id=owner.id,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    env.skills.set("build_reviewer", brief_aware_reviewer({2}))
+    env.skills.set("architect", _audience_changed())
+    updates = architect_node(
+        env.state(session_id=contributor_sid, architect_message="this is for the CFO")
+    )
+
+    assert [
+        c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")
+    ] == [0, 1, 2]
+    assert updates["target_positions"] == [2]
+
+
+# ---------------------------------------------------------------------------
+# 5. The build path's prompt is byte-identical
+# ---------------------------------------------------------------------------
+
+
+def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
+    """The surgical half of the payload widening.
+
+    The build reviewer and the re-review share one criteria block and one output
+    schema, so the re-review's extra instruction must not reach the build path.
+    ``call_skill`` adds it on the presence of ``deck_brief`` and nothing else.
+    """
+    from src.core.skills import _with_conditional_instructions, load_skill
+    from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
+
+    skill = load_skill("build_reviewer")
+    build_payload = {"position": 0, "html": "<div>x</div>", "scripts": ""}
+
+    assert (
+        _with_conditional_instructions(skill, build_payload).instructions
+        == skill.instructions
+    )
+    widened = _with_conditional_instructions(
+        skill, {**build_payload, "deck_brief": {"audience": NEW_AUDIENCE}}
+    )
+    assert DECK_BRIEF_REVIEW in widened.instructions
+    assert widened.instructions.startswith(skill.instructions)
+    # The registry entry itself is never mutated: two concurrent branches must
+    # not be able to see each other's instructions.
+    assert load_skill("build_reviewer").instructions == skill.instructions
+
+
+def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
+    """The stronger form: the WHOLE assembled prompt, not just the instructions.
+
+    A build review's prompt must be byte-identical to what it was before §4.6's
+    pass existed — so this reconstructs it from the registry's own instructions
+    plus the payload and asserts equality with what ``call_skill`` would assemble.
+    """
+    from src.services.agent_resolution import assemble_skill_prompt
+    from src.core.skills import _with_conditional_instructions, load_skill
+    from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
+
+    skill = load_skill("build_reviewer")
+    payload = {
+        "position": 0,
+        "slide_spec": {"position": 0},
+        "resolved_style": "STUB",
+        "section_css": "",
+        "resolved_data": {"synthesis": "s", "figures": [], "gaps": []},
+        "html": "<div>x</div>",
+        "scripts": "",
+    }
+    for design_system_active in (False, True):
+        assembled = assemble_skill_prompt(
+            _with_conditional_instructions(skill, payload),
+            payload,
+            design_system_active,
+        )
+        untouched = assemble_skill_prompt(skill, payload, design_system_active)
+        assert assembled == untouched
+        assert DECK_BRIEF_REVIEW not in assembled
