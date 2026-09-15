@@ -12,6 +12,7 @@ import logging
 import queue
 import re
 import threading
+import uuid
 from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional
 
@@ -2720,14 +2721,51 @@ class ChatService:
 
     @staticmethod
     def _reindex_slide_ids(deck: "SlideDeck") -> None:
-        """Ensure every slide has a unique, sequential slide_id.
+        """Ensure every slide has a UNIQUE slide_id, without taking one away.
 
         Must be called after ANY operation that changes the slide list
-        (add, delete, reorder, duplicate, replace). Prevents duplicate
-        React keys in the frontend thumbnail panel.
+        (add, delete, reorder, duplicate, replace).
+
+        UNIQUENESS IS THE INVARIANT.  SEQUENTIALITY WAS INCIDENTAL DAMAGE.
+        -----------------------------------------------------------------
+        This used to assign ``f"slide_{idx}"`` to every slide unconditionally, and
+        that one line defeated ``slide_id`` as identity everywhere downstream:
+
+        * ``session_manager._attribute_slide_records`` resolves which verdict and
+          which spec fragment belong to each slide by ``slide_id`` FIRST, documented
+          as "durable per-slide identity".  With positional ids on both sides of the
+          comparison, matching by identity WAS matching by position, so pass 3's
+          "unclaimed" guard — the whole of the F1/F2 fix — never ran and a reorder
+          handed slide A's verdict to slide B.  Measured end to end through
+          ``PUT /api/slides/reorder``: the HTML moved and the verdicts did not.
+        * ``SlideViewer.tsx`` keys its verification Map AND its per-slide staleness
+          Set on ``slide_id`` precisely "so deck mutations (delete, reorder) cannot
+          shift the index → result mapping"; ``AppLayout.tsx`` matches slides across
+          deck versions with ``findIndex(s => s.slide_id === ...)``.  Rewriting the
+          ids reshuffled the frontend's own state too.
+
+        Nothing in ``src/`` or ``frontend/src`` parses an index out of a slide_id, so
+        the positional FORM was never load-bearing.  What is load-bearing is
+        uniqueness — this function's original stated purpose (no duplicate React
+        keys), plus ``ThumbnailRibbon.tsx``'s use of the id as the dnd-kit sortable
+        item id, where a collision breaks drag-and-drop outright.
+
+        So: preserve an id a slide already has, and mint a fresh uuid4 ONLY where one
+        is missing, blank, or already taken by an earlier slide in this deck.  Ids
+        that merely LOOK positional (``SlideDeck.from_html_string`` assigns
+        ``slide_<idx>`` to freshly parsed slides) are left alone — they are unique,
+        and once they stop being rewritten they bind to their slide and become real
+        identities.
         """
-        for idx, slide in enumerate(deck.slides):
-            slide.slide_id = f"slide_{idx}"
+        seen: set = set()
+        for slide in deck.slides:
+            slide_id = (slide.slide_id or "").strip()
+            if not slide_id or slide_id in seen:
+                # Missing, blank, or a collision (a clone carries its source's id):
+                # this slide needs an identity of its own.
+                slide_id = str(uuid.uuid4())
+            slide.slide_id = slide_id
+            seen.add(slide_id)
 
     def _invalidate_deck_cache(self, session_id: str) -> None:
         """Remove the cached deck for a session so the next read hits the DB."""
@@ -3379,6 +3417,12 @@ class ChatService:
 
         # Clone slide and stamp as newly created by current user
         cloned = current_deck.slides[index].clone()
+        # A clone is a NEW slide, so it gets an identity of its own.  `Slide.clone()`
+        # copies slide_id, and this used to rely on `_reindex_slide_ids` rewriting
+        # every id to pull the two apart again — which is exactly the rewrite that
+        # destroyed durability.  Assigned here, at the point the new slide is
+        # created, rather than left for a later pass to notice as a collision.
+        cloned.slide_id = str(uuid.uuid4())
         try:
             _user = get_current_username()
         except Exception:

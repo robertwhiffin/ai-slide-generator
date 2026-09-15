@@ -24,17 +24,21 @@ its HTML, and every assertion below reads
 tell "the record travelled with its slide" from "a record happens to sit at that
 position".
 
-Why the fixture's ROWS carry uuid-shaped slide_ids
---------------------------------------------------
-`chat_service._reindex_slide_ids` rewrites every slide_id to `slide_<index>` after
-any list mutation, so a deck that has already been saved through chat_service has
-POSITIONAL ids on both sides of the comparison and pass 1 (match by slide_id)
-degenerates into pass 3 (match by position).  The rows a graph build writes carry
-uuid4 ids (`slide_repository.py`, F9), which is the state in which fragments exist
-at all — the graph is their only producer — so that is the state these tests set
-up, and the precondition is asserted rather than assumed.  See the task-7 report
-for the measured consequences of the positional-id case, which is a pre-existing
-defect in the verification half and out of this task's scope.
+Which attribution pass these tests exercise, and why it is asserted
+------------------------------------------------------------------
+Pass 1, match by `slide_id`.  `_reindex_slide_ids` now PRESERVES a slide's id and
+mints one only where it is missing or collides, so the deck handed to
+`save_slide_deck` carries the rows' own ids for the three existing slides and a
+fresh one for the inserted slide — and pass 1 resolves all four correctly.
+
+That was not always so.  `_reindex_slide_ids` used to rewrite every id to
+`slide_<index>`, which put POSITIONAL ids on both sides of pass 1's comparison and
+degenerated it into match-by-position, defeating the F1/F2 fix outright; these tests
+originally passed through pass 2 (content hash) for that reason.  Both properties
+the current path depends on — the rows have durable unique ids, and the deck
+preserves them — are asserted below rather than assumed, so a return of the
+wholesale rewrite reddens here and not only in
+`tests/integration/test_slide_id_is_durable.py`.
 """
 from __future__ import annotations
 
@@ -49,9 +53,12 @@ from sqlalchemy.orm import sessionmaker
 from unittest.mock import patch
 
 import src.database.models  # noqa: F401 — register all ORM models
+from src.api.services.chat_service import ChatService
 from src.api.services.session_manager import SessionManager
 from src.core.database import Base
 from src.database.models.session import SessionSlide, SessionSlideDeck, UserSession
+from src.domain.slide import Slide
+from src.domain.slide_deck import SlideDeck
 from src.utils.slide_hash import compute_slide_hash
 
 _OWNER_SID = "insert-shift-owner"
@@ -210,19 +217,21 @@ def _attribution_by_marker(
 def _insert_and_save(factory, slide_ids: List[str], insert_at: int) -> None:
     """Shift the deck exactly the way chat_service.insert_slide does, then save.
 
-    Reproduces the two steps that matter to attribution: the new slide is spliced
-    into the list, then `_reindex_slide_ids` rewrites every slide_id to
-    `slide_<index>` before the deck dict reaches save_slide_deck.
+    Calls the REAL `ChatService._reindex_slide_ids` rather than imitating it.  An
+    earlier version of this helper hand-rolled the id step as `slide_<index>`, and
+    when that function's contract changed the imitation silently became a test of
+    behaviour the code no longer had.  Simulating a collaborator you can just call is
+    how a test stops describing the system.
     """
-    slides: List[dict] = [
-        {"html": _html(marker), "slide_id": slide_ids[i], "scripts": ""}
-        for i, marker in enumerate(_MARKERS)
-    ]
-    slides.insert(
-        insert_at, {"html": _html("NEW"), "slide_id": "not-yet-persisted", "scripts": ""}
+    deck = SlideDeck(
+        slides=[
+            Slide(html=_html(marker), slide_id=slide_ids[i], scripts="")
+            for i, marker in enumerate(_MARKERS)
+        ]
     )
-    for index, slide in enumerate(slides):  # _reindex_slide_ids
-        slide["slide_id"] = f"slide_{index}"
+    deck.insert_slide(Slide(html=_html("NEW")), insert_at)
+    ChatService._reindex_slide_ids(deck)
+    slides: List[dict] = deck.to_dict()["slides"]
 
     with patch(
         "src.api.services.session_manager.get_db_session", _fake_db(factory)
@@ -247,19 +256,53 @@ def _insert_and_save(factory, slide_ids: List[str], insert_at: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_rows_carry_durable_not_positional_slide_ids(three_marked_rows, factory):
-    """Guard the guard: with positional row ids the tests below prove nothing.
-
-    If the rows carried `slide_0..slide_2`, pass 1 of `_attribute_slide_records`
-    would match the reindexed deck ids POSITION for POSITION and every assertion
-    about travelling would be measuring pass 3, not identity attribution.
-    """
+def test_the_rows_carry_durable_unique_slide_ids(three_marked_rows, factory):
+    """Guard the guard, half one: the rows have identities to attribute BY."""
     ids = _row_slide_ids(factory)
     assert len(ids) == 3
-    assert not any(sid.startswith("slide_") for sid in ids), (
-        "fixture precondition broken: rows carry positional slide_ids, so these "
-        f"tests no longer exercise identity attribution at all ({ids})"
+    assert all(ids), f"a row has no slide_id, so pass 1 cannot run at all: {ids}"
+    assert len(set(ids)) == 3, (
+        f"the fixture's rows share an id; pass 1 SKIPS an ambiguous id: {ids}"
     )
+
+
+def test_the_insert_preserves_the_rows_ids_and_mints_one_for_the_newcomer(
+    three_marked_rows, factory
+):
+    """Guard the guard, half two: the property the whole fix turns on.
+
+    The deck that reaches `save_slide_deck` must still carry each existing slide's
+    OWN id — that is what lets pass 1 attribute by identity — and the inserted slide
+    must carry a new one rather than inheriting the id of whatever it displaced.
+
+    If `_reindex_slide_ids` went back to rewriting every id positionally, this
+    reddens with a precise diagnosis instead of leaving the tests below to fail with
+    a confusing attribution mismatch.
+    """
+    deck = SlideDeck(
+        slides=[
+            Slide(html=_html(marker), slide_id=three_marked_rows[i], scripts="")
+            for i, marker in enumerate(_MARKERS)
+        ]
+    )
+    deck.insert_slide(Slide(html=_html("NEW")), 1)
+    ChatService._reindex_slide_ids(deck)
+
+    by_marker = {
+        _marker_of(s.html): s.slide_id for s in deck.slides
+    }
+    assert by_marker["A"] == three_marked_rows[0]
+    assert by_marker["B"] == three_marked_rows[1], (
+        f"slide B's id was rewritten, so pass 1 can no longer find it: {by_marker}"
+    )
+    assert by_marker["C"] == three_marked_rows[2], (
+        f"slide C's id was rewritten: {by_marker}"
+    )
+    assert by_marker["NEW"] not in three_marked_rows, (
+        f"the inserted slide took an existing slide's identity: {by_marker}"
+    )
+    ids = list(by_marker.values())
+    assert len(set(ids)) == 4, f"the insert produced a duplicate id: {ids}"
 
 
 # ---------------------------------------------------------------------------
