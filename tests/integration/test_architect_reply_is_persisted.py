@@ -51,6 +51,7 @@ import pytest
 
 from src.api.services.chat_service import ChatService
 from src.domain.skill_io import ArchitectOutput
+from src.services.graph.nodes import _advisory_text
 
 #: The architect's reply.  A sentence no default, no stub and no other node
 #: produces, so its presence in a transcript can only have come from the
@@ -67,8 +68,6 @@ USER_MESSAGE = "USE AGENT MODE draft me something about puffins"
 #: What ``_advisory_text([])`` composes — the one line a completed build turn owes
 #: the user.  Asserted as a CONSTANT read off the production helper rather than
 #: retyped, so a reworded advisory fails here instead of silently passing.
-from src.services.graph.nodes import _advisory_text  # noqa: E402
-
 CLEAN_ADVISORY = _advisory_text([])
 
 AUTHOR = "reply-persist@example.com"
