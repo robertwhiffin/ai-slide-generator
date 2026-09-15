@@ -2126,9 +2126,19 @@ class SessionManager:
         ``releasable_positions`` applies to GRAPH STATE; it does not and cannot
         call it.  ``releasable_positions(state)`` reads ``landed_positions`` /
         ``placeheld_positions`` off a turn's state, and the polling path has no
-        graph state at all.  The two must agree, and
-        ``test_slide_release.py::TestTheTwoPrefixRulesAgree`` drives the same
-        position set through both and compares.
+        graph state at all.  ``test_slide_release.py::TestTheTwoPrefixRulesAgree``
+        drives the same position set through both and compares.
+
+        **They agree over a turn's covered positions, and deliberately differ on
+        an EDIT turn** — the scope, stated here because "the two must agree" read
+        as unqualified and the guard did not establish it.  ``releasable_positions``
+        is turn-scoped: an edit turn's coverage is ``target_positions``, so it
+        releases only ``[5, 6]`` while this query releases 0..9 on a deck whose ten
+        rows exist.  That is this query's whole purpose — a poll knows nothing
+        about which turn built which row, and a client that reconnects must be able
+        to fetch everything committed.  The relationship the two hold, pinned by
+        that suite, is that THIS release narrowed to a turn's covered positions is
+        the state-derived one.  Do not "fix" either side into the other.
 
         Cursor semantics: ``cursor`` is the lowest position the caller has **not**
         yet been sent, so ``0`` (the default) means "send me everything released".
