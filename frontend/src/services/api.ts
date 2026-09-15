@@ -59,7 +59,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -76,6 +76,17 @@ export interface StreamEvent {
   experiment_url?: string;
   session_title?: string;
   session_id?: string;
+  // ws4d D3 — carried on a `slide_ready` event: one committed slide released by
+  // the reorder buffer, delivered as it lands instead of only on `complete`.
+  // Rendering these is ws4e's; `handleStreamEvent` deliberately has no
+  // `slide_ready` case yet and falls through its default path.
+  position?: number;
+  html?: string;
+  scripts?: string;
+  /** Which agent this event is attributed to (spec §7.3). */
+  agent?: string;
+  /** Next slide position not yet released; hand back as `slide_cursor` when polling. */
+  slide_cursor?: number;
 }
 
 export interface SessionMessage {

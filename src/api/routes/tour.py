@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from src.api.routes._authz import _check_deck_permission_for_session
+from src.api.services.deck_level_writer import write_deck_level_columns
 from src.api.services.session_manager import get_session_manager
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
@@ -86,6 +87,33 @@ def _phase2_add_slides(session_id: str, created_by: str) -> dict:
         scripts_content="",
         slide_count=len(slides),
         deck_dict=deck_dict,
+        modified_by=created_by,
+    )
+
+    # The fixture's hand-authored deck spec needs a SECOND write.
+    #
+    # save_slide_deck does NOT persist a deck spec: it writes deck_json, css,
+    # external_scripts_json, head_meta_json and the per-slide rows, and never
+    # touches deck.deck_spec_json.  A "deck_spec" key handed to it in deck_dict is
+    # swallowed into the deck_json blob and never read back into the column, with
+    # no exception — measured, and guarded by
+    # tests/unit/test_tour_ships_a_spec.py::test_save_slide_deck_alone_does_not
+    # _persist_a_spec.  So the spec is written here through ws4b's deck-level
+    # writer, which does own that column.
+    #
+    # Teaching save_slide_deck about specs was rejected: it is on the monolith's
+    # hot path with a large test surface, and the tour needs one extra call, not a
+    # new behaviour on a shared writer.  The cost is one deck.version bump, which
+    # is harmless for a freshly created tour deck.
+    #
+    # This is deck CREATION from fixed bytes, identical on every tour, so it
+    # deliberately does NOT call spec_sync.mark_dirty: that would schedule an LLM
+    # arc re-description of the same demo deck for every user who takes the tour.
+    # Shipping the arc in the fixture instead also lets the tour demonstrate the
+    # spec view, which an excluded-and-specless tour deck could not.
+    write_deck_level_columns(
+        session_id,
+        deck_spec=fixture["deck_spec"],
         modified_by=created_by,
     )
 

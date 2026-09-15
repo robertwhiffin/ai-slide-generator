@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -50,6 +50,7 @@ from src.api.services.session_manager import get_session_manager
 from src.api.services.slide_repository import SlideWriter, is_placeholder_record
 from src.core.database import get_db_session
 from src.core.skills import call_skill
+from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.finding import (
@@ -70,9 +71,17 @@ from src.services.foreman_service import (
     all_positions_committed,
     next_dispatch_batch,
     outstanding_positions,
+    releasable_positions,
     stalled_positions,
 )
-from src.services.graph.event_emitter import emit_event
+from src.services.graph.event_emitter import (
+    advance_slide_cursor,
+    emit_event,
+    emit_slide_ready,
+    get_chat_request_id,
+    get_event_emitter,
+    get_slide_cursor,
+)
 from src.services.graph.state import has_pending_fix, scoped, scoped_vals
 from src.services.template_sections import (
     extract_section,
@@ -114,6 +123,19 @@ _STALL_REASON = "Slide generation did not complete"
 _HUMAN_TYPES = {"user_query", "user_input", "chat"}
 _AI_TYPES = {"llm_response", "clarification"}
 
+# Appended to a `confirm_design_contract` message when confirming would drop the
+# deck's slide style (§L4).  ONE user action mutates TWO fields — setting
+# design_system_id and losing slide_style_id — and DesignContractRef's L1
+# validator rejects a spec carrying both, so the drop is the CALLER's, not a
+# validator's quiet correction.  The sentence is the only place the user learns
+# it, and it must arrive while they can still say no.
+_SLIDE_STYLE_DROPPED = (
+    "Note: a design system and a slide style cannot both apply to one deck, so "
+    "confirming this drops the slide style this deck currently uses (slide style "
+    "{}). Confirming also rebuilds every slide against the new design, because a "
+    "restyle affects all of them."
+)
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -137,6 +159,151 @@ def _emit(
             type=event_type, content=content, error=error, metadata=metadata
         )
     )
+
+
+def _say(state: dict, message: str, *, message_type: str = "llm_response") -> None:
+    """Persist one assistant utterance so it survives the turn.  Never raises.
+
+    **The durable half of speaking to the user, and it is not optional.**  An
+    ``_emit`` alone reaches the SSE client and NOBODY ELSE:
+    ``job_queue.process_chat_request`` handles only ``COMPLETE`` and
+    ``SESSION_TITLE`` and discards every other event, and ``GET /chat/poll`` reads
+    a turn's assistant text out of **persisted rows**
+    (``get_messages_for_request``).  So on the polling transport — the one the
+    deployed app uses — an emit-only reply is dropped between the job and the
+    poll, and the user is shown silence for a turn that completed and called the
+    model.  Measured live before this existed.
+
+    The second consumer is the architect itself.  ``_conversation`` builds the
+    architect's history from these rows and admits an assistant turn only when
+    ``message_type`` is in :data:`_AI_TYPES`, so a reply that is not persisted
+    with a replayable type leaves the architect able to ask a clarifying question
+    and, next turn, unable to remember asking.  ``llm_response`` is the type that
+    replays; ``info`` deliberately does not (that exclusion is what keeps the deck
+    reviewer's advisory out of the architect's prose — see :data:`_AI_TYPES`), so
+    ``info`` is the right type for an utterance the user should SEE but the
+    architect must not read back as its own words.
+
+    ``request_id`` comes from the turn's ``ContextVar``, not from state: the
+    polling projection filters on that column, and a row without it is durable but
+    invisible to the client waiting on it.  ``None`` (the SSE path, the sweeper) is
+    correct and still writes the row.
+
+    Not to be used for a machine advisory: :func:`_surface_notice` is the ungated
+    writer for those, and it stays ungated because a failure notice's value is that
+    it lands on every turn.  This one is for a node's own conversational turn.
+
+    **A describe-only turn writes nothing.**  ws4d's arc-review sweeper invokes
+    the graph with ``describe_only=True``, no emitter and no human waiting; its
+    reply is addressed to nobody.  Persisting it would put machine-generated prose
+    in a human's transcript AND — worse — feed it into ``_conversation``, so the
+    human's next turn would find the architect apparently having said something
+    they never saw, in answer to a question they never asked.  Suppression is
+    keyed on the same turn-scoped flag ``architect_router`` gates dispatch on, and
+    it is read HERE rather than passed by each caller so a new caller cannot
+    forget it.
+
+    Never raises: like emission, a transcript write must not be the thing that
+    fails a turn that has otherwise produced a deck.
+    """
+    if bool(scoped_vals(state, "describe_only")):
+        return
+    session_id = state.get("session_id")
+    if not session_id or not message:
+        return
+    try:
+        get_session_manager().add_message(
+            session_id,
+            role="assistant",
+            content=message,
+            message_type=message_type,
+            request_id=get_chat_request_id(),
+        )
+    except Exception:
+        logger.warning(
+            "Could not persist an assistant turn; the user may see silence on "
+            "the polling transport",
+            exc_info=True,
+        )
+
+
+def _release_slides(state: dict) -> List[int]:
+    """Emit ``slide_ready`` for every position the reorder buffer NEWLY releases.
+
+    This is ws4d D3's SSE half.  Called from ``foreman_node`` and from nowhere
+    else, for one reason: the foreman is the only node that runs **alone, after
+    the superstep barrier**.  Emitting from ``build_reviewer_node`` instead would
+    put the decision inside the fan-out, where N reviewers run concurrently — two
+    of them would compute overlapping prefixes, and position 3's reviewer
+    finishing before position 2's would send slide 3 first.  Ascending order is
+    the feature; the barrier is what guarantees it.
+
+    ``releasable_positions(state)`` decides WHAT is releasable, not
+    ``slides_since_cursor``, and the difference matters on an edit turn: the rows
+    for every untouched position already exist from a previous turn, so a
+    row-derived prefix would "release" the whole deck's stale HTML on the first
+    foreman wake — before the targeted builders had run — and the cursor would
+    then sit past the positions this turn actually rewrites.  Graph state knows
+    what THIS turn committed (``landed_positions`` / ``placeheld_positions`` are
+    turn-scoped); rows do not.  The polling path has no graph state and so uses
+    the row-derived twin, ``SessionManager.slides_since_cursor``; the two prefix
+    rules are pinned against each other by a test.
+
+    A **placeholder releases like any other position**: ``placeheld_positions`` is
+    inside ``releasable_positions``' committed set and ``commit_placeholder``
+    writes a real row, so there is no special case here either.
+
+    Returns the positions emitted (ascending), for the tests and for the caller's
+    logging — never raises, because emission is an optional side channel.
+    """
+    if get_event_emitter() is None:
+        return []  # sweeper tick / layer-1 state test: nothing to emit into
+    session_id = state.get("session_id")
+    if not session_id:
+        return []
+
+    cursor = get_slide_cursor()
+    pending = [p for p in releasable_positions(state) if p >= cursor]
+    if not pending:
+        return []
+
+    try:
+        rows = {
+            row["position"]: row
+            for row in SlideWriter().list_slides_in_position_order(
+                session_id, from_position=pending[0]
+            )
+        }
+    except Exception:
+        logger.warning(
+            "Could not read committed slides for release; skipping this wake",
+            exc_info=True,
+        )
+        return []
+
+    released: List[int] = []
+    for position in pending:
+        row = rows.get(position)
+        if row is None:
+            # State says committed but no row is readable.  STOP rather than skip:
+            # releasing the next position would deliver it ahead of this one.
+            logger.warning(
+                "Position %s is releasable but has no committed row; "
+                "holding the release here",
+                position,
+            )
+            break
+        emit_slide_ready(
+            position=position,
+            html=row["html"] or "",
+            scripts=row["scripts"] or "",
+            agent=row.get("modified_by") or row.get("created_by"),
+        )
+        released.append(position)
+
+    if released:
+        advance_slide_cursor(released[-1] + 1)
+    return released
 
 
 def _agent_config_for(contract: Optional[DesignContractRef]) -> AgentConfig:
@@ -165,6 +332,388 @@ def _contract_ids(contract: Optional[DesignContractRef]) -> tuple:
         contract.template_id,
         contract.slide_style_id,
     )
+
+
+#: The spec fields whose change invalidates every slide at once (§4.6).
+#:
+#: ``title`` is deliberately ABSENT: renaming a deck contradicts no slide, and
+#: including it would classify every re-title as a deck-level change and — once
+#: §4.6's other half lands — re-review a whole deck because the user fixed a
+#: typo in its name.  ``slides`` and ``resolved_data`` are absent for the mirror
+#: reason: a change there is per-slide work the foreman's ordinary coverage
+#: already covers, not a deck-wide invalidation.
+_DECK_LEVEL_FIELDS = (
+    "audience",
+    "purpose",
+    "argument",
+    "call_to_action",
+    "narrative_arc",
+)
+
+
+#: Criteria that mark a slide as no longer serving the deck's brief on §4.6's
+#: RE-REVIEW pass, in addition to the objective ones.
+#:
+#: ``brief_not_delivered`` is the ONLY criterion in the registry that can express
+#: "this slide no longer serves the brief", and it is ``objective=False``
+#: (``finding.py``: *"The one subjective slide criterion"*).  So the build path's
+#: objective-only rule — right there, because an objective finding is what a fixer
+#: can act on — is exactly wrong here, where the whole question is subjective.
+#: Counting objective findings alone made the pass unable to fail for the one
+#: reason it exists: it shipped once returning ``set()`` for a
+#: ``brief_not_delivered`` finding.
+#:
+#: The build path is untouched: ``build_reviewer_node`` still branches on
+#: ``objective`` alone.
+_REREVIEW_FAILING_CRITERIA = frozenset({"brief_not_delivered"})
+
+
+def classify_spec_change(
+    new_spec: Optional[DeckSpec], persisted: Optional[DeckSpec]
+) -> str:
+    """Classify what a newly committed spec changes against the persisted one.
+
+    Returns one of three strings:
+
+    ``"design_contract"``
+        Any of ``design_system_id``, ``template_id``, ``slide_style_id`` differs.
+        **This wins over** ``"deck_level"`` when both differ: it is the stronger,
+        confirm-first case, and a restyle genuinely affects every slide.
+        ``template_id`` is what "pinning or unpinning a template" means — there
+        is no persisted ``template_pinned`` field anywhere;
+        ``ResolvedStyle.template_pinned`` is a computed NamedTuple member on no
+        ORM model and no part of this contract, so watching it would watch
+        something that never persists.
+    ``"deck_level"``
+        Any of :data:`_DECK_LEVEL_FIELDS` differs.
+    ``"none"``
+        Nothing relevant differs — **including when there is no persisted spec at
+        all.**  A first build is not a change: classifying it as one would fire
+        §4.6's confirm-first path on the very first turn of every new deck, when
+        there are no slides to invalidate and nothing to confirm.
+
+    Both arguments are ``DeckSpec`` objects the caller already has.  The
+    persisted side comes from ``deck_level_writer.read_deck_spec``, which
+    ``architect_node`` has already called — there is deliberately no read in
+    here, so this stays a pure function and the node keeps its single reader.
+    """
+    if new_spec is None or persisted is None:
+        return "none"
+    if _contract_ids(new_spec.design_contract) != _contract_ids(
+        persisted.design_contract
+    ):
+        return "design_contract"
+    if any(
+        getattr(new_spec, field) != getattr(persisted, field)
+        for field in _DECK_LEVEL_FIELDS
+    ):
+        return "deck_level"
+    return "none"
+
+
+def _slide_style_being_dropped(
+    proposal: Optional[DesignContractRef],
+    inbound: Optional[DesignContractRef],
+    prior_spec: Optional[DeckSpec],
+) -> Optional[int]:
+    """The ``slide_style_id`` a confirmed *proposal* would drop, or ``None``.
+
+    §L4's point is that **one user action mutates two fields** and the user must
+    be told.  The clearing is real on ``AgentConfig`` — a serializer
+    (``_one_style_authority``) and ``put_agent_config`` both null
+    ``slide_style_id`` — but on the deck spec there is **nothing to clear**:
+    ``DesignContractRef``'s L1 validator REJECTS a spec carrying both ids.  So
+    whoever constructs the new contract must drop the slide style itself, and
+    this function exists to name what that drop costs while the user can still
+    say no.  Get it backwards and the architect's commit raises a
+    ``ValidationError`` on the exact path §4.6 exists for.
+
+    Two places are consulted for the style currently in force, in order:
+    ``inbound`` (the contract this turn's brand was actually resolved from — the
+    session's own selection when it has one, else the persisted spec's) and then
+    the persisted spec's contract.  The second is not redundant: when the session
+    has already been switched to a design system, ``AgentConfig``'s serializer
+    has ALREADY nulled its ``slide_style_id``, so ``inbound`` carries no style
+    while the persisted spec still does — and that deck is exactly one whose
+    style is about to be dropped.
+    """
+    if proposal is None or proposal.design_system_id is None:
+        return None
+    candidates = [inbound]
+    if prior_spec is not None:
+        candidates.append(prior_spec.design_contract)
+    for contract in candidates:
+        if contract is not None and contract.slide_style_id is not None:
+            return contract.slide_style_id
+    return None
+
+
+def rereview_committed_slides(
+    session_id: str,
+    spec: DeckSpec,
+    brand: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Score every committed slide against the **new** spec, serially, here.
+
+    §4.6's re-review pass.  It runs inside ``architect_node`` — **Option 2** —
+    because the two-pass turn the plan imagined cannot exist on this topology.
+    Measured on the compiled graph, in both directions:
+
+    * A turn that reviews a position before building it puts the position in
+      ``reviewed_positions``, ``build_reviewer_refan_router`` then skips its
+      builder's re-fan, and a three-slide deck came back with **three
+      placeholders and ``error_state`` None** — builders paid for, output
+      discarded, silently.
+    * Landing in the review pass instead makes ``all_positions_committed`` true
+      on the first wake, so the turn dispatched **zero** builders and went
+      straight to deck review — and it rewrites the very rows a hand-edit lives
+      in, which is the thing §4.6 is organised around preserving.
+
+    Both channels are turn-scoped **sets** with union reducers and there is no
+    tombstone for set membership, so neither can be un-set within a turn: **in
+    this graph reviews come after builds by construction.**  Running the pass
+    here touches no reducer, no router, no foreman and not
+    ``build_reviewer_node``; the failing positions then travel on
+    ``target_positions`` and the shipped ``builder -> build_reviewer -> land``
+    path rebuilds exactly those.
+
+    The cost, stated rather than hidden: this is **serial**, so §4.6's "cheap,
+    parallel" becomes "cheap, serial" — one review call per committed slide,
+    inside one architect turn.
+
+    Three judgement calls, each recorded because a reviewer may want to overrule
+    one:
+
+    **A placeholder fails by definition and costs no model call.**  There is no
+    slide there to preserve, so asking a model whether it still fits the brief
+    would be paying to be told what its own marker already says.
+
+    **A position whose review RAISES is left alone, not rebuilt.**  Both
+    directions are wrong in some way: leaving it risks one stale slide, and
+    rebuilding it risks overwriting a manual edit we could not judge.  §4.6
+    rejected the blanket rebuild-all as *"expensive and destructive"* and named
+    preserving manual edits as the reason, so the tie breaks toward preservation.
+    The position is logged and reported in ``unreviewable``.
+
+    **"Contradicts the new spec" means at least one OBJECTIVE finding**, decided
+    exactly as ``build_reviewer_node`` decides it — ``_stamp_findings``
+    re-derives ``objective`` from ``CRITERIA`` before it is read, so a model
+    returning ``objective=False`` for ``overflow`` cannot quietly suppress a
+    rebuild.  A subjective finding is surfaced, never acted on, on both paths.
+
+    **Nothing is written.**  No row, and nothing on the ``findings`` channel:
+    that channel's contract is *"exactly what this node persisted into a row"*,
+    and this pass persists nothing, so an entry here would be an "open" finding
+    that nothing ever supersedes.  This is a decision procedure, not a review of
+    record.
+
+    Returns a dict of plain sets: ``committed`` (positions the spec covers that
+    have a row), ``reviewed`` (positions a model actually scored), ``failing``,
+    ``unreviewable``, ``placeheld``.
+    """
+    empty = {
+        "committed": set(),
+        "reviewed": set(),
+        "failing": set(),
+        "unreviewable": set(),
+        "placeheld": set(),
+        "surfaced": [],
+    }
+    try:
+        rows = SlideWriter().list_slides_in_position_order(session_id)
+    except Exception:
+        logger.warning(
+            "Could not read the committed slides to re-review them; leaving this "
+            "turn's coverage as the architect set it",
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        return empty
+
+    spec_positions = {slide.position for slide in spec.slides}
+    by_position = {
+        row.get("position"): row
+        for row in rows
+        if row.get("position") in spec_positions
+    }
+    if not by_position:
+        return empty
+
+    resolved_style = brand.get("resolved_style") or ""
+    section_css = brand.get("deterministic_css") or ""
+    design_system_active = bool(brand.get("design_system_active"))
+    deck_brief = {field: getattr(spec, field) for field in _DECK_LEVEL_FIELDS}
+
+    committed: set = set()
+    reviewed: set = set()
+    failing: set = set()
+    unreviewable: set = set()
+    placeheld: set = set()
+    surfaced: List[dict] = []
+
+    for position in sorted(by_position):
+        row = by_position[position]
+        committed.add(position)
+
+        if is_placeholder_record(row.get("verification_record")):
+            placeheld.add(position)
+            failing.add(position)
+            continue
+
+        slide_spec = spec.slide_at(position)
+        if slide_spec is None:  # unreachable: by_position is filtered to the spec
+            continue
+
+        html = row.get("html") or ""
+        # The SAME payload shape build_reviewer_node builds, key for key, so the
+        # skill is judged on the input it was written against.
+        review_payload = {
+            "position": position,
+            "slide_spec": slide_spec.model_dump(),
+            "resolved_style": resolved_style,
+            "section_css": section_css,
+            "resolved_data": spec.resolved_data.model_dump(),
+            "html": html,
+            "scripts": row.get("scripts") or "",
+            # The five deck-level fields, WITHOUT WHICH THIS PASS CANNOT WORK.
+            # Built from _DECK_LEVEL_FIELDS — the same tuple classify_spec_change
+            # watches — so the fields that TRIGGER a re-review and the fields the
+            # reviewer is SHOWN can never drift apart.  Neither the reviewer's own
+            # payload nor SlideSpec carries any of them, so without this key the
+            # reviewer is asked whether a slide still serves a brief it was never
+            # told, and can only answer with rendering findings that no spec edit
+            # can cause.  Its presence is also what adds DECK_BRIEF_REVIEW to the
+            # instructions (see call_skill._with_conditional_instructions).
+            "deck_brief": deck_brief,
+        }
+        try:
+            out = call_skill("build_reviewer", review_payload, design_system_active)
+            findings = _stamp_findings(
+                _skill_findings(out),
+                subject_hash=compute_slide_hash(html),
+                slide_index=position,
+            )
+        except Exception:
+            logger.warning(
+                "Re-review failed at position %s; treating the slide as still "
+                "valid rather than overwriting work we could not judge",
+                position,
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+            unreviewable.add(position)
+            continue
+
+        reviewed.add(position)
+        for item in findings:
+            # Surfaced, not discarded. Given brief_not_delivered is subjective,
+            # dropping non-objective findings threw away the only signal this pass
+            # can produce — and left the notice claiming every slide still fit.
+            surfaced.append(
+                {
+                    "position": position,
+                    "criterion": item.criterion,
+                    "message": item.message,
+                    "objective": bool(item.objective),
+                }
+            )
+        if any(
+            item.objective or item.criterion in _REREVIEW_FAILING_CRITERIA
+            for item in findings
+        ):
+            failing.add(position)
+
+    return {
+        "committed": committed,
+        "reviewed": reviewed,
+        "failing": failing,
+        "unreviewable": unreviewable,
+        "placeheld": placeheld,
+        "surfaced": surfaced,
+    }
+
+
+def _design_system_library() -> List[dict]:
+    """Every live design system with its templates — §M1, delivered as payload.
+
+    §M1 asks for "the architect's tool manifest" to carry the design-system
+    library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, ``bind_tools``
+    appears nowhere under ``src/``, and ``call_skill`` invokes the architect with
+    structured output and no tools bound at all, so a library wired into
+    ``tool_grants`` would be read by nothing.  The operator ratified delivering
+    §M1 through the architect's **payload** instead, beside
+    ``available_design_contract`` and ``template_sections`` — the only channel
+    the architect actually reads.
+
+    **Ids and the brand's own labels only — never ``layout_html`` or
+    ``token_css``.**  The architect picks an id and ``_resolve_brand`` resolves
+    the bytes from it on the turn the pick is committed; shipping compiled
+    content here would put a snapshot in a prompt that can go stale against
+    ``COMPILER_VERSION`` (the very thing ``DesignContractRef`` stores ids to
+    avoid) and would cost the whole catalog's CSS in tokens on every architect
+    call.
+
+    Templates of a soft-deleted system never appear: the grouping is built off
+    the live systems, so an inactive parent's rows are dropped with it.
+
+    Returns ``[]`` on any failure, and that is deliberate.  A deck can be built
+    with no brand at all, so an unreadable catalog must degrade to "no brand on
+    offer this turn" rather than kill the turn — the same contract
+    ``_session_contract`` and ``_conversation`` already keep.
+    """
+    try:
+        with get_db_session() as db:
+            systems = (
+                db.query(
+                    DesignSystem.id,
+                    DesignSystem.name,
+                    DesignSystem.description,
+                    DesignSystem.is_default,
+                )
+                .filter(DesignSystem.is_active.is_(True))
+                .order_by(DesignSystem.name)
+                .all()
+            )
+            templates = (
+                db.query(
+                    DesignSystemTemplate.design_system_id,
+                    DesignSystemTemplate.id,
+                    DesignSystemTemplate.name,
+                    DesignSystemTemplate.description,
+                )
+                .order_by(
+                    DesignSystemTemplate.design_system_id,
+                    DesignSystemTemplate.name,
+                )
+                .all()
+            )
+    except Exception:
+        logger.warning(
+            "Could not read the design-system library; the architect will see "
+            "no brand on offer this turn",
+            exc_info=True,
+        )
+        return []
+
+    by_system: Dict[int, List[dict]] = {}
+    for design_system_id, template_id, name, description in templates:
+        by_system.setdefault(design_system_id, []).append(
+            {
+                "template_id": template_id,
+                "name": name,
+                "description": description,
+            }
+        )
+    return [
+        {
+            "design_system_id": design_system_id,
+            "name": name,
+            "description": description,
+            "is_default": bool(is_default),
+            "templates": by_system.get(design_system_id, []),
+        }
+        for design_system_id, name, description, is_default in systems
+    ]
 
 
 def _concat_css(token_css: str, style_block: str) -> str:
@@ -299,14 +848,58 @@ def _conversation(session_id: str) -> List[Dict[str, str]]:
     return turns
 
 
-def _committed_slide_htmls(session_id: str) -> List[str]:
-    """Every committed slide's HTML, in deck order (``[]`` when there are none)."""
+def _committed_slide_rows(session_id: str) -> List[Dict[str, Any]]:
+    """Every committed slide row, in deck order (``[]`` when there are none).
+
+    One read with two consumers inside ``architect_node``: the deck digest wants
+    each row's HTML and the persisted-spec alignment check wants each row's
+    POSITION.  Reading the rows twice per architect turn to fetch them separately
+    is a query nobody needs.
+    """
     try:
-        rows = SlideWriter().list_slides_in_position_order(session_id)
+        return SlideWriter().list_slides_in_position_order(session_id)
     except Exception:
         logger.debug("No committed slides for session", exc_info=True)
         return []
-    return [row.get("html") or "" for row in rows]
+
+
+def _persisted_spec_describes_these_rows(
+    prior_spec: DeckSpec, row_positions: Set[int]
+) -> bool:
+    """Whether a PERSISTED spec's positions still match the committed rows.
+
+    Applied to the persisted spec only, and never to a spec the architect just
+    emitted: a spec with more slides than the deck has rows is exactly how a deck
+    GROWS (the first build has no rows at all, and "add a slide" describes one
+    before it exists), so the row set cannot constrain model output.  What it can
+    constrain is the FALLBACK — reusing a description written for a deck whose
+    rows have since moved.
+
+    ``session_slide_decks.deck_spec_json`` is renumbered on insert and on nothing
+    else (final review C1), so after a delete or a duplicate its ``position``
+    entries describe slides that have moved or gone, while the row-level
+    ``deck_spec_slide`` fragments travel correctly.  Comparing the two sets is
+    what makes the mismatch representable at the one consumer that acts on it,
+    rather than relying on four mutation routes to remember to renumber.
+
+    **No rows means nothing to disagree with**, so an unbuilt deck is aligned by
+    definition: the check exists to stop a stale brief reaching a slide a human
+    already has, and there is no such slide.
+
+    **A reorder is invisible here and that is a known limit**, stated so the next
+    reader does not mistake this for a total guarantee: reordering leaves the two
+    position sets equal while every entry describes a different slide.  The two
+    stronger predicates were both measured and rejected — comparing a row
+    fragment's own ``position`` to its row position fires after an INSERT (the one
+    route that renumbers the deck spec correctly, because fragments travel with
+    their slides and keep their original position), and comparing fragment CONTENT
+    to the deck-level entry fires after any §4.6 deck-level change, where the spec
+    is deliberately newer than the slides not yet rebuilt against it.  Closing the
+    reorder case means renumbering in the routes.
+    """
+    if not row_positions:
+        return True
+    return {slide.position for slide in prior_spec.slides} == set(row_positions)
 
 
 def _resolve_deck_id(db, session_id: str) -> Optional[int]:
@@ -427,8 +1020,12 @@ def _write_reviewed_row(
 def _surface_notice(session_id: str, message: str) -> None:
     """Persist a machine-generated advisory as an ``info`` chat message.
 
-    The shipped channel for advisories the user must see.  Used by every
-    non-fatal failure path a **fanned** node can take, because those paths
+    The shipped channel for advisories the user must see, and the graph's ONE
+    **ungated** chat writer: it writes on every turn, describe-only included.
+    That is the line between this and :func:`_say` — ``_say`` carries a node's
+    conversational turn and suppresses it when nobody is listening; this carries a
+    machine advisory whose whole value is that it is durable regardless.  Used by
+    every non-fatal failure path a **fanned** node can take, because those paths
     cannot write ``error_state``: it is single-writer with no reducer, and two
     branches failing in the same superstep then raise — measured on the
     installed langgraph::
@@ -439,10 +1036,29 @@ def _surface_notice(session_id: str, message: str) -> None:
     which would kill the turn, exactly the failure the handler exists to
     prevent.  A chat message is per-row and concurrency-safe, and unlike a
     stream event it survives ``emitter=None`` (the sweeper path).
+
+    Two non-fanned callers use it too — ``foreman_node``'s unreconciled-END notice
+    and ``deck_reviewer_node``'s review advisory — because they want exactly these
+    semantics and each previously carried its own copy of this write, which is how
+    one of them ended up untagged and invisible to the polling client.
+
+    ``request_id`` is stamped because "an advisory the user must see" was only
+    half true before it was: ``GET /chat/poll`` reads a turn's chat text through
+    ``get_messages_for_request``, which filters on that column, so an untagged
+    row was durable and **invisible to every polling client** — the transport the
+    deployed app uses.  The value comes from the turn's ``ContextVar``, which
+    survives the ``Send`` fan-out this helper is reached from, and is ``None`` on
+    the SSE path and the sweeper.  The ``info`` TYPE is unchanged and must stay:
+    it is what keeps these notices out of ``_conversation``, so the architect
+    never reads a machine advisory back as its own prose.
     """
     try:
         get_session_manager().add_message(
-            session_id, role="assistant", content=message, message_type="info"
+            session_id,
+            role="assistant",
+            content=message,
+            message_type="info",
+            request_id=get_chat_request_id(),
         )
     except Exception:
         logger.warning("Could not surface a failure notice", exc_info=True)
@@ -675,12 +1291,29 @@ def architect_node(state: dict) -> Dict[str, Any]:
     Reads only fields ``ArchitectOutput`` declares: ``intent``, ``message``,
     ``deck_spec``, ``data_request``, ``target_positions``,
     ``proposed_design_contract``.
+
+    **§4.6 lives here, in two halves and one hole.**  A committed spec is
+    classified against the persisted one by :func:`classify_spec_change`.  A
+    ``design_contract`` change forces coverage to every position — the one place
+    a rebuild-all is correct — and a ``confirm_design_contract`` turn's message
+    is augmented to name the slide style that confirming would drop (§L4).  The
+    third case, a ``deck_level`` change, re-reviews every committed slide against
+    the new spec — SERIALLY, here, see ``rereview_committed_slides`` for the
+    measurement of why it cannot be a two-pass turn — and narrows coverage to the
+    slides that contradict it, so still-valid work including manual edits
+    survives.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
     initiated_by = state.get("initiated_by")
 
-    committed_htmls = _committed_slide_htmls(session_id)
+    committed_rows = _committed_slide_rows(session_id)
+    committed_htmls = [row.get("html") or "" for row in committed_rows]
+    committed_positions = {
+        row.get("position")
+        for row in committed_rows
+        if row.get("position") is not None
+    }
     prior_digest = compute_deck_digest(committed_htmls) if committed_htmls else None
     prior_review = None
     if prior_digest is not None:
@@ -740,27 +1373,54 @@ def architect_node(state: dict) -> Dict[str, Any]:
         ),
         "template_sections": brand["section_inventory"],
         "resolved_style": brand["resolved_style"],
+        # §M1, as a PAYLOAD key and not a tool manifest — see
+        # _design_system_library.  Without this the architect cannot offer a
+        # brand it cannot see: available_design_contract carries only the ids
+        # already in force, so every other design system in the org is invisible.
+        "design_system_library": _design_system_library(),
     }
 
     out = call_skill("architect", payload, brand["design_system_active"])
     intent = out.intent
+    message = out.message
+
+    # §L4 — a confirmation that would DROP the slide style has to say so, and it
+    # has to say so in the message the user actually sees.  That is why the
+    # augmentation happens HERE, before the emit and before `updates` is built:
+    # the emit is the streamed assistant turn and architect_message is the
+    # persisted one, so augmenting either alone would show the user a sentence
+    # the transcript does not contain, or the reverse.
+    if intent == "confirm_design_contract":
+        dropped_style_id = _slide_style_being_dropped(
+            out.proposed_design_contract, inbound_contract, prior_spec
+        )
+        if dropped_style_id is not None:
+            message = "\n\n".join(
+                [message.rstrip(), _SLIDE_STYLE_DROPPED.format(dropped_style_id)]
+            )
 
     updates: Dict[str, Any] = {
         "architect_intent": intent,
-        "architect_message": out.message,
+        "architect_message": message,
         "target_positions": None,
         "fix_target": None,
         "error_state": None,
     }
-    _emit(StreamEventType.ASSISTANT, content=out.message,
+    # BOTH surfaces, and the pairing is the fix.  The event is what an SSE client
+    # sees as it happens; the row is what a POLLING client sees at all, and what
+    # the architect reads back next turn as its own words.  An emit without a row
+    # is the shape that shipped: the model was called, the turn completed, and the
+    # user saw nothing.
+    _emit(StreamEventType.ASSISTANT, content=message,
           metadata={"node": "architect", "intent": intent})
+    _say(state, message)
 
     if intent == "ask_data":
         # GraphState declares no analyst channel and undeclared keys are
         # silently dropped (§11), so the request travels in architect_message —
         # the same key the analyst answers through.
         updates["architect_message"] = "\n\n".join(
-            [out.message, "DATA REQUEST: " + out.data_request.model_dump_json()]
+            [message, "DATA REQUEST: " + out.data_request.model_dump_json()]
         )
         return updates
 
@@ -770,11 +1430,63 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # proposal stays in proposed_design_contract — never in deck_spec (§M1).
         return updates
 
-    spec = out.deck_spec if out.deck_spec is not None else prior_spec
+    # The architect's own spec wins; the persisted one is a FALLBACK, and it is
+    # only usable while it still describes the rows this deck actually has.
+    # ArchitectOutput's validator requires deck_spec for intent='build', so this
+    # fallback is reached on an EDIT turn — the turn that hands a builder a brief
+    # resolved BY POSITION out of this spec (``build_branch_payload``), which is
+    # why a stale one is destructive rather than untidy: measured, an edit aimed
+    # at a position whose row was deleted rebuilds the row and the deck gains a
+    # slide, and an edit after a MIDDLE delete rewrites the human's surviving
+    # slide against the deleted slide's brief.  See
+    # _persisted_spec_describes_these_rows for what this can and cannot see.
+    spec = out.deck_spec
+    stale_prior_spec: Optional[dict] = None
+    if spec is None and prior_spec is not None:
+        if _persisted_spec_describes_these_rows(prior_spec, committed_positions):
+            spec = prior_spec
+        else:
+            stale_prior_spec = {
+                "spec_positions": sorted(s.position for s in prior_spec.slides),
+                "row_positions": sorted(committed_positions),
+            }
+            logger.warning(
+                "The persisted deck spec describes positions %s but this deck's "
+                "rows are at %s, so it cannot be used to brief a build; the deck "
+                "was changed outside the chat and the spec has not caught up "
+                "(the arc-review sweeper re-describes it)",
+                stale_prior_spec["spec_positions"],
+                stale_prior_spec["row_positions"],
+                extra={"session_id": session_id},
+            )
+
     if spec is None:
-        # An edit with nothing to edit. Degrade to a discussion turn rather than
-        # routing to a foreman that would cover no positions and reach deck
-        # review on an unbuilt deck.
+        # An edit with nothing usable to edit. Degrade to a discussion turn rather
+        # than routing to a foreman that would cover no positions and reach deck
+        # review on an unbuilt deck — or, on the stale-spec limb, dispatch a
+        # builder against a brief that describes another slide.  ONE degrade path
+        # for both causes, deliberately: two shapes of the same refusal would be
+        # two things to keep in step.  Only the code and the sentence differ, and
+        # the sentence differs because telling a user with a visible deck that no
+        # specification could be found would be false.
+        if stale_prior_spec is not None:
+            updates["architect_intent"] = "discuss"
+            updates["architect_message"] = (
+                "This deck has changed since I last described it — its slides no "
+                "longer line up with the plan I hold — so I have not rebuilt "
+                "anything. Tell me what this deck should say and I will describe "
+                "it again from what is there now."
+            )
+            updates["error_state"] = {
+                "node": "architect",
+                "code": "spec_positions_stale",
+                "message": (
+                    "the persisted deck_spec describes positions "
+                    f"{stale_prior_spec['spec_positions']} but the committed rows "
+                    f"are at {stale_prior_spec['row_positions']}"
+                ),
+            }
+            return updates
         updates["architect_intent"] = "discuss"
         updates["architect_message"] = (
             "I could not find a deck specification to edit for this session. "
@@ -792,6 +1504,139 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     if intent == "edit":
         updates["target_positions"] = list(out.target_positions)
+
+    # ---- §4.6: what does this commit change about the DECK, not a slide? ----
+    # Classified AFTER the edit turn's target_positions is set, so the
+    # design-contract branch below OVERRIDES it.  Reversing the two lines is the
+    # whole defect: an "edit slide 2, and use the Acme brand" turn would restyle
+    # the deck and rebuild only slide 2, leaving nineteen slides rendering
+    # against a stylesheet the deck no longer has.
+    spec_change = classify_spec_change(spec, prior_spec)
+    if spec_change == "design_contract":
+        # THE one place a rebuild-all is correct (§4.6).  A restyle genuinely
+        # affects every slide, so re-review-then-selective-rebuild would flag all
+        # of them anyway.  It is gated on confirmation by the topology rather
+        # than by a flag: the architect asks with `confirm_design_contract`,
+        # which routes to END and dispatches nothing, so a build/edit turn whose
+        # spec CHANGES the contract is by construction the turn that applies an
+        # answered confirmation.
+        #
+        # Written as the explicit position list rather than left as None.  On a
+        # build turn the two are equivalent — `_covered_positions` derives every
+        # spec position when target_positions is None — but only the explicit
+        # list also covers the EDIT turn, and only the explicit list is visible
+        # in final state, so "confirming rebuilt every position" is observable
+        # rather than inferred from an absence.
+        updates["target_positions"] = [slide.position for slide in spec.slides]
+        logger.info(
+            "Design-contract change committed; rebuilding every position",
+            extra={"session_id": session_id},
+        )
+    elif spec_change == "deck_level":
+        # §4.6's other half: re-review ALL, rebuild only what fails.  A new
+        # audience logically invalidates every slide, but a blanket rebuild-all
+        # was rejected as expensive and destructive, so every committed slide is
+        # scored against the NEW spec and only the ones that contradict it are
+        # rebuilt — which is what preserves still-valid work INCLUDING manual
+        # user edits.  The pass runs serially inside rereview_committed_slides;
+        # its docstring carries the measurement of why it cannot be the two-pass
+        # turn the plan imagined.
+        verdicts = rereview_committed_slides(session_id, spec, brand)
+        if not verdicts["committed"]:
+            # Nothing committed to score (an unbuilt deck, or the row read
+            # failed).  Coverage is left exactly as the architect set it: writing
+            # an empty target list here would make the turn cover NOTHING and
+            # complete vacuously, which is worse than building what was asked.
+            logger.warning(
+                "Deck-level spec change with no committed slide to re-review; "
+                "leaving this turn's coverage as the architect set it",
+                extra={"session_id": session_id},
+            )
+        else:
+            # A position the new spec declares but no row covers cannot be
+            # "still valid" — there is nothing there — so it joins the rebuild
+            # set.  Without this a deck-level change that also ADDS a slide would
+            # silently never build the new one.
+            uncovered = {
+                slide.position for slide in spec.slides
+            } - verdicts["committed"]
+            # An explicit edit request is honoured whatever the review said: the
+            # user asked for that slide, so "it still fits the brief" is not a
+            # reason to refuse.
+            requested = set(out.target_positions) if intent == "edit" else set()
+            rebuild = sorted(verdicts["failing"] | uncovered | requested)
+            updates["target_positions"] = rebuild
+
+            # Could the pass judge ANYTHING?  Every position unreviewable means
+            # the deck is now stale against a brief nothing checked it against,
+            # and the tie-break that leaves unreviewable slides alone gives that
+            # staleness no retry path.  So it must not read as a successful
+            # re-review: it is recorded on error_state (single-writer, and this
+            # node is its writer) and SAID in the notice, rather than reported as
+            # "every slide still fits".
+            judged_nothing = bool(verdicts["committed"]) and not verdicts["reviewed"]
+            if judged_nothing:
+                message = (
+                    f"The deck's brief changed, but I could not check any of its "
+                    f"{len(verdicts['committed'])} slide(s) against it — every "
+                    f"re-review failed. The slides are unchanged, so the deck may "
+                    f"no longer match its brief. Ask me again to re-check it."
+                )
+                logger.error(
+                    "Deck-level spec change: every re-review failed for %d "
+                    "committed slide(s); the deck is stale against its new brief "
+                    "and nothing will be rebuilt to fix it",
+                    len(verdicts["committed"]),
+                    extra={"session_id": session_id},
+                )
+                updates["error_state"] = {
+                    "node": "architect",
+                    "code": "rereview_judged_nothing",
+                    "message": message,
+                    "positions": sorted(verdicts["unreviewable"]),
+                }
+            else:
+                message = (
+                    f"The deck's brief changed, so I re-checked all "
+                    f"{len(verdicts['committed'])} slide(s) against it. "
+                    + (
+                        f"Rebuilding {len(rebuild)}: {rebuild}."
+                        if rebuild
+                        else "Every slide still fits, so I am rebuilding none."
+                    )
+                )
+                logger.info(
+                    "Deck-level spec change: re-reviewed %d slide(s), rebuilding "
+                    "%s (unreviewable: %s, surfaced: %s)",
+                    len(verdicts["committed"]),
+                    rebuild,
+                    sorted(verdicts["unreviewable"]),
+                    verdicts["surfaced"],
+                    extra={"session_id": session_id},
+                )
+            _emit(
+                StreamEventType.ASSISTANT,
+                content=message,
+                metadata={
+                    "node": "architect",
+                    "spec_change": "deck_level",
+                    "reviewed": sorted(verdicts["reviewed"]),
+                    "rebuilding": rebuild,
+                    "unreviewable": sorted(verdicts["unreviewable"]),
+                    # Every finding the pass produced, objective or not. The
+                    # subjective ones ARE the signal here, so dropping them left
+                    # the pass with nothing to report.
+                    "surfaced": verdicts["surfaced"],
+                    "stale": judged_nothing,
+                },
+            )
+            # The architect's SECOND utterance of the same turn, and it takes the
+            # same pair of surfaces as its first for one reason: this is the only
+            # place a user is told what the re-review decided.  Persisting the
+            # reply above while leaving this one emit-only would make the
+            # architect audible on a plain build turn and mute on a deck-level
+            # one — the same defect, moved rather than fixed.
+            _say(state, message)
 
     external_scripts = [SlideDeck.CHART_JS_URL]
     head_meta = json.dumps(_DEFAULT_HEAD_META)
@@ -829,12 +1674,24 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # deck's stylesheet, and the post-commit aggregate_deck_css would then
     # preserve the erasure. Omitting it is the writer's own documented way to
     # say "this turn resolved no deterministic CSS".
+    # A describe-only turn (ws4d's arc-review sweeper) is not a change the client
+    # should see. It re-describes the narrative and changes no slide, but
+    # deck.version is what the WYSIWYG client sends back as expected_version, and
+    # a bump turns the human's very next save into a 409 — on exactly the deck
+    # whose editor is mid-session, because the sweeper runs BECAUSE they are
+    # editing. deck.updated_at, which the client renders as modified_at, is
+    # suppressed by the same flag: leaving it bumped beside an unchanged version
+    # token would show "modified just now" against a deck whose lock says nothing
+    # changed, and that half-state is worse than either choice made consistently.
+    describe_only = bool(scoped_vals(state, "describe_only"))
+
     deck_write: Dict[str, Any] = {
         "title": spec.title,
         "external_scripts": external_scripts,
         "head_meta": head_meta,
         "deck_spec": spec.to_json(),
         "modified_by": initiated_by,
+        "user_visible": not describe_only,
     }
     if brand["deterministic_css"]:
         deck_write["css"] = brand["deterministic_css"]
@@ -914,6 +1771,18 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         content=message,
         metadata={"node": "data_analyst", "outcome": out.outcome},
     )
+    # Persisted as ``info``, NOT ``llm_response``, and the difference is not
+    # cosmetic.  This is user-facing prose from a node that speaks to the user, so
+    # it needs a durable row or the polling transport shows the user nothing where
+    # the SSE transport showed them the analyst's answer.  But it must NOT replay:
+    # ``_conversation`` has only ``user`` and ``assistant`` roles, so an
+    # ``llm_response`` here would come back to the architect next turn as the
+    # ARCHITECT's own words — and it would arrive twice on THIS turn, because the
+    # analyst also hands the same text to the architect on ``architect_message``
+    # (GraphState declares no analyst channel, Ruling C-7), which is the field the
+    # architect answers from.  ``info`` is the shipped type for exactly this:
+    # durable and visible, deliberately outside ``_AI_TYPES``.
+    _say(state, message, message_type="info")
 
     return {"architect_message": message}
 
@@ -978,6 +1847,13 @@ def foreman_node(state: dict) -> Dict[str, Any]:
     """
     turn_id = state["turn_id"]
 
+    # 0. ws4d D3 — release committed slides BEFORE the ladder, so every wake
+    #    delivers what the previous superstep committed no matter which limb this
+    #    wake then takes.  Inside the ladder it would sit on one branch and miss
+    #    the others: the pending-fix limb returns immediately, and the
+    #    all-committed limb is the wake that carries the LAST slide of the deck.
+    _release_slides(state)
+
     # 1. A pending fix preempts dispatch entirely. A 31-slide deck stops
     #    dispatching new builders until every fix completes; fix rounds
     #    serialise one position per superstep.
@@ -1020,15 +1896,12 @@ def foreman_node(state: dict) -> Dict[str, Any]:
     )
     logger.error("Foreman reached END with uncommitted positions: %s", outstanding)
     _emit(StreamEventType.ERROR, error=message, metadata={"node": "foreman"})
-    try:
-        get_session_manager().add_message(
-            state["session_id"],
-            role="assistant",
-            content=message,
-            message_type="info",
-        )
-    except Exception:
-        logger.warning("Could not surface the unreconciled-END notice", exc_info=True)
+    # Through `_surface_notice`, the shipped ungated writer, rather than a
+    # hand-rolled `add_message`: that is where the request-id tag lives, and an
+    # untagged row never reaches `GET /chat/poll`.  NOT through `_say` — this
+    # notice is a machine advisory that must be durable on every turn, and `_say`
+    # suppresses a describe-only one.
+    _surface_notice(state["session_id"], message)
     updates["error_state"] = {
         "node": "foreman",
         "code": "end_with_outstanding_positions",
@@ -1817,7 +2690,21 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     if deck_write:
         try:
             write_deck_level_columns(
-                session_id, modified_by=initiated_by, **deck_write
+                session_id,
+                modified_by=initiated_by,
+                # Passed here for the same reason the architect passes it, and
+                # passed EXPLICITLY rather than left to the default: these are the
+                # two deck-level writers, and one of them being describe-only
+                # aware while the other defaults to `True` is a divergence held
+                # apart only by `architect_router`'s gate — an accident of routing
+                # rather than an agreement between the writers.  A sixth intent
+                # routing to the foreman, or a describe-only turn that ever
+                # reaches this node, would otherwise re-open the 409 the flag
+                # exists for: bump the version out of band and the human's next
+                # save fails.  Derived identically to the architect's, off the
+                # same turn-scoped key.
+                user_visible=not bool(scoped_vals(state, "describe_only")),
+                **deck_write,
             )
         except Exception as exc:
             logger.exception("Post-commit deck-level write failed")
@@ -1889,15 +2776,16 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 "message": type(exc).__name__,
             }
 
-    try:
-        manager.add_message(
-            session_id,
-            role="assistant",
-            content=advisory,
-            message_type="info",
-        )
-    except Exception:
-        logger.warning("Could not persist the deck-review advisory", exc_info=True)
+    # Through `_surface_notice`, the shipped ungated writer, rather than a
+    # hand-rolled `add_message`: that is where the request-id tag lives, and an
+    # untagged row never reaches `GET /chat/poll`.  NOT through `_say`, which
+    # suppresses a describe-only turn's write — a describe-only turn cannot reach
+    # this node today (`architect_router` ends it first) but the unit suite calls
+    # this node directly with the flag set and PINS that the advisory still lands,
+    # deliberately: "gating the advisory is a change to what the user is told".
+    # The `info` TYPE is load-bearing and unchanged — its exclusion from
+    # `_AI_TYPES` keeps this advisory out of the architect's replayed conversation.
+    _surface_notice(session_id, advisory)
     _emit(
         StreamEventType.ASSISTANT,
         content=advisory,

@@ -24,5 +24,56 @@
     }
   ],
   "chat_prompt": "Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook.",
-  "chat_reply": "Here's your deck with 3 slides! I've created:\n\n1. **Title Slide** — introducing AI in healthcare\n2. **Key Advantages** — early detection, personalized treatment, operational efficiency, and drug discovery\n3. **Future Outlook** — predictive monitoring, AI-assisted surgery, and global health equity\n\nFeel free to ask me to refine any slide, add new ones, or change the style."
+  "chat_reply": "Here's your deck with 3 slides! I've created:\n\n1. **Title Slide** — introducing AI in healthcare\n2. **Key Advantages** — early detection, personalized treatment, operational efficiency, and drug discovery\n3. **Future Outlook** — predictive monitoring, AI-assisted surgery, and global health equity\n\nFeel free to ask me to refine any slide, add new ones, or change the style.",
+  "deck_spec": {
+    "title": "Example Deck — AI in Healthcare",
+    "audience": "A first-time Tellr user taking the product tour: a general business audience, with no clinical or machine-learning background assumed.",
+    "purpose": "Show a new user what a finished Tellr deck looks like, on a subject that needs no domain briefing, so they can see structure and styling before they write their own prompt.",
+    "argument": "AI already delivers concrete benefits across diagnosis, treatment and research, and its near-term trajectory points at prevention and wider access, so it is worth engaging with now rather than watching.",
+    "call_to_action": "Ask the assistant to refine a slide, add a new one, or change the style: the next step of the tour.",
+    "narrative_arc": [
+      "Frame the subject: AI is already changing patient care, diagnostics and medical research, a transformation under way rather than a forecast.",
+      "Ground that claim in four advantages visible today: earlier disease detection, personalized treatment, operational efficiency, and faster drug discovery.",
+      "Extend today's gains into the near future and land on access: predictive monitoring, AI-assisted surgery, and specialist-level care reaching underserved communities."
+    ],
+    "design_contract": {
+      "design_system_id": null,
+      "template_id": null,
+      "slide_style_id": null
+    },
+    "resolved_data": {
+      "synthesis": "No live data was resolved for this deck. The tour ships fixed illustrative bytes so every user sees the same three slides; the claims are widely reported general benefits of AI in healthcare, not figures drawn from a source system.",
+      "figures": [],
+      "gaps": [
+        "No quantitative source: the deck cites no measured figure, so no claim in it is traceable to a dataset.",
+        "No organisation context: the tour deck is deliberately generic and names no customer, hospital or vendor."
+      ]
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Open the deck: name the subject and frame AI in healthcare as a transformation already under way.",
+        "content_brief": "Title slide. Badge reading 'AI & Healthcare', headline 'The Benefits of AI in Modern Healthcare', and a one-line standfirst naming the three areas the deck covers: patient care, diagnostics, and medical research.",
+        "assumes": "Nothing. This is the deck's first slide.",
+        "hands_off": "The reader knows the subject and expects concrete advantages next.",
+        "data_references": []
+      },
+      {
+        "position": 1,
+        "purpose": "Make the case with four concrete present-day advantages, so the benefit claim is specific rather than atmospheric.",
+        "content_brief": "Four bolded items, one explanatory clause each: early disease detection (imaging patterns a human reader can miss), personalized treatment plans (genetics, lifestyle, history), operational efficiency (scheduling, documentation, triage), and drug discovery acceleration (molecular simulation at scale).",
+        "assumes": "The reader has accepted the framing from the title slide.",
+        "hands_off": "The present-tense case is made; the reader is ready to look forward.",
+        "data_references": []
+      },
+      {
+        "position": 2,
+        "purpose": "Extend the argument from today's gains to the near future and close on access, so the deck ends on consequence rather than a list.",
+        "content_brief": "Three bolded forward-looking items: predictive health monitoring (wearables shifting medicine from reactive to proactive), AI-assisted surgery (robotics guided by real-time analysis), and global health equity (mobile diagnostics for underserved communities). Close on the italic line about healthcare becoming intelligent, personalized and accessible to all.",
+        "assumes": "The reader accepts the four present-day advantages from the previous slide.",
+        "hands_off": "The deck ends; the reader leaves with the equity claim as the takeaway.",
+        "data_references": []
+      }
+    ]
+  }
 }

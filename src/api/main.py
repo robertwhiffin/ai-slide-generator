@@ -51,13 +51,14 @@ _worker_task = None
 _export_worker_task = None
 _cleanup_task = None
 _timeout_task = None
+_spec_sweeper_task = None
 _frontend_assets_stack: ExitStack | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _cleanup_task, _timeout_task, _frontend_assets_stack
+    global _worker_task, _export_worker_task, _cleanup_task, _timeout_task, _spec_sweeper_task, _frontend_assets_stack
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
@@ -134,6 +135,16 @@ async def lifespan(app: FastAPI):
         _cleanup_task = asyncio.create_task(request_log_cleanup_loop())
         logger.info("Request log cleanup task started")
 
+        # Start the spec-dirty arc-review sweeper. A PERIODIC LOOP, so it belongs
+        # here beside the two above and NOT in run.py::init_database: the
+        # pre-fork rule there is for migrations and backfills, which must run
+        # exactly once, and a loop started in that step would die with it. It
+        # runs in every uvicorn worker (UVICORN_WORKERS defaults to 4), which is
+        # why claim_due_marker takes an atomic lease rather than trusting a read.
+        from src.services.spec_sync import spec_review_sweeper_loop
+        _spec_sweeper_task = asyncio.create_task(spec_review_sweeper_loop())
+        logger.info("Spec-review arc sweeper started")
+
         # Recover any stuck requests from previous crashes
         try:
             recovered = await recover_stuck_requests()
@@ -184,6 +195,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("MCP job timeout sweeper stopped")
+
+    if _spec_sweeper_task:
+        _spec_sweeper_task.cancel()
+        try:
+            await _spec_sweeper_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Spec-review arc sweeper stopped")
 
     # Tear down the FastMCP session manager's task group. Safe to call
     # unconditionally — the stack was entered unconditionally at startup.

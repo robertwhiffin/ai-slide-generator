@@ -25,7 +25,7 @@ arc, section assignment) reaches no tool.  The other six declare ``[]``.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic import BaseModel
@@ -148,6 +148,39 @@ def list_skills() -> list[str]:
     return list(_SKILLS)
 
 
+def _with_conditional_instructions(skill: Skill, payload: dict[str, Any]) -> Skill:
+    """Return *skill*, or a copy whose instructions carry a payload-conditional block.
+
+    Exactly one such block exists: the build reviewer's ``DECK_BRIEF_REVIEW``,
+    added when — and only when — the payload carries a non-empty ``deck_brief``.
+    §4.6's deck-level re-review supplies that key; the normal build path never
+    does, so **the build path's assembled prompt is byte-identical** and no
+    existing invocation changes by a single character.  That property is the whole
+    reason the branch lives here rather than in ``build_instructions()``: the two
+    invocations share one criteria block and one output schema, and widening the
+    shared prose to describe a pass the build path never takes would spend the
+    build reviewer's attention on a brief it was not given.
+
+    ``assemble_skill_prompt`` is deliberately NOT the home for this either.  It
+    serves all seven skills and the monolith's own prompt assembly; a payload
+    sniff there would be a build-reviewer concern in a function that has no
+    business knowing about one.  ``call_skill`` already owns the (skill, payload)
+    pair and is the single documented entry point for skill invocation, so the
+    decision "which instructions does THIS invocation get" belongs to it.
+
+    ``Skill`` is frozen, so this returns a ``dataclasses.replace`` copy and the
+    registry entry is never mutated — two concurrent branches must not be able to
+    see each other's instructions.
+    """
+    if skill.name != "build_reviewer" or not (payload or {}).get("deck_brief"):
+        return skill
+    from .build_reviewer import DECK_BRIEF_REVIEW
+
+    return replace(
+        skill, instructions="\n\n".join([skill.instructions, DECK_BRIEF_REVIEW])
+    )
+
+
 def call_skill(
     name: str,
     payload: dict[str, Any],
@@ -186,7 +219,7 @@ def call_skill(
     """
     from src.services.agent_resolution import assemble_skill_prompt, get_structured_model
 
-    skill = load_skill(name)
+    skill = _with_conditional_instructions(load_skill(name), payload)
     prompt = assemble_skill_prompt(skill, payload, design_system_active)
     model = get_structured_model(skill.output_schema)
     return model.invoke(prompt)

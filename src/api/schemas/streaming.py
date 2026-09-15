@@ -20,6 +20,7 @@ class StreamEventType(str, Enum):
     COMPLETE = "complete"  # Generation finished
     SESSION_TITLE = "session_title"  # Auto-generated session title
     SESSION_CREATED = "session_created"  # New session created on first message
+    SLIDE_READY = "slide_ready"  # One committed slide released by the reorder buffer
 
 
 class StreamEvent(BaseModel):
@@ -34,6 +35,11 @@ class StreamEvent(BaseModel):
         slides: Slide deck data (for complete event)
         error: Error message (for error events)
         message_id: Database ID of persisted message
+        position: 0-based slide position (for slide_ready events)
+        html: One slide's body HTML (for slide_ready events)
+        scripts: One slide's per-slide JavaScript (for slide_ready events)
+        agent: Which agent produced this event's subject (§7.3 attribution)
+        slide_cursor: The next position not yet released (for slide_ready events)
     """
 
     type: StreamEventType = Field(..., description="Event type")
@@ -52,6 +58,23 @@ class StreamEvent(BaseModel):
     experiment_url: Optional[str] = Field(default=None, description="MLflow experiment URL")
     session_title: Optional[str] = Field(default=None, description="Auto-generated session title")
     session_id: Optional[str] = Field(default=None, description="Session ID (for session_created events)")
+    # ws4d D3 — incremental slide delivery.  `position`/`html`/`scripts` are the
+    # payload the spec (§6.2) puts on a `slide_ready` event; `agent` is §7.3's
+    # attribution; `slide_cursor` tells the client the next position it has NOT
+    # yet been sent, so an SSE consumer that later falls back to polling can hand
+    # the same number to `GET /chat/poll`'s `slide_cursor` query parameter.
+    position: Optional[int] = Field(default=None, description="0-based slide position")
+    html: Optional[str] = Field(default=None, description="One slide's body HTML")
+    # `scripts: str = ""`, NOT `Optional[str] = None`.  "No per-slide JavaScript"
+    # already has exactly one spelling everywhere else in the slide chain —
+    # `SlideWriter.write_slide(scripts: str = "")`, `commit_placeholder`'s
+    # `scripts=""`, and the backfill's `slide_dict.get("scripts") or ""` — so a
+    # second spelling here would make every consumer handle both.
+    scripts: str = Field(default="", description="One slide's per-slide JavaScript")
+    agent: Optional[str] = Field(default=None, description="Agent this event is attributed to")
+    slide_cursor: Optional[int] = Field(
+        default=None, description="Next slide position not yet released"
+    )
 
     def to_sse(self) -> str:
         """Format event as SSE data line.

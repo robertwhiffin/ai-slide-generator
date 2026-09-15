@@ -57,6 +57,10 @@ def scoped(turn_id: str, value: Any) -> dict:
 # {} for anything not ending in "positions" would hand emitted_style_blocks'
 # list reducer a dict — survivable only by accident (round-3 finding 24).
 _EMPTY_FOR: dict[str, Any] = {
+    # False, not None: describe_only gates a destructive branch, so the value a
+    # turn with no flag reads must be the SAFE-TO-BUILD one, and it must be a
+    # bool so `if scoped_vals(...)` cannot be accidentally truthy.
+    "describe_only":        False,
     "landed_positions":     set(),
     "placeheld_positions":  set(),
     "reviewed_positions":   set(),
@@ -232,6 +236,28 @@ class GraphState(TypedDict, total=False):
 
     # Set by architect_node or exception handlers.
     error_state: Optional[dict]
+
+    # "This turn may re-DESCRIBE the deck but must not REBUILD it."  Set by
+    # invoke_graph from its describe_only argument; read by architect_router,
+    # which sends a build/edit intent to END instead of the foreman.  ws4d's
+    # arc-review sweeper is the caller: it runs with no emitter and nobody
+    # watching, and _INTENT_ROUTES maps both "build" and "edit" to "foreman",
+    # so without this a sweeper turn dispatches builders whose reviewers
+    # overwrite the very hand-edits that scheduled the review.
+    #
+    # TURN-SCOPED, and that is the whole difficulty.  Turn 2 state ACCUMULATES
+    # (measured: turn 2 passing a fresh empty value still saw turn 1's), so a
+    # plain single-writer bool set on a sweeper turn would still read True on
+    # the user's next turn on the same thread and silently bar every subsequent
+    # build for that deck — a worse failure than the one it fixes, and a
+    # completely silent one.  So it carries a scoped() wrapper and is read
+    # through scoped_vals, whose turn comparison happens on the READ.  It needs
+    # NO reducer: invoke_graph is the only writer, once, before any node runs,
+    # so there is no fan-in and a reducer would only be able to merge where the
+    # semantics are "replace".
+    #
+    # JSON-native throughout ({"turn": str, "vals": bool}), per Ruling W-8(b).
+    describe_only: Optional[dict]
 
     # -- fan-in keys (reducer required) ------------------------------------
 

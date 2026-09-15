@@ -11,6 +11,9 @@ Fixtures in this file
   released_deck              — session_id with a committed ascending prefix
   graph_turn_env             — the COMPILED graph over a real database, a real
                                checkpointer and a SkillRecorder (ws4c C5)
+  postgres_engine            — a throwaway PostgreSQL database with the full
+                               Tellr schema, one connection PER THREAD; self-skips
+                               when no PostgreSQL is reachable
 
 Why these three belong here and not in tests/unit/conftest.py:
   stub_writer's purpose is call-order assertions in ws4c/d; its named consumer
@@ -44,7 +47,8 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine, inspect as sa_inspect
+from sqlalchemy import create_engine, inspect as sa_inspect, text as sa_text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -171,6 +175,122 @@ def sqlite_engine_file_backed():
         os.unlink(path)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# postgres_engine — the real-database fixture, and why it is not the SQLite one
+# ---------------------------------------------------------------------------
+#
+# The established repo pattern (six modules under tests/unit/ plus
+# tests/integration/test_graph_live_real_model.py): read the URL from
+# ``TELLR_TEST_POSTGRES_URL``, probe it with ``SELECT 1``, and self-skip when it
+# does not answer.  This is the first copy of that pattern to live in a conftest,
+# so every file under tests/integration/ inherits it instead of rolling its own.
+#
+# THE POOL CLASS IS THE LOAD-BEARING PART, NOT THE STORAGE LOCATION.
+# ``sqlite_engine_file_backed`` above is ``StaticPool``, which hands every thread
+# the SAME connection.  Under a real fan-out that corrupted the database in 3 of
+# 3 measured runs on ws4c (``database schema has changed``, ``query aborted``,
+# ``database disk image is malformed``).  This fixture therefore leaves
+# SQLAlchemy's default ``QueuePool`` in place, where each thread checks out its
+# own connection — which is what makes N claimers N genuinely concurrent
+# transactions rather than N users of one.  ``test_claim_exclusivity_postgres.py``
+# asserts that positively, by collecting distinct ``pg_backend_pid()`` values
+# from threads holding connections at the same instant.
+#
+# Each test gets its own throwaway database (uuid-named, created and dropped by
+# the fixture) so the suite is safe under ``pytest -n auto``: two xdist workers
+# never share a schema, and the ``pg_terminate_backend`` sweep on teardown is
+# scoped to this fixture's own ``datname``.
+
+#: Admin URL the throwaway per-test databases are created on.  Same env var and
+#: same default as every other PostgreSQL suite in this repo.
+_PG_URL = os.environ.get(
+    "TELLR_TEST_POSTGRES_URL",
+    "postgresql+psycopg2://localhost:5432/postgres",
+)
+
+#: Probed at most once per pytest process, and only when a test actually asks for
+#: ``postgres_engine``.  Probing at import time would add a connect timeout to
+#: every integration run on a machine with no PostgreSQL.
+_PG_REACHABLE: Optional[bool] = None
+
+
+def _postgres_available() -> bool:
+    """True when the admin URL answers ``SELECT 1``; False on any exception."""
+    global _PG_REACHABLE
+    if _PG_REACHABLE is None:
+        try:
+            probe = create_engine(_PG_URL, isolation_level="AUTOCOMMIT")
+            with probe.connect() as conn:
+                conn.execute(sa_text("SELECT 1"))
+            probe.dispose()
+            _PG_REACHABLE = True
+        except Exception:
+            _PG_REACHABLE = False
+    return _PG_REACHABLE
+
+
+@pytest.fixture
+def postgres_engine():
+    """A fresh PostgreSQL database with the full Tellr schema, dropped afterwards.
+
+    One connection PER THREAD (SQLAlchemy's default ``QueuePool``) — see the
+    comment block above for the measured reason that is not negotiable.
+
+    Schema is built in the production ordering: ``Base.metadata.create_all``
+    followed by ``_run_migrations``.  Fails loudly if the deck tables are absent,
+    so a disabled migration cannot leave a test green over an empty schema.
+
+    Self-skips when ``TELLR_TEST_POSTGRES_URL`` names nothing reachable.
+    """
+    if not _postgres_available():
+        pytest.skip(
+            f"no PostgreSQL reachable at {_PG_URL}; set TELLR_TEST_POSTGRES_URL "
+            "to run the integration suite's real-database tests",
+        )
+
+    db_name = f"tellr_int_{uuid.uuid4().hex[:16]}"
+    admin = create_engine(_PG_URL, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa_text(f'CREATE DATABASE "{db_name}"'))
+
+    # No poolclass= argument on purpose: the psycopg2 default is QueuePool.
+    # pool_size is raised above the default 5 so a fan-out of four claimers plus
+    # an observer connection cannot queue behind each other and turn a
+    # concurrency test into a serial one.
+    engine = create_engine(
+        make_url(_PG_URL).set(database=db_name),
+        pool_size=10,
+        max_overflow=10,
+        pool_pre_ping=True,
+    )
+    try:
+        Base.metadata.create_all(bind=engine)
+        _run_migrations(engine)
+
+        tables = set(sa_inspect(engine).get_table_names())
+        for required in ("session_slide_decks", "session_slides", "user_sessions"):
+            assert required in tables, (
+                f"{required} missing from the PostgreSQL engine; "
+                f"found {sorted(tables)}"
+            )
+        yield engine
+    finally:
+        engine.dispose()
+        with admin.connect() as conn:
+            # Terminate stragglers first: a leftover backend blocks DROP DATABASE,
+            # and the filter is scoped to this fixture's own database so a
+            # parallel xdist worker's connections are untouched.
+            conn.execute(
+                sa_text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :db AND pid <> pg_backend_pid()"
+                ),
+                {"db": db_name},
+            )
+            conn.execute(sa_text(f'DROP DATABASE IF EXISTS "{db_name}"'))
+        admin.dispose()
 
 
 # ---------------------------------------------------------------------------
