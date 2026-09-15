@@ -22,6 +22,7 @@ from src.api.routes._authz import (
     _require_session_access,
 )
 from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
+from src.api.services.chat_service import get_chat_service
 from src.api.services.session_manager import (
     SessionAccessDeniedError,
     SessionNotFoundError,
@@ -701,6 +702,57 @@ async def add_message(session_id: str, request: AddMessageRequest):
         raise HTTPException(
             status_code=500,
             detail="Failed to add message",
+        ) from e
+
+
+@router.delete("/{session_id}/context")
+async def clear_session_context(session_id: str):
+    """Clear the conversation context for a session, keeping the deck and its spec.
+
+    Drops the transcript and the graph checkpoint thread; keeps the slide deck,
+    ``deck_spec_json`` (the structured compaction of what was decided) and the
+    earliest user message, which is what engine-mode resolution reads.
+
+    Requires CAN_EDIT: the helper's default is CAN_VIEW, and taking the default
+    would let a **viewer** wipe another user's transcript and graph thread.
+
+    Args:
+        session_id: Session whose context to clear
+
+    Returns:
+        Clear confirmation with the number of messages deleted
+    """
+    # Permission check: require CAN_EDIT on the deck — NOT the helper's default.
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
+
+    try:
+        chat_service = get_chat_service()
+        result = await asyncio.to_thread(chat_service.clear_context, session_id)
+
+        logger.info(
+            "Session context cleared via API",
+            extra={
+                "session_id": session_id,
+                "deleted_messages": result.get("deleted_messages"),
+            },
+        )
+
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to clear session context: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to clear session context",
         ) from e
 
 

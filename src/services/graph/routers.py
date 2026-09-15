@@ -63,6 +63,30 @@ def architect_router(state: dict) -> str:
             "architect_router saw an unroutable intent %r; ending the turn", intent
         )
         return END
+
+    # A describe-only turn may re-describe the deck but must not rebuild it.
+    # ws4d's arc-review sweeper runs with no emitter and nobody watching, so a
+    # "build" or "edit" intent here would dispatch builders whose reviewers
+    # OVERWRITE the hand-edits that scheduled the review.  A post-hoc check
+    # cannot help: invoke_graph is synchronous and the rows land before it
+    # returns, so the only safe place is the edge that would dispatch them.
+    #
+    # Gated on the DESTINATION, not on the intent literal, so a sixth intent
+    # added to _INTENT_ROUTES with "foreman" as its destination is covered the
+    # day it lands rather than the day someone remembers this branch.
+    #
+    # The architect's own deck-level write has already happened by now, inside
+    # the node: that is exactly what the sweeper wants (the re-described
+    # deck_spec is persisted) and it touches no slide row.
+    if destination == "foreman" and scoped_vals(state, "describe_only"):
+        logger.info(
+            "architect_router: describe-only turn, so intent %r ends the turn "
+            "instead of dispatching builders",
+            intent,
+            extra={"session_id": state.get("session_id")},
+        )
+        return END
+
     return destination
 
 

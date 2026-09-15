@@ -73,7 +73,10 @@ from langgraph.graph import END, START, StateGraph
 from src.core.checkpointer import get_checkpointer
 from src.core.user_context import get_current_user
 from src.services.foreman_service import CAP
-from src.services.graph.event_emitter import set_event_emitter
+from src.services.graph.event_emitter import (
+    set_chat_request_id,
+    set_event_emitter,
+)
 from src.services.graph.nodes import (
     architect_node,
     build_reviewer_node,
@@ -91,7 +94,7 @@ from src.services.graph.routers import (
     fixer_router,
     foreman_router,
 )
-from src.services.graph.state import GraphState
+from src.services.graph.state import GraphState, scoped
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +190,8 @@ def invoke_graph(
     *,
     emitter: Any = None,
     principal: Optional[str] = None,
+    describe_only: bool = False,
+    request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one turn of the graph for *session_id*.
 
@@ -204,6 +209,27 @@ def invoke_graph(
             channel, never a precondition for building a deck.
         principal: The acting user, for callers with no request context (ws4d's
             sweeper passes the marker's ``spec_dirty_by``).
+        describe_only: When true, a ``build`` or ``edit`` intent **ends the turn**
+            instead of routing to the foreman — see ``architect_router``.  ws4d's
+            arc-review sweeper passes it: that turn exists to re-describe the
+            deck a human hand-edited, and dispatching builders would overwrite
+            the very edits that scheduled it.
+        request_id: The ``ChatRequest.request_id`` this turn is answering, or
+            ``None``.  Bound in a ``ContextVar`` so a node persisting a chat
+            message can TAG it: ``GET /chat/poll`` reads a turn's assistant text
+            through ``get_messages_for_request``, which filters on that column,
+            so an untagged row is invisible to every polling client — the
+            transport the deployed app uses.  ``None`` is correct on the SSE path
+            (no request row exists) and on the sweeper (no request at all); those
+            rows are still durable and still reach ``_conversation``.
+
+    ``describe_only`` is turn-scoped, and it is wrapped HERE because this is the
+    only place that knows ``turn_id``.  It is written on **every** invocation,
+    ``False`` included, for the same reason the emitter is: turn state
+    accumulates across a thread, so a flag left from an earlier turn would
+    otherwise still read ``True`` and silently bar every later build on that
+    deck.  Belt and braces — ``scoped_vals`` also discards a wrapper whose turn
+    is not this one, so both the write and the read are turn-bounded.
 
     A fresh ``turn_id`` is minted per turn — it is the discriminator every
     turn-scoped reducer compares, so reusing one would let turn 2 inherit turn
@@ -217,12 +243,17 @@ def invoke_graph(
 
     The emitter is set on every invocation, ``None`` included: that is the reset
     a turn resumed in a new process needs, or events queue into the first
-    process's queue forever.
+    process's queue forever.  ``request_id`` is set unconditionally for the same
+    reason, and the failure it prevents is worse than a lost event: a stale id
+    left in the var would tag turn 2's chat rows with turn 1's request, so turn
+    1's poll would receive turn 2's reply and turn 2's own poll would never see
+    it.
     """
     turn_id = uuid.uuid4().hex
     initiated_by = principal or get_current_user()
 
     set_event_emitter(emitter)
+    set_chat_request_id(request_id)
 
     state: Dict[str, Any] = dict(initial or {})
     state.update(
@@ -230,6 +261,7 @@ def invoke_graph(
             "session_id": session_id,
             "turn_id": turn_id,
             "initiated_by": initiated_by,
+            "describe_only": scoped(turn_id, bool(describe_only)),
         }
     )
 
@@ -244,6 +276,7 @@ def invoke_graph(
             "session_id": session_id,
             "turn_id": turn_id,
             "has_emitter": emitter is not None,
+            "describe_only": bool(describe_only),
         },
     )
     return get_graph().invoke(state, config)

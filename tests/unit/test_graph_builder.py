@@ -15,8 +15,10 @@ dispatches nothing.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import queue
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
@@ -171,6 +173,122 @@ def fake_graph(monkeypatch):
     set_event_emitter(None)
 
 
+class TestNothingNewMayReachTheForeman:
+    """The structural tripwire behind ws4d's describe-only gate.
+
+    `architect_router` is the only thing that stops a sweeper turn dispatching
+    builders over a human's hand-edits.  It protects ONE edge, so a new edge or a
+    new router fall-through into the foreman would bypass it silently — and ws4c's
+    amended Ruling C-2 already forbids exactly that for its own reason: a
+    fall-through to the foreman once woke it mid-batch and made the deck reviewer
+    run twice.
+
+    A MEASURED CORRECTION to how C-2 is usually stated.  C-2 is quoted as "the
+    foreman's only inbound edges are static ones from build_reviewer, fix_reviewer
+    and placeholder, plus the conditional set out of itself".  Read off the
+    compiled graph, that is incomplete: `architect` and `fixer` BOTH have
+    conditional edges into the foreman.  `architect -> foreman` is the very edge
+    the describe-only gate guards, and `fixer -> foreman` is `fixer_router`'s
+    fall-through.  So the invariant this asserts is the measured five, not the
+    quoted three, and it is asserted as set EQUALITY.
+    """
+
+    #: (source, conditional) for every edge into the foreman, measured.
+    _INBOUND = {
+        ("architect", True),        # architect_router — the describe-only gate
+        ("fixer", True),            # fixer_router's fall-through
+        ("build_reviewer", False),  # static, after a barrier (C-2)
+        ("fix_reviewer", False),    # static, after a barrier (C-2)
+        ("placeholder", False),     # static, after a barrier (C-2)
+    }
+
+    @staticmethod
+    def _inbound_to_foreman():
+        compiled = build_graph(checkpointer=False)
+        return {
+            (e.source, e.conditional)
+            for e in compiled.get_graph().edges
+            if e.target == "foreman"
+        }
+
+    def test_the_edge_list_is_read_at_all(self):
+        """Entry assertion: an empty edge list would make the equality vacuous."""
+        compiled = build_graph(checkpointer=False)
+        edges = compiled.get_graph().edges
+        assert len(edges) >= 15, f"only {len(edges)} edges found; the read failed"
+
+    def test_exactly_five_edges_reach_the_foreman_and_no_sixth(self):
+        """Set EQUALITY, not containment.
+
+        Containment is the same class of hole as asserting a field equals its own
+        default: it stays green with an extra edge present, which is precisely the
+        edge that would bypass the describe-only gate.
+        """
+        assert self._inbound_to_foreman() == self._INBOUND, (
+            "the foreman's inbound edges changed. A new edge reaching it bypasses "
+            "architect_router, so a sweeper's describe-only turn can dispatch "
+            "builders over a human's hand-edits — and C-2's own reason applies "
+            "too: a fall-through wakes the foreman mid-batch and the deck "
+            "reviewer runs twice"
+        )
+
+    def test_the_only_conditional_inbound_edges_are_the_two_routers_we_know(self):
+        conditional = {src for src, cond in self._inbound_to_foreman() if cond}
+        assert conditional == {"architect", "fixer"}
+
+
+class TestNoSendMayTargetTheForeman:
+    """The hole the edge list cannot see, measured rather than assumed.
+
+    A `Send` to a node that is NOT in its router's path map **runs anyway, and
+    does not appear in the compiled graph's edge list at all.**  Probed on a
+    three-node graph: a router declaring `{"b": "b"}` and returning
+    `[Send("c", {})]` executed `c`, while `get_graph().edges` listed only
+    `a -> b`.  So `TestNothingNewMayReachTheForeman` would stay green over a
+    `Send("foreman", …)` added anywhere.
+
+    Hence this second, complementary scan: no `Send` under
+    `src/services/graph/` may name the foreman.  Read off the AST rather than the
+    text, because `routers.py`'s docstrings discuss `Send` and the foreman at
+    length and a substring check would pass or fail on prose.
+    """
+
+    _GRAPH_DIR = Path(__file__).resolve().parents[2] / "src/services/graph"
+
+    @classmethod
+    def _send_targets(cls):
+        """Every literal first argument to a `Send(...)` call under the package."""
+        targets = []
+        for path in sorted(cls._GRAPH_DIR.rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "Send"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                ):
+                    targets.append((str(path.name), node.args[0].value))
+        return targets
+
+    def test_the_scan_finds_the_sends_that_do_exist(self):
+        """Entry assertion. An absence over a scan that finds nothing is free."""
+        found = {name for _, name in self._send_targets()}
+        assert found == {"builder", "build_reviewer"}, (
+            f"the Send targets under src/services/graph are {sorted(found)}; "
+            "update this test deliberately rather than letting it drift"
+        )
+
+    def test_no_send_targets_the_foreman(self):
+        offenders = [f"{f}:{n}" for f, n in self._send_targets() if n == "foreman"]
+        assert not offenders, (
+            f"{offenders} Sends to the foreman. A Send outside its router's path "
+            "map runs and shows in NO edge list, so it bypasses both "
+            "architect_router's describe-only gate and the inbound-edge tripwire"
+        )
+
+
 class TestInvokeGraphConfig:
     def test_passes_thread_id_and_max_concurrency_and_no_recursion_limit(
         self, fake_graph
@@ -210,6 +328,54 @@ class TestInvokeGraphConfig:
     def test_session_id_always_wins_over_the_initial_state(self, fake_graph):
         invoke_graph("sess-42", {"session_id": "someone-elses-session"})
         assert fake_graph.calls[0]["state"]["session_id"] == "sess-42"
+
+
+class TestInvokeGraphDescribeOnly:
+    """ws4d: the flag that lets a sweeper turn describe a deck without rebuilding.
+
+    `invoke_graph` wraps it because `invoke_graph` is the only thing that knows
+    `turn_id`, and it must be turn-scoped: turn state accumulates across a
+    thread, so a plain bool set on a sweeper turn would still read True on the
+    user's next turn and silently bar every later build for that deck.
+    """
+
+    def test_it_defaults_to_false_so_a_normal_turn_still_builds(self, fake_graph):
+        invoke_graph("sess-42", {})
+        assert fake_graph.calls[0]["state"]["describe_only"]["vals"] is False
+
+    def test_an_explicit_flag_is_wrapped_with_THIS_turns_id(self, fake_graph):
+        invoke_graph("sess-42", {}, describe_only=True)
+        state = fake_graph.calls[0]["state"]
+        wrapper = state["describe_only"]
+        assert wrapper["vals"] is True
+        assert wrapper["turn"] == state["turn_id"], (
+            "the flag is not stamped with this turn, so scoped_vals cannot "
+            "discard it on the next turn"
+        )
+
+    def test_each_turn_stamps_its_own_id_so_the_flag_cannot_outlive_its_turn(
+        self, fake_graph
+    ):
+        invoke_graph("sess-42", {}, describe_only=True)
+        invoke_graph("sess-42", {}, describe_only=False)
+
+        first, second = fake_graph.calls
+        assert first["state"]["describe_only"]["turn"] != (
+            second["state"]["describe_only"]["turn"]
+        )
+        assert second["state"]["describe_only"]["vals"] is False, (
+            "the second turn did not overwrite the flag; on a real thread the "
+            "sweeper's True would still be in the channel"
+        )
+
+    def test_the_wrapper_is_json_native(self, fake_graph):
+        """Ruling W-8(b): a new GraphState key carries JSON-native scalars only,
+        because state crosses the checkpointer's serde on turn 2."""
+        import json
+
+        invoke_graph("sess-42", {}, describe_only=True)
+        wrapper = fake_graph.calls[0]["state"]["describe_only"]
+        assert json.loads(json.dumps(wrapper)) == wrapper
 
 
 class TestInvokeGraphPrincipal:

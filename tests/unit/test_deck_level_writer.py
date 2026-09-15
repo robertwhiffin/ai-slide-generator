@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import text as sa_text
 from unittest.mock import patch
 
 from src.api.services.deck_level_writer import (
@@ -147,6 +149,238 @@ class TestOptimisticLock:
             )
         assert deck_with_three_rows.version() == start + 2
         assert second["version"] == start + 2
+
+    def test_user_visible_false_writes_the_columns_but_leaves_the_token(
+        self, deck_with_three_rows
+    ):
+        """ws4d: a write that changes nothing the client's token guards.
+
+        `deck.version` is the optimistic-lock token a WYSIWYG client holds between
+        saves, and the slide routes turn a mismatch into HTTP 409.  The arc-review
+        sweeper is the first writer that runs outside a user turn, and it runs
+        BECAUSE the human is editing — so a bump there rejects that human's very
+        next save.
+        """
+        start = deck_with_three_rows.version()
+
+        with _patched(deck_with_three_rows._factory):
+            result = write_deck_level_columns(
+                deck_with_three_rows.session_id, css=_CSS, user_visible=False
+            )
+
+        assert deck_with_three_rows.version() == start, (
+            "the token moved on a write that guards nothing; the editing human's "
+            "next save is a 409"
+        )
+        assert result["version"] == start
+        # The write itself must still have happened: a "fix" that skipped the
+        # write entirely would satisfy the assertion above.
+        assert deck_with_three_rows.deck_row().css == _CSS
+
+    def test_the_default_still_bumps_so_a_real_edit_invalidates_the_token(
+        self, deck_with_three_rows
+    ):
+        """The paired direction, asserted on the DEFAULT rather than on True.
+
+        A default flipped to False would break the optimistic lock for every
+        user-driven write, and passing True explicitly here would not notice.
+        """
+        start = deck_with_three_rows.version()
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
+        assert deck_with_three_rows.version() == start + 1
+
+
+class TestTheClientVisibleModifiedTimestamp:
+    """`user_visible=False` also leaves `updated_at` alone.
+
+    ONE flag governs both signals, so a caller cannot produce the half-state:
+    "modified just now" rendered beside an *unchanged* optimistic-lock token.
+
+    The suppression is measured, not assumed: `Column(onupdate=)` applies to any
+    column not already in the UPDATE's SET clause, and an ORM attribute with no
+    net change never reaches that clause — so `deck.updated_at = deck.updated_at`
+    suppresses nothing.  `flag_modified` puts it in the clause at its loaded
+    value, which does.
+
+    A timestamp planted an hour back rather than whatever the INSERT wrote, so
+    neither direction is a microsecond-resolution race with the UPDATE under test.
+    """
+
+    @staticmethod
+    def _backdate(fixture, seconds: float = 3600.0) -> datetime:
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        db = fixture._factory()
+        try:
+            db.execute(
+                sa_text(
+                    "UPDATE session_slide_decks SET updated_at = :at WHERE id = :id"
+                ),
+                {"at": stamp, "id": fixture.deck_row().id},
+            )
+            db.commit()
+        finally:
+            db.close()
+        assert fixture.deck_row().updated_at == stamp, "the backdate did not take"
+        return stamp
+
+    def test_a_write_the_client_should_not_see_leaves_modified_at_alone(
+        self, deck_with_three_rows
+    ):
+        planted = self._backdate(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(
+                deck_with_three_rows.session_id, css=_CSS, user_visible=False
+            )
+
+        assert deck_with_three_rows.deck_row().updated_at == planted, (
+            "the deck shows as modified just now beside an unchanged version "
+            "token — the half-state this flag exists to prevent"
+        )
+        # The columns really were written, so this is not a no-op passing.
+        assert deck_with_three_rows.deck_row().css == _CSS
+
+    def test_the_DEFAULT_still_moves_modified_at(self, deck_with_three_rows):
+        """The paired direction, on the default rather than an explicit True.
+
+        Suppressing everywhere would satisfy the test above while making every
+        real edit invisible in the session list.
+        """
+        planted = self._backdate(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
+
+        assert deck_with_three_rows.deck_row().updated_at > planted, (
+            "a user-driven deck write no longer moves modified_at"
+        )
+
+
+class TestTheSessionListOrdering:
+    """`user_visible=False` also leaves `UserSession.last_activity` alone.
+
+    The THIRD client-visible signal, and the one that escaped an earlier version
+    of this flag that governed only `version` and `updated_at`.  The session list
+    is ORDERED by `last_activity.desc()` (`sessions.py:207`) and returns it
+    (`:232`), so a sweeper write that moved it would silently re-sort the human's
+    session list about three minutes after they stopped editing — on a deck whose
+    other two signals both say nothing changed.
+
+    Kept in its own class per the standing rule: it is a distinct property of the
+    same write, and a shared test would report one failure for any of the three.
+    """
+
+    @staticmethod
+    def _backdate_session(fixture, seconds: float = 3600.0) -> datetime:
+        stamp = datetime.utcnow() - timedelta(seconds=seconds)
+        db = fixture._factory()
+        try:
+            db.execute(
+                sa_text(
+                    "UPDATE user_sessions SET last_activity = :at "
+                    "WHERE session_id = :sid"
+                ),
+                {"at": stamp, "sid": fixture.session_id},
+            )
+            db.commit()
+        finally:
+            db.close()
+        assert TestTheSessionListOrdering._session_row(fixture).last_activity == stamp
+        return stamp
+
+    @staticmethod
+    def _session_row(fixture) -> UserSession:
+        db = fixture._factory()
+        try:
+            row = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == fixture.session_id)
+                .one()
+            )
+            db.expunge(row)
+            return row
+        finally:
+            db.close()
+
+    def test_a_write_the_client_should_not_see_leaves_last_activity_alone(
+        self, deck_with_three_rows
+    ):
+        """The absence half — PAIRED, per the standing rule, with proof the write
+        happened at all: "the timestamp did not move" is equally true of a call
+        that did nothing."""
+        planted = self._backdate_session(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(
+                deck_with_three_rows.session_id, css=_CSS, user_visible=False
+            )
+
+        assert deck_with_three_rows.deck_row().css == _CSS, (
+            "the write did not happen, so an unmoved timestamp proves nothing"
+        )
+        assert self._session_row(deck_with_three_rows).last_activity == planted, (
+            "a sweeper write moved last_activity; the human's session list "
+            "re-sorts minutes after they stopped editing, on a deck whose version "
+            "and modified_at both say nothing changed"
+        )
+
+    def test_the_DEFAULT_still_moves_last_activity(self, deck_with_three_rows):
+        """The paired direction, on the default rather than an explicit True.
+
+        Suppressing everywhere would satisfy the test above while freezing the
+        session list's ordering for every real edit.
+        """
+        planted = self._backdate_session(deck_with_three_rows)
+
+        with _patched(deck_with_three_rows._factory):
+            write_deck_level_columns(deck_with_three_rows.session_id, css=_CSS)
+
+        assert self._session_row(deck_with_three_rows).last_activity > planted, (
+            "a user-driven deck write no longer moves last_activity; the session "
+            "list will not re-order after a real edit"
+        )
+
+    def test_a_contributors_own_session_row_is_left_alone_too(
+        self, contributor_session
+    ):
+        """The writer touches TWO rows on a contributor write — the owner's and
+        the contributor's — so a suppression covering only the owner would leave
+        the contributor's list re-sorting. The single-direction trap."""
+        stamp = datetime.utcnow() - timedelta(seconds=3600)
+        db = contributor_session._factory()
+        try:
+            db.execute(
+                sa_text("UPDATE user_sessions SET last_activity = :at"),
+                {"at": stamp},
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        with _patched(contributor_session._factory):
+            write_deck_level_columns(
+                contributor_session.contributor_session_id,
+                css=_CSS,
+                user_visible=False,
+            )
+
+        assert contributor_session.owner_deck_row().css == _CSS, (
+            "the contributor's write did not land, so nothing below is tested"
+        )
+        db = contributor_session._factory()
+        try:
+            moved = [
+                r.session_id
+                for r in db.query(UserSession).all()
+                if r.last_activity != stamp
+            ]
+        finally:
+            db.close()
+        assert not moved, (
+            f"{moved} had last_activity moved by a write the client should not "
+            "see; a contributor's session list re-sorts too"
+        )
 
     def test_matching_expected_version_is_accepted(self, deck_with_three_rows):
         current = deck_with_three_rows.version()

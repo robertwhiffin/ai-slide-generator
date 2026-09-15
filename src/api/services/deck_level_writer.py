@@ -85,6 +85,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from sqlalchemy.orm.attributes import flag_modified
+
 from src.api.services.session_manager import (
     VersionConflictError,
     get_session_manager,
@@ -157,6 +159,7 @@ def write_deck_level_columns(
     html_content: Any = _UNSET,
     modified_by: Optional[str] = None,
     expected_version: Optional[int] = None,
+    user_visible: bool = True,
 ) -> Dict[str, Any]:
     """Write only deck-level columns on a session's slide deck.
 
@@ -184,6 +187,57 @@ def write_deck_level_columns(
             ``save_slide_deck``, the check applies only to an EXISTING row: a row
             that does not yet exist has no version to be stale against, and is
             created at ``version=1``.
+        user_visible: Whether this write is a change the client should see.
+            Default ``True``, which is every user-driven write.  ``False``
+            suppresses **all three** signals a client reads as "this deck
+            changed": the ``version`` bump, the ``updated_at`` touch and the
+            ``UserSession.last_activity`` touch.
+
+            **It is ONE parameter on purpose.**  Separate flags would let a caller
+            suppress some and not others, and that half-state is worse than any
+            choice made consistently: a client would render "modified just now",
+            or re-sort its session list, beside an *unchanged* optimistic-lock
+            token.  Making the divergence inexpressible is the point — and
+            ``last_activity`` is the proof that it matters, because it escaped an
+            earlier version of this flag that governed only the first two.
+
+            **ws4d passes ``False`` for the sweeper's describe-only arc review**,
+            and the reason is a measured user-visible bug rather than tidiness.
+            ``deck.version`` is the token a WYSIWYG client holds between saves,
+            and the slide routes send it back as ``expected_version``
+            (``slides.py:173``, ``:244``, ``:314``, ``:390``), where a mismatch
+            becomes **HTTP 409** (``slides.py:186``).  Before ws4d nothing invoked
+            the graph outside a user turn, so a bump always coincided with the
+            user's own turn and their client refreshed the token from the
+            response.  The arc-review sweeper is the first out-of-band writer, and
+            it runs *because* the human is editing: human edits -> marker -> 180 s
+            -> sweeper claims -> architect writes -> version bumps -> **the
+            human's next save is rejected.**  Edit a deck, wait three minutes,
+            your next save fails.
+
+            ``updated_at`` is suppressed by the same rule the marker writes
+            follow: it is what a client renders as ``modified_at``, and an arc
+            re-description changes no slide.  **Accepted cost:** a client relying
+            on ``modified_at`` to notice a *spec* change will not see one until the
+            deck's next real change — the same cost already taken on ``version``.
+
+            The suppression uses ``flag_modified`` rather than assigning the
+            column to itself, and that is measured: ``Column(onupdate=)`` is
+            applied to any column NOT already in the UPDATE's SET clause, and an
+            ORM attribute with no net change never reaches that clause — so
+            ``deck.updated_at = deck.updated_at`` does not suppress anything.
+            ``flag_modified`` puts it in the clause at its loaded value, which
+            does.
+
+            ``last_activity`` orders the session list
+            (``sessions.py:207``, returned at ``:232``), so a sweeper write moving
+            it re-sorts the human's list minutes after they stopped editing.
+
+            The ``version`` and ``updated_at`` suppressions do not apply on the
+            CREATE branch: a created row is born at ``version=1`` with no bump to
+            skip, and its ``updated_at`` is genuinely its creation time.
+            ``last_activity`` is suppressed on both branches, because a session
+            row created by a describe-only write is not activity either.
 
     Returns:
         dict with ``session_id``, ``deck_owner_session_id``, ``title``,
@@ -248,9 +302,19 @@ def write_deck_level_columns(
             else:
                 setattr(deck, _PLAIN_COLUMNS[key], value)
 
-        if not created:
+        if not created and user_visible:
             # Exactly one bump per accepted call (session_manager.py:1328).
+            # Skipped only for a write the client should not see as a change —
+            # see user_visible in the docstring.
             deck.version += 1
+
+        if not created and not user_visible:
+            # Keep updated_at, which the client renders as modified_at. Naming the
+            # column in the SET clause is what beats Column(onupdate=); a
+            # no-net-change assignment never reaches that clause and suppresses
+            # nothing. Paired with the version branch above deliberately: the two
+            # signals must not diverge on one write.
+            flag_modified(deck, "updated_at")
 
         if modified_by:
             deck.modified_by = modified_by
@@ -260,10 +324,19 @@ def write_deck_level_columns(
             # deck-only title write leaves an untitled session row behind.
             deck_owner.title = supplied["title"]
 
-        now = datetime.utcnow()
-        deck_owner.last_activity = now
-        if session.id != deck_owner.id:
-            session.last_activity = now
+        if user_visible:
+            # The THIRD client-visible signal, and the one that escaped the flag
+            # on the first pass. `sessions.py:207` orders the session list by
+            # `last_activity.desc()` and `:232` returns it, so a sweeper write
+            # that moved it would silently RE-SORT the human's session list about
+            # three minutes after they stopped editing — on a deck whose version
+            # and updated_at both say nothing changed. That is exactly the
+            # incoherence one flag governing everything exists to prevent; it just
+            # escaped through a third column.
+            now = datetime.utcnow()
+            deck_owner.last_activity = now
+            if session.id != deck_owner.id:
+                session.last_activity = now
 
         db.flush()
 
@@ -273,7 +346,9 @@ def write_deck_level_columns(
                 "session_id": session_id,
                 "deck_owner_session_id": deck_owner.session_id,
                 "columns": sorted(supplied),
-                "created": created,
+                # NOT "created": that is a reserved LogRecord attribute and
+                # logging raises KeyError when extra= tries to overwrite one.
+                "row_created": created,
                 "version": deck.version,
             },
         )

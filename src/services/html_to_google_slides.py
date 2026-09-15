@@ -1485,7 +1485,7 @@ class HtmlToGoogleSlidesConverter:
                 filepath = Path(assets_dir) / filename
                 filepath.write_bytes(image_bytes)
                 filenames.append(filename)
-                logger.info("Extracted content image", extra={"filename": filename, "size": len(image_bytes)})
+                logger.info("Extracted content image", extra={"image_filename": filename, "size": len(image_bytes)})
             except Exception as e:
                 logger.warning("Failed to extract content image", exc_info=True, extra={"error": str(e)})
                 return match.group(0)
