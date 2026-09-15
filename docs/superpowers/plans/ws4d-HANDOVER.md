@@ -49,7 +49,7 @@ Each was measured, not reasoned, and each would have been silent.
 | **The async engine-mode path runs through the JOB QUEUE, which the plan never mentions.** `POST /chat/async` does not call `send_message_streaming` — it enqueues, and **MCP shares the same `enqueue_job`, worker and `process_chat_request`.** Resolving mode "at the top of the streaming path" puts MCP on the graph, which is the blocking review finding the plan was written to fix. Six edit points across two files. And the payload key had to be `engine_mode`, because `mode` was already taken by MCP | §2 |
 | **`_reindex_slide_ids` rewrote every `slide_id` to its position** at ten call sites, so the matcher's tier-1 "durable per-slide identity" silently degraded to matching by position. **On a monolith deck every reorder mis-attributed verification verdicts; a slide could display another slide's verdict.** The frontend was already written to the contract the backend broke — `SlideViewer.tsx` keys verification by `slide_id` "not array index" precisely so mutations survive | §29 / Task 7 |
 | **§4.6's re-review pass was INERT, and fourteen tests were green over it.** The brief never reached the reviewer's payload, and the only criterion able to express "no longer serves the brief" is `objective=False` while the failing rule counted objective findings only. The tests passed because every failing stub returned `overflow` — a *rendering* criterion no spec edit can cause | §31 |
-| **The deck-level spec is renumbered on INSERT ONLY.** After a delete or duplicate its positions no longer match the rows, and this branch's own code reads that representation — measured, a turn dispatched a builder for a position with no slide and **the deck gained one nobody asked for** | final review C1 |
+| **The deck-level spec was renumbered on INSERT ONLY.** After a delete or duplicate its positions no longer matched the rows, and this branch's own code reads that representation — measured, a turn dispatched a builder for a position with no slide and **the deck gained one nobody asked for**. Fixed twice: a consumer-side guard during the build, then **route renumbering after it, at the operator's request** — see §4a, which is the half that closes reorder | final review C1 |
 
 ---
 
@@ -112,6 +112,66 @@ Each was measured, not reasoned, and each would have been silent.
   `deck_reviews` reaching the user as an `info` message; no `slide_index == -1` reaches `SlideViewer`.
 - **The spec view after `clear_context`** — the assertion ws4e owns: the spec view still has data while the
   transcript is empty.
+
+---
+
+## 4a. ROUTE RENUMBERING — done after the build, at the operator's request
+
+**This section supersedes what §3's C1 row and §8's first bullet used to say.** During the build the fix for
+C1 was a **consumer-side guard**; the operator then asked why the real fix was not simply taken, and it was.
+Both halves are now in the tree and both are tested, because they cover different things.
+
+**What changed.** `session_slide_decks.deck_spec_json` is renumbered by **every** mutation route, not only
+insert. One primitive, `ChatService._rewrite_deck_spec_slides`, with four thin callers
+(`_insert_deck_spec_slide`, `_delete_deck_spec_slide`, `_duplicate_deck_spec_slide`,
+`_reorder_deck_spec_slides`). The routes supply only *which entries end up in which order*; the position
+stamping, the raw-dict handling, the author stamp and the failure policy live in the primitive once — because
+four hand-copied writers diverging is the defect class that produced C1 in the first place.
+
+**Why the guard stays and is NOT redundant.** Renumbering closes the routes; it does not make a stale spec
+unreachable:
+- **the spec write is deliberately allowed to fail** — `_rewrite_deck_spec_slides` logs and returns `None`
+  rather than failing the mutation the user asked for, since the slide change is already committed by then.
+  That path leaves exactly the misalignment the guard catches, and it is live in production.
+- **an architect-EMITTED spec goes through no route at all** (still open — §8).
+- **`deck_spec_json` is a column a human or a migration can edit.**
+
+**Two rulings, both the controller's, both overridable:**
+1. **A duplicated slide inherits its SOURCE's brief, not a blank one.** A duplicate is a copy of a slide we
+   already have a description for, so that description is known to be right, where an inserted slide has
+   none. The sweeper re-describes both either way, so this decides which starting point is true, not who
+   writes the final prose.
+2. **A spec that cannot answer the mutation is left untouched, not renumbered.** If the entry count and the
+   deck disagree the two have already drifted; leaving a drifted spec alone is recoverable, renumbering it
+   against the wrong slides is not.
+
+**What the evidence is.** `tests/unit/test_mutations_renumber_the_deck_spec.py` (26 cases) written RED
+first — 18 failed, and the 8 that passed were exactly the controls (insert, the no-spec degradation, the
+save-point count). Plus `tests/integration/test_spec_row_alignment.py`, rewritten. Five sabotages, each
+read by which tests fired rather than by a count:
+
+| Sabotage | Result |
+|---|---|
+| delete call site → `None` | 9 fail |
+| reorder call site → `None` | 8 fail |
+| duplicate call site → `None` | 6 fail |
+| `_permute` returns `entries` unchanged | 8 fail — the reorder tests, **and the identity control stayed GREEN** |
+| the `position` re-stamp removed | 22 fail, insert's own case among them |
+
+**That fourth row is the point.** §29's involution trap: a renumber is a permutation and the identity is one
+of them, so a reorder test that only ever permutes cannot tell a correct remap from one that ran twice or
+never ran. The suite pins the fixed point (`[0, 1, 2]`) *and* a reversal (`[2, 1, 0]`, which is its own
+inverse), so the sabotage has somewhere to land and somewhere it must not.
+
+**Suite after:** `7 failed, 5484 passed, 10 skipped, 1 xfailed`, **5501 collected** — from 5470, exactly the
+31 added. Failure causes unchanged: 2 deploy-autoscaling, 5 expired PAT. No new cause.
+
+**One thing to know if you touch `test_spec_row_alignment.py`.** It anticipated this change in its own
+docstring and left instructions — *"that change should redden the premise test first, and whoever makes it
+should then relax these three rather than delete the guard."* That is exactly what happened, so the premise
+tests now assert the **opposite** of what they originally asserted, and the three damage tests inject the
+mismatch directly rather than obtaining it from a route that no longer produces one. The injection is not a
+weakening: it is the honest shape of what remains reachable, per the three bullets above.
 
 ---
 
@@ -198,9 +258,11 @@ way and one — §4.6's inert re-review — had fourteen green tests over it pre
 - **CI has never executed this branch. Reported as NOT met**, and CI has never completed a run on ws4a,
   ws4b or ws4c either. **Any DoD item resting on a CI observation cannot be claimed.** Worse, per §4, the
   Postgres it provisions is unused.
-- **A reorder is invisible to the final review's C1 guard**, because it compares position **sets** and a
-  reorder preserves the set. Both stronger predicates were measured and rejected for firing on correctly
-  aligned decks. **Only per-route renumbering closes it** — the wide fix that was ruled against.
+- ~~A reorder is invisible to the final review's C1 guard.~~ **CLOSED after the build — see §4a.** The
+  reasoning that parked it still holds and is worth keeping: the guard compares position **sets**, a reorder
+  preserves the set, both stronger consumer-side predicates were measured and rejected for firing on
+  correctly aligned decks, and **only per-route renumbering closes it**. That is the fix that was ruled
+  against during the build and taken afterwards.
 - **An architect-EMITTED spec is unchecked.** A model echoing back `current_deck_spec` can re-materialise a
   deleted slide on a build turn. The C1 guard covers only the persisted-spec fallback.
 - **The confirmation gate for a design-contract rebuild-all is structural, not enforced.** Nothing prevents
