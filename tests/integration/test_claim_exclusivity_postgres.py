@@ -510,3 +510,118 @@ class TestFourOverlappingClaimersOnPostgres:
             "the take-over did not stamp the new lease with the claiming "
             "instant, so the TTL is measured from the dead worker's claim"
         )
+
+
+# ---------------------------------------------------------------------------
+# The other half of the race: mark_dirty's unlocked read-modify-write
+# ---------------------------------------------------------------------------
+
+
+class TestMarkDirtyRacingTheClaim:
+    """``mark_dirty`` decides whether to coalesce from a read it does not hold.
+
+    ``spec_sync``'s stated rule (module docstring): "A marker that has already
+    been CLAIMED by a sweeper starts a *new* window, because the in-flight review
+    cannot cover an edit made after it began."  ``mark_dirty`` implements that by
+    reading ``spec_dirty_claimed_at``, deciding ``coalesced``, and only then
+    writing — with no lock across the two.  A claim that commits inside that gap
+    is invisible to the decision, so the edit coalesces into a window that has
+    ALREADY been claimed, ``clear_marker``'s re-dirty rule
+    (``spec_dirty_at > spec_dirty_claimed_at``) does not fire, and the finishing
+    review clears the marker the human's edit had just set.
+
+    XFAIL, STRICT, ON PURPOSE
+    -------------------------
+    This is a measured live defect in ``mark_dirty``, not a defect in the test.
+    Reproduced on PostgreSQL 14.20 with this harness: the claim lands between the
+    read and the write, and ``spec_dirty_at`` stays BEHIND
+    ``spec_dirty_claimed_at``.  Fixing it means taking a row lock on a human's
+    request path (``SELECT ... FOR UPDATE``, or a conditional UPDATE in the shape
+    ``claim_due_marker`` already uses), which is a production change with its own
+    design question and is deliberately not made here.
+
+    ``strict=True`` so the record retires itself: the day ``mark_dirty`` takes
+    that lock this test XPASSes, which strict xfail reports as a FAILURE, and
+    whoever fixed it is told to delete the marker rather than leave a
+    permanently-lying xfail behind.
+
+    The cost of the defect is bounded — one skipped re-description of one deck —
+    which is why it is recorded rather than treated as a release blocker.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "measured defect: mark_dirty reads spec_dirty_claimed_at and decides "
+            "whether to coalesce without holding a lock, so a claim committing in "
+            "that gap makes the human's edit coalesce into an already-claimed "
+            "window and the finishing review discards it"
+        ),
+    )
+    def test_an_edit_racing_the_claim_is_not_swallowed_by_the_finishing_review(
+        self, postgres_engine
+    ):
+        from src.services.spec_sync import mark_dirty
+        import src.services.spec_sync as spec_sync
+
+        factory = _make_factory(postgres_engine)
+        deck = _seed_owner_deck(factory, session_id="pg-owner-sess-0003")
+        now = datetime.utcnow()
+        deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 60, base=now)
+
+        read_done = threading.Event()
+        claim_done = threading.Event()
+        real_resolve = spec_sync._resolve_owner_deck
+
+        def paused_resolve(db, session_id):
+            """Hold mark_dirty between its read of the marker and its write."""
+            out = real_resolve(db, session_id)
+            # Force the lazy load so the columns are genuinely in this session's
+            # snapshot before the pause; otherwise the read happens AFTER the
+            # claim and there is no race to observe.
+            _ = out[1].spec_dirty_at, out[1].spec_dirty_claimed_at
+            read_done.set()
+            assert claim_done.wait(timeout=_WAIT_SECONDS), (
+                "the claim never completed; nothing here is evidence about the race"
+            )
+            return out
+
+        marked: Dict[str, Any] = {}
+
+        def editor() -> None:
+            with patch.object(spec_sync, "_resolve_owner_deck", paused_resolve):
+                with _patched(factory):
+                    marked["result"] = mark_dirty(deck.session_id, "second@example.com")
+
+        thread = threading.Thread(target=editor, name="human-editor")
+        thread.start()
+        assert read_done.wait(timeout=_WAIT_SECONDS), (
+            "mark_dirty never reached its pause, so its read never overlapped "
+            "the claim and this test proves nothing"
+        )
+
+        with _patched(factory):
+            claimed = claim_due_marker(now)
+        claim_done.set()
+        thread.join(timeout=_WAIT_SECONDS * 2)
+
+        # Both halves of the race must actually have happened, or the ordering
+        # assertion below is vacuous.
+        assert claimed is not None, "the sweeper did not claim the marker"
+        assert marked.get("result") is True, (
+            f"mark_dirty did not report a write: {marked!r}"
+        )
+        row = deck.row()
+        assert row.spec_dirty_by == "second@example.com", (
+            "mark_dirty's write never landed, so the timestamps below say nothing "
+            f"about coalescing: spec_dirty_by is {row.spec_dirty_by!r}"
+        )
+        assert row.spec_dirty_claimed_at is not None, "no lease was recorded"
+
+        assert row.spec_dirty_at > row.spec_dirty_claimed_at, (
+            f"spec_dirty_at ({row.spec_dirty_at}) is not after "
+            f"spec_dirty_claimed_at ({row.spec_dirty_claimed_at}). The human edit "
+            "coalesced into a window the sweeper had already claimed, so "
+            "clear_marker's re-dirty rule will not preserve it and the review "
+            "now finishing will clear a marker it never covered."
+        )

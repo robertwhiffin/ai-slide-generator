@@ -147,14 +147,11 @@ def test_the_exported_url_matches_that_jobs_own_service(job_name):
     assert values, f"{job_name} exports no {_VAR}"
 
     for where, actual in values.items():
-        assert actual == expected, (
-            f"{job_name}: {_VAR} at {where} is\n  {actual}\nbut this job's own "
-            f"postgres service is reachable at\n  {expected}\n"
-            "The URL must name the service the job actually started — a URL "
-            "pointing anywhere else makes the suites skip (unreachable) or, "
-            "worse, share a database with another job."
-        )
-
+        # Driver FIRST, then the whole URL. The order is deliberate: `expected`
+        # hard-codes postgresql+psycopg2, so an equality check placed first would
+        # fire on a wrong driver and this assertion could never run — an
+        # unreachable assertion that looks like coverage. Checking the driver
+        # first leaves both individually reachable, each with its own diagnosis.
         url = make_url(actual)
         assert url.drivername == "postgresql+psycopg2", (
             f"{job_name}: {_VAR} at {where} uses driver "
@@ -162,6 +159,14 @@ def test_the_exported_url_matches_that_jobs_own_service(job_name):
             "make_url(...).set(database=...) into a throwaway database, and "
             "their documented default is postgresql+psycopg2 — the driver token "
             "has to survive verbatim."
+        )
+
+        assert actual == expected, (
+            f"{job_name}: {_VAR} at {where} is\n  {actual}\nbut this job's own "
+            f"postgres service is reachable at\n  {expected}\n"
+            "The URL must name the service the job actually started — a URL "
+            "pointing anywhere else makes the suites skip (unreachable) or, "
+            "worse, share a database with another job."
         )
 
 
