@@ -210,8 +210,19 @@ def test_an_edit_turn_with_no_contract_change_rebuilds_only_its_target(
 
 # ---------------------------------------------------------------------------
 # A deck-level change: re-review all, rebuild only failures (Option 2)
+#
+# Every stub here keys its verdict on the NEW brief being visible in the review
+# payload, never on the position.  That is deliberate and it is the whole reason
+# these tests can see the mechanism: the first version of this suite failed slides
+# by position for `overflow` — an objective DESIGN criterion no spec edit can
+# cause — and stayed green while the deck-level fields never reached the reviewer
+# at all and the failing rule ignored the one criterion that could express
+# "no longer serves the brief".  A stub that can only fail when it was SHOWN the
+# new brief reddens on both of those defects, and on a pass scored against the
+# OLD spec.
 # ---------------------------------------------------------------------------
 
+NEW_AUDIENCE = "the CFO, not engineers"
 HAND_EDITED = "<div class='slide'><h1>HAND EDITED BY A HUMAN</h1></div>"
 COMMITTED = {
     0: HAND_EDITED,
@@ -254,26 +265,48 @@ def _seed_committed_rows(env) -> None:
         db.close()
 
 
-def _review_committed_html_as_failing(env, failing) -> None:
-    """Fail the RE-REVIEW at *failing*, and pass every post-build review.
+def _brief_aware_reviewer(env, failing) -> None:
+    """Fail *failing* only when the payload shows the NEW brief AND committed html.
 
-    Keyed on the html, which is the only honest discriminator: the re-review sees
-    the COMMITTED markup and a post-build review sees ``builder_html(position)``.
-    Keying on the position instead would make a rebuilt slide fail its own review
-    too, opening a fix round and confusing "which positions rebuilt" with "which
-    positions were fixed".
+    Two conditions, each load-bearing:
+
+    * ``deck_brief["audience"] == NEW_AUDIENCE`` — a pass that shows the reviewer
+      no brief, or the OLD spec's brief, cannot produce a finding, so both
+      defects redden here rather than passing silently.
+    * the html is one of the COMMITTED markups — so a post-build review of a
+      REBUILT slide is always clean.  Keying on position instead would make a
+      rebuilt slide fail its own review too, opening a fix round and conflating
+      "which positions rebuilt" with "which positions were fixed".
     """
-    from tests.integration.conftest_stub_skills import objective_finding
-    from src.domain.finding import SlideReviewOutput
+    from src.domain.finding import CRITERIA, Finding, SlideReviewOutput
 
     committed_htmls = set(COMMITTED.values())
+    # brief_not_delivered is the only criterion that can express "no longer serves
+    # the brief"; it is subjective, which is exactly why the objective-only rule
+    # made this pass inert.
+    criterion = "brief_not_delivered"
+    assert CRITERIA[criterion].category != "design", (
+        "a design criterion is not reachable from a spec change; a stub using one "
+        "makes every test over it vacuous"
+    )
 
     def _review(payload):
         position = payload["position"]
+        brief = payload.get("deck_brief") or {}
         is_rereview = payload.get("html") in committed_htmls
+        saw_the_new_brief = brief.get("audience") == NEW_AUDIENCE
         findings = (
-            [objective_finding(position)]
-            if is_rereview and position in failing
+            [
+                Finding(
+                    id="stub-unstamped",
+                    slide_index=position,
+                    category=CRITERIA[criterion].category,
+                    criterion=criterion,
+                    message="still written for engineers, not the CFO",
+                    objective=CRITERIA[criterion].objective,
+                )
+            ]
+            if is_rereview and saw_the_new_brief and position in failing
             else []
         )
         return SlideReviewOutput(
@@ -301,7 +334,7 @@ def _audience_changed_build(env) -> None:
         ArchitectOutput(
             intent="build",
             message="Retargeting the whole deck at the CFO.",
-            deck_spec=_spec().model_copy(update={"audience": "the CFO, not engineers"}),
+            deck_spec=_spec().model_copy(update={"audience": NEW_AUDIENCE}),
         ),
     )
 
@@ -309,23 +342,30 @@ def _audience_changed_build(env) -> None:
 def test_a_deck_level_change_re_reviews_all_and_rebuilds_only_failures(
     graph_turn_env, stub_style
 ):
-    """The headline behaviour, asserted three ways at once.
+    """The headline behaviour, asserted four ways at once.
 
     The re-review ran over EVERY position — without that, "rebuilt only failures"
-    is vacuously true because a pass that reviews nothing has no failures.  Only
-    position 2 rebuilt, by identity.  And positions 0 and 1 are BYTE-IDENTICAL
-    afterwards, position 0 being the hand-edited one, which is the whole reason
-    §4.6 rejected a blanket rebuild-all.
+    is vacuously true because a pass that reviews nothing has no failures.  Every
+    re-review payload carried the NEW brief.  Only position 2 rebuilt, by
+    identity.  And positions 0 and 1 are BYTE-IDENTICAL afterwards, position 0
+    being the hand-edited one, which is the whole reason §4.6 rejected a blanket
+    rebuild-all.
     """
     env = graph_turn_env
     _persist_spec(env.session_id, _spec())
     _seed_committed_rows(env)
-    _review_committed_html_as_failing(env, {2})
+    _brief_aware_reviewer(env, {2})
     _audience_changed_build(env)
 
     state = env.run(initial={"architect_message": "this is for the CFO now"})
 
     assert _rereviewed_positions(env) == [0, 1, 2], "the re-review skipped a slide"
+    briefs = [
+        call["payload"].get("deck_brief")
+        for call in env.recorder.calls_for("build_reviewer")
+        if call["payload"].get("html") in set(COMMITTED.values())
+    ]
+    assert all(b and b.get("audience") == NEW_AUDIENCE for b in briefs), briefs
     assert state["target_positions"] == [2]
     assert env.recorder.positions("builder") == [2]
 
@@ -343,7 +383,7 @@ def test_a_deck_level_change_nothing_contradicts_rebuilds_nothing_and_completes(
     env = graph_turn_env
     _persist_spec(env.session_id, _spec())
     _seed_committed_rows(env)
-    _review_committed_html_as_failing(env, set())
+    _brief_aware_reviewer(env, set())
     _audience_changed_build(env)
 
     state = env.run(initial={"architect_message": "this is for the CFO now"})
@@ -367,7 +407,7 @@ def test_a_deck_level_change_everything_contradicts_rebuilds_every_position(
     env = graph_turn_env
     _persist_spec(env.session_id, _spec())
     _seed_committed_rows(env)
-    _review_committed_html_as_failing(env, {0, 1, 2})
+    _brief_aware_reviewer(env, {0, 1, 2})
     _audience_changed_build(env)
 
     state = env.run(initial={"architect_message": "this is for the CFO now"})
@@ -380,7 +420,9 @@ def test_a_deck_level_change_everything_contradicts_rebuilds_every_position(
         assert rows[position].html == builder_html(position)
 
 
-def test_the_re_review_costs_one_model_call_per_committed_slide(graph_turn_env, stub_style):
+def test_the_re_review_costs_one_model_call_per_committed_slide(
+    graph_turn_env, stub_style
+):
     """The accepted cost of Option 2, pinned as a number so a regression that
     turned it quadratic would be visible.
 
@@ -390,7 +432,7 @@ def test_the_re_review_costs_one_model_call_per_committed_slide(graph_turn_env, 
     env = graph_turn_env
     _persist_spec(env.session_id, _spec())
     _seed_committed_rows(env)
-    _review_committed_html_as_failing(env, set())
+    _brief_aware_reviewer(env, set())
     _audience_changed_build(env)
 
     env.run(initial={"architect_message": "this is for the CFO now"})
