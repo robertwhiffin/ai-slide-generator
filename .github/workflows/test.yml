@@ -703,6 +703,7 @@ jobs:
           - slide-styles-ui
           - slide-surface-fidelity
           - slide-viewer
+          - spec-view
           - stale-session-recovery
           - style-source-exclusivity
           - svg-raster-export

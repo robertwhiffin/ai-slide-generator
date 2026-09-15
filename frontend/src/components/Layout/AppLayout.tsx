@@ -4,6 +4,7 @@ import type { SlideDeck } from '../../types/slide';
 import type { SlideFinding } from '../../types/finding';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
+import { SpecView } from '../SpecView/SpecView';
 import { useDeckExport } from '../../hooks/useDeckExport';
 import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
@@ -29,6 +30,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 import { api } from '../../services/api';
 import { configApi } from '../../api/config';
+import { Button } from '@/ui/button';
 import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
@@ -834,6 +836,27 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     try { localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(collapsed)); } catch { /* non-fatal */ }
   }, [collapsed]);
 
+  // Which panel the main view shows on the right: the slides, or the deck spec.
+  //
+  // LOCAL STATE, NOT A ViewMode MEMBER, AND NOT PERSISTED.
+  //   - Not a ViewMode member, because ViewMode drives navigate() and a route
+  //     change unmounts both the ChatPanel and the SlideViewer.  That is the
+  //     hazard the chat-panel comment further down already warns about; adding
+  //     'spec' to the union walks straight into it.
+  //   - Not persisted (unlike `collapsed`), and never sent anywhere.  The view is
+  //     a HINT, never a mode: intent comes from language, so "tighten the arc"
+  //     edits the spec and "make slide 5 bolder" edits the slide whichever panel
+  //     is open.  Nothing about this flag may reach a request body.
+  const [showSpec, setShowSpec] = useState(false);
+
+  // The spec is read-only; every edit to it is conversational, so Discuss hands
+  // the user to the conversation rather than opening an editor.  It expands the
+  // chat if it is collapsed and does nothing else — in particular it sends no
+  // message, so clicking it cannot mutate the deck or the spec.
+  const handleDiscussSpec = useCallback(() => {
+    setCollapsed((prev) => (prev.chat ? { ...prev, chat: false } : prev));
+  }, []);
+
   const viewOnlyReason =
     !isLockHolder && editingLockHolder
       ? `${editingLockHolder} is currently editing this session`
@@ -977,28 +1000,99 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                   </div>
                 </div>
 
-                <div className="flex-1 bg-background min-w-0" data-tour="slide-viewer">
-                  <SlideViewer
-                    ref={slideViewerRef}
-                    key={versionKey}
-                    slideDeck={displayDeck}
-                    deckKey={sessionId ?? 'no-session'}
-                    findings={stableFindings}
-                    callbacks={{
-                      onApplyFinding: (id) => console.info('[viewer] apply finding', id),
-                      onDismissFinding: (id) => console.info('[viewer] dismiss finding', id),
-                      onDiscussFinding: (id) => console.info('[viewer] discuss finding', id),
-                    }}
-                    onReorder={handleReorderSlides}
-                    onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
-                      setSlideDeckGated(deck, deck.version);
-                    }}
-                    onSendMessage={isReadOnly ? undefined : handleSendMessage}
-                    readOnly={isReadOnly}
-                    lockedBy={!isLockHolder ? editingLockHolder : null}
-                    onVerificationComplete={handleVerificationComplete}
-                    sessionId={sessionId}
-                  />
+                <div
+                  className="flex flex-1 flex-col bg-background min-w-0"
+                  data-tour="slide-viewer"
+                >
+                  {/* View controls: slides ⇄ spec.
+                      `showSpec` is LOCAL state of the main view, deliberately NOT
+                      an entry in ViewMode. ViewMode drives route-level navigation
+                      through navigate(), so a 'spec' member would unmount the
+                      ChatPanel and the SlideViewer below — destroying the
+                      conversation, any in-flight stream, and the viewer's
+                      dismissed-findings set. The same hazard the chat-panel
+                      comment above warns about, arriving by a different door.
+                      AppLayoutSpecToggle.test.ts pins both halves. */}
+                  <div
+                    data-testid="main-view-controls"
+                    className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-1.5"
+                    role="group"
+                    aria-label="View controls"
+                  >
+                    <Button
+                      data-testid="view-toggle-slides"
+                      size="sm"
+                      variant={showSpec ? 'ghost' : 'secondary'}
+                      aria-pressed={!showSpec}
+                      onClick={() => setShowSpec(false)}
+                    >
+                      Slides
+                    </Button>
+                    <Button
+                      data-testid="view-toggle-spec"
+                      size="sm"
+                      variant={showSpec ? 'secondary' : 'ghost'}
+                      aria-pressed={showSpec}
+                      onClick={() => setShowSpec(true)}
+                    >
+                      Spec
+                    </Button>
+                  </div>
+
+                  {/* HIDDEN, NEVER UNMOUNTED — the same rule as the chat panel,
+                      for the same reason. SlideViewer holds `dismissed` in
+                      useState (reset on deckKey change), so conditionally
+                      rendering it away here would resurrect every dismissed
+                      finding on the round trip back from the spec. The stable key
+                      keeps React reconciling this as the SAME element across
+                      toggles; `versionKey` on SlideViewer itself is the ONLY
+                      thing entitled to remount it. */}
+                  <div
+                    key="slide-viewer-body"
+                    data-testid="slide-viewer-pane"
+                    // BLOCK, not a flex container. SlideViewer's own root is
+                    // `flex h-full min-h-0 flex-1` with no min-w-0, so making this
+                    // wrapper a flex container turns that root into a flex item
+                    // whose default min-width:auto refuses to shrink below its
+                    // content width: measured at 1072px inside a 778px column,
+                    // pushing the stage and its next arrow off-screen and failing
+                    // slide-viewer.spec.ts's "the viewer fits the viewport". A
+                    // block wrapper reproduces the containment SlideViewer already
+                    // had — width from the block, height from h-full.
+                    className={showSpec ? 'hidden' : 'min-h-0 flex-1'}
+                  >
+                    <SlideViewer
+                      ref={slideViewerRef}
+                      key={versionKey}
+                      slideDeck={displayDeck}
+                      deckKey={sessionId ?? 'no-session'}
+                      findings={stableFindings}
+                      callbacks={{
+                        onApplyFinding: (id) => console.info('[viewer] apply finding', id),
+                        onDismissFinding: (id) => console.info('[viewer] dismiss finding', id),
+                        onDiscussFinding: (id) => console.info('[viewer] discuss finding', id),
+                      }}
+                      onReorder={handleReorderSlides}
+                      onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
+                        setSlideDeckGated(deck, deck.version);
+                      }}
+                      onSendMessage={isReadOnly ? undefined : handleSendMessage}
+                      readOnly={isReadOnly}
+                      lockedBy={!isLockHolder ? editingLockHolder : null}
+                      onVerificationComplete={handleVerificationComplete}
+                      sessionId={sessionId}
+                    />
+                  </div>
+
+                  {/* Also hidden rather than unmounted, so the two panes are
+                      symmetric and neither can be the one that loses state. */}
+                  <div
+                    key="spec-view-body"
+                    data-testid="spec-view-pane"
+                    className={showSpec ? 'min-h-0 flex-1' : 'hidden'}
+                  >
+                    <SpecView slideDeck={displayDeck} onDiscuss={handleDiscussSpec} />
+                  </div>
                 </div>
               </div>
             </div>
