@@ -33,7 +33,12 @@ from src.domain.deck_spec import DesignContractRef
 from src.domain.skill_io import ArchitectOutput
 from src.services.graph.event_emitter import set_event_emitter
 from src.services.graph.nodes import architect_node, classify_spec_change
-from tests.unit.conftest_graph import graph_env, make_spec  # noqa: F401
+from tests.unit.conftest_graph import (  # noqa: F401
+    finding,
+    graph_env,
+    make_spec,
+    review_out,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -317,16 +322,15 @@ def test_pinning_a_template_widens_coverage_too(graph_env):
     assert updates["target_positions"] == [0, 1, 2]
 
 
-def test_a_deck_level_change_is_classified_and_recorded_not_silently_ignored(
+def test_a_deck_level_change_with_nothing_committed_leaves_coverage_alone(
     graph_env, caplog
 ):
-    """§4.6's re-review-all pass is unimplemented — measured as impossible inside
-    one turn on this topology — so the classification must at least be RECORDED.
+    """An unbuilt deck has nothing to score, so coverage stays as the architect
+    set it.
 
-    The guard is that the classifier reached the node on this path: without it
-    the log line cannot appear.  It also pins that coverage is NOT widened, which
-    is what keeps an audience change from becoming the blanket rebuild-all §4.6
-    rejected as expensive and destructive.
+    Writing an empty target list here would make the turn cover NOTHING and
+    complete vacuously — the failure mode the foreman's own coverage rules warn
+    about — which is strictly worse than building what was asked.
     """
     env = graph_env
     _persist(env, make_spec(positions=(0, 1, 2)))
@@ -345,8 +349,10 @@ def test_a_deck_level_change_is_classified_and_recorded_not_silently_ignored(
         )
 
     assert updates["target_positions"] == [1]
+    assert env.skills.calls_for("build_reviewer") == []
     assert any(
-        "re-review-all" in record.getMessage() for record in caplog.records
+        "no committed slide to re-review" in record.getMessage()
+        for record in caplog.records
     ), [r.getMessage() for r in caplog.records]
 
 
@@ -437,3 +443,287 @@ def test_the_notice_fires_when_agent_config_has_already_dropped_the_style(graph_
 
     assert "slide style" in updates["architect_message"].lower()
     assert "5" in updates["architect_message"]
+
+
+# ---------------------------------------------------------------------------
+# 4. The serial re-review pass (Option 2)
+# ---------------------------------------------------------------------------
+
+REVIEWER_PAYLOAD_KEYS = {
+    "position",
+    "slide_spec",
+    "resolved_style",
+    "section_css",
+    "resolved_data",
+    "html",
+    "scripts",
+}
+
+
+def _seed_rows(env, htmls, placeheld=()):
+    """Committed rows with distinctive HTML; *placeheld* get a placeholder record."""
+    import json as _json
+    import uuid as _uuid
+
+    from src.api.services.slide_repository import PLACEHOLDER_ERROR_KEY
+    from src.database.models.session import SessionSlide, UserSession
+    from src.utils.slide_hash import compute_slide_hash as _hash
+
+    db = env.factory()
+    try:
+        owner = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == env.session_id)
+            .one()
+        )
+        for position, html in enumerate(htmls):
+            record = None
+            if position in placeheld:
+                record = _json.dumps(
+                    {_hash(html): {PLACEHOLDER_ERROR_KEY: True, "message": "failed"}}
+                )
+            db.add(
+                SessionSlide(
+                    session_id=owner.id,
+                    position=position,
+                    id=str(_uuid.uuid4()),
+                    slide_id=str(_uuid.uuid4()),
+                    html=html,
+                    scripts="",
+                    verification_record=record,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _brand():
+    return {
+        "resolved_style": "STUB STYLE PROSE",
+        "deterministic_css": ".slide { color: red; }",
+        "design_system_active": False,
+        "template_layout_html": "",
+    }
+
+
+def test_the_re_review_scores_the_committed_html_with_the_reviewers_own_payload(
+    graph_env,
+):
+    """The pass must judge what is ON THE DECK, against the NEW spec, using the
+    shape ``build_reviewer_node`` builds — key for key, or the skill is scored on
+    an input it was never written against."""
+    from src.services.graph.nodes import rereview_committed_slides
+
+    env = graph_env
+    _seed_rows(env, ["<div>COMMITTED ZERO</div>", "<div>COMMITTED ONE</div>"])
+    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+    new_spec = make_spec(positions=(0, 1)).model_copy(
+        update={"audience": "the CFO, not engineers"}
+    )
+    verdicts = rereview_committed_slides(env.session_id, new_spec, _brand())
+
+    calls = env.skills.calls_for("build_reviewer")
+    assert [c["payload"]["position"] for c in calls] == [0, 1]
+    assert set(calls[0]["payload"]) == REVIEWER_PAYLOAD_KEYS
+    # The committed HTML, not the spec's or the builder's.
+    assert calls[0]["payload"]["html"] == "<div>COMMITTED ZERO</div>"
+    assert calls[1]["payload"]["html"] == "<div>COMMITTED ONE</div>"
+    # ...judged against the NEW spec's slide brief and resolved data.
+    assert calls[0]["payload"]["slide_spec"]["position"] == 0
+    assert verdicts["reviewed"] == {0, 1}
+    assert verdicts["failing"] == set()
+
+
+def test_only_an_objective_finding_marks_a_slide_as_contradicting_the_spec(graph_env):
+    """A subjective finding is surfaced, never acted on — the same rule
+    ``build_reviewer_node`` applies, and ``_stamp_findings`` re-derives
+    ``objective`` from CRITERIA so a model cannot suppress a rebuild by lying."""
+    from src.services.graph.nodes import rereview_committed_slides
+
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+
+    def _review(payload):
+        position = payload["position"]
+        if position == 1:
+            return review_out(position, [finding("overflow", slide_index=1)])
+        if position == 2:
+            # `arc_gap` is a SUBJECTIVE criterion: surfaced, not acted on.
+            return review_out(position, [finding("arc_gap", slide_index=2)])
+        return review_out(position)
+
+    env.skills.set("build_reviewer", _review)
+    verdicts = rereview_committed_slides(
+        env.session_id, make_spec(positions=(0, 1, 2)), _brand()
+    )
+
+    assert verdicts["failing"] == {1}
+    assert verdicts["reviewed"] == {0, 1, 2}
+
+
+def test_a_placeholder_fails_by_definition_and_costs_no_model_call(graph_env):
+    """There is nothing there to preserve, so paying a model to confirm what the
+    row's own marker says would be waste."""
+    from src.services.graph.nodes import rereview_committed_slides
+
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"], placeheld={1})
+    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+    verdicts = rereview_committed_slides(
+        env.session_id, make_spec(positions=(0, 1)), _brand()
+    )
+
+    assert verdicts["placeheld"] == {1}
+    assert verdicts["failing"] == {1}
+    assert [c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")] == [0]
+
+
+def test_an_unreviewable_slide_is_left_alone_rather_than_overwritten(graph_env):
+    """The recorded tie-break: §4.6 rejected the blanket rebuild-all as
+    "expensive and destructive" *because* manual edits matter, so a slide we
+    could not judge is preserved rather than rebuilt."""
+    from src.services.graph.nodes import rereview_committed_slides
+
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+
+    def _review(payload):
+        if payload["position"] == 1:
+            raise RuntimeError("the reviewer is down")
+        return review_out(payload["position"])
+
+    env.skills.set("build_reviewer", _review)
+    verdicts = rereview_committed_slides(
+        env.session_id, make_spec(positions=(0, 1)), _brand()
+    )
+
+    assert verdicts["unreviewable"] == {1}
+    assert verdicts["failing"] == set()
+    assert verdicts["reviewed"] == {0}
+    assert verdicts["committed"] == {0, 1}
+
+
+def test_a_row_the_new_spec_does_not_cover_is_not_re_reviewed(graph_env):
+    """A shorter new spec must not pay to review slides it no longer declares."""
+    from src.services.graph.nodes import rereview_committed_slides
+
+    env = graph_env
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+    verdicts = rereview_committed_slides(
+        env.session_id, make_spec(positions=(0, 1)), _brand()
+    )
+
+    assert verdicts["committed"] == {0, 1}
+    assert [c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")] == [0, 1]
+
+
+# -- and the narrowing the node does with those verdicts ---------------------
+
+
+def _deck_level_turn(env, out, emitter=None):
+    return _run_architect(env, out, emitter=emitter)
+
+
+def _audience_changed(positions=(0, 1, 2), targets=None):
+    spec = make_spec(positions=positions).model_copy(
+        update={"audience": "the CFO, not engineers"}
+    )
+    return ArchitectOutput(
+        intent="edit" if targets else "build",
+        message="Retargeting the deck at the CFO.",
+        target_positions=list(targets or []),
+        deck_spec=spec,
+    )
+
+
+def test_a_deck_level_change_rebuilds_only_the_slides_that_contradict_it(graph_env):
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set(
+        "build_reviewer",
+        lambda payload: review_out(
+            payload["position"],
+            [finding("overflow", slide_index=payload["position"])]
+            if payload["position"] == 2
+            else [],
+        ),
+    )
+
+    updates = _deck_level_turn(env, _audience_changed())
+
+    assert updates["target_positions"] == [2]
+
+
+def test_a_deck_level_change_that_nothing_contradicts_rebuilds_nothing(graph_env):
+    """The paired direction. Without it, "only failures rebuild" would also pass
+    against code that rebuilds everything it reviewed."""
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+    updates = _deck_level_turn(env, _audience_changed())
+
+    assert updates["target_positions"] == []
+
+
+def test_a_spec_position_with_no_committed_row_joins_the_rebuild_set(graph_env):
+    """A slide the new spec adds cannot be "still valid" — there is nothing
+    there — so a deck-level change that also adds one must still build it."""
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
+    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+    updates = _deck_level_turn(env, _audience_changed(positions=(0, 1, 2)))
+
+    assert updates["target_positions"] == [2]
+
+
+def test_an_explicit_edit_target_is_rebuilt_even_when_it_passed_review(graph_env):
+    """The user asked for that slide. "It still fits the brief" is not a reason
+    to refuse them."""
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+    updates = _deck_level_turn(env, _audience_changed(targets=[1]))
+
+    assert updates["target_positions"] == [1]
+
+
+def test_the_user_is_told_what_was_re_checked_and_what_is_being_rebuilt(graph_env):
+    """§4.6: "tell the user first". The emitter is the only user-facing channel —
+    nothing persists ``architect_message`` as chat."""
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set(
+        "build_reviewer",
+        lambda payload: review_out(
+            payload["position"],
+            [finding("overflow", slide_index=payload["position"])]
+            if payload["position"] == 2
+            else [],
+        ),
+    )
+    emitter = queue.Queue()
+
+    _deck_level_turn(env, _audience_changed(), emitter=emitter)
+
+    notices = [
+        e
+        for e in _drain(emitter)
+        if (e.metadata or {}).get("spec_change") == "deck_level"
+    ]
+    assert len(notices) == 1, [e.metadata for e in _drain(emitter)]
+    assert notices[0].metadata["reviewed"] == [0, 1, 2]
+    assert notices[0].metadata["rebuilding"] == [2]
+    assert "re-checked all 3" in notices[0].content
