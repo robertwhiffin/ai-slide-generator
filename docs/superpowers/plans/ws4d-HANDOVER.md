@@ -57,23 +57,47 @@ Each was measured, not reasoned, and each would have been silent.
 
 **Read this before planning your tasks. Three of these are yours by assignment, not by default.**
 
-- **THE POSTGRES HARNESS, and this is the one that will bite you.** Four items were parked as "ws4e, needs
-  a real database". **Measured: the `integration-graph` job provisions Postgres 15 and exports
-  `DATABASE_URL`, but NOT ONE of the seven ws4d integration files reads it** — they all run on the SQLite
-  engine at `tests/integration/conftest.py:604`. So CI will report the suite green and close **none** of
-  them. **Your layer-4 work must build the harness first**, or these four stay unfunded:
-  1. **The sweeper's outer lease predicate is untested.** Measured: dropping only the outer
-     `.where(unclaimed)` reddens **nothing**, because sqlite's single writer serialises the four claimers so
-     the race window never opens. Your test must exercise **two genuinely overlapping transactions**.
-  2. **The `mark_dirty`-versus-claim TOCTOU** — costs one skipped re-description, never a lost edit.
-  3. **Postgres lock ordering between the two title writers.**
-  4. **Sweeper throughput:** all four workers pick the same `LIMIT 1` candidate, so real throughput is 1–4
-     decks/minute rather than 4. `with_for_update(skip_locked=True)` fixes that **and** hedges the
-     EvalPlanQual reliance on the same line — but it is Postgres-behaviour reasoning with no Postgres to
-     test against, which is exactly why it is yours.
-  **And `sqlite_engine_file_backed` is `StaticPool`** — do not reach for it for anything that fans out. It
-  corrupted the database 3 of 3 runs on ws4c. **The load-bearing part is the POOL CLASS, not the storage
-  location.**
+- **THE POSTGRES HARNESS NOW EXISTS. Use it — do not build one.** This was fixed after the ws4d build, at
+  the operator's request, and it changes what you inherit.
+  **What was wrong:** eight jobs provisioned `postgres:15` and exported only `DATABASE_URL`, while the
+  repo's established self-skip pattern reads **`TELLR_TEST_POSTGRES_URL`** — which **no workflow set**. So
+  every Postgres-marked test self-skipped in CI while passing on a developer's laptop: **CI was strictly
+  weaker than a laptop, silently.** And no Postgres engine fixture existed for integration tests, which is
+  why all seven ws4d integration files used the SQLite engine at `tests/integration/conftest.py:604`.
+  **What you now have:** `TELLR_TEST_POSTGRES_URL` set in every job that provisions Postgres, `unit-tests`
+  provisioning one too (**nine** jobs), and a shared **`postgres_engine`** fixture in
+  `tests/integration/conftest.py` that gives **each thread its own connection**. `DATABASE_URL` is
+  deliberately NOT set in `unit-tests`, because that is what production code connects to, whereas
+  `TELLR_TEST_POSTGRES_URL` has zero readers under `src/` — which is what makes it safe.
+  **To run these locally:** start a Postgres on 5432, or export `TELLR_TEST_POSTGRES_URL`. **Six** modules
+  under `tests/unit/` need one (note `test_style_exclusivity_bypass_shapes_postgres.py` is gated by a
+  module-level `pytest.skip` rather than a marker, so a marker-only inventory misses it).
+  **Of the four items parked as "needs a real database", two are CLOSED and one is BANKED:**
+  1. **The sweeper's outer lease predicate — CLOSED.** It now has a test that can fail, in
+     `tests/integration/test_claim_exclusivity_postgres.py`, driving two genuinely overlapping
+     transactions. **The proof, measured both ways under one sabotage** — remove the outer
+     `.where(unclaimed)` at `src/services/spec_sync.py:479`, leaving the inner select's copy: **the Postgres
+     tests fail 2, the old SQLite four-claimer test passes 18, completely blind.** Before this, dropping
+     that predicate left **all 87** spec_sync tests green.
+  2. **The `mark_dirty`-versus-claim TOCTOU — REPRODUCED and BANKED as `xfail(strict=True)`, not fixed.**
+     Measured: `spec_dirty_at` ends BEHIND `spec_dirty_claimed_at` while `spec_dirty_by` carries the second
+     author, so the edit coalesces into an already-claimed window, `clear_marker`'s re-dirty rule never
+     fires, and the finishing review discards an edit it never covered. **Because the xfail is strict, the
+     moment someone lands the fix the test XPASSes and CI reports a failure — the record forces its own
+     deletion.** The fix is a row lock on a human's request path, which is a production design question.
+  3. **Postgres lock ordering between the two title writers — still yours**, and now cheap: use
+     `postgres_engine`.
+  4. **Sweeper throughput — still yours.** All four workers pick the same `LIMIT 1` candidate, so real
+     throughput is 1–4 decks/minute rather than 4. `with_for_update(skip_locked=True)` fixes that **and**
+     hedges the EvalPlanQual reliance on the same line. You now have a Postgres to test it against.
+  **Still true and still load-bearing: `sqlite_engine_file_backed` is `StaticPool`** — never reach for it
+  for anything that fans out. It corrupted the database 3 of 3 runs on ws4c. **The pool class is the
+  load-bearing part, not the storage location**, which is why the new fixture is guarded by a test asserting
+  four simultaneous checkouts are four distinct backends.
+  **Weakness to know about:** both new concurrency tests deliberately **gate** claimer A, because an ungated
+  barrier fan-out cannot guarantee overlap and would be flaky. So the genuinely-random four-worker arrival
+  shape is still only covered weakly, on SQLite. And `_await_lock_waiters` reads
+  `pg_stat_activity.wait_event_type` (PG 9.6+) — fine on 14.20 and 15, but version-dependent.
 - **A REAL-MODEL RUN, GATING §4.6.** `_REREVIEW_FAILING_CRITERIA` is a **single subjective criterion**, so
   the entire selective-rebuild decision rests on how liberally a real model emits `brief_not_delivered`.
   **Liberal, and a deck-level edit rebuilds everything and destroys manual edits — the exact outcome §4.6
