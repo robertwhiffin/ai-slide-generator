@@ -448,9 +448,17 @@ def test_a_save_that_both_reorders_and_edits_needs_durable_identity(
             for i, marker in enumerate(_MARKERS)
         ]
     )
-    # Reorder to C, B, A *and* rewrite B's HTML — both in the one save.
-    deck.slides = [deck.slides[2], deck.slides[1], deck.slides[0]]
-    deck.slides[1].html = edited_html
+    # Rotate to B, C, A *and* rewrite B's HTML — both in the one save.
+    #
+    # The arrangement is load-bearing and was got wrong on the first attempt: an
+    # earlier version rotated to C, B, A, which leaves the edited slide at position 1
+    # — its OWN old position — so tier 3's positional fallback resolved it and the
+    # test passed with tier 1 disabled (measured: 48 passed).  The edited slide must
+    # therefore MOVE, and move onto a position whose old row another slide has
+    # already claimed, so that neither tier 2 nor tier 3 can reach it.  B moves to
+    # position 0, whose old row belongs to A — and tier 2 claims A's row by hash.
+    deck.slides = [deck.slides[1], deck.slides[2], deck.slides[0]]
+    deck.slides[0].html = edited_html
     ChatService._reindex_slide_ids(deck)
 
     with patch("src.api.services.session_manager.get_db_session", _fake_db(factory)):
@@ -481,3 +489,116 @@ def test_a_save_that_both_reorders_and_edits_needs_durable_identity(
     # assertion above cannot pass on a save that attributed nothing at all.
     assert attributed["A"] == ("VERDICT-A", "FRAGMENT-A")
     assert attributed["C"] == ("VERDICT-C", "FRAGMENT-C")
+
+
+# ---------------------------------------------------------------------------
+# The AGENT add path — impersonation, caught behaviourally and not only by grep
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def three_monolith_rows(factory):
+    """Rows whose ids are `slide_0..slide_2` — what `from_html_string` produces.
+
+    The impersonation needs this shape specifically: a stamped positional id can only
+    steal an identity if some real slide already holds that id, and on a freshly
+    parsed deck every slide does.
+    """
+    db = factory()
+    try:
+        owner = UserSession(session_id=_OWNER_SID, created_by="owner@test.com")
+        db.add(owner)
+        db.flush()
+        db.add(
+            SessionSlideDeck(
+                session_id=owner.id,
+                title="Monolith deck",
+                html_content="",
+                scripts_content="",
+                slide_count=3,
+                version=1,
+            )
+        )
+        db.flush()
+        for position, marker in enumerate(_MARKERS):
+            html = _html(marker)
+            db.add(
+                SessionSlide(
+                    session_id=owner.id,
+                    position=position,
+                    id=str(uuid.uuid4()),
+                    html=html,
+                    slide_id=f"slide_{position}",
+                    scripts="",
+                    created_by="owner@test.com",
+                    verification_record=json.dumps(
+                        {compute_slide_hash(html): {"marker": f"VERDICT-{marker}"}}
+                    ),
+                    deck_spec_slide=json.dumps({"purpose": f"FRAGMENT-{marker}"}),
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_an_agent_added_slide_cannot_impersonate_an_existing_slide(
+    three_monolith_rows, factory
+):
+    """The agent add path, driven for real — not a text check on the source.
+
+    `_apply_slide_replacements`' add branch used to stamp
+    `f"slide_{insert_position + idx}"` on every slide the LLM added.  Inserted at
+    position 1 on a freshly parsed deck, that id already belongs to the slide
+    currently at position 1 — and `_reindex_slide_ids` resolves a collision in favour
+    of the FIRST holder, which is the newcomer.  So the newcomer KEPT the real
+    slide's identity, attribution tier 1 handed it that slide's verdict and spec
+    fragment, and the displaced slide was re-minted with neither.
+
+    Note what this means: the uniqueness pass running is not protection.  It resolved
+    the collision, in the wrong direction.  That is why the stamp had to go rather
+    than be deduplicated afterwards.
+    """
+    service = ChatService()
+    with patch(
+        "src.api.services.session_manager.get_db_session", _fake_db(factory)
+    ), patch(
+        "src.api.services.chat_service.get_session_manager",
+        return_value=SessionManager(),
+    ):
+        before = service._get_or_load_deck(_OWNER_SID)
+        assert [s.slide_id for s in before.slides] == ["slide_0", "slide_1", "slide_2"], (
+            "fixture precondition: the deck carries parse-shaped positional ids"
+        )
+
+        result = service._apply_slide_replacements(
+            {
+                "replacement_slides": [Slide(html=_html("AGENT-NEW"))],
+                "start_index": 0,
+                "original_count": 1,
+                "is_add_operation": True,
+                "position_type": "after",
+            },
+            _OWNER_SID,
+        )
+
+    by_marker = {
+        _marker_of(s["html"]): s["slide_id"] for s in result["slides"]
+    }
+    assert set(by_marker) == {"A", "B", "C", "AGENT-NEW"}, (
+        f"the add did not land as expected: {sorted(by_marker)}"
+    )
+
+    assert by_marker["B"] == "slide_1", (
+        "slide B was re-minted because the agent's new slide took its identity: "
+        f"{by_marker}"
+    )
+    assert by_marker["A"] == "slide_0" and by_marker["C"] == "slide_2", (
+        f"an existing slide lost its identity to the newcomer: {by_marker}"
+    )
+    assert by_marker["AGENT-NEW"] not in {"slide_0", "slide_1", "slide_2"}, (
+        "the agent's new slide is carrying an id that belongs to an existing slide, "
+        f"so tier 1 will hand it that slide's verdict: {by_marker}"
+    )
+    ids = list(by_marker.values())
+    assert len(set(ids)) == 4, f"duplicate slide_id after the add: {ids}"
