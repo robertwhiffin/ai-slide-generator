@@ -2019,9 +2019,29 @@ class ChatService:
         session id ``invoke_graph`` runs under.  ``BaseCheckpointSaver``'s method
         body is ``raise NotImplementedError``, not a no-op, so a saver that
         cannot delete surfaces as a 500 on the route rather than skipping
-        quietly — and because the call sits inside this transaction, a raise
-        rolls the transcript prune back rather than leaving a half-cleared
-        session.
+        quietly.
+
+        **This is not one transaction, and the skew has a direction.**
+        ``delete_thread`` opens ``self._session()``
+        (``core/checkpointer.py:226``), which **commits on success** — its own
+        transaction, committed while this one is still open.  So:
+
+        * a **raise** from ``delete_thread`` propagates out of this ``with``
+          block and the transcript prune is rolled back: nothing is lost, and the
+          route 500s.  That direction is safe, and it is why the call sits inside
+          the block rather than after it;
+        * a failure of **this** transaction's commit, after ``delete_thread``
+          returned, leaves the graph thread **deleted and the transcript intact**.
+          Recoverable rather than corrupting — the next graph turn starts a fresh
+          thread and the user can clear again — but it is a real half-state, and
+          no ordering of these two writes removes it while they are two
+          transactions.  Do not read the placement as atomicity.
+
+        A second consequence of the two connections: the bulk
+        ``delete(synchronize_session=False)`` below emits its DELETE immediately,
+        so the transcript rows are locked on this connection while the
+        checkpointer deletes on another.  Different tables, so there is no
+        ordering cycle today; worth not deepening.
 
         No hidden agent state can survive: every non-architect agent is built
         fresh per invocation and the monolith's history is hydrated from these

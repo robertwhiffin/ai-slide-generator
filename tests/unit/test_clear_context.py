@@ -254,9 +254,16 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
     ):
         """BaseCheckpointSaver.delete_thread is `raise NotImplementedError`.
 
-        It must surface (the route turns it into a 500) rather than skip
-        quietly, and it must not leave a half-cleared session behind: the call
-        sits inside the transaction, so the transcript prune rolls back.
+        It must surface (the route turns it into a 500) rather than skip quietly,
+        and a raise must not leave a half-cleared session behind: the call sits
+        inside the transaction, so the transcript prune rolls back.
+
+        **This is the direction that holds, and the only one.**  ``delete_thread``
+        commits its own transaction, so the reverse skew — the outer commit
+        failing after the thread is already deleted — is real and is not
+        prevented by the placement.  `clear_context`'s docstring states it; no
+        test pins it, because reaching it means failing this transaction's commit
+        after the saver returned.
         """
         sid = session_with_messages(
             [_PHRASE_MESSAGE, "turn two", "turn three"], message_type="user_input"
