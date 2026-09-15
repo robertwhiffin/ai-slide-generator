@@ -50,6 +50,7 @@ from src.api.services.session_manager import get_session_manager
 from src.api.services.slide_repository import SlideWriter, is_placeholder_record
 from src.core.database import get_db_session
 from src.core.skills import call_skill
+from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.finding import (
@@ -120,6 +121,19 @@ _STALL_REASON = "Slide generation did not complete"
 # what keeps deck_reviewer_node's advisory message out of the architect's input.
 _HUMAN_TYPES = {"user_query", "user_input", "chat"}
 _AI_TYPES = {"llm_response", "clarification"}
+
+# Appended to a `confirm_design_contract` message when confirming would drop the
+# deck's slide style (§L4).  ONE user action mutates TWO fields — setting
+# design_system_id and losing slide_style_id — and DesignContractRef's L1
+# validator rejects a spec carrying both, so the drop is the CALLER's, not a
+# validator's quiet correction.  The sentence is the only place the user learns
+# it, and it must arrive while they can still say no.
+_SLIDE_STYLE_DROPPED = (
+    "Note: a design system and a slide style cannot both apply to one deck, so "
+    "confirming this drops the slide style this deck currently uses (slide style "
+    "{}). Confirming also rebuilds every slide against the new design, because a "
+    "restyle affects all of them."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +265,186 @@ def _contract_ids(contract: Optional[DesignContractRef]) -> tuple:
         contract.template_id,
         contract.slide_style_id,
     )
+
+
+#: The spec fields whose change invalidates every slide at once (§4.6).
+#:
+#: ``title`` is deliberately ABSENT: renaming a deck contradicts no slide, and
+#: including it would classify every re-title as a deck-level change and — once
+#: §4.6's other half lands — re-review a whole deck because the user fixed a
+#: typo in its name.  ``slides`` and ``resolved_data`` are absent for the mirror
+#: reason: a change there is per-slide work the foreman's ordinary coverage
+#: already covers, not a deck-wide invalidation.
+_DECK_LEVEL_FIELDS = (
+    "audience",
+    "purpose",
+    "argument",
+    "call_to_action",
+    "narrative_arc",
+)
+
+
+def classify_spec_change(
+    new_spec: Optional[DeckSpec], persisted: Optional[DeckSpec]
+) -> str:
+    """Classify what a newly committed spec changes against the persisted one.
+
+    Returns one of three strings:
+
+    ``"design_contract"``
+        Any of ``design_system_id``, ``template_id``, ``slide_style_id`` differs.
+        **This wins over** ``"deck_level"`` when both differ: it is the stronger,
+        confirm-first case, and a restyle genuinely affects every slide.
+        ``template_id`` is what "pinning or unpinning a template" means — there
+        is no persisted ``template_pinned`` field anywhere;
+        ``ResolvedStyle.template_pinned`` is a computed NamedTuple member on no
+        ORM model and no part of this contract, so watching it would watch
+        something that never persists.
+    ``"deck_level"``
+        Any of :data:`_DECK_LEVEL_FIELDS` differs.
+    ``"none"``
+        Nothing relevant differs — **including when there is no persisted spec at
+        all.**  A first build is not a change: classifying it as one would fire
+        §4.6's confirm-first path on the very first turn of every new deck, when
+        there are no slides to invalidate and nothing to confirm.
+
+    Both arguments are ``DeckSpec`` objects the caller already has.  The
+    persisted side comes from ``deck_level_writer.read_deck_spec``, which
+    ``architect_node`` has already called — there is deliberately no read in
+    here, so this stays a pure function and the node keeps its single reader.
+    """
+    if new_spec is None or persisted is None:
+        return "none"
+    if _contract_ids(new_spec.design_contract) != _contract_ids(
+        persisted.design_contract
+    ):
+        return "design_contract"
+    if any(
+        getattr(new_spec, field) != getattr(persisted, field)
+        for field in _DECK_LEVEL_FIELDS
+    ):
+        return "deck_level"
+    return "none"
+
+
+def _slide_style_being_dropped(
+    proposal: Optional[DesignContractRef],
+    inbound: Optional[DesignContractRef],
+    prior_spec: Optional[DeckSpec],
+) -> Optional[int]:
+    """The ``slide_style_id`` a confirmed *proposal* would drop, or ``None``.
+
+    §L4's point is that **one user action mutates two fields** and the user must
+    be told.  The clearing is real on ``AgentConfig`` — a serializer
+    (``_one_style_authority``) and ``put_agent_config`` both null
+    ``slide_style_id`` — but on the deck spec there is **nothing to clear**:
+    ``DesignContractRef``'s L1 validator REJECTS a spec carrying both ids.  So
+    whoever constructs the new contract must drop the slide style itself, and
+    this function exists to name what that drop costs while the user can still
+    say no.  Get it backwards and the architect's commit raises a
+    ``ValidationError`` on the exact path §4.6 exists for.
+
+    Two places are consulted for the style currently in force, in order:
+    ``inbound`` (the contract this turn's brand was actually resolved from — the
+    session's own selection when it has one, else the persisted spec's) and then
+    the persisted spec's contract.  The second is not redundant: when the session
+    has already been switched to a design system, ``AgentConfig``'s serializer
+    has ALREADY nulled its ``slide_style_id``, so ``inbound`` carries no style
+    while the persisted spec still does — and that deck is exactly one whose
+    style is about to be dropped.
+    """
+    if proposal is None or proposal.design_system_id is None:
+        return None
+    candidates = [inbound]
+    if prior_spec is not None:
+        candidates.append(prior_spec.design_contract)
+    for contract in candidates:
+        if contract is not None and contract.slide_style_id is not None:
+            return contract.slide_style_id
+    return None
+
+
+def _design_system_library() -> List[dict]:
+    """Every live design system with its templates — §M1, delivered as payload.
+
+    §M1 asks for "the architect's tool manifest" to carry the design-system
+    library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, ``bind_tools``
+    appears nowhere under ``src/``, and ``call_skill`` invokes the architect with
+    structured output and no tools bound at all, so a library wired into
+    ``tool_grants`` would be read by nothing.  The operator ratified delivering
+    §M1 through the architect's **payload** instead, beside
+    ``available_design_contract`` and ``template_sections`` — the only channel
+    the architect actually reads.
+
+    **Ids and the brand's own labels only — never ``layout_html`` or
+    ``token_css``.**  The architect picks an id and ``_resolve_brand`` resolves
+    the bytes from it on the turn the pick is committed; shipping compiled
+    content here would put a snapshot in a prompt that can go stale against
+    ``COMPILER_VERSION`` (the very thing ``DesignContractRef`` stores ids to
+    avoid) and would cost the whole catalog's CSS in tokens on every architect
+    call.
+
+    Templates of a soft-deleted system never appear: the grouping is built off
+    the live systems, so an inactive parent's rows are dropped with it.
+
+    Returns ``[]`` on any failure, and that is deliberate.  A deck can be built
+    with no brand at all, so an unreadable catalog must degrade to "no brand on
+    offer this turn" rather than kill the turn — the same contract
+    ``_session_contract`` and ``_conversation`` already keep.
+    """
+    try:
+        with get_db_session() as db:
+            systems = (
+                db.query(
+                    DesignSystem.id,
+                    DesignSystem.name,
+                    DesignSystem.description,
+                    DesignSystem.is_default,
+                )
+                .filter(DesignSystem.is_active.is_(True))
+                .order_by(DesignSystem.name)
+                .all()
+            )
+            templates = (
+                db.query(
+                    DesignSystemTemplate.design_system_id,
+                    DesignSystemTemplate.id,
+                    DesignSystemTemplate.name,
+                    DesignSystemTemplate.description,
+                )
+                .order_by(
+                    DesignSystemTemplate.design_system_id,
+                    DesignSystemTemplate.name,
+                )
+                .all()
+            )
+    except Exception:
+        logger.warning(
+            "Could not read the design-system library; the architect will see "
+            "no brand on offer this turn",
+            exc_info=True,
+        )
+        return []
+
+    by_system: Dict[int, List[dict]] = {}
+    for design_system_id, template_id, name, description in templates:
+        by_system.setdefault(design_system_id, []).append(
+            {
+                "template_id": template_id,
+                "name": name,
+                "description": description,
+            }
+        )
+    return [
+        {
+            "design_system_id": design_system_id,
+            "name": name,
+            "description": description,
+            "is_default": bool(is_default),
+            "templates": by_system.get(design_system_id, []),
+        }
+        for design_system_id, name, description, is_default in systems
+    ]
 
 
 def _concat_css(token_css: str, style_block: str) -> str:
@@ -761,6 +955,16 @@ def architect_node(state: dict) -> Dict[str, Any]:
     Reads only fields ``ArchitectOutput`` declares: ``intent``, ``message``,
     ``deck_spec``, ``data_request``, ``target_positions``,
     ``proposed_design_contract``.
+
+    **§4.6 lives here, in two halves and one hole.**  A committed spec is
+    classified against the persisted one by :func:`classify_spec_change`.  A
+    ``design_contract`` change forces coverage to every position — the one place
+    a rebuild-all is correct — and a ``confirm_design_contract`` turn's message
+    is augmented to name the slide style that confirming would drop (§L4).  The
+    third case, a ``deck_level`` change, is classified and logged but **not
+    acted on**: re-reviewing every slide before rebuilding the failures cannot be
+    done inside one turn on this topology, measured, and the branch below records
+    why.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
@@ -826,19 +1030,40 @@ def architect_node(state: dict) -> Dict[str, Any]:
         ),
         "template_sections": brand["section_inventory"],
         "resolved_style": brand["resolved_style"],
+        # §M1, as a PAYLOAD key and not a tool manifest — see
+        # _design_system_library.  Without this the architect cannot offer a
+        # brand it cannot see: available_design_contract carries only the ids
+        # already in force, so every other design system in the org is invisible.
+        "design_system_library": _design_system_library(),
     }
 
     out = call_skill("architect", payload, brand["design_system_active"])
     intent = out.intent
+    message = out.message
+
+    # §L4 — a confirmation that would DROP the slide style has to say so, and it
+    # has to say so in the message the user actually sees.  That is why the
+    # augmentation happens HERE, before the emit and before `updates` is built:
+    # the emit is the streamed assistant turn and architect_message is the
+    # persisted one, so augmenting either alone would show the user a sentence
+    # the transcript does not contain, or the reverse.
+    if intent == "confirm_design_contract":
+        dropped_style_id = _slide_style_being_dropped(
+            out.proposed_design_contract, inbound_contract, prior_spec
+        )
+        if dropped_style_id is not None:
+            message = "\n\n".join(
+                [message.rstrip(), _SLIDE_STYLE_DROPPED.format(dropped_style_id)]
+            )
 
     updates: Dict[str, Any] = {
         "architect_intent": intent,
-        "architect_message": out.message,
+        "architect_message": message,
         "target_positions": None,
         "fix_target": None,
         "error_state": None,
     }
-    _emit(StreamEventType.ASSISTANT, content=out.message,
+    _emit(StreamEventType.ASSISTANT, content=message,
           metadata={"node": "architect", "intent": intent})
 
     if intent == "ask_data":
@@ -846,7 +1071,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # silently dropped (§11), so the request travels in architect_message —
         # the same key the analyst answers through.
         updates["architect_message"] = "\n\n".join(
-            [out.message, "DATA REQUEST: " + out.data_request.model_dump_json()]
+            [message, "DATA REQUEST: " + out.data_request.model_dump_json()]
         )
         return updates
 
@@ -878,6 +1103,57 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     if intent == "edit":
         updates["target_positions"] = list(out.target_positions)
+
+    # ---- §4.6: what does this commit change about the DECK, not a slide? ----
+    # Classified AFTER the edit turn's target_positions is set, so the
+    # design-contract branch below OVERRIDES it.  Reversing the two lines is the
+    # whole defect: an "edit slide 2, and use the Acme brand" turn would restyle
+    # the deck and rebuild only slide 2, leaving nineteen slides rendering
+    # against a stylesheet the deck no longer has.
+    spec_change = classify_spec_change(spec, prior_spec)
+    if spec_change == "design_contract":
+        # THE one place a rebuild-all is correct (§4.6).  A restyle genuinely
+        # affects every slide, so re-review-then-selective-rebuild would flag all
+        # of them anyway.  It is gated on confirmation by the topology rather
+        # than by a flag: the architect asks with `confirm_design_contract`,
+        # which routes to END and dispatches nothing, so a build/edit turn whose
+        # spec CHANGES the contract is by construction the turn that applies an
+        # answered confirmation.
+        #
+        # Written as the explicit position list rather than left as None.  On a
+        # build turn the two are equivalent — `_covered_positions` derives every
+        # spec position when target_positions is None — but only the explicit
+        # list also covers the EDIT turn, and only the explicit list is visible
+        # in final state, so "confirming rebuilt every position" is observable
+        # rather than inferred from an absence.
+        updates["target_positions"] = [slide.position for slide in spec.slides]
+        logger.info(
+            "Design-contract change committed; rebuilding every position",
+            extra={"session_id": session_id},
+        )
+    elif spec_change == "deck_level":
+        # §4.6's OTHER half — re-review every slide against the new spec and
+        # rebuild only the ones that contradict it — is NOT implemented, and the
+        # reason is the topology rather than the effort.  Measured on this branch:
+        # a turn that reviews a position before building it places the position
+        # in `reviewed_positions`, `build_reviewer_refan_router` then skips its
+        # builder's re-fan, and all three positions of a three-slide deck were
+        # PLACEHELD with `error_state` None — builders paid for, output discarded,
+        # silently.  Landing them in the review pass instead makes
+        # `all_positions_committed` true, and the turn dispatched ZERO builders
+        # and went straight to deck review.  Both channels are turn-scoped sets
+        # with union reducers, so neither can be un-set within a turn: reviews
+        # come AFTER builds here by construction.  The mechanism therefore needs
+        # a ruling, not a local edit — see task-8-report.md.  Until then this
+        # turn covers what the architect targeted, which changes no slide it was
+        # not asked to change.
+        logger.warning(
+            "Deck-level spec change committed (audience/purpose/argument/"
+            "call_to_action/narrative_arc): §4.6's re-review-all and "
+            "rebuild-only-failures pass is not implemented, so this turn covers "
+            "only the positions the architect targeted",
+            extra={"session_id": session_id},
+        )
 
     external_scripts = [SlideDeck.CHART_JS_URL]
     head_meta = json.dumps(_DEFAULT_HEAD_META)

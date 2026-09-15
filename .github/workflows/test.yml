@@ -412,6 +412,7 @@ jobs:
             tests/integration/test_sweeper_describe_only.py \
             tests/integration/test_insert_slide_route.py \
             tests/integration/test_slide_id_is_durable.py \
+            tests/integration/test_deck_spec_change_turn.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live"
       - uses: actions/upload-artifact@v4
         if: always()
