@@ -14,7 +14,7 @@ import re
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -50,6 +50,18 @@ logger = logging.getLogger(__name__)
 #: empty slide still has to carry it.  Left otherwise bare deliberately — the deck's
 #: own CSS styles it, and any content here would be content nobody asked for.
 BLANK_SLIDE_HTML = '<div class="slide"></div>'
+
+# The deck-spec entry a newly inserted slide gets: contiguous with its neighbours
+# (`DeckSpec.slide_at` depends on that) and deliberately undescribed.  The route
+# that inserts fires the spec-dirty marker and the arc-review sweeper writes the
+# prose; inventing a purpose here would put words in the architect's mouth.
+_BLANK_DECK_SPEC_ENTRY: Dict[str, Any] = {
+    "purpose": "",
+    "content_brief": "",
+    "assumes": "",
+    "hands_off": "",
+    "data_references": [],
+}
 
 
 def resolve_active_design_system_id(session_id: Optional[str]) -> Optional[int]:
@@ -3354,6 +3366,13 @@ class ChatService:
         )
         self._record_deck_version(session_id, save_result)
 
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._reorder_deck_spec_slides(session_id, new_order)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
+
         # Create save point
         try:
             self.create_save_point(
@@ -3529,6 +3548,13 @@ class ChatService:
         )
         self._record_deck_version(session_id, save_result)
 
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._duplicate_deck_spec_slide(session_id, index)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
+
         # Create save point
         try:
             self.create_save_point(
@@ -3671,33 +3697,66 @@ class ChatService:
         deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
 
-    def _insert_deck_spec_slide(
+    def _rewrite_deck_spec_slides(
         self,
         session_id: str,
-        position: int,
+        reorder: Callable[[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]],
+        *,
+        label: str,
     ) -> Optional[Dict[str, Any]]:
-        """Give the deck spec an entry at *position* and shift the entries above it.
+        """Re-order the deck spec's slide entries and re-stamp their positions.
 
         A deck spec describes the deck slide by slide, keyed on ``position``
         (``SlideSpec.position`` is the canonical identity, looked up by
-        ``DeckSpec.slide_at`` and never by list index).  Inserting a slide without
-        renumbering would leave every entry above the insertion point describing
-        its neighbour.
+        ``DeckSpec.slide_at`` and never by list index).  Any mutation that moves,
+        adds or removes a slide must move its spec entry with it, or every entry
+        past the change describes its neighbour.
 
-        The new entry is a PLACEHOLDER — empty purpose and brief.  The route that
-        reaches this fires the spec-dirty marker, and the arc-review sweeper is
-        what actually describes the new slide; inventing a purpose here would put
-        words in the architect's mouth, and leaving the entry out entirely would
-        break the contiguity ``slide_at`` depends on.
+        Before this existed, ``deck_spec_json`` was renumbered on INSERT and on
+        nothing else (final review C1), so after a delete, a duplicate or a reorder
+        the deck-level spec and the per-row ``deck_spec_slide`` fragments — two
+        representations of the same thing — disagreed, and three consumers read the
+        deck-level one: the builder brief, §4.6's re-review and ``architect_node``'s
+        edit-turn fallback.  Measured: an edit turn dispatched a builder for a
+        position with no slide and the deck gained one nobody asked for.
 
-        Operates on the RAW spec dict rather than parsing a ``DeckSpec``: a spec
-        that no longer validates (an older shape, a hand-edited column) must not be
-        destroyed by a renumber, and this only touches ``slides[*].position``.
+        WHY ONE PRIMITIVE AND NOT FOUR WRITERS
+        --------------------------------------
+        Four hand-copied row-writers diverging is the defect class the previous
+        workstream's final review found, and C1 is itself an instance of it — insert
+        renumbered, its three siblings did not.  So the four routes supply only
+        *which entries end up in which order*; the position stamping, the raw-dict
+        handling, the author stamp and the failure policy live here once.
+
+        *reorder* receives the positioned entries **in position order** and returns
+        the new list in the new order — it does not touch ``position`` at all, which
+        this method re-stamps contiguously from 0.  Returning ``None`` leaves the
+        spec untouched.
+
+        Operates on the RAW spec dict rather than parsing a ``DeckSpec``: a spec that
+        no longer validates (an older shape, a hand-edited column) must not be
+        destroyed by a renumber, and nothing here reads a field other than
+        ``position``.  Entries that are not dicts, or whose ``position`` is not an
+        int, cannot be identified with a slide, so they are carried through
+        **unchanged and last** rather than silently permuted.
+
+        A spec write that fails must never fail the mutation: the slide change is
+        already committed by the time this runs, and the route's spec-dirty marker
+        still fires, so the sweeper re-describes the deck either way.
+
+        Args:
+            session_id: The mutating session.  Resolves to the deck owner in the
+                layers below, exactly as every other mutation does.
+            reorder: Takes the positioned entries in position order, returns them in
+                their new order, or ``None`` to leave the spec alone.  Raises
+                ``IndexError`` when the spec cannot answer the mutation.
+            label: Route name, for the log lines only.
 
         Returns:
             The writer's result dict (carrying the new deck ``version``), or None
-            when there was no spec to shift — a deck built before the spec existed
-            is not an error.
+            when there was no spec to renumber, the spec was unreadable, or
+            *reorder* declined — none of which is an error.  A deck built before the
+            spec column existed has no spec.
         """
         # Imported here, not at module scope: src.api.services.__init__ imports
         # chat_service, so a module-level import of a sibling service is circular.
@@ -3709,7 +3768,7 @@ class ChatService:
         try:
             spec = read_deck_spec(session_id)
         except Exception as e:
-            logger.warning(f"Failed to read deck spec (insert_slide): {e}")
+            logger.warning(f"Failed to read deck spec ({label}): {e}")
             return None
 
         if not spec:
@@ -3719,37 +3778,48 @@ class ChatService:
         if not isinstance(slides, list):
             logger.warning(
                 "deck_spec_json has no slides list; leaving it untouched",
-                extra={"session_id": session_id},
+                extra={"session_id": session_id, "route": label},
             )
             return None
 
-        shifted: List[Dict[str, Any]] = []
+        # One pass, and identity is never inferred from equality: two entries with
+        # the same content are still two entries.
+        positioned: List[Dict[str, Any]] = []
+        unpositioned: List[Any] = []
         for entry in slides:
-            if not isinstance(entry, dict):
-                shifted.append(entry)
-                continue
-            entry = dict(entry)
-            entry_position = entry.get("position")
-            if isinstance(entry_position, int) and entry_position >= position:
-                entry["position"] = entry_position + 1
-            shifted.append(entry)
+            if isinstance(entry, dict) and isinstance(entry.get("position"), int):
+                positioned.append(entry)
+            else:
+                unpositioned.append(entry)
+        positioned.sort(key=lambda e: e["position"])
 
-        shifted.append(
-            {
-                "position": position,
-                "purpose": "",
-                "content_brief": "",
-                "assumes": "",
-                "hands_off": "",
-                "data_references": [],
-            }
-        )
-        shifted.sort(
-            key=lambda e: e.get("position", 0) if isinstance(e, dict) else 0
-        )
+        try:
+            rewritten = reorder(list(positioned))
+        except IndexError:
+            # The route validated its index against the DECK, so an index the spec
+            # cannot answer means the two have already drifted.  Leaving a drifted
+            # spec alone is recoverable; renumbering it against the wrong slides is
+            # not.
+            logger.warning(
+                "deck spec has %s entries and cannot answer this mutation; "
+                "leaving it untouched",
+                len(positioned),
+                extra={"session_id": session_id, "route": label},
+            )
+            return None
+
+        if rewritten is None:
+            return None
+
+        renumbered: List[Any] = []
+        for index, entry in enumerate(rewritten):
+            entry = dict(entry)
+            entry["position"] = index
+            renumbered.append(entry)
+        renumbered.extend(unpositioned)
 
         spec = dict(spec)
-        spec["slides"] = shifted
+        spec["slides"] = renumbered
 
         try:
             _user = get_current_username()
@@ -3763,10 +3833,104 @@ class ChatService:
                 modified_by=_user,
             )
         except Exception as e:
-            # The slide is already saved and the marker will still fire, so a spec
-            # write that fails must not fail the insert.
-            logger.warning(f"Failed to shift deck spec (insert_slide): {e}")
+            logger.warning(f"Failed to write deck spec ({label}): {e}")
             return None
+
+    def _insert_deck_spec_slide(
+        self,
+        session_id: str,
+        position: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Give the deck spec a placeholder entry at *position*, shifting the rest up.
+
+        *position* is where the slide ACTUALLY landed, which the caller computes
+        before the insert: ``SlideDeck.insert_slide`` delegates to ``list.insert``,
+        which clamps a too-large position into an append, so the requested position
+        and the real one diverge on an append.  The clamp is re-applied here against
+        the spec's own length rather than trusted, because a spec shorter than the
+        deck would otherwise leave a hole.
+        """
+
+        def _splice(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            landed = min(position, len(entries))
+            return (
+                entries[:landed]
+                + [dict(_BLANK_DECK_SPEC_ENTRY)]
+                + entries[landed:]
+            )
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _splice, label="insert_slide"
+        )
+
+    def _delete_deck_spec_slide(
+        self,
+        session_id: str,
+        index: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Drop the deleted slide's spec entry and shift every higher entry down."""
+
+        def _drop(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if index >= len(entries):
+                raise IndexError(index)
+            return entries[:index] + entries[index + 1 :]
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _drop, label="delete_slide"
+        )
+
+    def _duplicate_deck_spec_slide(
+        self,
+        session_id: str,
+        index: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Copy the duplicated slide's spec entry in beside it.
+
+        The clone gets its SOURCE's brief, not a blank one: a duplicate is a copy of
+        a slide we already have a description for, so that description is known to be
+        right, where insert's newcomer has none.  The route's spec-dirty marker fires
+        either way, so the sweeper re-describes both — this decides which starting
+        point is true, not who writes the final prose.
+        """
+
+        def _clone(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if index >= len(entries):
+                raise IndexError(index)
+            return (
+                entries[: index + 1]
+                + [dict(entries[index])]
+                + entries[index + 1 :]
+            )
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _clone, label="duplicate_slide"
+        )
+
+    def _reorder_deck_spec_slides(
+        self,
+        session_id: str,
+        new_order: List[int],
+    ) -> Optional[Dict[str, Any]]:
+        """Permute the spec entries by the same permutation the slides took.
+
+        ``new_order[j]`` is the OLD index of the slide that now sits at *j* — the
+        route validates it is a true permutation of ``range(len(slides))`` before
+        reaching here.
+
+        This is the case the consumer-side guard structurally cannot cover: a reorder
+        preserves the position SET, so ``_persisted_spec_describes_these_rows`` reads
+        a reordered deck as aligned while every entry describes a different slide.
+        Renumbering in the route is the only thing that closes it.
+        """
+
+        def _permute(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if len(new_order) != len(entries):
+                raise IndexError(len(new_order))
+            return [entries[old] for old in new_order]
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _permute, label="reorder_slides"
+        )
 
     def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Delete a slide.
@@ -3809,6 +3973,13 @@ class ChatService:
             expected_version=expected_version,
         )
         self._record_deck_version(session_id, save_result)
+
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._delete_deck_spec_slide(session_id, index)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
 
         # Create save point
         try:
