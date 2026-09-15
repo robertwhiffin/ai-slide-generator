@@ -2578,7 +2578,21 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     if deck_write:
         try:
             write_deck_level_columns(
-                session_id, modified_by=initiated_by, **deck_write
+                session_id,
+                modified_by=initiated_by,
+                # Passed here for the same reason the architect passes it, and
+                # passed EXPLICITLY rather than left to the default: these are the
+                # two deck-level writers, and one of them being describe-only
+                # aware while the other defaults to `True` is a divergence held
+                # apart only by `architect_router`'s gate — an accident of routing
+                # rather than an agreement between the writers.  A sixth intent
+                # routing to the foreman, or a describe-only turn that ever
+                # reaches this node, would otherwise re-open the 409 the flag
+                # exists for: bump the version out of band and the human's next
+                # save fails.  Derived identically to the architect's, off the
+                # same turn-scoped key.
+                user_visible=not bool(scoped_vals(state, "describe_only")),
+                **deck_write,
             )
         except Exception as exc:
             logger.exception("Post-commit deck-level write failed")

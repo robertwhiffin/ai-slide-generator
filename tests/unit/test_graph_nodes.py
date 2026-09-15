@@ -1494,6 +1494,130 @@ class TestDeckReviewerDeckLevelWrite:
         assert "--brand" in css
 
 
+class TestDeckReviewerRespectsDescribeOnly:
+    """Final review I2 — the two deck-level writers must not disagree.
+
+    ``architect_node`` passes ``user_visible=not describe_only``; this node used
+    to pass nothing and take the default ``True``.  Today that is unreachable —
+    ``architect_router`` ends a describe-only turn before the foreman — so these
+    tests call the node DIRECTLY, which is the only way to see a writer's own
+    behaviour rather than the router's.  The point of the fix is that the two
+    writers agree by construction instead of by a routing accident.
+
+    Both directions are asserted, and the positive control is what makes the
+    suppression mean anything: a suppression test alone passes on a node that
+    never writes at all.
+    """
+
+    def _seeded(self, graph_env):
+        graph_env.seed_slides(
+            [
+                ("<div class='slide'>a</div>", "renderChartA();"),
+                ("<div class='slide'>b</div>", "renderChartB();"),
+            ]
+        )
+        graph_env.skills.set("deck_reviewer", DeckReviewOutput(findings=[]))
+
+    def test_a_describe_only_turn_does_not_bump_the_version_or_updated_at(
+        self, graph_env
+    ):
+        """Two of the three signals a client reads as "this deck changed".
+
+        ``deck.version`` is the token the WYSIWYG client sends back as
+        ``expected_version``, so an out-of-band bump turns the human's next save
+        into a 409 — on exactly the deck they are editing.
+
+        **``last_activity`` is NOT suppressed here, and measuring that is the
+        point of the third assertion.**  ``user_visible=False`` does suppress the
+        writer's own touch, but this node then always posts its review advisory
+        through ``add_message``, which moves ``last_activity`` itself
+        (``session_manager.py:1441``).  So the writer's flag cannot make this node
+        invisible on its own — a describe-only turn that ever reaches the deck
+        reviewer still re-sorts the human's session list.  Unreachable today
+        (``architect_router`` ends a describe-only turn before the foreman) and
+        deliberately not fixed here: gating the advisory is a change to what the
+        user is told, not to what the writers agree about.
+        """
+        from datetime import datetime
+
+        from src.database.models.session import UserSession
+
+        self._seeded(graph_env)
+        version_before = graph_env.deck_row().version
+        updated_before = graph_env.deck_row().updated_at
+        # A distinctive PAST value, not the column's own default: "unchanged"
+        # asserted against a freshly defaulted timestamp cannot tell a suppressed
+        # touch from a touch that landed in the same microsecond.
+        long_ago = datetime(2020, 1, 1, 0, 0, 0)
+        db = graph_env.factory()
+        try:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == graph_env.session_id)
+                .one()
+            )
+            session.last_activity = long_ago
+            db.commit()
+        finally:
+            db.close()
+
+        updates = deck_reviewer_node(
+            graph_env.state(turn_id=TURN, describe_only=scoped(TURN, True))
+        )
+
+        deck = graph_env.deck_row()
+        # ENTRY: the write really happened, so the suppression is a statement
+        # about a write and not about a node that returned early.
+        assert deck.slide_count == 2
+        assert updates["knitted_html"] == deck.html_content
+        assert deck.version == version_before
+        assert deck.updated_at == updated_before
+        db = graph_env.factory()
+        try:
+            assert (
+                db.query(UserSession)
+                .filter(UserSession.session_id == graph_env.session_id)
+                .one()
+                .last_activity
+                != long_ago
+            ), (
+                "last_activity was left alone, so the advisory no longer posts — "
+                "read this test's docstring before changing it"
+            )
+        finally:
+            db.close()
+
+    def test_a_normal_turn_still_bumps_the_version(self, graph_env):
+        """The paired direction: without this the suppression could be
+        unconditional and every user-driven graph turn would stop telling the
+        client its deck changed."""
+        self._seeded(graph_env)
+        version_before = graph_env.deck_row().version
+
+        deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        deck = graph_env.deck_row()
+        assert deck.slide_count == 2
+        assert deck.version == version_before + 1
+
+    def test_a_describe_only_flag_from_a_PREVIOUS_turn_does_not_suppress(
+        self, graph_env
+    ):
+        """Read through ``scoped_vals``, so a stale wrapper reads as ``False``.
+
+        Reading the raw wrapper instead would make every turn after a sweeper turn
+        on the same thread silently invisible to the client.
+        """
+        self._seeded(graph_env)
+        version_before = graph_env.deck_row().version
+
+        deck_reviewer_node(
+            graph_env.state(turn_id=TURN, describe_only=scoped("some-older-turn", True))
+        )
+
+        assert graph_env.deck_row().version == version_before + 1
+
+
 class TestDeckReviewerWriteInputsAreInsideTheHandler:
     """The write's INPUTS are guarded, not only the write call.
 
