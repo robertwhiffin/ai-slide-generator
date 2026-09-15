@@ -17,6 +17,7 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -89,6 +90,7 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # Five modules under tests/unit/ carry `pytest.mark.postgres` and a sixth
@@ -154,6 +156,7 @@ jobs:
   integration-api-routes:
     name: "Integration: API Routes"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -200,6 +203,7 @@ jobs:
   integration-config-api:
     name: "Integration: Config API"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -251,6 +255,7 @@ jobs:
   integration-export:
     name: "Integration: Export"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -297,6 +302,7 @@ jobs:
   integration-streaming:
     name: "Integration: Streaming"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -343,6 +349,7 @@ jobs:
   integration-slides:
     name: "Integration: Slides"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -403,6 +410,7 @@ jobs:
   integration-graph:
     name: "Integration: Graph Orchestration"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -458,6 +466,7 @@ jobs:
   integration-genie:
     name: "Integration: Genie"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -562,6 +571,7 @@ jobs:
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     steps:
@@ -592,6 +602,7 @@ jobs:
   frontend-unit-tests:
     name: Frontend Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     steps:
@@ -616,6 +627,7 @@ jobs:
   wheel-build:
     name: Wheel Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.packages == 'true'
     steps:
@@ -654,6 +666,7 @@ jobs:
   e2e-tests:
     name: E2E - ${{ matrix.test }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [changes, unit-tests, frontend-build]
     if: |
       always() &&
@@ -978,6 +991,7 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - unit-tests
       - frontend-build
