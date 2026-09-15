@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -781,14 +781,58 @@ def _conversation(session_id: str) -> List[Dict[str, str]]:
     return turns
 
 
-def _committed_slide_htmls(session_id: str) -> List[str]:
-    """Every committed slide's HTML, in deck order (``[]`` when there are none)."""
+def _committed_slide_rows(session_id: str) -> List[Dict[str, Any]]:
+    """Every committed slide row, in deck order (``[]`` when there are none).
+
+    One read with two consumers inside ``architect_node``: the deck digest wants
+    each row's HTML and the persisted-spec alignment check wants each row's
+    POSITION.  Reading the rows twice per architect turn to fetch them separately
+    is a query nobody needs.
+    """
     try:
-        rows = SlideWriter().list_slides_in_position_order(session_id)
+        return SlideWriter().list_slides_in_position_order(session_id)
     except Exception:
         logger.debug("No committed slides for session", exc_info=True)
         return []
-    return [row.get("html") or "" for row in rows]
+
+
+def _persisted_spec_describes_these_rows(
+    prior_spec: DeckSpec, row_positions: Set[int]
+) -> bool:
+    """Whether a PERSISTED spec's positions still match the committed rows.
+
+    Applied to the persisted spec only, and never to a spec the architect just
+    emitted: a spec with more slides than the deck has rows is exactly how a deck
+    GROWS (the first build has no rows at all, and "add a slide" describes one
+    before it exists), so the row set cannot constrain model output.  What it can
+    constrain is the FALLBACK — reusing a description written for a deck whose
+    rows have since moved.
+
+    ``session_slide_decks.deck_spec_json`` is renumbered on insert and on nothing
+    else (final review C1), so after a delete or a duplicate its ``position``
+    entries describe slides that have moved or gone, while the row-level
+    ``deck_spec_slide`` fragments travel correctly.  Comparing the two sets is
+    what makes the mismatch representable at the one consumer that acts on it,
+    rather than relying on four mutation routes to remember to renumber.
+
+    **No rows means nothing to disagree with**, so an unbuilt deck is aligned by
+    definition: the check exists to stop a stale brief reaching a slide a human
+    already has, and there is no such slide.
+
+    **A reorder is invisible here and that is a known limit**, stated so the next
+    reader does not mistake this for a total guarantee: reordering leaves the two
+    position sets equal while every entry describes a different slide.  The two
+    stronger predicates were both measured and rejected — comparing a row
+    fragment's own ``position`` to its row position fires after an INSERT (the one
+    route that renumbers the deck spec correctly, because fragments travel with
+    their slides and keep their original position), and comparing fragment CONTENT
+    to the deck-level entry fires after any §4.6 deck-level change, where the spec
+    is deliberately newer than the slides not yet rebuilt against it.  Closing the
+    reorder case means renumbering in the routes.
+    """
+    if not row_positions:
+        return True
+    return {slide.position for slide in prior_spec.slides} == set(row_positions)
 
 
 def _resolve_deck_id(db, session_id: str) -> Optional[int]:
@@ -1173,7 +1217,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
     turn_id = state["turn_id"]
     initiated_by = state.get("initiated_by")
 
-    committed_htmls = _committed_slide_htmls(session_id)
+    committed_rows = _committed_slide_rows(session_id)
+    committed_htmls = [row.get("html") or "" for row in committed_rows]
+    committed_positions = {
+        row.get("position")
+        for row in committed_rows
+        if row.get("position") is not None
+    }
     prior_digest = compute_deck_digest(committed_htmls) if committed_htmls else None
     prior_review = None
     if prior_digest is not None:
@@ -1284,11 +1334,63 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # proposal stays in proposed_design_contract — never in deck_spec (§M1).
         return updates
 
-    spec = out.deck_spec if out.deck_spec is not None else prior_spec
+    # The architect's own spec wins; the persisted one is a FALLBACK, and it is
+    # only usable while it still describes the rows this deck actually has.
+    # ArchitectOutput's validator requires deck_spec for intent='build', so this
+    # fallback is reached on an EDIT turn — the turn that hands a builder a brief
+    # resolved BY POSITION out of this spec (``build_branch_payload``), which is
+    # why a stale one is destructive rather than untidy: measured, an edit aimed
+    # at a position whose row was deleted rebuilds the row and the deck gains a
+    # slide, and an edit after a MIDDLE delete rewrites the human's surviving
+    # slide against the deleted slide's brief.  See
+    # _persisted_spec_describes_these_rows for what this can and cannot see.
+    spec = out.deck_spec
+    stale_prior_spec: Optional[dict] = None
+    if spec is None and prior_spec is not None:
+        if _persisted_spec_describes_these_rows(prior_spec, committed_positions):
+            spec = prior_spec
+        else:
+            stale_prior_spec = {
+                "spec_positions": sorted(s.position for s in prior_spec.slides),
+                "row_positions": sorted(committed_positions),
+            }
+            logger.warning(
+                "The persisted deck spec describes positions %s but this deck's "
+                "rows are at %s, so it cannot be used to brief a build; the deck "
+                "was changed outside the chat and the spec has not caught up "
+                "(the arc-review sweeper re-describes it)",
+                stale_prior_spec["spec_positions"],
+                stale_prior_spec["row_positions"],
+                extra={"session_id": session_id},
+            )
+
     if spec is None:
-        # An edit with nothing to edit. Degrade to a discussion turn rather than
-        # routing to a foreman that would cover no positions and reach deck
-        # review on an unbuilt deck.
+        # An edit with nothing usable to edit. Degrade to a discussion turn rather
+        # than routing to a foreman that would cover no positions and reach deck
+        # review on an unbuilt deck — or, on the stale-spec limb, dispatch a
+        # builder against a brief that describes another slide.  ONE degrade path
+        # for both causes, deliberately: two shapes of the same refusal would be
+        # two things to keep in step.  Only the code and the sentence differ, and
+        # the sentence differs because telling a user with a visible deck that no
+        # specification could be found would be false.
+        if stale_prior_spec is not None:
+            updates["architect_intent"] = "discuss"
+            updates["architect_message"] = (
+                "This deck has changed since I last described it — its slides no "
+                "longer line up with the plan I hold — so I have not rebuilt "
+                "anything. Tell me what this deck should say and I will describe "
+                "it again from what is there now."
+            )
+            updates["error_state"] = {
+                "node": "architect",
+                "code": "spec_positions_stale",
+                "message": (
+                    "the persisted deck_spec describes positions "
+                    f"{stale_prior_spec['spec_positions']} but the committed rows "
+                    f"are at {stale_prior_spec['row_positions']}"
+                ),
+            }
+            return updates
         updates["architect_intent"] = "discuss"
         updates["architect_message"] = (
             "I could not find a deck specification to edit for this session. "

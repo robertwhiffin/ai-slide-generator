@@ -219,13 +219,26 @@ class TestArchitectTurnHygiene:
         assert updates["error_state"] is None
 
     def test_an_edit_turn_carries_its_target_positions(self, graph_env):
+        """Three seeded rows for a three-position spec, and that is load-bearing.
+
+        The persisted spec is only usable as a fallback while its positions still
+        match the committed rows, so seeding ONE row against a three-slide spec —
+        as this test first did — now exercises the stale-spec refusal rather than
+        the edit path it is named for.
+        """
         graph_env.skills.set(
             "architect",
             ArchitectOutput(
                 intent="edit", message="Editing slide 2.", target_positions=[2]
             ),
         )
-        graph_env.seed_slides(["<div class='slide'>a</div>"])
+        graph_env.seed_slides(
+            [
+                "<div class='slide'>a</div>",
+                "<div class='slide'>b</div>",
+                "<div class='slide'>c</div>",
+            ]
+        )
         from src.api.services.deck_level_writer import write_deck_level_columns
 
         write_deck_level_columns(
@@ -248,6 +261,71 @@ class TestArchitectTurnHygiene:
 
         assert updates["architect_intent"] == "discuss"
         assert updates["error_state"]["code"] == "edit_without_spec"
+
+    def test_a_persisted_spec_that_no_longer_matches_the_rows_is_refused(
+        self, graph_env
+    ):
+        """Final review C1, at the node: the fallback is gated on alignment.
+
+        A deck whose rows a human deleted from keeps a three-entry spec, and every
+        entry from the deletion point on describes a different slide.  The turn
+        must refuse rather than brief a builder from it — with its OWN code, so
+        the two causes of the same refusal are distinguishable in a log, and its
+        own sentence, because a user looking at a visible deck must not be told no
+        specification could be found.
+        """
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(
+                intent="edit", message="Editing slide 2.", target_positions=[2]
+            ),
+        )
+        graph_env.seed_slides(
+            ["<div class='slide'>a</div>", "<div class='slide'>b</div>"]
+        )
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        write_deck_level_columns(
+            graph_env.session_id, deck_spec=make_spec((0, 1, 2)).to_json()
+        )
+
+        updates = architect_node(graph_env.state())
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "spec_positions_stale"
+        assert "[0, 1, 2]" in updates["error_state"]["message"]
+        assert "[0, 1]" in updates["error_state"]["message"]
+        assert "specification" not in updates["architect_message"]
+        # Nothing was committed off a spec this turn refused to trust.
+        assert "deck_spec" not in updates
+        assert graph_env.deck_row().deck_spec_json == make_spec((0, 1, 2)).to_json()
+
+    def test_an_unbuilt_deck_still_edits_from_its_persisted_spec(self, graph_env):
+        """The boundary the alignment check deliberately does not police.
+
+        With no committed rows there is no human slide for a stale brief to
+        overwrite and nothing for the spec to disagree with, so a deck described
+        but not yet built must still be buildable from its own description.  A
+        check written as "the sets are equal" with no empty-row case would refuse
+        every such turn, and this is the only test that can see that.
+        """
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(
+                intent="edit", message="Editing slide 0.", target_positions=[0]
+            ),
+        )
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        write_deck_level_columns(
+            graph_env.session_id, deck_spec=make_spec((0, 1, 2)).to_json()
+        )
+
+        updates = architect_node(graph_env.state())
+
+        assert updates["architect_intent"] == "edit"
+        assert updates["error_state"] is None
+        assert [s.position for s in updates["deck_spec"].slides] == [0, 1, 2]
 
     def test_discuss_commits_no_spec(self, graph_env):
         graph_env.skills.set(
