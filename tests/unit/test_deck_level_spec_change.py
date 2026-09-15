@@ -1004,20 +1004,23 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
     from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
 
     skill = load_skill("build_reviewer")
+    # Captured BY VALUE, before the call. Comparing skill.instructions afterwards
+    # would be inert: an in-place mutation of the frozen registry entry makes both
+    # sides of the comparison the same object and every assertion below pass.
+    baseline = str(skill.instructions)
     build_payload = {"position": 0, "html": "<div>x</div>", "scripts": ""}
 
-    assert (
-        _with_conditional_instructions(skill, build_payload).instructions
-        == skill.instructions
-    )
+    assert _with_conditional_instructions(skill, build_payload).instructions == baseline
     widened = _with_conditional_instructions(
         skill, {**build_payload, "deck_brief": {"audience": NEW_AUDIENCE}}
     )
     assert DECK_BRIEF_REVIEW in widened.instructions
-    assert widened.instructions.startswith(skill.instructions)
-    # The registry entry itself is never mutated: two concurrent branches must
-    # not be able to see each other's instructions.
-    assert load_skill("build_reviewer").instructions == skill.instructions
+    assert widened.instructions.startswith(baseline)
+    # The registry entry itself is never mutated: two concurrent branches must not
+    # be able to see each other's instructions, and the build path that runs after
+    # a re-review must get the same prompt as one that runs before it.
+    assert load_skill("build_reviewer").instructions == baseline
+    assert _with_conditional_instructions(skill, build_payload).instructions == baseline
 
 
 def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
