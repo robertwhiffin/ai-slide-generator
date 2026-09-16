@@ -27,6 +27,9 @@ interface ChatPanelProps {
   rawHtml: string | null;
   onSlidesGenerated: (slideDeck: SlideDeck, rawHtml: string | null) => void;
   onGenerationStart?: () => void;
+  /** E0: called for each slide_ready event; position + content arrive one slide at a
+   *  time as the graph's reorder buffer releases them.  Called before `complete`. */
+  onSlideReady?: (position: number, html: string, scripts: string) => void;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
   viewOnlyReason?: string;  // When provided, show why the user cannot edit
@@ -36,6 +39,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
   onSlidesGenerated,
   onGenerationStart,
+  onSlideReady,
   disabled = false,
   previewMessages = null,
   viewOnlyReason,
@@ -295,6 +299,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           // they persist across every prompt/generation in this session until
           // the user changes them (no after-generation reset).
           refreshConfig();
+          break;
+
+        // E0: ws4d D3 — one committed slide released by the graph's reorder buffer,
+        // delivered before `complete`.  Forwards position + content to AppLayout so
+        // the viewer can render slides as they land in ascending order.
+        case 'slide_ready':
+          if (event.position != null && event.html != null) {
+            onSlideReady?.(event.position, event.html, event.scripts ?? '');
+          }
           break;
       }
     };

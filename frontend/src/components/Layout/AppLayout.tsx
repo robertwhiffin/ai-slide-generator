@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { SlideDeck } from '../../types/slide';
+import type { SlideDeck, Slide } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
 import { SpecView } from '../SpecView/SpecView';
@@ -48,6 +48,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
   const navigate = useNavigate();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
+  // E0: tracks which slide positions have been released via slide_ready events in the
+  // current turn.  Resets when a new generation starts.  E2b reads this alongside
+  // isGenerating from GenerationContext: releasedPositions.size === deckSpec.slides.length && !isGenerating
+  const [releasedPositions, setReleasedPositions] = useState<Set<number>>(new Set());
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -93,6 +97,48 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       loadVersionsRef.current?.();
     }
   }, []);
+
+  // E0: incremental slide delivery — called by ChatPanel on each slide_ready event.
+  // Inserts the released slide at the correct ascending-position slot in slideDeck,
+  // creating a minimal deck when slideDeck is null (first slide of a fresh build).
+  // One list of slides, updated in place — no parallel pending-slides structure.
+  const handleSlideReady = useCallback((position: number, html: string, scripts: string) => {
+    setReleasedPositions(prev => {
+      const next = new Set(prev);
+      next.add(position);
+      return next;
+    });
+    const newSlide: Slide = {
+      index: position,
+      slide_id: `build-${position}`,
+      html,
+      scripts,
+    };
+    setSlideDeck(prev => {
+      if (!prev) {
+        return {
+          title: '',
+          slide_count: 1,
+          css: '',
+          external_scripts: [],
+          scripts: '',
+          slides: [newSlide],
+        };
+      }
+      const slides = [...prev.slides];
+      const existingIdx = slides.findIndex(s => s.index === position);
+      if (existingIdx >= 0) {
+        slides[existingIdx] = newSlide;
+      } else {
+        // Maintain ascending index order regardless of arrival order
+        const insertIdx = slides.findIndex(s => s.index > position);
+        if (insertIdx < 0) slides.push(newSlide);
+        else slides.splice(insertIdx, 0, newSlide);
+      }
+      return { ...prev, slides, slide_count: slides.length };
+    });
+  }, []);
+
   const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
@@ -1009,7 +1055,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       ref={chatPanelRef}
                       rawHtml={rawHtml}
                       disabled={isReadOnly}
-                      onGenerationStart={onGenerationStart}
+                      onGenerationStart={() => {
+                        onGenerationStart();
+                        // E0: reset released-position tracking for the new turn
+                        setReleasedPositions(new Set());
+                      }}
+                      onSlideReady={handleSlideReady}
                       previewMessages={previewVersion != null ? previewMessages : null}
                       onSlidesGenerated={async (deck, raw) => {
                         onGenerationComplete();
@@ -1033,6 +1084,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                 <div
                   className="flex flex-1 flex-col bg-background min-w-0"
                   data-tour="slide-viewer"
+                  data-released-count={releasedPositions.size}
                 >
                   {/* View controls: slides ⇄ spec.
                       `showSpec` is LOCAL state of the main view, deliberately NOT
