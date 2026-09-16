@@ -918,9 +918,13 @@ export const api = {
    * @param afterMessageId - Return messages after this ID
    * @returns Promise with poll response
    */
-  async pollChat(requestId: string, afterMessageId: number = 0): Promise<PollResponse> {
+  async pollChat(requestId: string, afterMessageId: number = 0, slideCursor?: number): Promise<PollResponse> {
+    // E0: hand slide_cursor back when polling so the backend delivers only
+    // the slides not yet seen by the client.  Only appended when > 0 to
+    // avoid changing the URL shape for requests that carry no cursor.
+    const cursorParam = slideCursor != null && slideCursor > 0 ? `&slide_cursor=${slideCursor}` : '';
     const response = await fetch(
-      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}`,
+      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}${cursorParam}`,
     );
 
     if (!response.ok) {
@@ -958,6 +962,9 @@ export const api = {
         const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig);
 
         let lastMessageId = 0;
+        // E0: track the next-slide cursor so we hand it back on each poll,
+        // letting the backend deliver only slides not yet released to this client.
+        let slidesCursor = 0;
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
@@ -966,11 +973,15 @@ export const api = {
           }
 
           try {
-            const response = await this.pollChat(request_id, lastMessageId);
+            const response = await this.pollChat(request_id, lastMessageId, slidesCursor > 0 ? slidesCursor : undefined);
 
             // Process new events
             for (const event of response.events) {
               onEvent(event);
+              // E0: keep the cursor up-to-date as slide_ready events arrive
+              if (event.type === 'slide_ready' && event.slide_cursor != null) {
+                slidesCursor = event.slide_cursor;
+              }
             }
             lastMessageId = response.last_message_id;
 
