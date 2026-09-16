@@ -1006,20 +1006,29 @@ jobs:
   #      than weaken an assertion until a placeholder satisfies it, each module
   #      carries an unconditional skip — tests/agentic/gates.py.
   #
-  # TO ENABLE, in that order:
-  #   a. delete the `if: false` below and add DATABRICKS_HOST / DATABRICKS_TOKEN
-  #      to the repo's secrets;
-  #   b. retire the placeholder gate: delete PLACEHOLDER_GATE from LAYER3_MARKS
-  #      in tests/agentic/gates.py.  One edit, for the whole layer — no test
-  #      file changes and no marker changes;
-  #   c. make this job GATE the build: remove it from _GATE_EXEMPT in
-  #      tests/unit/test_ci_test_summary_gates_every_job.py and add it to
-  #      test-summary's needs:, its echo block AND its `for result in` loop.
-  #      All three: needs: alone is a dependency, not a gate.
+  # TO ENABLE — TWO steps, and only the first is in this file:
+  #   a. HERE: delete the `if: false` below, and add DATABRICKS_HOST /
+  #      DATABRICKS_TOKEN to the repository's secrets.  Nothing else in this
+  #      workflow changes: the job is already wired into test-summary's needs:,
+  #      its echo block and its `for result in` failure loop, so it gates the
+  #      build the moment it runs.
+  #   b. NOT in this file, and worth saying plainly rather than filing under
+  #      "workflow-only": delete PLACEHOLDER_GATE from LAYER3_MARKS in
+  #      tests/agentic/gates.py.  Until that line goes, every test in the layer
+  #      is unconditionally skipped and this job would report a green nine-skip.
+  #      It is ONE line, for the whole layer — no test file changes, no marker
+  #      changes, no assertion changes — but it is a step, not a footnote.
   #
-  # It is in _GATE_EXEMPT today because a disabled job is still a job in the
-  # YAML, and a permanently-skipped entry in test-summary's failure loop gates
-  # nothing while looking as though it does.
+  # It is NOT in _GATE_EXEMPT, deliberately.  A disabled job is still a job in
+  # this YAML, and the alternative — exempting it now and un-exempting it on the
+  # way in — would make enabling the layer require editing a test file.  Being in
+  # the gate while disabled is safe, and safe by a mechanism this workflow already
+  # relies on: the loop fails only on the exact string `failure`
+  # (`if [ "$result" == "failure" ]`), a skipped job reports `skipped`, and
+  # test-summary is `if: always()`.  frontend-build, frontend-unit-tests and
+  # e2e-tests already sit in that loop and report `skipped` on every
+  # backend-only PR, which is why the step ends "All tests passed or were
+  # skipped!".
   #
   # It runs the same one command a developer runs (§G1: discoverable and one
   # command, rather than a marker nobody remembers), so CI and a laptop cannot
@@ -1072,6 +1081,7 @@ jobs:
       - integration-genie
       - integration-general
       - e2e-tests
+      - agentic-tests
     if: always()
     steps:
       - name: Check test results
@@ -1089,6 +1099,7 @@ jobs:
           echo "Genie: ${{ needs.integration-genie.result }}"
           echo "General Integration: ${{ needs.integration-general.result }}"
           echo "E2E: ${{ needs.e2e-tests.result }}"
+          echo "Agentic Behaviour (layer 3): ${{ needs.agentic-tests.result }}"
 
           # Fail if any required job failed (not skipped)
           failed=false
@@ -1104,7 +1115,8 @@ jobs:
                         "${{ needs.integration-graph.result }}" \
                         "${{ needs.integration-genie.result }}" \
                         "${{ needs.integration-general.result }}" \
-                        "${{ needs.e2e-tests.result }}"; do
+                        "${{ needs.e2e-tests.result }}" \
+                        "${{ needs.agentic-tests.result }}"; do
             if [ "$result" == "failure" ]; then
               failed=true
               break

@@ -64,17 +64,22 @@ unconditional ``skip`` (:data:`PLACEHOLDER_GATE`)
     skipped honest test beats a passing dishonest one, so the tests keep their
     real assertions and ship skipped.
 
-HOW TO RETIRE THE PLACEHOLDER GATE (the only edit inside ``tests/``)
--------------------------------------------------------------------
+HOW TO RETIRE THE PLACEHOLDER GATE — THE ONE EDIT THIS LAYER NEEDS
+-----------------------------------------------------------------
 When the authored prompts land, delete :data:`PLACEHOLDER_GATE` from
-:data:`LAYER3_MARKS` **here** — one edit, in one file, for the whole layer.  No
+:data:`LAYER3_MARKS` **here** — one line, in one file, for the whole layer.  No
 test file changes, no marker changes, no assertion changes.
 ``tests/unit/test_agentic_layer_is_placed_and_gated.py`` pins the skill versions
 that shipped with placeholders, so re-authoring the prompts turns that guard red
 and puts this decision in front of whoever changed them.
 
-Enabling the CI *job* is a separate, workflow-side change — see that job's own
-comment in ``.github/workflows/test.yml``.
+That line is the SECOND of the two steps that switch this layer on, and it is the
+one that is not in the workflow.  The first is deleting ``if: false`` from the
+``agentic-tests`` job in ``.github/workflows/test.yml`` and giving it credentials;
+that job is already wired into ``test-summary``'s ``needs:``, echo block and
+failure loop, so it gates the build the moment it runs.  Until *this* line goes,
+though, an enabled job would report a green all-skipped run — which is why the two
+steps belong together and why neither is described as the whole job.
 """
 
 from __future__ import annotations

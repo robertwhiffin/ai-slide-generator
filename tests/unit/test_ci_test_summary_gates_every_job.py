@@ -63,9 +63,13 @@ and the next hang costs six runner-hours across a matrix.  GitHub's default is
 **360 minutes**, so an absent key is not "no limit in practice"; it is six hours.
 
 ``_GATE_EXEMPT`` does NOT apply to this invariant, and deliberately.  A job can
-have a legitimate reason to sit outside the pass/fail gate — being disabled, or
-being the gate itself — and no reason at all to be allowed to hang.  The disabled
-layer-3 job is covered like any other.
+have a legitimate reason to sit outside the pass/fail gate — being the gate itself,
+or being the paths-filter every other job reads — and no reason at all to be
+allowed to hang.  The disabled layer-3 job is covered like any other, and note that
+being *disabled* is not on that list: ``agentic-tests`` is in the gate while
+``if: false``, because a skipped job reports ``skipped`` and the loop acts only on
+``failure``.  Exempting it instead would have made enabling the layer require an
+edit to this file.
 """
 
 import re
@@ -91,16 +95,6 @@ _GATE_EXEMPT = {
         "skips them and they report as skipped rather than passing"
     ),
     SUMMARY_JOB: "it IS the gate; it cannot gate itself",
-    "agentic-tests": (
-        "layer 3 — the agentic-behaviour suite, added DISABLED (`if: false`) "
-        "because it calls a real Databricks serving endpoint this org has no "
-        "credentials for, and because the seven skills still ship placeholder "
-        "prompts (tests/agentic/gates.py). A disabled job is still a job in this "
-        "YAML, so it needs an entry here; a permanently-skipped job in the "
-        "failure loop would gate nothing while looking as though it does. WHEN IT "
-        "IS ENABLED: delete this entry and add `agentic-tests` to test-summary's "
-        "needs:, its echo block AND its `for result in` loop — all three"
-    ),
 }
 
 #: ``needs.<job>.result``.  Digits included — see the module docstring.

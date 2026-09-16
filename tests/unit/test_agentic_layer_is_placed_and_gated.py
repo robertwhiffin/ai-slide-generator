@@ -49,8 +49,12 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 NODES = REPO_ROOT / "src" / "services" / "graph" / "nodes.py"
 
 #: The CI job that runs this layer.  Its ``if:`` is deliberately NOT asserted
-#: anywhere: enabling the layer must be a workflow-only change, and a guard that
-#: pinned ``if: false`` would make enabling it require editing a test.
+#: anywhere, and it is deliberately NOT in ``_GATE_EXEMPT``: switching the layer on
+#: is (1) deleting ``if: false`` plus adding two secrets, and (2) deleting one line
+#: from ``tests/agentic/gates.py``.  A guard that pinned ``if: false``, or an
+#: exemption that had to be removed on the way in, would add a third edit to a test
+#: file for no gain — the job is wired into the gate already, and a disabled job
+#: reports ``skipped``, which the failure loop does not act on.
 LAYER3_JOB = "agentic-tests"
 
 #: The one command for this layer, and the directory it runs.  §G1 asks for "a
