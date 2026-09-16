@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { SlideDeck } from '../../types/slide';
-import type { SlideFinding } from '../../types/finding';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
 import { SpecView } from '../SpecView/SpecView';
@@ -759,17 +758,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     [navigate]
   );
 
-  // Findings have no producing endpoint yet (PRD workstream 5). Tests inject
-  // fixtures on window; production renders an empty list.
-  const [testFindings, setTestFindings] = useState<SlideFinding[]>([]);
-  useEffect(() => {
-    const injected = (window as unknown as { __TELLR_TEST_FINDINGS__?: SlideFinding[] })
-      .__TELLR_TEST_FINDINGS__;
-    if (injected) setTestFindings(injected);
-  }, []);
-
-  // Stable findings identity — prevents unnecessary re-renders in SlideViewer.
-  const stableFindings = useMemo(() => testFindings, [testFindings]);
+  // Derive findings from the displayed deck.  get_slide_deck populates the
+  // findings key on all three of its read paths (session_manager.py :1827,
+  // :1916, :1943), so slideDeck.findings is never undefined on a deck returned
+  // from the API.  Memoised so SlideViewer does not see a new array reference
+  // on every render that does not change the deck.
+  const stableFindings = useMemo(
+    () => displayDeck?.findings ?? [],
+    [displayDeck],
+  );
 
   // Reorder handler — lifted from SlidePanel so SlideViewer can call it.
   const handleReorderSlides = useCallback(async (from: number, to: number) => {
@@ -856,6 +853,39 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const handleDiscussSpec = useCallback(() => {
     setCollapsed((prev) => (prev.chat ? { ...prev, chat: false } : prev));
   }, []);
+
+  // ── Finding action handlers ────────────────────────────────────────────────
+  // The drawer calls these after its own internal state updates (dismiss updates
+  // the dismissed set and seenState; apply/discuss pass through unchanged).
+
+  // Apply: no dedicated backend endpoint today.  Route through chat so the agent
+  // can construct and deliver the fix.  Expand the chat so the user sees the
+  // response.
+  const handleApplyFinding = useCallback((findingId: string) => {
+    const finding = displayDeck?.findings?.find(f => f.id === findingId);
+    if (!finding) return;
+    setCollapsed((prev) => prev.chat ? { ...prev, chat: false } : prev);
+    handleSendMessage(
+      `Please apply this review suggestion for slide ${finding.slideIndex + 1}: ${finding.message}`,
+    );
+  }, [displayDeck, handleSendMessage]);
+
+  // Dismiss: SlideViewer's handleDismiss already updates the dismissed set and
+  // seenState.  No further server action for dismissal today.
+  const handleDismissFinding = useCallback((_findingId: string) => {
+    // intentional no-op — the drawer manages dismiss state internally
+  }, []);
+
+  // Discuss: expand the chat panel so the user can ask follow-up questions.
+  const handleDiscussFinding = useCallback((findingId: string) => {
+    const finding = displayDeck?.findings?.find(f => f.id === findingId);
+    setCollapsed((prev) => prev.chat ? { ...prev, chat: false } : prev);
+    if (finding) {
+      handleSendMessage(
+        `I'd like to discuss this review finding for slide ${finding.slideIndex + 1}: ${finding.message}`,
+      );
+    }
+  }, [displayDeck, handleSendMessage]);
 
   const viewOnlyReason =
     !isLockHolder && editingLockHolder
@@ -1068,9 +1098,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       deckKey={sessionId ?? 'no-session'}
                       findings={stableFindings}
                       callbacks={{
-                        onApplyFinding: (id) => console.info('[viewer] apply finding', id),
-                        onDismissFinding: (id) => console.info('[viewer] dismiss finding', id),
-                        onDiscussFinding: (id) => console.info('[viewer] discuss finding', id),
+                        onApplyFinding: handleApplyFinding,
+                        onDismissFinding: handleDismissFinding,
+                        onDiscussFinding: handleDiscussFinding,
                       }}
                       onReorder={handleReorderSlides}
                       onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {

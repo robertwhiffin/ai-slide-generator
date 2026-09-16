@@ -701,6 +701,7 @@ jobs:
           - design-systems-ui
           - export-csp
           - export-ui
+          - findings-drawer
           - help-ui
           - history-integration
           - history-ui

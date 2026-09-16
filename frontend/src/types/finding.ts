@@ -28,3 +28,18 @@ export const CATEGORY_LABEL: Record<FindingCategory, string> = {
   design: 'Design',
   narrative: 'Narrative',
 };
+
+/**
+ * Criteria whose findings are routed to CHAT, not the slide drawer (grain-routing rule).
+ *
+ * Mirrors the `level: "deck"` entries in the Python CRITERIA registry at
+ * `src/domain/finding.py`.  Keep in sync when criteria are added to that registry.
+ *
+ * Guard: a finding with a deck-level criterion must never render in the FeedbackDrawer
+ * even if it somehow carries a real slideIndex (§E2 defence-in-depth filter).
+ */
+export const DECK_LEVEL_CRITERIA: ReadonlySet<string> = new Set([
+  'arc_gap',
+  'cross_slide_repetition',
+  'missing_conclusion',
+]);

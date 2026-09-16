@@ -26,7 +26,6 @@ import { test, expect } from '../fixtures/base-test';
 import type { Page } from '@playwright/test';
 import { setupMocks } from '../helpers/setup-mocks';
 import { apiPath } from '../helpers/api-route';
-import { mockFindings } from '../fixtures/findings';
 import type { SlideFinding } from '../../src/types/finding';
 import {
   mockSessionWithSlides,
@@ -223,15 +222,8 @@ test.describe('spec view toggle', () => {
       }),
     );
 
-    // Injected before navigation: AppLayout reads window.__TELLR_TEST_FINDINGS__
-    // once on mount, so addInitScript must run first.
-    await page.addInitScript(
-      (findings) => {
-        (window as unknown as { __TELLR_TEST_FINDINGS__: typeof findings })
-          .__TELLR_TEST_FINDINGS__ = findings;
-      },
-      mockFindings,
-    );
+    // Findings are delivered through mockSlidesResponse.slide_deck.findings
+    // (set in session-helpers.ts) — no window injection needed.
   });
 
   // ── the switch itself ──────────────────────────────────────────────────────
@@ -515,10 +507,22 @@ test.describe('spec view toggle', () => {
     // with the findings on slide 1 the resurrected finding would be off-screen and
     // this test would only ever fail on its control assertion — the defect would be
     // detected, but not the one named in the test's title. Measured, by sabotage.
-    await page.addInitScript((findings) => {
-      (window as unknown as { __TELLR_TEST_FINDINGS__: typeof findings })
-        .__TELLR_TEST_FINDINGS__ = findings;
-    }, SLIDE0_FINDINGS);
+    //
+    // Findings are now delivered through the API (E2 wired the real path).
+    // Override the slides endpoint for this test to return SLIDE0_FINDINGS.
+    // Registered AFTER mockSessionWithSlides so Playwright's LIFO ordering makes
+    // this more specific route take precedence.
+    await page.route(
+      apiPath(`/api/sessions/${TEST_SESSION_ID}/slides`),
+      (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          session_id: TEST_SESSION_ID,
+          slide_deck: { ...mockSlidesResponse.slide_deck, findings: SLIDE0_FINDINGS },
+        }),
+      }),
+    );
 
     await openDeck(page);
     await expect(page.getByTestId('finding-s0-dismiss-me')).toBeVisible();
