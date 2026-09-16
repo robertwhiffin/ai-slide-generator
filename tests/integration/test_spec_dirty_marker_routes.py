@@ -44,6 +44,16 @@ _SPEC_SYNC_DB = "src.services.spec_sync.get_db_session"
 # The graph's deck-level write path also opens its own session; a test that drives
 # it must point it at the same engine or it reaches the environment's database.
 _WRITER_DB = "src.api.services.deck_level_writer.get_db_session"
+# Every slide-mutation method in chat_service calls get_current_username() to stamp
+# modified_by on the Slide object.  On a laptop load_dotenv() supplies real
+# Databricks credentials, so the call returns in milliseconds and was invisible.
+# In CI, DATABRICKS_HOST is a non-empty but unreachable value
+# ("https://test.cloud.databricks.com"); the SDK enters a retry loop that sleeps
+# rather than raising, and the job hung for 22+ minutes before it was cancelled.
+# The username is incidental plumbing for this suite (the test subject is the
+# dirty-marker route, not Databricks identity resolution), so we stub it here at
+# the module boundary where chat_service binds the name.
+_CHAT_SERVICE_USERNAME = "src.api.services.chat_service.get_current_username"
 
 _EDITED_HTML = '<div class="slide"><h2>Edited by a human</h2></div>'
 
@@ -53,11 +63,14 @@ def api(client, test_db_factory):
     """The savepoint harness's TestClient, with spec_sync pointed at its engine.
 
     `client` is built first, so its patches are already active; this only adds the
-    one target it does not know about.
+    targets it does not know about: the spec_sync and deck_level_writer db sessions,
+    and chat_service's Databricks username lookup which would otherwise reach a
+    non-resolving host and hang indefinitely under CI credentials.
     """
     fake = _make_fake_get_db_session(test_db_factory)
     with patch(_SPEC_SYNC_DB, fake), patch(_WRITER_DB, fake):
-        yield client
+        with patch(_CHAT_SERVICE_USERNAME, return_value="test-user"):
+            yield client
 
 
 def _marker(test_db_factory, session_id: str) -> SessionSlideDeck:

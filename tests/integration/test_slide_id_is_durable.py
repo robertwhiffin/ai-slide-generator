@@ -53,13 +53,32 @@ from tests.integration.test_savepoint_e2e import (  # noqa: F401 — pytest fixt
 
 _SPEC_SYNC_DB = "src.services.spec_sync.get_db_session"
 _WRITER_DB = "src.api.services.deck_level_writer.get_db_session"
+# Every slide-mutation method in chat_service calls get_current_username() to stamp
+# modified_by / created_by on Slide objects.  On a laptop load_dotenv() supplies real
+# Databricks credentials, so the call returns in milliseconds and was invisible.
+# In CI, DATABRICKS_HOST is a non-empty but unreachable value
+# ("https://test.cloud.databricks.com"); the SDK enters a retry loop that sleeps
+# rather than raising, and the job hung for 604+ seconds before it was cancelled.
+# The username is incidental plumbing for this suite (the test subject is slide-id
+# durability, not Databricks identity resolution), so we stub it here at the module
+# boundary where chat_service binds the name.
+_CHAT_SERVICE_USERNAME = "src.api.services.chat_service.get_current_username"
 
 
 @pytest.fixture
 def api(client, test_db_factory):
+    """The savepoint harness's TestClient, with spec_sync, deck_level_writer, and
+    the Databricks username lookup all redirected away from the environment's host.
+
+    `client` is built first, so its patches are already active; this only adds the
+    targets it does not know about: the spec_sync and deck_level_writer db sessions,
+    and chat_service's Databricks username lookup which would otherwise reach a
+    non-resolving host and hang indefinitely under CI credentials.
+    """
     fake = _make_fake_get_db_session(test_db_factory)
     with patch(_SPEC_SYNC_DB, fake), patch(_WRITER_DB, fake):
-        yield client
+        with patch(_CHAT_SERVICE_USERNAME, return_value="test-user"):
+            yield client
 
 
 def _rows(test_db_factory, session_id: str):
