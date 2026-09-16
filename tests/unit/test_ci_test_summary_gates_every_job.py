@@ -47,6 +47,25 @@ above, in the other direction.
 The job-name pattern below includes DIGITS deliberately: the grep
 ``'^  [a-z_-]*:'`` that this repo has used before MISSES ``e2e-tests``
 (corrections §26, fact 4).
+
+A SECOND INVARIANT OVER THE SAME UNIVERSE — ``timeout-minutes``
+---------------------------------------------------------------
+Also guarded here, because it is the same question asked of the same set: *every
+job in ``workflow["jobs"]``*.  Splitting it into its own file would duplicate the
+parse, and with it the two lessons the parse encodes (yaml rather than a regex
+over indentation; digits in job ids).
+
+The defect: a job hung on a runner for twenty-two minutes, and the fix gave every
+job a ``timeout-minutes`` where only ``integration-general`` had one.  Two agents
+then confirmed that **nothing enforced it** — remove the key from a job and no
+check reddens — so the fix decayed the moment somebody added a job without one,
+and the next hang costs six runner-hours across a matrix.  GitHub's default is
+**360 minutes**, so an absent key is not "no limit in practice"; it is six hours.
+
+``_GATE_EXEMPT`` does NOT apply to this invariant, and deliberately.  A job can
+have a legitimate reason to sit outside the pass/fail gate — being disabled, or
+being the gate itself — and no reason at all to be allowed to hang.  The disabled
+layer-3 job is covered like any other.
 """
 
 import re
@@ -72,6 +91,16 @@ _GATE_EXEMPT = {
         "skips them and they report as skipped rather than passing"
     ),
     SUMMARY_JOB: "it IS the gate; it cannot gate itself",
+    "agentic-tests": (
+        "layer 3 — the agentic-behaviour suite, added DISABLED (`if: false`) "
+        "because it calls a real Databricks serving endpoint this org has no "
+        "credentials for, and because the seven skills still ship placeholder "
+        "prompts (tests/agentic/gates.py). A disabled job is still a job in this "
+        "YAML, so it needs an entry here; a permanently-skipped job in the "
+        "failure loop would gate nothing while looking as though it does. WHEN IT "
+        "IS ENABLED: delete this entry and add `agentic-tests` to test-summary's "
+        "needs:, its echo block AND its `for result in` loop — all three"
+    ),
 }
 
 #: ``needs.<job>.result``.  Digits included — see the module docstring.
@@ -265,4 +294,65 @@ def test_every_needed_job_is_echoed_in_the_summary():
         "these jobs are in test-summary's needs: but their result is never "
         "echoed, so a reader of the log cannot see them:\n"
         + "\n".join(f"  - {job}" for job in missing)
+    )
+
+
+# ---------------------------------------------------------------------------
+# The second invariant over the same universe: every job bounds its own runtime.
+# See the module docstring's `timeout-minutes` section.
+# ---------------------------------------------------------------------------
+
+#: An upper bound on any single job, in minutes.  Not arbitrary: the longest job in
+#: this workflow is the Playwright matrix at 20, and GitHub's own default is 360 —
+#: so a number in between is what separates "bounded" from "bounded on paper".
+#: Raising it is a deliberate edit here, with a reason, not a side effect of adding
+#: a slow job.
+_MAX_TIMEOUT_MINUTES = 60
+
+
+def test_every_job_declares_a_timeout():
+    """No job may inherit GitHub's 360-minute default.
+
+    Derived from ``jobs:`` — the same universe as the gate assertion, and for the
+    same reason: a job nobody wired up is exactly the job nobody remembered to
+    bound.
+    """
+    jobs = _jobs()
+    missing = sorted(name for name, job in jobs.items() if "timeout-minutes" not in job)
+    assert not missing, (
+        "these jobs in .github/workflows/test.yml declare no timeout-minutes, so "
+        "each inherits GitHub's 360-minute default and one hung step burns six "
+        "runner-hours (times every matrix leg):\n"
+        + "\n".join(f"  - {job}" for job in missing)
+        + "\n\nAdd `timeout-minutes:` to each, in the style of its neighbours. This "
+        "is not covered by _GATE_EXEMPT: a job may have a reason to sit outside the "
+        "pass/fail gate and no reason to be allowed to hang."
+    )
+
+
+def test_every_job_timeout_is_a_bounded_positive_integer():
+    """A declared timeout still has to be a real bound.
+
+    Paired with the test above rather than folded into it: "the key is present" and
+    "the value bounds anything" are different failures, and a single assertion over
+    both would let a diagnosis of one be read as the other.  ``timeout-minutes: 0``
+    and ``timeout-minutes: 600`` both satisfy presence.
+    """
+    jobs = _jobs()
+    broken = []
+    for name, job in sorted(jobs.items()):
+        value = job.get("timeout-minutes")
+        if value is None:
+            continue  # the test above owns absence, and names it precisely
+        if isinstance(value, bool) or not isinstance(value, int):
+            broken.append(f"{name}: timeout-minutes is {value!r}, not an integer")
+        elif value <= 0:
+            broken.append(f"{name}: timeout-minutes is {value}, which bounds nothing")
+        elif value > _MAX_TIMEOUT_MINUTES:
+            broken.append(
+                f"{name}: timeout-minutes is {value}, above the "
+                f"{_MAX_TIMEOUT_MINUTES}-minute ceiling this workflow keeps"
+            )
+    assert not broken, "\n".join(
+        ["Jobs whose declared timeout does not bound them:"] + broken
     )
