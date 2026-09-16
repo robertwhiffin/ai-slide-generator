@@ -30,6 +30,7 @@ import appLayoutSource from '../Layout/AppLayout.tsx?raw';
 import apiSource from '../../services/api.ts?raw';
 import { _insertSlideAscending } from '../Layout/AppLayout';
 import { api } from '../../services/api';
+import type { StreamEvent } from '../../services/api';
 
 // ── 1. slide_ready case exists in handleStreamEvent ──────────────────────────
 //
@@ -333,5 +334,164 @@ describe('E0 — polling cursor behavioral', () => {
     // Sabotage B (wrong constant, e.g. 3) → URL has slide_cursor=3 → passes here
     //   (presence is satisfied; only test 10 catches the wrong value).
     expect(pollUrls[1], 'second poll must include slide_cursor= parameter').toContain('slide_cursor=');
+  });
+});
+
+// ── 12, 13, 14. Polling batch slides — BEHAVIOURAL ───────────────────────────
+//
+// The server delivers released slides as top-level `slides` and `slide_cursor`
+// on the poll response, NOT as events in the `events` array.  The streaming path
+// uses real `slide_ready` events; the polling path must translate the top-level
+// shape into the same `slide_ready` event shape before the `complete` event fires.
+//
+// THREE CLAIMS:
+//
+//   Test 12 — emits a slide_ready per entry in response.slides, before complete.
+//     Sabotage: remove the translation loop → no slide_ready events → FAILS.
+//
+//   Test 13 — emits no slide_ready when response.slides is absent.
+//     Sabotage: emit unconditionally → spurious event on empty response → FAILS.
+//
+//   Test 14 — cursor from response.slide_cursor (top-level) advances slidesCursor.
+//     The streaming path advances cursor from events; the polling path must advance
+//     it from the top-level response.slide_cursor so the next poll starts at the
+//     right position.
+//     Sabotage: read cursor only from events (none here) → cursor stays 0 →
+//               second poll omits slide_cursor param → FAILS.
+//
+// Rule 6: each test below contains only behavioural assertions.
+
+describe('E0 — polling batch slides (response.slides → slide_ready events)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('12 — emits a slide_ready event for each entry in response.slides', async () => {
+    const emitted: StreamEvent[] = [];
+    let pollCount = 0;
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('/api/chat/async')) {
+        return { ok: true, json: async () => ({ request_id: 'batch-req' }) };
+      }
+      pollCount += 1;
+      if (pollCount === 1) {
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'running',
+            events: [],
+            slides: [
+              { position: 0, html: '<div>s0</div>', scripts: '', agent: 'slide_agent' },
+              { position: 1, html: '<div>s1</div>', scripts: '', agent: 'slide_agent' },
+            ],
+            slide_cursor: 2,
+            last_message_id: 1,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'completed',
+          events: [],
+          last_message_id: 2,
+          result: { slides: null, raw_html: null, replacement_info: null, experiment_url: null, session_title: null, metadata: null },
+        }),
+      };
+    }));
+
+    api.startPolling('session', 'msg', undefined, (e) => emitted.push(e), (err) => { throw err; });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(3001);
+    await vi.advanceTimersByTimeAsync(3001);
+
+    const slideReady = emitted.filter(e => e.type === 'slide_ready');
+    expect(slideReady.length, 'two slide_ready events must be emitted, one per response.slides entry').toBe(2);
+    expect(slideReady[0].position, 'first slide_ready carries position 0').toBe(0);
+    expect(slideReady[1].position, 'second slide_ready carries position 1').toBe(1);
+    // slide_ready events must precede the complete event
+    const completeIdx = emitted.findIndex(e => e.type === 'complete');
+    const lastSlideIdx = emitted.map(e => e.type).lastIndexOf('slide_ready');
+    expect(lastSlideIdx, 'last slide_ready must arrive before complete').toBeLessThan(completeIdx);
+  });
+
+  it('13 — emits no slide_ready events when response.slides is absent', async () => {
+    const emitted: StreamEvent[] = [];
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('/api/chat/async')) {
+        return { ok: true, json: async () => ({ request_id: 'no-slides-req' }) };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'completed',
+          events: [],
+          last_message_id: 1,
+          result: { slides: null, raw_html: null, replacement_info: null, experiment_url: null, session_title: null, metadata: null },
+        }),
+      };
+    }));
+
+    api.startPolling('session', 'msg', undefined, (e) => emitted.push(e), (err) => { throw err; });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(3001);
+
+    const slideReady = emitted.filter(e => e.type === 'slide_ready');
+    expect(slideReady.length, 'no slide_ready events should be emitted when response.slides is absent').toBe(0);
+  });
+
+  it('14 — second poll URL carries slide_cursor from response.slide_cursor (not from events)', async () => {
+    const pollUrls: string[] = [];
+    let pollCount = 0;
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/api/chat/async')) {
+        return { ok: true, json: async () => ({ request_id: 'cursor-batch-req' }) };
+      }
+      pollCount += 1;
+      pollUrls.push(u);
+      if (pollCount === 1) {
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'running',
+            events: [],
+            slides: [
+              { position: 0, html: '<div>s0</div>', scripts: '', agent: 'slide_agent' },
+            ],
+            slide_cursor: 5,
+            last_message_id: 1,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'completed',
+          events: [],
+          last_message_id: 2,
+          result: { slides: null, raw_html: null, replacement_info: null, experiment_url: null, session_title: null, metadata: null },
+        }),
+      };
+    }));
+
+    api.startPolling('session', 'msg', undefined, () => {}, (err) => { throw err; });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(3001);
+    await vi.advanceTimersByTimeAsync(3001);
+
+    expect(pollUrls.length, 'at least two poll requests must be made').toBeGreaterThanOrEqual(2);
+    expect(pollUrls[1], 'second poll must carry slide_cursor=5 from response.slide_cursor').toContain('slide_cursor=5');
   });
 });

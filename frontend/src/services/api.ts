@@ -161,6 +161,10 @@ interface PollResponse {
   status: 'pending' | 'running' | 'completed' | 'error';
   events: StreamEvent[];
   last_message_id: number;
+  /** E10: released slides delivered batch-style on the polling path */
+  slides?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
+  /** E10: next slide position not yet released; advance slidesCursor from this */
+  slide_cursor?: number;
   result?: {
     slides?: SlideDeck;
     raw_html?: string;
@@ -975,7 +979,7 @@ export const api = {
           try {
             const response = await this.pollChat(request_id, lastMessageId, slidesCursor > 0 ? slidesCursor : undefined);
 
-            // Process new events
+            // Process new events (streaming path emits real slide_ready events here)
             for (const event of response.events) {
               onEvent(event);
               // E0: keep the cursor up-to-date as slide_ready events arrive
@@ -983,6 +987,30 @@ export const api = {
                 slidesCursor = event.slide_cursor;
               }
             }
+
+            // E10: translate top-level slides batch (polling path) into slide_ready events.
+            // The streaming path delivers slides as events above; the polling path delivers
+            // them as response.slides + response.slide_cursor.  Both must reach onEvent as
+            // slide_ready before the complete event so the deck builds incrementally.
+            if (response.slides && response.slides.length > 0) {
+              for (const slide of response.slides) {
+                onEvent({
+                  type: 'slide_ready',
+                  position: slide.position,
+                  html: slide.html,
+                  scripts: slide.scripts,
+                  agent: slide.agent,
+                  slide_cursor: response.slide_cursor,
+                });
+              }
+            }
+            // E10: advance the cursor from the top-level response field (polling path).
+            // The streaming path advances it from events above; here we take the max so
+            // whichever path fired last wins and we never go backwards.
+            if (response.slide_cursor != null && response.slide_cursor > slidesCursor) {
+              slidesCursor = response.slide_cursor;
+            }
+
             lastMessageId = response.last_message_id;
 
             // Stop polling on completion
