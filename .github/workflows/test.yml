@@ -987,6 +987,72 @@ jobs:
           name: playwright-results-${{ matrix.test }}
           path: frontend/test-results/
 
+  # -------------------------------------------------------------------------
+  # Layer 3 — agentic behaviour.  DISABLED, and the `if: false` below is the
+  # ONLY thing keeping it off; everything else about it is finished.
+  #
+  # The suite's four layers are organised by what each NEEDS in order to run,
+  # not by marker: layer 1 (orchestration) and layer 2 (contracts) need nothing
+  # and run above; layer 4 needs a database and runs above; layer 3 needs a real
+  # language model, which is what this job is for.
+  #
+  # WHY IT CANNOT RUN HERE YET — two barriers, in the order they must fall:
+  #   1. No credentials.  These tests call a real Databricks serving endpoint
+  #      with real spend.  This repo's org has no secret to give them.
+  #   2. Placeholder prompts.  The seven skills ship substantive but
+  #      un-prompt-engineered instruction text by design (see
+  #      src/core/skills/__init__.py, which calls them placeholders itself), and
+  #      every layer-3 test is written against the AUTHORED prompts.  Rather
+  #      than weaken an assertion until a placeholder satisfies it, each module
+  #      carries an unconditional skip — tests/agentic/gates.py.
+  #
+  # TO ENABLE, in that order:
+  #   a. delete the `if: false` below and add DATABRICKS_HOST / DATABRICKS_TOKEN
+  #      to the repo's secrets;
+  #   b. retire the placeholder gate: delete PLACEHOLDER_GATE from LAYER3_MARKS
+  #      in tests/agentic/gates.py.  One edit, for the whole layer — no test
+  #      file changes and no marker changes;
+  #   c. make this job GATE the build: remove it from _GATE_EXEMPT in
+  #      tests/unit/test_ci_test_summary_gates_every_job.py and add it to
+  #      test-summary's needs:, its echo block AND its `for result in` loop.
+  #      All three: needs: alone is a dependency, not a gate.
+  #
+  # It is in _GATE_EXEMPT today because a disabled job is still a job in the
+  # YAML, and a permanently-skipped entry in test-summary's failure loop gates
+  # nothing while looking as though it does.
+  #
+  # It runs the same one command a developer runs (§G1: discoverable and one
+  # command, rather than a marker nobody remembers), so CI and a laptop cannot
+  # disagree about what "run layer 3" means.
+  agentic-tests:
+    name: "Agentic Behaviour (layer 3)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes, unit-tests]
+    # Literal `false`, not an expression: no repository state should be able to
+    # switch a job that spends money on a serving endpoint on by accident.
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run layer-3 agentic behaviour tests
+        env:
+          ENVIRONMENT: test
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          ./scripts/run_agentic_tests.sh \
+            --junitxml=test-results/agentic-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agentic-test-results
+          path: test-results/
+
   # Summary job - runs after all tests
   test-summary:
     name: Test Summary
