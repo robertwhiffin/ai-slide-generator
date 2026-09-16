@@ -94,6 +94,14 @@ class TestVerifySlideRouteWithAssetOnlySession:
             def save_verification(self, session_id, content_hash, result):
                 self.saved = result
 
+            # Row-per-slide (PR1): verification.py now ALSO writes the verdict onto
+            # the session_slides row, so the fake needs this or the route 500s
+            # before the judge assertion can be reached.
+            wrote_row_verification = None
+
+            def write_slide_verification(self, session_id, position, verification_record):
+                self.wrote_row_verification = (position, verification_record)
+
             def get_experiment_id(self, session_id):
                 return None
 
@@ -122,5 +130,14 @@ class TestVerifySlideRouteWithAssetOnlySession:
         assert judge_calls == []
         assert response.rating == "unknown"
         assert "No source data available" in response.explanation
-        assert fake_manager.saved is not None
-        assert fake_manager.saved["rating"] == "unknown"
+        # Row-per-slide (PR1) moved this persistence from
+        # save_verification(session_id, content_hash, result) to
+        # write_slide_verification(session_id, position, {content_hash: verdict}).
+        # The INTENT is unchanged — the unknown verdict must still be remembered —
+        # so the assertion follows the call site rather than being dropped.
+        assert fake_manager.wrote_row_verification is not None
+        position, record = fake_manager.wrote_row_verification
+        assert position == 0
+        verdicts = list(record.values())
+        assert len(verdicts) == 1, f"expected one hash-keyed verdict, got {record!r}"
+        assert verdicts[0]["rating"] == "unknown"

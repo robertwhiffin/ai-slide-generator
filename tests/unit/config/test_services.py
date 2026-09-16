@@ -6,7 +6,6 @@ from sqlalchemy.orm import sessionmaker
 from src.core.database import Base
 from src.database.models import ConfigProfile
 from src.services import (
-    ConfigService,
     ConfigValidator,
     GenieService,
     ProfileService,
@@ -161,20 +160,9 @@ def test_list_profiles(db_session):
     assert profiles[0].name == "profile1"  # Should be sorted by name
 
 
-def test_update_prompts_config(db_session):
-    """Test updating prompts settings."""
-    profile_service = ProfileService(db_session)
-    config_service = ConfigService(db_session)
-
-    profile = profile_service.create_profile("test", None, "test")
-
-    updated = config_service.update_prompts_config(
-        profile_id=profile.id,
-        system_prompt="Updated system prompt",
-        user="test",
-    )
-
-    assert updated.system_prompt == "Updated system prompt"
+# DELETED with B2.4: test_update_prompts_config's only assertion was
+# ``updated.system_prompt == "Updated system prompt"`` — that a custom system
+# prompt round-trips through ConfigService. The column and the kwarg are retired.
 
 
 def test_genie_space_management(db_session):
@@ -286,9 +274,7 @@ def test_validator_prompts_valid(db_session):
     """Test prompts validation with valid values."""
     validator = ConfigValidator()
 
-    result = validator.validate_prompts(
-        system_prompt="Test system prompt",
-    )
+    result = validator.validate_prompts()
     assert result.valid
 
 

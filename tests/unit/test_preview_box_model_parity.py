@@ -59,7 +59,10 @@ import pytest
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "src"
 _SLIDE_DOCUMENT = _FRONTEND / "services" / "slideDocument.ts"
 _PREVIEW_DOC = _FRONTEND / "components" / "config" / "templatePreviewDoc.ts"
-_SLIDE_SELECTION = _FRONTEND / "components" / "SlidePanel" / "SlideSelection.tsx"
+# SlideSelection.tsx was the fourth preview surface until ws6 retired checkbox
+# selection (PRD §3: "Checkbox selection is retired, not merely supplemented") and
+# deleted the component. THREE surfaces remain; the invariant is unchanged, and
+# every surviving surface is still asserted individually below.
 _PRESENTATION = _FRONTEND / "components" / "PresentationMode" / "PresentationMode.tsx"
 
 #: A universal-selector rule, captured with its declaration list. Matching the
@@ -119,17 +122,16 @@ def _inline_reset_literal(path: Path, declaration: str) -> str:
 
 
 def _four_preview_resets(slide_document: str) -> dict[str, str]:
-    """The four preview surfaces' resets, by surface name."""
+    """The surviving preview surfaces' resets, by surface name (three since ws6)."""
     return {
         "SlideTile+VisualEditorPanel": _preview_reset_block(slide_document),
         "template pop-out": _popout_reset_block(),
-        "SlideSelection": _inline_reset_literal(_SLIDE_SELECTION, "resetStyle"),
         "PresentationMode": _inline_reset_literal(_PRESENTATION, "extraHeadStyle"),
     }
 
 
 def test_all_four_preview_surfaces_agree(slide_document):
-    """The VALID half of WC-02: the four surfaces must not disagree on the box
+    """The VALID half of WC-02: the surfaces must not disagree on the box
     model. Necessary, but — as the falsified premise proved — NOT sufficient on
     its own, which is why the next test pins the DIRECTION they agree on."""
     declared = {
@@ -144,14 +146,14 @@ def test_all_four_preview_surfaces_agree(slide_document):
 
 @pytest.mark.parametrize(
     "surface",
-    ["SlideTile+VisualEditorPanel", "template pop-out", "SlideSelection", "PresentationMode"],
+    ["SlideTile+VisualEditorPanel", "template pop-out", "PresentationMode"],
 )
 def test_and_they_agree_on_the_ground_truth_box_model(slide_document, surface):
     """THE PART THAT ACTUALLY MATTERS. Ground truth — not inter-surface
     agreement — is the reference, and ground truth lays slide content out in
     CONTENT-box: no preview surface may declare a UNIVERSAL box-sizing reset.
 
-    All four are asserted, including the two that carried it before WC-02: they
+    Every surviving surface is asserted, including the one that carried it before WC-02: they
     were never the reference, and dev13's C6 of 0 px held only because C6
     measures the POP-OUT, which was content-box at the time."""
     reset = _four_preview_resets(slide_document)[surface]
@@ -185,7 +187,6 @@ def test_every_preview_surface_routes_its_frame_through_the_shared_contract(slid
     declaring one of their own."""
     assert "${slideHostFrameStyle('body')}" in _preview_reset_block(slide_document)
     assert "slideHostFrameStyle(" in _PREVIEW_DOC.read_text(encoding="utf-8")
-    assert "${slideHostFrameStyle('body')}" in _SLIDE_SELECTION.read_text(encoding="utf-8")
     assert "${slideHostFrameStyle('.slide-container')}" in _PRESENTATION.read_text(
         encoding="utf-8"
     )

@@ -27,7 +27,6 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.core.database import get_db_session, init_db, Base, get_engine
-from src.core.defaults import DEFAULT_CONFIG
 from src.database.models import (
     ConfigGenieSpace,
     ConfigProfile,
@@ -203,23 +202,12 @@ def initialize_database(reset: bool = False):
                 db.add(genie_space)
                 print(f"  ✓ Genie space: {genie_config['space_name']}")
             
-            # Create prompts with default slide style
-            # Handle "USE_DEFAULT" values by substituting from defaults.py
-            prompts_config = seed.get('prompts', {})
-            system_prompt = prompts_config.get('system_prompt', 'USE_DEFAULT')
-            slide_editing = prompts_config.get('slide_editing_instructions', 'USE_DEFAULT')
-            
-            # Substitute defaults if USE_DEFAULT is specified
-            if system_prompt == 'USE_DEFAULT':
-                system_prompt = DEFAULT_CONFIG['prompts']['system_prompt']
-            if slide_editing == 'USE_DEFAULT':
-                slide_editing = DEFAULT_CONFIG['prompts']['slide_editing_instructions']
-            
+            # Create prompts with default slide style. The retired
+            # system_prompt / slide_editing_instructions overrides are gone,
+            # so a seed file's `prompts:` block is no longer consulted.
             prompts = ConfigPrompts(
                 profile_id=profile.id,
                 selected_slide_style_id=default_style_id,
-                system_prompt=system_prompt,
-                slide_editing_instructions=slide_editing,
             )
             db.add(prompts)
             print(f"  ✓ Prompts settings (with default slide style)")

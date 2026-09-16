@@ -263,39 +263,36 @@ test.describe('SlideDisplay', () => {
     await setupWithSlides(page);
   });
 
-  test('displays slide tiles after generation', async ({ page }) => {
+  test('displays flip-through viewer with thumbnails after generation', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Should show all 3 slide headers - use the slide header text specifically
-    // The slide header has class text-sm font-medium text-gray-700
-    const slideHeaders = page.locator('[data-testid="slide-tile-header"]');
-    await expect(slideHeaders.getByText('Slide 1')).toBeVisible();
-    await expect(slideHeaders.getByText('Slide 2')).toBeVisible();
-    await expect(slideHeaders.getByText('Slide 3')).toBeVisible();
+    // The new model shows a flip-through viewer with a thumbnail ribbon.
+    // slide-tile-header is retired; ribbon-thumb-* are the new per-slide entries.
+    await expect(page.getByTestId('slide-viewer')).toBeVisible();
+    await expect(page.getByTestId('ribbon-thumb-0')).toBeVisible();
+    await expect(page.getByTestId('ribbon-thumb-1')).toBeVisible();
+    await expect(page.getByTestId('ribbon-thumb-2')).toBeVisible();
 
-    // Slides should have iframes for preview (there may be more than 3 due to thumbnails)
-    const iframes = page.locator('iframe[title^="Slide"]');
-    await expect(iframes.first()).toBeVisible();
+    // The stage shows exactly one slide at a time via an iframe.
+    const stageIframe = page.getByTestId('slide-stage-frame');
+    await expect(stageIframe).toHaveCount(1);
+    await expect(stageIframe).toBeVisible();
   });
 
-  test('shows slide index/number', async ({ page }) => {
+  test('shows slide position indicator', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Verify slide numbers are displayed (Slide 1, Slide 2, Slide 3)
-    // Use more specific selector to avoid matching thumbnail previews
-    const slideHeaders = page.locator('[data-testid="slide-tile-header"]');
-    await expect(slideHeaders.getByText('Slide 1')).toBeVisible();
-    await expect(slideHeaders.getByText('Slide 2')).toBeVisible();
-    await expect(slideHeaders.getByText('Slide 3')).toBeVisible();
+    // The stage position indicator shows "1 / 3" format.
+    await expect(page.getByTestId('stage-position')).toContainText('1 /');
   });
 
   test('shows slide count in header', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Should show "3 slides" in the panel header - use the specific gray text element
+    // Should show "3 slides" in the page header subtitle.
     await expect(page.getByText('3 slides').first()).toBeVisible();
   });
 
@@ -308,90 +305,38 @@ test.describe('SlideDisplay', () => {
 });
 
 // ============================================
-// Slide Selection Tests
+// Slide Selection Tests — RETIRED
 // ============================================
-
-test.describe('SlideSelection', () => {
-  test.beforeEach(async ({ page }) => {
-    await setupWithSlides(page);
-  });
-
-  test('clicking chat context button selects slide', async ({ page }) => {
-    await goToGenerator(page);
-    await generateSlides(page);
-
-    // Find the first slide's "Add to chat context" button (FiMessageSquare icon button)
-    // The button is in the slide header actions area
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    const chatContextButton = firstSlideHeader.locator('button[aria-pressed]');
-
-    await chatContextButton.click();
-
-    // Button should now show as selected (aria-pressed="true")
-    await expect(chatContextButton).toHaveAttribute('aria-pressed', 'true');
-  });
-
-  test('selected slide shows visual indicator', async ({ page }) => {
-    await goToGenerator(page);
-    await generateSlides(page);
-
-    // Click the chat context button to select the slide
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    const chatContextButton = firstSlideHeader.locator('button[aria-pressed]');
-    await chatContextButton.click();
-
-    // The slide container should have a ring-2 ring-blue-500 class when selected
-    const slideContainer = page.locator('.ring-2.ring-blue-500');
-    await expect(slideContainer).toBeVisible();
-  });
-
-  test('selecting different slide changes selection', async ({ page }) => {
-    await goToGenerator(page);
-    await generateSlides(page);
-
-    // Select first slide
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    const firstChatContextButton = firstSlideHeader.locator('button[aria-pressed]');
-    await firstChatContextButton.click();
-
-    // Verify first slide is selected
-    await expect(firstChatContextButton).toHaveAttribute('aria-pressed', 'true');
-
-    // Select second slide
-    const secondSlideHeader = page.locator('[data-testid="slide-tile-header"]').nth(1);
-    const secondChatContextButton = secondSlideHeader.locator('button[aria-pressed]');
-    await secondChatContextButton.click();
-
-    // Second slide should be selected
-    await expect(secondChatContextButton).toHaveAttribute('aria-pressed', 'true');
-    // First slide should be deselected (only one selected at a time)
-    await expect(firstChatContextButton).toHaveAttribute('aria-pressed', 'false');
-  });
-});
+// The checkbox/chat-context selection feature was removed in the flip-through
+// viewer workstream (spec §4 "Retired"). This describe block is intentionally
+// deleted. Coverage that the UI contains no checkbox remnants lives in
+// slide-viewer.spec.ts → 'no checkbox selection UI remains'.
 
 // ============================================
 // Delete Slide Tests
 // ============================================
+// Retargeted: delete affordance moved from slide-tile-header to stage-delete-slide
+// in the flip-through viewer workstream. The stage toolbar shows controls for the
+// currently-displayed slide.
 
 test.describe('DeleteSlide', () => {
   test.beforeEach(async ({ page }) => {
     await setupWithSlides(page);
   });
 
-  test('delete button is visible on each slide', async ({ page }) => {
+  test('delete button is visible in the stage toolbar', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const deleteButtons = page.locator('[data-testid="slide-tile-header"]').getByRole('button', { name: 'Delete' });
-    await expect(deleteButtons).toHaveCount(3);
+    // The stage toolbar has exactly one delete button (for the current slide).
+    await expect(page.getByTestId('stage-delete-slide')).toBeVisible();
   });
 
   test('clicking delete opens confirmation dialog', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
-    await deleteButton.click();
+    await page.getByTestId('stage-delete-slide').click();
 
     await expect(page.getByText('Delete slide 1?')).toBeVisible();
     await page.getByRole('button', { name: 'Cancel' }).click();
@@ -448,8 +393,7 @@ test.describe('DeleteSlide', () => {
       }
     });
 
-    const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
-    await deleteButton.click();
+    await page.getByTestId('stage-delete-slide').click();
 
     // Confirm deletion in the custom dialog
     const confirmButton = page.locator('.fixed').getByRole('button', { name: 'Delete' });
@@ -462,13 +406,12 @@ test.describe('DeleteSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const deleteButton = page.locator('[data-testid="slide-tile-header"]').first().getByRole('button', { name: 'Delete' });
-    await deleteButton.click();
+    await page.getByTestId('stage-delete-slide').click();
 
     // Dismiss the custom confirmation dialog
     await page.getByRole('button', { name: 'Cancel' }).click();
 
-    // Slide count should remain 3 - use specific selector
+    // Slide count should remain 3
     await expect(page.getByText('3 slides').first()).toBeVisible();
 
     await expect(page.locator('header').getByText(/Benefits of Cloud Computing/i)).toBeVisible();
@@ -478,29 +421,26 @@ test.describe('DeleteSlide', () => {
 // ============================================
 // Edit Slide Tests
 // ============================================
+// Retargeted: edit affordance moved from slide-tile-header to stage-edit-slide
+// in the flip-through viewer workstream.
 
 test.describe('EditSlide', () => {
   test.beforeEach(async ({ page }) => {
     await setupWithSlides(page);
   });
 
-  test('edit button is visible on each slide', async ({ page }) => {
+  test('edit button is visible in the stage toolbar', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Each slide should have an edit button (blue color, FiEdit icon)
-    const editButtons = page.locator('button.text-blue-600').filter({ has: page.locator('svg') });
-    // Filter to only include edit buttons (not other blue buttons)
-    const slideEditButtons = page.locator('[data-testid="slide-tile-header"] button');
-    await expect(slideEditButtons.first()).toBeVisible();
+    await expect(page.getByTestId('stage-edit-slide')).toBeVisible();
   });
 
   test('clicking edit opens HTML editor modal', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
+    await page.getByTestId('stage-edit-slide').click();
 
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();
   });
@@ -509,8 +449,7 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
+    await page.getByTestId('stage-edit-slide').click();
 
     await expect(page.getByRole('button', { name: 'Save Changes' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
@@ -520,8 +459,7 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
+    await page.getByTestId('stage-edit-slide').click();
 
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();
     await page.getByRole('button', { name: 'Cancel' }).click();
@@ -532,8 +470,7 @@ test.describe('EditSlide', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    const firstSlideHeader = page.locator('[data-testid="slide-tile-header"]').first();
-    await firstSlideHeader.getByRole('button', { name: 'Edit' }).click();
+    await page.getByTestId('stage-edit-slide').click();
 
     await expect(page.getByRole('heading', { name: 'Edit Slide' })).toBeVisible();
     await page.getByRole('button', { name: 'Close' }).click();
@@ -544,19 +481,21 @@ test.describe('EditSlide', () => {
 // ============================================
 // Verification Tests
 // ============================================
+// Retargeted: verification badge and verify button moved to stage-verification-badge
+// in the flip-through viewer workstream.
 
 test.describe('SlideVerification', () => {
   test.beforeEach(async ({ page }) => {
     await setupWithSlides(page);
   });
 
-  test('verify button is visible when no verification exists', async ({ page }) => {
+  test('verify button is visible in stage toolbar when no verification exists', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Look for the verify button (amber-colored button with gavel icon)
-    // The button appears when there's no verification result
-    const verifyButton = page.locator('button.text-amber-600').first();
+    // The verification badge wrapper is in the stage toolbar.
+    // The amber verify button is rendered by VerificationBadge when no result exists.
+    const verifyButton = page.getByTestId('stage-verification-badge').locator('button').first();
     await expect(verifyButton).toBeVisible();
   });
 
@@ -581,8 +520,8 @@ test.describe('SlideVerification', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Click verify button
-    const verifyButton = page.locator('button.text-amber-600').first();
+    // Click the verify button inside the stage-verification-badge wrapper.
+    const verifyButton = page.getByTestId('stage-verification-badge').locator('button').first();
     await verifyButton.click();
 
     // Should show "Verifying..." text
@@ -593,8 +532,7 @@ test.describe('SlideVerification', () => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Click verify button on first slide
-    const verifyButton = page.locator('button.text-amber-600').first();
+    const verifyButton = page.getByTestId('stage-verification-badge').locator('button').first();
     await verifyButton.click();
 
     // Wait for verification badge to appear
@@ -606,20 +544,24 @@ test.describe('SlideVerification', () => {
 // ============================================
 // Drag and Drop / Reorder Tests
 // ============================================
+// Retargeted: reorder affordance moved to the thumbnail ribbon.
+// The ribbon thumbnails (ribbon-thumb-*) are dnd-kit sortable items —
+// they ARE the drag handles (no separate cursor-grab button). The old
+// SlidePanel had distinct drag handles; the new ribbon does not.
 
 test.describe('SlideReorder', () => {
   test.beforeEach(async ({ page }) => {
     await setupWithSlides(page);
   });
 
-  test('drag handle is visible on each slide', async ({ page }) => {
+  test('thumbnail ribbon shows one entry per slide', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    // Each slide should have a drag handle button
-    // The drag handle has cursor-grab class
-    const dragHandles = page.locator('button.cursor-grab');
-    await expect(dragHandles).toHaveCount(3);
+    // All 3 slide thumbnails must be present and draggable via dnd-kit.
+    await expect(page.getByTestId('ribbon-thumb-0')).toBeVisible();
+    await expect(page.getByTestId('ribbon-thumb-1')).toBeVisible();
+    await expect(page.getByTestId('ribbon-thumb-2')).toBeVisible();
   });
 });
 
@@ -647,10 +589,10 @@ test.describe('PresentationMode', () => {
     // Click Present button
     await page.getByRole('button', { name: 'Present' }).click();
 
-    // Presentation mode should open - it uses createPortal with inline styles
-    // Look for the slide counter which appears at the bottom
-    // It shows "1 / 3" format
-    await expect(page.getByText('1 / 3')).toBeVisible({ timeout: 5000 });
+    // Presentation mode should open — it uses createPortal with inline styles.
+    // The stage-position element also shows "1 / 3", so use nth(1) to target the
+    // presentation mode counter specifically (it appears AFTER the stage-position).
+    await expect(page.getByText('1 / 3').nth(1)).toBeVisible({ timeout: 5000 });
   });
 });
 

@@ -74,6 +74,29 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to migrate profiles/sessions to agent_config: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Row-per-slide (PR1): migrate historical deck_json blobs into session_slides
+    # rows. Runs HERE, pre-fork, for the same reason as the two migrations above —
+    # the uvicorn workers must never execute migration code. It originally lived in
+    # the FastAPI lifespan; main moved migrations out of the lifespan while this
+    # branch was in flight, so it was relocated on merge rather than dropped.
+    #
+    # Guarded by a per-deck NOT EXISTS anti-join over session_slides (index-only
+    # against its composite PK), so it is a no-op scan once every deck has rows.
+    # A deck whose blob will not parse is logged and skipped, never raised — one
+    # bad row must not abort startup.
+    logger.info("Backfilling session_slides rows...")
+    try:
+        from src.core.database import get_session_local
+        from src.core.backfill_session_slides_startup import backfill_unmigrated_decks
+
+        slide_decks = backfill_unmigrated_decks(get_session_local())
+        if slide_decks:
+            logger.info(f"Backfilled {slide_decks} deck(s) into session_slides rows")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to backfill session_slides rows: {e}\n{tb}")
+        raise SystemExit(1) from e
+
     # Seed default content
     logger.info(f"Seeding defaults (include_databricks={seed_databricks_defaults})...")
     try:
@@ -95,6 +118,28 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"Failed to ensure encryption key: {e}\n{tb}")
+        raise SystemExit(1) from e
+
+    # Retired prompt overrides: strip 'system_prompt' and
+    # 'slide_editing_instructions' out of every stored agent_config blob. The
+    # physical columns are dropped inside init_db()'s migration chain, early,
+    # because a database that still has them cannot insert a profile; the BLOB
+    # strip runs LAST, deliberately — it is the one position no later step can
+    # undo by writing a fresh blob (seed_defaults above creates profiles).
+    # A blob that will not parse is logged and skipped, never raised, so one bad
+    # row cannot abort startup; anything else here is SystemExit(1) like the five
+    # steps above.
+    logger.info("Stripping retired prompt keys from agent_config blobs...")
+    try:
+        from src.core.database import get_session_local
+        from src.core.strip_retired_prompt_keys import strip_retired_prompt_keys
+
+        stripped = strip_retired_prompt_keys(get_session_local())
+        if stripped:
+            logger.info(f"Stripped retired prompt keys from {stripped} row(s)")
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to strip retired prompt keys from agent_config: {e}\n{tb}")
         raise SystemExit(1) from e
 
 

@@ -31,8 +31,6 @@ interface AgentConfigShape {
   tools?: ToolEntry[];
   slide_style_id?: number | null;
   deck_prompt_id?: number | null;
-  system_prompt?: string | null;
-  slide_editing_instructions?: string | null;
 }
 
 interface NameLookups {
@@ -56,9 +54,6 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
   const vectorTools = tools.filter(t => t.type === 'vector_index');
   const modelTools = tools.filter(t => t.type === 'model_endpoint');
   const agentTools = tools.filter(t => t.type === 'agent_bricks');
-  const hasCustomSystemPrompt = !!cfg.system_prompt;
-  const hasCustomSlideInstructions = !!cfg.slide_editing_instructions;
-
   const styleName = cfg.slide_style_id != null
     ? names.slideStyles.get(cfg.slide_style_id) ?? `Unknown (ID ${cfg.slide_style_id})`
     : null;
@@ -133,20 +128,6 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
         </div>
       </div>
 
-      {/* Custom prompts indicator */}
-      {(hasCustomSystemPrompt || hasCustomSlideInstructions) && (
-        <div className="flex items-start gap-2">
-          <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-          <div className="flex flex-wrap gap-1.5">
-            {hasCustomSystemPrompt && (
-              <Badge variant="secondary" className="text-xs font-normal">Custom system prompt</Badge>
-            )}
-            {hasCustomSlideInstructions && (
-              <Badge variant="secondary" className="text-xs font-normal">Custom slide instructions</Badge>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 };

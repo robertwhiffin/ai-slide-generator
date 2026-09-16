@@ -62,6 +62,7 @@ const sidebars = {
         'technical/multi-user-concurrency',
         'technical/permissions-model',
         'technical/presentation-mode',
+        'technical/slide-viewer',
         'technical/profile-switch-genie-flow',
         'technical/save-points-versioning',
         'technical/url-routing',

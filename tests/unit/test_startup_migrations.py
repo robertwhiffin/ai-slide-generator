@@ -30,10 +30,17 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
 
     monkeypatch.setattr("src.core.database.init_db", lambda: None)
     monkeypatch.setattr("src.core.database.get_session_local", lambda: "SESSION_FACTORY")
+    # These two record into `calls` as well, so the ORDER assertion at the end is
+    # real: with them silent, "the strip ran last" held even when the strip was moved
+    # ahead of both — an assertion that could not fail.
     monkeypatch.setattr(
-        "src.core.init_default_profile.seed_defaults", lambda include_databricks: None
+        "src.core.init_default_profile.seed_defaults",
+        lambda include_databricks: calls.append(("seed_defaults", include_databricks)),
     )
-    monkeypatch.setattr("src.core.encryption.ensure_encryption_key", lambda: None)
+    monkeypatch.setattr(
+        "src.core.encryption.ensure_encryption_key",
+        lambda: calls.append(("ensure_encryption_key", None)),
+    )
     monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.migrate_profiles",
         lambda sf: calls.append(("migrate_profiles", sf)) or 0,
@@ -42,11 +49,31 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
         "src.core.migrate_profiles_to_agent_config.backfill_sessions",
         lambda sf: calls.append(("backfill_sessions", sf)) or 0,
     )
+    # Row-per-slide (PR1) moved into init_database on the 2026-08-18 main merge:
+    # it used to run in the FastAPI lifespan, which no longer runs migrations at
+    # all. This test pins "the full set", so the set now includes it.
+    monkeypatch.setattr(
+        "src.core.backfill_session_slides_startup.backfill_unmigrated_decks",
+        lambda sf: calls.append(("backfill_unmigrated_decks", sf)) or 0,
+    )
+    # B2.5's agent_config blob strip is the LAST step: it removes the retired
+    # 'system_prompt' / 'slide_editing_instructions' keys, and last is the position
+    # no earlier-finishing step (seed_defaults creates profiles) can undo by writing
+    # a fresh blob. This test pins "the full set", so the set now includes it.
+    monkeypatch.setattr(
+        "src.core.strip_retired_prompt_keys.strip_retired_prompt_keys",
+        lambda sf: calls.append(("strip_retired_prompt_keys", sf)) or 0,
+    )
 
     run.init_database()
 
     assert ("migrate_profiles", "SESSION_FACTORY") in calls
     assert ("backfill_sessions", "SESSION_FACTORY") in calls
+    assert ("backfill_unmigrated_decks", "SESSION_FACTORY") in calls
+    assert ("strip_retired_prompt_keys", "SESSION_FACTORY") in calls
+    assert calls[-1][0] == "strip_retired_prompt_keys", (
+        f"the blob strip must run LAST in init_database; call order was {calls}"
+    )
 
 
 def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):

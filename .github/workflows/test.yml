@@ -17,6 +17,7 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -33,10 +34,18 @@ jobs:
         id: filter
         with:
           filters: |
+            # NOTE: `backend` includes `frontend/tests/**` so that a
+            # frontend-tests-only PR (e.g. a new E2E spec) also runs the backend
+            # unit tests and all seven integration jobs — they all gate on
+            # `backend`. This coupling is intentional: E2E spec files import
+            # backend fixtures, and integration guards (test_ci_collects_integration_tests,
+            # test_e2e_matrix_covers_specs) live in tests/unit.
             backend:
               - 'src/**'
               - 'tests/**'
               - 'pyproject.toml'
+              - '.github/workflows/test.yml'
+              - 'frontend/tests/**'
             frontend:
               - 'frontend/**'
             packages:
@@ -81,8 +90,32 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.backend == 'true'
+    # Five modules under tests/unit/ carry `pytest.mark.postgres` and a sixth
+    # skips itself at import; all six create uuid-named throwaway databases off
+    # TELLR_TEST_POSTGRES_URL and self-skip when it names nothing reachable.
+    # Without this service they skipped in CI while passing on every developer's
+    # laptop, which made CI strictly weaker than a laptop, silently.
+    #
+    # DATABASE_URL is deliberately NOT set here: it is what production code
+    # connects to, and pointing ~5400 unit tests at a real database would change
+    # what they exercise. TELLR_TEST_POSTGRES_URL has no reader under src/.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
 
@@ -98,6 +131,8 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run unit tests
+        env:
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
         run: |
           pytest tests/unit -v --tb=short -n auto \
             --junitxml=test-results/unit-results.xml \
@@ -121,6 +156,7 @@ jobs:
   integration-api-routes:
     name: "Integration: API Routes"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -150,6 +186,7 @@ jobs:
       - name: Run API routes tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -166,6 +203,7 @@ jobs:
   integration-config-api:
     name: "Integration: Config API"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -195,6 +233,7 @@ jobs:
       - name: Run config API tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -216,6 +255,7 @@ jobs:
   integration-export:
     name: "Integration: Export"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -245,6 +285,7 @@ jobs:
       - name: Run export tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -261,6 +302,7 @@ jobs:
   integration-streaming:
     name: "Integration: Streaming"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -290,6 +332,7 @@ jobs:
       - name: Run streaming tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -306,6 +349,7 @@ jobs:
   integration-slides:
     name: "Integration: Slides"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -335,6 +379,7 @@ jobs:
       - name: Run slide tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -347,10 +392,81 @@ jobs:
           name: integration-slides-results
           path: test-results/
 
+  # Integration test: LangGraph orchestration (ws4c layer 1)
+  #
+  # Cloned from integration-slides (Ruling C-16): the same Postgres service, the
+  # same DATABASE_URL/ENVIRONMENT env, -m "not live", and a junit artifact.
+  #
+  # It needs a job of its own.  unit-tests collects tests/unit wholesale, but
+  # every integration job names FILES, so a new file under tests/integration/
+  # would run NOWHERE; ws4e's layer-4 job filters -k layer4, which excludes this
+  # suite by construction; and integration-general has no Postgres and blanks
+  # DATABRICKS_HOST/TOKEN deliberately.  Parking these tests anywhere else leaves
+  # ws4c's headline DoD unverifiable in CI.
+  #
+  # Name every file of this suite explicitly in the run: block below —
+  # tests/unit/test_ci_collects_integration_tests.py fails otherwise
+  # (DELIBERATE_EXCLUSIONS is empty, and stays that way).
+  integration-graph:
+    name: "Integration: Graph Orchestration"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      needs.changes.outputs.backend == 'true'
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run graph orchestration tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_graph_orchestration.py \
+            tests/integration/test_graph_mode_turn.py \
+            tests/integration/test_spec_dirty_marker_routes.py \
+            tests/integration/test_sweeper_describe_only.py \
+            tests/integration/test_architect_reply_is_persisted.py \
+            tests/integration/test_insert_slide_route.py \
+            tests/integration/test_slide_id_is_durable.py \
+            tests/integration/test_deck_spec_change_turn.py \
+            tests/integration/test_spec_row_alignment.py \
+            tests/integration/test_claim_exclusivity_postgres.py \
+            -v --tb=short --junitxml=test-results/graph-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-graph-results
+          path: test-results/
+
   # Integration test: Genie
   integration-genie:
     name: "Integration: Genie"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [changes, unit-tests]
     if: |
       always() &&
@@ -380,6 +496,7 @@ jobs:
       - name: Run Genie tests
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -395,10 +512,66 @@ jobs:
           name: integration-genie-results
           path: test-results/
 
+  # Integration test: General (previously-uncollected orphan files)
+  # All ten files use SQLite in-memory or FastAPI TestClient — no Postgres needed.
+  integration-general:
+    name: "Integration: General"
+    runs-on: ubuntu-latest
+    # Backstop: the measured baseline is ~18 s for all ten files. 15 minutes is
+    # far above that but far below GitHub's 6-hour default, so a future
+    # regression that re-introduces the SCIM-retry hang fails fast instead of
+    # burning the runner for hours.
+    timeout-minutes: 15
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      needs.changes.outputs.backend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run general integration tests
+        env:
+          ENVIRONMENT: test
+          # IMPORTANT: these must be empty strings, NOT fake values like
+          # "https://test.cloud.databricks.com". A non-empty but unreachable host
+          # puts the identity provider into WORKSPACE mode via get_system_client()
+          # (databricks_client.py), and the first SCIM call against that host then
+          # retries until the job dies (measured: >60 s each for four of these ten
+          # tests). Empty credentials make WorkspaceClient() construction raise,
+          # which _determine_mode() catches and falls back to LOCAL identity — no
+          # SCIM call, no retries, all ten tests finish in ~18 s total.
+          DATABRICKS_HOST: ""
+          DATABRICKS_TOKEN: ""
+        run: |
+          pytest \
+            tests/integration/test_comments_removed.py \
+            tests/integration/test_export_parity.py \
+            tests/integration/test_get_slide_deck_row_read.py \
+            tests/integration/test_image_api.py \
+            tests/integration/test_mcp_endpoint.py \
+            tests/integration/test_request_logging.py \
+            tests/integration/test_save_slide_deck_dual_write.py \
+            tests/integration/test_savepoint_e2e.py \
+            tests/integration/test_slide_row_identity_and_verdicts.py \
+            tests/integration/test_task7_verification_and_restore.py \
+            tests/integration/test_ws4b_fixture_contracts.py \
+            -v --tb=short --junitxml=test-results/general-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-general-results
+          path: test-results/
+
   # Frontend build check - catches TypeScript errors before E2E
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     steps:
@@ -423,10 +596,38 @@ jobs:
         working-directory: frontend
         run: npx vite build
 
+  # Frontend unit tests (vitest) - separate from frontend-build so a type-check
+  # failure and a unit-test failure surface independently.  Does NOT block the
+  # e2e matrix (e2e-tests needs frontend-build, not this job).
+  frontend-unit-tests:
+    name: Frontend Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run vitest unit tests
+        working-directory: frontend
+        run: npm run test:unit
+
   # Wheel build check - verifies both packages build successfully
   wheel-build:
     name: Wheel Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.packages == 'true'
     steps:
@@ -465,40 +666,67 @@ jobs:
   e2e-tests:
     name: E2E - ${{ matrix.test }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [changes, unit-tests, frontend-build]
     if: |
       always() &&
       (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
       needs.frontend-build.result == 'success' &&
       needs.changes.outputs.frontend == 'true'
-    
+
+    # Job-level so every step sees it. This job runs Playwright, not pytest, so
+    # nothing here reads it today; it is exported because
+    # tests/unit/test_ci_exports_postgres_test_url.py requires EVERY job that
+    # provisions a postgres service to export the URL of its own service. A job
+    # that provisions a database and hides it from the test harness is how the
+    # postgres suites came to skip in CI in the first place.
+    env:
+      TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+
     strategy:
       fail-fast: false
       matrix:
         test:
+          - admin-page
           - admin-route-gate
+          - agent-config-integration
+          - api-route-matcher
           - chat-ui
           - css-bg-export
           - deck-integrity
+          - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui
+          - design-system-brand-text-uncapped
           - design-system-selector
           - design-systems-ui
+          - export-csp
           - export-ui
+          - findings-drawer
           - help-ui
           - history-integration
+          - incremental-slide-delivery
           - history-ui
-          - agent-config-integration
+          - inline-svg-records-export
           - presentation-mode
-          - profiles-integration
           - profile-ui
+          - profiles-integration
+          - session-config-isolation
+          - session-loading
           - slide-operations-ui
+          - slide-security
           - slide-styles-integration
           - slide-styles-ui
           - slide-surface-fidelity
+          - slide-viewer
+          - spec-view
+          - stale-session-recovery
+          - style-source-exclusivity
           - svg-raster-export
-          - inline-svg-records-export
           - template-cards
+          - template-preview-import-scan
+          - template-viewer
+          - viewer-readonly
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:
@@ -588,9 +816,7 @@ jobs:
                   # Create prompts config
                   prompts = ConfigPrompts(
                       profile_id=profile.id,
-                      selected_slide_style_id=style_id,
-                      system_prompt='You are a helpful assistant.',
-                      slide_editing_instructions='Edit slides as requested.'
+                      selected_slide_style_id=style_id
                   )
                   db.add(prompts)
                   
@@ -764,48 +990,196 @@ jobs:
           name: playwright-results-${{ matrix.test }}
           path: frontend/test-results/
 
+  # -------------------------------------------------------------------------
+  # Layer 3 — agentic behaviour.  DISABLED, and the `if: false` below is the
+  # ONLY thing keeping it off; everything else about it is finished.
+  #
+  # The suite's four layers are organised by what each NEEDS in order to run,
+  # not by marker: layer 1 (orchestration) and layer 2 (contracts) need nothing
+  # and run above; layer 4 needs a database and runs above; layer 3 needs a real
+  # language model, which is what this job is for.
+  #
+  # WHY IT CANNOT RUN HERE YET — two barriers, in the order they must fall:
+  #   1. No credentials.  These tests call a real Databricks serving endpoint
+  #      with real spend.  This repo's org has no secret to give them.
+  #   2. Placeholder prompts.  The seven skills ship substantive but
+  #      un-prompt-engineered instruction text by design (see
+  #      src/core/skills/__init__.py, which calls them placeholders itself), and
+  #      every layer-3 test is written against the AUTHORED prompts.  Rather
+  #      than weaken an assertion until a placeholder satisfies it, each module
+  #      carries an unconditional skip — tests/agentic/gates.py.
+  #
+  # TO ENABLE — TWO steps, and only the first is in this file:
+  #   a. HERE: delete the `if: false` below, and add DATABRICKS_HOST /
+  #      DATABRICKS_TOKEN to the repository's secrets.  Nothing else in this
+  #      workflow changes: the job is already wired into test-summary's needs:,
+  #      its echo block and its `for result in` failure loop, so it gates the
+  #      build the moment it runs.
+  #   b. NOT in this file, and worth saying plainly rather than filing under
+  #      "workflow-only": delete PLACEHOLDER_GATE from LAYER3_MARKS in
+  #      tests/agentic/gates.py.  Until that line goes, every test in the layer
+  #      is unconditionally skipped and this job would report a green nine-skip.
+  #      It is ONE line, for the whole layer — no test file changes, no marker
+  #      changes, no assertion changes — but it is a step, not a footnote.
+  #
+  # It is NOT in _GATE_EXEMPT, deliberately.  A disabled job is still a job in
+  # this YAML, and the alternative — exempting it now and un-exempting it on the
+  # way in — would make enabling the layer require editing a test file.  Being in
+  # the gate while disabled is safe, and safe by a mechanism this workflow already
+  # relies on: the loop fails only on the exact string `failure`
+  # (`if [ "$result" == "failure" ]`), a skipped job reports `skipped`, and
+  # test-summary is `if: always()`.  frontend-build, frontend-unit-tests and
+  # e2e-tests already sit in that loop and report `skipped` on every
+  # backend-only PR, which is why the step ends "All tests passed or were
+  # skipped!".
+  #
+  # It runs the same one command a developer runs (§G1: discoverable and one
+  # command, rather than a marker nobody remembers), so CI and a laptop cannot
+  # disagree about what "run layer 3" means.
+  agentic-tests:
+    name: "Agentic Behaviour (layer 3)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes, unit-tests]
+    # Literal `false`, not an expression: no repository state should be able to
+    # switch a job that spends money on a serving endpoint on by accident.
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run layer-3 agentic behaviour tests
+        env:
+          ENVIRONMENT: test
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          ./scripts/run_agentic_tests.sh \
+            --junitxml=test-results/agentic-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agentic-test-results
+          path: test-results/
+
+  # Integration test: Layer 4 — concurrency and multi-worker safety (ws4e E4)
+  #
+  # Proves the rebuild is free of the bug class it exists to remove: in-process
+  # deck state that was invisible to a different uvicorn worker.  Needs a real
+  # Postgres (row locks, READ COMMITTED, cross-process reads), no model.
+  #
+  # ENABLED by default — unlike layer 3, this suite needs only a database.
+  #
+  # Name every file of this suite explicitly in the run: block below —
+  # tests/unit/test_ci_collects_integration_tests.py fails otherwise
+  # (DELIBERATE_EXCLUSIONS is empty, and stays that way).
+  layer4-integration:
+    name: "Integration: Layer 4 Concurrency"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      needs.changes.outputs.backend == 'true'
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run layer-4 concurrency tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_layer4_multi_worker.py \
+            -v --tb=short --junitxml=test-results/layer4-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-layer4-results
+          path: test-results/
+
   # Summary job - runs after all tests
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - unit-tests
       - frontend-build
+      - frontend-unit-tests
       - wheel-build
       - integration-api-routes
       - integration-config-api
       - integration-export
       - integration-streaming
       - integration-slides
+      - integration-graph
       - integration-genie
+      - integration-general
       - e2e-tests
+      - agentic-tests
+      - layer4-integration
     if: always()
     steps:
       - name: Check test results
         run: |
           echo "Unit Tests: ${{ needs.unit-tests.result }}"
           echo "Frontend Build: ${{ needs.frontend-build.result }}"
+          echo "Frontend Unit Tests: ${{ needs.frontend-unit-tests.result }}"
           echo "Wheel Build: ${{ needs.wheel-build.result }}"
           echo "API Routes: ${{ needs.integration-api-routes.result }}"
           echo "Config API: ${{ needs.integration-config-api.result }}"
           echo "Export: ${{ needs.integration-export.result }}"
           echo "Streaming: ${{ needs.integration-streaming.result }}"
           echo "Slides: ${{ needs.integration-slides.result }}"
+          echo "Graph Orchestration: ${{ needs.integration-graph.result }}"
           echo "Genie: ${{ needs.integration-genie.result }}"
+          echo "General Integration: ${{ needs.integration-general.result }}"
           echo "E2E: ${{ needs.e2e-tests.result }}"
+          echo "Agentic Behaviour (layer 3): ${{ needs.agentic-tests.result }}"
+          echo "Layer 4 Concurrency: ${{ needs.layer4-integration.result }}"
 
           # Fail if any required job failed (not skipped)
           failed=false
           for result in "${{ needs.unit-tests.result }}" \
                         "${{ needs.frontend-build.result }}" \
+                        "${{ needs.frontend-unit-tests.result }}" \
                         "${{ needs.wheel-build.result }}" \
                         "${{ needs.integration-api-routes.result }}" \
                         "${{ needs.integration-config-api.result }}" \
                         "${{ needs.integration-export.result }}" \
                         "${{ needs.integration-streaming.result }}" \
                         "${{ needs.integration-slides.result }}" \
+                        "${{ needs.integration-graph.result }}" \
                         "${{ needs.integration-genie.result }}" \
-                        "${{ needs.e2e-tests.result }}"; do
+                        "${{ needs.integration-general.result }}" \
+                        "${{ needs.e2e-tests.result }}" \
+                        "${{ needs.agentic-tests.result }}" \
+                        "${{ needs.layer4-integration.result }}"; do
             if [ "$result" == "failure" ]; then
               failed=true
               break

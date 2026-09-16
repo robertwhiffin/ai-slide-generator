@@ -10,10 +10,10 @@ That gap is how adopting ``NormalizedAgentConfig`` on these two columns changed
 behaviour with no test noticing. ``sqlalchemy.JSON`` defaults to
 ``none_as_null=False``, which serializes a bound ``None`` to the two-byte document
 ``null`` rather than leaving it as SQL NULL — so a freshly seeded ``default``
-profile stopped being backfilled, never inherited its ``selected_slide_style_id``
-or its two prompt strings, and therefore compared BYTE-IDENTICALLY to a brand-new
-session. The first "save this session as a profile" from an untouched session got a
-legitimate 409 naming ``'default'``.
+profile stopped being backfilled, never inherited its ``selected_slide_style_id``,
+and therefore compared BYTE-IDENTICALLY to a brand-new session. The first "save this
+session as a profile" from an untouched session got a legitimate 409 naming
+``'default'``.
 
 The invariant these tests pin is therefore BOTH halves, because either alone is
 satisfied by the broken code:
@@ -28,7 +28,7 @@ scalar ``null`` comes back as Python ``None`` exactly like SQL NULL, so a test
 written that way passes on the broken code. The sibling suite
 ``test_style_exclusivity_persistence_boundary.py`` did precisely that.
 
-All fixtures SYNTHETIC (invented ids, names and prompt text).
+All fixtures SYNTHETIC (invented ids and names).
 """
 
 import pytest
@@ -42,9 +42,6 @@ from src.database.models.profile import ConfigProfile
 from src.database.models.prompts import ConfigPrompts
 from src.database.models.session import UserSession
 from src.database.models.slide_style_library import SlideStyleLibrary
-
-_CUSTOM_SYSTEM_PROMPT = "Synthetic system prompt, deliberately unlike the default."
-_CUSTOM_EDITING_INSTRUCTIONS = "Synthetic editing instructions, also unlike the default."
 
 
 @pytest.fixture()
@@ -126,8 +123,6 @@ def _seed_profile_like_init_default_profile(db):
         ConfigPrompts(
             profile_id=profile.id,
             selected_slide_style_id=style.id,
-            system_prompt=_CUSTOM_SYSTEM_PROMPT,
-            slide_editing_instructions=_CUSTOM_EDITING_INSTRUCTIONS,
         )
     )
     db.commit()
@@ -204,8 +199,11 @@ class TestTheBackfillThenFillsIt:
             "the seeded profile did not inherit its selected_slide_style_id, so it "
             f"carries no style authority at all: {stored!r}"
         )
-        assert stored["system_prompt"] == _CUSTOM_SYSTEM_PROMPT
-        assert stored["slide_editing_instructions"] == _CUSTOM_EDITING_INSTRUCTIONS
+        # The two prompt assertions that stood here are DELETED with B2.4: the
+        # retired override columns are no longer carried into agent_config, so
+        # ``slide_style_id`` above is now the whole of what the backfill inherits —
+        # and therefore the whole of what distinguishes the row from an empty
+        # config (see the sibling test below).
 
     def test_the_backfilled_profile_no_longer_matches_an_empty_config(
         self, db, session_factory

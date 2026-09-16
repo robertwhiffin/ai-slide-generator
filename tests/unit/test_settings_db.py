@@ -68,8 +68,6 @@ def test_profile(test_db):
     # Add prompts
     prompts = ConfigPrompts(
         profile_id=profile.id,
-        system_prompt=DEFAULT_CONFIG["prompts"]["system_prompt"],
-        slide_editing_instructions=DEFAULT_CONFIG["prompts"]["slide_editing_instructions"],
     )
     test_db.add(prompts)
     
@@ -99,7 +97,8 @@ def test_load_settings_from_database(test_db, test_profile, monkeypatch):
     assert settings.profile_id == test_profile.id
     assert settings.profile_name == "test-profile"
     assert settings.genie.space_id == "test-space-id"
-    assert "system_prompt" in settings.prompts
+    # ``system_prompt`` is NOT asserted here any more: B2.4 retired the column and
+    # settings_db no longer reads it into AppSettings.prompts.
 
 
 def test_load_settings_specific_profile(test_db, test_profile, monkeypatch):

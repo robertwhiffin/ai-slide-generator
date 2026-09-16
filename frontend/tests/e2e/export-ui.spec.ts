@@ -562,11 +562,14 @@ test.describe('ViewModes', () => {
     await setupStreamMock(page);
   });
 
-  test('default view is Generated Slides (tiles)', async ({ page }) => {
+  test('default view is the flip-through viewer', async ({ page }) => {
     await goToGenerator(page);
     await generateSlides(page);
 
-    await expect(page.locator('[data-testid="slide-tile-header"]').first()).toBeVisible();
+    // SlidePanel tiles were replaced by SlideViewer in the flip-through workstream.
+    // Verify the stage viewer and thumbnail ribbon are present.
+    await expect(page.getByTestId('slide-viewer')).toBeVisible();
+    await expect(page.getByTestId('thumbnail-ribbon')).toBeVisible();
   });
 
   test('debug view tabs hidden by default', async ({ page }) => {
@@ -677,9 +680,11 @@ test.describe('PresentButton', () => {
     // Click Present button
     await page.getByRole('button', { name: 'Present' }).click();
 
-    // Presentation mode should be active - look for the slide counter "1 / 3"
-    // which appears in presentation mode overlay
-    await expect(page.getByText(/1\s*\/\s*3/)).toBeVisible({ timeout: 5000 });
+    // Presentation mode should be active — look for the slide counter "1 / 3"
+    // which appears in presentation mode overlay.  The flip-through viewer's
+    // stage-position also shows "1 / 3", so use nth(1) to target the
+    // presentation mode counter (appears after stage-position).
+    await expect(page.getByText(/1\s*\/\s*3/).nth(1)).toBeVisible({ timeout: 5000 });
   });
 });
 
