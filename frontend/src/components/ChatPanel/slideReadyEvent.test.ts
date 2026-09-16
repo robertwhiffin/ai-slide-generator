@@ -1,30 +1,28 @@
 /**
- * E0 — shape tests for the slide_ready incremental delivery wiring.
+ * E0 — component tests for the slide_ready incremental delivery wiring.
  *
- * Read as text on purpose, for the same reason AppLayoutSpecToggle reads
- * AppLayout.tsx as text and api.ts's StreamEventType is guarded as text:
- *  - `handleStreamEvent`'s switch is inside a closure, unreachable without
- *    mounting ChatPanel behind SessionContext/AgentConfigContext/GenerationContext/Router.
- *  - TypeScript erases the union member at runtime, so deleting it leaves
- *    `npm run typecheck` at exit 0.
- *  - The behavioural proofs (slide renders before complete, ascending order,
- *    releasedPositions state, polling path) are in
- *    frontend/tests/e2e/incremental-slide-delivery.spec.ts.
+ * Two sections:
+ *
+ * SHAPE TESTS — read source as text, for the same reason AppLayoutSpecToggle does:
+ *   `handleStreamEvent`'s switch is inside a closure, unreachable without mounting
+ *   ChatPanel behind many providers.  TypeScript erases union members at runtime.
+ *   Each shape test covers exactly one structural claim (rule 6).
+ *
+ * BEHAVIOURAL TESTS — import and exercise `_insertSlideAscending` directly.
+ *   This function is the load-bearing half of the ordering claim: a later-arriving
+ *   lower-position slide must appear BEFORE a higher-position one.  Replacing the
+ *   ascending-insertion with a simple push silently produces the wrong deck order
+ *   if the shape tests are the only guard.  These tests go red on that sabotage.
+ *   The remaining behavioural proofs (slides visible before complete, polling path
+ *   cursor) are in frontend/tests/e2e/incremental-slide-delivery.spec.ts.
  *
  * Rule 6 — a shape assertion and a behaviour assertion must not share a test.
- * Each test below covers exactly one shape claim.
- *
- * Sabotage targets (one per test, documented inline):
- *  - Remove `case 'slide_ready':` from ChatPanel.tsx → test 1 goes red.
- *  - Remove `onSlideReady` from ChatPanelProps → test 2 goes red.
- *  - Remove `releasedPositions` from AppLayout.tsx → test 3 goes red.
- *  - Remove the `setReleasedPositions(new Set())` call in onGenerationStart → test 4 goes red.
- *  - Remove `data-released-count` attribute → test 5 goes red (E2b's operand becomes unobservable).
  */
 
 import chatPanelSource from './ChatPanel.tsx?raw';
 import appLayoutSource from '../Layout/AppLayout.tsx?raw';
 import apiSource from '../../services/api.ts?raw';
+import { _insertSlideAscending } from '../Layout/AppLayout';
 
 // ── 1. slide_ready case exists in handleStreamEvent ──────────────────────────
 //
@@ -118,20 +116,74 @@ describe('E0 — data-released-count attribute', () => {
 // The key delivery path is still the `onEvent` dispatch for each event.
 
 describe('E0 — polling transport cursor tracking', () => {
-  it('startPolling tracks slide_cursor from slide_ready events', () => {
+  // Both regexes below require EXECUTABLE syntax (assignment or template literal),
+  // not prose.  A comment like "// slidesCursor tracks slide_cursor" does NOT
+  // match either pattern because it lacks the required `=` operator or `${…}`.
+  // This closes the absence-assertion shape the round-1 reviewer found.
+
+  it('startPolling assigns event.slide_cursor to slidesCursor (executable assignment)', () => {
     expect(
       apiSource,
-      'slide_cursor tracking not found in startPolling. The cursor from slide_ready '
-      + 'events must be handed back on the next poll so the backend delivers only '
-      + 'new slides.',
-    ).toMatch(/slide_cursor.*slidesCursor|slidesCursor.*slide_cursor/s);
+      'slidesCursor = event.slide_cursor assignment not found in api.ts. '
+      + 'The cursor received from a slide_ready event must be stored in slidesCursor '
+      + 'and handed back on the next poll.  A comment about the cursor does not satisfy this.',
+    ).toMatch(/slidesCursor\s*=\s*event\.slide_cursor/);
   });
 
-  it('pollChat accepts a slide_cursor parameter and appends it to the URL', () => {
+  it('pollChat URL contains the slide_cursor template literal (executable template)', () => {
     expect(
       apiSource,
-      'slide_cursor not passed to pollChat URL. Without it every poll re-fetches all '
-      + 'slides from position 0.',
-    ).toMatch(/slide_cursor=.*slideCursor|cursorParam.*slide_cursor/s);
+      '`&slide_cursor=${slideCursor}` template literal not found in api.ts. '
+      + 'The cursor must be appended to the poll URL as a query parameter so the '
+      + 'backend delivers only slides not yet released to the client.',
+    ).toContain('`&slide_cursor=${slideCursor}`');
+  });
+});
+
+// ── 8 & 9. Ascending-insertion ordering — BEHAVIOURAL ────────────────────────
+//
+// Imports the extracted _insertSlideAscending pure function from AppLayout.tsx
+// and exercises it directly.  Shape tests 1-7 cannot catch this sabotage:
+//
+//   Sabotage: in _insertSlideAscending, replace the findIndex + splice/push
+//   logic with a simple `result.push(newSlide); return result;`.
+//   Result:
+//     - test 8 goes red: out-of-order arrival produces [2, 0, 1] not [0, 1, 2].
+//     - test 9 goes red: the last position in a run of 3 is correct, but the
+//       specific out-of-order sequence used exposes the wrong order at index 1.
+//
+// Rule 6: each test below contains only behavioural assertions.
+
+const makeSlide = (i: number) => ({
+  index: i,
+  slide_id: `build-${i}`,
+  html: `<div class="slide-container"><h1 data-pos="${i}">Slide ${i}</h1></div>`,
+  scripts: '',
+});
+
+describe('E0 — _insertSlideAscending ordering behavioral', () => {
+  it('out-of-order arrival (2, 0, 1) produces ascending index order [0, 1, 2]', () => {
+    let slides: ReturnType<typeof makeSlide>[] = [];
+    slides = _insertSlideAscending(slides, makeSlide(2)); // arrives first
+    slides = _insertSlideAscending(slides, makeSlide(0)); // arrives second
+    slides = _insertSlideAscending(slides, makeSlide(1)); // arrives third
+
+    expect(slides.map(s => s.index)).toEqual([0, 1, 2]);
+    // Each element carries the correct content for its position.
+    expect(slides[0].html).toContain('data-pos="0"');
+    expect(slides[1].html).toContain('data-pos="1"');
+    expect(slides[2].html).toContain('data-pos="2"');
+  });
+
+  it('replacing a position updates content in place without moving it', () => {
+    // Start with slides 0, 1, 2 already in order.
+    let slides = [makeSlide(0), makeSlide(1), makeSlide(2)];
+    // Replace position 1 with a revised version.
+    const revised = { index: 1, slide_id: 'build-1-rev', html: '<div>Revised One</div>', scripts: '' };
+    slides = _insertSlideAscending(slides, revised);
+
+    expect(slides.map(s => s.index)).toEqual([0, 1, 2]); // order unchanged
+    expect(slides[1].slide_id).toBe('build-1-rev');       // content updated
+    expect(slides.length).toBe(3);                         // no duplicate inserted
   });
 });
