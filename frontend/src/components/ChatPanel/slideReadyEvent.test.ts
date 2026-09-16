@@ -87,6 +87,16 @@ describe('E0 — releasedPositions state in AppLayout', () => {
 // Without the reset a position released in turn N is still present at the
 // start of turn N+1, making the gate fire immediately on the next build
 // even before any slide_ready event arrives.
+//
+// THIS IS NOT THE GUARD FOR THAT BEHAVIOUR — it is a total-deletion tripwire.
+// Like tests 6 and 7 below, it reads source as TEXT, so commenting the call out
+// while leaving `setReleasedPositions(new Set())` inside the comment satisfies
+// it (measured: the whole suite stayed 75/75 green, typecheck clean).  Review
+// finding I1.  The executable guard is the cross-turn test
+// "releasedPositions resets between turns" in
+// frontend/tests/e2e/deck-review-flag.spec.ts, which runs two real turns and
+// asserts the badge is off on turn 2's first frame; that test reddens under the
+// comment-out sabotage.  Do not treat this text match as coverage.
 
 describe('E0 — releasedPositions resets on generation start', () => {
   it('setReleasedPositions(new Set()) is called in the onGenerationStart wrapper', () => {

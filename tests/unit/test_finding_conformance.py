@@ -63,6 +63,33 @@ def _extract_type_union(ts_src: str, type_name: str) -> set[str]:
     return {v.strip().strip("'\"") for v in m.group(1).split("|")}
 
 
+def _extract_deck_level_criteria(ts_src: str) -> set[str]:
+    """Return the criterion names listed in the DECK_LEVEL_CRITERIA constant.
+
+    Parses the ``new Set([...])`` literal.  Asserts the construct is present and
+    non-empty, so a renamed or deleted constant fails here rather than silently
+    yielding an empty set that some other assertion then compares against.
+    """
+    m = re.search(
+        r"export const DECK_LEVEL_CRITERIA[^=]*=\s*new Set\(\s*\[(.*?)\]",
+        ts_src,
+        re.DOTALL,
+    )
+    assert m, (
+        "export const DECK_LEVEL_CRITERIA = new Set([...]) not found in finding.ts. "
+        "If it was renamed or removed, update this test and its consumer "
+        "(SlideViewer.tsx's grain-routing filter) together."
+    )
+    names = set()
+    for raw in m.group(1).split(","):
+        entry = raw.strip()
+        if not entry or entry.startswith("//"):
+            continue
+        names.add(entry.strip("'\""))
+    assert names, "DECK_LEVEL_CRITERIA parsed as empty; the literal has no entries"
+    return names
+
+
 def _extract_category_label_keys(ts_src: str) -> set[str]:
     """Return the keys defined in the CATEGORY_LABEL constant."""
     m = re.search(
@@ -165,6 +192,43 @@ class TestFindingConformance:
             f"{sorted(union)!r}. "
             f"Missing from CATEGORY_LABEL: {sorted(union - label_keys)}. "
             f"Extra in CATEGORY_LABEL: {sorted(label_keys - union)}."
+        )
+
+    def test_deck_level_criteria_mirror_equals_the_registrys_deck_level_set(self) -> None:
+        """DECK_LEVEL_CRITERIA must be exactly the level="deck" names in CRITERIA.
+
+        Review finding I2.  `frontend/src/types/finding.ts` hand-copies the
+        server's deck-level criterion names and its own comment says only "keep in
+        sync" — a comment, not a test.  There is no runtime bridge between the
+        registry and that Set, the same absence that let Finding and SlideFinding
+        drift once already, which is why this file exists.
+
+        The consequence of drift is concrete, not stylistic: SlideViewer.tsx's
+        grain-routing filter reads this Set to keep deck-level findings OUT of the
+        per-slide drawer.  A fourth `level="deck"` criterion added server-side and
+        not mirrored here renders in the slide drawer, defeating that filter.  The
+        only existing guard is indirect — test_finding_schema.py pins the registry
+        to exactly nine named criteria, so adding one forces an edit THERE — and it
+        points nowhere at the frontend.
+
+        Fails in both directions: a registry criterion promoted to deck level and
+        not mirrored, and a mirror entry that no longer names a deck-level
+        criterion (including a typo).
+        """
+        from src.domain.finding import CRITERIA
+
+        mirrored = _extract_deck_level_criteria(_read_ts())
+        registry_deck_level = {
+            name for name, crit in CRITERIA.items() if crit.level == "deck"
+        }
+        assert mirrored == registry_deck_level, (
+            f"DECK_LEVEL_CRITERIA in finding.ts is {sorted(mirrored)!r} but the "
+            f"level=\"deck\" criteria in src/domain/finding.py CRITERIA are "
+            f"{sorted(registry_deck_level)!r}. "
+            f"Missing from the TypeScript mirror (these would render in the slide "
+            f"drawer): {sorted(registry_deck_level - mirrored)}. "
+            f"In the mirror but not deck-level in the registry (these would be "
+            f"filtered out of the drawer wrongly): {sorted(mirrored - registry_deck_level)}."
         )
 
     def test_model_dump_maps_to_exact_camelcase_dict(self) -> None:

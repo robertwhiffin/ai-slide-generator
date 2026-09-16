@@ -1119,7 +1119,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       disabled={isReadOnly}
                       onGenerationStart={() => {
                         onGenerationStart();
-                        // E0: reset released-position tracking for the new turn
+                        // E0: reset released-position tracking for the new turn.
+                        // Guarded BEHAVIOURALLY by the cross-turn test in
+                        // tests/e2e/deck-review-flag.spec.ts ("releasedPositions
+                        // resets between turns"): the source-text guard in
+                        // slideReadyEvent.test.ts is satisfied by a comment
+                        // containing this very line, so it is not the guard.
                         setReleasedPositions(new Set());
                       }}
                       onSlideReady={handleSlideReady}

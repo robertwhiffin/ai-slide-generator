@@ -500,7 +500,16 @@ class TestCrossProcessReleaseQuery:
 
         # Extract the DB URL so the child process can connect to the same DB.
         # Use the engine's URL (already pointing at the throw-away test database).
-        db_url = str(postgres_engine.url)
+        #
+        # render_as_string(hide_password=False), NOT str(url): SQLAlchemy 2.0's
+        # URL.__str__ is render_as_string(hide_password=True), which replaces the
+        # password with '***'.  The child builds its own engine from this string,
+        # so with str() it authenticates as the literal '***'.  That is invisible
+        # on a laptop whose fixture URL is credential-free (trust auth: nothing to
+        # mask) and fatal in CI, where TELLR_TEST_POSTGRES_URL is
+        # postgresql+psycopg2://test:test@localhost:5432/test_db against
+        # postgres:15 with scram auth.
+        db_url = postgres_engine.url.render_as_string(hide_password=False)
         parent_pid = os.getpid()
 
         # -----------------------------------------------------------------------
@@ -654,8 +663,11 @@ class TestCheckpointerResumesInSecondProcess:
         # Store the checkpoint in the parent process.
         checkpoint_id = _store_test_checkpoint(saver, thread_id, payload_data)
 
-        # Extract the DB URL for the child.
-        db_url = str(postgres_engine.url)
+        # Extract the DB URL for the child.  render_as_string(hide_password=False),
+        # not str(url) — see the note in TestCrossProcessReleaseQuery: str() masks
+        # the password to '***' and the child cannot authenticate under CI's
+        # password-authenticated URL.
+        db_url = postgres_engine.url.render_as_string(hide_password=False)
 
         # Read back in a child subprocess.
         child_result = _read_checkpoint_in_subprocess(db_url, thread_id, checkpoint_id)
