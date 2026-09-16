@@ -104,6 +104,20 @@ _REPO_DB = "src.api.services.slide_repository.get_db_session"
 _WRITER_DB = "src.api.services.deck_level_writer.get_db_session"
 _SPEC_SYNC_DB = "src.services.spec_sync.get_db_session"
 _AUTHZ_DB = "src.api.routes._authz.get_db_session"
+# Every slide-mutation method in chat_service calls get_current_username() to stamp
+# modified_by on the Slide object.  In CI, DATABRICKS_HOST is a non-empty but
+# unreachable value; the SDK enters a retry loop that sleeps rather than raising,
+# and the job hangs.  The username is incidental plumbing for the route-level
+# tests in this suite, so we stub it at the same module boundary the other four
+# files in this package use — keeping this one mechanism rather than divergent copies.
+_CHAT_SERVICE_USERNAME = "src.api.services.chat_service.get_current_username"
+# session_manager.get_slide_deck calls _resolve_deck_display_names on every read
+# path; that method does `from src.services.identity_provider import
+# resolve_display_names` and then issues a SCIM API call.  With the CI
+# environment's unreachable DATABRICKS_HOST the SDK retry loop sleeps for
+# minutes before raising.  Identity resolution is not what any route-level test
+# here asserts, so we stub it to an empty map at its authoritative module.
+_RESOLVE_DISPLAY_NAMES = "src.services.identity_provider.resolve_display_names"
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +385,8 @@ class TestVersionCounterRejectsStaleWrite:
                 patch(_SPEC_SYNC_DB, fake_db),
                 patch("src.api.routes.slides.get_current_user", return_value="layer4@example.com"),
                 patch("src.api.routes._authz.get_permission_context", return_value=perm_ctx),
+                patch(_CHAT_SERVICE_USERNAME, return_value="layer4@example.com"),
+                patch(_RESOLVE_DISPLAY_NAMES, lambda emails: {}),
                 TestClient(app) as client,
             ):
                 # Reorder with correct expected_version=1 → succeeds (version → 2).
@@ -989,6 +1005,8 @@ class TestHumanVsGraph409:
                 patch(_SPEC_SYNC_DB, fake_db),
                 patch("src.api.routes.slides.get_current_user", return_value="layer4@example.com"),
                 patch("src.api.routes._authz.get_permission_context", return_value=perm_ctx),
+                patch(_CHAT_SERVICE_USERNAME, return_value="layer4@example.com"),
+                patch(_RESOLVE_DISPLAY_NAMES, lambda emails: {}),
                 TestClient(app) as client,
             ):
                 # --- Step 3: user submits with stale version ---
