@@ -295,9 +295,12 @@ slide viewer** (retire the scroll list), plus a redesigned direct editor.
 - Slides are addressed **by natural-language reference** ("slide 5", "the pricing
   slide"). The supervisor resolves references against the deck spec / graph state —
   **no selection state and no base64 `slide_context` round-trip.**
-- A lightweight **"@slide" affordance** remains: clicking a slide inserts a
+- ~~A lightweight **"@slide" affordance** remains: clicking a slide inserts a
   reference chip into the chat so pointing is easy when the user doesn't want to
-  type an index. It *augments* natural language; it does not gate it.
+  type an index. It *augments* natural language; it does not gate it.~~
+  ❌ **DROPPED (2026-09-16, operator's decision).** Natural-language addressing proved
+  sufficient in use, so the chip is not being built. It was only ever an ergonomic
+  augmentation — the bullet above is the requirement, and it stands.
 - The contiguous-only constraint is gone: any set of slides, adjacent or not, can be
   targeted in one message with distinct instructions each.
 
@@ -532,7 +535,7 @@ defines the end state and the seams.
 | 4 | ✅ **DONE** — **LangGraph core** — supervisor + builder, deck-spec state, two front doors; runs *alongside* the monolith | 2 | L | The big one. Merged 2026-09-16 into `feat/langgraph-core` as five workstreams, ws4a–ws4e (merge `60789f72`). **Two deliberate exclusions:** the monolith is not deleted, and MCP stays on it — both belong to a later PR. See `docs/superpowers/plans/ws4e-HANDOVER.md` |
 | 5 | **Review subsystem** — 3 agents as scorers + remediation loop | 3, 4 | L | Review = eval |
 | 6 | ✅ **DONE** — **Flip-through viewer + feedback drawer** — new slide stage + AI feedback UI | — (stub) | M | Shipped on `feat/flip-through-viewer`; see §6.2 for what landed vs. deferred |
-| 7 | 🟡 **PARTLY DELIVERED as a side-effect of 4 and 6 — not ticked off** — **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | **Done incidentally:** checkboxes and `SelectionContext` are gone (6), and the graph is invoked with `{"architect_message": message}` **and nothing else**, so §6.1's "no selection state and no base64 `slide_context` round-trip" holds *structurally*. **Still missing:** the "@slide" reference-chip affordance §6.1 requires does not exist anywhere in `frontend/`; no architect prompt text addresses distinct instructions per slide in one turn; and multi-target editing has **no test and has never been measured**. Needs its own spec → plan cycle for the remainder |
+| 7 | 🟢 **BELIEVED DELIVERED by 4 and 6 without being worked on — needs a revisit, not a build** — **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | **Delivered incidentally:** checkboxes and `SelectionContext` are gone (6); the graph is invoked with `{"architect_message": message}` **and nothing else**, so §6.1's "no selection state and no `slide_context` round-trip" holds *structurally* rather than by discipline; and **the operator tested multi-target editing on 2026-09-16 and it behaved as expected.** §6.1's "@slide" chip is **dropped** — see §6.1. **What is genuinely open is whether this workstream is still needed at all**, and that cannot be settled yet: the seven agent prompts are **placeholders**, so today's behaviour is not the behaviour that ships. **Revisit once real prompts land** — with a bias toward closing it rather than planning it. **The one real gap either way: no automated test covers multi-target editing**, so it can regress in silence |
 | 8 | **Inline WYSIWYG editor** — click-to-edit, move/resize, drag-reorder, raw-HTML escape hatch | 6 | L | Largest FE build |
 
 ### 10.1 Sequencing notes
@@ -550,11 +553,16 @@ defines the end state and the seams.
   fixes had introduced.
 - **6** ✅ **is done** — it was built against a stub deck and merged independently,
   as planned. **8** builds on **6** and is now unblocked.
-- **7** 🟡 **is partly delivered without having been worked on** — 6 removed the selection
-  state and 4 gave the graph a language-only entry point, which together satisfy the
-  structural half of §6.1. What remains is a real deliverable, not a formality: the
-  "@slide" affordance, and an architect that handles several slides with distinct
-  instructions in one turn. **Neither exists nor is measured.**
+- **7** 🟢 **appears to be delivered without having been worked on, and the next action is a
+  revisit rather than a build.** 6 removed the selection state, 4 gave the graph a
+  language-only entry point, and the operator has since driven multi-target editing and
+  found it behaves as expected. The "@slide" chip is dropped as unnecessary.
+  **Why it is not simply ticked:** the agent prompts are placeholders, so the behaviour
+  observed is not the behaviour that ships, and **this workstream's necessity needs
+  significant revisit once the real prompts land.** The likely outcome is that it closes
+  with no build at all — but that is a judgement to make against real prompts, not against
+  these. Note also that nothing automated covers multi-target editing, so whatever is
+  concluded, the behaviour is currently unguarded against regression.
 - **Two things 4 deliberately left, which the later PR that deletes the monolith owns:**
   removing `src/services/agent.py` and the `USE AGENT MODE` trigger phrase, and moving the
   MCP one-shot door (§9.2) onto the graph.
@@ -685,6 +693,21 @@ rediscover. Recorded here so they are not lost between documents.
   file passes every local test and ships the old stack. That file also deliberately
   leaves leaf transitives ranged so the Apps base image can satisfy them — do not
   "tidy" it into a fully-pinned closure.
+- ⚠️ **The seven agent prompts are PLACEHOLDERS, and several judgements in this document
+  are provisional until they are not.** Workstream 4 shipped substantive, functional
+  instruction text for the architect, analyst, builder, reviewers and fixer, but none of it
+  has been prompt-engineered — `src/core/skills/__init__.py` says so in its own docstring.
+  Consequences worth holding in mind rather than rediscovering:
+  - **Deck quality is not yet evidence of anything.** Judge the machinery, not the prose.
+  - **Workstream 7's necessity cannot be settled** against these prompts; see §10.1.
+  - **Workstream 5 inherits this directly** — review *is* eval, and a scorer built against
+    placeholder reviewers measures the placeholder.
+  - The layer-3 test suite exists, is discoverable by one command, and **ships skipped for
+    exactly this reason**. Enabling it is a workflow change plus deleting one gate line.
+    **Do not weaken a layer-3 assertion to make a placeholder satisfy it** — a skipped
+    honest test beats a passing dishonest one.
+  **Authoring the real prompts is unassigned work and is not in any workstream above.**
+
 - **Security surface of review agents.** Review agents read untrusted deck content
   and tool output, and their findings feed instructions back to the builder. The
   existing `<untrusted-data>` wrapping/injection scanning and the output safety gate
