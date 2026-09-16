@@ -41,6 +41,12 @@ interface SpecViewProps {
    * conversation is reached, and sends nothing itself.
    */
   onDiscuss: () => void;
+  /**
+   * E2b: true while the whole-deck reviewer is the only remaining node in the
+   * current turn — i.e., every slide position has been released AND the turn
+   * is still open.  Purely informational: no control is gated on this prop.
+   */
+  reviewInProgress?: boolean;
 }
 
 /** One deck-level field, as a definition-list row. */
@@ -57,7 +63,7 @@ function SpecField({ label, value, testId }: { label: string; value: string; tes
   );
 }
 
-export function SpecView({ slideDeck, onDiscuss }: SpecViewProps) {
+export function SpecView({ slideDeck, onDiscuss, reviewInProgress = false }: SpecViewProps) {
   // `deck_spec` is absent on a client-side deck and null on a specless one (and
   // on one whose stored JSON would not parse).  Both render the empty state:
   // pre-cutover decks and MCP-built decks legitimately have no spec, so this is
@@ -86,7 +92,19 @@ export function SpecView({ slideDeck, onDiscuss }: SpecViewProps) {
         className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-1.5"
       >
         <h2 className="text-sm font-medium text-foreground">Deck spec</h2>
-        {/* E2b badge slot — intentionally empty in E1. */}
+        {/* E2b badge slot: shown while the deck reviewer is the only remaining
+            node in the turn.  Non-blocking — no control is disabled by this. */}
+        {reviewInProgress && (
+          <span
+            data-testid="deck-review-in-progress"
+            role="status"
+            aria-live="polite"
+            className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+          >
+            <span aria-hidden="true" className="animate-spin inline-block">⟳</span>
+            Reviewing arc
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <span className="hidden text-xs text-muted-foreground sm:inline">
             Read-only — edits go through the conversation
