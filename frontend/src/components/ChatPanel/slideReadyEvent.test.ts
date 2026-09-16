@@ -1,20 +1,26 @@
 /**
  * E0 — component tests for the slide_ready incremental delivery wiring.
  *
- * Two sections:
+ * Three sections:
  *
- * SHAPE TESTS — read source as text, for the same reason AppLayoutSpecToggle does:
+ * SHAPE TESTS — read source as text (tests 1-7).
  *   `handleStreamEvent`'s switch is inside a closure, unreachable without mounting
  *   ChatPanel behind many providers.  TypeScript erases union members at runtime.
  *   Each shape test covers exactly one structural claim (rule 6).
+ *   IMPORTANT LIMITATION: any source-text assertion is satisfiable by a comment that
+ *   contains the matched text.  Shape tests catch total deletion; they do NOT prove
+ *   the code is executable, nor do they prove the correct value is sent.
+ *   Tests 10 and 11 below close that gap for the polling cursor specifically.
  *
- * BEHAVIOURAL TESTS — import and exercise `_insertSlideAscending` directly.
- *   This function is the load-bearing half of the ordering claim: a later-arriving
- *   lower-position slide must appear BEFORE a higher-position one.  Replacing the
- *   ascending-insertion with a simple push silently produces the wrong deck order
- *   if the shape tests are the only guard.  These tests go red on that sabotage.
- *   The remaining behavioural proofs (slides visible before complete, polling path
- *   cursor) are in frontend/tests/e2e/incremental-slide-delivery.spec.ts.
+ * BEHAVIOURAL TESTS — ordering (tests 8-9):
+ *   Import and exercise `_insertSlideAscending` directly.  Go red when ascending
+ *   insertion is replaced with a simple push.
+ *
+ * BEHAVIOURAL TESTS — polling cursor (tests 10-11):
+ *   Call `api.startPolling` directly with a stubbed `fetch` and fake timers.
+ *   No browser, no polling-mode detection — tests what startPolling DOES with a
+ *   slide_ready event, not whether the app routes to the polling path.
+ *   Two sabotages for two distinct claims: cursor presence AND cursor value.
  *
  * Rule 6 — a shape assertion and a behaviour assertion must not share a test.
  */
@@ -23,6 +29,7 @@ import chatPanelSource from './ChatPanel.tsx?raw';
 import appLayoutSource from '../Layout/AppLayout.tsx?raw';
 import apiSource from '../../services/api.ts?raw';
 import { _insertSlideAscending } from '../Layout/AppLayout';
+import { api } from '../../services/api';
 
 // ── 1. slide_ready case exists in handleStreamEvent ──────────────────────────
 //
@@ -116,10 +123,11 @@ describe('E0 — data-released-count attribute', () => {
 // The key delivery path is still the `onEvent` dispatch for each event.
 
 describe('E0 — polling transport cursor tracking', () => {
-  // Both regexes below require EXECUTABLE syntax (assignment or template literal),
-  // not prose.  A comment like "// slidesCursor tracks slide_cursor" does NOT
-  // match either pattern because it lacks the required `=` operator or `${…}`.
-  // This closes the absence-assertion shape the round-1 reviewer found.
+  // These text assertions catch total deletion of the cursor code.
+  // LIMITATION: a comment containing the matched syntax also satisfies them.
+  // For example, `// slidesCursor = event.slide_cursor` matches test 6, and
+  // a comment containing the backtick template satisfies test 7.
+  // Tests 10 and 11 below provide the executable guard that closes this gap.
 
   it('startPolling assigns event.slide_cursor to slidesCursor (executable assignment)', () => {
     expect(
@@ -185,5 +193,135 @@ describe('E0 — _insertSlideAscending ordering behavioral', () => {
     expect(slides.map(s => s.index)).toEqual([0, 1, 2]); // order unchanged
     expect(slides[1].slide_id).toBe('build-1-rev');       // content updated
     expect(slides.length).toBe(3);                         // no duplicate inserted
+  });
+});
+
+// ── 10 & 11. Polling cursor — BEHAVIOURAL ────────────────────────────────────
+//
+// Calls `api.startPolling` directly with a stubbed `fetch` and fake timers.
+// No browser, no isPollingMode() routing — this exercises the startPolling code
+// path in isolation and verifies what it DOES with a slide_ready event.
+//
+// The cursor value is 7 (deliberately non-trivial):
+//   - A test checking only for `slide_cursor=` in the URL would pass even if the
+//     code always sent `slide_cursor=0`.
+//   - Testing for `slide_cursor=7` verifies both presence AND correct propagation
+//     of the value the server returned.
+//
+// TWO SABOTAGES, two distinct claims (run each separately):
+//
+//   Sabotage A — remove the cursor assignment
+//     `slidesCursor = event.slide_cursor` → delete this line.
+//     slidesCursor stays 0; `slidesCursor > 0` is false; second poll omits
+//     the cursor parameter entirely.
+//     Expected: test 10 goes red (URL lacks `slide_cursor=7`), test 11 goes red
+//               (URL lacks `slide_cursor=`), all other tests stay green.
+//
+//   Sabotage B — assign the wrong constant (e.g. `slidesCursor = 3`)
+//     slidesCursor becomes 3 instead of 7 (the value the server sent).
+//     Expected: test 10 goes red (`slide_cursor=3` ≠ `slide_cursor=7`),
+//               test 11 stays green (`slide_cursor=` is still present),
+//               all other tests stay green.
+//
+// Rule 6: each test below contains only behavioural assertions.
+
+describe('E0 — polling cursor behavioral', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // Helper: build the fetch mock.  Captures poll URLs so the test can assert on them.
+  function buildFetchMock(pollUrls: string[]) {
+    return vi.fn(async (url: string) => {
+      const u = String(url);
+
+      if (u.includes('/api/chat/async')) {
+        return { ok: true, json: async () => ({ request_id: 'cursor-test-req' }) };
+      }
+
+      // All other requests are poll calls
+      pollUrls.push(u);
+
+      if (pollUrls.length === 1) {
+        // First poll: return a slide_ready event carrying slide_cursor=7
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'running',
+            events: [{
+              type: 'slide_ready',
+              position: 0,
+              html: '<div>s0</div>',
+              scripts: '',
+              slide_cursor: 7,
+            }],
+            last_message_id: 1,
+          }),
+        };
+      }
+
+      // Second+ poll: complete so the interval stops
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'completed',
+          events: [],
+          last_message_id: 2,
+          result: {
+            slides: null,
+            raw_html: null,
+            replacement_info: null,
+            experiment_url: null,
+            session_title: null,
+            metadata: null,
+          },
+        }),
+      };
+    });
+  }
+
+  it('10 — second poll URL carries slide_cursor VALUE 7 from first poll response', async () => {
+    const pollUrls: string[] = [];
+    vi.stubGlobal('fetch', buildFetchMock(pollUrls));
+
+    api.startPolling('session', 'msg', undefined, () => {}, (e) => { throw e; });
+
+    // Advance 1ms to let the async IIFE complete submitChatAsync and register the interval
+    await vi.advanceTimersByTimeAsync(1);
+    // First interval fires at 3000ms
+    await vi.advanceTimersByTimeAsync(3001);
+    // Second interval fires at 6001ms
+    await vi.advanceTimersByTimeAsync(3001);
+
+    expect(pollUrls.length, 'at least two poll requests must be made').toBeGreaterThanOrEqual(2);
+
+    // VALUE assertion: the cursor must equal the value the server returned (7).
+    // Sabotage A (no assignment) → URL has no slide_cursor → fails here.
+    // Sabotage B (constant cursor ≠ 7) → URL has slide_cursor=3 not 7 → fails here.
+    expect(pollUrls[1], 'second poll must include slide_cursor=7').toContain('slide_cursor=7');
+  });
+
+  it('11 — second poll URL contains slide_cursor= (parameter presence)', async () => {
+    const pollUrls: string[] = [];
+    vi.stubGlobal('fetch', buildFetchMock(pollUrls));
+
+    api.startPolling('session', 'msg', undefined, () => {}, (e) => { throw e; });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(3001);
+    await vi.advanceTimersByTimeAsync(3001);
+
+    expect(pollUrls.length).toBeGreaterThanOrEqual(2);
+
+    // PRESENCE assertion: any non-zero cursor is handed back.
+    // Sabotage A (no assignment, cursor stays 0) → URL omits parameter → fails here.
+    // Sabotage B (wrong constant, e.g. 3) → URL has slide_cursor=3 → passes here
+    //   (presence is satisfied; only test 10 catches the wrong value).
+    expect(pollUrls[1], 'second poll must include slide_cursor= parameter').toContain('slide_cursor=');
   });
 });
