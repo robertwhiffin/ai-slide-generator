@@ -74,13 +74,43 @@ export function _insertSlideAscending<T extends { index: number }>(
   return result;
 }
 
+/**
+ * E2b — pure helper for the "agentic deck review in progress" flag.
+ * Exported for unit testing only.
+ *
+ * The deck reviewer is the ONLY work left after every position has been
+ * released; once all slides are out and the turn is still running, the
+ * graph topology guarantees the only remaining node is deck_reviewer.
+ *
+ * Null guard: deckSpec is null until the architect has run, and is absent
+ * on client-side decks.  A null/undefined specSlideCount returns false so
+ * the flag stays off on a fresh session or a specless deck.
+ *
+ * Zero guard: if specSlideCount === 0 and releasedCount === 0, both sides
+ * match but nothing has been released, so the flag must stay off.
+ *
+ * Sabotage target (E2b unit test):
+ *   Replace `&& isGenerating` with `&& !isGenerating`.  The "on while turn
+ *   is still open" and "off when turn completes" assertions both invert and
+ *   go red.
+ */
+export function _isReviewInProgress(
+  releasedCount: number,
+  specSlideCount: number | null,
+  isGenerating: boolean,
+): boolean {
+  if (specSlideCount === null) return false;
+  if (releasedCount === 0) return false;
+  return releasedCount === specSlideCount && isGenerating;
+}
+
 export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
   const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
   const navigate = useNavigate();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
   // E0: tracks which slide positions have been released via slide_ready events in the
   // current turn.  Resets when a new generation starts.  E2b reads this alongside
-  // isGenerating from GenerationContext: releasedPositions.size === deckSpec.slides.length && !isGenerating
+  // isGenerating from GenerationContext: releasedPositions.size === deckSpec.slides.length && isGenerating
   const [releasedPositions, setReleasedPositions] = useState<Set<number>>(new Set());
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
@@ -733,6 +763,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
 
+  // E2b: "agentic deck review in progress" flag.
+  // True only while all slide positions have been released AND the turn is still
+  // running — the only work left at that point is the whole-deck reviewer node.
+  // Null guard: slideDeck?.deck_spec can be absent (client-side deck) or null
+  // (specless / unparseable).  _isReviewInProgress returns false for null.
+  const reviewInProgress = _isReviewInProgress(
+    releasedPositions.size,
+    slideDeck?.deck_spec?.slides.length ?? null,
+    isGenerating,
+  );
+
   const { handleExportPDF, handleExportPPTX, handleSaveAsHTML: handleExportHTML } = useDeckExport({
     slideDeck: displayDeck,
     sessionId,
@@ -1194,7 +1235,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     data-testid="spec-view-pane"
                     className={showSpec ? 'min-h-0 flex-1' : 'hidden'}
                   >
-                    <SpecView slideDeck={displayDeck} onDiscuss={handleDiscussSpec} />
+                    <SpecView slideDeck={displayDeck} onDiscuss={handleDiscussSpec} reviewInProgress={reviewInProgress} />
                   </div>
                 </div>
               </div>

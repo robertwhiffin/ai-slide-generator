@@ -694,6 +694,7 @@ jobs:
           - chat-ui
           - css-bg-export
           - deck-integrity
+          - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui
           - design-system-brand-text-uncapped
