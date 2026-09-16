@@ -9,10 +9,10 @@ Layer 4 needs a database and no model, so unlike layer 3 it runs in CI
 
 The six plan assertions
 -----------------------
-1. 15 parallel slide-row writes do not collide on the composite PK
-   (session_id, position).  Each ``write_slide`` call opens its own session,
-   so the contention is real: only Postgres shows it (SQLite's single-writer
-   lock serialises threads and hides the race).
+1. 15 writes to distinct ``(session_id, position)`` PK slots all persist.
+   Completeness assertion: every position lands in the database.  Concurrent
+   writes stress the PK on Postgres; the test does NOT prove they ran in
+   parallel (serialised writes would also pass).  The name reflects this.
 
 2. The deck-level ``version`` counter rejects a stale write with HTTP 409.
    This assertion is route-level: ``save_slide_deck`` is the writer that
@@ -82,6 +82,13 @@ from src.core.database import Base, get_db, _run_migrations
 from src.core.permission_context import PermissionContext
 from src.database.models.session import SessionSlide, SessionSlideDeck, UserSession
 from tests.integration.conftest import _make_factory
+from tests.integration.postgres_concurrency_helpers import (
+    _ClaimGate,
+    _WAIT_SECONDS,
+    _await_lock_waiters,
+    _seed_owner_deck,
+    _thread_aware_db,
+)
 
 # ---------------------------------------------------------------------------
 # CI job: the layer4 job names this file in its run block.
@@ -229,7 +236,7 @@ class TestFifteenParallelSlideWrites:
     test goes red on that change.
     """
 
-    def test_fifteen_parallel_writes_all_land(self, postgres_engine):
+    def test_fifteen_distinct_positions_persist(self, postgres_engine):
         _assert_postgres(postgres_engine)
 
         factory = _make_factory(postgres_engine)
@@ -786,15 +793,9 @@ class TestFourConcurrentSweepersOneWins:
     ):
         _assert_postgres(postgres_engine)
 
-        # Import the concurrency infrastructure from the existing file.
-        # That file's fixtures proved the pool class; we inherit that guarantee.
-        from tests.integration.test_claim_exclusivity_postgres import (
-            _ClaimGate,
-            _await_lock_waiters,
-            _thread_aware_db,
-            _seed_owner_deck,
-            _WAIT_SECONDS,
-        )
+        # _ClaimGate, _await_lock_waiters, _thread_aware_db, _seed_owner_deck
+        # and _WAIT_SECONDS come from postgres_concurrency_helpers (module-level
+        # import at the top of this file).
         from src.services.spec_sync import DEBOUNCE_SECONDS, claim_due_marker
         from datetime import datetime, timedelta
         import contextlib
