@@ -120,10 +120,23 @@ def _fake_db(factory):
 
 
 def _service(env, monkeypatch):
-    """The real ``ChatService`` the slide routes call, wired to this database."""
+    """The real ``ChatService`` the slide routes call, wired to this database.
+
+    ``get_current_username`` is patched here for the same reason ``graph_turn_env``
+    already patches ``resolve_display_names``: in CI the Databricks host is a
+    non-empty but unreachable value, and the SDK enters a retry loop that sleeps
+    rather than raising.  ``delete_slide``, ``duplicate_slide`` and
+    ``reorder_slides`` all call ``get_current_username()`` internally to stamp
+    authorship; the username is incidental to what this suite tests (spec-position
+    alignment), so we stub it at the module boundary rather than reaching the SDK.
+    """
     from src.api.services.chat_service import ChatService
 
     monkeypatch.setattr("src.core.database.get_db_session", _fake_db(env.factory))
+    monkeypatch.setattr(
+        "src.api.services.chat_service.get_current_username",
+        lambda: "test-user",
+    )
     return ChatService()
 
 

@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
 import { setupMocks } from '../helpers/setup-mocks';
-import { mockFindings } from '../fixtures/findings';
 import { mockSessionWithSlides, TEST_SESSION_ID, mockSlidesResponse } from '../helpers/session-helpers';
 
 test.describe('seen-state persistence', () => {
@@ -82,12 +81,8 @@ test.describe('flip-through viewer', () => {
       });
     });
 
-    // Inject findings BEFORE navigation — AppLayout reads window.__TELLR_TEST_FINDINGS__
-    // once on mount (AppLayout.tsx:739-744), so addInitScript must run first.
-    await page.addInitScript(
-      (findings) => { (window as unknown as { __TELLR_TEST_FINDINGS__: typeof findings }).__TELLR_TEST_FINDINGS__ = findings; },
-      mockFindings,
-    );
+    // Findings are now delivered through the API response (mockSlidesResponse.slide_deck.findings),
+    // not via window.__TELLR_TEST_FINDINGS__.  No addInitScript needed.
   });
 
   /** Navigate to the deck-loaded session and wait for the viewer to be visible. */
