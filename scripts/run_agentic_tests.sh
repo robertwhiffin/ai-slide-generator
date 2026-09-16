@@ -35,10 +35,15 @@
 #   `-rs` below prints the reason for every skip, so this command always explains
 #   itself rather than just printing a row of dots.
 #
-# To turn the layer on when the authored prompts land:
-#   delete PLACEHOLDER_GATE from LAYER3_MARKS in tests/agentic/gates.py.  One edit,
-#   for the whole layer.  Turning on the CI job is a separate, workflow-side change
-#   documented on the `agentic-tests` job in .github/workflows/test.yml.
+# To turn the layer on — two steps, and they are not both in the workflow:
+#   1. delete `if: false` from the `agentic-tests` job in
+#      .github/workflows/test.yml and give the repo DATABRICKS_HOST /
+#      DATABRICKS_TOKEN secrets.  That job already gates the build (it is in
+#      test-summary's needs:, echo block and failure loop), so nothing else in the
+#      workflow changes.
+#   2. delete PLACEHOLDER_GATE from LAYER3_MARKS in tests/agentic/gates.py.  ONE
+#      line, for the whole layer — but it is not a workflow file, and without it an
+#      enabled job just reports a green all-skipped run.
 #
 
 set -euo pipefail
