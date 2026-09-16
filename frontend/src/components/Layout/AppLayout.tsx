@@ -44,6 +44,36 @@ interface AppLayoutProps {
   viewOnly?: boolean;
 }
 
+/**
+ * E0 — pure helper for handleSlideReady.  Exported for unit testing only.
+ *
+ * Inserts `newSlide` at the correct ascending-index position in `slides`.
+ * If a slide with the same `index` already exists it is replaced in place.
+ * A later-arriving lower-index slide must appear BEFORE a higher-index one —
+ * this is what makes incremental rendering display the deck in the correct order
+ * even when the graph's reorder buffer releases slides out of sequence.
+ *
+ * Sabotage target (E0 unit test):
+ *   Replace the `findIndex(s => s.index > newSlide.index)` branch with a
+ *   simple `push`.  Out-of-order arrival then produces arrival-order output
+ *   rather than ascending order, and the unit test goes red.
+ */
+export function _insertSlideAscending<T extends { index: number }>(
+  slides: T[],
+  newSlide: T,
+): T[] {
+  const result = [...slides];
+  const existingIdx = result.findIndex(s => s.index === newSlide.index);
+  if (existingIdx >= 0) {
+    result[existingIdx] = newSlide;
+  } else {
+    const insertIdx = result.findIndex(s => s.index > newSlide.index);
+    if (insertIdx < 0) result.push(newSlide);
+    else result.splice(insertIdx, 0, newSlide);
+  }
+  return result;
+}
+
 export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
   const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
   const navigate = useNavigate();
@@ -125,16 +155,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
           slides: [newSlide],
         };
       }
-      const slides = [...prev.slides];
-      const existingIdx = slides.findIndex(s => s.index === position);
-      if (existingIdx >= 0) {
-        slides[existingIdx] = newSlide;
-      } else {
-        // Maintain ascending index order regardless of arrival order
-        const insertIdx = slides.findIndex(s => s.index > position);
-        if (insertIdx < 0) slides.push(newSlide);
-        else slides.splice(insertIdx, 0, newSlide);
-      }
+      const slides = _insertSlideAscending(prev.slides, newSlide);
       return { ...prev, slides, slide_count: slides.length };
     });
   }, []);
