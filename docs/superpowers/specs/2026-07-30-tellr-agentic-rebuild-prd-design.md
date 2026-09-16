@@ -151,6 +151,26 @@ credentials), so it is asserted only via the shared `build_slide_html` funnel �
 export check belongs in the release gate. Permissions and sharing are unchanged by these
 workstreams but remain to be re-verified for 4/5.
 
+*Status after workstream 4 (2026-09-16):* **six of the seven release-gate checks passed on
+a live devloop deployment**, so several items above are now closed by measurement rather
+than by argument. Existing decks open and stay editable; a monolith-mode turn is unchanged
+(3 slides, ascending, styled); a graph-mode turn builds a styled deck with a populated deck
+spec; **the Google Slides export parity gap above is closed** — both PPTX and Google Slides
+exports were run end to end, and the Chart.js canvas rasterises into the PPTX (verified by
+inspecting the artefact, not the code path); a pinned-template deck is not washed out; and
+the checkpointer survives the Lakebase OAuth refresh, observed across 80 requests to
+t+134m and a graph turn that wrote checkpoints past a refresh. The seventh check —
+"a placeholder is honest" — **cannot be performed:** it needs a fault-injection mechanism
+that exists in no plan.
+
+**Two gate items are NOT closed, and one of them can lose a user's work.**
+Permissions and sharing are still to be re-verified for 5. And the selective-rebuild
+economics were measured and **failed**: a real model emitted the single criterion that
+drives the decision on **3 slides out of 3**, so a deck-level spec edit may rebuild the
+whole deck and discard manual edits. **This is the one item that should gate offering the
+graph path to real users, and it lands directly on workstream 7**, whose whole subject is
+conversational editing.
+
 ---
 
 ## 4. Target architecture
@@ -509,10 +529,10 @@ defines the end state and the seams.
 | 1 | **UC-in-setup** — required UC catalog/schema in app config + provisioning; handles upgrade path for existing deployments | — | S | Unblocks MLflow; can land early |
 | 2 | **Gateway endpoint abstraction** — de-hardcode the model, route via Gateway, usage tracking & rate limits | — | S | Independent |
 | 3 | **MLflow rebuild** — always-on nested tracing + scorer framework; delete fallback/auto-skip hacks | 1 | M | |
-| 4 | **LangGraph core** — supervisor + builder, deck-spec state, two front doors; replaces the monolith | 2 | L | The big one |
+| 4 | ✅ **DONE** — **LangGraph core** — supervisor + builder, deck-spec state, two front doors; runs *alongside* the monolith | 2 | L | The big one. Merged 2026-09-16 into `feat/langgraph-core` as five workstreams, ws4a–ws4e (merge `60789f72`). **Two deliberate exclusions:** the monolith is not deleted, and MCP stays on it — both belong to a later PR. See `docs/superpowers/plans/ws4e-HANDOVER.md` |
 | 5 | **Review subsystem** — 3 agents as scorers + remediation loop | 3, 4 | L | Review = eval |
 | 6 | ✅ **DONE** — **Flip-through viewer + feedback drawer** — new slide stage + AI feedback UI | — (stub) | M | Shipped on `feat/flip-through-viewer`; see §6.2 for what landed vs. deferred |
-| 7 | **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | |
+| 7 | 🟡 **PARTLY DELIVERED as a side-effect of 4 and 6 — not ticked off** — **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | **Done incidentally:** checkboxes and `SelectionContext` are gone (6), and the graph is invoked with `{"architect_message": message}` **and nothing else**, so §6.1's "no selection state and no base64 `slide_context` round-trip" holds *structurally*. **Still missing:** the "@slide" reference-chip affordance §6.1 requires does not exist anywhere in `frontend/`; no architect prompt text addresses distinct instructions per slide in one turn; and multi-target editing has **no test and has never been measured**. Needs its own spec → plan cycle for the remainder |
 | 8 | **Inline WYSIWYG editor** — click-to-edit, move/resize, drag-reorder, raw-HTML escape hatch | 6 | L | Largest FE build |
 
 ### 10.1 Sequencing notes
@@ -523,10 +543,28 @@ defines the end state and the seams.
   attributed to one change or the other rather than both at once.
 - **1 and 2** are small, independent, and safe to land first.
 - **3** depends on UC being available (1).
-- **4** is the keystone; **5 and 7** build on it. Its data-model and dependency
-  prerequisites are now satisfied.
+- **4** ✅ **is done** (2026-09-16) — the keystone. **So 7 is unblocked, and 5 is blocked
+  only by 3.** It landed as five stacked workstreams rather than one PR, because the
+  single-PR plan was reviewed to a three-round limit without converging: severity never
+  decayed and four of round 3's nine blocking findings were regressions the loop's own
+  fixes had introduced.
 - **6** ✅ **is done** — it was built against a stub deck and merged independently,
   as planned. **8** builds on **6** and is now unblocked.
+- **7** 🟡 **is partly delivered without having been worked on** — 6 removed the selection
+  state and 4 gave the graph a language-only entry point, which together satisfy the
+  structural half of §6.1. What remains is a real deliverable, not a formality: the
+  "@slide" affordance, and an architect that handles several slides with distinct
+  instructions in one turn. **Neither exists nor is measured.**
+- **Two things 4 deliberately left, which the later PR that deletes the monolith owns:**
+  removing `src/services/agent.py` and the `USE AGENT MODE` trigger phrase, and moving the
+  MCP one-shot door (§9.2) onto the graph.
+
+**Where the work physically is.** All of it sits on the integration branch
+`feat/langgraph-core`, which is **586 commits ahead of `main` and 0 behind**. `main` is
+still at the 0.4.1 bump. Unreleased there: workstreams 0a, 0b, 6 and 4, the Design System
+Library, and six SDR-4437 security PRs. That is this section's "big-bang release" posture
+working as intended, but it is worth stating plainly rather than inferring from the
+absence of a note: **nothing in this table has reached `main`.**
 
 ### 10.2 What the prerequisites delivered (and what they oblige workstream 4 to do)
 
@@ -620,6 +658,22 @@ rediscover. Recorded here so they are not lost between documents.
   engine, because the official Postgres saver bypasses the OAuth token listener. What
   remains is genuinely in-process cached state, which is a web-app concern rather than a
   database one.
+  ✅ **CLOSED by workstream 4 (2026-09-16), and closed by measurement.** The custom saver
+  landed and goes through the shared engine by design, never holding its own connection —
+  which is the only reason the OAuth-refresh gate above can be observed at all. A layer-4
+  suite proves the multi-worker property against a real PostgreSQL rather than SQLite:
+  fifteen parallel row writes land, the deck-level version counter still rejects a stale
+  write, four concurrent sweepers claim a marker exactly once, **the release query is
+  correct from a different process with a cold cache**, and **a checkpoint written in one
+  process is readable in another**. The last two are the ones that would fail if anyone
+  reintroduced in-process buffering, and their sabotage was chosen so that it
+  discriminates: the first process buffers instead of persisting, and the child then sees
+  nothing.
+  **One residual, filed rather than fixed:** a race between marking a deck dirty and
+  claiming it is reproduced and banked as a strict expected-failure, so whoever fixes it is
+  forced to delete the record. And checkpoint growth is unbounded — one whole-state blob per
+  checkpoint and an uncapped findings list, so growth is super-linear in turns, with no
+  retention policy. `delete_thread` exists but only a user action calls it.
 - ✅ **RESOLVED (workstream 0b, PR #236) — Dependency resolution risk.** The `mlflow`
   pin conflict between `requirements.txt` and `pyproject.toml` is reconciled (3.14.0),
   and the langgraph 1.2.10 stack is pinned and proven to resolve on the Apps build
