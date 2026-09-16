@@ -12,7 +12,7 @@ import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
-import type { DrawerCallbacks, SlideFinding } from '../../types/finding';
+import { DECK_LEVEL_CRITERIA, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
 import { ViewerProvider, useViewer } from '../../contexts/ViewerContext';
 import { SlideStage } from './SlideStage';
 import { ThumbnailRibbon } from './ThumbnailRibbon';
@@ -184,7 +184,11 @@ const ViewerBody = forwardRef<
   }, [next, prev, first, last, isEditing, showDeleteConfirm]);
 
   const visible = useMemo(
-    () => findings.filter(f => !dismissed.has(f.id)),
+    // Grain-routing guard: findings with deck-level criteria are routed to chat,
+    // not the drawer.  Filter them out here as defence-in-depth — the backend
+    // should never include them in slideDeck.findings, but if one slips through
+    // (e.g. slideIndex set to a real index instead of -1) it must not render.
+    () => findings.filter(f => !dismissed.has(f.id) && !DECK_LEVEL_CRITERIA.has(f.criterion)),
     [findings, dismissed],
   );
 
