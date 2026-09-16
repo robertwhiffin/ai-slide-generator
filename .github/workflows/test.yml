@@ -704,6 +704,7 @@ jobs:
           - findings-drawer
           - help-ui
           - history-integration
+          - incremental-slide-delivery
           - history-ui
           - inline-svg-records-export
           - presentation-mode
@@ -1063,6 +1064,63 @@ jobs:
           name: agentic-test-results
           path: test-results/
 
+  # Integration test: Layer 4 — concurrency and multi-worker safety (ws4e E4)
+  #
+  # Proves the rebuild is free of the bug class it exists to remove: in-process
+  # deck state that was invisible to a different uvicorn worker.  Needs a real
+  # Postgres (row locks, READ COMMITTED, cross-process reads), no model.
+  #
+  # ENABLED by default — unlike layer 3, this suite needs only a database.
+  #
+  # Name every file of this suite explicitly in the run: block below —
+  # tests/unit/test_ci_collects_integration_tests.py fails otherwise
+  # (DELIBERATE_EXCLUSIONS is empty, and stays that way).
+  layer4-integration:
+    name: "Integration: Layer 4 Concurrency"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes, unit-tests]
+    if: |
+      always() &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
+      needs.changes.outputs.backend == 'true'
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - name: Run layer-4 concurrency tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.cloud.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: |
+          pytest tests/integration/test_layer4_multi_worker.py \
+            -v --tb=short --junitxml=test-results/layer4-results.xml -m "not live"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-layer4-results
+          path: test-results/
+
   # Summary job - runs after all tests
   test-summary:
     name: Test Summary
@@ -1083,6 +1141,7 @@ jobs:
       - integration-general
       - e2e-tests
       - agentic-tests
+      - layer4-integration
     if: always()
     steps:
       - name: Check test results
@@ -1101,6 +1160,7 @@ jobs:
           echo "General Integration: ${{ needs.integration-general.result }}"
           echo "E2E: ${{ needs.e2e-tests.result }}"
           echo "Agentic Behaviour (layer 3): ${{ needs.agentic-tests.result }}"
+          echo "Layer 4 Concurrency: ${{ needs.layer4-integration.result }}"
 
           # Fail if any required job failed (not skipped)
           failed=false
@@ -1117,7 +1177,8 @@ jobs:
                         "${{ needs.integration-genie.result }}" \
                         "${{ needs.integration-general.result }}" \
                         "${{ needs.e2e-tests.result }}" \
-                        "${{ needs.agentic-tests.result }}"; do
+                        "${{ needs.agentic-tests.result }}" \
+                        "${{ needs.layer4-integration.result }}"; do
             if [ "$result" == "failure" ]; then
               failed=true
               break
