@@ -61,6 +61,28 @@ async function setupMocks(page: Page) {
     }
   });
 
+  // Mock the read-only preview endpoint (any style id) → a ready 2-slide deck.
+  await page.route(/\/api\/settings\/slide-styles\/\d+\/preview$/, (route, request) => {
+    const id = parseInt(request.url().split('/').slice(-2)[0] || '1');
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        style_id: id,
+        status: 'ready',
+        fingerprint: 'fp-mock',
+        slides: [
+          "<div class='slide'>Cover</div>",
+          "<div class='slide'>Content</div>",
+        ],
+        css: '.slide{color:navy}',
+        assets: [],
+        generated_at: new Date().toISOString(),
+        stale: false,
+      }),
+    });
+  });
+
   // Mock individual slide style endpoints
   await page.route(/http:\/\/127.0.0.1:8000\/api\/settings\/slide-styles\/\d+$/, (route, request) => {
     if (request.method() === 'DELETE') {
@@ -227,15 +249,20 @@ test.describe('SlideStyleList', () => {
     await expect(page.getByRole('button', { name: 'Hide' }).first()).toBeVisible();
   });
 
-  test('expanded view shows style content', async ({ page }) => {
+  test('expanded view shows visual preview and toggles raw style content', async ({ page }) => {
     await goToSlideStyles(page);
 
     // Click Preview on System Default
     const systemCard = page.locator('div.border.rounded-lg').filter({ hasText: 'System Default' }).filter({ hasText: 'Protected system style' });
     await systemCard.getByRole('button', { name: 'Preview' }).click();
 
-    // Should show Style Content label and content
-    await expect(page.getByText('Style Content')).toBeVisible();
+    // The expanded panel now leads with a rendered visual preview.
+    await expect(page.getByText('Style Preview')).toBeVisible();
+    await expect(systemCard.getByTestId('slide-style-preview')).toBeVisible();
+
+    // Raw style text is behind an independent toggle.
+    await expect(page.locator('pre').filter({ hasText: '/* System default CSS */' })).not.toBeVisible();
+    await systemCard.getByTestId('slide-style-raw-toggle').click();
     await expect(page.locator('pre').filter({ hasText: '/* System default CSS */' })).toBeVisible();
   });
 

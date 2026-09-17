@@ -182,6 +182,12 @@ ALLOWLIST = {
         "Read-only library browse; HIGH-3 admin-gates writes only.",
     ("GET", "/api/settings/slide-styles/{style_id}"):
         "Read-only library browse; HIGH-3 admin-gates writes only.",
+    # Read-only cached visual preview; mirrors GET /{style_id} visibility (404
+    # parity, no admin gate) so any user can preview a style before picking it.
+    # It never generates inline — it enqueues a deduplicated background job — and
+    # the WRITE side (POST .../preview/regenerate) IS admin-gated (HIGH-3).
+    ("GET", "/api/settings/slide-styles/{style_id}/preview"):
+        "Read-only library browse; HIGH-3 admin-gates writes only.",
     # Design systems adapt the deck-prompt / slide-style library shape:
     # rename/delete are creator-or-admin (admin-only while the row is the org
     # default), set-default is admin-only, and — since SDR-4437 F-CR-17 —

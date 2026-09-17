@@ -55,10 +55,15 @@ def _create_model():
     llm_config = DEFAULT_CONFIG["llm"]
     system_client = get_system_client()
 
+    # Preview generation caps max_tokens via a context-var (same model, smaller
+    # thinking budget); None for normal generation so the full budget is used.
+    from src.services.slide_style_preview_fixture import preview_max_tokens_override
+    max_tokens = preview_max_tokens_override.get() or llm_config["max_tokens"]
+
     model = ChatDatabricks(
         endpoint=llm_config["endpoint"],
         temperature=llm_config["temperature"],
-        max_tokens=llm_config["max_tokens"],
+        max_tokens=max_tokens,
         top_p=0.95,
         workspace_client=system_client,
     )
@@ -68,7 +73,8 @@ def _create_model():
         extra={
             "endpoint": llm_config["endpoint"],
             "temperature": llm_config["temperature"],
-            "max_tokens": llm_config["max_tokens"],
+            "max_tokens": max_tokens,
+            "preview_capped": max_tokens != llm_config["max_tokens"],
         },
     )
 

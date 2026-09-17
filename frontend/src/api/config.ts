@@ -166,6 +166,33 @@ export interface SlideStyleListResponse {
   total: number;
 }
 
+// Slide-style generated preview (a cached, model-generated sample deck).
+export type SlideStylePreviewStatus =
+  | 'ready'
+  | 'stale'
+  | 'queued'
+  | 'generating'
+  | 'failed'
+  | 'missing';
+
+export interface SlideStylePreviewAsset {
+  type: string;
+  token?: string;
+}
+
+export interface SlideStylePreview {
+  style_id: number;
+  status: SlideStylePreviewStatus;
+  fingerprint?: string | null;
+  /** Per-slide sanitized HTML fragments (kept separate for the mini-deck pager). */
+  slides?: string[] | null;
+  css?: string | null;
+  assets?: SlideStylePreviewAsset[] | null;
+  generated_at?: string | null;
+  error_code?: string | null;
+  stale?: boolean;
+}
+
 // Design System Library types (Phase 4).
 // Mirrors the backend schemas in src/api/routes/settings/design_systems.py.
 
@@ -550,6 +577,22 @@ export const configApi = {
   
   getSlideStyle: (styleId: number): Promise<SlideStyle> =>
     fetchJson(`${API_BASE}/slide-styles/${styleId}`),
+
+  // Read-only preview fetch. Never triggers generation directly; the backend
+  // enqueues a deduplicated background job when the cached preview is missing or
+  // stale. Pass an AbortSignal to cancel in-flight polls when the selection
+  // changes.
+  getSlideStylePreview: (
+    styleId: number,
+    signal?: AbortSignal,
+  ): Promise<SlideStylePreview> =>
+    fetchJson(`${API_BASE}/slide-styles/${styleId}/preview`, { signal }),
+
+  // Admin-only explicit regeneration.
+  regenerateSlideStylePreview: (styleId: number): Promise<SlideStylePreview> =>
+    fetchJson(`${API_BASE}/slide-styles/${styleId}/preview/regenerate`, {
+      method: 'POST',
+    }),
   
   createSlideStyle: (data: SlideStyleCreate): Promise<SlideStyle> =>
     fetchJson(`${API_BASE}/slide-styles`, {

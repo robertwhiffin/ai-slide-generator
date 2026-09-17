@@ -16,8 +16,13 @@ from sqlalchemy.orm import Session
 from src.api.routes._authz import require_admin
 from src.core.database import get_db, get_db_session
 from src.database.models import SlideStyleLibrary
+from src.services import slide_style_preview_fixture as preview_fixture
+from src.services import slide_style_preview_storage as preview_storage
 
 logger = logging.getLogger(__name__)
+
+# Fields whose change invalidates a generated preview (see cache-invalidation).
+_PREVIEW_AFFECTING_FIELDS = ("style_content", "image_guidelines")
 
 router = APIRouter(prefix="/slide-styles", tags=["slide-styles"])
 
@@ -66,6 +71,26 @@ class SlideStyleListResponse(BaseModel):
     """Response for listing slide styles."""
     styles: List[SlideStyleResponse]
     total: int
+
+
+class SlideStylePreviewResponse(BaseModel):
+    """Read-only preview state for a slide style.
+
+    ``status`` drives the client: ``ready`` (current), ``stale`` (a usable but
+    out-of-date copy while regeneration runs), ``queued``/``generating`` (in
+    flight), ``failed`` (with optional last-known-good copy), ``missing`` (never
+    generated). HTTP is always 200; the client polls on ``status`` rather than
+    on status codes.
+    """
+    style_id: int
+    status: str
+    fingerprint: Optional[str] = None
+    slides: Optional[List[str]] = None
+    css: Optional[str] = None
+    assets: Optional[List[dict]] = None
+    generated_at: Optional[str] = None
+    error_code: Optional[str] = None
+    stale: bool = False
 
 
 # API endpoints
@@ -238,6 +263,15 @@ def create_slide_style(
         db.refresh(style)
         
         logger.info(f"Created slide style: {style.name} (id={style.id})")
+
+        # Warm the visual preview immediately so the first viewer gets a cache
+        # hit instead of waiting on a cold generation. Deduplicated + best-effort.
+        try:
+            from src.api.services.slide_style_preview_queue import try_enqueue
+
+            try_enqueue(style.id)
+        except Exception:  # noqa: BLE001 — warming must never fail the create
+            logger.warning("Preview warm-on-create failed", exc_info=True)
         
         return SlideStyleResponse(
             id=style.id,
@@ -321,10 +355,37 @@ def update_slide_style(
             style.description = request.description
         if request.category is not None:
             style.category = request.category
+
+        # Detect preview-affecting changes BEFORE mutating, so we can invalidate
+        # the cached preview in the SAME transaction as the edit (cache-invalidation).
+        preview_affected = False
+        if request.style_content is not None and request.style_content != style.style_content:
+            preview_affected = True
+        if (
+            request.image_guidelines is not None
+            and request.image_guidelines != style.image_guidelines
+        ):
+            preview_affected = True
+
         if request.style_content is not None:
             style.style_content = request.style_content
         if request.image_guidelines is not None:
             style.image_guidelines = request.image_guidelines
+
+        if preview_affected:
+            # Bump the revision (the generation write-back guard) and reset the
+            # cached preview to 'missing' so it regenerates. The last-known-good
+            # payload row is left in storage until the next successful prune.
+            style.style_revision = (style.style_revision or 0) + 1
+            style.preview_status = "missing"
+            style.preview_fingerprint = None
+            style.preview_payload_id = None
+            style.preview_error_code = None
+            style.preview_error_message = None
+            logger.info(
+                "Invalidated slide-style preview after edit",
+                extra={"style_id": style.id, "style_revision": style.style_revision},
+            )
 
         # Update the user (skip Databricks call in test/dev to avoid network timeout)
         if os.getenv("ENVIRONMENT") in ("development", "test"):
@@ -344,6 +405,16 @@ def update_slide_style(
         db.refresh(style)
         
         logger.info(f"Updated slide style: {style.name} (id={style.id})")
+
+        # If the edit invalidated the preview, warm it right away (against the
+        # now-committed new revision) so viewers don't hit a cold regeneration.
+        if preview_affected:
+            try:
+                from src.api.services.slide_style_preview_queue import try_enqueue
+
+                try_enqueue(style.id)
+            except Exception:  # noqa: BLE001 — warming must never fail the update
+                logger.warning("Preview warm-on-update failed", exc_info=True)
         
         return SlideStyleResponse(
             id=style.id,
@@ -510,3 +581,123 @@ def set_default_slide_style(style_id: int):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to set default slide style",
         )
+
+
+@router.get("/{style_id}/preview", response_model=SlideStylePreviewResponse)
+def get_slide_style_preview(
+    style_id: int,
+    db: Session = Depends(get_db),
+):
+    """Read the cached visual preview for a slide style. NEVER generates inline.
+
+    Visibility mirrors ``GET /{style_id}`` (404 parity). When the cached preview
+    is missing or stale relative to the current generation fingerprint, this
+    enqueues a deduplicated background job and returns the current state (with a
+    stale copy if one exists) so the UI stays fast and crawlers/prefetch/scroll
+    never trigger LLM cost.
+    """
+    from src.api.services.slide_style_preview_queue import try_enqueue
+
+    style = db.query(SlideStyleLibrary).filter(SlideStyleLibrary.id == style_id).first()
+    if not style:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Slide style {style_id} not found",
+        )
+
+    current_fp = preview_fixture.compute_fingerprint(
+        style.style_content, style.image_guidelines
+    )
+    status_val = style.preview_status or "missing"
+
+    # Load any stored payload (ready OR last-known-good) once.
+    payload = None
+    if style.preview_payload_id:
+        payload = preview_storage.load_payload(db, style.preview_payload_id)
+
+    def _resp(status_str: str, *, include_payload: bool, stale: bool = False):
+        has = include_payload and payload
+        return SlideStylePreviewResponse(
+            style_id=style_id,
+            status=status_str,
+            fingerprint=style.preview_fingerprint if include_payload else None,
+            slides=(payload or {}).get("slides") if has else None,
+            css=(payload or {}).get("css") if has else None,
+            assets=(payload or {}).get("assets") if has else None,
+            generated_at=style.preview_generated_at.isoformat()
+            if (has and style.preview_generated_at)
+            else None,
+            error_code=style.preview_error_code,
+            stale=stale,
+        )
+
+    # Ready and current (cache hit).
+    if status_val == "ready" and style.preview_fingerprint == current_fp and payload:
+        logger.info(
+            "slide_style_preview.cache_hit",
+            extra={"style_id": style_id, "status": "ready"},
+        )
+        return _resp("ready", include_payload=True)
+
+    # Ready but stale (fingerprint moved). Serve the stale copy, kick a refresh.
+    if status_val == "ready" and payload:
+        age_s = None
+        if style.preview_generated_at:
+            from datetime import datetime as _dt
+
+            age_s = (_dt.utcnow() - style.preview_generated_at).total_seconds()
+        logger.info(
+            "slide_style_preview.cache_stale",
+            extra={"style_id": style_id, "stale_age_s": age_s},
+        )
+        try_enqueue(style_id)
+        return _resp("stale", include_payload=True, stale=True)
+
+    # In flight. Serve stale copy underneath if present.
+    if status_val in ("queued", "generating"):
+        return _resp(status_val, include_payload=bool(payload), stale=bool(payload))
+
+    # Failed. Return last-known-good if we have one; otherwise just the error.
+    if status_val == "failed":
+        return _resp("failed", include_payload=bool(payload), stale=bool(payload))
+
+    # Missing (or unknown): enqueue and report queued.
+    try_enqueue(style_id)
+    # Re-read status: try_enqueue may have transitioned it to 'queued'.
+    return SlideStylePreviewResponse(style_id=style_id, status="queued")
+
+
+# SDR-4437 HIGH-3: workspace-global library writes are admin-only.
+@router.post(
+    "/{style_id}/preview/regenerate",
+    response_model=SlideStylePreviewResponse,
+    dependencies=[Depends(require_admin)],
+)
+def regenerate_slide_style_preview(
+    style_id: int,
+    db: Session = Depends(get_db),
+):
+    """Explicitly (re)generate a slide-style preview. Admin-only, deduplicated.
+
+    Enqueues a background job against the current style snapshot. Idempotent: if
+    a generation is already in flight this is a no-op that returns the in-flight
+    status.
+    """
+    from src.api.services.slide_style_preview_queue import try_enqueue
+
+    style = db.query(SlideStyleLibrary).filter(SlideStyleLibrary.id == style_id).first()
+    if not style:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Slide style {style_id} not found",
+        )
+
+    # Force a re-attempt even from a 'failed'/'ready' terminal state by clearing
+    # to 'missing' first (in its own committed txn), then enqueue.
+    db.query(SlideStyleLibrary).filter(SlideStyleLibrary.id == style_id).update(
+        {"preview_status": "missing"}, synchronize_session=False
+    )
+    db.commit()
+
+    try_enqueue(style_id)
+    return SlideStylePreviewResponse(style_id=style_id, status="queued")
