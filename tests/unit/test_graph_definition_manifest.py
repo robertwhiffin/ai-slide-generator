@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -251,6 +251,42 @@ def test_manifest_contains_no_foreman_or_tool_grants():
     raw = json.loads(GRAPH_VERSION_1_MANIFEST_JSON)
     assert tuple(item["agent_key"] for item in raw["definitions"]) == MODEL_DRIVEN_AGENT_KEYS
     _assert_no_tool_grants(raw)
+
+
+def test_cached_manifest_overlay_cannot_mutate_shared_or_canonical_state():
+    first = load_graph_v1_manifest().definitions[0]
+    before_dump = first.model_dump(mode="python")
+    before_hash = definition_content_hash(first)
+
+    overrides = cast(Any, first.schema_overlay.field_overrides)
+    with pytest.raises(TypeError):
+        overrides["review_probe"] = {"nested": True}
+
+    second = load_graph_v1_manifest().definitions[0]
+    assert second is first
+    assert second.model_dump(mode="python") == before_dump
+    assert definition_content_hash(second) == before_hash
+
+
+def test_nested_overlay_containers_are_immutable_but_dump_as_json_containers():
+    original = load_graph_v1_manifest().definitions[0]
+    raw = original.model_dump(mode="python")
+    raw["schema_overlay"]["field_overrides"] = {
+        "outer": {"values": [{"enabled": True}]}
+    }
+    candidate = DefinitionContent.model_validate(raw)
+    before_hash = definition_content_hash(candidate)
+    overrides = cast(Any, candidate.schema_overlay.field_overrides)
+
+    with pytest.raises(TypeError):
+        overrides["outer"]["added"] = False
+    with pytest.raises(TypeError):
+        overrides["outer"]["values"][0]["enabled"] = False
+    with pytest.raises(TypeError):
+        overrides["outer"]["values"][0] = {"enabled": False}
+
+    assert candidate.model_dump(mode="python") == raw
+    assert definition_content_hash(candidate) == before_hash
 
 
 def test_static_assembly_rule_shapes_are_literal_and_role_specific():
