@@ -369,6 +369,56 @@ def _make_mapping_role_incompatible(factory: sessionmaker) -> None:
         raw.close()
 
 
+def _insert_extra_draft_parent(factory: sessionmaker) -> None:
+    engine = factory.kw["bind"]
+    raw = engine.raw_connection()
+    cursor = raw.cursor()
+    try:
+        cursor.execute("PRAGMA ignore_check_constraints=ON")
+        cursor.execute(
+            "INSERT INTO graph_draft "
+            "(id, base_release_id, lock_version, updated_by, updated_at) "
+            "SELECT 2, base_release_id, lock_version, updated_by, updated_at "
+            "FROM graph_draft WHERE id = 1"
+        )
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        cursor.execute("PRAGMA ignore_check_constraints=OFF")
+        raw.close()
+
+
+def _insert_out_of_singleton_draft_agent(factory: sessionmaker) -> None:
+    engine = factory.kw["bind"]
+    raw = engine.raw_connection()
+    cursor = raw.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute(
+            "INSERT INTO graph_draft_agent ("
+            "graph_draft_id, agent_key, candidate_hash, definition_version, "
+            "prompt_text, endpoint_name, temperature, max_tokens, top_p, "
+            "schema_overlay, assembly_rules, protected_assembly_version, "
+            "protected_assembly_digest, schema_contract_version, "
+            "schema_contract_digest"
+            ") SELECT 2, agent_key, candidate_hash, definition_version, "
+            "prompt_text, endpoint_name, temperature, max_tokens, top_p, "
+            "schema_overlay, assembly_rules, protected_assembly_version, "
+            "protected_assembly_digest, schema_contract_version, "
+            "schema_contract_digest FROM graph_draft_agent "
+            "WHERE graph_draft_id = 1 AND agent_key = 'architect'"
+        )
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        raw.close()
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -378,6 +428,14 @@ def _make_mapping_role_incompatible(factory: sessionmaker) -> None:
         (_corrupt_draft_hash, "draft role architect content hash does not match persisted content"),
         (_remove_active_release, "graph configuration must have exactly one active release"),
         (_make_mapping_role_incompatible, "active release has a role-incompatible mapping"),
+        (
+            _insert_extra_draft_parent,
+            "graph configuration must have exactly one singleton draft",
+        ),
+        (
+            _insert_out_of_singleton_draft_agent,
+            "shared draft agents must all belong to the singleton draft",
+        ),
     ],
 )
 def test_corrupt_current_graph_fails_closed_with_precise_domain_cause(
@@ -390,10 +448,18 @@ def test_corrupt_current_graph_fails_closed_with_precise_domain_cause(
             GraphConfiguration().read_workbench(session)
 
 
-def test_corrupt_incomplete_release_maps_to_stable_nonleaking_500(
-    session_factory, monkeypatch
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        _remove_release_mapping,
+        _insert_extra_draft_parent,
+        _insert_out_of_singleton_draft_agent,
+    ],
+)
+def test_corrupt_graph_maps_to_stable_nonleaking_500(
+    session_factory, monkeypatch, mutation: Mutation
 ):
-    _remove_release_mapping(session_factory)
+    mutation(session_factory)
     _force_admin(monkeypatch, is_admin=True)
 
     with _app_for(session_factory, raise_server_exceptions=False) as client:
