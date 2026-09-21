@@ -51,6 +51,23 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to initialize database tables: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    logger.info("Bootstrapping Graph Configuration...")
+    try:
+        from src.core.database import get_session_local
+        from src.services.graph_configuration import bootstrap_graph_configuration
+
+        result = bootstrap_graph_configuration(get_session_local())
+        logger.info(
+            "Graph Configuration ready: release_id=%s version=%s created=%s",
+            result.release_id,
+            result.version_number,
+            result.created,
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to bootstrap Graph Configuration: {e}\n{tb}")
+        raise SystemExit(1) from e
+
     # Data migrations/backfills that used to run in the FastAPI lifespan now run
     # HERE, once, before the server forks its workers — the uvicorn workers must
     # never execute migration code (4 of them racing the migration chain on boot
@@ -86,8 +103,8 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
     # bad row must not abort startup.
     logger.info("Backfilling session_slides rows...")
     try:
-        from src.core.database import get_session_local
         from src.core.backfill_session_slides_startup import backfill_unmigrated_decks
+        from src.core.database import get_session_local
 
         slide_decks = backfill_unmigrated_decks(get_session_local())
         if slide_decks:
