@@ -603,10 +603,119 @@ def _run_migrations(engine, schema: str | None = None):
         # three siblings.
         _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- Graph Configuration: database-enforced published-row immutability ---
+        # create_all owns the six fresh table definitions. These PostgreSQL-only
+        # guards add the mutation boundary that constraints alone cannot express.
+        # Keep this before owner reassignment so new functions/triggers are re-homed
+        # in the same migration transaction.
+        _install_graph_configuration_mutation_guards(conn, schema, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _install_graph_configuration_mutation_guards(
+    conn, schema: str | None, is_sqlite: bool
+) -> None:
+    """Install idempotent PostgreSQL guards for immutable published graph rows.
+
+    Definition revisions and release mappings reject every update/delete. A release
+    rejects delete and every update except its first ``effective_to`` transition from
+    NULL to a non-NULL value with all other fields unchanged.
+    """
+    if is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    preparer = conn.dialect.identifier_preparer
+    namespace = preparer.quote(schema or "public")
+
+    def qualified(name: str) -> str:
+        return f"{namespace}.{preparer.quote(name)}"
+
+    reject_function = qualified("reject_graph_published_mutation")
+    release_function = qualified("guard_graph_release_mutation")
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {reject_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME
+                    USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {release_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'UPDATE'
+                   AND OLD.effective_to IS NULL
+                   AND NEW.effective_to IS NOT NULL
+                   AND NEW.id IS NOT DISTINCT FROM OLD.id
+                   AND NEW.version_number IS NOT DISTINCT FROM OLD.version_number
+                   AND NEW.previous_release_id IS NOT DISTINCT FROM OLD.previous_release_id
+                   AND NEW.restored_from_release_id
+                       IS NOT DISTINCT FROM OLD.restored_from_release_id
+                   AND NEW.release_note IS NOT DISTINCT FROM OLD.release_note
+                   AND NEW.published_by IS NOT DISTINCT FROM OLD.published_by
+                   AND NEW.published_at IS NOT DISTINCT FROM OLD.published_at
+                   AND NEW.effective_from IS NOT DISTINCT FROM OLD.effective_from
+                THEN
+                    RETURN NEW;
+                END IF;
+
+                RAISE EXCEPTION 'graph_release rows are immutable except for their first close'
+                    USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+
+    for table_name, trigger_name in (
+        (
+            "agent_definition_revision",
+            "trg_agent_definition_revision_immutable",
+        ),
+        ("graph_release_agent", "trg_graph_release_agent_immutable"),
+    ):
+        table = qualified(table_name)
+        trigger = preparer.quote(trigger_name)
+        conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+        conn.execute(
+            text(
+                f"CREATE TRIGGER {trigger} "
+                f"BEFORE UPDATE OR DELETE ON {table} "
+                f"FOR EACH ROW EXECUTE FUNCTION {reject_function}()"
+            )
+        )
+
+    release_table = qualified("graph_release")
+    release_trigger = preparer.quote("trg_graph_release_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {release_trigger} ON {release_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {release_trigger} "
+            f"BEFORE UPDATE OR DELETE ON {release_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {release_function}()"
+        )
+    )
 
 
 def _migrate_graph_checkpoints(conn, schema: str | None = None) -> None:
