@@ -690,6 +690,7 @@ jobs:
           - admin-page
           - admin-route-gate
           - agent-config-integration
+          - agent-definition-workbench
           - api-route-matcher
           - chat-ui
           - css-bg-export

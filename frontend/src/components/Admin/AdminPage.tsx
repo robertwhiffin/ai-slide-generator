@@ -5,6 +5,7 @@ import { AdminDesignSystemDefault } from './AdminDesignSystemDefault';
 import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
 import { UsageDashboard } from './UsageDashboard';
+import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
 
 type TabId =
   | 'usage'
@@ -12,7 +13,8 @@ type TabId =
   | 'google_slides'
   | 'design_system'
   | 'slide_style'
-  | 'judge';
+  | 'judge'
+  | 'agent_definitions';
 
 export const AdminPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('usage');
@@ -116,6 +118,20 @@ export const AdminPage: React.FC = () => {
           >
             Judge
           </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'agent_definitions'}
+            aria-controls="agent-definitions-panel"
+            id="agent-definitions-tab"
+            onClick={() => setActiveTab('agent_definitions')}
+            className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors -mb-px ${
+              activeTab === 'agent_definitions'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            Agent Definitions
+          </button>
         </div>
 
         <div
@@ -177,6 +193,16 @@ export const AdminPage: React.FC = () => {
         >
           <AdminJudgeSettings />
         </div>
+
+        {activeTab === 'agent_definitions' && (
+          <div
+            role="tabpanel"
+            id="agent-definitions-panel"
+            aria-labelledby="agent-definitions-tab"
+          >
+            <AgentDefinitionWorkbench />
+          </div>
+        )}
       </div>
     </div>
   );
