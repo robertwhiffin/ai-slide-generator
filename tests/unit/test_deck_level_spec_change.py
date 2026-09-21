@@ -998,10 +998,19 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
 
     The build reviewer and the re-review share one criteria block and one output
     schema, so the re-review's extra instruction must not reach the build path.
-    ``call_skill`` adds it on the presence of ``deck_brief`` and nothing else.
+    ``AgentRuntime`` adds it on the presence of ``deck_brief`` and nothing else.
     """
-    from src.core.skills import _with_conditional_instructions, load_skill
+    from src.core.skills import load_skill
     from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
+    from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+
+    class Capture:
+        def __init__(self):
+            self.prompts = []
+
+        def invoke(self, *, configuration, schema, prompt):
+            self.prompts.append(prompt)
+            return schema.model_construct()
 
     skill = load_skill("build_reviewer")
     # Captured BY VALUE, before the call. Comparing skill.instructions afterwards
@@ -1009,18 +1018,25 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
     # sides of the comparison the same object and every assertion below pass.
     baseline = str(skill.instructions)
     build_payload = {"position": 0, "html": "<div>x</div>", "scripts": ""}
+    capture = Capture()
+    runtime = AgentRuntime.compatibility(model_adapter=capture)
 
-    assert _with_conditional_instructions(skill, build_payload).instructions == baseline
-    widened = _with_conditional_instructions(
-        skill, {**build_payload, "deck_brief": {"audience": NEW_AUDIENCE}}
+    runtime.run("build_reviewer", build_payload, AgentAssemblyContext(False))
+    runtime.run(
+        "build_reviewer",
+        {**build_payload, "deck_brief": {"audience": NEW_AUDIENCE}},
+        AgentAssemblyContext(False),
     )
-    assert DECK_BRIEF_REVIEW in widened.instructions
-    assert widened.instructions.startswith(baseline)
+
+    assert DECK_BRIEF_REVIEW not in capture.prompts[0]
+    assert DECK_BRIEF_REVIEW in capture.prompts[1]
+    assert capture.prompts[1].startswith(baseline)
     # The registry entry itself is never mutated: two concurrent branches must not
     # be able to see each other's instructions, and the build path that runs after
     # a re-review must get the same prompt as one that runs before it.
     assert load_skill("build_reviewer").instructions == baseline
-    assert _with_conditional_instructions(skill, build_payload).instructions == baseline
+    runtime.run("build_reviewer", build_payload, AgentAssemblyContext(False))
+    assert capture.prompts[2] == capture.prompts[0]
 
 
 def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
@@ -1028,11 +1044,23 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
 
     A build review's prompt must be byte-identical to what it was before §4.6's
     pass existed — so this reconstructs it from the registry's own instructions
-    plus the payload and asserts equality with what ``call_skill`` would assemble.
+    plus the payload and asserts equality with what ``AgentRuntime`` assembles.
     """
-    from src.services.agent_resolution import assemble_skill_prompt
-    from src.core.skills import _with_conditional_instructions, load_skill
+    import json
+
+    from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
+    from src.core.skills import load_skill
     from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
+    from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+    from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+
+    class Capture:
+        def __init__(self):
+            self.prompts = []
+
+        def invoke(self, *, configuration, schema, prompt):
+            self.prompts.append(prompt)
+            return schema.model_construct()
 
     skill = load_skill("build_reviewer")
     payload = {
@@ -1045,11 +1073,20 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
         "scripts": "",
     }
     for design_system_active in (False, True):
-        assembled = assemble_skill_prompt(
-            _with_conditional_instructions(skill, payload),
+        capture = Capture()
+        AgentRuntime.compatibility(model_adapter=capture).run(
+            "build_reviewer",
             payload,
-            design_system_active,
+            AgentAssemblyContext(design_system_active),
         )
-        untouched = assemble_skill_prompt(skill, payload, design_system_active)
+        parts = [skill.instructions]
+        if design_system_active:
+            parts.append(DESIGN_SYSTEM_PRECEDENCE)
+        else:
+            parts.append(_SLIDE_FRAME_CONSTRAINTS)
+        parts.append(json.dumps(payload, indent=2, default=str))
+        untouched = "\n\n".join(parts)
+
+        assembled = capture.prompts[0]
         assert assembled == untouched
         assert DECK_BRIEF_REVIEW not in assembled

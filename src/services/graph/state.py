@@ -219,7 +219,7 @@ class GraphState(TypedDict, total=False):
     # warns on — and will eventually block — deserialising unregistered types
     # from checkpoint (Ruling C-21, corrections §46).  build_branch_payload
     # copies this scalar into the Send payload so fanned branches can call
-    # call_skill / assemble_skill_prompt without touching the DB again.
+    # AgentRuntime can assemble the prompt without touching the DB again.
     design_system_active: Optional[bool]
 
     # Set by architect_node; resolved deterministically before fan-out.

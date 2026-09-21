@@ -26,7 +26,7 @@ unscoped flag and prove nothing — the single-direction trap again.
 Harness
 -------
 `graph_turn_env` (tests/integration/conftest.py) — the compiled graph over a real
-database and a real `SqlAlchemyCheckpointSaver`, with only `call_skill` stubbed.
+database and a real `SqlAlchemyCheckpointSaver`, with only `AgentRuntime` stubbed.
 Two additions it does not know about:
 
 * `src.services.graph.builder._compiled_graph` is pointed at the env's graph, so

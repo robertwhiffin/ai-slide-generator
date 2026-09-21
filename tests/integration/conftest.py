@@ -10,7 +10,7 @@ Fixtures in this file
   partial_deck               — drives release-order assertions (land / placehold)
   released_deck              — session_id with a committed ascending prefix
   graph_turn_env             — the COMPILED graph over a real database, a real
-                               checkpointer and a SkillRecorder (ws4c C5)
+                               checkpointer and an AgentRuntime recorder (ws4c C5)
   postgres_engine            — a throwaway PostgreSQL database with the full
                                Tellr schema, one connection PER THREAD; self-skips
                                when no PostgreSQL is reachable
@@ -494,7 +494,7 @@ def released_deck(sqlite_engine_file_backed):
 # ---------------------------------------------------------------------------
 # graph_turn_env — the compiled graph, a real database, a real checkpointer
 #
-# ws4c C5.  Everything a layer-1 orchestration test needs beyond call_skill:
+# ws4c C5.  Everything a layer-1 orchestration test needs beyond AgentRuntime:
 # a live DB session (architect_node's deck-level write, the reviewers' row
 # writes, the placeholder's row write, deck_reviewer_node's post-commit write)
 # and a real checkpointer (turn 2, and the resumed-mid-fix case).
@@ -701,7 +701,7 @@ def graph_turn_env(monkeypatch, tmp_path):
     """The COMPILED graph over a real database and a real checkpointer.
 
     Only what reaches a Databricks workspace is stubbed, and only one thing
-    does: ``call_skill``, replaced by a ``SkillRecorder``.  Everything else is
+    does: ``AgentRuntime.run``, replaced by a ``SkillRecorder``. Everything else is
     the shipped code — ``SlideWriter`` row writes, ``write_deck_level_columns``,
     ``save_deck_review``, the chat message, ``resolve_style_source`` (which
     touches no database for an unpinned deck, and every spec this suite builds
@@ -748,7 +748,10 @@ def graph_turn_env(monkeypatch, tmp_path):
     )
 
     recorder = SkillRecorder()
-    monkeypatch.setattr("src.services.graph.nodes.call_skill", recorder)
+    monkeypatch.setattr(
+        "src.services.graph.nodes.get_agent_runtime",
+        lambda: recorder,
+    )
 
     graph = build_graph(
         checkpointer=SqlAlchemyCheckpointSaver(session_factory=factory)

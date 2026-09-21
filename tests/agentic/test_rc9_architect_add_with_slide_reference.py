@@ -43,7 +43,7 @@ reference → clarification.  RC9 is its counterpart for add intent with a refer
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 
 pytestmark = LAYER3_MARKS
@@ -56,8 +56,6 @@ def test_the_architect_adds_a_slide_at_the_referenced_position():
     architect must return 'build' intent with a spec that has at least five slides,
     showing it understood the request as addition rather than replacement.
     """
-    from src.core.skills import call_skill
-
     existing = deck_spec_dict(
         [
             slide_spec(0, purpose="executive summary", content_brief="the key finding"),
@@ -68,7 +66,7 @@ def test_the_architect_adds_a_slide_at_the_referenced_position():
         title="Customer Satisfaction Study",
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             "add a slide after slide 2 that shows the regional breakdown",

@@ -43,7 +43,7 @@ a ``build`` intent here is the regression (silent overwrite of prior work).
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 
 pytestmark = LAYER3_MARKS
@@ -56,8 +56,6 @@ def test_the_architect_asks_before_replacing_an_existing_deck():
     architect must ask whether to add to or replace the existing deck, not issue a
     build intent that would silently overwrite it.
     """
-    from src.core.skills import call_skill
-
     existing = deck_spec_dict(
         [
             slide_spec(0, purpose="introduce the product", content_brief="what the product does"),
@@ -67,7 +65,7 @@ def test_the_architect_asks_before_replacing_an_existing_deck():
         title="Seed Round Pitch",
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             "build me a five-slide presentation about our Series A strategy",

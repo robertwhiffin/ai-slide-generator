@@ -50,7 +50,8 @@ from src.database.models.session import (
     SessionSlideDeck,
     SlideDeckVersion,
 )
-from tests.integration.conftest_stub_skills import builder_html
+from src.services.agent_runtime import AgentAssemblyContext
+from tests.integration.conftest_stub_skills import CallableAgentRuntime, builder_html
 
 AUTHOR = "graph-caller@example.com"
 SEEDED_AUTHOR = "someone-who-came-before@example.com"
@@ -464,8 +465,12 @@ def _pin_the_design_contract(env, monkeypatch, *, ds_id=7, template_id=11):
 
     recorder = env.recorder
 
-    def call_skill_with_a_pinned_spec(name, payload, design_system_active):
-        out = recorder(name, payload, design_system_active)
+    def invoke_with_a_pinned_spec(name, payload, design_system_active):
+        out = recorder.run(
+            name,
+            payload,
+            AgentAssemblyContext(design_system_active),
+        ).output
         if name == "architect" and getattr(out, "deck_spec", None) is not None:
             spec = DeckSpec.model_validate(
                 {
@@ -482,8 +487,10 @@ def _pin_the_design_contract(env, monkeypatch, *, ds_id=7, template_id=11):
             )
         return out
 
+    runtime = CallableAgentRuntime(invoke_with_a_pinned_spec)
     monkeypatch.setattr(
-        "src.services.graph.nodes.call_skill", call_skill_with_a_pinned_spec
+        "src.services.graph.nodes.get_agent_runtime",
+        lambda: runtime,
     )
     return token_css
 
@@ -532,7 +539,7 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
 
     **Both barriers hang off the WRITES, not off anything upstream of them, and
     that correction came out of the sabotage.**  An earlier version signalled the
-    architect's side from its `call_skill` return, which is BEFORE
+    architect's side from its AgentRuntime output, which is BEFORE
     `architect_node` performs its write — so the reversed case released the
     naming thread while the architect's write was still pending, the two writes
     raced again, and the architect still usually won.  The sabotage produced NO
@@ -569,7 +576,7 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
             architect_wrote.set()
         return result
 
-    def call_skill(name, payload, design_system_active):
+    def invoke_agent(name, payload, design_system_active):
         if name == "architect" and naming_first:
             # The naming write must have LANDED before the architect resolves
             # the spec whose title it is about to write.
@@ -577,14 +584,22 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
                 "the naming step never wrote a title, so the ordering under "
                 "test was never established"
             )
-        return recorder(name, payload, design_system_active)
+        return recorder.run(
+            name,
+            payload,
+            AgentAssemblyContext(design_system_active),
+        ).output
 
     monkeypatch.setattr(SessionManager, "rename_session", rename_session)
     monkeypatch.setattr(
         "src.services.graph.nodes.write_deck_level_columns",
         write_deck_level_columns,
     )
-    monkeypatch.setattr("src.services.graph.nodes.call_skill", call_skill)
+    runtime = CallableAgentRuntime(invoke_agent)
+    monkeypatch.setattr(
+        "src.services.graph.nodes.get_agent_runtime",
+        lambda: runtime,
+    )
     return naming_wrote, architect_wrote
 
 

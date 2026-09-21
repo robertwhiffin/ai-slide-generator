@@ -1,4 +1,4 @@
-"""The layer-1 skill stub: one recorder that stands in for ``call_skill``.
+"""The layer-1 model stub: one recorder that stands in for ``AgentRuntime``.
 
 REGISTRATION — this module is HELPERS-ONLY and is consumed by PLAIN IMPORT.
 ------------------------------------------------------------------------
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from src.domain.deck_spec import DeckSpec
@@ -121,14 +122,14 @@ def fixed_html(position: int) -> str:
 
 
 class SkillRecorder:
-    """Stands in for ``call_skill``; every knob and every observation lives here.
+    """Stands in for ``AgentRuntime``; every knob and observation lives here.
 
     Knobs (mutate before running the graph)
     ---------------------------------------
     slide_count
         How many positions the architect's ``DeckSpec`` declares.
     fail_positions
-        Builder positions whose ``call_skill`` raises — the terminal-failure path.
+        Builder positions whose runtime call raises — the terminal-failure path.
     slow_positions
         Builder positions that sleep ``slow_seconds`` before returning, which is
         how dispatch skew is created without a real model.
@@ -243,10 +244,11 @@ class SkillRecorder:
             if isinstance(call["payload"], dict) and "position" in call["payload"]
         )
 
-    # -- the call_skill surface --------------------------------------------
+    # -- the AgentRuntime surface ------------------------------------------
 
-    def __call__(self, name: str, payload: dict, design_system_active: bool) -> Any:
-        """``call_skill(name, payload, design_system_active)`` — three arguments."""
+    def run(self, name: str, payload: dict, assembly_context: Any) -> Any:
+        """Record one runtime invocation and return its canonical output."""
+        design_system_active = assembly_context.design_system_active
         with self._lock:
             self.calls.append(
                 {
@@ -262,7 +264,7 @@ class SkillRecorder:
                 f"SkillRecorder has no handler for skill {name!r}; the graph "
                 f"reached a model this suite does not stub"
             )
-        return handler(payload)
+        return SimpleNamespace(output=handler(payload))
 
     # -- per-skill handlers -------------------------------------------------
 
@@ -345,4 +347,20 @@ class SkillRecorder:
         raise AssertionError(
             "the data analyst is not part of any layer-1 orchestration scenario; "
             "an ask_data turn reaching here means the architect stub changed"
+        )
+
+
+class CallableAgentRuntime:
+    """Adapt a test function to the production ``AgentRuntime.run`` interface."""
+
+    def __init__(self, function) -> None:
+        self._function = function
+
+    def run(self, name: str, payload: dict, assembly_context: Any) -> Any:
+        return SimpleNamespace(
+            output=self._function(
+                name,
+                payload,
+                assembly_context.design_system_active,
+            )
         )

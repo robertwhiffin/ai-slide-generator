@@ -7,7 +7,7 @@ nothing at all.  ``tests/unit/test_graph_nodes.py`` and
 ``tests/unit/test_graph_routers.py`` pin the *policy* and stay green either way.
 Everything below runs a real turn through ``build_graph()``'s compiled graph,
 over a real database, with a real ``SqlAlchemyCheckpointSaver``, and only
-``call_skill`` stubbed.
+``AgentRuntime`` stubbed.
 
 How the harness is registered
 -----------------------------

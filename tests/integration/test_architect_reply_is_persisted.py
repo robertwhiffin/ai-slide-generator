@@ -51,7 +51,9 @@ import pytest
 
 from src.api.services.chat_service import ChatService
 from src.domain.skill_io import ArchitectOutput
+from src.services.agent_runtime import AgentAssemblyContext
 from src.services.graph.nodes import _advisory_text
+from tests.integration.conftest_stub_skills import CallableAgentRuntime
 
 #: The architect's reply.  A sentence no default, no stub and no other node
 #: produces, so its presence in a transcript can only have come from the
@@ -243,14 +245,22 @@ def async_turn_env(graph_turn_env, monkeypatch):
     knobs: Dict[str, Any] = {"discuss": True, "reply": REPLY}
 
     def stub_architect(name: str, payload: dict, design_system_active: bool):
-        out = recorder(name, payload, design_system_active)
+        out = recorder.run(
+            name,
+            payload,
+            AgentAssemblyContext(design_system_active),
+        ).output
         if name != "architect":
             return out
         if knobs["discuss"]:
             return ArchitectOutput(intent="discuss", message=knobs["reply"])
         return out.model_copy(update={"message": knobs["reply"]})
 
-    monkeypatch.setattr("src.services.graph.nodes.call_skill", stub_architect)
+    runtime = CallableAgentRuntime(stub_architect)
+    monkeypatch.setattr(
+        "src.services.graph.nodes.get_agent_runtime",
+        lambda: runtime,
+    )
 
     from src.core.user_context import set_current_user
 
@@ -494,7 +504,11 @@ def test_the_analysts_answer_reaches_the_user_but_never_replays_as_the_architect
         # handler raises on purpose ("not part of any layer-1 scenario"), so
         # routing this skill through it would kill the turn.
         if name == "architect":
-            env.recorder(name, payload, design_system_active)
+            env.recorder.run(
+                name,
+                payload,
+                AgentAssemblyContext(design_system_active),
+            )
             architect_passes["n"] += 1
             if architect_passes["n"] == 1:
                 return ArchitectOutput(
@@ -509,7 +523,11 @@ def test_the_analysts_answer_reaches_the_user_but_never_replays_as_the_architect
             )
         raise AssertionError(f"unexpected skill {name!r} on an ask_data turn")
 
-    monkeypatch.setattr("src.services.graph.nodes.call_skill", ask_then_discuss)
+    runtime = CallableAgentRuntime(ask_then_discuss)
+    monkeypatch.setattr(
+        "src.services.graph.nodes.get_agent_runtime",
+        lambda: runtime,
+    )
 
     request_id = env.run()
     delivered = [event["content"] for event in env.poll(request_id)["events"]]

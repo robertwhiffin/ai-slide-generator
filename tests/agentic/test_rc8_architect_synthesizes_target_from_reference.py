@@ -41,7 +41,7 @@ it must act.
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 
 pytestmark = LAYER3_MARKS
@@ -54,8 +54,6 @@ def test_the_architect_targets_the_referenced_slide_without_asking():
     must classify as 'edit' and target position 7 (0-indexed) without asking for
     clarification — the reference is unambiguous.
     """
-    from src.core.skills import call_skill
-
     existing = deck_spec_dict(
         [
             slide_spec(i, purpose=f"section {i + 1}", content_brief=f"content for section {i + 1}")
@@ -64,7 +62,7 @@ def test_the_architect_targets_the_referenced_slide_without_asking():
         title="Annual Operating Plan",
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             "edit slide 8 to include a bar chart of quarterly results",

@@ -48,8 +48,7 @@ INSTRUCTIONS: str = build_instructions()
 
 #: Appended to the build reviewer's instructions **only** when the payload carries
 #: a ``deck_brief`` — i.e. only on §4.6's deck-level re-review pass.  The normal
-#: build path's prompt is byte-identical without it (``call_skill`` decides; see
-#: ``_with_conditional_instructions``).
+#: build path's prompt is byte-identical without it (``AgentRuntime`` decides).
 #:
 #: It exists because the two invocations ask genuinely different questions.  The
 #: build review asks "is this slide well made?", which the criteria above already

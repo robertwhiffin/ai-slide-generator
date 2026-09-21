@@ -2,7 +2,7 @@
 
 WHY THIS EXISTS
 ---------------
-A layer-3 test calls ``call_skill`` directly — one model call, no database, no
+A layer-3 test calls ``AgentRuntime`` directly — one model call, no database, no
 graph — because the question is "what did the agent do with this input", not "did
 the topology hold" (layer 1 owns that, in CI, with stubs).  But a skill invoked
 with a payload the production nodes never send is measuring the fixture, not the
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-#: Exactly the keys ``architect_node`` puts in its ``call_skill`` payload
+#: Exactly the keys ``architect_node`` puts in its ``AgentRuntime`` payload
 #: (``src/services/graph/nodes.py``).  Guarded against drift — see the module
 #: docstring.
 ARCHITECT_PAYLOAD_KEYS: tuple[str, ...] = (
@@ -122,7 +122,7 @@ def build_reviewer_payload(
 
     ``resolved_style`` and ``section_css`` are ``None`` on the no-template path,
     which is also the path that makes ``design_system_active`` false — and that
-    flag is what causes ``assemble_skill_prompt`` to inject
+    flag is what causes ``AgentRuntime`` to inject
     ``_SLIDE_FRAME_CONSTRAINTS``.  The reviewer must be shown the numbers it is
     told to judge against, or the test is unfair by construction.
     """

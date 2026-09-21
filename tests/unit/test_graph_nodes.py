@@ -19,6 +19,7 @@ import inspect
 import json
 import queue
 import time
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -90,6 +91,53 @@ def _branch_payload(env, position=0, html=None, scripts="", spec=None, **extra):
         payload["scripts"] = scripts
     payload.update(extra)
     return payload
+
+
+class TestAgentRuntimeSeam:
+    def test_model_driven_node_invokes_agent_runtime(self, graph_env, monkeypatch):
+        output = architect_build(make_spec((0,)))
+        graph_env.skills.set("architect", output)
+
+        class RecordingRuntime:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, agent_key, payload, assembly_context):
+                self.calls.append((agent_key, payload, assembly_context))
+                return SimpleNamespace(output=output)
+
+        runtime = RecordingRuntime()
+        monkeypatch.setattr(nodes, "get_agent_runtime", lambda: runtime, raising=False)
+
+        architect_node(graph_env.state())
+
+        assert len(runtime.calls) == 1
+        agent_key, payload, assembly_context = runtime.calls[0]
+        assert agent_key == "architect"
+        assert payload["session_id"] == graph_env.session_id
+        assert assembly_context.design_system_active is False
+
+    def test_foreman_stays_outside_agent_runtime(self, graph_env, monkeypatch):
+        class RuntimeMustNotRun:
+            def run(self, *args, **kwargs):
+                raise AssertionError("Foreman is deterministic and must not invoke a model")
+
+        monkeypatch.setattr(
+            nodes,
+            "get_agent_runtime",
+            lambda: RuntimeMustNotRun(),
+            raising=False,
+        )
+
+        updates = foreman_node(
+            graph_env.state(
+                turn_id=TURN,
+                deck_spec=make_spec((0,)),
+                fix_map=scoped(TURN, {0: {"original_html": "<p>x</p>"}}),
+            )
+        )
+
+        assert updates["foreman_wakes"] == scoped(TURN, [[]])
 
 
 # ===========================================================================

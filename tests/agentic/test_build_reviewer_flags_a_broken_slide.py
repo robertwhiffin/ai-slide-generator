@@ -28,14 +28,14 @@ criterion forbids, and would go stale silently the day the block changes.
 the parsed block.
 
 ``design_system_active=False`` is deliberate: that is what makes
-``assemble_skill_prompt`` append ``_SLIDE_FRAME_CONSTRAINTS`` to the prompt.  A
+``AgentRuntime`` append ``_SLIDE_FRAME_CONSTRAINTS`` to the prompt. A
 reviewer that never received the numbers would be judged against numbers it was
 never shown, which is unfair by construction.
 """
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS, frame_constraint_numbers
+from tests.agentic.gates import LAYER3_MARKS, frame_constraint_numbers, invoke_agent
 from tests.agentic.payloads import (
     build_reviewer_payload,
     overflowing_slide_html,
@@ -47,7 +47,6 @@ pytestmark = LAYER3_MARKS
 
 def test_the_build_reviewer_flags_a_slide_that_does_not_fit_its_frame():
     """The reviewer must return a finding whose ``criterion`` is ``overflow``."""
-    from src.core.skills import call_skill
     from src.domain.finding import CRITERIA
 
     frame = frame_constraint_numbers()
@@ -61,7 +60,7 @@ def test_the_build_reviewer_flags_a_slide_that_does_not_fit_its_frame():
         "anchored to _SLIDE_FRAME_CONSTRAINTS"
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "build_reviewer",
         build_reviewer_payload(
             position=0,

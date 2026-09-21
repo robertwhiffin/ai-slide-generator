@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
-from tests.agentic.gates import LAYER3_MARKS, frame_constraint_numbers
+from tests.agentic.gates import LAYER3_MARKS, frame_constraint_numbers, invoke_agent
 from tests.agentic.payloads import fixer_payload, slide_spec, well_formed_slide_html
 
 pytestmark = LAYER3_MARKS
@@ -47,7 +47,6 @@ _MINIMUM_PRESERVED = 0.6
 
 def test_the_fixer_corrects_one_colour_without_re_authoring_the_slide():
     """One narrow finding; the returned HTML must still be recognisably the same slide."""
-    from src.core.skills import call_skill
     from src.domain.finding import Finding, make_finding_id
 
     frame = frame_constraint_numbers()
@@ -65,7 +64,7 @@ def test_the_fixer_corrects_one_colour_without_re_authoring_the_slide():
         objective=True,
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "fixer",
         fixer_payload(
             position=0,
