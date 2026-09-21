@@ -10,11 +10,20 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from decimal import Decimal
 from functools import lru_cache
-from typing import Annotated, Literal, TypeAlias
+from types import MappingProxyType
+from typing import Annotated, Literal, TypeAlias, cast
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    field_serializer,
+    model_validator,
+)
 
 AgentKey: TypeAlias = Literal[
     "architect",
@@ -55,9 +64,45 @@ class ModelConfiguration(_FrozenModel):
     top_p: float | Decimal = Field(ge=0, le=1)
 
 
+def _freeze_json_containers(value: object) -> object:
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("schema overlay object keys must be strings")
+        return MappingProxyType(
+            {key: _freeze_json_containers(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_containers(item) for item in value)
+    if value is None or isinstance(value, (str, int, float, bool, Decimal)):
+        return value
+    raise ValueError(f"schema overlay values must be JSON-compatible, received {value!r}")
+
+
+def _thaw_json_containers(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_containers(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json_containers(item) for item in value]
+    return value
+
+
 class SchemaOverlay(_FrozenModel):
-    field_overrides: dict[str, object]
+    field_overrides: Mapping[str, object]
     additional_optional_fields: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def freeze_field_overrides(self) -> SchemaOverlay:
+        frozen = _freeze_json_containers(self.field_overrides)
+        object.__setattr__(self, "field_overrides", frozen)
+        return self
+
+    @field_serializer("field_overrides")
+    def serialize_field_overrides(
+        self,
+        value: Mapping[str, object],
+    ) -> dict[str, object]:
+        thawed = _thaw_json_containers(value)
+        return cast(dict[str, object], thawed)
 
 
 class AuthoredPromptBlock(_FrozenModel):
