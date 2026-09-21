@@ -191,8 +191,17 @@ class GraphConfiguration:
             )
 
     @staticmethod
-    def _now() -> datetime:
-        return datetime.now(timezone.utc)
+    def _database_timestamp(session: Session) -> datetime:
+        timestamp = session.scalar(select(func.current_timestamp()))
+        if timestamp is None:
+            raise GraphConfigurationIntegrityError(
+                "database did not return a transaction timestamp"
+            )
+        if timestamp.tzinfo is None:
+            # SQLite returns CURRENT_TIMESTAMP without an offset even though the value
+            # is UTC. PostgreSQL returns a timezone-aware timestamptz unchanged.
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp
 
     @staticmethod
     def _content_from_revision(row: AgentDefinitionRevision) -> DefinitionContent:
@@ -432,7 +441,7 @@ class GraphConfiguration:
         actor: str,
     ) -> BootstrapResult:
         manifest.assert_complete(GRAPH_V1_AGENT_KEYS)
-        timestamp = self._now()
+        timestamp = self._database_timestamp(session)
         definitions = {item.agent_key: item for item in manifest.definitions}
         if set(definitions) != _EXPECTED_AGENT_KEYS:
             raise GraphConfigurationIntegrityError(
