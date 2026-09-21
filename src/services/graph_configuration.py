@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, true
 
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
@@ -281,7 +281,7 @@ class GraphConfiguration:
         parent_rows = session.execute(
             select(GraphRelease, GraphDraft)
             .select_from(GraphRelease)
-            .join(GraphDraft, GraphDraft.id == 1)
+            .join(GraphDraft, true())
             .where(GraphRelease.effective_to.is_(None))
             .with_for_update(read=True, of=(GraphRelease, GraphDraft))
         ).all()
@@ -342,12 +342,12 @@ class GraphConfiguration:
             published[mapping.agent_key] = (revision, content)
 
         draft_rows = list(
-            session.scalars(
-                select(GraphDraftAgent).where(
-                    GraphDraftAgent.graph_draft_id == draft.id
-                )
-            )
+            session.scalars(select(GraphDraftAgent))
         )
+        if any(row.graph_draft_id != draft.id for row in draft_rows):
+            raise GraphConfigurationIntegrityError(
+                "shared draft agents must all belong to the singleton draft"
+            )
         draft_keys = {row.agent_key for row in draft_rows}
         if (
             len(draft_rows) != len(_EXPECTED_AGENT_KEYS)
