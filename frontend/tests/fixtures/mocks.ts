@@ -876,3 +876,115 @@ export function createStreamingResponse(slides: typeof mockSlides): string {
 
   return events.join('');
 }
+
+// ============================================
+// Agent Definition Workbench Mocks
+// ============================================
+
+const mockAssemblyRules = {
+  format_version: 1,
+  separator: "\n\n",
+  blocks: [
+    { kind: "authored_prompt", condition: "always" },
+    { kind: "protected", name: "slide_frame_constraints", condition: "design_system_inactive" },
+    { kind: "protected", name: "design_system_precedence", condition: "design_system_active" },
+    { kind: "payload_json", condition: "always", indent: 2, default: "str" },
+    {
+      kind: "structured_output_binding",
+      condition: "always",
+      binding: "langchain.with_structured_output",
+      terminal: true,
+    },
+  ],
+};
+
+const workbenchAgentNames = [
+  ["architect", "Architect"],
+  ["data_analyst", "Data Analyst"],
+  ["builder", "Builder"],
+  ["build_reviewer", "Build Reviewer"],
+  ["fixer", "Fixer"],
+  ["fix_reviewer", "Fix Reviewer"],
+  ["deck_reviewer", "Deck Reviewer"],
+] as const;
+
+const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) => {
+  const definition = {
+    definition_version: 2,
+    prompt_text: `Synthetic ${displayName} prompt — exact fixture value.`,
+    model: {
+      endpoint_name: "databricks-claude-opus-4-6",
+      temperature: 0.7,
+      max_tokens: 60000,
+      top_p: 0.95,
+    },
+    schema_overlay: {
+      field_overrides: agentKey === "architect" ? { title: { description: "Synthetic title override" } } : {},
+      additional_optional_fields: agentKey === "architect" ? ["speaker_notes"] : [],
+    },
+    assembly_rules: mockAssemblyRules,
+    protected_assembly: { version: 1, digest: "b".repeat(64) },
+    schema_contract: { version: 1, digest: "c".repeat(64) },
+  };
+
+  return {
+    agent_key: agentKey,
+    display_name: displayName,
+    execution_kind: "model",
+    editable: true,
+    changed: false,
+    published: {
+      revision_id: index + 11,
+      content_hash: "a".repeat(64),
+      ...definition,
+    },
+    draft: {
+      base_revision_id: index + 11,
+      candidate_hash: "a".repeat(64),
+      ...definition,
+    },
+    read_only_reason: null,
+  };
+});
+
+/** Complete Task 4 wire shape used by both component and browser tests. */
+export const mockAgentDefinitionWorkbench = {
+  active_release: {
+    release_id: 41,
+    version_number: 1,
+    previous_release_id: null,
+    restored_from_release_id: null,
+    release_note: "Bootstrap current code-owned Agent Definitions",
+    published_by: "system:bootstrap",
+    published_at: "2026-09-21T12:00:00Z",
+    effective_from: "2026-09-21T12:00:00Z",
+    effective_to: null,
+  },
+  draft: {
+    draft_id: 1,
+    base_release_id: 41,
+    base_version_number: 1,
+    lock_version: 0,
+    updated_by: "system:bootstrap",
+    updated_at: "2026-09-21T12:00:00Z",
+  },
+  nodes: [
+    mockModelNodes[0],
+    mockModelNodes[1],
+    mockModelNodes[2],
+    mockModelNodes[3],
+    {
+      agent_key: "foreman",
+      display_name: "Foreman",
+      execution_kind: "deterministic",
+      editable: false,
+      changed: false,
+      published: null,
+      draft: null,
+      read_only_reason: "Foreman is deterministic scheduling and routing code; it has no Agent Definition.",
+    },
+    mockModelNodes[4],
+    mockModelNodes[5],
+    mockModelNodes[6],
+  ],
+};
