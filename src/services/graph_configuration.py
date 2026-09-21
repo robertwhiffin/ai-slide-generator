@@ -305,6 +305,10 @@ class GraphConfiguration:
             )
 
         release, draft = parent_rows[0]
+        if draft.id != 1:
+            raise GraphConfigurationIntegrityError(
+                "graph configuration must have exactly one singleton draft"
+            )
         if draft.base_release_id != release.id:
             raise GraphConfigurationIntegrityError(
                 "shared draft is not based on the current active release"

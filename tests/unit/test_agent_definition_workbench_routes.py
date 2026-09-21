@@ -419,6 +419,28 @@ def _insert_out_of_singleton_draft_agent(factory: sessionmaker) -> None:
         raw.close()
 
 
+def _rekey_singleton_draft_to_two(factory: sessionmaker) -> None:
+    engine = factory.kw["bind"]
+    raw = engine.raw_connection()
+    cursor = raw.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("PRAGMA ignore_check_constraints=ON")
+        cursor.execute(
+            "UPDATE graph_draft_agent SET graph_draft_id = 2 "
+            "WHERE graph_draft_id = 1"
+        )
+        cursor.execute("UPDATE graph_draft SET id = 2 WHERE id = 1")
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        cursor.execute("PRAGMA ignore_check_constraints=OFF")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        raw.close()
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -435,6 +457,10 @@ def _insert_out_of_singleton_draft_agent(factory: sessionmaker) -> None:
         (
             _insert_out_of_singleton_draft_agent,
             "shared draft agents must all belong to the singleton draft",
+        ),
+        (
+            _rekey_singleton_draft_to_two,
+            "graph configuration must have exactly one singleton draft",
         ),
     ],
 )
@@ -454,6 +480,7 @@ def test_corrupt_current_graph_fails_closed_with_precise_domain_cause(
         _remove_release_mapping,
         _insert_extra_draft_parent,
         _insert_out_of_singleton_draft_agent,
+        _rekey_singleton_draft_to_two,
     ],
 )
 def test_corrupt_graph_maps_to_stable_nonleaking_500(
