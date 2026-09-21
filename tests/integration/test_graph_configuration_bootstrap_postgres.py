@@ -5,9 +5,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.orm import sessionmaker
 
+import src.services.graph_configuration as graph_configuration_module
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     AgentTestCase,
@@ -60,6 +61,45 @@ def _identities(factory):
                 ).order_by(AgentTestCase.agent_key)
             ).all(),
         }
+
+
+def test_bootstrap_uses_one_timezone_aware_database_timestamp(
+    postgres_engine, monkeypatch
+):
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    timestamp_selects: list[str] = []
+
+    @event.listens_for(postgres_engine, "before_cursor_execute")
+    def _record_timestamp_query(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if "CURRENT_TIMESTAMP" in statement.upper():
+            timestamp_selects.append(statement)
+
+    class PoisonedApplicationClock:
+        @classmethod
+        def now(cls, *args, **kwargs):
+            raise AssertionError("bootstrap consulted the application clock")
+
+    monkeypatch.setattr(
+        graph_configuration_module, "datetime", PoisonedApplicationClock
+    )
+    GraphConfiguration().bootstrap_v1(factory)
+
+    with factory() as session:
+        timestamps = {
+            *session.scalars(select(AgentDefinitionRevision.created_at)).all(),
+            *session.scalars(select(GraphRelease.published_at)).all(),
+            *session.scalars(select(GraphRelease.effective_from)).all(),
+            *session.scalars(select(GraphDraft.updated_at)).all(),
+            *session.scalars(select(AgentTestCase.created_at)).all(),
+            *session.scalars(select(AgentTestCase.updated_at)).all(),
+        }
+    assert len(timestamp_selects) == 1
+    assert len(timestamps) == 1
+    (database_timestamp,) = timestamps
+    assert database_timestamp.tzinfo is not None
+    assert database_timestamp.utcoffset() is not None
 
 
 def test_two_bootstraps_observe_second_backend_waiting_on_advisory_lock(

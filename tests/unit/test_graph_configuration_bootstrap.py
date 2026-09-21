@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401
+import src.services.graph_configuration as graph_configuration_module
 from src.core.database import Base
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
@@ -146,6 +148,8 @@ EXPECTED_REQUIRED_SMOKE_PAYLOADS = {
     },
 }
 
+TEST_AUDIT_TIMESTAMP = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
+
 
 @pytest.fixture
 def session_factory():
@@ -247,7 +251,7 @@ def _create_active_v2(session_factory) -> int:
         architect_revision = GraphConfiguration._revision_from_definition(
             architect_v2,
             actor="test:v2",
-            timestamp=GraphConfiguration._now(),
+            timestamp=TEST_AUDIT_TIMESTAMP,
         )
         session.add(architect_revision)
         session.flush()
@@ -338,7 +342,26 @@ def test_fresh_bootstrap_creates_exact_complete_v1(session_factory):
     assert REQUIRED_SMOKE_PAYLOADS == EXPECTED_REQUIRED_SMOKE_PAYLOADS
 
 
-def test_all_persisted_rows_use_one_database_timestamp(session_factory):
+def test_all_persisted_rows_use_one_database_timestamp(
+    session_factory, monkeypatch
+):
+    timestamp_selects: list[str] = []
+
+    @event.listens_for(session_factory.kw["bind"], "before_cursor_execute")
+    def _record_timestamp_query(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if "CURRENT_TIMESTAMP" in statement.upper():
+            timestamp_selects.append(statement)
+
+    class PoisonedApplicationClock:
+        @classmethod
+        def now(cls, *args, **kwargs):
+            raise AssertionError("bootstrap consulted the application clock")
+
+    monkeypatch.setattr(
+        graph_configuration_module, "datetime", PoisonedApplicationClock
+    )
     GraphConfiguration().bootstrap_v1(session_factory)
     with session_factory() as session:
         timestamps = {
@@ -349,6 +372,7 @@ def test_all_persisted_rows_use_one_database_timestamp(session_factory):
             *session.scalars(select(AgentTestCase.created_at)).all(),
             *session.scalars(select(AgentTestCase.updated_at)).all(),
         }
+    assert len(timestamp_selects) == 1
     assert len(timestamps) == 1
 
 
@@ -466,7 +490,7 @@ def test_mid_transaction_failure_rolls_back_attempted_graph_artifacts(
     if reuse_revision:
         definition = load_graph_v1_manifest().definitions[0]
         reusable = GraphConfiguration._revision_from_definition(
-            definition, actor="preexisting", timestamp=GraphConfiguration._now()
+            definition, actor="preexisting", timestamp=TEST_AUDIT_TIMESTAMP
         )
         with session_factory.begin() as session:
             session.add(reusable)
@@ -506,7 +530,7 @@ def test_mid_transaction_failure_rolls_back_attempted_graph_artifacts(
 def test_valid_unreferenced_revision_is_reused(session_factory):
     definition = load_graph_v1_manifest().definitions[0]
     reusable = GraphConfiguration._revision_from_definition(
-        definition, actor="preexisting", timestamp=GraphConfiguration._now()
+        definition, actor="preexisting", timestamp=TEST_AUDIT_TIMESTAMP
     )
     with session_factory.begin() as session:
         session.add(reusable)
