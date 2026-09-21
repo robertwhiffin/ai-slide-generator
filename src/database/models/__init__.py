@@ -18,6 +18,14 @@ from src.database.models.graph_checkpoint import (
     GraphCheckpoint,
     GraphCheckpointWrite,
 )
+from src.database.models.graph_configuration import (
+    AgentDefinitionRevision,
+    AgentTestCase,
+    GraphDraft,
+    GraphDraftAgent,
+    GraphRelease,
+    GraphReleaseAgent,
+)
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
 from src.database.models.profile import ConfigProfile
@@ -44,6 +52,8 @@ from src.database.models.user_preference import UserProfilePreference
 
 __all__ = [
     "AppIdentity",
+    "AgentDefinitionRevision",
+    "AgentTestCase",
     "ChatRequest",
     "ConfigGenieSpace",
     "DeckContributor",
@@ -63,6 +73,10 @@ __all__ = [
     "GoogleOAuthToken",
     "GraphCheckpoint",
     "GraphCheckpointWrite",
+    "GraphDraft",
+    "GraphDraftAgent",
+    "GraphRelease",
+    "GraphReleaseAgent",
     "IdentityType",
     "ImageAsset",
     "PermissionLevel",
