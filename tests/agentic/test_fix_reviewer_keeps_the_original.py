@@ -30,7 +30,7 @@ node's whole reason for existing is that this can happen.
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS, frame_constraint_numbers
+from tests.agentic.gates import LAYER3_MARKS, frame_constraint_numbers, invoke_agent
 from tests.agentic.payloads import (
     fix_reviewer_payload,
     slide_spec,
@@ -42,7 +42,6 @@ pytestmark = LAYER3_MARKS
 
 def test_the_fix_reviewer_re_reports_a_finding_the_candidate_did_not_fix():
     """The candidate left the reported fault in place and added another."""
-    from src.core.skills import call_skill
     from src.domain.finding import Finding, make_finding_id
 
     frame = frame_constraint_numbers()
@@ -65,7 +64,7 @@ def test_the_fix_reviewer_re_reports_a_finding_the_candidate_did_not_fix():
         frame, caption_colour="#cccccc", title_colour="#cccccc"
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "fix_reviewer",
         fix_reviewer_payload(
             position=0,

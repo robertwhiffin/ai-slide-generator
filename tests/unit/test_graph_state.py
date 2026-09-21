@@ -436,7 +436,7 @@ class TestGraphStateAnnotations:
         hints = get_type_hints(GraphState, include_extras=True)
         assert "design_system_active" in hints, (
             "design_system_active must be declared in GraphState so fanned builder "
-            "branches can call assemble_skill_prompt without re-resolving from the DB"
+            "branches can call AgentRuntime without re-resolving from the DB"
         )
         hint = hints["design_system_active"]
         assert not hasattr(hint, "__metadata__"), (

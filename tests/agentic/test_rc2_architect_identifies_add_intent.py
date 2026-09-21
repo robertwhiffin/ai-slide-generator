@@ -39,7 +39,7 @@ preserving existing content; the two are orthogonal.
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 
 pytestmark = LAYER3_MARKS
@@ -52,8 +52,6 @@ def test_the_architect_adds_to_an_existing_deck_rather_than_replacing_it():
     must carry at least as many slides as were committed, proving the architect
     understood "add" as addition rather than replacement.
     """
-    from src.core.skills import call_skill
-
     existing = deck_spec_dict(
         [
             slide_spec(0, purpose="set the scene", content_brief="the market opportunity"),
@@ -63,7 +61,7 @@ def test_the_architect_adds_to_an_existing_deck_rather_than_replacing_it():
         title="Regional Expansion Review",
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             "add a slide about our competitive positioning",

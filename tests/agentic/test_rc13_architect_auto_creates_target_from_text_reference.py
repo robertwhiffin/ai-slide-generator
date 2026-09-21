@@ -51,7 +51,7 @@ appears there.  No message wording is asserted.
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 
 pytestmark = LAYER3_MARKS
@@ -64,8 +64,6 @@ def test_the_architect_targets_the_named_slide_without_being_asked():
     architect must classify as 'edit' and target position 2 (0-indexed) without
     asking for clarification — the slide is explicitly identified.
     """
-    from src.core.skills import call_skill
-
     existing = deck_spec_dict(
         [
             slide_spec(0, purpose="context", content_brief="the background"),
@@ -78,7 +76,7 @@ def test_the_architect_targets_the_named_slide_without_being_asked():
         title="Technology Investment Proposal",
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             "make slide 3 more concise — it is too long for the time we have",

@@ -11,7 +11,7 @@ asserting a kwarg was passed to a mock — the kwarg-discarded-before-it-reached
 anything failure mode this repo has shipped twice.
 
 Only two things are stubbed, and both because they reach a Databricks workspace:
-``call_skill`` (the model) and the brand resolvers (``resolve_style_source``,
+``AgentRuntime`` (the model) and the brand resolvers (``resolve_style_source``,
 ``resolve_template_bytes``).  Both stubs RECORD their calls, because several
 assertions are about whether they were called at all.
 """
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 import pytest
@@ -115,12 +116,12 @@ def finding(
 
 
 # ---------------------------------------------------------------------------
-# call_skill stub
+# AgentRuntime stub
 # ---------------------------------------------------------------------------
 
 
 class SkillStub:
-    """Stands in for ``call_skill``; records every call, returns per-skill values.
+    """Stands in for ``AgentRuntime``; records calls and returns per-role values.
 
     A handler may be a value or a callable taking ``(payload)``.  An unset skill
     name raises, so a node reaching a model this test did not intend to exercise
@@ -137,7 +138,8 @@ class SkillStub:
     def calls_for(self, name: str) -> List[Dict[str, Any]]:
         return [c for c in self.calls if c["name"] == name]
 
-    def __call__(self, name: str, payload: dict, design_system_active: bool) -> Any:
+    def run(self, name: str, payload: dict, assembly_context: Any) -> Any:
+        design_system_active = assembly_context.design_system_active
         self.calls.append(
             {
                 "name": name,
@@ -151,7 +153,8 @@ class SkillStub:
                 f"expect that skill to be invoked"
             )
         handler = self._handlers[name]
-        return handler(payload) if callable(handler) else handler
+        output = handler(payload) if callable(handler) else handler
+        return SimpleNamespace(output=output)
 
 
 def architect_build(spec: DeckSpec, message: str = "Building your deck.") -> ArchitectOutput:
@@ -388,7 +391,7 @@ def _build_env(monkeypatch, url: str):
     skills = SkillStub()
     style = StyleStub()
     template = TemplateStub()
-    monkeypatch.setattr("src.services.graph.nodes.call_skill", skills)
+    monkeypatch.setattr("src.services.graph.nodes.get_agent_runtime", lambda: skills)
     monkeypatch.setattr(
         "src.services.agent_resolution.resolve_style_source", style
     )
@@ -401,7 +404,7 @@ def _build_env(monkeypatch, url: str):
 
 @pytest.fixture
 def graph_env(monkeypatch):
-    """A real in-memory database, with ``call_skill`` and the brand resolvers stubbed.
+    """A real in-memory database, with AgentRuntime and brand resolvers stubbed.
 
     Single-threaded use only.  A compiled-graph run fans out across threads and
     needs ``graph_env_threadsafe``.

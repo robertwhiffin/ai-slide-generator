@@ -2,7 +2,7 @@
 
 §M1 asks for "the architect's tool manifest" to carry the library.  There is no
 manifest: ``TOOL_GRANTS`` is ``[]``, ``bind_tools`` appears nowhere under
-``src/``, and ``call_skill`` invokes the architect with structured output and no
+``src/``, and ``AgentRuntime`` invokes the architect with structured output and no
 tools bound — so a library wired into ``tool_grants`` would be read by nothing.
 The operator ratified delivering §M1 through the payload instead, and these
 guards are written against the channel the architect actually reads.
@@ -16,7 +16,7 @@ looking correct:
     ``COMPILER_VERSION`` — the exact staleness ``DesignContractRef`` stores ids to
     avoid — and would bill the whole catalog's CSS on every architect call.
 *   **The payload must survive ``json.dumps``**, because that is what
-    ``assemble_skill_prompt`` does to it.  An ORM row or a ``Row`` object in there
+    ``AgentRuntime`` does to it. An ORM row or a ``Row`` object in there
     passes every in-Python assertion and then raises at prompt assembly.
 """
 
@@ -120,7 +120,7 @@ def test_the_architect_payload_carries_the_library_and_no_compiled_bytes(graph_e
     assert ids["acme"] in listed and ids["beta"] in listed
     assert ids["gone"] not in listed
 
-    # The payload is JSON-serialised by assemble_skill_prompt, so anything that
+    # The payload is JSON-serialised by AgentRuntime, so anything that
     # cannot cross json.dumps fails at prompt assembly rather than here.
     serialised = json.dumps(payload)
     # Ids and labels only: the template's compiled layout must NOT be in the prompt.
@@ -139,4 +139,3 @@ def test_an_unreadable_library_degrades_to_no_brand_on_offer(graph_env, monkeypa
 
     monkeypatch.setattr("src.services.graph.nodes.get_db_session", _boom)
     assert _design_system_library() == []
-

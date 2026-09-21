@@ -46,7 +46,7 @@ Three outcomes, all structural:
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 
 pytestmark = LAYER3_MARKS
@@ -54,8 +54,6 @@ pytestmark = LAYER3_MARKS
 
 def test_the_architect_asks_which_slide_rather_than_choosing_one():
     """RC10 on the graph path: edit intent, no slide reference, four slides."""
-    from src.core.skills import call_skill
-
     spec = deck_spec_dict(
         [
             slide_spec(0, purpose="open the argument", content_brief="the headline claim"),
@@ -66,7 +64,7 @@ def test_the_architect_asks_which_slide_rather_than_choosing_one():
         title="Adoption through the third quarter",
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             # Edit intent, no slide reference, and TWO slides carry a chart — so
@@ -76,7 +74,7 @@ def test_the_architect_asks_which_slide_rather_than_choosing_one():
             committed_slide_count=len(spec["slides"]),
         ),
         # False on purpose: the no-design-system path, which is also the path that
-        # makes assemble_skill_prompt inject the frame constraints.
+        # makes AgentRuntime inject the frame constraints.
         False,
     )
 

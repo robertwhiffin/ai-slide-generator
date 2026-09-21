@@ -36,7 +36,7 @@ mistaken for a finding about the inventory's richness.
 
 from __future__ import annotations
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import architect_payload
 
 pytestmark = LAYER3_MARKS
@@ -63,7 +63,6 @@ _LAYOUT_HTML = """
 
 def test_a_title_slide_is_assigned_the_title_section_not_the_data_section():
     """One architect call, judged on the two indices it wrote into the spec."""
-    from src.core.skills import call_skill
     from src.services.template_sections import section_inventory
 
     inventory = section_inventory(_LAYOUT_HTML)
@@ -91,7 +90,7 @@ def test_a_title_slide_is_assigned_the_title_section_not_the_data_section():
         f"probe assumes: {inventory}"
     )
 
-    out = call_skill(
+    out = invoke_agent(
         "architect",
         architect_payload(
             "Build me a two-slide deck: a title slide, then one slide with a bar "

@@ -49,7 +49,6 @@ from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_
 from src.api.services.session_manager import get_session_manager
 from src.api.services.slide_repository import SlideWriter, is_placeholder_record
 from src.core.database import get_db_session
-from src.core.skills import call_skill
 from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
@@ -61,6 +60,7 @@ from src.domain.finding import (
 )
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import SAFETY_RETRY_NOTICE
+from src.services.agent_runtime import AgentAssemblyContext, get_agent_runtime
 from src.services.deck_css_aggregator import aggregate_deck_css
 from src.services.deck_review_store import (
     compute_deck_digest,
@@ -583,11 +583,15 @@ def rereview_committed_slides(
             # reviewer is asked whether a slide still serves a brief it was never
             # told, and can only answer with rendering findings that no spec edit
             # can cause.  Its presence is also what adds DECK_BRIEF_REVIEW to the
-            # instructions (see call_skill._with_conditional_instructions).
+            # instructions (see AgentRuntime's protected prompt assembly).
             "deck_brief": deck_brief,
         }
         try:
-            out = call_skill("build_reviewer", review_payload, design_system_active)
+            out = get_agent_runtime().run(
+                "build_reviewer",
+                review_payload,
+                AgentAssemblyContext(design_system_active),
+            ).output
             findings = _stamp_findings(
                 _skill_findings(out),
                 subject_hash=compute_slide_hash(html),
@@ -638,7 +642,7 @@ def _design_system_library() -> List[dict]:
 
     §M1 asks for "the architect's tool manifest" to carry the design-system
     library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, ``bind_tools``
-    appears nowhere under ``src/``, and ``call_skill`` invokes the architect with
+    appears nowhere under ``src/``, and AgentRuntime invokes the architect with
     structured output and no tools bound at all, so a library wired into
     ``tool_grants`` would be read by nothing.  The operator ratified delivering
     §M1 through the architect's **payload** instead, beside
@@ -1380,7 +1384,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "design_system_library": _design_system_library(),
     }
 
-    out = call_skill("architect", payload, brand["design_system_active"])
+    out = get_agent_runtime().run(
+        "architect",
+        payload,
+        AgentAssemblyContext(brand["design_system_active"]),
+    ).output
     intent = out.intent
     message = out.message
 
@@ -1746,9 +1754,11 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             state["deck_spec"].purpose if state.get("deck_spec") else None
         ),
     }
-    out = call_skill(
-        "data_analyst", payload, bool(state.get("design_system_active"))
-    )
+    out = get_agent_runtime().run(
+        "data_analyst",
+        payload,
+        AgentAssemblyContext(bool(state.get("design_system_active"))),
+    ).output
 
     if out.outcome == "success":
         message = out.synthesis or ""
@@ -1951,16 +1961,22 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     skill_payload = dict(payload)
 
     try:
-        out = call_skill("builder", skill_payload, design_system_active)
+        out = get_agent_runtime().run(
+            "builder",
+            skill_payload,
+            AgentAssemblyContext(design_system_active),
+        ).output
 
         def _regenerate() -> str:
             retry_payload = {
                 **skill_payload,
                 "corrective_instruction": _SAFETY_CORRECTION,
             }
-            return call_skill(
-                "builder", retry_payload, design_system_active
-            ).html
+            return get_agent_runtime().run(
+                "builder",
+                retry_payload,
+                AgentAssemblyContext(design_system_active),
+            ).output.html
 
         def _on_retry() -> None:
             _emit(
@@ -2052,11 +2068,11 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "html": html,
             "scripts": scripts,
         }
-        out = call_skill(
+        out = get_agent_runtime().run(
             "build_reviewer",
             review_payload,
-            bool(payload.get("design_system_active")),
-        )
+            AgentAssemblyContext(bool(payload.get("design_system_active"))),
+        ).output
 
         findings = _stamp_findings(
             _skill_findings(out), subject_hash=content_hash, slide_index=position
@@ -2275,14 +2291,22 @@ def fixer_node(state: dict) -> Dict[str, Any]:
     )
 
     try:
-        out = call_skill("fixer", fix_payload, design_system_active)
+        out = get_agent_runtime().run(
+            "fixer",
+            fix_payload,
+            AgentAssemblyContext(design_system_active),
+        ).output
 
         def _regenerate() -> str:
             retry_payload = {
                 **fix_payload,
                 "corrective_instruction": _SAFETY_CORRECTION,
             }
-            return call_skill("fixer", retry_payload, design_system_active).html
+            return get_agent_runtime().run(
+                "fixer",
+                retry_payload,
+                AgentAssemblyContext(design_system_active),
+            ).output.html
 
         def _on_retry() -> None:
             _emit(
@@ -2397,11 +2421,11 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                 "section_css": payload.get("section_css"),
             }
             try:
-                out = call_skill(
+                out = get_agent_runtime().run(
                     "fix_reviewer",
                     review_payload,
-                    bool(payload.get("design_system_active")),
-                )
+                    AgentAssemblyContext(bool(payload.get("design_system_active"))),
+                ).output
                 re_findings = _stamp_findings(
                     _skill_findings(out),
                     subject_hash=compute_slide_hash(fixed_html),
@@ -2747,11 +2771,11 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 "slide_count": len(slide_htmls),
                 "slides": spotlight_prior_slides(slide_htmls, session_id),
             }
-            out = call_skill(
+            out = get_agent_runtime().run(
                 "deck_reviewer",
                 review_payload,
-                bool(state.get("design_system_active")),
-            )
+                AgentAssemblyContext(bool(state.get("design_system_active"))),
+            ).output
             findings = _stamp_findings(
                 _skill_findings(out), subject_hash=digest, slide_index=-1
             )

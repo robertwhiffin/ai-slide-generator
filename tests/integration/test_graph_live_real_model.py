@@ -1,7 +1,7 @@
 """ws4c Definition-of-done: a REAL-MODEL run of the compiled graph.
 
 This is the one DoD item the stub suite structurally cannot cover.
-``test_graph_orchestration.py`` monkeypatches ``call_skill`` and returns canned
+``test_graph_orchestration.py`` replaces ``AgentRuntime`` and returns canned
 schema-valid outputs, so it proves the TOPOLOGY holds given well-formed agent
 output.  It cannot prove the topology holds given output a real model actually
 produces.  That is what this file is for.
@@ -24,7 +24,7 @@ COST, and why it is bounded by a call budget rather than a recursion limit.
 ``invoke_graph`` deliberately sets no ``recursion_limit`` (the installed default
 is 10007; the superseded plan's ~50 would have made the graph fail EARLIER), and
 this file does not change production code to bound it.  Instead every
-``call_skill`` goes through :class:`_CallBudget`, which raises once a hard call
+``AgentRuntime.run`` goes through :class:`_CallBudget`, which raises once a hard call
 count is reached.  That bounds spend absolutely, independent of any graph
 behaviour, and the recorded calls are also the evidence the assertions need.
 
@@ -112,7 +112,7 @@ class _BudgetExceeded(RuntimeError):
 
 
 class _CallBudget:
-    """Wrap the real ``call_skill``, record every call, and stop at ``limit``.
+    """Wrap the real ``AgentRuntime``, record every call, and stop at ``limit``.
 
     Recording is per ``(skill, position)`` because that is exactly what the DoD
     assertions are about: one reviewer per slide, one fix round per position,
@@ -125,13 +125,13 @@ class _CallBudget:
         self.limit = limit
         self.calls: list[tuple[str, object]] = []
 
-    def __call__(self, name: str, payload: dict, design_system_active: bool):
+    def run(self, name: str, payload: dict, assembly_context):
         if len(self.calls) >= self.limit:
             raise _BudgetExceeded(
                 f"call budget of {self.limit} reached; calls so far: {self.counts()}"
             )
         self.calls.append((name, (payload or {}).get("position")))
-        return self._real(name, payload, design_system_active)
+        return self._real.run(name, payload, assembly_context)
 
     def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -166,11 +166,11 @@ def live_env(monkeypatch):
 
 
 def _install_budget(monkeypatch, limit: int) -> _CallBudget:
-    """Route ``call_skill`` through a budget, patched where the nodes read it."""
+    """Route AgentRuntime through a budget, patched where the nodes read it."""
     import src.services.graph.nodes as nodes
 
-    budget = _CallBudget(nodes.call_skill, limit)
-    monkeypatch.setattr(nodes, "call_skill", budget)
+    budget = _CallBudget(nodes.get_agent_runtime(), limit)
+    monkeypatch.setattr(nodes, "get_agent_runtime", lambda: budget)
     return budget
 
 

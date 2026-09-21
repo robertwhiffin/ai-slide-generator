@@ -6,9 +6,9 @@ Re-measured on this branch before writing a line of it:
 
 * ``grep -rn "bind_tools" src/`` returns **one** hit, and it is prose — a docstring
   in ``src/services/graph/nodes.py`` stating *"There is no manifest. ``TOOL_GRANTS``
-  is ``[]``, ``bind_tools`` appears nowhere under ``src/``, and ``call_skill``
+  is ``[]``, ``bind_tools`` appears nowhere under ``src/``, and ``AgentRuntime``
   invokes the architect with structured output and no tools bound at all"*.
-* ``get_structured_model`` ends at ``return model.with_structured_output(schema)``.
+* ``DatabricksModelAdapter`` ends at ``model.with_structured_output(schema)``.
   There is no ``.bind_tools(...)`` on that path, or on any other.
 * ``data_analyst``'s ``TOOL_GRANTS`` is ``["genie", "vector_index"]`` and is read by
   **nothing**: the only occurrences under ``src/`` are its own definition and the
@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.agentic.gates import LAYER3_MARKS
+from tests.agentic.gates import LAYER3_MARKS, invoke_agent
 from tests.agentic.payloads import analyst_payload
 
 pytestmark = LAYER3_MARKS
@@ -63,7 +63,7 @@ pytestmark = LAYER3_MARKS
 #: "not supported".
 _NO_TOOL_IS_BOUND = (
     "the analyst can reach no tool on the graph path: bind_tools appears nowhere "
-    "under src/ (the single hit is a docstring saying so), get_structured_model "
+    "under src/ (the single hit is a docstring saying so), DatabricksModelAdapter "
     "ends at with_structured_output with no tools bound, and data_analyst's "
     "TOOL_GRANTS is read by nothing. This outcome is therefore unreachable — NOT "
     "because the prompts are placeholders. Authoring them will not make it pass; "
@@ -80,9 +80,7 @@ def test_the_analyst_reports_no_tool_and_says_why():
     enforce it (only ``success`` is validated), which is precisely why it is worth
     asserting here.
     """
-    from src.core.skills import call_skill
-
-    out = call_skill(
+    out = invoke_agent(
         "data_analyst",
         analyst_payload(
             "How many weekly active teams were there in each region last quarter?",
@@ -115,9 +113,7 @@ def test_the_analyst_reports_no_tool_and_says_why():
 @pytest.mark.skip(reason=_NO_TOOL_IS_BOUND)
 def test_the_analyst_reports_success_with_synthesis_and_sources():
     """Unreachable today — see the module docstring and ``_NO_TOOL_IS_BOUND``."""
-    from src.core.skills import call_skill
-
-    out = call_skill(
+    out = invoke_agent(
         "data_analyst",
         analyst_payload(
             "How many weekly active teams were there in each region last quarter?",
@@ -136,9 +132,7 @@ def test_the_analyst_reports_success_with_synthesis_and_sources():
 @pytest.mark.skip(reason=_NO_TOOL_IS_BOUND)
 def test_the_analyst_reports_missing_data_and_names_the_gap():
     """Unreachable today — ``missing_data`` means a tool ran and found nothing."""
-    from src.core.skills import call_skill
-
-    out = call_skill(
+    out = invoke_agent(
         "data_analyst",
         analyst_payload(
             "What was the churn rate for the Antarctic region in 1804?",
@@ -164,12 +158,10 @@ def test_a_single_source_passes_through_without_being_re_summarised():
     pass-through check on text the *fixture* supplied — not a comparison against
     wording this test expects the model to produce.
     """
-    from src.core.skills import call_skill
-
     source_sentence = (
         "Weekly active teams rose from 40 in week one to 81 in week thirteen."
     )
-    out = call_skill(
+    out = invoke_agent(
         "data_analyst",
         analyst_payload(
             "Weekly active teams by week for last quarter.",

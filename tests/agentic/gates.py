@@ -14,7 +14,7 @@ Layer   Needs                                       In CI
 4       a database, no model                         yes
 ======  ==========================================  ======
 
-This directory is layer 3.  Every module here calls ``call_skill`` against a real
+This directory is layer 3. Every module here calls ``AgentRuntime`` against a real
 serving endpoint and asserts what the *agent* did — so it cannot run on a runner
 with no credentials, and it costs real money where it can.
 
@@ -204,11 +204,22 @@ MECHANISMS_BY_NAME: dict[str, frozenset[str]] = {
 }
 
 
+def invoke_agent(agent_key: str, payload: dict, design_system_active: bool):
+    """Invoke the production AgentRuntime for one live layer-3 model call."""
+    from src.services.agent_runtime import AgentAssemblyContext, get_agent_runtime
+
+    return get_agent_runtime().run(
+        agent_key,
+        payload,
+        AgentAssemblyContext(design_system_active),
+    ).output
+
+
 def frame_constraint_numbers() -> dict[str, int]:
     """Parse the slide-frame numbers out of ``_SLIDE_FRAME_CONSTRAINTS`` itself.
 
-    The builder and the reviewer are both shown that block (``assemble_skill_prompt``
-    appends it whenever ``design_system_active`` is false), and the ``overflow``
+    The builder and the reviewer are both shown that block (``AgentRuntime`` appends
+    it whenever ``design_system_active`` is false), and the ``overflow``
     criterion tells the reviewer to "judge against ``_SLIDE_FRAME_CONSTRAINTS``
     numbers, never reviewer-invented numbers".  A fixture that hard-coded 1280 or
     720 would be judging the model against numbers of the *test's* invention, and
