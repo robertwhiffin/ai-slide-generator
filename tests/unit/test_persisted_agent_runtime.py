@@ -32,6 +32,7 @@ from src.services.graph_definition_manifest import (
 )
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
+    PersistedGraphReleaseLoader,
     PinnedInvocationEndpointError,
     ResolvedDefinition,
 )
@@ -89,11 +90,12 @@ def _resolved() -> ResolvedDefinition:
 
 def test_persisted_runtime_uses_exact_release_and_records_full_identity():
     definition = _resolved()
+    loader = _Loader(definition)
     sink = RecordingAgentInvocationIdentitySink()
     output = OUTPUT_SCHEMAS["architect"].model_construct()
     adapter = _Adapter(output)
     runtime = AgentRuntime(
-        persisted_release_loader=_Loader(definition),
+        persisted_release_loader=loader,
         model_adapter=adapter,
         identity_sink=sink,
     )
@@ -101,6 +103,7 @@ def test_persisted_runtime_uses_exact_release_and_records_full_identity():
     result = runtime.run("architect", 41, {"request": "a deck"}, AgentAssemblyContext(False))
 
     assert result.output is output
+    assert loader.calls == [(41, "architect")]
     assert sink.calls == [
         AgentInvocationIdentity(
             graph_version=7,
@@ -111,8 +114,28 @@ def test_persisted_runtime_uses_exact_release_and_records_full_identity():
         )
     ]
     assert adapter.calls[0]["agent_key"] == "architect"
+    assert adapter.calls[0]["configuration"] == AgentModelConfiguration(
+        endpoint_name="databricks-claude-opus-4-6",
+        temperature=0.7,
+        max_tokens=60000,
+        top_p=0.95,
+    )
     assert adapter.calls[0]["schema"] is OUTPUT_SCHEMAS["architect"]
     assert '"request": "a deck"' in str(adapter.calls[0]["prompt"])
+    assert result.diagnostics.protected_prompt.version == 1
+    assert (
+        result.diagnostics.protected_prompt.digest
+        == definition.content.protected_assembly.digest
+    )
+    assert result.diagnostics.schema_contract.agent_key == "architect"
+    assert result.diagnostics.schema_contract.version == 1
+    assert result.diagnostics.schema_contract.digest == definition.content.schema_contract.digest
+    identity = sink.calls[0]
+    assert identity.graph_version == 7
+    assert identity.graph_release_id == 41
+    assert identity.agent_key == "architect"
+    assert identity.agent_definition_revision_id == 23
+    assert identity.content_hash == "a" * 64
 
 
 def test_provider_failure_is_converted_before_recording_sink_observes_it():
@@ -241,12 +264,17 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
                 raise provider_error
             return Structured()
 
+    model_endpoint_attempts: list[str] = []
+    client_factory_calls: list[None] = []
+
     def model_factory(**kwargs):
+        model_endpoint_attempts.append(kwargs["endpoint"])
         if phase == "model":
             raise provider_error
         return Model()
 
     def client_factory():
+        client_factory_calls.append(None)
         if phase == "client":
             raise provider_error
         return object()
@@ -273,6 +301,13 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
     assert "secret" not in str(pinned)
     assert isinstance(pinned.__cause__, ModelProviderUnavailableError)
     assert pinned.__cause__.__cause__ is provider_error
+    assert client_factory_calls == [None]
+    expected_endpoint = "databricks-claude-opus-4-6"
+    if phase == "client":
+        assert model_endpoint_attempts == []
+    else:
+        assert model_endpoint_attempts == [expected_endpoint]
+    assert "default" not in model_endpoint_attempts
     if isinstance(sink, RecordingAgentInvocationIdentitySink):
         assert sink.error_classes == ["PinnedInvocationEndpointError"]
     else:
@@ -282,6 +317,45 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
         assert len(records) == 1
         assert records[0].outcome == "error"
         assert records[0].error_class == "PinnedInvocationEndpointError"
+
+
+def test_removed_endpoint_is_attempted_once_without_a_default_fallback():
+    request = httpx.Request("POST", "https://workspace/serving-endpoints/removed")
+    response = httpx.Response(404, request=request)
+    original = openai.NotFoundError("removed", response=response, body=None)
+    model_endpoint_attempts: list[str] = []
+    client_factory_calls: list[None] = []
+
+    class Structured:
+        def invoke(self, prompt):
+            raise original
+
+    class Model:
+        def with_structured_output(self, schema):
+            return Structured()
+
+    def model_factory(**kwargs):
+        model_endpoint_attempts.append(kwargs["endpoint"])
+        return Model()
+
+    def client_factory():
+        client_factory_calls.append(None)
+        return object()
+
+    runtime = AgentRuntime(
+        persisted_release_loader=_Loader(_resolved()),
+        model_adapter=DatabricksModelAdapter(
+            model_factory=model_factory, client_factory=client_factory
+        ),
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+
+    with pytest.raises(PinnedInvocationEndpointError) as raised:
+        runtime.run("architect", 41, {}, AgentAssemblyContext(False))
+
+    assert model_endpoint_attempts == ["databricks-claude-opus-4-6"]
+    assert client_factory_calls == [None]
+    assert raised.value.__cause__.__cause__ is original
 
 
 @pytest.mark.parametrize(
@@ -347,3 +421,22 @@ def test_sqlalchemy_loader_failure_is_a_safe_lakebase_unavailable_error():
         runtime.run("architect", 41, {}, AgentAssemblyContext(False))
 
     assert raised.value.code == "lakebase_unavailable"
+
+
+def test_session_factory_runtime_failure_is_a_safe_lakebase_unavailable_error():
+    original = RuntimeError("factory boom")
+
+    def session_factory():
+        raise original
+
+    runtime = AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=session_factory),
+        model_adapter=_Adapter(OUTPUT_SCHEMAS["architect"].model_construct()),
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+
+    with pytest.raises(PersistedConfigurationUnavailableError) as raised:
+        runtime.run("architect", 41, {}, AgentAssemblyContext(False))
+
+    assert raised.value.code == "lakebase_unavailable"
+    assert raised.value.__cause__ is original
