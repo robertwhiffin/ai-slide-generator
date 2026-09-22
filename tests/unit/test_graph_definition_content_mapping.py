@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import fields
 from datetime import datetime, timezone
 
+import pytest
+
 from src.api.schemas.agent_definitions import (
     DraftDefinitionResponse,
     PublishedDefinitionResponse,
@@ -23,7 +25,119 @@ from src.services.graph_configuration_workbench import (
     DraftDefinitionSnapshot,
     PublishedDefinitionSnapshot,
 )
-from src.services.graph_definition_manifest import load_graph_v1_manifest
+from src.services.graph_definition_manifest import (
+    definition_content_hash,
+    load_graph_v1_manifest,
+)
+
+
+def _changed_canonical_content(content, path: str):
+    if path == "agent_key":
+        return content.model_copy(update={"agent_key": "builder"})
+    if path == "definition_version":
+        return content.model_copy(update={"definition_version": 999})
+    if path == "prompt_text":
+        return content.model_copy(update={"prompt_text": "changed prompt"})
+    if path.startswith("model."):
+        field = path.removeprefix("model.")
+        values = {
+            "endpoint_name": "changed-endpoint",
+            "temperature": 0.123,
+            "max_tokens": 1234,
+            "top_p": 0.456,
+        }
+        return content.model_copy(
+            update={"model": content.model.model_copy(update={field: values[field]})}
+        )
+    if path == "schema_overlay":
+        return content.model_copy(
+            update={
+                "schema_overlay": content.schema_overlay.model_copy(
+                    update={"additional_optional_fields": ("changed",)}
+                )
+            }
+        )
+    if path == "assembly_rules":
+        return content.model_copy(
+            update={
+                "assembly_rules": content.assembly_rules.model_copy(
+                    update={"separator": "changed"}
+                )
+            }
+        )
+    identity_name, member = path.split(".")
+    identity = getattr(content, identity_name)
+    value = identity.version + 1 if member == "version" else "f" * 64
+    return content.model_copy(
+        update={identity_name: identity.model_copy(update={member: value})}
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "agent_key",
+        "definition_version",
+        "prompt_text",
+        "model.endpoint_name",
+        "model.temperature",
+        "model.max_tokens",
+        "model.top_p",
+        "schema_overlay",
+        "assembly_rules",
+        "protected_assembly.version",
+        "protected_assembly.digest",
+        "schema_contract.version",
+        "schema_contract.digest",
+    ],
+)
+def test_canonical_hash_covers_every_persisted_content_path(path: str) -> None:
+    content = load_graph_v1_manifest().definitions[0]
+
+    assert definition_content_hash(_changed_canonical_content(content, path)) != (
+        definition_content_hash(content)
+    )
+
+
+def test_canonical_payload_has_exactly_the_thirteen_persisted_paths() -> None:
+    payload = load_graph_v1_manifest().definitions[0].canonical_payload()
+    leaf_paths = {
+        ("agent_key",),
+        ("definition_version",),
+        ("prompt_text",),
+        ("model", "endpoint_name"),
+        ("model", "temperature"),
+        ("model", "max_tokens"),
+        ("model", "top_p"),
+        ("schema_overlay",),
+        ("assembly_rules",),
+        ("protected_assembly", "version"),
+        ("protected_assembly", "digest"),
+        ("schema_contract", "version"),
+        ("schema_contract", "digest"),
+    }
+
+    assert len(DEFINITION_CONTENT_COLUMN_NAMES) == 13
+    assert set(payload) == {
+        "agent_key",
+        "definition_version",
+        "prompt_text",
+        "model",
+        "schema_overlay",
+        "assembly_rules",
+        "protected_assembly",
+        "schema_contract",
+    }
+    assert leaf_paths == {
+        ("agent_key",),
+        ("definition_version",),
+        ("prompt_text",),
+        *(("model", member) for member in payload["model"]),
+        ("schema_overlay",),
+        ("assembly_rules",),
+        *(("protected_assembly", member) for member in payload["protected_assembly"]),
+        *(("schema_contract", member) for member in payload["schema_contract"]),
+    }
 
 
 def test_one_mapping_round_trips_every_semantic_field_through_both_row_types() -> None:

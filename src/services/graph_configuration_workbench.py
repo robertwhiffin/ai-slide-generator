@@ -138,6 +138,15 @@ class GraphWorkbenchSnapshot:
     nodes: tuple[ModelAgentNodeSnapshot | DeterministicAgentNodeSnapshot, ...]
 
 
+@dataclass
+class _LockedDraftWriteAggregate:
+    snapshot: GraphWorkbenchSnapshot
+    release_row: GraphRelease
+    draft_row: GraphDraft
+    selected_row: GraphDraftAgent
+    selected: ModelAgentNodeSnapshot
+
+
 _WORKBENCH_ORDER = (
     "architect",
     "data_analyst",
@@ -169,13 +178,35 @@ class _GraphConfigurationWorkbench:
 
     def read_workbench(self, session: Session) -> GraphWorkbenchSnapshot:
         """Read under shared parent locks so parent and children cannot diverge."""
-        parent_rows = session.execute(
+        release, draft = self._lock_current_parents(session, exclusive=False)
+        return self._snapshot_locked_workbench(
+            session,
+            release=release,
+            draft=draft,
+        )
+
+    def _lock_current_parents(
+        self,
+        session: Session,
+        *,
+        exclusive: bool,
+    ) -> tuple[GraphRelease, GraphDraft]:
+        parent_statement = (
             select(GraphRelease, GraphDraft)
             .select_from(GraphRelease)
             .join(GraphDraft, true())
             .where(GraphRelease.effective_to.is_(None))
-            .with_for_update(read=True, of=(GraphRelease, GraphDraft))
-        ).all()
+        )
+        if exclusive:
+            parent_statement = parent_statement.with_for_update(
+                of=(GraphRelease, GraphDraft)
+            )
+        else:
+            parent_statement = parent_statement.with_for_update(
+                read=True,
+                of=(GraphRelease, GraphDraft),
+            )
+        parent_rows = session.execute(parent_statement).all()
         if len(parent_rows) != 1:
             active_count = session.scalar(
                 select(func.count())
@@ -204,6 +235,15 @@ class _GraphConfigurationWorkbench:
             raise GraphConfigurationIntegrityError(
                 "shared draft is not based on the current active release"
             )
+        return release, draft
+
+    def _snapshot_locked_workbench(
+        self,
+        session: Session,
+        *,
+        release: GraphRelease,
+        draft: GraphDraft,
+    ) -> GraphWorkbenchSnapshot:
 
         mapping_rows = session.execute(
             select(GraphReleaseAgent, AgentDefinitionRevision)
@@ -318,4 +358,51 @@ class _GraphConfigurationWorkbench:
                 updated_at=draft.updated_at,
             ),
             nodes=tuple(nodes),
+        )
+
+    def _read_workbench_for_draft_write(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+    ) -> _LockedDraftWriteAggregate:
+        release, draft = self._lock_current_parents(session, exclusive=True)
+        selected_statement = select(GraphDraftAgent).where(
+            GraphDraftAgent.graph_draft_id == draft.id,
+            GraphDraftAgent.agent_key == agent_key,
+        )
+        selected_statement = selected_statement.with_for_update()
+        selected = session.scalar(selected_statement)
+        if selected is None:
+            raise GraphConfigurationIntegrityError(
+                f"shared draft is missing selected role {agent_key!r}"
+            )
+
+        snapshot = self._snapshot_locked_workbench(
+            session,
+            release=release,
+            draft=draft,
+        )
+        selected_node = next(
+            (
+                node
+                for node in snapshot.nodes
+                if node.execution_kind == "model" and node.agent_key == agent_key
+            ),
+            None,
+        )
+        if (
+            selected_node is None
+            or selected_node.agent_key != selected.agent_key
+            or selected.agent_key != agent_key
+        ):
+            raise GraphConfigurationIntegrityError(
+                f"shared draft selected role {agent_key!r} is inconsistent"
+            )
+        return _LockedDraftWriteAggregate(
+            snapshot=snapshot,
+            release_row=release,
+            draft_row=draft,
+            selected_row=selected,
+            selected=selected_node,
         )

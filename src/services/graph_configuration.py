@@ -13,6 +13,15 @@ from src.services.graph_configuration_bootstrap import (
     _GraphConfigurationBootstrap,
 )
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
+from src.services.graph_configuration_draft import (
+    DraftAggregateSnapshot,
+    DraftContentRejected,
+    DraftSaveConflict,
+    DraftSaveResult,
+    DraftValidationIssue,
+    EditableModelDraft,
+    _GraphConfigurationDraft,
+)
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
 from src.services.graph_configuration_workbench import (
     ActiveReleaseSnapshot,
@@ -29,8 +38,12 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import sessionmaker
 
 
-class GraphConfiguration(_GraphConfigurationWorkbench, _GraphConfigurationBootstrap):
-    """Read the workbench or atomically create/validate Graph Version 1."""
+class GraphConfiguration(
+    _GraphConfigurationDraft,
+    _GraphConfigurationWorkbench,
+    _GraphConfigurationBootstrap,
+):
+    """Read, edit, or atomically bootstrap the Graph Configuration aggregate."""
 
 
 def bootstrap_graph_configuration(session_factory: sessionmaker) -> BootstrapResult:
@@ -42,8 +55,14 @@ __all__ = [
     "ActiveReleaseSnapshot",
     "BootstrapResult",
     "DeterministicAgentNodeSnapshot",
+    "DraftAggregateSnapshot",
+    "DraftContentRejected",
     "DraftDefinitionSnapshot",
     "DraftMetadataSnapshot",
+    "DraftSaveConflict",
+    "DraftSaveResult",
+    "DraftValidationIssue",
+    "EditableModelDraft",
     "GraphConfiguration",
     "GraphConfigurationIntegrityError",
     "GraphWorkbenchSnapshot",
