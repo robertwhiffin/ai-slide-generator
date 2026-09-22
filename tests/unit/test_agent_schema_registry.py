@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic_core import PydanticUndefined
 
 from src.domain.skill_io import OUTPUT_SCHEMAS, ArchitectOutput
 from src.services.agent_schema_registry import (
@@ -179,6 +180,11 @@ def test_guidance_supplied_mutations_cannot_be_changed_through_model_fields_set(
         guidance.examples = ()  # type: ignore[misc]
     guidance._supplied_mutations = frozenset()
     guidance.__pydantic_private__ = {"_supplied_mutations": frozenset()}
+    with pytest.raises(AttributeError):
+        guidance._semantic_state_slot = object()
+    with pytest.raises(FrozenInstanceError):
+        guidance._semantic_state_slot.description = "injected"
+    guidance.__dict__["_semantic_state_slot"] = object()
     assert overlay.model_dump(mode="json") == expected_dump
     guidance.model_fields_set.clear()
 
@@ -196,9 +202,62 @@ def test_guidance_supplied_mutations_cannot_be_changed_through_model_fields_set(
     omitted_guidance._supplied_mutations = frozenset({"description"})
     omitted_guidance.__pydantic_private__ = {"_supplied_mutations": frozenset({"description"})}
     assert omitted.model_dump(mode="json")["field_overrides"]["message"] == {}
+    omitted_guidance.__dict__["description"] = "injected"
+    omitted_guidance.__dict__["examples"] = ("injected example",)
+    assert omitted.model_dump(mode="json")["field_overrides"]["message"] == {}
     omitted_guidance.model_fields_set.add("description")
     assert omitted.model_dump(mode="json")["field_overrides"]["message"] == {}
     assert registry.validate_overlay("architect", identity, omitted) == ()
+
+
+@pytest.mark.parametrize(
+    "direct_dict_mutation",
+    [
+        "replace_with_undefined",
+        "remove",
+        "replace_with_other_values",
+        "replace_entire_dict",
+    ],
+)
+def test_guidance_semantics_ignore_direct_dict_mutation(
+    direct_dict_mutation: str,
+) -> None:
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for("architect", 2)
+    guidance = CanonicalFieldGuidance.model_validate(
+        {"description": "Kept description", "examples": ["Kept example"]}
+    )
+    overlay = SchemaOverlay(field_overrides={"message": guidance})
+
+    if direct_dict_mutation == "replace_with_undefined":
+        guidance.__dict__["description"] = PydanticUndefined
+        guidance.__dict__["examples"] = PydanticUndefined
+        assert guidance.__dict__["description"] is PydanticUndefined
+    elif direct_dict_mutation == "remove":
+        guidance.__dict__.pop("description")
+        guidance.__dict__.pop("examples")
+        assert "description" not in guidance.__dict__
+    elif direct_dict_mutation == "replace_with_other_values":
+        guidance.__dict__["description"] = "Injected description"
+        guidance.__dict__["examples"] = ("Injected example",)
+        assert guidance.__dict__["description"] == "Injected description"
+    else:
+        guidance.__dict__ = {
+            "description": "Injected description",
+            "examples": ("Injected example",),
+        }
+        assert guidance.__dict__["description"] == "Injected description"
+
+    assert overlay.model_dump(mode="json")["field_overrides"]["message"] == {
+        "description": "Kept description",
+        "examples": ["Kept example"],
+    }
+    assert registry.validate_overlay("architect", identity, overlay) == ()
+    composed_property = registry.compose("architect", identity, overlay).model.model_json_schema(
+        mode="validation"
+    )["properties"]["message"]
+    assert composed_property["description"] == "Kept description"
+    assert composed_property["examples"] == ["Kept example"]
 
 
 def test_guidance_model_copy_update_preserves_pydantic_and_omission_semantics() -> None:
@@ -227,6 +286,7 @@ def test_guidance_model_copy_update_preserves_pydantic_and_omission_semantics() 
 
     omitted = CanonicalFieldGuidance()
     explicit_null = omitted.model_copy(update={"description": None})
+    explicit_null.__dict__["description"] = "injected"
     assert omitted.model_dump(mode="json") == {}
     assert explicit_null.model_dump(mode="json") == {"description": None}
     assert (
