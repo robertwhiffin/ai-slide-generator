@@ -44,6 +44,12 @@ from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE, UNTRUSTED_DATA_NOT
 from src.core.skills import load_skill
 from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW, build_instructions
 from src.domain.skill_io import OUTPUT_SCHEMAS
+from src.services.agent_runtime_identity import (
+    AgentInvocationIdentity,
+    AgentInvocationIdentitySink,
+    LoggingAgentInvocationIdentitySink,
+    RecordingAgentInvocationIdentitySink,
+)
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_definition_manifest import (
@@ -164,73 +170,6 @@ class AgentInvocationDiagnostics:
 class AgentInvocationResult:
     output: BaseModel
     diagnostics: AgentInvocationDiagnostics
-
-
-@dataclass(frozen=True)
-class AgentInvocationIdentity:
-    graph_version: int
-    graph_release_id: int
-    agent_key: str
-    agent_definition_revision_id: int
-    content_hash: str
-
-
-class AgentInvocationIdentitySink(Protocol):
-    def invoke(
-        self,
-        identity: AgentInvocationIdentity,
-        callback: Callable[[], BaseModel],
-    ) -> BaseModel: ...
-
-
-class RecordingAgentInvocationIdentitySink:
-    def __init__(self) -> None:
-        self.calls: list[AgentInvocationIdentity] = []
-        self.error_classes: list[str] = []
-
-    def invoke(
-        self,
-        identity: AgentInvocationIdentity,
-        callback: Callable[[], BaseModel],
-    ) -> BaseModel:
-        self.calls.append(identity)
-        try:
-            return callback()
-        except Exception as exc:
-            self.error_classes.append(type(exc).__name__)
-            raise
-
-
-class LoggingAgentInvocationIdentitySink:
-    def __init__(self, *, logger: logging.Logger) -> None:
-        self._logger = logger
-
-    def invoke(
-        self,
-        identity: AgentInvocationIdentity,
-        callback: Callable[[], BaseModel],
-    ) -> BaseModel:
-        try:
-            result = callback()
-        except Exception as exc:
-            self._logger.info(
-                "persisted_agent_invocation",
-                extra={
-                    **identity.__dict__,
-                    "outcome": "error",
-                    "error_class": type(exc).__name__,
-                },
-            )
-            raise
-        self._logger.info(
-            "persisted_agent_invocation",
-            extra={
-                **identity.__dict__,
-                "outcome": "success",
-                "error_class": None,
-            },
-        )
-        return result
 
 
 class AgentDefinitionSource(Protocol):

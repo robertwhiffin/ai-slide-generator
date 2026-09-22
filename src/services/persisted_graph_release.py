@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Iterator, Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -104,7 +105,7 @@ class PersistedGraphReleaseLoader:
         if cached is not None:
             return cached
 
-        with self._session_factory() as session:
+        with self._open_session() as session:
             rows = session.execute(
                 select(GraphRelease, GraphReleaseAgent, AgentDefinitionRevision)
                 .outerjoin(
@@ -136,6 +137,31 @@ class PersistedGraphReleaseLoader:
 
         self._cache[graph_release_id] = snapshot
         return snapshot
+
+    @contextmanager
+    def _open_session(self) -> Iterator[object]:
+        """Open the persistence boundary, translating only factory/open failures."""
+        try:
+            session_context = self._session_factory()
+        except Exception as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="lakebase_unavailable"
+            ) from exc
+
+        try:
+            session = session_context.__enter__()
+        except Exception as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="lakebase_unavailable"
+            ) from exc
+
+        try:
+            yield session
+        except BaseException as exc:
+            session_context.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            session_context.__exit__(None, None, None)
 
     @staticmethod
     def _validate_complete_snapshot(
