@@ -5,9 +5,21 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
-from src.services.graph_definition_manifest import AgentKey, AssemblyCondition
+from src.services.graph_definition_manifest import (
+    GRAPH_V1_AGENT_KEYS,
+    AgentKey,
+    AssemblyCondition,
+)
 
 
 class _AttributeResponse(BaseModel):
@@ -171,3 +183,74 @@ class GraphWorkbenchResponse(_AttributeResponse):
     active_release: ActiveReleaseResponse
     draft: DraftMetadataResponse
     nodes: tuple[AgentNodeResponse, ...]
+
+
+class _StrictDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class EditableModelDraftModelRequest(_StrictDraftRequest):
+    endpoint_name: str
+    temperature: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+    max_tokens: Annotated[int, Field(gt=0)]
+    top_p: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+
+    @field_validator("endpoint_name", mode="after")
+    @classmethod
+    def endpoint_name_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Endpoint name must not be blank.")
+        return value
+
+
+class EditableModelDraftRequest(_StrictDraftRequest):
+    prompt_text: str
+    model: EditableModelDraftModelRequest
+
+    @field_validator("prompt_text", mode="after")
+    @classmethod
+    def prompt_text_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Prompt text must not be blank.")
+        return value
+
+
+class DraftSaveRequest(_StrictDraftRequest):
+    lock_version: Annotated[int, Field(ge=0)]
+    candidate: EditableModelDraftRequest
+
+
+class DraftSaveSuccessResponse(_AttributeResponse):
+    draft: DraftMetadataResponse
+    definition: DraftDefinitionResponse
+    changed: bool
+
+
+class DraftFieldErrorResponse(BaseModel):
+    field: str
+    code: str
+    message: str
+
+
+class DraftValidationErrorResponse(BaseModel):
+    code: Literal["invalid_draft"]
+    errors: list[DraftFieldErrorResponse]
+
+
+class DraftSaveConflictServerResponse(BaseModel):
+    draft: DraftMetadataResponse
+    definitions: dict[AgentKey, DraftDefinitionResponse]
+
+    @model_validator(mode="after")
+    def require_exact_role_set(self) -> "DraftSaveConflictServerResponse":
+        if set(self.definitions) != set(GRAPH_V1_AGENT_KEYS):
+            raise ValueError("conflict server definitions must contain all seven roles")
+        return self
+
+
+class DraftSaveConflictResponse(BaseModel):
+    code: Literal["stale_draft"]
+    expected_lock_version: int
+    current_lock_version: int
+    client_candidate: EditableModelDraftRequest
+    server: DraftSaveConflictServerResponse
