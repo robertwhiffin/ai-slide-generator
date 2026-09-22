@@ -388,7 +388,7 @@ def test_required_cases_pass_unchanged_through_current_runtime_adapter_seam(
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
-        def invoke(self, *, configuration, schema, prompt):
+        def invoke(self, *, agent_key, configuration, schema, prompt):
             self.calls.append(
                 {"configuration": asdict(configuration), "schema": schema, "prompt": prompt}
             )
@@ -402,6 +402,7 @@ def test_required_cases_pass_unchanged_through_current_runtime_adapter_seam(
         before = json.loads(json.dumps(case.synthetic_payload))
         runtime.run(
             case.agent_key,
+            1,
             case.synthetic_payload,
             AgentAssemblyContext(**case.assembly_context),
         )

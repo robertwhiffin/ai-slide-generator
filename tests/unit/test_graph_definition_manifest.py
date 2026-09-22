@@ -308,20 +308,22 @@ def test_manifest_assembly_replays_exact_runtime_prompt(
     agent_key: str,
     design_system_active: bool,
 ):
-    definition = CodeOwnedAgentDefinitionSource().resolve(agent_key)
     payload = (
         {"deck_brief": "Synthetic brief"}
         if agent_key == "build_reviewer"
         else {"synthetic": True}
     )
     runtime = AgentRuntime.compatibility()
-    actual = runtime._assemble_prompt(
-        definition,
-        runtime._protected_prompts.resolve(definition.protected_prompt),
+    manifest_definition = _definition_by_key(load_graph_v1_manifest(), agent_key)
+    protected = runtime._protected_prompts.resolve(
+        CodeOwnedAgentDefinitionSource().resolve(agent_key).protected_prompt
+    )
+    actual = runtime._assemble_v1_prompt(
+        manifest_definition,
+        protected,
         payload,
         AgentAssemblyContext(design_system_active),
     )
-    manifest_definition = _definition_by_key(load_graph_v1_manifest(), agent_key)
     replayed = _replay_literal_v1_rules(
         manifest_definition,
         payload,
@@ -335,11 +337,13 @@ def test_manifest_assembly_replays_exact_runtime_prompt(
 def test_build_reviewer_deck_brief_block_tracks_payload_truthiness(deck_brief: str | None):
     payload = {"deck_brief": deck_brief}
     content = _definition_by_key(load_graph_v1_manifest(), "build_reviewer")
-    definition = CodeOwnedAgentDefinitionSource().resolve("build_reviewer")
     runtime = AgentRuntime.compatibility()
-    actual = runtime._assemble_prompt(
-        definition,
-        runtime._protected_prompts.resolve(definition.protected_prompt),
+    protected = runtime._protected_prompts.resolve(
+        CodeOwnedAgentDefinitionSource().resolve("build_reviewer").protected_prompt
+    )
+    actual = runtime._assemble_v1_prompt(
+        content,
+        protected,
         payload,
         AgentAssemblyContext(False),
     )
@@ -349,11 +353,13 @@ def test_build_reviewer_deck_brief_block_tracks_payload_truthiness(deck_brief: s
 def test_non_build_reviewer_ignores_deck_brief_protected_block():
     payload = {"deck_brief": "Synthetic brief"}
     content = _definition_by_key(load_graph_v1_manifest(), "architect")
-    definition = CodeOwnedAgentDefinitionSource().resolve("architect")
     runtime = AgentRuntime.compatibility()
-    actual = runtime._assemble_prompt(
-        definition,
-        runtime._protected_prompts.resolve(definition.protected_prompt),
+    protected = runtime._protected_prompts.resolve(
+        CodeOwnedAgentDefinitionSource().resolve("architect").protected_prompt
+    )
+    actual = runtime._assemble_v1_prompt(
+        content,
+        protected,
         payload,
         AgentAssemblyContext(False),
     )
