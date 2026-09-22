@@ -1,14 +1,16 @@
-# Issue #261 plan repair report
+# Issue #261 plan repair report — second correction
 
 **Plan:** docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md
 
-**Authorities re-probed:** GitHub #258, #261, #262; the 2026-09-21 design; #260 worktree preflight; current branch code; and .superpowers/issue-261-plan-review.md.
+**Authorities re-probed:** GitHub #258, #261, #262; the 2026-09-21 design; #260 worktree preflight; final #260 merge 29e034114; current branch code; .superpowers/issue-261-plan-review.md; and .superpowers/issue-261-plan-rereview.md.
 
 ## Rulings
 
-1. #261 owns only explicit POST /api/sessions creation. Chat auto-create, contributors, duplicate sessions, and mixed-release collaboration remain #262.
-2. graph_capable is an explicit, default-false root intent. This avoids assigning graph provenance to a plain monolith root. If product authority later defines all roots as capable, the contained change is request/default/UI parity, rather than corrective migration of wrongly pinned sessions.
-3. Dangling-release end-to-end PostgreSQL setup is removed: RESTRICT plus immutable release guards make it invalid. Direct loader proves absent ID; shipped graph seam proves null pin.
+1. #261 owns only explicit POST /api/sessions creation. Browser new-root creation is that explicit path and sends graphCapable true before its first message; chat auto-create, contributors, duplicates, and mixed-release collaboration remain #262.
+2. The API default is false for non-browser callers. A browser root is capability-pinned, not a claim that its first monolith turn used the graph; the UI label is Pinned Graph Version.
+3. The active-release lock has exactly two READ COMMITTED scans. A publication-first wait that makes R1 ineligible triggers the second fresh scan and pins R2. Creation-first locks/pins R1 and makes publication wait.
+4. Production MLflow tracing is forbidden by merged PRD authority. The plan uses a structured non-retaining application-log identity sink with an allowlist of identity/outcome fields and no customer content or trace table.
+5. Dangling-release end-to-end PostgreSQL setup is removed: RESTRICT plus immutable release guards make it invalid. Direct loader proves absent ID; shipped graph seam proves null pin.
 
 ## Review findings corrected
 
@@ -25,9 +27,24 @@
 | Endpoint identity omitted | Task 4 introduces endpoint error/trace proof. |
 | Collision table incomplete | The final table orders nodes, rereview tests, chat service, workflow, and graph harness edits. |
 
+## Second-pass corrections
+
+| Re-review finding | Plan correction |
+|---|---|
+| Ordinary browser graph root was unpinned | Task 8 owns API camel/snake serialization, browser true intent before first message, SessionContext version state/reset/restore, and normal New Session graph-first-message E2E. |
+| Publication-first lock failed | Task 2 gives two-scan READ COMMITTED code and forced R1-to-R2/R1-first ordering assertions. |
+| Runtime callers and fixture omitted | Tasks 4/5 list every rereviewed compatibility suite and make graph_turn_env seed graph_release_id in direct graph state. |
+| MLflow conflicts with final merge | MLflow removed; logging identity sink has explicit content-retention/security contract and production construction. |
+| Assembly/schema vague | Task 3 uses DefinitionContent/AssemblyRules; Task 4 defines exact V1 evaluator and all-role/context parity. |
+| Typed failures incomplete | Task 4 conversion table plus Task 6 exact safe stream event make later node re-raise effective. |
+| Acceptance state machine incomplete | Task 9 supplies A/B, two turns, every retry/rebuild tail, typed outputs, real Send wrapper, and ordered identity assertions. |
+| uv violated pyenv rule | Every backend command uses python -m pytest; pre/post checks require shared Python 3.11 and absent .venv. |
+| chat_service collision wrong | Task 1 owns selector delegation and Task 6 owns stream contract; collision table is ordered. |
+
 ## Plan-quality verification
 
 - Read all required skills: writing-plans, codebase-design, executing-plans-tellr.
 - Ran placeholder/signature/scope/CI keyword scans against the repaired plan; removed all ellipsis/TODO-style placeholders.
+- Re-ran no-MLflow, no-uv, browser-intent, compatibility-caller, state-seed, and CI-enrollment searches after the second correction.
 - Ran git diff --check successfully.
 - No production code or tests were run or changed; this is planning-only work.
