@@ -153,6 +153,50 @@ def test_recursive_overlay_is_frozen_and_serializes_as_exact_json() -> None:
         )
 
 
+def test_guidance_supplied_mutations_cannot_be_changed_through_model_fields_set() -> None:
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for("architect", 2)
+    overlay = SchemaOverlay.model_validate(
+        {
+            "field_overrides": {
+                "message": {
+                    "description": "Replacement description",
+                    "examples": ["Replacement example"],
+                }
+            }
+        }
+    )
+    guidance = overlay.field_overrides["message"]
+    expected_dump = overlay.model_dump(mode="json")
+    assert registry.validate_overlay("architect", identity, overlay) == ()
+    expected_property = registry.compose("architect", identity, overlay).model.model_json_schema(
+        mode="validation"
+    )["properties"]["message"]
+
+    try:
+        guidance.model_fields_set.clear()
+    except (AttributeError, TypeError):
+        pass
+
+    assert overlay.model_dump(mode="json") == expected_dump
+    assert registry.validate_overlay("architect", identity, overlay) == ()
+    actual_property = registry.compose("architect", identity, overlay).model.model_json_schema(
+        mode="validation"
+    )["properties"]["message"]
+    assert actual_property == expected_property
+    assert actual_property["description"] == "Replacement description"
+    assert actual_property["examples"] == ["Replacement example"]
+
+    omitted = SchemaOverlay.model_validate({"field_overrides": {"message": {}}})
+    omitted_guidance = omitted.field_overrides["message"]
+    try:
+        omitted_guidance.model_fields_set.add("description")
+    except (AttributeError, TypeError):
+        pass
+    assert omitted.model_dump(mode="json")["field_overrides"]["message"] == {}
+    assert registry.validate_overlay("architect", identity, omitted) == ()
+
+
 def test_retained_identity_tables_and_bundle_order_are_frozen_literals() -> None:
     assert MODEL_DRIVEN_AGENT_KEYS == EXPECTED_ROLES
     assert tuple(V1_SCHEMA_IDENTITIES) == EXPECTED_ROLES
@@ -392,6 +436,25 @@ def test_compose_applies_guidance_and_builds_a_strict_dynamic_model() -> None:
         composed.model.model_validate({"intent": "discuss", "message": "ok", "rogue": True})
 
 
+@pytest.mark.parametrize("role", EXPECTED_ROLES)
+def test_composed_diagnostic_notes_has_exact_role_metadata(role: str) -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        role,
+        registry.identity_for(role, 2),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+
+    optional_property = composed.model.model_json_schema(mode="validation")["properties"][
+        "diagnostic_notes"
+    ]
+    expected_description, expected_example = EXPECTED_DESCRIPTOR_TEXT[role]
+    assert optional_property["description"] == expected_description
+    assert optional_property["examples"] == [[expected_example]]
+    assert optional_property["default"] is None
+    assert optional_property["anyOf"][0]["maxItems"] == 8
+
+
 def test_compose_rejects_invalid_overlay_with_ordered_diagnostics() -> None:
     registry = AgentSchemaRegistry()
     with pytest.raises(SchemaOverlayValidationError) as raised:
@@ -455,6 +518,55 @@ def test_canonical_and_optional_validation_fail_with_distinct_diagnostics() -> N
             },
         )
     assert optional.value.issues == (
+        _issue(
+            "output_invalid_optional_field",
+            "Output contains an invalid optional field.",
+            "diagnostic_notes",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("note", "expected"),
+    [
+        ("x", ("x",)),
+        (f"  {'x' * 280}  ", ("x" * 280,)),
+    ],
+)
+def test_diagnostic_note_item_accepts_stripped_length_boundaries(
+    note: str, expected: tuple[str, ...]
+) -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+
+    result = registry.validate_output(
+        composed,
+        {"intent": "discuss", "message": "ok", "diagnostic_notes": [note]},
+    )
+    assert result.additional_fields["diagnostic_notes"] == expected
+
+
+@pytest.mark.parametrize("note", [" \t\n ", "x" * 281])
+def test_diagnostic_note_item_rejects_invalid_stripped_length_boundaries(
+    note: str,
+) -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+
+    with pytest.raises(AgentOutputValidationError) as raised:
+        registry.validate_output(
+            composed,
+            {"intent": "discuss", "message": "ok", "diagnostic_notes": [note]},
+        )
+    assert raised.value.issues == (
         _issue(
             "output_invalid_optional_field",
             "Output contains an invalid optional field.",

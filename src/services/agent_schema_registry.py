@@ -384,12 +384,12 @@ class AgentSchemaRegistry:
                 issues.append(_issue("overlay_unknown_canonical_field", *path))
                 continue
 
-            if "description" in guidance.model_fields_set and (
+            if guidance.mutation_is_supplied("description") and (
                 guidance.description is None or not guidance.description.strip()
             ):
                 issues.append(_issue("overlay_description_blank", *path, "description"))
 
-            if "examples" in guidance.model_fields_set:
+            if guidance.mutation_is_supplied("examples"):
                 if guidance.examples is None or len(guidance.examples) == 0:
                     issues.append(_issue("overlay_examples_empty", *path, "examples"))
                 elif not all(is_json_value(item) for item in guidance.examples):
@@ -446,9 +446,9 @@ class AgentSchemaRegistry:
         for field_name, guidance in overlay.field_overrides.items():
             original = bundle.canonical_model.model_fields[field_name]
             field_info = copy.copy(original)
-            if "description" in guidance.model_fields_set:
+            if guidance.mutation_is_supplied("description"):
                 field_info.description = guidance.description
-            if "examples" in guidance.model_fields_set:
+            if guidance.mutation_is_supplied("examples"):
                 field_info.examples = cast(list[object], thaw_json_containers(guidance.examples))
             field_definitions[field_name] = (original.annotation, field_info)
 
