@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401
-import src.services.graph_configuration as graph_configuration_module
+import src.services.graph_configuration_bootstrap as graph_configuration_module
 from src.core.database import Base
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
@@ -35,6 +35,7 @@ from src.services.graph_configuration import (
     GraphConfiguration,
     GraphConfigurationIntegrityError,
 )
+from src.services.graph_configuration_content import revision_from_definition
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     definition_content_hash,
@@ -248,7 +249,7 @@ def _create_active_v2(session_factory) -> int:
         architect_v2 = load_graph_v1_manifest().definitions[0].model_copy(
             update={"prompt_text": "Synthetic future Architect prompt"}
         )
-        architect_revision = GraphConfiguration._revision_from_definition(
+        architect_revision = revision_from_definition(
             architect_v2,
             actor="test:v2",
             timestamp=TEST_AUDIT_TIMESTAMP,
@@ -489,7 +490,7 @@ def test_mid_transaction_failure_rolls_back_attempted_graph_artifacts(
 ):
     if reuse_revision:
         definition = load_graph_v1_manifest().definitions[0]
-        reusable = GraphConfiguration._revision_from_definition(
+        reusable = revision_from_definition(
             definition, actor="preexisting", timestamp=TEST_AUDIT_TIMESTAMP
         )
         with session_factory.begin() as session:
@@ -529,7 +530,7 @@ def test_mid_transaction_failure_rolls_back_attempted_graph_artifacts(
 
 def test_valid_unreferenced_revision_is_reused(session_factory):
     definition = load_graph_v1_manifest().definitions[0]
-    reusable = GraphConfiguration._revision_from_definition(
+    reusable = revision_from_definition(
         definition, actor="preexisting", timestamp=TEST_AUDIT_TIMESTAMP
     )
     with session_factory.begin() as session:

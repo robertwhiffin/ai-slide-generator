@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import event, select, text
 from sqlalchemy.orm import sessionmaker
 
-import src.services.graph_configuration as graph_configuration_module
+import src.services.graph_configuration_bootstrap as graph_configuration_module
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     AgentTestCase,

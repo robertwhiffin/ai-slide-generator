@@ -29,6 +29,7 @@ from src.services.graph_configuration import (
     GraphConfiguration,
     GraphConfigurationIntegrityError,
 )
+from src.services.graph_configuration_content import definition_content_from_row
 
 EXPECTED_TOPOLOGY_ORDER = [
     "architect",
@@ -242,13 +243,12 @@ def test_admin_workbench_returns_exact_typed_v1_contract(
 def test_base_revision_is_derived_from_base_release_mapping(
     session_factory, monkeypatch
 ):
-    service = GraphConfiguration()
     with session_factory.begin() as session:
         draft = session.scalar(
             select(GraphDraftAgent).where(GraphDraftAgent.agent_key == "architect")
         )
         assert draft is not None
-        content = service._content_from_draft(draft).model_copy(
+        content = definition_content_from_row(draft).model_copy(
             update={"prompt_text": draft.prompt_text + "\n\nCandidate edit."}
         )
         draft.prompt_text = content.prompt_text
