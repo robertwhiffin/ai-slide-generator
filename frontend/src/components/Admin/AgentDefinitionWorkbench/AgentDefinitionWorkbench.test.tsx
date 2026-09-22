@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mockAgentDefinitionWorkbench } from '../../../../tests/fixtures/mocks';
+import { syntheticAgentDefinitionWorkbench } from '../../../../tests/fixtures/mocks';
 import { AdminPage } from '../AdminPage';
 import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
 
@@ -22,6 +22,18 @@ const NODE_ORDER = [
   'Deck Reviewer',
 ];
 
+const FORBIDDEN_ACTION_NAME = /save\s+draft|\brun\b|approve|reject|review\s*&\s*publish|publish|history|rollback/i;
+
+function interactiveControls() {
+  return [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link')];
+}
+
+function expectNoForbiddenActionNames() {
+  for (const control of interactiveControls()) {
+    expect(control).not.toHaveAccessibleName(FORBIDDEN_ACTION_NAME);
+  }
+}
+
 function mockFetchResponse(status: number, body: unknown) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: status >= 200 && status < 300,
@@ -32,7 +44,7 @@ function mockFetchResponse(status: number, body: unknown) {
 }
 
 function renderSuccessfulWorkbench() {
-  mockFetchResponse(200, mockAgentDefinitionWorkbench);
+  mockFetchResponse(200, syntheticAgentDefinitionWorkbench);
   return render(<AgentDefinitionWorkbench />);
 }
 
@@ -55,7 +67,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('Loading Agent Definitions');
 
-    resolveResponse({ ok: true, status: 200, statusText: 'OK', json: async () => mockAgentDefinitionWorkbench });
+    resolveResponse({ ok: true, status: 200, statusText: 'OK', json: async () => syntheticAgentDefinitionWorkbench });
     await loadedNodeNavigation();
   });
 
@@ -86,6 +98,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     fireEvent.keyDown(promptTab, { key: 'ArrowRight' });
     expect(modelTab).toHaveAttribute('aria-selected', 'true');
+    await waitFor(() => expect(modelTab).toHaveFocus());
     expect(screen.getByRole('tabpanel', { name: 'Model' })).toHaveTextContent(
       'databricks-claude-opus-4-6',
     );
@@ -139,14 +152,33 @@ describe('AgentDefinitionWorkbench', () => {
   it('offers no write, execution, review, publication, history, or rollback action', async () => {
     renderSuccessfulWorkbench();
     await loadedNodeNavigation();
-    const forbidden = /save\s+draft|\brun\b|approve|reject|review\s*&\s*publish|publish|history|rollback/i;
-    const interactive = [...screen.getAllByRole('button'), ...screen.queryAllByRole('link')];
-    const interactiveNames = interactive.map((element) =>
-      element.getAttribute('aria-label') ?? element.textContent ?? '',
-    );
 
-    expect(interactiveNames.filter((name) => forbidden.test(name))).toEqual([]);
+    expectNoForbiddenActionNames();
     expect(screen.getByText('Isolated testing is not available in this release.')).toBeVisible();
+  });
+
+  it.each([
+    [
+      'aria-labelledby',
+      () => (
+        <>
+          <span id="forbidden-labelled-action">Save Draft</span>
+          <button type="button" aria-labelledby="forbidden-labelled-action"><svg aria-hidden="true" /></button>
+        </>
+      ),
+    ],
+    [
+      'title',
+      () => <a href="/history" title="Release history"><span aria-hidden="true">Details</span></a>,
+    ],
+    [
+      'a non-text alternative',
+      () => <button type="button"><img src="/probe.svg" alt="Run isolated test" /></button>,
+    ],
+  ])('the forbidden-action guard detects a name supplied by %s', (_source, renderProbe) => {
+    render(renderProbe());
+
+    expect(() => expectNoForbiddenActionNames()).toThrow();
   });
 
   it('issues exactly one read when mounted', async () => {
@@ -161,7 +193,7 @@ describe('AgentDefinitionWorkbench', () => {
   });
 
   it('does not mount or request the workbench until the Agent Definitions admin tab is selected', async () => {
-    mockFetchResponse(200, mockAgentDefinitionWorkbench);
+    mockFetchResponse(200, syntheticAgentDefinitionWorkbench);
     render(<AdminPage />);
     const workbenchCalls = () => vi.mocked(fetch).mock.calls.filter(([url]) =>
       String(url).endsWith('/api/admin/agent-definitions/workbench'),
