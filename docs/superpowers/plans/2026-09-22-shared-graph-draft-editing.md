@@ -12,16 +12,16 @@
 
 ## Global Constraints
 
-- Start from reviewed #260 head `7897cbc0190155ba70c80945047c6be5b99a1481`; do not weaken its bootstrap, integrity, read-lock, immutable-release, or CI-collection guarantees.
+- Use implementation base `a9f7f1324c41f625038ba26ef7367e8673e9ca2f`, the post-merge #263 worktree HEAD immediately before this correction commit. It contains final #260 head `29e03411487476383b34101b7b34513dbb917f26`; do not weaken its bootstrap, integrity, no-manifest fallback, read-lock, immutable-release, or CI-collection guarantees.
 - At execution time load `executing-plans-tellr` alongside `superpowers:subagent-driven-development`; run the plan-vs-code corrections pre-pass before Task 1 and attach the corrections ledger to every implementer/reviewer brief.
-- Use the shared Python environment with `uv run --no-sync`; never install a package or create a virtual environment. Leave the ignored `frontend/node_modules` symlink unchanged.
+- Use only `/Users/robert.whiffin/.pyenv/shims/python` at Python 3.11 with `python -m pytest`; never run `uv`, install a package, or create a virtual environment. Stop if `.venv` exists. Leave the ignored `frontend/node_modules` symlink unchanged.
 - The public save request exposes exactly `prompt_text`, exact `endpoint_name`, `temperature`, `max_tokens`, and `top_p`, plus the optimistic `lock_version`; `agent_key` is the path identity.
 - A public save cannot set `agent_key`, `definition_version`, schema overlay, assembly rules, protected identities, base/revision IDs, candidate hash, audit fields, evidence, or release state.
 - Validate in #263 only nonblank prompt/endpoint, exact endpoint text, finite `temperature`/`top_p` in `[0, 1]`, and positive integral `max_tokens`. Endpoint discovery, endpoint existence/connectivity, arbitrary-URL policy, and structured-output capability belong to #266.
 - Reconstruct and canonical-hash the complete persisted `DefinitionContent`; never introduce a five-field hash. Preserve the reviewed v1 overlay and assembly policy unchanged.
 - Every write uses one explicit transaction, exclusive locks on the singleton draft parent and selected draft-agent row, exact aggregate validation, a database transaction timestamp, and a nonblank trusted request principal.
 - An explicit valid same-content save increments `lock_version` and updates audit metadata, but returns `changed: false`; evidence applicability changes only when the canonical hash changes.
-- A stale save returns the stable `409` envelope defined below, preserves both candidates, performs no write, and never partially overwrites another agent or the parent audit token.
+- A stale save returns the stable `409` envelope defined below with one coherent locked server snapshot of all seven draft definitions, preserves the selected submitted candidate, performs no write, and never partially overwrites or misrepresents another agent or the parent audit token.
 - Emit only `Clean`, `Unsaved`, and `Needs test` for model agents. `Test failed`, `Awaiting review`, and `Approved` remain #267 work backed by immutable evidence.
 - Historical evidence is never updated or invalidated. Applicability is identity-based: candidate hash (and, in #267, test-case version) either matches or it does not; exact reversion to an eligible earlier hash may reuse evidence.
 - Ordinary typing, validation, selection changes, tab changes, remounts, conflict actions, and navigation never save. Only **Save Draft** issues the `PUT`.
@@ -38,8 +38,8 @@
 2. The endpoint string is retained exactly. #263 rejects only blank/whitespace-only text and numeric syntax/bounds; #266 owns discovery, existence, connectivity, arbitrary-URL decisions, and structured-output checks.
 3. Until #267 adds immutable run/verdict queries, the status vocabulary is exactly `Clean`, `Unsaved`, and `Needs test` (plus Foreman’s existing `Deterministic · read-only`).
 4. #263 does not alter `SchemaOverlay`, `AssemblyRules`, `DefinitionContent.validate_role_assembly`, protected bundle identities, schema-contract identities, or any v1 overlay/assembly rule.
-5. A stale response is useful data, not a failed generic detail string: it echoes the submitted five-field candidate and returns the current selected server candidate plus current draft metadata.
-6. Conflict **Keep local** adopts the returned server baseline and new lock token while retaining the submitted local form, ready for a later explicit retry. Conflict **Reload** adopts the server form and retains the submitted form as a visible recovery copy until the user restores or dismisses it. Neither action writes.
+5. A stale response is useful aggregate data, not a failed generic detail string: it echoes the selected submitted five-field candidate and returns current draft metadata plus a role-keyed, exact-seven-definition snapshot built while the aggregate locks are held.
+6. On every conflict, the client first merges all seven server baselines atomically: an entry clean against its old baseline adopts the server value as both `saved` and `local`; a locally dirty entry adopts the server value as `saved` while retaining `local`. For the selected entry, **Keep local** retains the submitted form and clears the blocking conflict; **Reload** adopts the server form and retains the submission as a visible recovery copy. Neither action writes.
 
 ## Stable interfaces and wire contracts
 
@@ -49,7 +49,8 @@ Create `src/services/graph_configuration_draft.py` with these public facade type
 
 ```python
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from types import MappingProxyType
+from typing import Generic, Mapping, TypeVar
 
 from sqlalchemy.orm import Session
 
@@ -76,6 +77,12 @@ class DraftSaveResult:
     changed: bool
 
 
+@dataclass(frozen=True)
+class DraftAggregateSnapshot:
+    draft: DraftMetadataSnapshot
+    definitions: Mapping[AgentKey, DraftDefinitionSnapshot]
+
+
 ClientCandidateT = TypeVar("ClientCandidateT")
 
 
@@ -84,16 +91,27 @@ class DraftSaveConflict(Generic[ClientCandidateT]):
     expected_lock_version: int
     current_lock_version: int
     client_candidate: ClientCandidateT
-    draft: DraftMetadataSnapshot
-    definition: DraftDefinitionSnapshot
+    server: DraftAggregateSnapshot
 
 
 DraftSaveOutcome = DraftSaveResult | DraftSaveConflict[ClientCandidateT]
 
 
-class DraftContentRejected(ValueError):
-    """A trusted caller proposed content outside the draft-writer contract."""
+@dataclass(frozen=True)
+class DraftValidationIssue:
+    field: str
+    code: str
+    message: str
 
+
+class DraftContentRejected(ValueError):
+    issues: tuple[DraftValidationIssue, ...]
+
+    def __init__(self, *issues: DraftValidationIssue) -> None:
+        if not issues:
+            raise ValueError("DraftContentRejected requires at least one issue")
+        self.issues = issues
+        super().__init__("; ".join(issue.message for issue in issues))
 
 ```
 
@@ -122,7 +140,43 @@ _GraphConfigurationDraft.save_draft_content(
 
 `save_draft_content` is the trusted downstream seam for #264 and #265. It may change the five model/prompt values, `schema_overlay`, or `assembly_rules`, but rejects a mismatch in `agent_key`, `definition_version`, `protected_assembly`, or `schema_contract` relative to the locked stored candidate. Both facade methods use the same private locked writer, hash function, audit update, and conflict construction.
 
-`EditableModelDraft` is deliberately a domain command rather than an HTTP model. The writer itself therefore validates exact types, finiteness, bounds, and nonblank text before it locks or writes; route validation is an earlier UX/security layer, not the only correctness layer. `DraftContentRejected` represents caller-controlled invalid commands/invariant changes; `GraphConfigurationIntegrityError` remains reserved for persisted aggregate corruption.
+Define the private locked carrier in `graph_configuration_workbench.py`, alongside the ORM and snapshot types it carries, so the workbench module does not import the new draft facade and no circular dependency is introduced:
+
+```python
+@dataclass
+class _LockedDraftWriteAggregate:
+    snapshot: GraphWorkbenchSnapshot
+    release_row: GraphRelease
+    draft_row: GraphDraft
+    selected_row: GraphDraftAgent
+    selected: ModelAgentNodeSnapshot
+```
+
+The draft module imports this private carrier from the workbench module. The private ORM interface is exact and admits no unlocked second lookup:
+
+```text
+_GraphConfigurationWorkbench._read_workbench_for_draft_write(
+    self,
+    session: Session,
+    *,
+    agent_key: AgentKey
+) -> _LockedDraftWriteAggregate
+
+_GraphConfigurationDraft._write_locked_content(
+    self,
+    session: Session,
+    *,
+    locked: _LockedDraftWriteAggregate,
+    content: DefinitionContent,
+    actor: str
+) -> DraftSaveResult
+```
+
+The loader exclusively locks and returns the actual active `GraphRelease`, singleton `GraphDraft`, and selected `GraphDraftAgent` ORM identities, plus the exact aggregate snapshot and its selected model node. Conflict construction and mutation use those same objects. `_write_locked_content` must not call `session.get`, issue another selected-row query, or replace any returned ORM identity. It builds returned snapshots directly from `locked.draft_row`, `locked.selected_row`, and the already validated base-revision mapping in `locked.selected` after `flush()`.
+
+`DraftAggregateSnapshot.definitions` is created as `MappingProxyType({node.agent_key: node.draft for node in snapshot.nodes if node.execution_kind == "model"})`, and its key set must equal `frozenset(GRAPH_V1_AGENT_KEYS)` before either a conflict or response is returned. It therefore carries one coherent locked server baseline for all seven roles.
+
+`EditableModelDraft` is deliberately a domain command rather than an HTTP model. The writer itself therefore validates exact types, finiteness, bounds, and nonblank text before it locks or writes; route validation is an earlier UX/security layer, not the only correctness layer. Invalid commands raise `DraftContentRejected` with ordered `DraftValidationIssue(field, code, message)` values. #263 uses the same wire field names as the HTTP contract; the trusted full-content operation uses semantic paths such as `definition_version`, `protected_assembly`, and `schema_contract`. `GraphConfigurationIntegrityError` remains reserved for persisted aggregate corruption.
 
 ### HTTP operation
 
@@ -179,50 +233,22 @@ Success `200`:
 
 The example’s empty `blocks` is only envelope notation; actual successful content retains the locked valid v1 block sequence. The server response returns the protected/full content so clients rehydrate from authority, but the request cannot send it.
 
-Stale `409` (the route projects the domain command’s flat `endpoint_name`/numeric members into the same nested `model` wire shape used by the request):
+Stale `409` projects the flat domain command into the nested request shape and carries the complete locked server candidate set:
 
-```json
-{
-  "code": "stale_draft",
-  "expected_lock_version": 4,
-  "current_lock_version": 5,
-  "client_candidate": {
-    "prompt_text": "Submitted local text",
-    "model": {
-      "endpoint_name": "custom-endpoint-exact-name",
-      "temperature": 0.2,
-      "max_tokens": 4096,
-      "top_p": 0.8
-    }
-  },
-  "server": {
-    "draft": {
-      "draft_id": 1,
-      "base_release_id": 41,
-      "base_version_number": 1,
-      "lock_version": 5,
-      "updated_by": "winner@example.com",
-      "updated_at": "2026-09-22T12:00:00Z"
-    },
-    "definition": {
-      "base_revision_id": 11,
-      "candidate_hash": "64-lowercase-hex",
-      "definition_version": 2,
-      "prompt_text": "Winning server text",
-      "model": {
-        "endpoint_name": "databricks-claude-opus-4-6",
-        "temperature": 0.7,
-        "max_tokens": 60000,
-        "top_p": 0.95
-      },
-      "schema_overlay": {"field_overrides": {}, "additional_optional_fields": []},
-      "assembly_rules": {"format_version": 1, "separator": "\n\n", "blocks": []},
-      "protected_assembly": {"version": 1, "digest": "64-lowercase-hex"},
-      "schema_contract": {"version": 1, "digest": "64-lowercase-hex"}
-    }
-  }
+```typescript
+interface DraftSaveConflictResponse {
+  code: 'stale_draft';
+  expected_lock_version: number;
+  current_lock_version: number;
+  client_candidate: EditableModelDraft;
+  server: {
+    draft: DraftMetadata;
+    definitions: Record<AgentKey, DraftDefinition>;
+  };
 }
 ```
+
+`server.definitions` has exactly the seven `AgentKey` properties (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`, `deck_reviewer`) serialized from one locked `DraftAggregateSnapshot`. Missing, extra, or duplicate role keys are an integrity failure, never a partial `409`.
 
 Stable `422`:
 
@@ -270,6 +296,7 @@ export interface DraftEditorEntry {
   fieldErrors: Partial<Record<EditableDraftField, string>>;
   conflict: DraftSaveConflictResponse | null;
   recoveryCandidate: EditableModelDraft | null;
+  requestError: string | null;
   saving: boolean;
 }
 
@@ -287,16 +314,16 @@ export function validateDraftForm(form: EditableModelDraftForm):
   | { ok: false; errors: Partial<Record<EditableDraftField, string>> };
 ```
 
-The reducer/hook actions are `edit`, `saveStarted`, `saveSucceeded`, `saveInvalid`, `saveConflicted`, `reloadServer`, `keepLocal`, `restoreRecovery`, and `dismissRecovery`. Later UI tickets consume these exports rather than inventing another lock, hash, conflict, or autosave model.
+The reducer/hook actions are `edit`, `saveStarted`, `saveSucceeded`, `saveInvalid`, `saveConflicted`, `saveFailed`, `reloadServer`, `keepLocal`, `restoreRecovery`, and `dismissRecovery`. `saveFailed` carries `{agentKey, message}` and sets only that entry’s `requestError`, resets `saving`, performs no retry, and leaves every saved/local/hash/lock value unchanged. `requestError` clears on that entry’s next `edit`, `saveStarted`, `saveSucceeded`, or `saveConflicted`; another role’s action cannot clear it. Later UI tickets consume these exports rather than inventing another lock, hash, conflict, request-error, or autosave model.
 
 ## Plan-vs-code shared interface and file table
 
-All “verified” entries below were re-probed at `7897cbc01` on 2026-09-22; executors re-run the commands in the execution pre-pass because the plan is not runtime evidence.
+All “verified” entries below were re-probed at implementation base `a9f7f1324c41f625038ba26ef7367e8673e9ca2f` on 2026-09-22; executors re-run the commands in the execution pre-pass because the plan is not runtime evidence.
 
 | Shared seam/file | Verified current fact | #263 change and stable handoff | Ordering |
 | --- | --- | --- | --- |
 | `src/services/graph_configuration.py` | `GraphConfiguration(_GraphConfigurationWorkbench, _GraphConfigurationBootstrap)` is the only public facade. | Compose `_GraphConfigurationDraft`; re-export the draft types only. #264/#265 call `save_draft_content`; routes call `save_editable_model_draft`. | Task 1 only. |
-| `src/services/graph_configuration_workbench.py` | `read_workbench(Session) -> GraphWorkbenchSnapshot` holds shared parent locks and validates singleton, active base, exact seven mappings, compatible revisions, exact seven draft rows, and hashes. | Extract private “parents locked → validate/project snapshot” logic; keep public read behavior byte-for-byte equivalent; give the writer one internal exclusive parent/selected-row loader. | Task 1 before PostgreSQL tests. |
+| `src/services/graph_configuration_workbench.py` | `read_workbench(Session) -> GraphWorkbenchSnapshot` holds shared parent locks and validates singleton, active base, exact seven mappings, compatible revisions, exact seven draft rows, and hashes. | Extract private “parents locked → validate/project snapshot” logic; keep public read behavior byte-for-byte equivalent; return `_LockedDraftWriteAggregate` containing the locked release/draft/selected ORM rows and exact snapshot. | Task 1 before PostgreSQL tests. |
 | `src/services/graph_configuration_content.py` | `_PERSISTED_CONTENT_FIELDS` exactly equals all 13 ORM content columns; row reconstruction and canonical hash validation already centralize semantic content. | Reuse unchanged. All writes apply `definition_content_values`; no second field registry. | Read-only in every task. |
 | `src/services/graph_definition_manifest.py` | `DefinitionContent.canonical_payload()` includes agent/version, five fields, overlay, assembly, and both protected identities; finite decimals normalize; assembly is still v1-closed. | Reuse unchanged. #263 must not broaden overlay/assembly. | Read-only in every task. |
 | `src/database/models/graph_configuration.py` | Draft id check is `id = 1`; child PK is `(graph_draft_id, agent_key)`; content checks cover nonblank text and numeric ranges; releases/revisions are immutable artifacts. | No schema or migration. Writer updates one `graph_draft_agent` and the singleton `graph_draft` only. | Read-only in every task. |
@@ -307,7 +334,8 @@ All “verified” entries below were re-probed at `7897cbc01` on 2026-09-22; ex
 | `tests/integration/test_agent_definition_workbench_postgres.py` | Real QueuePool/PostgreSQL test proves reader/writer waiting; CI `integration-graph` already names this file. | Add forced two-writer same-version interleavings and rollback/timestamp assertions. No CI workflow edit is required unless the pre-pass disproves collection. | Task 2. |
 | `frontend/src/api/agentDefinitions.ts` | GET types/client only; StrictMode read coalescing is deliberate. | Add stable save types/client and preserve structured error JSON. Never coalesce writes. | Task 4. |
 | `draftEditorState.ts` / `useDraftEditor.ts` / `DefinitionEditor.tsx` | Do not exist; current state is selected node + per-mount tab only. | Extract per-agent local state, status, validation, save, and conflict recovery so #264/#265/#266 extend panels without redefining semantics. | Tasks 4–6 sequentially. |
-| `AgentDefinitionWorkbench.tsx` | Read-only prompt/model panels; `DefinitionPanel key={agent_key}` remounts; one GET on lazy admin-tab mount. | Compose extracted editor/state; retain per-agent local edits across remount/selection/tab changes; keep Output Schema/Assembly read-only and isolated testing unavailable. | Task 5 then Task 6. |
+| `AgentDefinitionWorkbench.tsx` | Read-only prompt/model panels; `DefinitionPanel key={agent_key}` remounts; one GET on lazy admin-tab mount. | Compose extracted editor/state; retain per-agent local edits across definition selection/tab changes; keep Output Schema/Assembly read-only and isolated testing unavailable. | Task 5 then Task 6. |
+| `frontend/src/components/Admin/AdminPage.tsx` | The workbench is absent before first visit and unmounts whenever `activeTab !== 'agent_definitions'`. | Track first visit, preserve no-GET-before-visit, then keep the workbench mounted inside the hidden tabpanel so local editor state survives Admin-tab switches. | Task 5. |
 | component fixture/test and Playwright spec | Complete #260 read fixture, 90-unit-test baseline, exact browser route mock; E2E matrix already includes `agent-definition-workbench`. | Extend endpoint-specific mocks and replace only obsolete “no Save” assertion; keep Run/Approve/Publish/History/Rollback forbidden. | Tasks 4–6 sequentially. |
 
 ## Exact no-scope list
@@ -318,7 +346,7 @@ All “verified” entries below were re-probed at `7897cbc01` on 2026-09-22; ex
 - No `Test failed`, `Awaiting review`, or `Approved` statuses (#267).
 - No runtime graph resolution, model invocation, conversation pin, trace, graph fan-out, legacy monolith, export model, feedback model, or LLM-judge change.
 - No tool assignment/toggle/grant behavior, Data Analyst tool binding, or Foreman configurability.
-- No autosave, debounce save, navigation save, merge algorithm, private draft, field-level collaborative merge, or last-write-wins fallback.
+- No autosave, debounce save, navigation save, server-side content merge, private draft, field-level collaborative merge, or last-write-wins fallback. The required client merge only reconciles the coherent seven-role server baselines with already-local dirty forms; it never synthesizes field values or writes.
 - No client-supplied actor, timestamp, hash, identity, revision/base ID, release data, schema overlay, or assembly rules.
 - No endpoint alias normalization, URL rewrite, family upgrade, live catalog lookup, live serving call, or arbitrary URL decision.
 - No broad redesign of the existing admin layout, Output Schema/Assembly panes, or isolated-testing placeholder.
@@ -330,6 +358,13 @@ Before Task 1, create the ignored `.superpowers/2026-09-22-shared-graph-draft-ed
 ```bash
 git status --short --branch
 git rev-parse HEAD
+git merge-base --is-ancestor 29e03411487476383b34101b7b34513dbb917f26 HEAD
+test "$(git rev-parse a9f7f1324c41f625038ba26ef7367e8673e9ca2f)" = \
+  "a9f7f1324c41f625038ba26ef7367e8673e9ca2f"
+test ! -e .venv
+test "$(command -v python)" = "/Users/robert.whiffin/.pyenv/shims/python"
+python --version | rg '^Python 3\.11\.'
+python -c 'import sys; assert sys.version_info[:2] == (3, 11); print(sys.executable)'
 rg -n "class GraphConfiguration|read_workbench|_PERSISTED_CONTENT_FIELDS|canonical_payload|def get_db|require_admin|require_current_user" \
   src/services/graph_configuration.py \
   src/services/graph_configuration_workbench.py \
@@ -343,12 +378,39 @@ git diff --cached -- src/api/schemas/agent_definitions.py frontend/src/api/agent
 readlink frontend/node_modules
 ```
 
-The accepted fresh baseline at plan time is cause-based, not merely numeric:
+The exact cause baseline at implementation base `a9f7f1324c41f625038ba26ef7367e8673e9ca2f` is:
 
-- Backend/workbench: **40 passed**. It covers canonical manifest/content mapping, bootstrap/read integrity, admin route confidentiality, and the existing real-PostgreSQL reader/writer lock proof; no #263 write contract exists yet.
-- Frontend unit: **90 passed**. It covers the #260 read-only workbench and surrounding frontend suite; the existing “no Save Draft” assertion is expected to be replaced by #263 positive save coverage.
-- Frontend typecheck: **passed**. Existing GET wire types and fixtures agree; there are no save types yet.
-- PostgreSQL availability is an environmental cause, not a count: the race test must actually run against a reachable `TELLR_TEST_POSTGRES_URL`, show two distinct backend PIDs and an observed lock waiter, and must not be reported green if skipped.
+```bash
+python -m pytest -q \
+  tests/unit/test_graph_definition_manifest.py \
+  tests/unit/test_graph_configuration_models.py \
+  tests/unit/test_graph_configuration_bootstrap.py \
+  tests/unit/test_graph_definition_content_mapping.py \
+  tests/unit/test_agent_definition_workbench_routes.py \
+  tests/integration/test_graph_configuration_bootstrap_postgres.py \
+  tests/integration/test_graph_configuration_constraints_postgres.py \
+  tests/integration/test_agent_definition_workbench_postgres.py
+```
+
+Result: **95 passed, 0 failed, 0 skipped** in 15.02s. This exact file set covers manifest/hash policy, ORM constraints, bootstrap/integrity, content mapping, admin GET confidentiality/no-fallback behavior, PostgreSQL bootstrap/constraints, and the real reader/writer lock. Warning causes only: existing Pydantic class-config/validator deprecations, `langchain-community` sunset notice, and existing route-import Pydantic deprecations.
+
+```bash
+python -m pytest -q \
+  tests/unit/test_graph_definition_content_mapping.py \
+  tests/unit/test_agent_definition_workbench_routes.py \
+  tests/integration/test_agent_definition_workbench_postgres.py
+```
+
+Result: **21 passed, 0 failed, 0 skipped** in 2.25s. This is the narrow content/route/real-PostgreSQL workbench cause set used after backend tasks.
+
+```bash
+cd frontend && npm run test:unit
+cd frontend && npm run typecheck
+```
+
+Results: **9 files / 90 tests passed** in 5.13s; typecheck passed. Warning causes only: stale `baseline-browser-mapping` and Browserslist data. The existing “no Save Draft” assertion is expected to be replaced by #263 positive save coverage; no other baseline cause may change silently.
+
+PostgreSQL availability is an environmental cause, not a count: the race test must actually run against a reachable `TELLR_TEST_POSTGRES_URL`, show two distinct backend PIDs and an observed lock waiter, and must not be reported green if skipped. After every Python command, re-run `test ! -e .venv`; if it fails, stop and remove nothing until the controller inspects the unexpected environment mutation.
 
 After every task, compare failure causes with this list. Schema/ORM/dependency changes are outside scope; if any appear, stop and correct scope rather than accepting a same-count baseline.
 
@@ -395,7 +457,7 @@ Assert the five saved values match exactly (including endpoint spaces), the othe
 Run:
 
 ```bash
-uv run --no-sync pytest -q \
+python -m pytest -q \
   tests/unit/test_graph_configuration_draft.py \
   tests/unit/test_graph_definition_content_mapping.py
 ```
@@ -404,7 +466,7 @@ Expected: collection fails because `src.services.graph_configuration_draft` and 
 
 - [ ] **Step 3: Refactor the locked read projection without changing public GET behavior**
 
-In `graph_configuration_workbench.py`, extract private helpers with these signatures:
+In `graph_configuration_workbench.py`, define `_LockedDraftWriteAggregate` exactly as specified in the stable interface above and extract private helpers with these signatures:
 
 ```text
 _GraphConfigurationWorkbench._lock_current_parents(
@@ -424,7 +486,7 @@ _GraphConfigurationWorkbench._read_workbench_for_draft_write(
     session: Session,
     *,
     agent_key: AgentKey
-) -> GraphWorkbenchSnapshot
+) -> _LockedDraftWriteAggregate
 ```
 
 `read_workbench` calls `_lock_current_parents(exclusive=False)` and then `_snapshot_locked_workbench`. The write loader calls `_lock_current_parents(exclusive=True)`, then executes this selected-row lock before projection:
@@ -444,7 +506,7 @@ if selected is None:
     )
 ```
 
-The snapshot helper retains every current exact-set, base-release, role-compatible mapping, and hash assertion. Do not import the manifest or substitute defaults.
+The snapshot helper retains every current exact-set, base-release, role-compatible mapping, and hash assertion. The write loader returns `_LockedDraftWriteAggregate(snapshot=..., release_row=release, draft_row=draft, selected_row=selected, selected=selected_node)` and verifies `selected_node.agent_key == selected.agent_key == agent_key`. Do not import the manifest, substitute defaults, or issue an unlocked re-query after returning this object.
 
 - [ ] **Step 4: Implement the cohesive writer and compose the facade**
 
@@ -464,19 +526,17 @@ def save_editable_model_draft(
         actor, expected_lock_version, candidate
     )
     with session.begin():
-        snapshot = self._read_workbench_for_draft_write(
+        locked = self._read_workbench_for_draft_write(
             session, agent_key=agent_key
         )
-        current = self._selected_model_node(snapshot, agent_key)
-        if expected_lock_version != snapshot.draft.lock_version:
+        if expected_lock_version != locked.snapshot.draft.lock_version:
             return DraftSaveConflict(
                 expected_lock_version=expected_lock_version,
-                current_lock_version=snapshot.draft.lock_version,
+                current_lock_version=locked.snapshot.draft.lock_version,
                 client_candidate=candidate,
-                draft=snapshot.draft,
-                definition=current.draft,
+                server=self._draft_aggregate_snapshot(locked.snapshot),
             )
-        payload = current.draft.content.model_dump(mode="python")
+        payload = locked.selected.draft.content.model_dump(mode="python")
         payload["prompt_text"] = candidate.prompt_text
         payload["model"] = {
             "endpoint_name": candidate.endpoint_name,
@@ -487,25 +547,24 @@ def save_editable_model_draft(
         content = DefinitionContent.model_validate(payload)
         return self._write_locked_content(
             session,
-            snapshot=snapshot,
-            current=current,
+            locked=locked,
             content=content,
             actor=actor,
         )
 ```
 
-`save_draft_content` derives `agent_key` from its validated `DefinitionContent`, uses the same lock-first/stale-first flow, and calls `_write_locked_content`. Before applying values it compares locked/current and proposed `agent_key`, `definition_version`, `protected_assembly`, and `schema_contract`; mismatch performs no flush.
+`save_draft_content` derives `agent_key` from its validated `DefinitionContent`, uses the same lock-first/stale-first flow, and calls `_write_locked_content`. Before applying values it compares locked/current and proposed fields through the exact constant `_IMMUTABLE_DRAFT_FIELDS = ("agent_key", "definition_version", "protected_assembly", "schema_contract")`; mismatch performs no flush.
 
-Use `DraftContentRejected`, not `GraphConfigurationIntegrityError`, for invalid caller input. `_validate_actor_lock_and_editable_candidate` requires `type(expected_lock_version) is int`, a nonnegative version, `actor.strip()`, nonblank prompt/endpoint, `type(max_tokens) is int and max_tokens > 0`, numeric-but-not-boolean temperature/top-p, `math.isfinite`, and inclusive `[0, 1]` bounds. `save_draft_content` raises the same type for a proposed protected identity/version/key mismatch. The HTTP adapter converts only `DraftContentRejected` to `422`; persisted `GraphConfigurationIntegrityError` remains a nonleaking `500`.
+Use `DraftContentRejected`, not `GraphConfigurationIntegrityError`, for invalid caller input. `_validate_actor_lock_and_editable_candidate` requires `type(expected_lock_version) is int`, a nonnegative version, `actor.strip()`, nonblank prompt/endpoint, `type(max_tokens) is int and max_tokens > 0`, numeric-but-not-boolean temperature/top-p, `math.isfinite`, and inclusive `[0, 1]` bounds. It returns ordered issues using the HTTP field names and codes fixed above—for example `DraftValidationIssue("candidate.model.temperature", "out_of_range", "Temperature must be between 0 and 1.")`. `save_draft_content` raises the same type with `immutable_field` issues for a proposed `agent_key`, `definition_version`, `protected_assembly`, or `schema_contract` mismatch. The HTTP adapter projects `exc.issues` in order to `DraftFieldErrorResponse`; persisted `GraphConfigurationIntegrityError` remains a nonleaking `500`.
 
 `_write_locked_content` must:
 
 ```python
-old_hash = current.draft.candidate_hash
+old_hash = locked.selected.draft.candidate_hash
 new_hash = definition_content_hash(content)
 for column_name, value in definition_content_values(content).items():
-    setattr(selected_row, column_name, value)
-selected_row.candidate_hash = new_hash
+    setattr(locked.selected_row, column_name, value)
+locked.selected_row.candidate_hash = new_hash
 timestamp = session.scalar(select(func.current_timestamp()))
 if timestamp is None:
     raise GraphConfigurationIntegrityError(
@@ -513,13 +572,13 @@ if timestamp is None:
     )
 if timestamp.tzinfo is None:
     timestamp = timestamp.replace(tzinfo=timezone.utc)
-draft_parent.lock_version += 1
-draft_parent.updated_by = actor
-draft_parent.updated_at = timestamp
+locked.draft_row.lock_version += 1
+locked.draft_row.updated_by = actor
+locked.draft_row.updated_at = timestamp
 session.flush()
 ```
 
-Return snapshots built from the flushed rows, with the selected `base_revision_id` from the active release mapping and `changed=(new_hash != old_hash)`. Actor validation requires `actor.strip()` to be nonempty; optimistic version requires a nonnegative integer and rejects `bool`.
+Return snapshots built directly from the flushed `locked.draft_row` and `locked.selected_row`, with the selected `base_revision_id` from `locked.selected.draft.base_revision_id` and `changed=(new_hash != old_hash)`. Actor validation requires `actor.strip()` to be nonempty; optimistic version requires a nonnegative integer and rejects `bool`. There is no `session.get()` or second selected-row `SELECT` in the write path.
 
 Compose the facade as:
 
@@ -532,7 +591,7 @@ class GraphConfiguration(
     """Read, edit, or atomically bootstrap the Graph Configuration aggregate."""
 ```
 
-Re-export `EditableModelDraft`, `DraftSaveResult`, `DraftSaveConflict`, and `DraftContentRejected` from `graph_configuration.py`.
+Re-export `EditableModelDraft`, `DraftAggregateSnapshot`, `DraftSaveResult`, `DraftSaveConflict`, `DraftValidationIssue`, and `DraftContentRejected` from `graph_configuration.py`.
 
 - [ ] **Step 5: Add same-content, protected-invariant, validation, and rollback tests**
 
@@ -540,14 +599,14 @@ Assert an identical valid candidate returns `changed is False`, changes no candi
 
 Call `save_draft_content` with a valid changed schema overlay to prove the generic writer carries full content through one hash/write seam. The current v1 validator intentionally admits no changed assembly; #265 will evolve that validator and then consume the same writer without changing lock/hash/audit mechanics. Separately submit changed `agent_key`, `definition_version`, protected assembly identity, and schema-contract identity and assert each is rejected without mutation.
 
-Install a SQLAlchemy `before_flush` listener that raises `RuntimeError("forced flush failure")`; assert candidate values/hash, parent lock/actor/time, all revisions, all release mappings, and active release interval are byte-for-byte unchanged in a fresh session after the exception. Assert a stale call returns both client and server data and leaves the complete database snapshot unchanged.
+Install a SQLAlchemy `before_flush` listener that raises `RuntimeError("forced flush failure")`; assert candidate values/hash, parent lock/actor/time, all revisions, all release mappings, and active release interval are byte-for-byte unchanged in a fresh session after the exception. Assert every invalid `DraftContentRejected` has the exact ordered issues. Assert a stale call returns the client candidate plus an exact-seven `server.definitions` mapping from the locked snapshot and leaves the complete database snapshot unchanged.
 
 - [ ] **Step 6: Run GREEN and the read-path regression**
 
 Run:
 
 ```bash
-uv run --no-sync pytest -q \
+python -m pytest -q \
   tests/unit/test_graph_configuration_draft.py \
   tests/unit/test_graph_definition_content_mapping.py \
   tests/unit/test_agent_definition_workbench_routes.py
@@ -557,9 +616,39 @@ Expected: all selected tests pass; existing GET contract, confidentiality, exact
 
 - [ ] **Step 7: Falsify the task’s tests**
 
-Controller sabotage: temporarily assign `selected_row.candidate_hash = old_hash` after applying changed content. Confirm the marker is inside `_write_locked_content`, run `test_each_editable_field_rebuilds_the_complete_canonical_hash`, and observe a hash/content mismatch failure. Restore and observe GREEN.
+Controller sabotage: replace `locked.selected_row.candidate_hash = new_hash` with these two lines, confirm the marker, run the named node, then restore the original line and rerun GREEN:
 
-Reviewer sabotage (different target): temporarily remove the protected-identity comparison for `schema_contract`. Confirm the removed guard is the executed `save_draft_content` path, run `test_trusted_full_content_writer_rejects_protected_identity_changes`, and observe RED. Restore and observe GREEN.
+```python
+locked.selected_row.candidate_hash = old_hash
+TASK1_CONTROLLER_HASH_SABOTAGE = True
+```
+
+```bash
+rg -n 'TASK1_CONTROLLER_HASH_SABOTAGE' src/services/graph_configuration_draft.py
+python -m pytest -q \
+  tests/unit/test_graph_configuration_draft.py::test_each_editable_field_rebuilds_the_complete_canonical_hash
+```
+
+Expected sabotage result: RED because persisted content and candidate hash diverge.
+
+Reviewer sabotage (different target): replace `_IMMUTABLE_DRAFT_FIELDS` with the exact tuple below, confirm the marker, run the named node, then restore `schema_contract` and rerun GREEN:
+
+```python
+_IMMUTABLE_DRAFT_FIELDS = (
+    "agent_key",
+    "definition_version",
+    "protected_assembly",
+)
+TASK1_REVIEWER_IDENTITY_SABOTAGE = True
+```
+
+```bash
+rg -n 'TASK1_REVIEWER_IDENTITY_SABOTAGE' src/services/graph_configuration_draft.py
+python -m pytest -q \
+  tests/unit/test_graph_configuration_draft.py::test_trusted_full_content_writer_rejects_protected_identity_changes
+```
+
+Expected sabotage result: RED because a changed schema-contract identity is accepted. Remove every sabotage marker and rerun the Task 1 GREEN command.
 
 - [ ] **Step 8: Commit Task 1**
 
@@ -592,6 +681,8 @@ git commit -m "feat: add shared Graph Draft writer (#263)"
 
 Parameterize `(winner_key, loser_key)` as `("architect", "builder")` and `("builder", "architect")`. Give each thread its own `Session`, the same expected lock `0`, distinct candidates and actors, and capture `pg_backend_pid()`.
 
+Before either thread starts, capture `original_by_key: dict[AgentKey, DefinitionContent]` from a locked/read snapshot. The winner candidate changes only `winner_key`; the loser candidate changes only `loser_key`.
+
 Record normalized SQL in an `after_cursor_execute` listener and assert it contains exclusive locks for both the singleton parent query and the selected `graph_draft_agent` query. Pause the winner immediately after the singleton parent `FOR UPDATE` is acquired. Start the loser, query `pg_stat_activity` from an observer connection until the loser has `wait_event_type = 'Lock'`, then release the winner. Assert:
 
 ```python
@@ -602,23 +693,31 @@ assert isinstance(loser_outcome, DraftSaveConflict)
 assert loser_outcome.expected_lock_version == 0
 assert loser_outcome.current_lock_version == 1
 assert loser_outcome.client_candidate == loser_candidate
-assert loser_outcome.definition.content.prompt_text == winner_candidate.prompt_text
+assert set(loser_outcome.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+assert (
+    loser_outcome.server.definitions[winner_key].content.prompt_text
+    == winner_candidate.prompt_text
+)
+assert (
+    loser_outcome.server.definitions[loser_key].content
+    == original_by_key[loser_key]
+)
 ```
 
-Reload and assert exact winner content/hash, `lock_version == 1`, winner actor/time, unchanged losing row, exact seven draft keys, exact seven release mappings, and unchanged revisions/release interval.
+Reload and assert exact winner content/hash, `lock_version == 1`, winner actor/time, unchanged losing row, exact seven draft keys, exact seven release mappings, and unchanged revisions/release interval. The conflict’s `server.draft` equals the reloaded parent metadata; every `server.definitions[key]` equals the same reload’s candidate for that key.
 
 - [ ] **Step 2: Run the race and verify RED**
 
-Before the first run, temporarily remove the selected `graph_draft_agent` row’s `.with_for_update()` call from Task 1’s write loader and mark the changed line `# TASK2_RED_OMIT_SELECTED_LOCK`. Confirm with `rg -n TASK2_RED_OMIT_SELECTED_LOCK src/services/graph_configuration_workbench.py` that the sabotage is on the executed path, then run:
+Before the first run, replace the selected `graph_draft_agent` query's `.with_for_update()` with `.execution_options()  # TASK2_RED_OMIT_SELECTED_LOCK` in Task 1's write loader. Confirm the unique marker with `rg -n 'TASK2_RED_OMIT_SELECTED_LOCK' src/services/graph_configuration_workbench.py`, then run:
 
 ```bash
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
-  uv run --no-sync pytest -q \
+  python -m pytest -q \
   tests/integration/test_agent_definition_workbench_postgres.py \
   -k "two_writers"
 ```
 
-Expected: RED because the SQL assertion cannot find the required exclusive selected-row lock. Restore the Task 1 lock immediately, confirm the marker is absent, and rerun to establish GREEN before extending the assertions. If the test is skipped, PostgreSQL is unavailable and this step is not complete; use the CI PostgreSQL job or a reachable local URL.
+Expected: RED because the SQL assertion cannot find the required exclusive selected-row lock. Restore the exact `.with_for_update()` call immediately, confirm `! rg -n 'TASK2_RED_OMIT_SELECTED_LOCK' src/services/graph_configuration_workbench.py`, and rerun the same command to establish GREEN before extending the assertions. If the test is skipped, PostgreSQL is unavailable and this step is not complete; use the CI PostgreSQL job or a reachable local URL.
 
 - [ ] **Step 3: Add DB-time and rollback assertions**
 
@@ -632,9 +731,9 @@ Run:
 
 ```bash
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
-  uv run --no-sync pytest -q \
+  python -m pytest -q \
   tests/integration/test_agent_definition_workbench_postgres.py
-uv run --no-sync pytest -q \
+python -m pytest -q \
   tests/unit/test_ci_collects_integration_tests.py
 ```
 
@@ -642,9 +741,24 @@ Expected: all PostgreSQL tests execute (zero skips), both lock-order parameters 
 
 - [ ] **Step 5: Falsify the concurrency evidence**
 
-Controller sabotage: temporarily remove `.with_for_update()` from the singleton parent query. Confirm the marker is absent from the executed SQL, run the two-writer test, and observe RED because no loser waiter is observed and/or both operations report success. Restore and observe GREEN.
+Controller sabotage: replace the parent query’s `.with_for_update(of=(GraphRelease, GraphDraft))` call with the line below, confirm the marker, and run the race node. Restore the exclusive call and rerun GREEN.
 
-Reviewer sabotage (different target): temporarily compare `expected_lock_version` only before acquiring the lock. Confirm both workers execute that pre-lock comparison, run the race, and observe RED because both accept version `0` or overwrite state. Restore and observe GREEN.
+```python
+parent_query = parent_query  # TASK2_CONTROLLER_PARENT_LOCK_SABOTAGE
+```
+
+```bash
+rg -n 'TASK2_CONTROLLER_PARENT_LOCK_SABOTAGE' src/services/graph_configuration_workbench.py
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py \
+  -k 'two_writers'
+```
+
+Expected sabotage result: RED because the loser is not observed waiting at the aggregate linearization lock and/or both writes succeed.
+
+Reviewer sabotage (different target): replace the post-lock stale condition with `if False and expected_lock_version != locked.snapshot.draft.lock_version:  # TASK2_REVIEWER_STALE_SABOTAGE`. Confirm with `rg -n 'TASK2_REVIEWER_STALE_SABOTAGE' src/services/graph_configuration_draft.py`, run `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py -k 'two_writers'`, and observe RED. Restore `if expected_lock_version != locked.snapshot.draft.lock_version:`, remove the marker, and rerun that exact node GREEN.
+
+Expected sabotage result: RED because the loser writes at lock 1 instead of returning the exact-seven conflict. Remove all sabotage markers and run Task 2 GREEN once more.
 
 - [ ] **Step 6: Commit Task 2**
 
@@ -676,7 +790,8 @@ Add tests for:
 
 - changed save `200` with exact top-level keys `draft`, `definition`, `changed`, exact full definition response, lock `0 -> 1`, trusted actor, and unchanged Graph Version/release IDs;
 - repeated identical save `200`, `changed: false`, and lock/audit advance;
-- stale `409` exactly matching the envelope above and preserving DB state;
+- stale `409` exactly matching the envelope above, with all seven role keys and values matching a GET performed after the winning write, while preserving DB state;
+- the real cross-agent sequence: GET lock 0/A0/B0, save Builder B1 at lock 0, stale-save Architect A2 at lock 0, then assert the `409` reports lock 1, Architect A0, Builder B1, and all five other current candidates—never a selected-only response;
 - one parametrized `422` case for every field/rule, including strict-number rejection and extra fields `candidate.schema_overlay`, `candidate.model.model_alias`, top-level `updated_by`, `candidate_hash`, and `release_id`;
 - unknown key and `foreman` as `422` field `agent_key`, code `unknown_agent`;
 - malformed JSON as the stable `$` error;
@@ -689,7 +804,7 @@ Add tests for:
 Run:
 
 ```bash
-uv run --no-sync pytest -q \
+python -m pytest -q \
   tests/unit/test_agent_definition_workbench_routes.py \
   -k "save_draft or non_admin_put or principal"
 ```
@@ -741,7 +856,13 @@ class DraftValidationErrorResponse(BaseModel):
 
 class DraftSaveConflictServerResponse(BaseModel):
     draft: DraftMetadataResponse
-    definition: DraftDefinitionResponse
+    definitions: dict[AgentKey, DraftDefinitionResponse]
+
+    @model_validator(mode="after")
+    def require_exact_role_set(self) -> "DraftSaveConflictServerResponse":
+        if set(self.definitions) != set(GRAPH_V1_AGENT_KEYS):
+            raise ValueError("conflict server definitions must contain all seven roles")
+        return self
 
 
 class DraftSaveConflictResponse(BaseModel):
@@ -779,7 +900,7 @@ def require_draft_write_principal() -> str:
 
 Use an `async def` route accepting `Request`, raw `agent_key: str`, `actor: Annotated[str, Depends(require_draft_write_principal)]`, and DB session. Parse `await request.json()` inside the handler only after router/principal dependencies succeed, validate the key against `GRAPH_V1_AGENT_KEYS`, then validate `DraftSaveRequest` and call the facade. Do not declare the Pydantic body as a FastAPI parameter, because that would return the framework’s generic validation envelope and could parse secret content before the explicit contract.
 
-Map `DraftSaveResult` to `200`. For `DraftSaveConflict`, explicitly build the flat-to-nested projection below, then return `JSONResponse(status_code=409, content=conflict_response.model_dump(mode="json"))`:
+Map `DraftSaveResult` to `200`. For `DraftSaveConflict`, explicitly build the flat-to-nested client projection below and project every item from `conflict.server.definitions` through `DraftDefinitionResponse.model_validate(..., from_attributes=True)`, then return `JSONResponse(status_code=409, content=conflict_response.model_dump(mode="json"))`:
 
 ```python
 client_candidate = EditableModelDraftRequest(
@@ -793,14 +914,30 @@ client_candidate = EditableModelDraftRequest(
 )
 ```
 
-Return `JSONResponse(status_code=422, content=validation_response.model_dump(mode="json"))` for request validation or `DraftContentRejected`. Map `GraphConfigurationIntegrityError` to the same stable nonleaking `500` used by GET. Actor never comes from the body.
+For `DraftContentRejected`, use the structured payload directly:
+
+```python
+validation_response = DraftValidationErrorResponse(
+    code="invalid_draft",
+    errors=[
+        DraftFieldErrorResponse(
+            field=issue.field,
+            code=issue.code,
+            message=issue.message,
+        )
+        for issue in exc.issues
+    ],
+)
+```
+
+Return `JSONResponse(status_code=422, content=validation_response.model_dump(mode="json"))` for request validation or structured domain rejection. Map `GraphConfigurationIntegrityError` to the same stable nonleaking `500` used by GET. Actor never comes from the body.
 
 - [ ] **Step 5: Run GREEN and full backend/workbench regression**
 
 Run:
 
 ```bash
-uv run --no-sync pytest -q \
+python -m pytest -q \
   tests/unit/test_graph_configuration_draft.py \
   tests/unit/test_graph_definition_content_mapping.py \
   tests/unit/test_agent_definition_workbench_routes.py
@@ -810,9 +947,9 @@ Expected: exact `GET` remains unchanged; all PUT contract/security tests pass.
 
 - [ ] **Step 6: Falsify security and field isolation**
 
-Controller sabotage: temporarily add `schema_overlay: dict[str, object] | None = None` to the public request candidate. Confirm the request parser accepts it, run `test_put_rejects_every_protected_or_server_owned_field`, and observe RED. Restore and observe GREEN.
+Controller sabotage: add `schema_overlay: dict[str, object] | None = None` plus `TASK3_CONTROLLER_DTO_SABOTAGE = True` to `EditableModelDraftRequest`. Confirm with `rg -n 'TASK3_CONTROLLER_DTO_SABOTAGE' src/api/schemas/agent_definitions.py`, run `python -m pytest -q tests/unit/test_agent_definition_workbench_routes.py::test_put_rejects_every_protected_or_server_owned_field`, and observe RED because the protected field is accepted. Remove both lines/marker and rerun the exact node GREEN.
 
-Reviewer sabotage (different target): temporarily fall back to `actor = get_current_user() or "anonymous"`. Confirm the writer receives `anonymous`, run `test_put_requires_nonblank_trusted_principal_before_write`, and observe RED. Restore and observe GREEN.
+Reviewer sabotage (different target): replace `actor = get_current_user()` with `actor = get_current_user() or "anonymous"  # TASK3_REVIEWER_ACTOR_SABOTAGE`. Confirm with `rg -n 'TASK3_REVIEWER_ACTOR_SABOTAGE' src/api/routes/agent_definitions.py`, run `python -m pytest -q tests/unit/test_agent_definition_workbench_routes.py::test_put_requires_nonblank_trusted_principal_before_write`, and observe RED. Restore the trusted-only lookup, remove the marker, and rerun that exact node GREEN.
 
 - [ ] **Step 7: Commit Task 3**
 
@@ -843,6 +980,8 @@ git commit -m "feat: expose admin Graph Draft save contract (#263)"
 - [ ] **Step 1: Write API/state RED tests**
 
 Test that `saveDraftDefinition('architect', request)` issues exactly one `PUT` to `/api/admin/agent-definitions/draft/architect`, sends `Content-Type: application/json`, and serializes no protected or server-owned key. Test that `409` and `422` throw `AgentDefinitionApiError` preserving the typed payload object, while GET detail behavior remains compatible.
+
+Add the exact lost-update regression from C1: initialize lock 0 with Architect A0/Builder B0, feed `saveConflicted` for a stale Architect A2 whose coherent server snapshot is lock 1 with Architect A0/Builder B1, and assert Builder becomes `saved=B1`, `local=B1`, status `Needs test`; Architect becomes `saved=A0`, `local=A2`, status `Unsaved`; all other clean roles adopt their server values. Then dispatch `keepLocal` for Architect and assert no state path represents B0 as the clean Builder server value. Repeat with a locally dirty Builder B2 and assert `saved=B1`, `local=B2`, status `Unsaved`.
 
 For state, assert:
 
@@ -877,7 +1016,7 @@ export interface EditableModelDraft {
 }
 ```
 
-Add `DraftSaveRequest`, `DraftSaveSuccessResponse`, `DraftFieldError`, `DraftValidationErrorResponse`, and `DraftSaveConflictResponse` mirroring Task 3. Change `AgentDefinitionApiError` to retain `readonly payload: unknown` while continuing to derive `detail` for GET-style errors. `saveDraftDefinition` performs one direct `fetch`; it must not share `workbenchRequest` or retry automatically.
+Add `DraftSaveRequest`, `DraftSaveSuccessResponse`, `DraftFieldError`, `DraftValidationErrorResponse`, and `DraftSaveConflictResponse` mirroring Task 3; `DraftSaveConflictResponse.server.definitions` is `Record<AgentKey, DraftDefinition>`, never a partial map. Change `AgentDefinitionApiError` to retain `readonly payload: unknown` while continuing to derive `detail` for GET-style errors. `saveDraftDefinition` performs one direct `fetch`; it must not share `workbenchRequest` or retry automatically. The hook maps a rejected `fetch` to `Unable to save draft. Check your connection and try again.`, a non-JSON HTTP failure to `Unable to save draft (500 Internal Server Error).` using the actual status/status text, and a JSON body that matches none of the declared success/error contracts to `Unable to save draft because the server response was invalid.`
 
 - [ ] **Step 4: Implement pure local state/status/validation**
 
@@ -889,7 +1028,9 @@ if (entry.saved.candidate_hash === entry.publishedHash) return 'Clean';
 return 'Needs test';
 ```
 
-Reducer actions update one keyed entry immutably. `saveSucceeded` adopts returned draft/definition and clears selected field/conflict errors; `saveConflicted` stores both candidates without changing the local form; `keepLocal` adopts the server baseline/global lock but leaves local form; `reloadServer` adopts server baseline/local form and copies `client_candidate` to `recoveryCandidate`; restore/dismiss affect only recovery state.
+Reducer actions update immutable state. `saveSucceeded` adopts returned draft/definition and clears selected field/conflict/request errors. `saveConflicted` first requires exactly seven server definitions, binds `const serverDefinitions = action.conflict.server.definitions`, adopts `server.draft`, and maps all seven entries in one reducer transition: compare each old `local` with its old `saved`; clean entries adopt the new server definition as both `saved` and `local`, dirty entries adopt it as `saved` only. The selected entry stores the conflict and keeps its submitted local form. `keepLocal` clears that conflict while retaining local; `reloadServer` adopts the selected server form and copies `client_candidate` to `recoveryCandidate`; restore/dismiss affect only recovery state.
+
+`saveFailed` sets only the selected entry’s `requestError` and `saving=false`, leaves lock/saved/local/conflict/recovery unchanged, and never retries. Test a rejected `fetch` (`new TypeError("network down")`) and a non-JSON `500` (`statusText="Internal Server Error"`): they produce, respectively, the exact two messages above on only the selected role. The next edit/save start and every success/conflict clear that role’s request error.
 
 - [ ] **Step 5: Run GREEN and typecheck**
 
@@ -905,9 +1046,19 @@ Expected: focused tests and TypeScript build pass; GET callers still compile.
 
 - [ ] **Step 6: Falsify status precedence and transport isolation**
 
-Controller sabotage: swap `Unsaved` and hash comparisons in `draftStatus`. Confirm the dirty-changed fixture executes both conditions, run the state test, and observe RED (`Needs test` incorrectly masks `Unsaved`). Restore and observe GREEN.
+Controller sabotage: swap the first two conditions in `draftStatus` and append `// TASK4_CONTROLLER_STATUS_SABOTAGE` to the now-first hash comparison. Confirm with `rg -n 'TASK4_CONTROLLER_STATUS_SABOTAGE' frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts`, run `cd frontend && npm run test:unit -- src/components/Admin/AgentDefinitionWorkbench/draftEditorState.test.ts -t "status precedence"`, and observe RED because `Needs test` masks `Unsaved`. Restore the original order/remove the marker and rerun the exact node GREEN.
 
-Reviewer sabotage (different target): add `schema_overlay` from the saved definition to the serialized PUT candidate. Confirm it appears in the captured request JSON, run the API serialization test, and observe RED. Restore and observe GREEN.
+Reviewer sabotage (different target): replace `body: JSON.stringify(request)` with the executable literal injection below. Confirm with `rg -n 'TASK4_REVIEWER_TRANSPORT_SABOTAGE' frontend/src/api/agentDefinitions.ts`, run `cd frontend && npm run test:unit -- src/components/Admin/AgentDefinitionWorkbench/draftEditorState.test.ts -t "serializes only editable fields"`, and observe RED because the captured request contains `schema_overlay`. Restore `body: JSON.stringify(request)`, remove the marker, and rerun the exact node GREEN.
+
+```typescript
+body: JSON.stringify({
+  ...request,
+  candidate: {
+    ...request.candidate,
+    schema_overlay: { TASK4_REVIEWER_TRANSPORT_SABOTAGE: true },
+  },
+}),
+```
 
 - [ ] **Step 7: Commit Task 4**
 
@@ -924,11 +1075,12 @@ git commit -m "feat: add Graph Draft editor state (#263)"
 
 ### Task 5: Explicit Prompt/Model Editor with Persistent Local Drafts
 
-**Review question:** Can an administrator edit exactly the five owned values, retain unsaved state across agent/tab/remount interactions, see truthful status, and save only through the explicit button?
+**Review question:** Can an administrator edit exactly the five owned values, retain unsaved state across agent selection, editor tabs, and the Admin Usage ↔ Agent Definitions tab lifecycle, see truthful status/errors, and save only through the explicit button?
 
 **Files:**
 - Create: `frontend/src/components/Admin/AgentDefinitionWorkbench/useDraftEditor.ts`
 - Create: `frontend/src/components/Admin/AgentDefinitionWorkbench/DefinitionEditor.tsx`
+- Modify: `frontend/src/components/Admin/AdminPage.tsx`
 - Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.tsx`
 - Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx`
 
@@ -938,9 +1090,9 @@ git commit -m "feat: add Graph Draft editor state (#263)"
 
 - [ ] **Step 1: Replace the obsolete no-Save guard with positive RED tests**
 
-Keep Run, Approve, Reject, Review & Publish, Publish, History, and Rollback forbidden. Add tests that edit all five accessible controls, switch Architect → Builder → Architect, switch all tabs, hide/show the Admin tab, and assert Architect’s values and `Unsaved` status survive.
+Keep Run, Approve, Reject, Review & Publish, Publish, History, and Rollback forbidden. Add tests that edit all five accessible controls, switch Architect → Builder → Architect, switch all editor tabs, switch Admin Agent Definitions → Usage → Agent Definitions, and assert Architect’s form values and `Unsaved` status survive. Assert no workbench GET occurs before the first Agent Definitions visit, exactly one GET occurs after the visit-and-return sequence, and zero PUTs occur throughout that navigation.
 
-Spy on `fetch` and assert zero PUTs after every keystroke, blur, validation, agent selection, tab selection, Admin-tab switch, rerender, and StrictMode remount. Click **Save Draft** once and assert exactly one PUT using the current global lock and exact five-field candidate.
+Spy on `fetch` and assert zero PUTs after every keystroke, blur, validation, agent selection, editor-tab selection, and Admin-tab switch. Click **Save Draft** once and assert exactly one PUT using the current global lock and exact five-field candidate.
 
 Add success tests: changed save adopts returned server content/hash/lock, displays `Needs test`, leaves Graph Version/base release unchanged, and preserves another agent’s local unsaved form. Repeated same-content save adopts the incremented lock and `changed: false` without claiming `Clean` if candidate hash still differs from published.
 
@@ -971,13 +1123,21 @@ Expected: RED because prompt/model controls, status, hook, and Save Draft do not
 }
 ```
 
-`save` first calls `validateDraftForm`; invalid input dispatches `saveInvalid` and returns without fetch. Valid input dispatches `saveStarted`, awaits one `saveDraftDefinition`, then dispatches success, typed `422`, typed `409`, or a nonfield request error. No `useEffect`, timeout, blur handler, selection handler, or reducer action calls the save client.
+`save` first calls `validateDraftForm`; invalid input dispatches `saveInvalid` and returns without fetch. Valid input dispatches `saveStarted`, awaits one `saveDraftDefinition`, then dispatches success, typed `422`, typed `409`, or `saveFailed` with the exact transport message for a network/non-JSON/non-contract response. It does not retry. No `useEffect`, timeout, blur handler, selection handler, or reducer action calls the save client.
 
 - [ ] **Step 4: Implement the focused editor and compose it into the workbench**
 
 `DefinitionEditor` receives the selected `ModelAgentNode`, selected `DraftEditorEntry`, and hook actions. Prompt tab renders a labelled `<textarea>`; Model tab renders labelled exact endpoint text and number inputs for Temperature, Maximum tokens, and Top-p. Output Schema and Assembly continue rendering the full server-owned read-only JSON from `entry.saved`.
 
-Render the exact `draftStatus(entry)` near the selected agent and in graph navigation. Disable Save only while the selected entry is saving or local validation is invalid; never hide it for a valid same-content explicit save. Preserve tab state by agent in the extracted component or keep panels mounted; do not use `key={agent_key}` to discard local state. Foreman remains read-only with no Save button/status from the three-value vocabulary.
+Render the exact `draftStatus(entry)` near the selected agent and in graph navigation. Render `entry.requestError` as a selected-role `role="alert"`; other roles' errors remain contained in their entries. Disable Save only while the selected entry is saving or local validation is invalid; never hide it for a valid same-content explicit save. Preserve editor-tab state by agent in the extracted component or keep panels mounted; do not use `key={agent_key}` to discard local state. Foreman remains read-only with no Save button/status from the three-value vocabulary.
+
+Preserve lazy loading before the first Admin Agent Definitions visit, but do not unmount the workbench after that visit. In `AdminPage.tsx` add:
+
+```tsx
+const [hasVisitedAgentDefinitions, setHasVisitedAgentDefinitions] = useState(false);
+```
+
+The Agent Definitions tab click sets `hasVisitedAgentDefinitions` to `true` before setting that tab active. Keep the existing tabpanel mounted/hidden behavior and render the workbench with `{hasVisitedAgentDefinitions && <AgentDefinitionWorkbench />}` rather than conditioning it on `activeTab`. This makes Usage ↔ Agent Definitions navigation preserve reducer state without issuing another GET.
 
 - [ ] **Step 5: Run GREEN, all frontend unit tests, and typecheck**
 
@@ -993,16 +1153,17 @@ cd frontend && npm run typecheck
 
 Expected: component/state tests pass, the frontend suite remains green, and the accepted 90-test baseline increases only by the added tests.
 
-- [ ] **Step 6: Falsify explicit-save and per-agent persistence**
+- [ ] **Step 6: Falsify explicit-save and Admin-tab persistence**
 
-Controller sabotage: temporarily call `save(selectedAgent)` from the endpoint input `onChange`. Confirm the spy sees the executed branch, run `test_typing_navigation_and_remount_never_save`, and observe RED from unexpected PUT count. Restore and observe GREEN.
+Controller sabotage: after the endpoint edit dispatch in `DefinitionEditor.tsx`, inject `void save(selectedAgent); // TASK5_CONTROLLER_AUTOSAVE_SABOTAGE`. Confirm with `rg -n 'TASK5_CONTROLLER_AUTOSAVE_SABOTAGE' frontend/src/components/Admin/AgentDefinitionWorkbench/DefinitionEditor.tsx`, run `cd frontend && npm run test:unit -- src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx -t "typing and navigation never save"`, and observe RED from the unexpected PUT count. Remove the injected call/marker and rerun the same node GREEN.
 
-Reviewer sabotage (different target): temporarily initialize local form inside `DefinitionEditor` so it resets on agent change. Confirm the component remount executes that initializer, run `test_unsaved_values_survive_agent_and_tab_changes`, and observe RED. Restore and observe GREEN.
+Reviewer sabotage (different target): in `AdminPage.tsx`, replace `{hasVisitedAgentDefinitions && <AgentDefinitionWorkbench />}` with `{activeTab === 'agent_definitions' && <AgentDefinitionWorkbench />}{/* TASK5_REVIEWER_ADMIN_UNMOUNT_SABOTAGE */}`. Confirm with `rg -n 'TASK5_REVIEWER_ADMIN_UNMOUNT_SABOTAGE' frontend/src/components/Admin/AdminPage.tsx`, run `cd frontend && npm run test:unit -- src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx -t "Admin tab preserves unsaved draft"`, and observe RED because the form/status reset and a second GET occurs after Usage → Agent Definitions. Restore the visited-state conditional/remove the marker and rerun GREEN.
 
 - [ ] **Step 7: Commit Task 5**
 
 ```bash
 git add \
+  frontend/src/components/Admin/AdminPage.tsx \
   frontend/src/components/Admin/AgentDefinitionWorkbench/useDraftEditor.ts \
   frontend/src/components/Admin/AgentDefinitionWorkbench/DefinitionEditor.tsx \
   frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.tsx \
@@ -1028,11 +1189,11 @@ git commit -m "feat: edit and save Graph Draft definitions (#263)"
 
 - [ ] **Step 1: Write component conflict/validation RED tests**
 
-Return a `409` where client and server prompt/endpoint differ. Assert the UI shows both candidates, expected/current locks, status `Unsaved`, and **Reload server** / **Keep local** actions.
+Return a `409` whose exact-seven `server.definitions` aggregate differs from the client in the selected Architect and whose Builder is newer on the server. Assert the UI shows both selected-role candidates, expected/current locks, status `Unsaved`, and **Reload server** / **Keep local** actions. Also assert the clean Builder entry adopts server B1 as both saved and local with `Needs test` while the stale save is on Architect. In a second case make Builder locally dirty at B2 before the Architect conflict; assert it adopts B1 as saved, retains B2 as local, and remains `Unsaved`. Every other role must also reconcile from the same exact-seven response.
 
 Click **Keep local** and assert server lock/baseline update, local client form survives, no second PUT occurs, and a later manual Save uses the refreshed lock. In a separate test click **Reload server** and assert server form becomes current, no PUT occurs, the submitted candidate remains visible as a recovery copy, **Restore submitted values** makes it local/Unsaved without saving, and **Dismiss** removes only the recovery copy.
 
-Return stable `422` errors for all five fields and assert each message is associated with its labelled input, with no opaque-only toast. Assert conflict/validation actions do not alter any other agent’s local form.
+Return stable `422` errors for all five fields and assert each message is associated with its labelled input, with no opaque-only toast. Reject the request with a network error and separately with a non-JSON `500`; assert the exact transport message is contained in the selected role only, no retry occurs, editing or a new save clears it per the Task 4 transition table, and another role's form/error is unchanged.
 
 - [ ] **Step 2: Run component tests and verify RED**
 
@@ -1050,7 +1211,7 @@ Expected: RED because comparison/recovery UI is not rendered.
 
 Render a blocking conflict panel labelled **Draft changed on the server** with current and submitted prompt/endpoint/model values and both lock versions. Wire buttons only to reducer actions. Render `recoveryCandidate` in a separate **Submitted values retained for recovery** panel with Restore and Dismiss. Field errors use `aria-describedby` and `role="alert"`; a transport failure that is neither `409` nor `422` remains a contained request alert.
 
-Do not fetch a fresh workbench on conflict: the `409` server object is the authoritative selected definition/lock and avoids overwriting dirty forms for other agents.
+Do not fetch a fresh workbench on conflict: the exact-seven `409 server` aggregate is authoritative. The reducer reconciles every role's saved baseline while retaining each locally dirty form, so no extra GET is needed and unrelated dirty forms are not overwritten.
 
 - [ ] **Step 4: Add Playwright save/no-autosave/conflict tests**
 
@@ -1058,10 +1219,11 @@ Extend the existing route mocks with `SAVE_ENDPOINT = '**/api/admin/agent-defini
 
 1. Type in all five fields, switch agent and tabs, and observe zero PUTs.
 2. Save once; assert exact JSON, lock `0`, one PUT, returned lock `1`, `Needs test`, unchanged Graph Version 1.
-3. Produce `409`; assert both candidates visible, Keep local performs zero extra PUTs, explicit retry uses current lock.
+3. Produce an exact-seven `409` after server Builder B1 wins while the stale save targets Architect; assert both selected Architect candidates are visible, clean Builder reconciles to B1/`Needs test`, Keep local performs zero extra PUTs, and explicit retry uses the current global lock.
 4. Produce `409` again; Reload uses server values, retains recovery copy, and performs zero extra PUTs.
 5. Produce `422`; assert exact field message beside the input.
-6. Retain existing lazy single GET, topology, Foreman, error containment, and small-viewport assertions.
+6. Produce a network error and non-JSON `500`; assert selected-role request alerts, no retry, and defined clearing behavior.
+7. Retain existing lazy single GET (including the Usage round trip), topology, Foreman, error containment, and small-viewport assertions.
 
 - [ ] **Step 5: Run Playwright, unit/type checks, and backend regressions**
 
@@ -1073,13 +1235,13 @@ cd frontend && npx playwright test \
   --project=chromium --workers=1
 cd frontend && npm run test:unit
 cd frontend && npm run typecheck
-uv run --no-sync pytest -q \
+python -m pytest -q \
   tests/unit/test_graph_configuration_draft.py \
   tests/unit/test_graph_definition_content_mapping.py \
   tests/unit/test_agent_definition_workbench_routes.py \
   tests/unit/test_ci_collects_integration_tests.py
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
-  uv run --no-sync pytest -q \
+  python -m pytest -q \
   tests/integration/test_agent_definition_workbench_postgres.py
 ```
 
@@ -1087,9 +1249,9 @@ Expected: all commands pass; PostgreSQL reports zero skips; browser PUT counts m
 
 - [ ] **Step 6: Falsify browser recovery and backend rollback independently**
 
-Controller sabotage: temporarily clear `client_candidate` when handling `409`. Confirm the conflict reducer executes that branch, run the Playwright conflict test, and observe RED because submitted text cannot be displayed/restored. Restore and observe GREEN.
+Controller sabotage: in the `saveConflicted` reducer case, replace `const serverDefinitions = action.conflict.server.definitions` with `const serverDefinitions = { ...action.conflict.server.definitions, builder: undefined as never } /* TASK6_CONTROLLER_ALL_ROLE_MERGE_SABOTAGE */`. Confirm with `rg -n 'TASK6_CONTROLLER_ALL_ROLE_MERGE_SABOTAGE' frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts`, run `cd frontend && npx playwright test tests/e2e/agent-definition-workbench.spec.ts --project=chromium --workers=1 -g "cross-agent conflict"`, and observe RED because Builder does not adopt B1 from the Architect conflict response. Restore the exact original binding/remove the marker and rerun the exact Playwright node GREEN.
 
-Reviewer sabotage (different target): temporarily increment the parent lock before comparing `expected_lock_version`. Confirm the PostgreSQL loser executes that line, run the write/write race, and observe RED because stale processing mutates the lock/audit snapshot. Restore and observe GREEN.
+Reviewer sabotage (different target): immediately before the stale comparison in `save_draft_definition`, inject `locked.draft_row.lock_version += 1  # TASK6_REVIEWER_STALE_MUTATION_SABOTAGE`. Confirm with `rg -n 'TASK6_REVIEWER_STALE_MUTATION_SABOTAGE' src/services/graph_configuration_draft.py`, run `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py -k 'write_write_race'`, and observe RED because the concurrent loser mutates the lock/audit snapshot instead of returning the unchanged winner aggregate. Remove the line/marker and rerun GREEN.
 
 - [ ] **Step 7: Run final scope and diff checks**
 
@@ -1097,7 +1259,7 @@ Run:
 
 ```bash
 git diff --check
-git diff --name-only 7897cbc01..HEAD
+git diff --name-only a9f7f1324c41f625038ba26ef7367e8673e9ca2f..HEAD
 rg -n "autosave|debounce|Test failed|Awaiting review|Approved|schema_overlay.*DraftSaveRequest|assembly_rules.*DraftSaveRequest" \
   src/services/graph_configuration_draft.py \
   src/api/schemas/agent_definitions.py \
@@ -1122,7 +1284,7 @@ git commit -m "test: cover Graph Draft conflict recovery (#263)"
 
 ## Final whole-branch review handoff
 
-After Task 6, run a whole-branch review against `7897cbc01` using the correction ledger. Require the reviewer to provide:
+After Task 6, run a whole-branch review against `a9f7f1324c41f625038ba26ef7367e8673e9ca2f` using the correction ledger. Require the reviewer to provide:
 
 - a writer-by-writer table proving the route adapter and trusted full-content operation converge on one locked writer;
 - a rollback ruling covering stale, validation, forced flush, and concurrent loser paths;
