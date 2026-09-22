@@ -107,4 +107,5 @@ Task 7: fix round 1/5 dispatched to original implementer; covering file is `test
 Task 7: fix round 1/5 (1 addressed, 0 open — added direct coverage for non-integer single pins, dangling batch referents, and omitted batch rows; commit `0b1b37501`).
 Task 7: complete (commits `77e42b3..0b1b375`, review clean after fix round 1; Spec ✅; Task quality Approved; no findings).
 Task 8: dispatched (base `0b1b375016f70ff499175d7435b40ac4ac285548`; implementer `/root/issue_261_task8`; brief `task-8-brief.md`; report `task-8-report.md`).
-Task 8: complete (implementation commit `2544ab35cad8042931abc2fc95261be67bac7a5e`; Vitest 95/95, typecheck clean, focused Chromium 4/4, E2E matrix guard 4/4; two owned sabotage RED/GREEN sequences recorded in `task-8-report.md`; no concerns).
+Task 8: implementer DONE at `87dc8fd7d` (implementation `2544ab35c`); Vitest 95/95, typecheck clean, focused Chromium 4/4, E2E matrix guard 4/4; no concerns.
+Task 8: controller sabotage independently bypassed the null-version status branch (`TASK8_CONTROLLER_NULL_STATUS_SABOTAGE`); the exact null-state test failed 1/5 because the UI invented the ordinary version rendering, restoration removed the marker and the same focused suite passed 5/5. Evidence: `task-8-controller-sabotage.md`.
