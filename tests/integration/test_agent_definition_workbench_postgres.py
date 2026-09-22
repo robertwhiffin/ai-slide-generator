@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from sqlalchemy import event, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
@@ -83,7 +83,28 @@ def _immutable_graph_artifacts(factory) -> dict[str, list[tuple[object, ...]]]:
 def test_two_writers_serialize_at_postgresql_locks_and_rollback_loser(
     postgres_engine, winner_key, loser_key
 ) -> None:
-    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    winner_parent_locked = threading.Event()
+    release_winner = threading.Event()
+    loser_attempted = threading.Event()
+    pids: dict[str, int] = {}
+    outcomes: dict[str, DraftSaveResult | DraftSaveConflict[EditableModelDraft]] = {}
+    sql_statements: list[str] = []
+    returned_timestamps: dict[str, object] = {}
+    guard = threading.Lock()
+
+    class TimestampCapturingSession(Session):
+        def scalar(self, statement, params=None, **kwargs):
+            value = super().scalar(statement, params, **kwargs)
+            if "CURRENT_TIMESTAMP" in str(statement).upper():
+                with guard:
+                    returned_timestamps[threading.current_thread().name] = value
+            return value
+
+    factory = sessionmaker(
+        bind=postgres_engine,
+        class_=TimestampCapturingSession,
+        expire_on_commit=False,
+    )
     GraphConfiguration().bootstrap_v1(factory)
     service = GraphConfiguration()
 
@@ -106,13 +127,6 @@ def test_two_writers_serialize_at_postgresql_locks_and_rollback_loser(
         prompt_text=original_by_key[loser_key].prompt_text + "\n\nLoser edit.",
     )
     before_artifacts = _immutable_graph_artifacts(factory)
-    winner_parent_locked = threading.Event()
-    release_winner = threading.Event()
-    loser_attempted = threading.Event()
-    pids: dict[str, int] = {}
-    outcomes: dict[str, DraftSaveResult | DraftSaveConflict[EditableModelDraft]] = {}
-    sql_statements: list[str] = []
-    guard = threading.Lock()
 
     class ObservedGraphConfiguration(GraphConfiguration):
         def _lock_current_parents(self, session, *, exclusive):
@@ -235,6 +249,9 @@ def test_two_writers_serialize_at_postgresql_locks_and_rollback_loser(
     assert after.draft.lock_version == 1
     assert after.draft.updated_by == "winner-admin"
     assert after.draft.updated_at.tzinfo is not None
+    database_timestamp = returned_timestamps["draft-winner"]
+    assert database_timestamp == winner_outcome.draft.updated_at
+    assert database_timestamp == after.draft.updated_at
     assert winner_outcome.draft == after.draft
     assert after.draft.updated_at == winner_outcome.draft.updated_at
     assert after_by_key[winner_key].content == expected_winner_content
