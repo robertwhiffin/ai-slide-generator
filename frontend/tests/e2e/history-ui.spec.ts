@@ -406,45 +406,225 @@ test.describe('SessionHistory Rename', () => {
 // Delete Session Tests
 // ============================================
 
+/**
+ * Serve a *stateful* sessions list so a delete actually removes the row.
+ *
+ * `setupMocks` returns the static `mockSessions` fixture and 200s every DELETE without
+ * mutating anything, so deleted rows reappear on the post-delete refresh. Registering
+ * this afterwards wins (Playwright resolves the most recently registered route first)
+ * without touching `setupMocks`, which backs the rest of this file.
+ *
+ * `statusFor` lets a test fail specific ids to exercise partial-failure reporting.
+ */
+async function setupStatefulSessions(
+  page: Page,
+  statusFor: (id: string) => number = () => 204,
+) {
+  const remaining = mockSessions.sessions.map((s) => ({ ...s }));
+  const deleted: string[] = [];
+
+  await page.route('**/api/sessions/**', (route, request) => {
+    const method = request.method();
+    const id = new URL(request.url()).pathname.split('/').pop() ?? '';
+
+    if (method !== 'DELETE') {
+      route.fallback();
+      return;
+    }
+
+    const status = statusFor(id);
+    if (status < 300) {
+      const idx = remaining.findIndex((s) => s.session_id === id);
+      if (idx !== -1) remaining.splice(idx, 1);
+      deleted.push(id);
+      route.fulfill({ status: 204 });
+    } else {
+      route.fulfill({
+        status,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'nope' }),
+      });
+    }
+  });
+
+  await page.route('**/api/sessions?**', (route, request) => {
+    if (request.method() !== 'GET') {
+      route.fallback();
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ sessions: remaining, count: remaining.length }),
+    });
+  });
+
+  return { deleted };
+}
+
 test.describe('SessionHistory Delete', () => {
   test.beforeEach(async ({ page }) => {
     await setupMocks(page);
   });
 
-  test('clicking Delete triggers browser confirm dialog', async ({ page }) => {
+  test('clicking Delete opens the custom confirm dialog', async ({ page }) => {
     await goToHistory(page);
 
-    // Set up dialog handler to accept
-    page.on('dialog', async (dialog) => {
-      expect(dialog.type()).toBe('confirm');
-      expect(dialog.message()).toContain('Delete this session');
-      await dialog.accept();
-    });
+    await page.getByRole('button', { name: 'Delete', exact: true }).first().click();
 
-    // Click Delete on first session
-    await page.getByRole('button', { name: 'Delete' }).first().click();
+    // Custom modal, not window.confirm() — the latter is blocked in cross-origin iframes.
+    await expect(page.getByText('Delete this session? This cannot be undone.')).toBeVisible();
   });
 
-  test('dismissing confirm dialog does not delete session', async ({ page }) => {
+  test('cancelling the dialog issues no DELETE request', async ({ page }) => {
+    const { deleted } = await setupStatefulSessions(page);
     await goToHistory(page);
 
-    // Count sessions before
-    const sessionsBefore = await page.locator('tbody tr').count();
+    await page.getByRole('button', { name: 'Delete', exact: true }).first().click();
+    await page.getByTestId('confirm-dialog').getByRole('button', { name: 'Cancel' }).click();
 
-    // Set up dialog handler to dismiss
-    page.on('dialog', async (dialog) => {
-      await dialog.dismiss();
+    await expect(page.getByText('Delete this session? This cannot be undone.')).toBeHidden();
+    expect(deleted).toEqual([]);
+    await expect(page.locator('tbody tr')).toHaveCount(mockSessions.sessions.length);
+  });
+
+  test('confirming deletes exactly the one row that was clicked', async ({ page }) => {
+    const { deleted } = await setupStatefulSessions(page);
+    await goToHistory(page);
+
+    // Select the *other* row first: a per-row Delete must never expand to the selection.
+    await page.getByRole('checkbox', { name: `Select ${mockSessions.sessions[1].title}` }).check();
+
+    await page.getByRole('button', { name: 'Delete', exact: true }).first().click();
+    await page.getByTestId('confirm-dialog').getByRole('button', { name: 'Delete' }).click();
+
+    await expect(page.locator('tbody tr')).toHaveCount(mockSessions.sessions.length - 1);
+    expect(deleted).toEqual([mockSessions.sessions[0].session_id]);
+  });
+});
+
+// ============================================
+// Bulk Delete Tests
+// ============================================
+
+test.describe('SessionHistory Bulk Delete', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMocks(page);
+  });
+
+  test('bulk delete button appears only once a row is selected', async ({ page }) => {
+    await goToHistory(page);
+
+    await expect(page.getByTestId('bulk-action-bar')).toBeVisible();
+    await expect(page.getByTestId('bulk-delete-button')).toHaveCount(0);
+
+    await page.getByRole('checkbox', { name: `Select ${mockSessions.sessions[0].title}` }).check();
+
+    await expect(page.getByTestId('bulk-delete-button')).toBeVisible();
+    await expect(page.getByTestId('bulk-action-bar')).toContainText('1 selected');
+  });
+
+  test('selecting multiple rows deletes all of them in one action', async ({ page }) => {
+    const { deleted } = await setupStatefulSessions(page);
+    await goToHistory(page);
+
+    for (const s of mockSessions.sessions) {
+      await page.getByRole('checkbox', { name: `Select ${s.title}` }).check();
+    }
+    await expect(page.getByTestId('bulk-action-bar')).toContainText('2 selected');
+
+    await page.getByTestId('bulk-delete-button').click();
+    await expect(page.getByText('Delete 2 sessions? This cannot be undone.')).toBeVisible();
+    await page.getByTestId('confirm-dialog').getByRole('button', { name: 'Delete 2' }).click();
+
+    await expect(page.locator('tbody tr')).toHaveCount(0);
+    expect(deleted.sort()).toEqual(mockSessions.sessions.map((s) => s.session_id).sort());
+    await expect(page.getByTestId('bulk-delete-button')).toHaveCount(0);
+  });
+
+  test('header checkbox selects all, shows indeterminate, and clears', async ({ page }) => {
+    await goToHistory(page);
+
+    const selectAll = page.getByTestId('select-all-sessions');
+    await expect(selectAll).toHaveJSProperty('indeterminate', false);
+
+    // One of two selected → indeterminate.
+    await page.getByRole('checkbox', { name: `Select ${mockSessions.sessions[0].title}` }).check();
+    await expect(selectAll).toHaveJSProperty('indeterminate', true);
+
+    await selectAll.click();
+    await expect(page.getByTestId('bulk-action-bar')).toContainText('2 selected');
+    await expect(selectAll).toHaveJSProperty('indeterminate', false);
+    await expect(selectAll).toBeChecked();
+
+    await selectAll.click();
+    await expect(page.getByTestId('bulk-delete-button')).toHaveCount(0);
+  });
+
+  test('partial failure reports how many were deleted', async ({ page }) => {
+    const failing = mockSessions.sessions[0].session_id;
+    await setupStatefulSessions(page, (id) => (id === failing ? 500 : 204));
+    await goToHistory(page);
+
+    await page.getByTestId('select-all-sessions').click();
+    await page.getByTestId('bulk-delete-button').click();
+    await page.getByTestId('confirm-dialog').getByRole('button', { name: 'Delete 2' }).click();
+
+    await expect(page.getByText(/Deleted 1 of 2 sessions/)).toBeVisible();
+    // The failed deck is still listed; the successful one is gone.
+    await expect(page.locator('tbody tr')).toHaveCount(1);
+  });
+
+  test('a 404 is treated as success, not an error', async ({ page }) => {
+    // The deck is already gone, which is exactly what the user asked for.
+    await setupStatefulSessions(page, () => 404);
+    await goToHistory(page);
+
+    await page.getByRole('checkbox', { name: `Select ${mockSessions.sessions[0].title}` }).check();
+    await page.getByTestId('bulk-delete-button').click();
+    await page.getByTestId('confirm-dialog').getByRole('button', { name: 'Delete' }).click();
+
+    await expect(page.getByTestId('bulk-delete-button')).toHaveCount(0);
+    await expect(page.getByText(/Failed to delete/)).toHaveCount(0);
+  });
+
+  test('selection does not survive a tab switch', async ({ page }) => {
+    await goToHistory(page);
+
+    await page.getByRole('checkbox', { name: `Select ${mockSessions.sessions[0].title}` }).check();
+    await expect(page.getByTestId('bulk-delete-button')).toBeVisible();
+
+    await page.getByRole('button', { name: /Shared with Me/ }).click();
+    await page.getByRole('button', { name: /My Sessions/ }).click();
+
+    await expect(page.getByTestId('bulk-delete-button')).toHaveCount(0);
+  });
+
+  test('Shared with Me tab exposes no checkboxes', async ({ page }) => {
+    // Those users may hold only CAN_VIEW/CAN_EDIT, so bulk delete is out of scope there.
+    await page.route('http://127.0.0.1:8000/api/sessions/shared**', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          presentations: [{
+            session_id: 'shared-1',
+            title: 'Someone elses deck',
+            created_by: 'other@test.com',
+            created_at: '2026-01-01T00:00:00Z',
+            modified_by: null,
+            modified_at: null,
+            my_permission: 'CAN_VIEW',
+          }],
+          count: 1,
+        }),
+      });
     });
+    await goToHistory(page);
 
-    // Click Delete
-    await page.getByRole('button', { name: 'Delete' }).first().click();
-
-    // Wait a bit
-    await page.waitForTimeout(500);
-
-    // Sessions count should be unchanged (mocked data doesn't actually change)
-    const sessionsAfter = await page.locator('tbody tr').count();
-    expect(sessionsAfter).toBe(sessionsBefore);
+    await page.getByRole('button', { name: /Shared with Me/ }).click();
+    await expect(page.getByText('Someone elses deck')).toBeVisible();
+    await expect(page.getByRole('checkbox')).toHaveCount(0);
   });
 });
 
