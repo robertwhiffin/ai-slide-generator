@@ -88,6 +88,26 @@ async function editArchitectFiveFields(page: Page) {
   await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.8');
 }
 
+async function expectArchitectFiveFields(page: Page) {
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
+  await page.getByRole('tab', { name: 'Model' }).click();
+  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-a2');
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.4');
+  await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('8192');
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.8');
+}
+
+async function expectBuilderFormUnchanged(page: Page) {
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
+  await page.getByRole('tab', { name: 'Model' }).click();
+  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('databricks-claude-opus-4-6');
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
+  await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
+}
+
 test('loads lazily once, preserves exact topology, and exposes exact definition tabs', async ({ page }) => {
   await installExactIdentityMock(page);
   const requestCount = await installWorkbenchMock(page);
@@ -166,7 +186,7 @@ test('explicit Save is the only write and sends the exact five-field candidate w
 
 test('cross-agent conflict reconciles Builder and Keep local retries only on explicit Save', async ({ page }) => {
   await installExactIdentityMock(page);
-  await installWorkbenchMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
   const saves = await installSaveMock(page, (route, save, call) => call === 0
     ? fulfillJson(route, 409, syntheticDraftSaveConflict(save.body, {
       architect: 'Architect server A1',
@@ -181,21 +201,24 @@ test('cross-agent conflict reconciles Builder and Keep local retries only on exp
   const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
   await expect(conflict.getByRole('group', { name: 'Server values' })).toContainText('Architect server A1');
   await expect(conflict.getByRole('group', { name: 'Submitted values' })).toContainText('Architect local A2');
+  await expect.poll(workbenchRequestCount).toBe(1);
   await navigation.getByRole('button', { name: 'Builder' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder server B1');
   await expect(navigation.getByRole('button', { name: 'Builder' })).toContainText('Needs test');
   await navigation.getByRole('button', { name: 'Architect' }).click();
   await conflict.getByRole('button', { name: 'Keep local' }).click();
   expect(saves).toHaveLength(1);
+  await expect.poll(workbenchRequestCount).toBe(1);
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect local A2');
   await page.getByRole('button', { name: 'Save Draft' }).click();
   await expect.poll(() => saves.length).toBe(2);
   expect(saves[1].body.lock_version).toBe(1);
+  await expect.poll(workbenchRequestCount).toBe(1);
 });
 
 test('Reload server is write-free and retains the latest local values for recovery', async ({ page }) => {
   await installExactIdentityMock(page);
-  await installWorkbenchMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
   let heldRoute: Route | null = null;
   const saves = await installSaveMock(page, (route) => { heldRoute = route; });
   await openWorkbench(page);
@@ -212,14 +235,17 @@ test('Reload server is write-free and retains the latest local values for recove
 
   const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
   await expect(conflict.getByRole('group', { name: 'Current local values' })).toContainText('Architect A3');
+  await expect.poll(workbenchRequestCount).toBe(1);
   await conflict.getByRole('button', { name: 'Reload server' }).click();
   await expect(prompt).toHaveValue('Architect server A1');
+  await expect.poll(workbenchRequestCount).toBe(1);
   const recovery = page.getByRole('region', { name: 'Values retained for recovery' });
   await expect(recovery).toContainText('Architect A3');
   expect(saves).toHaveLength(1);
   await recovery.getByRole('button', { name: 'Restore retained values' }).click();
   await expect(prompt).toHaveValue('Architect A3');
   expect(saves).toHaveLength(1);
+  await expect.poll(workbenchRequestCount).toBe(1);
 });
 
 test('422 field validation is rendered beside the labelled input', async ({ page }) => {
@@ -337,7 +363,7 @@ for (const invalidCase of invalidSaveCases) {
       : fulfillJson(route, 200, syntheticDraftSaveSuccess(save.agentKey, save.body, 1)));
     await openWorkbench(page);
     const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
-    await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect retained A2');
+    await editArchitectFiveFields(page);
     await navigation.getByRole('button', { name: 'Builder' }).click();
     await page.getByRole('textbox', { name: 'Prompt text' }).fill('Builder retained B2');
     await navigation.getByRole('button', { name: 'Architect' }).click();
@@ -345,14 +371,19 @@ for (const invalidCase of invalidSaveCases) {
 
     await expect(page.getByRole('alert')).toContainText(invalidCase.expectedAlert);
     expect(saves).toHaveLength(1);
-    await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect retained A2');
+    await expectArchitectFiveFields(page);
     await navigation.getByRole('button', { name: 'Builder' }).click();
-    await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expectBuilderFormUnchanged(page);
     await navigation.getByRole('button', { name: 'Architect' }).click();
+    await expect(page.getByRole('alert')).toContainText(invalidCase.expectedAlert);
     await page.getByRole('button', { name: 'Save Draft' }).click();
     await expect.poll(() => saves.length).toBe(2);
     await expect(page.getByRole('alert')).toHaveCount(0);
-    await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect retained A2');
+    await expectArchitectFiveFields(page);
+    await navigation.getByRole('button', { name: 'Builder' }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expectBuilderFormUnchanged(page);
   });
 }
 
