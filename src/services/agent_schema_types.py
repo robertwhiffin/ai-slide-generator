@@ -8,7 +8,15 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TypeAlias, cast
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_serializer,
+    model_validator,
+)
+from pydantic_core import PydanticUndefined
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | Mapping[str, "JsonValue"] | tuple["JsonValue", ...]
@@ -52,21 +60,14 @@ class CanonicalFieldGuidance(BaseModel):
 
     model_config = ConfigDict(extra="allow", frozen=True, arbitrary_types_allowed=True)
 
-    description: str | None = None
-    examples: tuple[object, ...] | None = None
-    _supplied_mutations: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    description: str | None = Field(default_factory=lambda: cast(object, PydanticUndefined))
+    examples: tuple[object, ...] | None = Field(
+        default_factory=lambda: cast(object, PydanticUndefined)
+    )
 
     @model_validator(mode="after")
     def freeze_recursive_values(self) -> CanonicalFieldGuidance:
-        self._supplied_mutations = frozenset(
-            name for name in ("description", "examples") if name in self.__pydantic_fields_set__
-        )
-        object.__setattr__(
-            self,
-            "__pydantic_fields_set__",
-            frozenset(self.__pydantic_fields_set__),
-        )
-        if self.examples is not None:
+        if self.mutation_is_supplied("examples") and self.examples is not None:
             object.__setattr__(
                 self,
                 "examples",
@@ -86,7 +87,11 @@ class CanonicalFieldGuidance(BaseModel):
         return self
 
     def mutation_is_supplied(self, name: str) -> bool:
-        return name in self._supplied_mutations
+        if name == "description":
+            return self.description is not PydanticUndefined
+        if name == "examples":
+            return self.examples is not PydanticUndefined
+        raise ValueError(f"Unknown canonical guidance mutation {name!r}")
 
     def serialized_mutations(self) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -99,6 +104,10 @@ class CanonicalFieldGuidance(BaseModel):
                 {key: thaw_json_containers(item) for key, item in self.__pydantic_extra__.items()}
             )
         return result
+
+    @model_serializer(mode="plain")
+    def serialize_guidance(self) -> dict[str, object]:
+        return self.serialized_mutations()
 
 
 class SchemaOverlay(BaseModel):
