@@ -31,6 +31,9 @@ in effect, **an HTML emitter with a chat log bolted in front of it**:
   MLflow entirely, spans are auto-skipped under some conditions, and UC-backed
   tracing silently degrades to a plain experiment when unavailable. Verification is
   a manual, post-hoc "click Verify on a slide" action, not an intrinsic step.
+  **Resolution (§16): this is fixed by REMOVING MLflow from the product, not by
+  rebuilding it.** Every hack listed here is deleted; the quality evidence becomes a CI
+  gate, and the manual Verify action is retired with the judge behind it.
 
 This PRD reframes Tellr from *a slide-generating agent* into **an agentic
 slide-authoring system you converse with** — a brainstorming and refinement partner
@@ -43,8 +46,12 @@ This is a **phased platform re-architecture**, not a single-axis improvement. Th
 PRD frames the end-state and sequences the work. Three outcomes matter together:
 
 1. **Conversational UX** — an agent you brainstorm and iterate a deck with.
-2. **Databricks showcase** — exemplary use of Unity AI Gateway and MLflow 3 GenAI.
-3. **Quality & trust** — automated review agents plus real evaluation/observability.
+2. **Databricks showcase** — exemplary use of Unity AI Gateway.
+   ~~and MLflow 3 GenAI~~ ❌ **AMENDED 2026-09-18 (§16).** MLflow is not in the
+   product, so a stated outcome claiming exemplary use of it would be false. This
+   follows from §16's decision rather than being an independent choice.
+3. **Quality & trust** — automated review agents plus real evaluation. (~~/observability~~
+   — §16: no observability stack; the evidence is a CI gate, not a dashboard.)
 
 ---
 
@@ -124,13 +131,23 @@ checkpoints; each workstream spec derives its own acceptance tests.
   drawer) and are actionable (Apply / Dismiss / Discuss).
 - The eval harness runs in CI and can demonstrate quality has not regressed when
   prompts or models change.
-- Review verdicts are queryable as MLflow assessments against traces.
+- ~~Review verdicts are queryable as MLflow assessments against traces.~~
+  ❌ **STRUCK 2026-09-18 (§16).** Verdicts live in Lakebase —
+  `session_slides.verification_record` (per slide, content-hashed) and `deck_reviews`
+  (deck-level, digest-addressed) — which carry product-specific invalidation semantics
+  an MLflow assessment does not have.
 
 **Platform / showcase**
 - Every LLM call in the system is attributable to a user and session, with token and
   cost visibility in the admin dashboard.
-- A full turn is inspectable end-to-end as one nested trace (supervisor → builder →
-  reviewers → tools) with no gaps.
+  **Owned by workstream 2** via Gateway metering (§16). No token or cost capture exists
+  anywhere in `src/` today, and `get_structured_model` discards `usage_metadata`, so
+  this criterion has no foundation in the application until the Gateway supplies it.
+- ~~A full turn is inspectable end-to-end as one nested trace (supervisor → builder →
+  reviewers → tools) with no gaps.~~
+  ❌ **STRUCK 2026-09-18 (§16).** The user-facing need it served — showing a user what
+  the agent did — is met by an app-native activity view over Lakebase, subject to the
+  app's existing deck permissions.
 - No hardcoded model endpoint remains.
 
 **No regression** (release gate)
@@ -226,8 +243,9 @@ fully endpoint-hosted Databricks Agent Framework deployment).
 - *Why:* LangGraph is purpose-built for exactly this shape — multiple agents, a
   cyclic remediation loop, human-in-the-loop interrupts, streaming, and
   checkpointed state that maps cleanly onto Tellr sessions. It makes the flow
-  observable as clean nested spans (feeding the MLflow pillar) and replaces the
-  imperative control flow of the 1,863-line monolith.
+  observable as clean nested spans (useful for debugging, though no MLflow pillar now
+  depends on it — §16) and replaces the imperative control flow of the 1,863-line
+  monolith.
 - *Rejected — Python orchestrator over LangChain-classic:* would hand-roll state,
   loops, interrupts, and streaming, growing exactly the kind of hard-to-trace
   imperative code that is the current staleness.
@@ -366,9 +384,15 @@ flip-through stage and the feedback drawer.
 
 ### 7.1 The three review agents
 
-Run as parallel graph nodes after any build. Each is implemented as an **MLflow 3
-GenAI scorer** (`make_judge` / custom scorer), so its verdict is a first-class
-assessment logged against the trace. **"Review" and "eval" are one codebase.**
+Run as parallel graph nodes after any build. **REVISED 2026-09-18 (§16):** each is a
+graph *participant*, not an MLflow scorer. A scorer grades a recorded interaction as an
+observer; these reviewers run inline and synchronously and their findings drive the
+remediation loop, so the two cannot be one runtime object without making the graph
+depend on an evaluation harness. What review and evaluation genuinely share is the
+**prompt text and the criteria registry** (`src/domain/finding.py`) — a weaker claim
+than "one codebase", and the only one that holds.
+
+Verdicts are persisted in Lakebase, not logged as MLflow assessments.
 
 | Agent | Checks | Objective (auto-fix) | Subjective (surface) |
 |---|---|---|---|
@@ -430,18 +454,50 @@ generation becomes incremental; and per-agent model choice (a cheaper model for
 reviewers) is deferred in §8.1 but is the obvious lever if review cost becomes the
 constraint.
 
-### 7.5 MLflow 3 GenAI rebuild
+### 7.5 Agent-quality CI gates
 
-- **Reliable, always-on tracing.** The LangGraph flow emits clean nested spans
-  (supervisor → builder → each review agent → tools). A single traced entrypoint on
-  LangGraph resolves the async/ContextVar breakage that forced autolog off today.
-  **Delete** the direct-judge fallback and the span-auto-skip hacks.
-- **Eval harness / regression suite.** A curated evaluation dataset plus the same
-  scorers, runnable in CI, to catch quality regressions when prompts/models change.
-  This is the "quality & trust" evidence.
-- **Production monitoring & feedback.** Dashboards over live traces (quality
-  scores, token cost, latency per agent). Structured human feedback (drawer
-  Apply/Dismiss, thumbs, edits) logged back to MLflow to close the loop.
+> **REPLACED IN FULL, 2026-09-18 — see §16.** This subsection was "MLflow 3 GenAI
+> rebuild". MLflow is removed from the product and is not adopted in a development rig
+> either; the reasoning is in §16. Its three original bullets are disposed of as follows:
+> always-on tracing — **struck**; eval harness — **becomes the fixture gate below**;
+> production monitoring and feedback — **struck**.
+
+The quality-and-trust evidence is a **fixture-based CI gate over the review agents**, not
+an observability stack. It asks one question with an objective answer: *does the reviewer
+catch defects that are definitely there, and refrain from reporting defects that are
+definitely not?*
+
+- **Two halves, and the second matters more.** **Recall** fixtures are deliberately broken
+  slides and decks that must be caught. **Precision** fixtures are deliberately clean ones
+  that must yield no findings. Both reviewer defects recorded in workstream 4e's closing
+  note are false positives, so a recall-only gate would score those reviewers as flawless.
+- **The ruler is independent of the thing under test.** Fixtures carry known-correct
+  answers, so the metric does not move when a prompt changes. Had the production reviewer
+  also been the scorer, a reviewer prompt change would move the number for two
+  indistinguishable reasons — the deck changed, or the ruler changed — which makes
+  evaluating the reviewers incoherent.
+- **It extends what already exists.** `tests/agentic` (layer 3) already calls `call_skill`
+  against a real serving endpoint behind three deliberate gates: a `live` marker for
+  selection, a reachability `skipif` for safety, and an unconditional skip for honesty
+  while the prompts are placeholders. The additions are a few dozen fixtures across the
+  nine criteria, assertions on the **content** of output fields rather than their validity,
+  and a path-filtered trigger keyed to changes in prompts, skills, criteria or the graph.
+- **Fixtures are hand-authored, and that carries a risk worth naming.** Without a rendering
+  oracle a fixture's label is the author's belief, not a measurement. So recall fixtures
+  must be *unambiguously* broken rather than marginally so, and any numeric threshold must
+  be derived at runtime from `_SLIDE_FRAME_CONSTRAINTS` — as
+  `tests/agentic/gates.py::frame_constraint_numbers` already does — so a fixture cannot go
+  stale when the constraints change. A generated fixture factory was considered and
+  rejected as unnecessary machinery at this stage.
+- **Human feedback still closes the loop, one hop longer.** Drawer Apply/Dismiss remains in
+  Lakebase (`feedback_conversations`, `survey_responses`) and is exported into fixture
+  corpora on demand, rather than logged to MLflow on a live path.
+
+**This cannot be validated yet, and that is the honest status.** See §16 for the three
+blockers: the repository is in a personal account so CI cannot hold Databricks credentials;
+the seven prompts are placeholders so no assertion can be calibrated; and `test.yml`
+triggers only on `main` and `release/**`, so nothing based on `feat/langgraph-core` runs CI
+at all.
 
 ---
 
@@ -459,32 +515,32 @@ constraint.
   custom regex safety gate. The endpoint abstraction makes both cheap to add later;
   they are explicitly out of scope for the first pass.
 
-### 8.2 Unity Catalog requirement (cross-cutting tradeoff)
+### 8.2 ~~Unity Catalog requirement (cross-cutting tradeoff)~~
 
-**Tellr is intentionally UC-agnostic today** — it requires no UC schema, which keeps
-deployment simple. Traces to UC are currently *optional*: the app only binds a UC
-trace location when `TELLR_MLFLOW_UC_*` is fully configured, and silently falls back
-to a plain MLflow experiment when UC linking is unavailable.
-
-**This rebuild makes MLflow tracing to Unity Catalog non-negotiable.**
-
-- A **required UC catalog/schema** is added to app config and to the
-  setup/provisioning flow (setup wizard, deploy tooling, `app.yaml`).
-- **The existing optional/fallback behaviour is a workaround, not a feature.** It
-  exists because of an egress restriction in FEVM workspaces. It is to be **retired**,
-  not preserved as a supported lean-install mode.
-- **Why non-negotiable:** the review agents *are* MLflow scorers (§7.1), so review,
-  evaluation and observability are one system. Making tracing optional would mean
-  either a second code path for verdicts or losing a headline feature on lean
-  installs. We accept the provisioning friction to keep one code path.
-- **What UC actually buys:** traces land in queryable Delta tables, which is what
-  makes the eval harness (§7.5) and monitoring dashboards possible at all.
-- **A SQL warehouse is *not* required to write traces.** It is an optional additional
-  step needed only to *enable production monitoring* over UC-backed traces. Setup
-  should treat it as optional and not gate installation on it.
-- **Migration concern:** existing deployments will need a UC schema provisioned on
-  upgrade. The UC-in-setup workstream (§10, stream 1) must handle this path, not only fresh
-  installs.
+> ❌ **STRUCK IN FULL, 2026-09-18 — see §16.** Tellr remains **UC-agnostic**. No Unity
+> Catalog catalog or schema is required: not in app config, not in the setup or
+> provisioning flow, not in `app.yaml`, and not on upgrade. The workstream this section
+> created (§10, stream 1) is deleted.
+>
+> This section rested on three premises, each of which proved false or stale:
+>
+> 1. That the optional trace binding existed as a workaround for "an egress restriction in
+>    FEVM workspaces". Current Databricks documentation for storing MLflow traces in Unity
+>    Catalog carries no preview or beta gating and does not mention regional
+>    artifact-storage egress. `_is_uc_trace_backend_unavailable_error` guards a condition
+>    that has since become generally available — dead code, not a tradeoff.
+> 2. That existing deployments "will need a UC schema provisioned on upgrade". No trace
+>    data needs moving; there was no migration. The only real constraint is that an
+>    experiment's trace location binds at creation and can never be reassigned, which a
+>    newly created experiment satisfies trivially.
+> 3. That UC was non-negotiable *because* "the review agents are MLflow scorers, so review,
+>    evaluation and observability are one system". They are not scorers — see §7.1 as
+>    revised — so the justification does not stand.
+>
+> Independently of all three, tracing user work in production would write data fetched under
+> a user's own on-behalf-of token into a store governed by coarser grants, durably and
+> irreversibly (UC trace tables do not support deleting individual traces). That alone rules
+> it out. See §12.1's extended OBO constraint.
 
 ---
 
@@ -529,11 +585,11 @@ defines the end state and the seams.
 |---|---|---|---|---|
 | 0a | ✅ **DONE** — **Row-per-slide schema** — `session_slides` (one row per slide), per-row verification, deck-spec column | — | M | Merged 2026-08-12 (PR #235). Prerequisite for 4; see §10.2 |
 | 0b | ✅ **DONE** — **Dependency stack upgrade** — langgraph 1.2.10 pinned and proven on the Apps build proxy | — | S | Merged 2026-08-12 (PR #236). Prerequisite for 4; see §10.2 |
-| 1 | **UC-in-setup** — required UC catalog/schema in app config + provisioning; handles upgrade path for existing deployments | — | S | Unblocks MLflow; can land early |
+| 1 | ❌ **DELETED (2026-09-18, §16)** — ~~**UC-in-setup**~~ | — | — | Existed only to provision UC for MLflow tracing. §8.2 struck, so there is nothing to provision. Row kept so numbering and history stay legible |
 | 2 | **Gateway endpoint abstraction** — de-hardcode the model, route via Gateway, usage tracking & rate limits | — | S | Independent |
-| 3 | **MLflow rebuild** — always-on nested tracing + scorer framework; delete fallback/auto-skip hacks | 1 | M | |
+| 3 | 🔄 **REDEFINED (2026-09-18, §16)** — **Agent-quality CI gates** — fixture-based recall/precision gate over the review agents, extending `tests/agentic`; plus deletion of all MLflow code from the product | — | S | Was "MLflow rebuild". No longer depends on 1. **Cannot be validated until the repo leaves a personal account and the prompts are authored** — see §16 |
 | 4 | ✅ **DONE** — **LangGraph core** — supervisor + builder, deck-spec state, two front doors; runs *alongside* the monolith | 2 | L | The big one. Merged 2026-09-16 into `feat/langgraph-core` as five workstreams, ws4a–ws4e (merge `60789f72`). **Two deliberate exclusions:** the monolith is not deleted, and MCP stays on it — both belong to a later PR. See `docs/superpowers/plans/ws4e-HANDOVER.md` |
-| 5 | **Review subsystem** — 3 agents as scorers + remediation loop | 3, 4 | L | Review = eval |
+| 5 | **Review subsystem** — 3 agents + remediation loop | 4 | L | ~~3, 4~~ — no longer depends on 3 (§16). ~~as scorers~~ — reviewers are participants, not scorers (§7.1 as revised). Much of this shipped incidentally in workstream 4: the three reviewer nodes, the nine-criterion registry with its `objective` predicate, and the foreman→fixer→fix_reviewer loop all exist |
 | 6 | ✅ **DONE** — **Flip-through viewer + feedback drawer** — new slide stage + AI feedback UI | — (stub) | M | Shipped on `feat/flip-through-viewer`; see §6.2 for what landed vs. deferred |
 | 7 | 🟢 **BELIEVED DELIVERED by 4 and 6 without being worked on — needs a revisit, not a build** — **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | **Delivered incidentally:** checkboxes and `SelectionContext` are gone (6); the graph is invoked with `{"architect_message": message}` **and nothing else**, so §6.1's "no selection state and no `slide_context` round-trip" holds *structurally* rather than by discipline; and **the operator tested multi-target editing on 2026-09-16 and it behaved as expected.** §6.1's "@slide" chip is **dropped** — see §6.1. **What is genuinely open is whether this workstream is still needed at all**, and that cannot be settled yet: the seven agent prompts are **placeholders**, so today's behaviour is not the behaviour that ships. **Revisit once real prompts land** — with a bias toward closing it rather than planning it. **The one real gap either way: no automated test covers multi-target editing**, so it can regress in silence |
 | 8 | **Inline WYSIWYG editor** — click-to-edit, move/resize, drag-reorder, raw-HTML escape hatch | 6 | L | Largest FE build |
@@ -544,8 +600,14 @@ defines the end state and the seams.
   workstream-4 design spec identified them as prerequisites that had to land and be
   verified against live data *before* the core rewrite, so a bad deck could be
   attributed to one change or the other rather than both at once.
-- **1 and 2** are small, independent, and safe to land first.
-- **3** depends on UC being available (1).
+- ~~**1 and 2** are small, independent, and safe to land first.~~ **2** is; **1 is deleted**
+  (§16).
+- ~~**3** depends on UC being available (1).~~ **3 depends on nothing**, and is now a CI
+  gate rather than an MLflow build (§16). Its blockers are environmental, not sequential:
+  a non-personal repository so CI can hold credentials, and authored prompts so its
+  assertions can be calibrated. **It should be built together with prompt authoring** — a
+  gate written before its prompt is a guess, and a prompt written without a gate is
+  unmeasurable. See §12.1's closing note on that unassigned work.
 - **4** ✅ **is done** (2026-09-16) — the keystone. **So 7 is unblocked, and 5 is blocked
   only by 3.** It landed as five stacked workstreams rather than one PR, because the
   single-PR plan was reviewed to a three-round limit without converging: severity never
@@ -645,7 +707,8 @@ subsystems are reused and must keep working:
 - Review-loop iteration cap value and back-off behavior.
 - How auto-fixed vs. surfaced findings are persisted across turns and save points.
 - Gateway endpoint provisioning: is it FE-provided, per-workspace, or app-managed?
-- UC schema migration UX for existing production deployments.
+- ~~UC schema migration UX for existing production deployments.~~ ❌ **MOOT (§16)** — no UC
+  requirement, so no migration.
 - Whether/when to promote specialist agents to governed serving endpoints (the
   showcase-vs-latency tradeoff).
 
@@ -693,6 +756,9 @@ rediscover. Recorded here so they are not lost between documents.
   file passes every local test and ships the old stack. That file also deliberately
   leaves leaf transitives ranged so the Apps base image can satisfy them — do not
   "tidy" it into a fully-pinned closure.
+  **Further reduction now available (§16.6, item 5):** with MLflow out of the product,
+  the `mlflow[databricks]` extra — and possibly `databricks-agents` plus three cloud
+  SDKs — may leave the closure entirely. Prove it on the build proxy, not locally.
 - ⚠️ **The seven agent prompts are PLACEHOLDERS, and several judgements in this document
   are provisional until they are not.** Workstream 4 shipped substantive, functional
   instruction text for the architect, analyst, builder, reviewers and fixer, but none of it
@@ -715,6 +781,12 @@ rediscover. Recorded here so they are not lost between documents.
   auto-remediated HTML. Affects workstream 5.
 - **OBO propagation.** The user's token must reach tool calls made from any agent in
   the graph, and deck/profile permission checks still apply. Affects workstream 4/5.
+  **EXTENDED 2026-09-18 (§16): OBO-derived data must not be written to any store whose
+  access control differs from the data's own.** Tool output reaches the agents under the
+  user's own token, so persisting it anywhere governed by coarser grants makes it
+  readable by principals holding no grants on it. This binds all logging, observability
+  and telemetry work, not only the agent graph, and it is what ruled out production
+  tracing independently of every other argument in §16.
 - **Behavioural regression checklist.** The regex intent rules being retired
   (RC10–RC15 and related) each encode a previously-shipped bug fix. They are a test
   checklist for the supervisor's intent handling, not merely dead code to delete.
@@ -772,7 +844,7 @@ Product-level risks. (Technical execution risks belong in the workstream specs.)
 | **Review fatigue** — too many subjective findings | Users learn to ignore the drawer, and the quality pillar dies as decoration | Objective defects are fixed silently, not reported; subjective findings must clear a usefulness bar; findings are dismissible and must not nag |
 | **Latency perceived as regression** | Even masked, more LLM calls per turn risks feeling slower than today | §7.4 is a hard product requirement, not a nice-to-have; "go now" escape always available |
 | **Cost per deck rises materially** | Review multiplies calls; Tellr is FE-wide, so unit cost matters | Gateway usage tracking (§8.1) makes cost visible from day one; per-agent cheaper models are the deferred lever (§8.1) |
-| **Install friction from mandatory UC** | Requiring UC removes Tellr's easy-install advantage and could slow FE adoption | Accepted deliberately (§8.2); setup must make provisioning as close to one step as possible, and must not additionally gate on a SQL warehouse |
+| ~~**Install friction from mandatory UC**~~ ❌ **RETIRED (2026-09-18, §16)** | ~~Requiring UC removes Tellr's easy-install advantage and could slow FE adoption~~ | **Risk eliminated rather than mitigated.** §8.2 is struck and Tellr stays UC-agnostic, so the easy-install advantage is kept |
 | **Two large UI builds** (flip-through viewer, inline WYSIWYG) | The biggest schedule risk; WYSIWYG editors are notoriously deep | Viewer and editor are separate workstreams (§10 streams 6 and 8) so the viewer can land and be useful without the full editor |
 
 ---
@@ -780,5 +852,207 @@ Product-level risks. (Technical execution risks belong in the workstream specs.)
 ## 15. Non-goals (this PRD)
 
 - Per-agent model routing and Gateway guardrails (deferred; see §8.1).
+- **MLflow 3 GenAI adoption, in the product and in a development rig (see §16).**
 - Rewriting export, permissions, or the data-tool internals.
 - Detailed implementation specs — each workstream produces its own.
+
+---
+
+## 16. Amendment — 2026-09-18: MLflow is an evaluation concern, not a product feature
+
+**Status:** Agreed. The replacement work (§7.5 as revised) is **parked**, blocked on the
+three items in §16.5. This section supersedes §8.2 in full and revises §1.1, §3, §4.2,
+§7.1, §7.5, §10, §10.1, §12, §12.1, §14 and §15.
+
+### 16.1 The decision
+
+MLflow is removed from Tellr's production path, and is not adopted in a separate
+development rig either. What this PRD called the "MLflow rebuild" (§10, stream 3) becomes
+**agent-quality CI gates**: fixture-based tests measuring whether the review agents catch
+defects that are definitely present and refrain from reporting defects that are definitely
+absent. **UC-in-setup (§10, stream 1) is deleted** — it existed solely to provision Unity
+Catalog for MLflow tracing, and there is nothing left to provision.
+
+### 16.2 Why the original position was wrong
+
+The PRD asked how to implement MLflow in the product. The question it should have asked is
+how we know Tellr's agents are good. MLflow is an evaluation tool, and evaluation belongs in
+an evaluation context rather than in software a customer installs. Databricks does not
+retain a customer's sensitive processing logs; Tellr should not retain traces of a field
+engineer's work in order to observe itself.
+
+Five findings support this, each weakening the original position independently.
+
+**1. §8.2's factual premises were stale.** Detailed in §8.2's own strike note. In summary:
+the fallback it wanted retired guards a condition that has since become generally available;
+the "migration" it wanted handled does not exist, because no trace data needs moving; and
+its justification rested on the scorer claim refuted in point 3.
+
+**2. Production tracing launders Unity Catalog entitlements.** Tool results reach the agents
+under the user's own on-behalf-of token, so a user sees only data they hold UC grants for.
+Writing those results into a trace store governed by coarse table grants makes them readable
+by principals holding no grants on the underlying data — durably, because UC trace tables do
+not support deleting individual traces (removal is direct SQL against Delta). MLflow 3.14
+does provide a masking hook (`mlflow.tracing.configure(span_processors=...)`, applied before
+export), but the sensitive payload here is free-form — Genie synthesis text, and slide HTML
+that may embed customer figures — so only an allowlist is defensible, and an allowlist
+excludes precisely the content that made the trace worth keeping. **This consideration alone
+rules out tracing user work in production**, independently of everything else here. It is
+recorded as a standing constraint in §12.1.
+
+**3. Review agents cannot be MLflow scorers.** §7.1 asserted that each review agent "is
+implemented as an MLflow 3 GenAI scorer", and used that to make tracing non-negotiable. A
+scorer grades a recorded interaction — offline across a dataset, or sampled from production
+traces. It is an observer. The graph's reviewers are participants: they run inline and
+synchronously, and their findings drive the remediation loop. The two cannot be one runtime
+object without making the graph depend on an evaluation harness. See §7.1 as revised.
+
+**4. A shared artefact would invalidate the measurement.** If the production reviewer were
+also the evaluation scorer, changing a reviewer's prompt would move the metric for two
+indistinguishable reasons: the deck changed, or the ruler changed. Evaluating the reviewers —
+one of the harness's stated purposes — becomes incoherent. The resolution is a ruler
+independent of the system under test: fixtures with known-correct answers, measuring
+**recall** and **precision** separately. See §7.5 as revised.
+
+**5. MLflow does not survive in a development rig either.** Skill-level evaluation requires
+no instrumentation: a test imports `call_skill`, passes a fixture payload, and asserts on the
+returned model. `tests/agentic` already works this way with no MLflow present. Retaining
+MLflow for a rig would mean maintaining an instrumentation path existing only for
+development, in exchange for a user interface over data a committed test baseline already
+holds. The one activity where MLflow's tooling genuinely helps — comparing many prompt
+variants across many cases — is a one-off exercise suited to a notebook, needing no permanent
+place in the codebase.
+
+### 16.3 How the decision was tested
+
+Three independent assessments were commissioned — a skeptic's case, an advocate's case, and a
+neutral recommendation — each given the same facts, and none given knowledge of the others or
+of the conclusions reached in discussion. All three recommended deferring an MLflow
+evaluation harness until real prompts exist, keeping review verdicts in Lakebase, and not
+building production monitoring dashboards. **None endorsed mandatory Unity Catalog
+provisioning in the install path.** The advocate, briefed to defend the proposal, conceded
+that its case rested on fan-out debugging alone.
+
+Two of the three made material factual errors, both traceable to
+`docs/technical/mlflow-uc-tracing.md` describing constraints that no longer apply. That
+document misled reviewers reading in good faith; it is listed for deletion in §16.6.
+
+### 16.4 What can land, and what it is coupled to
+
+**CORRECTED 2026-09-21.** An earlier draft of this subsection listed the MLflow deletions
+and a CI-trigger change as independently landable. Both were wrong; see the two notes below
+the list.
+
+Genuinely independent and urgent:
+
+- **Withhold `source_contradiction`** from the build reviewer's generated criteria block, so
+  the fixer stops rewriting correct slides against a hallucinated finding (§16.6, item 1).
+  A live defect that damages user work on every graph turn, and a small change. **This is
+  the only item here that should not wait for anything.**
+- **Author the fixtures.** They can be written before they can be run.
+
+Coupled to a UI update, and therefore *not* independent:
+
+- **Removing MLflow from production:** `src/core/mlflow_tracing.py`,
+  `src/core/mlflow_agent_spans.py`, `ChatService._ensure_user_experiment` and its
+  `mlflow.set_experiment` block, `src/services/evaluation/llm_judge.py`, the
+  `mlflow.log_feedback` call in `src/api/routes/verification.py`, the admin judge-backend
+  control with the `llm_judge_backend` column, the experiment link at `AppLayout.tsx:750`
+  with its `experiment_url` plumbing and `session.experiment_id`, the four `TELLR_MLFLOW_*`
+  variables in `app.yaml.template` with `deploy.py`'s substitution machinery, and
+  `docs/technical/mlflow-uc-tracing.md`. The monolith's own MLflow calls ride the pull
+  request that deletes `src/services/agent.py`.
+  Several of these are **user-visible** — the experiment link, the admin judge-backend
+  control — so the removal should coincide with a UI update rather than landing on its own.
+- **The dependency-closure reduction** (§16.6, item 5) **follows the removal above**, not
+  precedes it: the `mlflow[databricks]` extra cannot leave the closure while
+  `src/services/evaluation/llm_judge.py` still imports `mlflow.genai`. So the prize is real
+  but it queues behind the UI-coupled work.
+
+**Not a blocker, and not a defect: `test.yml`'s trigger set.** Restricting continuous
+integration to `main` and `release/**` is **deliberate**, to stop CI filling up. Workstream
+4e's closing note (§2) records it as an unowned defect and proposes adding `feat/**`; that
+filing rests on a false premise and should not be acted on. The real consequence is simply
+that work on `feat/langgraph-core` must be verified **locally** and said to be so — against
+failure *causes*, never counts.
+
+### 16.5 What blocks the replacement work
+
+Two blockers, with different scopes — finishing the prompts will *feel* like it unblocked
+everything, and it will not. Prompts unblock authoring and local validation of the gate; the
+repository move unblocks enforcing it.
+
+1. **The repository is in a personal account.** CI cannot hold Databricks credentials, so the
+   live-model gate cannot execute. Until the repository moves, the gate can be written but
+   not validated — and *an artefact built and never executed in the environment it was built
+   for* is the most expensive failure pattern recorded in workstream 4e's closing note.
+2. **The seven agent prompts are placeholders.** No assertion can be calibrated against them.
+   This is what layer 3's unconditional placeholder skip exists to make explicit, and it must
+   not be weakened to make a placeholder pass.
+
+**Consequently: prompt authoring and the CI gate should be one piece of work with one
+owner.** A gate written before its prompt is a guess; a prompt written without a gate is
+unmeasurable. Authoring the seven prompts remains unassigned to any workstream in §10 — as
+§12.1 already records — and is the natural next workstream, with this gate as its definition
+of done.
+
+### 16.6 Defects and opportunities found while investigating
+
+Discovered in the course of this decision and recorded here because they exist nowhere else.
+
+**1. `source_contradiction` is unreachable, and misfiring is not harmless.** `resolved_data`
+is a required field of `DeckSpec`, so it is emitted by the **architect**, not the data
+analyst. The build reviewer already receives it (`nodes.py:2051`, sourced from
+`spec.resolved_data.model_dump()` at lines 575 and 1252). But the architect's instructions
+never mention `resolved_data`, `synthesis`, `figures` or `source`, so the field is emitted
+schema-valid and empty. The criterion is defined as "only assertable against
+`resolved_data`", so it can never be legitimately asserted — and because it is
+`objective=True`, a hallucinated finding dispatches the fixer to rewrite a slide that was
+correct. Workstream 4e measured three of twelve findings on a real deck as invented
+`source_contradiction`.
+
+**Three code comments misdiagnose the cause** — `nodes.py:1731`, the module docstring of
+`src/core/skills/data_analyst.py`, and the criterion's own description in
+`src/domain/finding.py` — attributing it to a missing field on `AnalystOutput` and an
+escalation to workstream 4b. **No schema change is required.** The fix is authoring the
+architect's prompt; prose in `resolved_data.synthesis` is very likely sufficient, since the
+working per-slide judge compares slide text against raw Genie text and produces usable
+ratings. Once `resolved_data` is populated, workstream 4e's ruling that adding it to the
+re-review trigger would be "an inert guard" ceases to hold, and that record should be
+deleted.
+
+**2. No cross-slide design-consistency criterion exists.** §7.1 promises cross-deck
+consistency of bullet markers, fonts and colour usage. The nine criteria contain no such
+check: the four design criteria are slide-level, `build_reviewer` receives exactly one
+slide's HTML, and `deck_reviewer` is narrative-only and explicitly instructed not to report
+slide-level issues. Where a design system is active, consistency arises by construction
+through `rogue_colour` judged against the compiled contract; with no design system, a deck
+can drift unchecked. **This is the one review capability in this PRD with neither a criterion
+nor an agent able to hold it.**
+
+**3. The build reviewer is shown deck-level criteria.** Its criteria block is generated from
+the whole registry, so a per-slide reviewer is told about `arc_gap`,
+`cross_slide_repetition` and `missing_conclusion` with no instruction to disregard them —
+while `deck_reviewer` does receive the converse instruction.
+
+**4. Token usage is discarded at the one point every agent passes through.**
+`get_structured_model` returns `model.with_structured_output(schema)`, so `.invoke()` yields
+the parsed object and the `AIMessage` — carrying `usage_metadata` — is dropped. No token or
+cost capture exists anywhere in `src/`. §3's cost-visibility criterion therefore has no
+foundation in the application today. Whether this needs fixing depends on whether workstream
+2's Gateway supplies per-user metering at the endpoint; if it does, no app-side capture is
+needed at all.
+
+**5. A dependency-closure opportunity.** The app pins `mlflow[databricks]==3.14.0`, whose
+`databricks` extra requires `databricks-agents<2.0`, `boto3`, `botocore`,
+`google-cloud-storage` and `azure-storage-file-datalake`. `databricks-langchain` requires
+only `mlflow>=2.20.1`. Removing the extra may allow `databricks-agents` and three cloud SDKs
+out of the closure, along with some of the defensive pins that exist to stop that resolution
+graph backtracking during the Apps build. **Must be proven against
+`packages/databricks-tellr-app/pyproject.toml` on the Apps build proxy**, since no other
+dependency file is on that path.
+
+**6. `docs/technical/mlflow-uc-tracing.md` is stale and actively misleading.** It documents
+preview gating and a regional artifact-storage egress requirement that current Databricks
+documentation does not carry, and it caused factual errors in two of three independent
+reviews (§16.3). Delete it alongside the code it documents.

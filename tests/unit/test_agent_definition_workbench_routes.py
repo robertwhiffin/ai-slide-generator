@@ -30,6 +30,7 @@ from src.services.graph_configuration import (
     GraphConfigurationIntegrityError,
 )
 from src.services.graph_configuration_content import definition_content_from_row
+from src.services.graph_definition_manifest import load_graph_v1_manifest
 
 EXPECTED_TOPOLOGY_ORDER = [
     "architect",
@@ -293,6 +294,7 @@ def test_read_workbench_does_not_import_or_fallback_to_v1_manifest(
     session_factory, monkeypatch
 ):
     generated_module = "src.services.agent_definition_manifest_v1"
+    load_graph_v1_manifest.cache_clear()
     sys.modules.pop(generated_module, None)
     real_import = builtins.__import__
     attempted: list[str] = []
@@ -303,13 +305,17 @@ def test_read_workbench_does_not_import_or_fallback_to_v1_manifest(
             raise AssertionError("read path imported the frozen v1 manifest")
         return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", _guarded_import)
-    with session_factory() as session:
-        snapshot = GraphConfiguration().read_workbench(session)
+    try:
+        monkeypatch.setattr(builtins, "__import__", _guarded_import)
+        with session_factory() as session:
+            snapshot = GraphConfiguration().read_workbench(session)
 
-    assert snapshot.active_release.version_number == 1
-    assert attempted == []
-    assert generated_module not in sys.modules
+        assert snapshot.active_release.version_number == 1
+        assert attempted == []
+        assert generated_module not in sys.modules
+    finally:
+        load_graph_v1_manifest.cache_clear()
+        sys.modules.pop(generated_module, None)
 
 
 Mutation = Callable[[sessionmaker], None]
