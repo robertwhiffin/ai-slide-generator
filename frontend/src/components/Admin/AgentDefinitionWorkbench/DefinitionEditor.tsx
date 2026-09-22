@@ -2,8 +2,12 @@ import { useRef, useState, type KeyboardEvent } from 'react';
 import type { AgentKey, ModelAgentNode } from '../../../api/agentDefinitions';
 import {
   draftStatus,
+  editableFormsEqual,
+  formFromCandidate,
+  formFromDefinition,
   type DraftEditorEntry,
   type EditableDraftField,
+  type EditableModelDraftForm,
 } from './draftEditorState';
 
 const DEFINITION_TABS = ['prompt', 'model', 'output-schema', 'assembly'] as const;
@@ -29,8 +33,25 @@ interface DefinitionEditorProps {
   onDismissRecovery(agentKey: AgentKey): void;
 }
 
-function FieldError({ message }: { message?: string }) {
-  return message ? <span className="mt-1 block text-xs text-red-700">{message}</span> : null;
+function FieldError({ id, message }: { id: string; message?: string }) {
+  return message ? (
+    <span id={id} role="alert" className="mt-1 block text-xs text-red-700">{message}</span>
+  ) : null;
+}
+
+function DraftValues({ label, values }: { label: string; values: EditableModelDraftForm }) {
+  return (
+    <div role="group" aria-label={label} className="rounded border border-current/20 bg-white/60 p-2">
+      <h5 className="font-medium">{label}</h5>
+      <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-2 text-xs">
+        <dt>Prompt</dt><dd className="break-words font-mono">{values.prompt_text}</dd>
+        <dt>Endpoint</dt><dd className="break-words font-mono">{values.endpoint_name}</dd>
+        <dt>Temperature</dt><dd>{values.temperature}</dd>
+        <dt>Maximum tokens</dt><dd>{values.max_tokens}</dd>
+        <dt>Top-p</dt><dd>{values.top_p}</dd>
+      </dl>
+    </div>
+  );
 }
 
 export function DefinitionEditor({
@@ -67,6 +88,15 @@ export function DefinitionEditor({
     selectTab(DEFINITION_TABS[nextIndex], true);
   };
 
+  const conflictServer = entry.conflict
+    ? formFromDefinition(entry.conflict.server.definitions[agentKey])
+    : null;
+  const conflictSubmitted = entry.conflict
+    ? formFromCandidate(entry.conflict.client_candidate)
+    : null;
+  const currentDiffersFromSubmitted = conflictSubmitted !== null
+    && !editableFormsEqual(entry.local, conflictSubmitted);
+
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -75,7 +105,7 @@ export function DefinitionEditor({
         </span>
         <button
           type="button"
-          disabled={saveDisabled}
+          disabled={saveDisabled || entry.conflict !== null}
           onClick={() => { void onSave(agentKey); }}
           className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-gray-300"
         >
@@ -89,22 +119,39 @@ export function DefinitionEditor({
         </div>
       )}
       {entry.conflict && (
-        <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          <p>The Graph Draft changed on the server. Reload it or keep your local values.</p>
+        <section
+          role="region"
+          aria-labelledby={`${agentKey}-conflict-heading`}
+          className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+        >
+          <h4 id={`${agentKey}-conflict-heading`} className="font-semibold">Draft changed on the server</h4>
+          <p className="mt-1">
+            Expected lock {entry.conflict.expected_lock_version}; Current lock {entry.conflict.current_lock_version}
+          </p>
+          <div className="mt-2 grid gap-2">
+            {conflictServer && <DraftValues label="Server values" values={conflictServer} />}
+            {conflictSubmitted && <DraftValues label="Submitted values" values={conflictSubmitted} />}
+            {currentDiffersFromSubmitted && <DraftValues label="Current local values" values={entry.local} />}
+          </div>
           <div className="mt-2 flex gap-2">
             <button type="button" onClick={() => onReloadServer(agentKey)}>Reload server</button>
             <button type="button" onClick={() => onKeepLocal(agentKey)}>Keep local</button>
           </div>
-        </div>
+        </section>
       )}
       {entry.recoveryForm && (
-        <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-          <p>Your previous local values are available for recovery.</p>
+        <section
+          role="region"
+          aria-labelledby={`${agentKey}-recovery-heading`}
+          className="mb-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900"
+        >
+          <h4 id={`${agentKey}-recovery-heading`} className="font-semibold">Values retained for recovery</h4>
+          <div className="mt-2"><DraftValues label="Retained values" values={entry.recoveryForm} /></div>
           <div className="mt-2 flex gap-2">
-            <button type="button" onClick={() => onRestoreRecovery(agentKey)}>Restore local</button>
+            <button type="button" onClick={() => onRestoreRecovery(agentKey)}>Restore retained values</button>
             <button type="button" onClick={() => onDismissRecovery(agentKey)}>Dismiss</button>
           </div>
-        </div>
+        </section>
       )}
 
       <div
@@ -150,11 +197,12 @@ export function DefinitionEditor({
         </label>
         <textarea
           id={`${agentKey}-prompt`}
+          aria-describedby={entry.fieldErrors.prompt_text ? `${agentKey}-prompt-error` : undefined}
           value={entry.local.prompt_text}
           onChange={(event) => onEdit(agentKey, 'prompt_text', event.currentTarget.value)}
           className="min-h-56 w-full rounded-md border border-gray-300 p-3 font-mono text-sm"
         />
-        <FieldError message={entry.fieldErrors.prompt_text} />
+        <FieldError id={`${agentKey}-prompt-error`} message={entry.fieldErrors.prompt_text} />
       </div>
 
       <div
@@ -164,49 +212,57 @@ export function DefinitionEditor({
         hidden={activeTab !== 'model'}
         className="min-h-72 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4"
       >
-        <label className="block text-sm font-medium text-gray-700">
-          Endpoint
+        <div>
+          <label htmlFor={`${agentKey}-endpoint`} className="block text-sm font-medium text-gray-700">Endpoint</label>
           <input
+            id={`${agentKey}-endpoint`}
+            aria-describedby={entry.fieldErrors.endpoint_name ? `${agentKey}-endpoint-error` : undefined}
             type="text"
             value={entry.local.endpoint_name}
             onChange={(event) => onEdit(agentKey, 'endpoint_name', event.currentTarget.value)}
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
-          <FieldError message={entry.fieldErrors.endpoint_name} />
-        </label>
-        <label className="block text-sm font-medium text-gray-700">
-          Temperature
+          <FieldError id={`${agentKey}-endpoint-error`} message={entry.fieldErrors.endpoint_name} />
+        </div>
+        <div>
+          <label htmlFor={`${agentKey}-temperature`} className="block text-sm font-medium text-gray-700">Temperature</label>
           <input
+            id={`${agentKey}-temperature`}
+            aria-describedby={entry.fieldErrors.temperature ? `${agentKey}-temperature-error` : undefined}
             type="number"
             step="any"
             value={entry.local.temperature}
             onChange={(event) => onEdit(agentKey, 'temperature', event.currentTarget.value)}
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
-          <FieldError message={entry.fieldErrors.temperature} />
-        </label>
-        <label className="block text-sm font-medium text-gray-700">
-          Maximum tokens
+          <FieldError id={`${agentKey}-temperature-error`} message={entry.fieldErrors.temperature} />
+        </div>
+        <div>
+          <label htmlFor={`${agentKey}-max-tokens`} className="block text-sm font-medium text-gray-700">Maximum tokens</label>
           <input
+            id={`${agentKey}-max-tokens`}
+            aria-describedby={entry.fieldErrors.max_tokens ? `${agentKey}-max-tokens-error` : undefined}
             type="number"
             step="1"
             value={entry.local.max_tokens}
             onChange={(event) => onEdit(agentKey, 'max_tokens', event.currentTarget.value)}
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
-          <FieldError message={entry.fieldErrors.max_tokens} />
-        </label>
-        <label className="block text-sm font-medium text-gray-700">
-          Top-p
+          <FieldError id={`${agentKey}-max-tokens-error`} message={entry.fieldErrors.max_tokens} />
+        </div>
+        <div>
+          <label htmlFor={`${agentKey}-top-p`} className="block text-sm font-medium text-gray-700">Top-p</label>
           <input
+            id={`${agentKey}-top-p`}
+            aria-describedby={entry.fieldErrors.top_p ? `${agentKey}-top-p-error` : undefined}
             type="number"
             step="any"
             value={entry.local.top_p}
             onChange={(event) => onEdit(agentKey, 'top_p', event.currentTarget.value)}
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
-          <FieldError message={entry.fieldErrors.top_p} />
-        </label>
+          <FieldError id={`${agentKey}-top-p-error`} message={entry.fieldErrors.top_p} />
+        </div>
       </div>
 
       <div

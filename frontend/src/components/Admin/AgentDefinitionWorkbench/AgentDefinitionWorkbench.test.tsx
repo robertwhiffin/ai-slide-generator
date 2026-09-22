@@ -112,6 +112,21 @@ function saveConflict(
   };
 }
 
+function conflictWithServerEdits(
+  request: DraftSaveRequest,
+  edits: Partial<Record<AgentKey, string>>,
+): DraftSaveConflictResponse {
+  const conflict = saveConflict(request);
+  for (const [agentKey, promptText] of Object.entries(edits) as Array<[AgentKey, string]>) {
+    conflict.server.definitions[agentKey] = {
+      ...conflict.server.definitions[agentKey],
+      prompt_text: promptText,
+      candidate_hash: 'd'.repeat(64),
+    };
+  }
+  return conflict;
+}
+
 function mockWorkbenchWithPuts(
   put: (agentKey: AgentKey, request: DraftSaveRequest, call: number) => Promise<object> | object,
 ) {
@@ -433,7 +448,92 @@ describe('AgentDefinitionWorkbench', () => {
     expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
   });
 
-  it('recovers A3 rather than submitted A2 after a deferred conflict and Reload server', async () => {
+  it('renders a conflict comparison and reconciles every clean role from the exact-seven response', async () => {
+    const fetchMock = mockWorkbenchWithPuts((_agentKey, request, call) => {
+      if (call === 0) return apiResponse(409, conflictWithServerEdits(request, {
+        architect: 'Architect server A1',
+        data_analyst: 'Data Analyst server D1',
+        builder: 'Builder server B1',
+        build_reviewer: 'Build Reviewer server BR1',
+        fixer: 'Fixer server F1',
+        fix_reviewer: 'Fix Reviewer server FR1',
+        deck_reviewer: 'Deck Reviewer server DR1',
+      }));
+      return apiResponse(200, saveSuccess('architect', request.candidate, 2));
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const prompt = screen.getByRole('textbox', { name: 'Prompt text' });
+    fireEvent.change(prompt, { target: { value: 'Architect submitted A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    const conflict = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(conflict).toHaveTextContent('Expected lock 0');
+    expect(conflict).toHaveTextContent('Current lock 1');
+    expect(within(conflict).getByRole('group', { name: 'Server values' })).toHaveTextContent('Architect server A1');
+    expect(within(conflict).getByRole('group', { name: 'Submitted values' })).toHaveTextContent('Architect submitted A2');
+    expect(within(conflict).queryByRole('group', { name: 'Current local values' })).not.toBeInTheDocument();
+    expect(within(conflict).getByRole('button', { name: 'Reload server' })).toBeEnabled();
+    expect(within(conflict).getByRole('button', { name: 'Keep local' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+
+    for (const [buttonName, promptText] of [
+      ['Data Analyst', 'Data Analyst server D1'],
+      ['Builder', 'Builder server B1'],
+      ['Build Reviewer', 'Build Reviewer server BR1'],
+      ['Fixer', 'Fixer server F1'],
+      ['Fix Reviewer', 'Fix Reviewer server FR1'],
+      ['Deck Reviewer', 'Deck Reviewer server DR1'],
+    ]) {
+      fireEvent.click(within(navigation).getByRole('button', { name: new RegExp(buttonName) }));
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(promptText);
+      expect(within(navigation).getByRole('button', { name: new RegExp(buttonName) })).toHaveTextContent('Needs test');
+    }
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('retains a dirty Builder while reconciling its saved baseline during an Architect conflict', async () => {
+    const fetchMock = mockWorkbenchWithPuts((_agentKey, request) => apiResponse(409, conflictWithServerEdits(request, {
+      architect: 'Architect server A1',
+      builder: 'Builder server B1',
+    })));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Builder local B2' } });
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await screen.findByRole('region', { name: 'Draft changed on the server' });
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder local B2');
+    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveTextContent('Unsaved');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('keeps local conflict values without writing and retries with the refreshed global lock', async () => {
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request, call) => call === 0
+      ? apiResponse(409, conflictWithServerEdits(request, { architect: 'Architect server A1' }))
+      : apiResponse(200, saveSuccess(agentKey, request.candidate, 2)));
+    render(<AgentDefinitionWorkbench />);
+    const prompt = await screen.findByRole('textbox', { name: 'Prompt text' });
+    fireEvent.change(prompt, { target: { value: 'Architect local A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    const conflict = await screen.findByRole('region', { name: 'Draft changed on the server' });
+
+    fireEvent.click(within(conflict).getByRole('button', { name: 'Keep local' }));
+    expect(screen.queryByRole('region', { name: 'Draft changed on the server' })).not.toBeInTheDocument();
+    expect(prompt).toHaveValue('Architect local A2');
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+    expect(JSON.parse(String((putCalls(fetchMock)[1][1] as RequestInit).body))).toMatchObject({ lock_version: 1 });
+  });
+
+  it('shows current local values and losslessly recovers A3 rather than submitted A2 after a deferred conflict', async () => {
     let resolvePut!: (response: object) => void;
     const pendingPut = new Promise<object>((resolve) => { resolvePut = resolve; });
     const fetchMock = mockWorkbenchWithPuts(() => pendingPut);
@@ -444,41 +544,150 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.change(prompt, { target: { value: 'Architect A3' } });
     const [, init] = putCalls(fetchMock)[0] as [string, RequestInit];
     const request = JSON.parse(String(init.body)) as DraftSaveRequest;
-    resolvePut(apiResponse(409, saveConflict(request)));
+    resolvePut(apiResponse(409, conflictWithServerEdits(request, { architect: 'Architect server A1' })));
 
-    const reload = await screen.findByRole('button', { name: 'Reload server' });
+    const conflict = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(within(conflict).getByRole('group', { name: 'Submitted values' })).toHaveTextContent('Architect A2');
+    expect(within(conflict).getByRole('group', { name: 'Current local values' })).toHaveTextContent('Architect A3');
+    const reload = within(conflict).getByRole('button', { name: 'Reload server' });
     fireEvent.click(reload);
-    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(
-      'Synthetic Architect prompt — exact fixture value.',
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Restore local' }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect server A1');
+    const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+    expect(recovery).toHaveTextContent('Architect A3');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+    fireEvent.click(within(recovery).getByRole('button', { name: 'Restore retained values' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A3');
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('surfaces typed validation and request errors only for the selected role', async () => {
+  it('dismisses only the recovery copy after Reload server without writing', async () => {
+    const fetchMock = mockWorkbenchWithPuts((_agentKey, request) => apiResponse(
+      409,
+      conflictWithServerEdits(request, { architect: 'Architect server A1' }),
+    ));
+    render(<AgentDefinitionWorkbench />);
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reload server' }));
+
+    const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+    expect(recovery).toHaveTextContent('Architect A3');
+    fireEvent.click(within(recovery).getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect server A1');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('associates all five 422 messages with their labelled inputs without an opaque request alert', async () => {
+    const fetchMock = mockWorkbenchWithPuts(() => apiResponse(422, {
+      code: 'invalid_draft',
+      errors: [
+        ['candidate.prompt_text', 'Prompt rejected.'],
+        ['candidate.model.endpoint_name', 'Endpoint rejected.'],
+        ['candidate.model.temperature', 'Temperature rejected.'],
+        ['candidate.model.max_tokens', 'Maximum tokens rejected.'],
+        ['candidate.model.top_p', 'Top-p rejected.'],
+      ].map(([field, message]) => ({ field, code: 'rejected', message })),
+    }));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await screen.findByText('Prompt rejected.');
+
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveAccessibleDescription('Prompt rejected.');
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    expect(screen.getByRole('textbox', { name: 'Endpoint' })).toHaveAccessibleDescription('Endpoint rejected.');
+    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveAccessibleDescription('Temperature rejected.');
+    expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveAccessibleDescription('Maximum tokens rejected.');
+    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveAccessibleDescription('Top-p rejected.');
+    expect(screen.getAllByRole('alert')).toHaveLength(4);
+    expect(screen.queryByText(/Unable to save draft/)).not.toBeInTheDocument();
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it.each([
+    ['malformed 200', () => apiResponse(200, { changed: true })],
+    ['six-role 409', (request: DraftSaveRequest) => {
+      const conflict = saveConflict(request);
+      const definitions = { ...conflict.server.definitions } as Record<string, unknown>;
+      delete definitions.builder;
+      return apiResponse(409, { ...conflict, server: { ...conflict.server, definitions } });
+    }],
+    ['eight-role 409', (request: DraftSaveRequest) => {
+      const conflict = saveConflict(request);
+      return apiResponse(409, {
+        ...conflict,
+        server: {
+          ...conflict.server,
+          definitions: { ...conflict.server.definitions, foreman: conflict.server.definitions.architect },
+        },
+      });
+    }],
+    ['mistyped 422', () => apiResponse(422, {
+      code: 'invalid_draft',
+      errors: [{ field: 'candidate.prompt_text', code: 'rejected', message: 42 }],
+    })],
+    ['non-object JSON', () => apiResponse(200, [])],
+  ])('rejects %s as an invalid response, preserves every form, and permits explicit retry', async (_name, invalidResponse) => {
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request, call) => call === 0
+      ? invalidResponse(request)
+      : apiResponse(200, saveSuccess(agentKey, request.candidate, 1)));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await editArchitectFiveFields();
+    fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Builder retained B2' } });
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unable to save draft because the server response was invalid.',
+    );
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    expect(screen.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-a2');
+    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
+    expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
+    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
+  });
+
+  it('contains transport failures to the selected role and clears them only on edit or a new save', async () => {
     const fetchMock = mockWorkbenchWithPuts((_agentKey, _request, call) => call === 0
-      ? apiResponse(422, {
-        code: 'invalid_draft',
-        errors: [{
-          field: 'candidate.prompt_text',
-          code: 'rejected',
-          message: 'Prompt text was rejected by the server.',
-        }],
-      })
-      : apiResponse(500, { detail: 'Draft store unavailable.' }));
+      ? Promise.reject(new TypeError('network failed'))
+      : call === 1
+        ? {
+          ok: false,
+          status: 500,
+          statusText: 'Internal Server Error',
+          json: vi.fn().mockRejectedValue(new SyntaxError('not JSON')),
+        }
+        : apiResponse(200, saveSuccess('architect', _request.candidate, 1)));
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
-    expect(await screen.findByText('Prompt text was rejected by the server.')).toBeVisible();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to save draft. Check your connection and try again.');
     expect(putCalls(fetchMock)).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Draft store unavailable.');
     fireEvent.click(within(navigation).getByRole('button', { name: 'Builder' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     fireEvent.click(within(navigation).getByRole('button', { name: 'Architect' }));
-    expect(screen.getByRole('alert')).toHaveTextContent('Draft store unavailable.');
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to save draft. Check your connection and try again.');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'clear network error' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to save draft (500 Internal Server Error).');
+    expect(putCalls(fetchMock)).toHaveLength(2);
   });
 
   it('Admin tab preserves unsaved draft after first lazy visit without another GET or any PUT', async () => {
