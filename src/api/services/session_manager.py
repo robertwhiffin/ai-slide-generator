@@ -29,7 +29,11 @@ from src.database.models.session import (
     UserSession,
 )
 from src.domain.finding import findings_from_record
-from src.services.conversation_pins import lock_active_graph_release
+from src.services.conversation_pins import (
+    get_conversation_graph_version,
+    get_conversation_graph_versions,
+    lock_active_graph_release,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -730,12 +734,16 @@ class SessionManager:
                 .first()
             )
             if existing:
+                graph_version = get_conversation_graph_version(db, existing)
                 return {
                     "session_id": existing.session_id,
                     "user_id": existing.user_id,
                     "created_by": existing.created_by,
                     "title": existing.title,
                     "created_at": existing.created_at.isoformat(),
+                    "graph_version": graph_version.graph_version,
+                    "active_graph_version": graph_version.active_graph_version,
+                    "is_older_than_active": graph_version.is_older_than_active,
                 }
 
             graph_release_id = None
@@ -761,12 +769,16 @@ class SessionManager:
                 },
             )
 
+            graph_version = get_conversation_graph_version(db, session)
             return {
                 "session_id": session_id,
                 "user_id": user_id,
                 "created_by": created_by,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
+                "graph_version": graph_version.graph_version,
+                "active_graph_version": graph_version.active_graph_version,
+                "is_older_than_active": graph_version.is_older_than_active,
             }
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -801,6 +813,7 @@ class SessionManager:
                 .scalar()
                 or 0
             )
+            graph_version = get_conversation_graph_version(db, session)
 
             return {
                 "id": session.id,
@@ -822,6 +835,9 @@ class SessionManager:
                 "parent_session_id": parent_session_id_str,
                 "parent_session_internal_id": session.parent_session_id,
                 "global_permission": deck_owner.global_permission,
+                "graph_version": graph_version.graph_version,
+                "active_graph_version": graph_version.active_graph_version,
+                "is_older_than_active": graph_version.is_older_than_active,
             }
 
     def get_or_create_contributor_session(
@@ -1013,6 +1029,9 @@ class SessionManager:
                 .limit(limit)
                 .all()
             )
+            graph_versions = get_conversation_graph_versions(
+                db, [session for session, _message_count in sessions]
+            )
 
             return [
                 {
@@ -1026,6 +1045,9 @@ class SessionManager:
                     "has_slide_deck": s.slide_deck is not None,
                     "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
                     "global_permission": s.global_permission,
+                    "graph_version": graph_versions[s.id].graph_version,
+                    "active_graph_version": graph_versions[s.id].active_graph_version,
+                    "is_older_than_active": graph_versions[s.id].is_older_than_active,
                 }
                 for s, message_count in sessions
             ]

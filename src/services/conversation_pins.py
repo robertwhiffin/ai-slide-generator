@@ -27,6 +27,15 @@ class PinnedRelease:
     graph_version: int
 
 
+@dataclass(frozen=True)
+class ConversationGraphVersion:
+    """The safe graph-release information a session response may disclose."""
+
+    graph_version: int | None
+    active_graph_version: int
+    is_older_than_active: bool
+
+
 class ActiveGraphReleaseUnavailableError(RuntimeError):
     """No active release existed across the bounded lock scans."""
 
@@ -37,6 +46,10 @@ class ConversationPinMissingError(RuntimeError):
 
 class ConversationSessionNotFoundError(RuntimeError):
     """The requested conversation does not exist."""
+
+
+class ConversationGraphReleaseIntegrityError(RuntimeError):
+    """A session pin or active release no longer has a valid referent."""
 
 
 MAX_ACTIVE_RELEASE_LOCK_SCANS = 2
@@ -59,6 +72,80 @@ def lock_active_graph_release(db: Session) -> PinnedRelease:
         if scan == 0:
             continue
     raise ActiveGraphReleaseUnavailableError("no active Graph Release")
+
+
+def _require_active_graph_release(db: Session) -> GraphRelease:
+    """Load exactly one active release for a public session projection."""
+    active = db.execute(
+        select(GraphRelease).where(GraphRelease.effective_to.is_(None))
+    ).scalar_one_or_none()
+    if active is None:
+        raise ConversationGraphReleaseIntegrityError("no active Graph Release")
+    return active
+
+
+def _pinned_graph_release_or_none(
+    db: Session, graph_release_id: int | None
+) -> GraphRelease | None:
+    """Load a persisted pin, preserving null pins and rejecting dangling ones."""
+    if graph_release_id is None:
+        return None
+    if not isinstance(graph_release_id, int):
+        raise ConversationGraphReleaseIntegrityError("invalid Graph Release pin")
+    pinned = db.get(GraphRelease, graph_release_id)
+    if pinned is None:
+        raise ConversationGraphReleaseIntegrityError("missing pinned Graph Release")
+    return pinned
+
+
+def get_conversation_graph_version(
+    db: Session, session: UserSession
+) -> ConversationGraphVersion:
+    """Project a session's pinned release without disclosing its internal identity."""
+    active = _require_active_graph_release(db)
+    pinned = _pinned_graph_release_or_none(db, session.graph_release_id)
+    return ConversationGraphVersion(
+        graph_version=None if pinned is None else pinned.version_number,
+        active_graph_version=active.version_number,
+        is_older_than_active=bool(
+            pinned and pinned.version_number < active.version_number
+        ),
+    )
+
+
+def get_conversation_graph_versions(
+    db: Session, sessions: list[UserSession]
+) -> dict[int, ConversationGraphVersion]:
+    """Batch-project session versions with one active lookup and one pinned join."""
+    if not sessions:
+        return {}
+
+    active = _require_active_graph_release(db)
+    session_ids = [session.id for session in sessions]
+    rows = db.execute(
+        select(
+            UserSession.id,
+            UserSession.graph_release_id,
+            GraphRelease.version_number,
+        )
+        .outerjoin(GraphRelease, UserSession.graph_release_id == GraphRelease.id)
+        .where(UserSession.id.in_(session_ids))
+    ).all()
+
+    versions: dict[int, ConversationGraphVersion] = {}
+    for session_id, graph_release_id, graph_version in rows:
+        if graph_release_id is not None and graph_version is None:
+            raise ConversationGraphReleaseIntegrityError("missing pinned Graph Release")
+        versions[session_id] = ConversationGraphVersion(
+            graph_version=graph_version,
+            active_graph_version=active.version_number,
+            is_older_than_active=bool(
+                graph_version is not None and graph_version < active.version_number
+            ),
+        )
+    if len(versions) != len(session_ids):
+        raise ConversationGraphReleaseIntegrityError("missing session in graph projection")
+    return versions
 
 
 def load_conversation_pin(session_factory: sessionmaker, session_id: str) -> int:
