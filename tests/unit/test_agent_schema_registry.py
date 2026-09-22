@@ -1,0 +1,538 @@
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError, replace
+from types import MappingProxyType
+from typing import Any
+
+import pytest
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from src.domain.skill_io import OUTPUT_SCHEMAS, ArchitectOutput
+from src.services.agent_schema_registry import (
+    MODEL_DRIVEN_AGENT_KEYS,
+    SCHEMA_CONTRACT_BUNDLES,
+    V1_SCHEMA_IDENTITIES,
+    V2_SCHEMA_IDENTITIES,
+    AgentOutputValidationError,
+    AgentSchemaRegistry,
+    SchemaContractMaterialChangedError,
+    SchemaOverlayValidationError,
+    upgrade_content_to_v2,
+)
+from src.services.agent_schema_types import (
+    CanonicalFieldGuidance,
+    SchemaContractIdentity,
+    SchemaOverlay,
+    SchemaValidationIssue,
+)
+
+EXPECTED_ROLES = (
+    "architect",
+    "data_analyst",
+    "builder",
+    "build_reviewer",
+    "fixer",
+    "fix_reviewer",
+    "deck_reviewer",
+)
+
+EXPECTED_V1_DIGESTS = {
+    "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
+    "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
+    "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
+    "fixer": "7a4e984c602d16ea73c2f5f3f26ac385c440527001fa14b1cfb5c1245de12297",
+    "fix_reviewer": "31ff0a6d02cefb7db4cd2c499b4e7905fdadcda789c658e1c7605cdde01020df",
+    "deck_reviewer": "56c7ce141e07a70fc2c57f614e915ebb9e3914d24b3c11057401c4cc1c637467",
+}
+
+EXPECTED_V2_DIGESTS = {
+    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
+    "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
+    "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
+    "fixer": "a77a9896705534109179e75a542eec212dbb25fd78582dff256d6b6c976a6143",
+    "fix_reviewer": "bbe6bf025d5c2e5dcbe1c23db029caff425890602f7e3819c6472c46e7fdfd99",
+    "deck_reviewer": "c466043b24678ceef8c80d3707f7e80672275415a8b1c0e4385f94bfea7104d3",
+}
+
+EXPECTED_DESCRIPTOR_TEXT = {
+    "architect": (
+        "Concise assumptions or ambiguities that influenced the selected intent; "
+        "never substitute for `message`, `deck_spec`, `data_request`, targets, or a "
+        "design proposal.",
+        "Assumed the request refers to the existing Q2 deck; no target slide numbers "
+        "were supplied.",
+    ),
+    "data_analyst": (
+        "Concise retrieval limitations, source disagreement, or interpretation assumptions; "
+        "never replace `outcome`, `synthesis`, `sources`, `gap`, `reason`, or `tried_tools`.",
+        "The two sources use different fiscal calendars; synthesis compares "
+        "calendar-quarter totals.",
+    ),
+    "builder": (
+        "Concise non-executable rendering/design trade-offs or unavailable inputs; never contain "
+        "HTML, scripts, image IDs, or a substitute for canonical slide output.",
+        "No supplied image IDs; used a text-and-chart composition.",
+    ),
+    "build_reviewer": (
+        "Concise review-scope/evidence notes; never hide, replace, or add a finding "
+        "outside canonical "
+        "`findings`.",
+        "Contrast was assessed against the resolved style tokens supplied in this invocation.",
+    ),
+    "fixer": (
+        "Concise reason for a narrowly limited or declined attempted fix; never replace `changed` "
+        "or `change_summary`.",
+        "Did not alter the chart because the reported issue concerns only title overflow.",
+    ),
+    "fix_reviewer": (
+        "Concise evidence about whether the original issue was resolved or a review limitation; "
+        "never replace the canonical verdict/findings.",
+        "Verified the original overflow against the corrected title container.",
+    ),
+    "deck_reviewer": (
+        "Concise deck-level review scope/limitations; never replace deck findings or introduce "
+        "slide-level findings.",
+        "Narrative assessment used the supplied slide sequence; no presenter notes were available.",
+    ),
+}
+
+
+def _issue(code: str, message: str, *path: str | int) -> SchemaValidationIssue:
+    return SchemaValidationIssue(code=code, message=message, path=path)
+
+
+def test_recursive_overlay_is_frozen_and_serializes_as_exact_json() -> None:
+    overlay = SchemaOverlay.model_validate(
+        {
+            "field_overrides": {
+                "message": {
+                    "description": "  Keep intentional edge spaces.  ",
+                    "examples": [
+                        {"nested": [1, True, None, {"label": "value"}]},
+                        "plain",
+                    ],
+                }
+            },
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+    )
+
+    guidance = overlay.field_overrides["message"]
+    assert isinstance(overlay.field_overrides, MappingProxyType)
+    assert isinstance(guidance.examples, tuple)
+    assert isinstance(guidance.examples[0], MappingProxyType)
+    assert guidance.examples[0]["nested"] == (1, True, None, MappingProxyType({"label": "value"}))
+    assert overlay.model_dump(mode="json") == {
+        "field_overrides": {
+            "message": {
+                "description": "  Keep intentional edge spaces.  ",
+                "examples": [
+                    {"nested": [1, True, None, {"label": "value"}]},
+                    "plain",
+                ],
+            }
+        },
+        "additional_optional_fields": ["diagnostic_notes"],
+    }
+    assert SchemaOverlay().model_dump(mode="json") == {
+        "field_overrides": {},
+        "additional_optional_fields": [],
+    }
+    with pytest.raises(TypeError):
+        overlay.field_overrides["message"] = CanonicalFieldGuidance()  # type: ignore[index]
+    protected = CanonicalFieldGuidance.model_validate({"type": {"nested": []}})
+    with pytest.raises(TypeError):
+        protected.__pydantic_extra__["type"] = "changed"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        protected.__pydantic_extra__["type"]["nested"] = ()  # type: ignore[index]
+    with pytest.raises(ValidationError):
+        SchemaOverlay.model_validate(
+            {"field_overrides": {}, "additional_optional_fields": [], "identity": {}}
+        )
+
+
+def test_retained_identity_tables_and_bundle_order_are_frozen_literals() -> None:
+    assert MODEL_DRIVEN_AGENT_KEYS == EXPECTED_ROLES
+    assert tuple(V1_SCHEMA_IDENTITIES) == EXPECTED_ROLES
+    assert tuple(V2_SCHEMA_IDENTITIES) == EXPECTED_ROLES
+    assert tuple(SCHEMA_CONTRACT_BUNDLES) == tuple(
+        (role, version) for role in EXPECTED_ROLES for version in (1, 2)
+    )
+    assert {role: item.digest for role, item in V1_SCHEMA_IDENTITIES.items()} == EXPECTED_V1_DIGESTS
+    assert {role: item.digest for role, item in V2_SCHEMA_IDENTITIES.items()} == EXPECTED_V2_DIGESTS
+    assert all(
+        item.version == 1 and item.agent_key == role for role, item in V1_SCHEMA_IDENTITIES.items()
+    )
+    assert all(
+        item.version == 2 and item.agent_key == role for role, item in V2_SCHEMA_IDENTITIES.items()
+    )
+    with pytest.raises(TypeError):
+        V1_SCHEMA_IDENTITIES["architect"] = V1_SCHEMA_IDENTITIES["architect"]  # type: ignore[index]
+
+
+def test_v1_catalogs_are_empty_and_v2_catalogs_have_exact_role_descriptors() -> None:
+    for role in EXPECTED_ROLES:
+        v1 = SCHEMA_CONTRACT_BUNDLES[(role, 1)]
+        v2 = SCHEMA_CONTRACT_BUNDLES[(role, 2)]
+        assert v1.canonical_model is OUTPUT_SCHEMAS[role]
+        assert v1.optional_fields == ()
+        assert len(v2.optional_fields) == 1
+        descriptor = v2.optional_fields[0]
+        assert descriptor.name == "diagnostic_notes"
+        assert (descriptor.description, descriptor.example) == EXPECTED_DESCRIPTOR_TEXT[role]
+        assert descriptor.max_items == 8
+        assert descriptor.item_min_length == 1
+        assert descriptor.item_max_length == 280
+        assert descriptor.strip_whitespace is True
+        with pytest.raises(FrozenInstanceError):
+            descriptor.name = "speaker_notes"  # type: ignore[misc]
+
+
+def test_registry_fails_closed_if_frozen_v2_bundle_material_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.services.agent_schema_registry as module
+
+    changed = dict(module._V2_OPTIONAL_DESCRIPTORS)
+    changed["architect"] = replace(changed["architect"], description="changed")
+    monkeypatch.setattr(module, "_V2_OPTIONAL_DESCRIPTORS", MappingProxyType(changed))
+
+    with pytest.raises(SchemaContractMaterialChangedError, match="architect"):
+        AgentSchemaRegistry()
+
+
+def test_identity_resolution_is_exact_and_mismatches_return_one_immutable_issue() -> None:
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for("architect", 2)
+    assert identity == V2_SCHEMA_IDENTITIES["architect"]
+
+    unavailable = (
+        replace(identity, digest="0" * 64),
+        replace(identity, agent_key="builder"),
+        replace(identity, version=999),
+    )
+    for wrong in unavailable:
+        issues = registry.validate_overlay("architect", wrong, SchemaOverlay())
+        assert issues == (
+            _issue(
+                "overlay_schema_contract_unavailable",
+                "Schema contract bundle is unavailable.",
+            ),
+        )
+        with pytest.raises(AttributeError):
+            issues.append(issues[0])  # type: ignore[attr-defined]
+        with pytest.raises(FrozenInstanceError):
+            issues[0].code = "changed"  # type: ignore[misc]
+
+
+def test_overlay_validation_reports_field_and_property_issues_in_request_order() -> None:
+    registry = AgentSchemaRegistry()
+    overlay = SchemaOverlay.model_validate(
+        {
+            "field_overrides": {
+                "unknown": {"description": "fine"},
+                "message": {
+                    "examples": [],
+                    "description": " \t",
+                    "json_schema": {"type": "integer"},
+                    "nested": {"protected": True},
+                },
+                "intent": {"examples": [object()]},
+            },
+            "additional_optional_fields": [],
+        }
+    )
+
+    assert registry.validate_overlay(
+        "architect", registry.identity_for("architect", 2), overlay
+    ) == (
+        _issue(
+            "overlay_unknown_canonical_field",
+            "Canonical field is not available for this agent.",
+            "field_overrides",
+            "unknown",
+        ),
+        _issue(
+            "overlay_description_blank",
+            "Description must not be blank.",
+            "field_overrides",
+            "message",
+            "description",
+        ),
+        _issue(
+            "overlay_examples_empty",
+            "Examples must contain at least one item.",
+            "field_overrides",
+            "message",
+            "examples",
+        ),
+        _issue(
+            "overlay_guidance_property_forbidden",
+            "Only description and examples are editable.",
+            "field_overrides",
+            "message",
+            "json_schema",
+        ),
+        _issue(
+            "overlay_guidance_property_forbidden",
+            "Only description and examples are editable.",
+            "field_overrides",
+            "message",
+            "nested",
+        ),
+        _issue(
+            "overlay_examples_invalid_json",
+            "Examples must contain JSON-compatible values.",
+            "field_overrides",
+            "intent",
+            "examples",
+        ),
+    )
+
+
+def test_overlay_validation_accepts_each_guidance_mutation_independently_and_together() -> None:
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for("architect", 2)
+
+    for raw in (
+        {"field_overrides": {"message": {"description": "New description"}}},
+        {"field_overrides": {"message": {"examples": ["A", {"json": True}]}}},
+        {"field_overrides": {"message": {"description": "New description", "examples": ["A"]}}},
+    ):
+        assert (
+            registry.validate_overlay("architect", identity, SchemaOverlay.model_validate(raw))
+            == ()
+        )
+
+
+def test_optional_name_validation_has_exact_precedence_and_index_order() -> None:
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for("architect", 2)
+    overlay = SchemaOverlay(
+        additional_optional_fields=(
+            " ",
+            "diagnostic_notes",
+            "diagnostic_notes",
+            "message",
+            "speaker_notes",
+        )
+    )
+
+    assert registry.validate_overlay("architect", identity, overlay) == (
+        _issue(
+            "overlay_optional_field_blank",
+            "Optional field name must not be blank.",
+            "additional_optional_fields",
+            0,
+        ),
+        _issue(
+            "overlay_optional_field_duplicate",
+            "Optional field names must be unique.",
+            "additional_optional_fields",
+            2,
+        ),
+        _issue(
+            "overlay_optional_field_canonical_collision",
+            "Optional field name collides with a canonical field.",
+            "additional_optional_fields",
+            3,
+        ),
+        _issue(
+            "overlay_optional_field_ineligible",
+            "Optional field is not available for this agent.",
+            "additional_optional_fields",
+            4,
+        ),
+    )
+
+
+def test_v1_rejects_every_optional_selection_because_its_catalog_is_empty() -> None:
+    registry = AgentSchemaRegistry()
+    issues = registry.validate_overlay(
+        "architect",
+        registry.identity_for("architect", 1),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+    assert issues == (
+        _issue(
+            "overlay_optional_field_ineligible",
+            "Optional field is not available for this agent.",
+            "additional_optional_fields",
+            0,
+        ),
+    )
+
+
+def test_compose_applies_guidance_and_builds_a_strict_dynamic_model() -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay.model_validate(
+            {
+                "field_overrides": {
+                    "message": {"description": "Replacement", "examples": ["Example"]}
+                },
+                "additional_optional_fields": ["diagnostic_notes"],
+            }
+        ),
+    )
+
+    schema = composed.model.model_json_schema(mode="validation")
+    assert composed.canonical_model is ArchitectOutput
+    assert composed.declared_optional_names == ("diagnostic_notes",)
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["message"]["description"] == "Replacement"
+    assert schema["properties"]["message"]["examples"] == ["Example"]
+    assert schema["properties"]["diagnostic_notes"]["default"] is None
+    assert schema["properties"]["diagnostic_notes"]["anyOf"][0]["maxItems"] == 8
+    with pytest.raises(ValidationError):
+        composed.model.model_validate({"intent": "discuss", "message": "ok", "rogue": True})
+
+
+def test_compose_rejects_invalid_overlay_with_ordered_diagnostics() -> None:
+    registry = AgentSchemaRegistry()
+    with pytest.raises(SchemaOverlayValidationError) as raised:
+        registry.compose(
+            "architect",
+            registry.identity_for("architect", 2),
+            SchemaOverlay(additional_optional_fields=("speaker_notes",)),
+        )
+    assert raised.value.issues == (
+        _issue(
+            "overlay_optional_field_ineligible",
+            "Optional field is not available for this agent.",
+            "additional_optional_fields",
+            0,
+        ),
+    )
+
+
+def test_raw_keys_are_rejected_before_pydantic_projection() -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+
+    with pytest.raises(AgentOutputValidationError) as raised:
+        registry.validate_output(
+            composed,
+            {"intent": "discuss", "message": "ok", "speaker_notes": ["must reject"]},
+        )
+    assert raised.value.issues == (
+        _issue(
+            "output_undeclared_top_level_field",
+            "Output contains an undeclared top-level field.",
+            "speaker_notes",
+        ),
+    )
+
+
+def test_canonical_and_optional_validation_fail_with_distinct_diagnostics() -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+
+    with pytest.raises(AgentOutputValidationError) as canonical:
+        registry.validate_output(composed, {"intent": "build", "message": "missing deck"})
+    assert canonical.value.issues[0].code == "output_invalid_canonical_field"
+    assert canonical.value.issues[0].path == ()
+
+    with pytest.raises(AgentOutputValidationError) as optional:
+        registry.validate_output(
+            composed,
+            {
+                "intent": "discuss",
+                "message": "ok",
+                "diagnostic_notes": ["valid"] * 9,
+            },
+        )
+    assert optional.value.issues == (
+        _issue(
+            "output_invalid_optional_field",
+            "Output contains an invalid optional field.",
+            "diagnostic_notes",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("optional_fragment", "expected"),
+    [
+        ({}, {}),
+        ({"diagnostic_notes": None}, {"diagnostic_notes": None}),
+        ({"diagnostic_notes": []}, {"diagnostic_notes": ()}),
+        (
+            {"diagnostic_notes": ["  stripped  "]},
+            {"diagnostic_notes": ("stripped",)},
+        ),
+    ],
+)
+def test_output_retains_only_explicitly_supplied_selected_optional_values(
+    optional_fragment: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay(additional_optional_fields=("diagnostic_notes",)),
+    )
+    result = registry.validate_output(
+        composed,
+        {"intent": "discuss", "message": "ok", **optional_fragment},
+    )
+
+    assert type(result.canonical_output) is ArchitectOutput
+    assert result.canonical_output.model_dump() == {
+        "intent": "discuss",
+        "message": "ok",
+        "deck_spec": None,
+        "data_request": None,
+        "target_positions": [],
+        "proposed_design_contract": None,
+    }
+    assert isinstance(result.additional_fields, MappingProxyType)
+    assert dict(result.additional_fields) == expected
+    with pytest.raises(TypeError):
+        result.additional_fields["diagnostic_notes"] = []  # type: ignore[index]
+
+
+def test_unselected_optional_default_is_never_projected() -> None:
+    registry = AgentSchemaRegistry()
+    composed = registry.compose(
+        "architect",
+        registry.identity_for("architect", 2),
+        SchemaOverlay(),
+    )
+    result = registry.validate_output(composed, {"intent": "discuss", "message": "ok"})
+    assert result.additional_fields == {}
+
+
+def test_upgrade_content_to_v2_preserves_content_and_uses_server_owned_identity() -> None:
+    class Content(BaseModel):
+        model_config = ConfigDict(frozen=True)
+        agent_key: str
+        schema_contract: SchemaContractIdentity
+        schema_overlay: SchemaOverlay
+        prompt_text: str
+
+    original = Content(
+        agent_key="architect",
+        schema_contract=V1_SCHEMA_IDENTITIES["architect"],
+        schema_overlay=SchemaOverlay(),
+        prompt_text="unchanged",
+    )
+    upgraded = upgrade_content_to_v2(original)
+
+    assert upgraded is not original
+    assert upgraded.agent_key == original.agent_key
+    assert upgraded.prompt_text == original.prompt_text
+    assert upgraded.schema_overlay == original.schema_overlay
+    assert upgraded.schema_contract == V2_SCHEMA_IDENTITIES["architect"]
