@@ -445,7 +445,12 @@ In the workspace, go to **Catalog** and create a new connection.
 | Client ID | from stage 1 |
 | Client secret | from stage 1 |
 | Authorization endpoint | `https://<your-workspace-url>/oidc/v1/authorize` |
-| OAuth scope | `all-apis` |
+| OAuth scope | `all-apis offline_access` |
+
+> **Both scopes are needed, in the one field, space-separated.** `all-apis` grants the API
+> access. `offline_access` is what makes the token endpoint return a *refresh* token, and
+> without it the connection cannot renew a user's access token — so the connection stops
+> working an hour in. This is verified behaviour, not a precaution.
 
 **Page 3 — MCP settings**
 
@@ -491,6 +496,8 @@ Genie should call the tellr MCP tools. The first call sends you through OAuth co
 
 **The OAuth endpoints belong to the workspace, not to tellr.** Authorization and token endpoints are `/oidc/v1/authorize` and `/oidc/v1/token` on your *workspace* URL. Only **Host** points at tellr.
 
+**Verified gotcha: `all-apis` on its own is not enough.** The connection's **OAuth scope** must be `all-apis offline_access`. With `all-apis` alone no refresh token is issued, the user's access token expires after an hour, and a connection that had been working stops — it is exactly the one-hour expiry that `offline_access` prevents. If Genie One called tellr fine at first and later began failing, check this field before anything else.
+
 **The client secret is shown once.** If it is lost, mint a new one in the account console and update the connection.
 
 **Ask for small decks first.** `create_deck` returns immediately and the caller must poll `get_deck_status`; a single-slide deck is ready in ~10-30s but a 10-slide deck takes 3-8 minutes (§2.4, Gotcha 4). Keep the first test small so the round-trip completes quickly.
@@ -522,6 +529,7 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 | `Deck not found or you do not have permission to view it` | Your identity doesn't match the deck's creator and you're not a contributor. | Check `created_by` on the deck; use the creator's identity or share the deck. |
 | Genie One's **Connectors** list doesn't show the tellr connection | Either the **Third Party Connectors for Agents** preview is off for the workspace, or the connection isn't flagged as an MCP connection (which a schema-scoped connection can't be). | Enable the preview, and confirm the connection was created at the metastore level with "is MCP connection" ticked — see §4.2. |
 | Genie One reports 403 from tellr although `USE CONNECTION` is granted | The Apps proxy checks app-level access separately from the Unity Catalog grant. | Ask tellr's app owner to grant that user access to the app — see §4.6. |
+| Genie One's calls to tellr work for about an hour, then stop | The Unity Catalog connection's **OAuth scope** omits `offline_access`, so no refresh token was issued and the expired access token cannot be renewed. | Edit the connection and set **OAuth scope** to `all-apis offline_access` — see §4.2. |
 
 ### 5.3 v1 limitations
 
