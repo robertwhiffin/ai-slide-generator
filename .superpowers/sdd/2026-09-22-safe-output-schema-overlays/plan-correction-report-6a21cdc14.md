@@ -27,7 +27,7 @@ Corrected `docs/superpowers/plans/2026-09-22-safe-output-schema-overlays.md` wit
 ## Preserved execution guarantees
 
 - Local integration order remains #265 → #264 → #266, with no remote integration dependency.
-- Review packages use exact recorded task bases and the whole-branch implementation base, never `HEAD~1`.
+- Review packages use exact recorded task bases and the whole-branch integration base, never `HEAD~1`.
 - Controller and reviewer sabotage distinct executed seams with marker, RED, restore, and GREEN evidence.
 - PostgreSQL tests require real execution with zero skips and identity/state assertions.
 - The final review uses the most-capable reviewer and requires writer, sink-outcome, no-write/rollback, and merge verdicts.
@@ -39,3 +39,15 @@ Corrected `docs/superpowers/plans/2026-09-22-safe-output-schema-overlays.md` wit
 - #265 is currently a corrected plan rather than landed integrated code. Task 0 must reconcile its eventual schema/route/client owners with the explicitly defined schema-upgrade `client_candidate: null` contract before shared edits; changing that contract requires a recorded spec ruling, not an ad hoc compatibility layer.
 
 This was a documentation-only correction. No implementation tests, dependency commands, PR, push, or merge were run.
+
+## Round 2 resolution — review `20b019b07`
+
+Re-corrected the plan after re-reading the full review and re-probing local refs on 2026-09-22. Current local observations remain `feat/langgraph-core` at `774703e4487877bf65e0eeff173892d3e00ceac5`, `feat/conversation-pins-runtime-261` at `785d9aaca35a3a9103cd4283afdc6bda3b679882`, `feat/shared-graph-draft-editor-263` at `1d706e21b92aad68314da2e79bb4d1d5626663b7`, and corrected #265 plan at `ae3d09f3437eb9ce45a6ac52c992c03a3a00c6ca`. The plan records these only as observations; execution still re-resolves final reviewed heads.
+
+| Review finding | Round 2 correction |
+|---|---|
+| Important I1 — ambiguous post-rebase base | Replaced the overloaded old base artifact with immutable `TASK1_BASE` and `INTEGRATION_BASE`, plus `predecessor-heads.md`. `TASK1_BASE` is now only Task 1 starting evidence. `INTEGRATION_BASE..HEAD` is the required final review/package range, and Task 0/Task 7 must prove that range contains exactly rebased Task 1 plus Tasks 2-6, with no integrated predecessor commits packaged as #264 work. |
+| Important I2 — incomplete/current verification matrix | Added current #261 `tests/integration/test_persisted_graph_runtime_failures_postgres.py` to Task 3 and Task 7 with `TELLR_TEST_POSTGRES_URL` and zero-skip requirements. Expanded Task 7 to exact backend unit paths covering #260/#261/#263/#265/#264, exact named PostgreSQL invocations for #260 bootstrap/constraints, #261 persisted-runtime failures, #263/#265 workbench, and #264 overlay tests, plus exact frontend unit/typecheck/ESLint/Playwright commands. Task 0 may reconcile renamed files but may not drop the current #261 PostgreSQL failure coverage. |
+| Important I3 — missing final-head/pre-merge gate | Added a final pre-local-merge gate that re-resolves final reviewed #261/#263/#265 heads and current local root, proves those heads and recorded `INTEGRATION_BASE` are ancestors of both local root and #264 `HEAD`, recomputes the reviewed `INTEGRATION_BASE..HEAD` diff, refuses merge if reconciliation changes that reviewed #264 diff, and requires integration/rebase plus refreshed corrections, baselines, affected task review, and final review if any predecessor advanced. |
+
+Preserved constraints: local-only order #265 -> #264 -> #266; Task 0/Task 1 isolation; exact package ranges; no remote refs/fetch/PR/push/merge; absolute shared pyenv pytest; no installs, `uv`, `pip`, or `.venv`.
