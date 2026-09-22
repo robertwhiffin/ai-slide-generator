@@ -172,6 +172,9 @@ class GraphState(TypedDict, total=False):
     # Set once per session by invoke_graph.
     session_id: str
 
+    # Immutable persisted Graph Release selected when the conversation was created.
+    graph_release_id: int
+
     # Set at the start of each turn by invoke_graph.
     turn_id: str
 

@@ -73,6 +73,7 @@ def _branch_payload(env, position=0, html=None, scripts="", spec=None, **extra):
     slide_spec = spec.slide_at(position)
     payload = {
         "session_id": env.session_id,
+        "graph_release_id": 1,
         "turn_id": TURN,
         "initiated_by": USER,
         "position": position,
@@ -102,8 +103,10 @@ class TestAgentRuntimeSeam:
             def __init__(self):
                 self.calls = []
 
-            def run(self, agent_key, payload, assembly_context):
-                self.calls.append((agent_key, payload, assembly_context))
+            def run(self, agent_key, graph_release_id, payload, assembly_context):
+                self.calls.append(
+                    (agent_key, graph_release_id, payload, assembly_context)
+                )
                 return SimpleNamespace(output=output)
 
         runtime = RecordingRuntime()
@@ -112,8 +115,9 @@ class TestAgentRuntimeSeam:
         architect_node(graph_env.state())
 
         assert len(runtime.calls) == 1
-        agent_key, payload, assembly_context = runtime.calls[0]
+        agent_key, graph_release_id, payload, assembly_context = runtime.calls[0]
         assert agent_key == "architect"
+        assert graph_release_id == 1
         assert payload["session_id"] == graph_env.session_id
         assert assembly_context.design_system_active is False
 
@@ -682,6 +686,7 @@ class TestBuilderNode:
         assert record["section_css"] == TEMPLATE_TOKEN_CSS
         assert record["slide_spec"]["position"] == 2
         assert record["initiated_by"] == USER
+        assert record["graph_release_id"] == 1
         assert updates["slides"]["turn"] == TURN
 
     def test_the_emitted_html_passes_through_the_safety_gate(
@@ -723,6 +728,10 @@ class TestBuilderNode:
 
         assert attempts[0] is None
         assert "rejected" in attempts[1]
+        assert [
+            call["graph_release_id"]
+            for call in graph_env.skills.calls_for("builder")
+        ] == [1, 1]
         assert updates["slides"]["vals"][0]["html"] == "<div class='slide'>clean</div>"
 
     def test_an_exception_placeholds_and_never_lands(self, graph_env):
@@ -1030,6 +1039,30 @@ class TestFixerNode:
         assert updates["fix_target"] == 0
         assert updates["fix_map"]["vals"][0]["in_flight"] is True
         assert updates["fixed"]["vals"][0]["html"] == "<div class='slide'>fixed 0</div>"
+
+    def test_unsafe_retry_keeps_the_session_release(self, graph_env):
+        attempts = []
+
+        def handler(payload):
+            attempts.append(payload.get("corrective_instruction"))
+            if len(attempts) == 1:
+                return fixer_out(
+                    payload,
+                    html="<div class='slide'><img src='https://evil.example/x.png'></div>",
+                )
+            return fixer_out(payload, html="<div class='slide'>clean fix</div>")
+
+        graph_env.skills.set("fixer", handler)
+
+        updates = fixer_node(_fix_state(graph_env, {0: _fix_entry(0)}))
+
+        assert attempts[0] is None
+        assert "rejected" in attempts[1]
+        assert [
+            call["graph_release_id"]
+            for call in graph_env.skills.calls_for("fixer")
+        ] == [1, 1]
+        assert updates["fixed"]["vals"][0]["html"] == "<div class='slide'>clean fix</div>"
 
     def test_an_in_flight_entry_is_never_sent_to_the_model_twice(self, graph_env):
         """This is what makes "exactly one fix round" true rather than aspirational."""

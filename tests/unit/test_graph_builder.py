@@ -168,6 +168,21 @@ class _FakeCompiled:
 @pytest.fixture
 def fake_graph(monkeypatch):
     fake = _FakeCompiled()
+
+    class _PinnedSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def scalar(self, statement):
+            return type("PinnedRow", (), {"graph_release_id": 1})()
+
+    def factory():
+        return _PinnedSession()
+
+    monkeypatch.setattr(builder_module, "get_session_local", lambda: factory)
     monkeypatch.setattr(builder_module, "_compiled_graph", fake)
     yield fake
     set_event_emitter(None)
@@ -290,6 +305,24 @@ class TestNoSendMayTargetTheForeman:
 
 
 class TestInvokeGraphConfig:
+    def test_loads_the_persisted_pin_and_overwrites_hostile_initial_state(
+        self, fake_graph
+    ):
+        calls = []
+
+        def pin_loader(factory, session_id):
+            calls.append((factory, session_id))
+            return 41
+
+        invoke_graph(
+            "sess-42",
+            {"graph_release_id": 999},
+            pin_loader=pin_loader,
+        )
+
+        assert calls == [(builder_module.get_session_local(), "sess-42")]
+        assert fake_graph.calls[0]["state"]["graph_release_id"] == 41
+
     def test_passes_thread_id_and_max_concurrency_and_no_recursion_limit(
         self, fake_graph
     ):
