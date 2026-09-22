@@ -83,6 +83,7 @@ from src.services.graph.event_emitter import (
     get_slide_cursor,
 )
 from src.services.graph.state import has_pending_fix, scoped, scoped_vals
+from src.services.persisted_graph_release import PersistedRuntimeError
 from src.services.template_sections import (
     extract_section,
     resolve_template_bytes,
@@ -92,6 +93,11 @@ from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
+    if isinstance(exc, PersistedRuntimeError):
+        raise exc
 
 # Appended to a skill payload when the safety gate rejects the first attempt.
 # The gate's `regenerate` argument is a ZERO-ARG callable it invokes, so the
@@ -599,7 +605,8 @@ def rereview_committed_slides(
                 subject_hash=compute_slide_hash(html),
                 slide_index=position,
             )
-        except Exception:
+        except Exception as exc:
+            _raise_if_persisted_runtime_failure(exc)
             logger.warning(
                 "Re-review failed at position %s; treating the slide as still "
                 "valid rather than overwriting work we could not judge",
@@ -2001,6 +2008,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
     except Exception as exc:
+        _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)
         if not _placehold_failed_position(
             position,
@@ -2137,6 +2145,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "reviewed_positions": scoped(turn_id, {position}),
         }
     except Exception as exc:
+        _raise_if_persisted_runtime_failure(exc)
         logger.exception("Build review failed at position %s", position)
         if not _placehold_failed_position(
             position,
@@ -2338,7 +2347,8 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         html, _retried = gate_emitted_html(
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
-    except Exception:
+    except Exception as exc:
+        _raise_if_persisted_runtime_failure(exc)
         logger.exception("Fixer failed at position %s; landing the original", position)
         findings = _land_original(
             position, entry, session_id=session_id, initiated_by=initiated_by
@@ -2479,7 +2489,8 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                     # findings inform only that decision.  Same shape as
                     # `_land_original`, deliberately.
                     findings = prior_findings
-            except Exception:
+            except Exception as exc:
+                _raise_if_persisted_runtime_failure(exc)
                 logger.exception(
                     "Fix review failed at position %s; keeping the original",
                     position,
@@ -2496,6 +2507,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             initiated_by=initiated_by,
         )
     except Exception as exc:
+        _raise_if_persisted_runtime_failure(exc)
         # The row could not be delivered at all — the prior findings would not
         # validate, or the write itself failed.  Unguarded, this killed the turn
         # (measured: rows [0, 2] committed, `slide_count = 0`, no deck review and
@@ -2811,6 +2823,7 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 save_deck_review(db, deck_id, digest, findings, initiated_by)
             advisory = _advisory_text(findings)
         except Exception as exc:
+            _raise_if_persisted_runtime_failure(exc)
             logger.exception("Deck review failed; the delivered deck stands")
             advisory = (
                 "The deck is complete, but the deck-level review could not be "
