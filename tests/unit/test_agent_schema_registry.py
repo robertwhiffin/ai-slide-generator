@@ -173,10 +173,14 @@ def test_guidance_supplied_mutations_cannot_be_changed_through_model_fields_set(
         mode="validation"
     )["properties"]["message"]
 
-    try:
-        guidance.model_fields_set.clear()
-    except (AttributeError, TypeError):
-        pass
+    with pytest.raises(ValidationError):
+        guidance.description = "Changed"  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        guidance.examples = ()  # type: ignore[misc]
+    guidance._supplied_mutations = frozenset()
+    guidance.__pydantic_private__ = {"_supplied_mutations": frozenset()}
+    assert overlay.model_dump(mode="json") == expected_dump
+    guidance.model_fields_set.clear()
 
     assert overlay.model_dump(mode="json") == expected_dump
     assert registry.validate_overlay("architect", identity, overlay) == ()
@@ -189,12 +193,61 @@ def test_guidance_supplied_mutations_cannot_be_changed_through_model_fields_set(
 
     omitted = SchemaOverlay.model_validate({"field_overrides": {"message": {}}})
     omitted_guidance = omitted.field_overrides["message"]
-    try:
-        omitted_guidance.model_fields_set.add("description")
-    except (AttributeError, TypeError):
-        pass
+    omitted_guidance._supplied_mutations = frozenset({"description"})
+    omitted_guidance.__pydantic_private__ = {"_supplied_mutations": frozenset({"description"})}
+    assert omitted.model_dump(mode="json")["field_overrides"]["message"] == {}
+    omitted_guidance.model_fields_set.add("description")
     assert omitted.model_dump(mode="json")["field_overrides"]["message"] == {}
     assert registry.validate_overlay("architect", identity, omitted) == ()
+
+
+def test_guidance_model_copy_update_preserves_pydantic_and_omission_semantics() -> None:
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for("architect", 2)
+    original = CanonicalFieldGuidance.model_validate(
+        {"description": "Original", "examples": ["Example"]}
+    )
+
+    copied = original.model_copy(update={"description": "Copied"})
+    assert copied.model_dump(mode="json") == {
+        "description": "Copied",
+        "examples": ["Example"],
+    }
+    copied_overlay = SchemaOverlay(field_overrides={"message": copied})
+    assert copied_overlay.model_dump(mode="json")["field_overrides"]["message"] == {
+        "description": "Copied",
+        "examples": ["Example"],
+    }
+    assert registry.validate_overlay("architect", identity, copied_overlay) == ()
+    copied_property = registry.compose(
+        "architect", identity, copied_overlay
+    ).model.model_json_schema(mode="validation")["properties"]["message"]
+    assert copied_property["description"] == "Copied"
+    assert copied_property["examples"] == ["Example"]
+
+    omitted = CanonicalFieldGuidance()
+    explicit_null = omitted.model_copy(update={"description": None})
+    assert omitted.model_dump(mode="json") == {}
+    assert explicit_null.model_dump(mode="json") == {"description": None}
+    assert (
+        SchemaOverlay(field_overrides={"message": omitted}).model_dump(mode="json")[
+            "field_overrides"
+        ]["message"]
+        == {}
+    )
+    explicit_null_overlay = SchemaOverlay(field_overrides={"message": explicit_null})
+    assert explicit_null_overlay.model_dump(mode="json")["field_overrides"]["message"] == {
+        "description": None
+    }
+    assert registry.validate_overlay("architect", identity, explicit_null_overlay) == (
+        _issue(
+            "overlay_description_blank",
+            "Description must not be blank.",
+            "field_overrides",
+            "message",
+            "description",
+        ),
+    )
 
 
 def test_retained_identity_tables_and_bundle_order_are_frozen_literals() -> None:
