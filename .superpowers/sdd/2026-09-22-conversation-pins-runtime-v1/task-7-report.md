@@ -176,3 +176,52 @@ Follow-up self-review: the fixture creates the active database state required
 by the new public projection, preserves every original Task 2 assertion, and
 does not catch or suppress `ConversationGraphReleaseIntegrityError`. The
 previous concern is resolved; the required combined suite is all green.
+
+## Fix round 1 — batch integrity regression coverage
+
+Reviewer finding addressed (test-only): added three focused tests to
+`tests/unit/test_conversation_graph_version_responses.py`; no production or
+fixture behavior changed in this round.
+
+- `test_non_integer_single_session_pin_is_an_integrity_error` calls the public
+  single-session projection with a real `UserSession` carrying the string pin
+  `"not-an-id"`. It executes the `isinstance(..., int)` guard and would fail if
+  that guard were removed.
+- `test_batch_projection_rejects_dangling_pinned_release` uses real SQLite rows:
+  a non-null `graph_release_id=999` has no `GraphRelease`, so the production
+  batch outer join returns a null version and the dangling-pin guard raises.
+  Removing that guard would make the test fail.
+- `test_batch_projection_rejects_requested_session_absent_from_rows` uses a
+  controlled result seam only for the production batch query's second execute;
+  the active-release lookup is real and the seam returns an empty `.all()`
+  result. This executes the production `len(versions) != len(session_ids)`
+  guard rather than duplicating it in test code. Removing that guard would make
+  the test fail.
+
+Focused command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_graph_version_responses.py
+```
+
+Result: `10 passed, 5 warnings in 0.17s`. Warning causes are unchanged:
+Pydantic v2 compatibility deprecations (two route schemas, Unity Catalog, and
+Databricks AI Bridge) plus the established LangChain community deprecation.
+
+Combined command with skip causes:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q -rs tests/unit/test_conversation_graph_version_responses.py tests/unit/test_conversation_pin_creation.py tests/integration/test_api_routes.py
+```
+
+Result: `105 passed, 2 skipped, 10 warnings in 2.69s`. The two skips are
+unchanged: `MLflow mocking requires complex setup - mlflow is imported inside
+function` at `tests/integration/test_api_routes.py:1193` and `:1216`. The five
+additional warnings relative to the focused unit command are the same existing
+route-module Pydantic deprecation causes recorded in the prior follow-up.
+
+Fix-round self-review: the tests are confined to the declared test file, each
+asserts `ConversationGraphReleaseIntegrityError` from a distinct existing
+production guard, and the omitted-row seam only supplies the batch SQL result
+needed to make the guard reachable. No production behavior, response shape,
+or Task 2 creation semantics was modified.
