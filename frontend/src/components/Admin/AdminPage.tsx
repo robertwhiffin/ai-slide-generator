@@ -18,6 +18,7 @@ type TabId =
 
 export const AdminPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('usage');
+  const [hasVisitedAgentDefinitions, setHasVisitedAgentDefinitions] = useState(false);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -123,7 +124,10 @@ export const AdminPage: React.FC = () => {
             aria-selected={activeTab === 'agent_definitions'}
             aria-controls="agent-definitions-panel"
             id="agent-definitions-tab"
-            onClick={() => setActiveTab('agent_definitions')}
+            onClick={() => {
+              setHasVisitedAgentDefinitions(true);
+              setActiveTab('agent_definitions');
+            }}
             className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors -mb-px ${
               activeTab === 'agent_definitions'
                 ? 'border-blue-500 text-blue-600'
@@ -201,7 +205,7 @@ export const AdminPage: React.FC = () => {
           hidden={activeTab !== 'agent_definitions'}
           className={activeTab !== 'agent_definitions' ? 'sr-only' : ''}
         >
-          {activeTab === 'agent_definitions' && <AgentDefinitionWorkbench />}
+          {hasVisitedAgentDefinitions && <AgentDefinitionWorkbench />}
         </div>
       </div>
     </div>
