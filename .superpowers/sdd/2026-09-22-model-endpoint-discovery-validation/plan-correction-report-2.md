@@ -10,17 +10,19 @@
 Task 1 is reviewed from `TASK1_BASE..TASK1_HEAD`.
 
 At the mandatory Task-2 local integration gate, after reviewed #260/#261/#263/#265/#264
-ancestry is proven and Task 1 is rebased, the plan records `TASK1_REBASED_HEAD`, sets
-final `IMPLEMENTATION_BASE` to the exact proven `INTEGRATION_BASE`, and proves its
-ancestry to `HEAD`.  It also proves the rebased Task-1 subrange contains Task 1 only.
+ancestry is proven, the plan replays the complete ledgered #266 source interval: the
+reviewed plan/research/review history needed to retain the plan plus Task 1 and its
+fixes. It records an auditable `git range-diff`, rejects predecessor-ticket and merge
+commits, sets final `IMPLEMENTATION_BASE` to the exact proven `INTEGRATION_BASE`, and
+proves its ancestry to `HEAD`.
 
 Before final review, the executor must prove `IMPLEMENTATION_BASE` still equals the
-recorded integration base and use its exact `..HEAD` log to show only rebased Task 1,
-Tasks 2–6, and review-approved #266 fixes.  Any #261/#263/#265/#264 predecessor commit
-in that range fails the gate.  The range proof accompanies the whole-branch review
-package.
+recorded integration base and use its exact `..HEAD` log/range-diff to show the allowed
+rebased #266 plan/research/review history, Task 1, Tasks 2–6, and review-approved #266
+fixes. Any #261/#263/#265/#264 predecessor commit or merge commit in that range fails
+the gate. The range proof accompanies the whole-branch review package.
 
-Task 1's package remains `TASK1_BASE..TASK1_HEAD`; after rebase every Task 2–6 review
+Task 1's package remains `TASK1_BASE..TASK1_HEAD`; after replay every Task 2–6 review
 uses its own fresh `TASK_BASE..TASK_HEAD`.  Final `IMPLEMENTATION_BASE` is reserved
 solely for the proven whole-branch package.
 
