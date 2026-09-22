@@ -1,4 +1,4 @@
-# Issue #261 plan repair report — third correction
+# Issue #261 plan repair report — fourth correction
 
 **Plan:** docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md
 
@@ -72,3 +72,23 @@ The prior second-pass report is retained above as historical context; this secti
 supersedes its former claims about typed failures, acceptance selection, endpoint
 classification, and compatibility construction. No implementation or tests were
 run for this planning-only third correction.
+
+## Fourth-pass correction for `.superpowers/issue-261-plan-rereview-3.md`
+
+**Installed seams re-probed:** the pinned `ChatDatabricks` client invokes the
+OpenAI-compatible serving client. `openai.APITimeoutError` is an
+`APIConnectionError`; `openai.NotFoundError` is an `APIStatusError`; none of
+those classes inherit `httpx.HTTPError`. `SchemaContractIdentity` has
+`agent_key`, `version`, and `digest`, while persisted `ContentIdentity` permits
+only `version` and `digest`.
+
+| Third re-review finding | Fourth-pass correction |
+|---|---|
+| Actual ChatDatabricks transport exceptions omitted | Task 4 explicitly translates `openai.APIConnectionError`, `openai.APITimeoutError`, and the `openai.APIStatusError` boundary (including `NotFoundError`) from every provider phase. Pydantic and LangChain output-parser errors remain ordinary. |
+| Compatibility schema contract fails `extra="forbid"` validation | The constructor now writes a two-field schema-contract identity and requires DefinitionContent validation plus hash equality for all seven graph roles. |
+| Coded/identity-bearing errors have no value contract | Task 3 now defines frozen, slotted dataclass exceptions with exact fields, legal configuration codes, safe strings, and field/content-exclusion tests. |
+| Sink conversion order is ambiguous | Task 4 shows the exact runtime callback: it catches the provider wrapper and raises `PinnedInvocationEndpointError` before `identity_sink.invoke` returns control to either sink. Recording and logging sinks are each required to observe/rethrow the same converted type, with converted error-class assertions. |
+
+This section supersedes the third-pass report’s provider-taxonomy, compatibility,
+error-value, and sink-order descriptions. No implementation, test suite, install,
+push, or merge was run for this planning-only fourth correction.
