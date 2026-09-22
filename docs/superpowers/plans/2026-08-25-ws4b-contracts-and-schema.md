@@ -1,0 +1,940 @@
+# ws4b — Contracts, schema and deck-level persistence
+
+> **For agentic workers:** REQUIRED SUB-SKILLS: `superpowers:subagent-driven-development` **plus**
+> `executing-plans-tellr`. **Read `2026-08-25-ws4-index.md` first** — this plan inherits its Global
+> Conventions (environment, the cause-based baseline gate, rulings R1/R2, the verified runtime facts,
+> execution requirements) and does not repeat them.
+
+**Goal:** Freeze every contract the graph binds to, land all four schema changes in one migration
+pass, prove the checkpointer against real Lakebase, and build the deck-level write/read path — all
+without a graph and without a model in the loop.
+
+**Why this is its own PR:** §A1 is the organising insight. A skill's prompt *prose* is metadata; its
+output *schema* is a contract, and the graph binds to it in four places at once — the reducers key
+off it, `foreman_router` reads its fields, `finding.ts` mirrors it, the conformance tests parse it. A
+schema change after ws4c starts ripples through all four plus the frontend types. So the contracts
+land, and get reviewed, **before** any code binds to them.
+
+**Depends on:** ws4a. **Blocks:** ws4c, ws4d, ws4e.
+
+**The rule that makes this PR worth separating:** once merged, **a later PR that wants a schema field
+which does not exist escalates back here — it never edits locally.** Three of the review loop's
+blocking findings were exactly that violation.
+
+**Spec:** §A1, §A2, §F1–§F4, §E2, §L3, §K4, §K7–§K9, §H1a, §H1b, §L2, §L2a, §L8, §M3, §G3, §C.
+
+---
+
+## Part 1 — Contracts
+
+### B1.1 The canonical finding schema and criteria registry
+
+**Contract** — `src/domain/finding.py`. Pure Pydantic; no DB, no framework imports.
+
+```python
+VERDICT_KEY = "tellr_review"          # findings nest one level deeper than is_placeholder_record scans
+
+FindingCategory = Literal["content", "design", "narrative"]     # CLOSED
+FindingStatus   = Literal["open", "fixed"]
+FindingLevel    = Literal["slide", "deck"]
+SlideVerdict    = Literal["clean", "fixed", "surfaced"]  # "placeholder" verdicts are constructed by commit_placeholder with error:True
+
+class FindingCriterion(BaseModel):
+    name: str; category: FindingCategory; level: FindingLevel
+    objective: bool          # PREDICATE: could a fixer handle this. NOT a state.
+    description: str
+
+CRITERIA: dict[str, FindingCriterion]
+
+class Finding(BaseModel):
+    id: str; slide_index: int          # -1 for deck-level
+    category: FindingCategory; criterion: str; message: str
+    objective: bool                    # predicate
+    status: FindingStatus = "open"      # STATE: did a fixer handle it (§F2 branches on this)
+    seen: bool = False                 # initial value only; lifecycle owned client-side
+
+def make_finding_id(criterion: str, subject_hash: str, ordinal: int = 0) -> str
+class SlideReviewOutput(BaseModel)     # slide_index, verdict, findings + objective/subjective splits
+class DeckReviewOutput(BaseModel)      # findings
+def build_verification_record(*, content_hash, findings, verdict) -> dict
+def findings_from_record(record, content_hash) -> list[Finding]
+```
+
+**Three hard constraints, each with a measured defect behind it.** These are the reason this file is
+canonical rather than convenient.
+
+1. **`category` is a closed union** consumed by an exhaustive `Record<SlideFinding['category'], string>`
+   at `FeedbackDrawer.tsx:13`. A fourth value **fails to compile**. So every criterion must map into
+   the three — which is why §A2's criteria list is schema-relevant, not stylistic.
+2. **`error` is reserved for placeholder detection (ws4c/d).** `is_placeholder_record`
+   (`slide_repository.py:41-61`) checks for `error is True` to detect failed placeholders. In the frontend,
+   `VerificationResult.error` is a **required boolean field** (`types/verification.ts:22`), not a trap key.
+   A finding payload must not use the key name `error` outside the verdict's structure. `is_placeholder_record`
+   currently has **zero production callers** today (only test fixtures), so this is a guard for ws4c/d's
+   future use, not present-tense breakage. Hence `VERDICT_KEY`.
+3. **A verdict stays inside the `{content_hash: verdict}` shape.** `get_verification_map`
+   (`session_manager.py:1793-1811`) flattens every row's record into one dict that feeds
+   `create_version`, so anything keyed otherwise is persisted into save points and silently lost.
+
+**§A2's initial criteria — few, sharply defined, objective-heavy**, because PRD §14 names review
+fatigue as a live risk and PRD §3 wants most defects fixed before the user sees them.
+
+| Criterion | Category | Level | Objective | Note |
+|---|---|---|---|---|
+| `overflow` | design | slide | yes | Judge against `_SLIDE_FRAME_CONSTRAINTS`' numbers (§L5/§L7), never numbers the reviewer invents |
+| `contrast_failure` | design | slide | yes | |
+| `rogue_colour` | design | slide | yes | Outside the *resolved* contract — compiled artifact tokens, or the resolved style on the legacy branch |
+| `distorted_image` | design | slide | yes | |
+| `source_contradiction` | content | slide | yes | Only assertable against `resolved_data`; a figure with no cited source is not this finding |
+| `brief_not_delivered` | content | slide | **no** | Exactly one subjective slide criterion, so the drawer's actionable path is exercised by real data rather than only fixtures |
+| `arc_gap` | narrative | deck | no | |
+| `cross_slide_repetition` | narrative | deck | no | |
+| `missing_conclusion` | narrative | deck | no | |
+
+**§K9's id rule, which is why this had to be settled here and not deferred.** Seen-state is persisted
+client-side in `localStorage` keyed `(deckKey, finding.id)` (`SlideViewer/seenState.ts`), and two
+requirements pull opposite ways: ids that are *not* stable make every carried-over finding re-highlight
+as unseen each turn (PRD §14's fatigue failure), while ids that are *unconditionally* stable make a
+finding legitimately re-raised after an edit read as already-seen. **A `(criterion, subject_hash, ordinal)`
+composite satisfies both** — stable while the slide is unchanged, different once it is edited, and unique
+when multiple findings of the same criterion exist on one subject. `subject_hash` is the slide's
+`compute_slide_hash` for a slide finding, the deck digest for a deck one. `ordinal` is the finding's
+position in the list of findings of that criterion on that subject (0-indexed), or derive it from the
+message content (digest or hash of the message text) — **decide in this PR and state it.**
+
+**Every caller passes all three arguments.** `ordinal` has a default, so a two-argument call compiles —
+and two `overflow` findings on one slide then mint the **same id**: `build_verification_record` keeps one
+of them, the drawer renders one, and dismissing it marks the other seen. Both consumers currently cite
+the two-part form (ws4c C4's `build_reviewer_node`, ws4e E2's parenthetical); the signature is three-part,
+and a stamping site that has no ordinal to pass has not yet worked out which finding of that criterion
+it is holding.
+
+**Test intent** — `tests/unit/test_finding_schema.py`:
+
+| Assertion | Why |
+|---|---|
+| every criterion's category is one of the three | Widening breaks the TS compile |
+| slide criteria are objective-heavy; deck criteria are all narrative and subjective | §A2's posture, and §F3/§F4's grain split |
+| an id is stable for the same `(criterion, hash)` and **changes** when the hash changes | Both halves of §K9 — one without the other is the bug |
+| two findings of the **same criterion on one subject** get different ids, asserted by round-tripping them through `build_verification_record` and counting what comes back | The collision `ordinal`'s default hides. Calling the helper twice with two explicit ordinals cannot fail; going through the record is what catches a caller that omitted the argument |
+| a `Finding` with an unknown criterion is rejected; one whose category contradicts the registry is rejected | The registry is the authority |
+| `objective` and `status` are independent | The superseded plan's `auto_fixable` conflated predicate and state, which made §F2 unimplementable |
+| `is_placeholder_record(build_verification_record(...))` is **False** for every `SlideVerdict` value | Constraint 2. The qualifier "when `verdict != "placeholder"`" would now be vacuous — `"placeholder"` was removed from the union, so no reachable verdict can produce a placeholder record. Placeholders come only from `commit_placeholder`, which writes `error: True`, and that path is asserted separately below |
+| the record's only top-level key is the content hash | Constraint 3 |
+| findings round-trip through the record | |
+| PR1's placeholder shape still reads as a placeholder | The other direction — don't break what works |
+
+**Sabotage both constraint tests.** Put `error: True` where the helper can see it and confirm red;
+add a criterion with a fourth category and confirm red (pydantic may reject it at import, which is a
+*stronger* guard — record which mechanism caught it). Confirm each sabotage landed on the executed
+path before believing the guard is real.
+
+**Do NOT write `test_every_criterion_maps_into_the_closed_union` as a loop over `CRITERIA`
+asserting membership.** `FindingCriterion.category` is already typed `FindingCategory`, so pydantic
+rejects a fourth value at construction and the test is a tautology. The real risk is the **TS union
+drifting from the Python**, and B1.2's `test_category_label_record_is_exhaustive_over_the_union` is
+what covers it. (Round-3 finding 25.)
+
+---
+
+### B1.2 Mirror the schema into `finding.ts`, with a conformance test
+
+**Contract** — `frontend/src/types/finding.ts` defines `SlideFinding` type that mirrors `Finding` 
+field-for-field in camelCase: `id`, `slideIndex`, `category`, `criterion`, `objective`, `status`, 
+`message`, `seen`. Adds `FindingStatus` type and `CATEGORY_LABEL` constant. `frontend/src/types/verification.ts` 
+defines `VerificationResult` and `VerificationRating`. `DrawerCallbacks` is unchanged.
+
+**Why a conformance test rather than trust:** there is no runtime bridge between the two, which is
+exactly why they had already drifted — the backend produced `{category, severity, description,
+auto_fixable}` while the frontend declared `{id, slideIndex, category, message, seen}`. §7.1 names
+this seam explicitly. The `VerificationResult` interface is equally critical — it's constructed by
+`get_slide_deck` from the backend record and rendered by `VerificationBadge.tsx`, which dereferences
+`.rating` and `.issues.length` (lines 119, 201) without null-checking the whole value.
+
+**Test intent** — `tests/unit/test_finding_conformance.py` and `test_verification_conformance.py`:
+
+*Finding conformance:*
+- every backend field has a camelCase mirror, and `finding.ts` declares no field the backend lacks
+- the `FindingCategory` union equals the categories in `CRITERIA` equals exactly the three
+- the `FindingStatus` union is exactly `open | fixed`
+- `CATEGORY_LABEL`'s keys are exhaustive over the union (`FeedbackDrawer.tsx:13`) — **this is the
+  test that matters**, per finding 25 above
+- a real `Finding.model_dump()` maps to the exact camelCase dict the frontend will read
+
+*Verification conformance:*
+- `VerificationResult` has all required fields: `score`, `rating`, `explanation`, `issues`, `duration_ms`, `error`
+- `VerificationRating` union matches the color and icon switch statements in `verification.ts`
+- a minimal `{content_hash: {"tellr_review": {…}}}` record from the backend maps to a full `VerificationResult` without missing required fields
+
+**Sabotage:** rename `message` → `description` in the mirror only and confirm red. A conformance test
+that survives a rename is the entire defect.
+
+**Fixture and e2e consequences — the part that is easy to miss.**
+`frontend/tests/fixtures/findings.ts` exports **`mockFindings`** with **three** entries: `f1`/`f2` on
+`slideIndex: 1` (content and design categories) and **`f3` on `slideIndex: 3`** (arc_gap, deck-level).
+All three need the full mirror: `id`, `slideIndex`, `category`, `criterion`, `objective`, `status`, 
+`message`. One must carry `status: 'fixed'` (suggest `f1`) so the read-only branch has coverage.
+`f2` and `f3` carry `status: 'open'`. **Keep the ids** — about ten assertions in
+`frontend/tests/e2e/slide-viewer.spec.ts:314-359` key on them, and after ws4a that spec runs in CI.
+
+Two specific breakages to handle rather than discover:
+
+- `slide-viewer.spec.ts:353-360` is `'Apply and Discuss buttons are present on each finding'` — note
+  **no Dismiss**, contrary to what an earlier draft claimed. Rewrite it to assert the branch:
+  `f1` (fixed) renders read-only with no action buttons and a "Fixed" marker; `f2` (open) renders all
+  three.
+- `slide-viewer.spec.ts:341-352` (`dismiss removes a finding from the drawer`) clicks
+  `finding-dismiss-f1`, which **will not render** once `f1` is `status: 'fixed'`. **Repoint it to
+  `f2`**, which stays open and actionable. This test is currently untouched by the change and would
+  break silently.
+- The spec uses `openDeck(page)` + `thumbClick(page, 'ribbon-thumb-1')`. There is no
+  `openDrawerOnSlide` helper — an earlier draft invented one.
+- `f3` carries `criterion: 'arc_gap'`, a **deck**-level criterion, on `slideIndex: 3`. That is fine
+  for a drawer *layout* fixture but contradicts the grain-routing rule, so say so in a comment — and
+  do not let it become the basis of a deck-level assertion. `slideIndex: 3` is **unreachable** in the
+  spec's 3-slide deck (`slide-viewer.spec.ts:63-64`), which is what keeps `drawer-empty` visible on
+  slide 2 at `:319`, so **leave the index where it is**. ws4e E2 asserts grain routing on its own
+  injected component-test finding, not on this fixture.
+
+---
+
+### B1.3 Frontend unit-test runner, and the drawer's `status` branch
+
+There is no FE unit runner today: all five `test*` scripts in `frontend/package.json` are Playwright
+variants and there are zero `*.test.tsx` files. §F2's read-only branch is a component concern badly
+served by E2E, so the runner lands here rather than as a follow-up.
+
+**Contract:** `vitest` + `@testing-library/react` + `jsdom`, a `test:unit` script, `vitest.config.ts`,
+`src/test/setup.ts`. The five Playwright scripts are untouched, and vitest's `include` is
+`src/**/*.test.{ts,tsx}` with `tests/**` excluded so it never collects a Playwright spec.
+
+**Two traps, both measured.**
+
+1. **The `@/ui` alias must resolve to `frontend/src/ui/`**, not `./src/components/ui` — the latter is
+   empty. `tsconfig.app.json:20-22` declares only `"@/*": ["./src/*"]`, so an aliases block claiming
+   to "mirror tsconfig" and adding a second entry is already diverging. A wrong `@/ui` currently
+   works only by accident, because Vite matches the earlier `'@'` entry first, and breaks on any
+   reordering. (Round-3 finding 27.)
+2. **The npm registry lockfile rule.** Your laptop resolves npm through the Databricks proxy; CI
+   resolves through public npmjs. After `npm install`, rewrite the lockfile's `resolved` URLs to
+   `registry.npmjs.org` before committing, and confirm zero `artifactory` hits. This repo has been
+   bitten by it.
+
+**Behaviour changes** — §F2's two halves plus the interaction that neither implies on its own:
+
+| Change | Site | Why |
+|---|---|---|
+| suppress Apply/Dismiss/Discuss when `status === 'fixed'`; add a "Fixed" marker | `FeedbackDrawer.tsx`, replacing the unconditional action block at `:135-160` | §F2: an auto-fixed finding is **reported** (PRD §3 wants what was fixed visible) but not **actionable** |
+| `unseenSlideIndices` and `hasUnseen` both ignore `status === 'fixed'` | `SlideViewer.tsx:201-205` and `:525` | Otherwise the unseen badge nags about work already done — the exact fatigue symptom §F2's read-only presentation exists to avoid. §F1 lists this as the third settled field |
+
+**CI: the vitest job** — `frontend-build` runs `npx tsc -b` + `npx vite build` and **adds `npx vitest`**
+with `include: src/**/*.test.{ts,tsx}`. `.github/workflows/test.yml` adds a new **`frontend-unit-tests`**
+job (separate from `frontend-build`) running `cd frontend && npm run test:unit`, enabled by default. The
+job must **not** block the e2e matrix. **ws4b is its sole owner: there is no co-ownership and no
+"earliest merge wins".** ws4b precedes ws4e by construction — ws4e's `Depends on:` names it — so ws4e
+adds no vitest job of its own and instead verifies that its component tests are collected by this one.
+A missing job is an escalation back here, never a local addition there.
+
+**Test intent — two files, because the table above states two behaviour changes.**
+
+`FeedbackDrawer.test.tsx`: an open finding renders all three actions; a fixed finding renders none and
+is labelled; the two render correctly when mixed. **Sabotage** by replacing the status gate with
+`true &&`, confirm red, and grep to confirm the edit landed.
+
+`SlideViewer.test.tsx` — **the second row of the table has no coverage without this.** Assert that a
+slide whose only unseen finding is `status: 'fixed'` reports **no** unseen indicator, and that a slide
+with an open unseen finding still does. Note the existing e2e (`slide-viewer.spec.ts:324-337`, "unseen
+indicator appears then clears once slide 1 is viewed") passes **regardless** of this change, because
+`f2` stays open — so it is not coverage. **Sabotage** by dropping the `status === 'fixed'` filter from
+`unseenSlideIndices` and confirming the fixed-only case goes red.
+
+**The tsconfig decision, made here rather than left to the builder.** Tests at
+`src/**/*.test.{ts,tsx}` land **inside** `tsconfig.app.json`'s `include: ["src"]`, which declares
+`types: ["vite/client"]` only and runs `noUnusedLocals`/`noUnusedParameters` — so `describe`/`it`/`expect`
+and the `jest-dom` matchers are untyped and `tsc -b` fails, which the Definition of Done requires to be
+clean. `vitest.config.ts` also falls outside both projects (`tsconfig.node.json` includes only
+`vite.config.ts` and `playwright.config.ts`). **Resolve by adding `"vitest/globals"` and
+`"@testing-library/jest-dom"` to `tsconfig.app.json`'s `types`, and `vitest.config.ts` to
+`tsconfig.node.json`'s `include`.** This is not a preference — leaving it unstated makes the plan's own
+DoD unsatisfiable on the first `tsc -b`.
+
+---
+
+### B1.4 Deck spec models
+
+**Contract** — `src/domain/deck_spec.py`. Pure Pydantic; **no DB imports** (`src/domain/` has none
+today, and persistence belongs to B3.1).
+
+```python
+class DesignContractRef(BaseModel):     # WHICH brand, never the compiled content
+    design_system_id: int | None; template_id: int | None; slide_style_id: int | None
+class ResolvedFigure(BaseModel):  key: str; value: str; source: str
+class ResolvedData(BaseModel):    synthesis: str; figures: list[ResolvedFigure]; gaps: list[str]
+class SlideSpec(BaseModel):
+    position: int; purpose: str; content_brief: str; assumes: str; hands_off: str
+    data_references: list[str]; template_section_index: int | None
+class DeckSpec(BaseModel):
+    title: str
+    audience: str; purpose: str; argument: str; call_to_action: str
+    narrative_arc: list[str]; design_contract: DesignContractRef
+    resolved_data: ResolvedData; slides: list[SlideSpec]
+    def slide_at(self, position: int) -> SlideSpec | None
+    def to_json(self) -> str
+    @classmethod
+    def from_json(cls, raw: str | None) -> DeckSpec | None    # never raises
+```
+
+**Five invariants the validators must enforce, each with a reason:**
+
+- **`title` is required and non-empty (§H1).** Nothing else in these contracts carries a deck title:
+  `ArchitectOutput` is closed and declares none, `SlideSpec` has no title, and the graph's pre-fan-out
+  deck-level write persists `title` to the deck row **and** the session row (B3.1) while ws4d asserts a
+  `SESSION_TITLE` event on turn 1 of a graph session. So the title reaches the writer only as a field on
+  the spec the architect commits — read off the committed spec, never derived from builder output. Reject
+  empty and whitespace-only.
+- **`design_contract` stores a reference, never content (§L3).** `compiled_style_content`'s currency
+  is an **exact** `COMPILER_VERSION` match, so a snapshot in the spec is stale the moment the version
+  moves and the spec would silently drive builds from a superseded artifact. §4.1's "+ image
+  guidelines" needs no field either: `image_guidelines` is a column on `slide_style_library` resolved
+  only on the legacy branch, so `slide_style_id` *is* the reference.
+- **A design system and a slide style are mutually exclusive** (§L1, enforced in three places
+  downstream). Reject both-set.
+- **`template_id` requires a `design_system_id`** — a template belongs to one.
+- **`template_section_index` is an INDEX, never markup** (§M3). Brand bytes never pass through a
+  model, and a spec carrying layout bytes would also go stale against its template.
+
+**`slide_at` looks up BY position, never by list index** — `SlideSpec` carries an explicit `position`,
+and the two diverge after a delete or a partial multi-target rebuild, at which point indexing by list
+position silently briefs a builder for the wrong slide.
+
+**`from_json` returns `None` rather than raising.** A deck may legitimately have no spec (pre-cutover
+decks, MCP-built decks) and a hand-edited column may not parse; spec §4.3 has the architect back-fill
+an absent spec, which it cannot do if the read raised.
+
+**Review criteria are NOT a spec field** (§4.2). If the architect authored the standard it is judged
+against, review independence would be nominal. Assert their absence — `review_criteria`, `criteria`,
+`rubric`, `quality_bar` — so a later "helpful" addition fails a test.
+
+**Test intent:** the five validator rejections, **including an empty or whitespace-only `title`**;
+`slide_at` by position with a gap in the sequence;
+positions unique; JSON round-trip lossless; `from_json` tolerates `None`, `""`, malformed JSON and a
+partial object; criteria absent.
+
+---
+
+### B1.5 The five remaining skill output schemas
+
+B1.1 covered `build_reviewer`, `fix_reviewer` and `deck_reviewer` (they share
+`SlideReviewOutput`/`DeckReviewOutput`). This covers the rest plus the registry.
+
+**Contract** — `src/domain/skill_io.py`:
+
+```python
+ArchitectIntent = Literal["discuss", "ask_data", "build", "edit", "confirm_design_contract"]
+class DataRequest(BaseModel):    metric, time_bound, grouping, units, tool_preferences
+class ArchitectOutput(BaseModel): intent, message, deck_spec?, data_request?,
+                                  target_positions, proposed_design_contract?
+class AnalystOutput(BaseModel):   outcome: Literal["success","missing_data","no_tool"], synthesis,
+                                  sources, gap, tried_tools, reason
+class BuilderOutput(BaseModel):   position, html, scripts: str
+class FixerOutput(BuilderOutput): changed: bool, change_summary
+OUTPUT_SCHEMAS: dict[str, type[BaseModel]]      # exactly the seven skill names
+```
+
+**The load-bearing validators:**
+
+| Validator | Why it is not decoration |
+|---|---|
+| `intent='build'` requires `deck_spec`; `ask_data` requires `data_request`; `edit` requires `target_positions`; `confirm_design_contract` requires `proposed_design_contract` | Each intent's payload is what the router acts on. `confirm_design_contract` holds its proposal **outside** `deck_spec` on purpose, so nothing restyles before the user answers (§4.6/§M1) |
+| `outcome='success'` requires **both** `synthesis` and `sources` | "Single source → pass through, do not re-summarise" and "synthesis only engages with 2+ sources" are both uncheckable without the source list |
+| `outcome` is a closed union | Spec §5.2.2's three outcomes are the testable contract |
+| `BuilderOutput.html` must contain **no `<style>` element** | Spec §5.2.3: deck-level CSS has a single writer, and n builders each emitting `<style>` would collide on shared deck state |
+| `scripts` is `str`, not dict | Matches `src/domain/slide.py`'s JavaScript-source-text field |
+
+**`scripts` is `str` everywhere — pick it once, here.** ws4d declares a `scripts` field on
+`StreamEvent` too; it must be the same type. An earlier draft had `str` in one place and
+`Optional[str]` in the other, and wrote a near-unfalsifiable test to paper over it
+(`assert … in (str, "Optional[str]", type(None))`, where the string literal can never match an
+annotation object). (Round-3 finding 26.)
+
+**Test intent:** all seven names present and each a `BaseModel`; each validator's rejection; the
+architect's discuss turn needs no deck spec (PRD §4.1: a substantive shaping conversation with zero
+slides); a builder emitting `<style>` is rejected; `scripts`' annotation is exactly `str`.
+
+---
+
+### B1.6 CI schema smoke tests (§G3)
+
+**Contract:** one realistic canned payload per skill under `tests/fixtures/skill_payloads/<skill>.json`,
+and `tests/unit/test_skill_schema_smoke.py` asserting, for each of the seven: the payload file exists,
+it parses against its schema, the schema emits JSON Schema (it is shipped to the model as a
+structured-output contract), and it round-trips.
+
+**Why realistic and not minimal:** a payload trimmed to required fields lets an optional field's type
+rot undetected.
+
+**This is the gate that stops a prompt edit breaking its own output schema and shipping green** — the
+"test that cannot fail" class this project has paid for twice. **Sabotage it:** rename a field in one
+payload and confirm that skill's parse test goes red.
+
+---
+
+### B1.7 Shared test fixtures
+
+**This is the largest single dependency in the PR and it currently exists nowhere.**
+`tests/unit/conftest.py` does not exist — only `tests/conftest.py`,
+`tests/unit/conftest_design_system.py` and `tests/unit/conftest_images.py`. Everything from B2
+onwards depends on these, so they are built here, first, with contracts stated.
+
+**Two conftests, and which fixture goes in which.** A `conftest.py` is scoped to its own directory tree,
+so nothing declared in `tests/unit/conftest.py` can be requested by a test under `tests/integration/`.
+Three fixtures in the table below have integration-only consumers — `stub_writer`, whose stated purpose is
+call-order assertions in ws4c/d and whose named consumer is ws4c C5's suite in `tests/integration/`, and
+the release-order pair `partial_deck` / `released_deck` — so **declare those three in
+`tests/integration/conftest.py`**, next to the file-backed engine fixture B3.3's closing note puts there.
+Declared under `tests/unit/` they are fixtures no test can request: ws4c rebuilds its own recorder, and the
+call-order contract this table exists to pin drifts across two copies. Everything else stays unit-scoped.
+If a unit test later needs one of the three, it moves up to the existing `tests/conftest.py`, which both
+trees can see — it is never duplicated.
+
+**`tests/integration/conftest.py` is a contended file.** ws4b creates it, ws4c adds the fixtures its
+layer-1 suite still needs, and ws4e's layer-4 job depends on the engine fixture in it. So create it here,
+in one commit, carrying every fixture a later plan's task names; a later plan **appends** to it and
+re-reads it first rather than resolving by hunk.
+
+**Contract — one table, and the methods are part of it.** A fixture whose methods are undeclared is
+a fixture the next task guesses at; round-3 finding 13 caught ~20 such methods and three fixtures used
+but never declared.
+
+| Fixture | Exposes | Purpose |
+|---|---|---|
+| `sqlite_engine_with_decks` | a bound engine | Throwaway sqlite with the deck tables built **by the real migration helper**, not `create_all` |
+| `sqlite_engine_with_prompts` | a bound engine | Same, with `config_prompts` |
+| `deck_fixture` | `session_id`, `deck_row()`, `prune_all_versions()` | One `SessionSlideDeck`; prune deletes every `SlideDeckVersion` for it |
+| `deck_with_three_rows` | `session_id`, `rows()`, `row_snapshot()`, `deck_row()`, `deck_json()`, `version()`, `session_row()`, `deck_row_for(sid)`, `set_raw_deck_spec_json(s)`, `get_slide_deck()`, `duplicate(version_number=None)`, `create_version()`, `version_count()` | The workhorse. `row_snapshot()` must capture enough to prove **no row changed** |
+| `deck_with_spec` | the above plus `set_spec_audience(str)` | Carries a parsed deck spec |
+| `deck_with_spec_but_no_rows` | `get_slide_deck()` | Forces the `deck_json` blob-fallback read path |
+| `deck_with_verdicts` | `verdict_for_html_at(pos)` | Keyed by content hash, so a verdict can be followed across a reorder |
+| `deck_with_marker` | `set_marker(age_seconds=, author=)`, `set_claim(age_seconds=)`, `deck_row()`, `restore_latest_version()`, `restore_version(n)` | The dirty marker's clock is injected, never slept on |
+| `partial_deck` | `land(positions=[…])`, `placehold(position=)`, `session_id` | Drives release-order assertions |
+| `released_deck` | `session_id` | A deck with a committed ascending prefix |
+| `stub_writer` | `written_positions`, `written`, `placeheld` | Monkeypatches `SlideWriter`, recording `(position, html)` **in call order** — order is the assertion in ws4c/d |
+| `contributor_session` | `contributor_session_id`, `owner_deck_row()` | Contributor writes must reach the deck owner |
+| `contributor_session_with_spec` | `get_slide_deck_as_contributor()` | §7.5: spec visibility equals deck visibility |
+| `session_with_messages(user_msgs, assistant_messages=None)` | returns a session id; `session_messages(sid)` helper | ws4d's engine-mode resolution reads the earliest `role='user'` row |
+| `empty_session`, `mcp_created_session` | session ids | The no-message and non-chat cases |
+| `session_with_spec_and_messages` | `session_id` | Context clearing keeps the spec |
+| `session_and_profile_with_legacy_blobs` | `session_local`, `reload_blobs()` | B2.5's JSON-key migration |
+| `session_with_garbage_blob` | `session_local` | See the trap below |
+| `as_user(username)` | context manager | Stamps identity for `modified_by` / permission assertions |
+| `other_user` | context manager | A different principal, for permission denials |
+| `fake_queue` | `.items` | ws4d asserts the emitter queues the **object**, not a string |
+
+**Fixture engines must call `create_all()` after `init_db()` to populate deck tables.** The `_migrate_*`
+helpers for `graph_checkpoints`, `graph_checkpoint_writes`, and `deck_reviews` assume their tables already
+exist (they perform `ALTER` and `DROP` operations only, never `CREATE TABLE`). In production this is safe
+because `create_all()` runs at `database.py:411` before `_run_migrations` at `:414`. In test fixtures:
+- Call `init_db(engine)` to load the ORM and apply migrations (which no-op on empty tables)
+- Ensure the new models are **registered on `Base.metadata`** — a missing import of the model module means `create_all()` skips those tables
+- Call `create_all(bind=engine)` to materialize the deck-level tables, then `_run_migrations(conn)`
+- Verify the fixture produces non-empty `engine.table_names()` or fail loudly rather than silently
+
+**This matters because:** a fixture that yields an engine with zero tables and no error is exactly the
+measured PR1 defect where an idempotency test stayed green with the migration disabled. Guard with an
+explicit assertion.
+
+**Trap for `session_with_garbage_blob`.** `agent_config` is a `NormalizedAgentConfig` (JSON) column,
+so decoding happens in the type's **result processor during the query**, outside any `try` in the
+consuming function. A genuinely unparseable blob raises before a guard in the caller can see it. So
+either make the fixture produce something that survives decode but fails downstream, or drop the
+"skipped not raised" assertion as unreachable and say which. (Round-3 finding 29.)
+
+---
+
+## Part 2 — Schema: four migrations in one pass, and the checkpointer
+
+**Where migrations run:** the chain reached from `run.py::init_database`, **pre-fork**, via
+`init_db()`. Each step `raise SystemExit(1)` on failure, so an app that reaches RUNNING is proof the
+migration applied (§L8).
+
+**Order, and the two facts that constrain it:**
+
+1. **`create_all(bind=engine)` runs at `database.py:411`, BEFORE `_run_migrations` at `:414`.** So
+   `graph_checkpoints`, `graph_checkpoint_writes` and `deck_reviews` — all ORM models — are created by
+   `create_all`, and their `_migrate_*` helpers always short-circuit in production. **This is accepted**
+   (repo precedent: `_migrate_design_system_tables`' own docstring says the same), and the helpers
+   still earn their place for sqlite test paths and for explicitness. **But do not write ordering
+   rhetoric that claims otherwise** — "X must run first or nothing works" is false for three of the
+   four. (Round-3 finding 22.)
+2. **`_run_migrations` ends with `_reassign_new_objects_to_shared_owner(conn, is_sqlite)`**
+   (`database.py:584`), whose comment reads *"Runs LAST so every object created above … is re-homed
+   onto the shared owner."* Appending after it leaves the raw `CREATE INDEX` statements in the new
+   helpers owned by the app's service principal for that boot. **Place the four steps BEFORE the
+   reassign**, and state that as the reason. (Round-3 finding 12.)
+
+Within that placement the four are ordered: checkpointer tables → `deck_reviews` → dirty marker →
+`ConfigPrompts` drop **last**, and only after B2.4 has stopped every writer.
+
+### B2.1 The checkpointer
+
+**Contract** — `src/core/checkpointer.py`: `SqlAlchemyCheckpointSaver(BaseCheckpointSaver)` plus
+`get_checkpointer()` returning a **process-wide** instance. Tables `graph_checkpoints` and
+`graph_checkpoint_writes`, keyed `(thread_id, checkpoint_ns, checkpoint_id[, task_id, idx])`.
+
+**Why custom rather than `langgraph-checkpoint-postgres`** — this is a correctness requirement, not a
+preference. `PostgresSaver(conn: Conn, …)` holds a live psycopg connection. Lakebase's OAuth token
+reaches connections **only** through `provide_token`, a SQLAlchemy `do_connect` listener on the
+**engine** (`database.py:303-312`), refreshed on a 50-minute timer against a 1-hour expiry. A saver
+holding a raw connection never traverses that listener, so its writes begin failing about an hour
+into every deployment — **in production only, and invisibly to any test that mocks the database.**
+
+**Verified surface on `langgraph-checkpoint` 4.1.1** — implement these five methods (they raise 
+`NotImplementedError` on the base class):
+
+```
+get_tuple(config) -> CheckpointTuple | None
+list(config, *, filter=None, before=None, limit=None) -> Iterator[CheckpointTuple]
+put(config, checkpoint, metadata, new_versions) -> RunnableConfig
+put_writes(config, writes: Sequence[tuple[str, Any]], task_id, task_path="") -> None
+delete_thread(thread_id) -> None        # ws4d uses it for context clearing
+CheckpointTuple = (config, checkpoint, metadata, parent_config, pending_writes)
+JsonPlusSerializer().dumps_typed(obj) -> (type: str, bytes);  loads_typed((type, bytes)) -> Any
+```
+
+Note this inventory is the subset the compiled graph uses; `prune`, `copy_thread`, `delete_for_runs`,
+`get_delta_channel_history`, `with_allowlist` and the `a*` methods also exist on the base class with
+`NotImplementedError` (do not implement; they are not called). Only the five above are called and require
+implementation. `get_next_version` is NOT called, so omit it — and do not omit it "because it raises":
+probed on langgraph-checkpoint 4.1.1 the base class ships a **working** integer increment (`None` -> `1`,
+otherwise `current + 1`) and raises only when `current` is a `str`. Omit it because nothing calls it.
+
+**Three traps, all measured.**
+
+1. **`get_session_local()` returns a `sessionmaker`, not a `Session`.** `with sessionmaker() as s`
+   raises `TypeError: 'sessionmaker' object does not support the context manager protocol`. The
+   session-opening helper must call it **twice**. A fixture that injects an explicit factory hides
+   this, which is how it survived review once.
+2. **Do NOT schema-qualify the raw SQL.** `database.py:239,259` append
+   `options=-csearch_path%3D{schema}` to the **connection URL**, so every pooled connection carries
+   it — and `src/core/encryption.py:46-54` is an explicit in-repo NOTE relying on exactly that, with
+   deliberately unqualified raw SQL "because this module must also run against SQLite (unit tests —
+   no schemas)". **Follow `encryption.py`.** Unconditional qualification also breaks every sqlite
+   unit test, and there is no `LAKEBASE_SCHEMA` symbol to import — `database.py` only reads
+   `os.getenv("LAKEBASE_SCHEMA", "app_data")` locally. (Round-3 finding 1.)
+3. **Sync only.** `BaseCheckpointSaver`'s async methods raise `NotImplementedError`, and the whole
+   generation path is sync end to end. Never `astream`. Consequence, recorded in the module docstring
+   because it decides ws4c's stall design: **`Send(timeout=)` is unusable** — it raises
+   `ValueError: Node timeouts are only supported for async nodes…`.
+
+**Test intent** — `tests/unit/test_checkpointer.py`, **against a real sqlite engine, never a mock.**
+Mocking is precisely what would hide the failure mode this design exists to avoid.
+
+- `put` → `get_tuple` round-trips, including a `set`, an **int-keyed dict** and a `None` value — the
+  shapes `GraphState` actually stores, which a naive `json.dumps` would not survive
+- `get_tuple` with no `checkpoint_id` returns the latest; with one, returns that one
+- `list` is newest-first and honours `limit`; `parent_config` links successive checkpoints
+- `put_writes` replays as `pending_writes`; threads are isolated; `delete_thread` clears both tables
+- `get_checkpointer()` is process-wide (one shared saver — a per-session saver would open a
+  connection per session against a `pool_size=80` engine)
+- invoking a compiled graph **without** `thread_id` raises `ValueError`, and a compiled graph
+  **resumes** from this saver across two invokes
+
+Plus a `@pytest.mark.live` Lakebase test asserting a write lands on an engine-issued connection.
+**The real proof of the token path is not a test** — it is an app that stays up past the 50-minute
+refresh with graph traffic on it, which belongs to ws4e's release gate.
+
+**Sabotage the migration, not just the saver:** disable `_migrate_graph_checkpoints`' body and
+confirm the fixture and every test using it go red with "no such table". If they stay green the
+fixture is building tables from the ORM — fix the fixture, not the test.
+
+### B2.2 `deck_reviews` and the deck digest
+
+**Contract** — `src/services/deck_review_store.py`: `compute_deck_digest(list[str]) -> str`,
+`save_deck_review(session_id, deck_id, digest, findings, author)`, `get_deck_review(session_id, deck_id)`. 
+Model `DeckReview` on `deck_reviews`, unique on `(deck_id, deck_digest)`.
+
+**Content-addressed, not SCD2 and not the version counter (§F4).** An SCD2 pair records *when* a
+review was current; every consumer needs *which deck state it judged*, and those come apart the moment
+a user edits and reverts. Three consequences, all simplifications:
+
+- **Restore needs no handling at all** — there is no "current" row to go stale. Contrast
+  `deck_spec_json`, which *did* need snapshot-and-copy-back precisely because it is keyed by deck.
+- **The save-point cap cannot break it.** `VERSION_LIMIT = 40` prunes the oldest version; anything
+  FK'd to `slide_deck_versions` would orphan or cascade away the history this table exists to keep.
+  FK the **deck** only, and assert that in a test.
+- **Reorder correctly invalidates**, because a deck review judges the arc and a reorder is exactly
+  what changes it. This is the **opposite** of the per-slide rule (§F3), where a record travels with
+  its slide. Both are correct; say so.
+
+**The digest is stored in the unique key `(deck_id, deck_digest)`, NOT denormalised onto `session_slide_decks`.** 
+The table is keyed by the digest (content-addressed); the digest is computed once per review and persisted
+as the row's clustering key. `save_deck_review` computes it at write time; the row is immutable and the
+digest is preserved. **Its one production caller is `architect_node`, at turn start** (ws4c C4) — it reads the previous
+verdict so turn *n+1* does not re-propose an arc the deck reviewer already criticised. That caller is why
+this table is content-addressed and survives a version restore: the architect must be able to ask "has
+this exact deck been reviewed, and what was said". Resolve `deck_id` from `session_id` through
+`_get_deck_owner_session` (§B3.1). **The human's copy of the verdict is a separate path** — a persisted
+`role="assistant", message_type="info"` chat message written by `deck_reviewer_node` — so do **not** add a
+route or a deck-dict key for this getter; it is a model-facing read, not a presentation one.
+
+**Trap.** `compute_slide_hash` normalises case and collapses whitespace **runs**, but does **not**
+remove inter-token whitespace: `src/utils/slide_hash.py:44` is `' '.join(html.split())`. So
+`"<DIV CLASS='slide'>  a  </DIV>"` and `"<div class='slide'>a</div>"` produce **different** digests.
+Do not assert they match. (`slide_hash.py:69-72`'s own docstring example is wrong, which is what
+misled an earlier draft — record it in `.ws4b-PLAN-CORRECTIONS.md`.) Assert the normalisation that *does*
+hold: case, and runs of whitespace between tokens.
+
+**Test intent:** digest stable for identical ordered content; **changes on reorder**; save/get
+round-trips; edit-then-revert finds the earlier verdict; re-saving the same digest updates rather than
+duplicating; no FK to `slide_deck_versions`; a review survives pruning every version.
+**Sabotage:** `sorted()` the per-slide hashes before joining and confirm the reorder test goes red.
+
+### B2.2b Findings and slide position stability
+
+**Trap — `Finding.slide_index` is captured at record-write time and carried inside the verdict blob.**
+Findings persist inside `verification_record`, keyed by `content_hash` (§F3). `findings_from_record(record, content_hash)`
+takes no position argument — it reads `slide_index` back from the payload. After a reorder, carried-over
+findings on the wrong slide trigger the drawer's filter `f.slideIndex === currentIndex`, silently detaching
+them from the view. This is exactly the slide-separation defect the per-row content-hash design exists to prevent.
+
+**Decision: store the `slide_index` captured at review time inside each `Finding`, never recompute.**
+This keeps findings with their slide across reorders (correct for cross-slide checks that reference position).
+The position is semantics-bearing (§F3's grain); drop it only if findings are never surfaced to users in a
+reorder context (which they are — the drawer runs live). Verify the field is read from the record, not
+re-derived.
+
+---
+
+### B2.3 The dirty-marker columns
+
+**Contract:** three columns on `session_slide_decks` — `spec_dirty_at`, `spec_dirty_by`,
+`spec_dirty_claimed_at`, all nullable — plus a partial index on `spec_dirty_at IS NOT NULL` (Postgres
+only).
+
+**Why three, and why here (§K7/§K8).** §B2 says the marker "lives in the database" and wants a lease,
+but nominates no table. A column trio on `session_slide_decks` is right because the marker never needs
+to outlive the deck row. The **third** column is the identity decision: a sweeper tick has no request,
+so `get_current_user()` returns `None` (`user_context.py:21-23`) and `get_user_client()` **fails
+closed** in production (`databricks_client.py:492`, raised at `:536`; `:511-515` records that
+SDR-4437 HIGH-6 removed the SP fallback outside non-prod). Recording the marker's author gives the arc
+review's write a real `modified_by`, PRD §8.1 a real user to attribute cost to, and a permission
+provenance that was already checked on that human's route — with no new identity concept and no
+stored credential.
+
+**Not deck presentation state**, so deliberately absent from `get_slide_deck`'s dict. Assert that.
+
+**Test intent:** the three columns exist and are nullable with the right types; the migration is
+idempotent across two runs; `spec_dirty` appears nowhere in `get_slide_deck`'s source.
+
+### B2.4 Stop every writer and reader of the retired prompt columns
+
+**Two physical storages, and one drop cannot retire both.**
+
+| Storage | Where | Retired by |
+|---|---|---|
+| Real columns | `ConfigPrompts.system_prompt` / `.slide_editing_instructions`, `Column(Text, nullable=False)` (`prompts.py:39-40`) | B2.5's `_migrate_*` |
+| JSON keys in `agent_config` | `AgentConfig.system_prompt` / `.slide_editing_instructions` (`agent_config.py:97-98`, validator `:100-105`), persisted through `Column(NormalizedAgentConfig, …)` on **both** `UserSession` (`session.py:135`) and `ConfigProfile` (`profile.py:31`) | B2.5's data migration |
+
+**`NormalizedAgentConfig` needs NO change.** It inspects only `slide_style_id` and `design_system_id`
+(`types.py:139-156`) and passes every other byte through, and its docstring says why (`:64-70`):
+routing each blob through `AgentConfig` is **lossy in both directions** — the model ignores unknown
+keys so a newer writer's value is destroyed, and it fills in every default so a lean `{"tools": []}`
+inflates. A bind hook stripping prompt keys would be exactly that generalisation.
+
+**Seven `ConfigPrompts(...)` insert sites, and two are not importable modules:**
+`init_default_profile.py:408`, `profile_service.py:204`, `:409`, **`:490` (`clone_profile` — copies
+from the *source* profile, so its lines look different; do not pattern-match past it)**,
+`scripts/init_database.py:218`, **`scripts/run_e2e_local.sh:160`** and
+**`.github/workflows/test.yml:589`**. The last two are inline Python, so no grep of `src/` finds them
+and no type checker will either — and `test.yml:589` is the `e2e-tests` job's seed step, which every
+matrix entry runs, so missing it **fails all matrix jobs at seeding before a single spec executes**.
+
+**Plus two read sites that fail independently of insert ordering:** `settings_db.py:386-387` reads
+both ORM attributes into `AppSettings`; `config_service.py:69-75` **assigns** both columns behind
+`PUT /agent-config`. **Dead parameters in scope:** `config_service.py:29-30` declares the function kwargs,
+`:41-42` documents them, and `:69-75` uses them — drop all three ranges together.
+
+**Plus `src/database/models/prompts.py:39-40` itself** — the ORM declarations. Removing them is
+sequenced **before** B2.5's drop, because otherwise every `db.query(ConfigPrompts)` emits
+`SELECT config_prompts.system_prompt` against a dropped column: `UndefinedColumn` on Postgres, and
+`create_all()` will **not** re-add it (it only creates missing *tables*), so the breakage is permanent.
+(Round-3 finding 7 — this file was in neither the file table nor the site list.)
+
+**Plus the rest:** `src/api/schemas/agent_config.py:97-98` + validator; `src/api/schemas/requests.py:35-36`, 
+`:133-134`, `:136-141`; `src/api/schemas/responses.py:53-54` (`PromptsConfig` — **dead schema**: referenced 
+only by `ProfileDetail`, which no route declares as a `response_model`; update or delete, nothing breaks 
+either way); `src/api/schemas/defaults.py:41`, `:150`; `src/api/schemas/config_loader.py:130`; 
+`src/api/schemas/validator.py:39`; `src/core/migrate_profiles_to_agent_config.py:15,17,44-45,51-52,54,76-77` 
+(**each line is a pair** — an earlier draft cited only the `system_prompt` half); 
+`src/core/agent_factory.py:250-268`; `src/core/agent.py:250-252,617,624-625`;
+`frontend/src/types/agentConfig.ts:82-83,135-136`;
+`frontend/src/contexts/AgentConfigContext.tsx:124-125,1137-1138` (**two** sites);
+`frontend/src/api/config.ts:83,92`; `frontend/src/components/config/ProfileList.tsx:34,59` (a **third**
+"has custom config" site).
+
+**Two traps on the runtime consumers.**
+
+- **`agent_factory._get_prompt_content` is 237 lines returning `dict[str, Optional[str]]`**, signature
+  `(config: AgentConfig, mode: str = "generate")`, and it carries the entire design-system /
+  pinned-template / type-scale pipeline (§L). **Edit only the override branch at `:250-268`** — `:250-263`
+  cuts mid-`return {`. Keep the name and signature: six suites pin it and ws4c repoints them.
+- **`agent.py:617,624-625` read the ASSEMBLED prompt dict**, not the retired `AgentConfig` field, so
+  "replace each read with the default" would break the monolith's prompt assembly. The real consequence
+  to record: once the override branch goes, `pre_assembled` is always `True` and `agent.py`'s legacy
+  concatenation branch (`620-675`) becomes unreachable dead code. (Round-3 finding 7.)
+
+**Ruling R1 applies to the tests.** Twelve files carry ~200+ references. **Primary files (six carry ~132):**
+`test_agent_factory.py` (41), `test_prompt_precedence_fixes.py` (40), `test_design_system_compiler.py`
+(17), `test_ds_generation_state_matrix.py` (14), `test_migration.py` (12),
+`test_agent_config_schema.py` (8). **Secondary files (six carry ConfigPrompts/AgentConfig structural assertions):**
+`test_models.py` (4), `test_unset_agent_config_is_sql_null.py` (2 assertions that blob **stores** both keys),
+`test_settings_db.py` (2), `test_services.py` (3), `test_config_loader.py` (1),
+`test_default_config_integration.py` (1). **Triage per test:**
+
+| The test asserts… | Action |
+|---|---|
+| that a custom prompt **overrides** the default, that the field round-trips, or validator behaviour on it | **DELETE** — the functionality is gone, there is nothing to repoint at |
+| design-system resolution, tool gating, prompt precedence or template pinning, merely *constructing* an `AgentConfig` with the retired kwarg incidentally | **KEEP**, dropping the kwarg. §L6 requires this behaviour survive |
+| `ConfigPrompts` round-trips or the blob **stores** both keys (secondary files) | **DELETE** or **ADAPT**: the secondary assertions are structural and lose ground once the blob changes. Drop them entirely rather than inventing new assertions on the leaner blob. The primary tests (which test override and precedence mechanics, not shape) survive. |
+
+`test_agent_factory.py` is the clearest split: its 41 references include both
+`test_custom_system_prompt_overrides_default` (delete) and the `_get_prompt_content` / `_build_tools`
+assertions §L6 names as the regression harness (keep; ws4c repoints them). **Name every deletion in
+its commit**, with the behaviour removed, and record the new collected count beside the cause list.
+
+**Inventory real custom values before removing anything.** §E2 requires they be visible rather than
+silently discarded. A one-off script over `ConfigPrompts` rows and both `agent_config` blobs, reporting
+anything not equal to a default. **If it reports anything, stop and escalate** — §E1's premise ("editing
+these is highly unlikely in practice") is what makes the breaking change acceptable.
+
+**Verify the CI seed step by running it**, not by reading it. Extract the inline Python from
+`run_e2e_local.sh:160` and `test.yml:589` and execute each against a throwaway sqlite database. No
+local pytest run would tell you.
+
+### B2.5 Drop the columns, and migrate the stored blobs
+
+**Contract:** B2.4's edits to `migrate_profiles_to_agent_config.py` (lines 51-56) are a **hard prerequisite** — they stop `build_agent_config_from_profile` from emitting the retired keys. Then `_migrate_drop_config_prompt_columns` issues `ALTER TABLE config_prompts DROP COLUMN` for both, idempotently; `src/core/strip_retired_prompt_keys.py` removes the two keys from every stored `agent_config` blob and is wired into `run.py::init_database` **LAST in the migration window**, after `migrate_profiles` / `backfill_sessions` complete, and before `seed_defaults()`, in its own `try` that `raise SystemExit(1)`. This ordering ensures B2.4's preventive edit (no new keys emitted) runs before the data fix (strip existing keys).
+
+**The implementation lives under `src/`, and the CLI (if any) imports *from* it.** The app wheel ships
+`src/` but **not** `scripts/`, so a startup step written as `from scripts.… import …` raises
+`ModuleNotFoundError` at boot in production while working perfectly locally — a measured PR1 near-miss.
+
+**The data migration is surgical by design**, for the same reason `NormalizedAgentConfig` refuses to
+generalise: it edits two keys and copies every other byte. Idempotent (a second boot returns 0), and a
+blob that will not parse is logged and skipped, never raised — one bad row must not abort startup.
+(See B1.7's trap on whether that last case is reachable at all.)
+
+**Test intent:** columns gone after the migration and the migration idempotent; **profile creation
+still works after the drop** (the ordering hazard, asserted); stored blobs lose the keys; **every other
+byte preserved, and a lean blob does not inflate**; idempotent; the whole four-migration chain applied
+twice against a fresh sqlite file leaves all four in place.
+
+**Verify against real Lakebase on a devloop fork.** Deploy per `.claude/skills/deploy-tellr-dev/` and
+confirm the app reaches **RUNNING** — each step is `SystemExit(1)` on failure, so RUNNING is proof all
+four applied.
+
+---
+
+## Part 3 — Deck-level persistence
+
+### B3.1 The deck-level-columns-only writer
+
+**Contract** — `src/api/services/deck_level_writer.py`:
+
+```python
+def write_deck_level_columns(session_id, *, title=_UNSET, css=_UNSET, external_scripts=_UNSET,
+                             head_meta=_UNSET, scripts_content=_UNSET, deck_spec=_UNSET,
+                             slide_count=_UNSET, html_content=_UNSET,
+                             modified_by=None, expected_version=None) -> dict
+def read_deck_spec(session_id) -> dict | None
+```
+
+**A sentinel, not `None` defaults.** Two writes per turn means the second must not erase what the
+first persisted, so "not supplied" and "explicitly null" must differ. An interface stating `=None`
+defaults and an implementation using a sentinel is a contradiction an implementer will resolve the
+wrong way — state the sentinel here and only here.
+
+**Why a new writer rather than `save_slide_deck` (§H1a).** That method has exactly two behaviours and
+neither is a deck-level-only write:
+
+- **`deck_dict=None`** → `deck.css` is *never assigned* (the assignment is inside `if deck_dict:`,
+  `session_manager.py:1366`) and it sets `deck.deck_json = None` (`:1303`, `:1320`).
+- **`deck_dict={…}`** → it upserts every slide in `deck_dict["slides"]` and then runs
+  `_prune_slide_rows_beyond(db, deck_owner.id, len(slides))` (`:1403`), hard-deleting every row at
+  `position >= len(slides)`. A **pre-fan-out** call carries a shorter list than the live row count, so
+  it would **truncate the live deck mid-turn** — and the read path serves rows whenever any exist.
+
+It also takes `html_content` as a **required positional**, which the graph has not knitted at fan-out
+time. Reuse `save_slide_deck`'s **locking shape** (`:1309-1314` check, `:1321` bump) but not its
+dual-write body.
+
+**It must handle the no-row case.** The pre-fan-out write is the **first** deck write of a brand-new
+session, when no `SessionSlideDeck` exists. `save_slide_deck` has an `else: deck = SessionSlideDeck(...)`
+branch; this writer needs the equivalent, or every graph turn on a new session raises. (Round-3
+finding 8.)
+
+**Resolving the deck owner:** the lookup already exists as
+`SessionManager._get_deck_owner_session(db, session: UserSession)` (`session_manager.py:709`, ~20 call
+sites) — note it takes a **`UserSession` object, not a session_id string**, so a `session_id` caller
+needs the session lookup first. Do not write a second implementation.
+
+**Eight columns — five belong to the pre-fan-out write, three to the post-commit write (§H1b, §L2).
+Nothing self-heals.** `css` is the one written by both: deterministic bytes up front, the aggregate after.
+
+| Column | Which write | If never written |
+|---|---|---|
+| `title` | pre-fan-out | untitled deck **and** untitled session row |
+| `css` | both (B3.3 aggregates for the second) | unstyled deck — the §H defect. `knit()` guards with `if self.css:` so an empty value emits **nothing** |
+| `external_scripts_json` | pre-fan-out | **Chart.js missing from every export.** Does **not** self-heal: `_ensure_default_external_scripts` runs only when something builds a `SlideDeck` domain object, and nothing on the export or preview path does — `export.py:84` reads the raw dict, and ten frontend consumers read `slideDeck.external_scripts`. Failure is **silent**: no exception, blank charts |
+| `head_meta_json` | pre-fan-out | custom viewport and every other `<meta>` reverts to `knit()`'s default |
+| `deck_spec_json` | pre-fan-out | **the spec is never persisted** — §7.1's view has no data and turn *n+1*'s architect starts blind. The pre-fan-out trigger *is* "the architect committed the spec" |
+| `slide_count` | post-commit | **the session list renders `0 slides`** (`routes/sessions.py:233` — a *column*, not derived) |
+| `html_content` | post-commit | raw-HTML debug view empty |
+| `scripts_content` | post-commit (derived — see below) | **thumbnails, PDF export and PPTX export render with no JavaScript and blank charts.** Failure is **silent**: no exception |
+
+**Why `scripts_content` is written, and where its value comes from.** It is a **denormalised cache of the
+per-slide aggregate**, not independent deck-level JavaScript. `SlideDeck.scripts` (`slide_deck.py:79-96`) is
+a read-only `@property` that IIFE-wraps and joins the slides' own `scripts`, and all six monolith save sites
+persist exactly that value — `scripts_content=current_deck.scripts` (`chat_service.py:690, 1489, 2746,
+2826, 2892, 2956`). The property is therefore the column's **source**, not an obstacle: nothing has to
+inject a value into `SlideDeck`, and re-deriving from the committed slides reproduces the column, exactly as
+`knit()` reproduces `html_content`. That is why it belongs to the **post-commit** write — at fan-out time
+there are no slides to aggregate. The graph writes it from `SlideDeck(...).scripts` in `deck_reviewer_node`
+(ws4c C4's post-commit bullet).
+
+**Leaving it NULL is a silent regression, not a no-op.** The row-read dict emits
+`"scripts": deck.scripts_content or ""` (`session_manager.py:1549`) and three surfaces consume that key —
+`ThumbnailRibbon.tsx:163`, `pdf_client.ts:98` and `pptx_client.ts:96` (`export.py:563` logs it) — so a graph
+deck's thumbnails, PDF export and PPTX export would all render with no JavaScript and blank charts, with no
+exception raised anywhere. Same failure class as `external_scripts_json` losing Chart.js.
+
+**§K4 — what deterministic CSS the pre-fan-out write persists: the pinned template's `token_css` plus
+its own `<style>` block.** Forced, not preferred: §H1's stated reason for writing before the fan-out is
+that an incrementally-released slide renders **styled**. Persist nothing up front and every released
+slide is unstyled until the post-commit write, which destroys that payoff. On an unpinned or legacy
+deck there is nothing deterministic, and `css` is left to the post-commit aggregation.
+
+**Test intent:** it **touches no `session_slides` row** (the reason it exists — snapshot before and
+after); it does **not** null `deck_json`; version bumps exactly once per call and the optimistic lock
+rejects a stale write; `html_content` is optional; **omitted columns are left alone rather than
+nulled** across two calls; all eight are written between the two; `title` also updates the session
+row; a contributor session writes to the **owner**; **it creates the deck row when none exists**;
+`read_deck_spec` round-trips, returns `None` when absent, and returns `None` for an unparseable column.
+
+**Sabotage:** make the writer delegate to `save_slide_deck(deck_dict={"slides": []})` — the plausible
+wrong implementation §H1a exists to rule out — and confirm the no-row-touched test goes red.
+
+### B3.2 Serve the deck spec and findings through the read path
+
+Two keys need read paths now: `deck_spec_json` and the findings index. Today `deck_spec_json`'s only
+touchers are `create_version`'s snapshot (`:1939-1951`) and `restore_version`'s copy-back
+(`:2240`), and the row-read `deck_dict` (`:1538-1564`) emits neither. So §7.1's spec view and E2's
+findings drawer have no data path.
+
+**The deck-less state is reachable — B3.1's pre-fan-out write produces it.** The row-read path has
+two branches: the normal case at `:1585` when `deck_json` is populated, and the fallback at `:1637`
+when `deck_json` is falsy (legacy path, "return basic info without slides array"). B3.1's pre-fan-out
+write creates a `SessionSlideDeck` row with `deck_json` never assigned, so the new session reaches
+the `:1637` fallback on the first read, before the post-commit write assigns `deck_json`. **Both paths
+must expose `deck_spec_json` and findings**, or the spec view renders null even on the moment after
+the architecture turn.
+
+**Contract:** add **two** parsed keys to **both** read paths — the normal `deck_dict` and the
+legacy fallback at `:1637-1650`. Parse with helpers that never raise, alongside each other and `_read_head_meta`.
+
+1. **`deck_spec`** — parsed from `deck_spec_json`, returns `None` if absent or unparseable.
+2. **`findings`** — call `findings_from_record(record, content_hash)` on every slide's
+   `verification_record` and emit **one flat deck-level list**, each entry carrying its own
+   `slideIndex`. **Not** a per-position index, and the choice is forced three ways: `Finding.slide_index`
+   already carries the position (B1.1), the `:1637` fallback has **no `slides` array** to key an index
+   against, and the drawer already holds a single flat `SlideFinding[]` and filters it by `slideIndex`
+   (`AppLayout.tsx:762`'s `testFindings`, which this key replaces — ws4e E2 wires it).
+   **`verification` stays canonical and per-slide; `findings` is derived and additive.** The per-slide
+   `verification` key is untouched, so nothing collides: `findings` is a projection of the same
+   `verification_record` blobs into the shape the drawer consumes.
+
+**The frontend needs a declared field for it, and does not have one.** `frontend/src/types/slide.ts:3-14`
+declares `verification?` and `content_hash?` and **no `findings`** — so without this, findings stay
+server-only, ws4e E2 has no typed field to read and `npm run typecheck` fails at the last PR. Add
+`findings?: SlideFinding[]` to **`SlideDeck`** in `frontend/src/types/slide.ts` (deck-level, because the
+key is deck-level on both read paths), importing `SlideFinding` from B1.2's `finding.ts`. It earns a
+conformance test for the same reason `Finding` does — there is no runtime bridge between the two
+declarations, which is exactly why they had already drifted — so extend B1.2's
+`test_finding_conformance.py` to assert the read path's `findings` entries map field-for-field onto the
+declared `SlideFinding[]`, `slideIndex` included.
+
+**Test intent:** both keys are present and parsed; neither is ever omitted — a specless deck reports
+`deck_spec` as `None` and a findingless deck reports `findings` as `[]`, so no consumer sees `undefined`;
+every `findings` entry carries a `slideIndex` and the list is flat (no position keys);
+the blob-fallback path exposes both; a contributor sees the owner's spec and
+findings (§7.5); **adding these keys changes no other key** — PRD §10.2's parity guarantee means the
+export chain and every `html_content` consumer depend on that dict's exact shape. Run the export and
+preview suites, not just the new test.
+
+### B3.3 Aggregate the deck's CSS and run the token backstop
+
+**Contract** — `src/services/deck_css_aggregator.py`:
+`aggregate_deck_css(existing_css, emitted_style_blocks, token_css) -> str`. Merges the blocks with
+ws4a's at-rule-preserving `merge_css`, then runs `ensure_deck_token_css`.
+
+**§L2a's unassigned owner.** `deck.css` is populated today by exactly two monolith-path mechanisms —
+`SlideDeck.from_html_string`'s `<style>` walk (`slide_deck.py:193-198`) and `update_css` → `merge_css`
+(`:108`, from `chat_service.py:2631`). The graph calls neither; `SlideWriter` writes per-row `html`
+only. Without this step a graph deck reaches `ensure_deck_token_css` with an empty `deck.css`, and that
+backstop restores only **custom properties and `@font-face` families** — so it returns the token
+stylesheet alone and the deck knits with **no layout CSS**, the exact §H defect by a different route.
+
+**Runs at the post-commit write, not before the fan-out**, because the backstop compares **emitted**
+deck CSS against the token stylesheet and so cannot run before builders have emitted anything.
+
+**Where the blocks come from — the constraint that makes this coherent.** `BuilderOutput` **forbids**
+a builder emitting `<style>` (B1.5), so the blocks are **not** builder output. They are produced by
+**one writer**: `architect_node` in ws4c, which emits them once per turn. The list holds exactly one
+element (or is empty on a legacy/unpinned deck). The aggregator's job is **not deduplication** but
+**aggregation and token backstopping** — merging the one emitted block into existing deck CSS and running
+`ensure_deck_token_css`. ws4c owns producing the blocks; this task owns consuming them. **A test asserting
+N-identical-copies-collapse-to-one is untestable** — constrain it to one block and assert its properties
+(at-rules survive, tokens are present).
+
+**CSS travels whole and is never pruned** (§M5): the backstop covers only custom properties and
+`@font-face` families, so a pruner's mistakes land outside the safety net.
+
+**Test intent:** the one emitted block is merged without duplication; at-rules survive; the backstop
+**prepends** when a token is undefined (so deck CSS stays later in the cascade and anything the model
+authored still wins) and leaves a genuinely compliant deck untouched; the pipeline is **semantically**
+idempotent — assert the invariant (every token defined exactly once, every at-rule present), **not
+byte equality**, because the backstop prepends a CSS *comment* marker that `merge_css` drops on
+the next pass; no `token_css` means no backstop and no crash; a failing backstop never blocks the save.
+
+**Fixture trap:** a "compliant" deck fixture must define **every** custom property `token_css`
+declares, or the backstop legitimately prepends and the test fails for the wrong reason. And count
+occurrences carefully — a fixture that both defines and `var()`-references a token contains it twice.
+(Round-3 findings 6 and 7.)
+
+**Layer-4 infrastructure note (ws4e E4)** — E4's concurrency tests need a database shared across
+**two processes**, and the existing row-per-slide integration tests use `sqlite:///:memory:`
+(`tests/integration/test_slide_row_identity_and_verdicts.py:45-47`), which two processes **cannot**
+share. Create `tests/integration/conftest.py` with a `pytest` fixture that provides a **file-backed
+sqlite** (or postgres) engine/session shared across processes. Layer 4 tests will use this fixture
+to assert that cross-process reads and writes work correctly. This conftest also unblocks any other
+multi-process integration tests that land later.
+
+---
+
+## Definition of done
+
+- [ ] Every contract in Part 1 has a passing test suite, and every guard has been **sabotage-verified**
+      with the sabotage confirmed on the executed path.
+- [ ] `npm run typecheck` clean; `npm run test:unit` green; the lockfile has zero `artifactory` hits.
+- [ ] The four-migration chain applies twice against a fresh sqlite database with all four effects
+      present, and reaches **RUNNING** on a devloop Lakebase fork.
+- [ ] The checkpointer's live test passes against Lakebase, and a compiled graph resumes across two
+      invokes.
+- [ ] Profile creation works after the column drop; the CI seed step was **executed**, not read.
+- [ ] Export and preview parity suites pass — `test_html_to_pptx.py`,
+      `test_google_slides_converter.py`, `test_preview_box_model_parity.py`, `test_export_csp.py`.
+- [ ] Full suite compared **by cause** to the index's baseline: no new cause, no change to the
+      deploy-autoscaling cause. **Every deleted test named in its commit**, with the new collected
+      count recorded beside the cause list.
+- [ ] The seven output schemas, `finding.ts`, the deck-spec models and the fixture contracts are
+      **frozen**. A later PR wanting a field escalates here; it does not edit locally.

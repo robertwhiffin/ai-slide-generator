@@ -71,3 +71,45 @@ def test_on_retry_not_called_when_clean():
         on_retry=lambda: calls.append("x"),
     )
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Graph-path equivalents — gate_emitted_html (AISEC-248)
+# ---------------------------------------------------------------------------
+
+class TestGraphPathGate:
+    """Graph-path gate_emitted_html exercises the same scanner as the monolith.
+
+    Both paths carry AISEC-248; these cases confirm the graph entry point
+    behaves identically to _run_output_safety_gate for the core contract.
+    """
+
+    def test_graph_gate_clean_passes_through(self):
+        from src.utils.graph_safety import gate_emitted_html
+
+        out, retried = gate_emitted_html(
+            "<div class='slide'>clean</div>",
+            lambda: "x",
+            session_id="s1",
+        )
+        assert out == "<div class='slide'>clean</div>"
+        assert retried is False
+
+    def test_graph_gate_unsafe_then_clean_flags_retried(self):
+        from src.utils.graph_safety import gate_emitted_html
+
+        out, retried = gate_emitted_html(
+            '<script>fetch("https://x")</script>',
+            lambda: "<div class='slide'>clean</div>",
+            session_id="s1",
+        )
+        assert out == "<div class='slide'>clean</div>"
+        assert retried is True
+
+    def test_graph_gate_unsafe_twice_raises(self):
+        from src.services.agent import AgentError
+        from src.utils.graph_safety import gate_emitted_html
+
+        unsafe = '<img src="https://attacker.com/b.png">'
+        with pytest.raises(AgentError):
+            gate_emitted_html(unsafe, lambda: unsafe, session_id="s1")

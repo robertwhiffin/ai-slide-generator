@@ -10,8 +10,6 @@ def test_empty_config_is_valid():
     assert config.slide_style_id is None
     assert config.deck_prompt_id is None
     assert config.design_system_id is None
-    assert config.system_prompt is None
-    assert config.slide_editing_instructions is None
 
 
 def test_design_system_id_optional_field():
@@ -85,16 +83,10 @@ def test_mixed_tools_no_duplicates():
     assert len(config.tools) == 2
 
 
-def test_system_prompt_must_be_nonempty_if_set():
-    from src.api.schemas.agent_config import AgentConfig
-    with pytest.raises(ValidationError):
-        AgentConfig(system_prompt="")
-
-
-def test_slide_editing_instructions_must_be_nonempty_if_set():
-    from src.api.schemas.agent_config import AgentConfig
-    with pytest.raises(ValidationError):
-        AgentConfig(slide_editing_instructions="")
+# DELETED with B2.4: test_system_prompt_must_be_nonempty_if_set and
+# test_slide_editing_instructions_must_be_nonempty_if_set asserted the
+# ``must_be_nonempty_if_set`` validator on the two retired AgentConfig override
+# fields. The fields and the validator are gone; there is nothing to repoint at.
 
 
 def test_config_serializes_to_dict():
@@ -329,14 +321,12 @@ class TestMalformedStyleSourceFailsSoft:
                 "design_system_id": 7,
                 "slide_style_id": 3,
                 "deck_prompt_id": 9,
-                "system_prompt": "synthetic",
             }
         )
         assert config.style_source == "user"
         assert config.design_system_id == 7
         assert config.slide_style_id == 3
         assert config.deck_prompt_id == 9
-        assert config.system_prompt == "synthetic"
 
     def test_malformed_value_logs_a_warning(self, caplog):
         """Silently rewriting provenance would hide a data problem, so the

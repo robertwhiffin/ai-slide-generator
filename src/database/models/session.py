@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.orm import backref, relationship
 
@@ -265,10 +266,38 @@ class SessionSlideDeck(Base):
     # Full SlideDeck structure as JSON (for restoration)
     # Note: Verification is NOT stored here - it's in verification_map
     deck_json = Column(Text)  # JSON with slides array, css, external_scripts, scripts
-    
+
     # Verification results keyed by content hash (survives deck regeneration)
     # JSON format: {"content_hash": {"score": 95, "rating": "excellent", ...}}
     verification_map = Column(Text, nullable=True)
+
+    # Deck spec (full architecture spec, architect-authored)
+    # Persisted per-session; inferred from existing HTML once, then persisted (spec §4.3).
+    # Snapshot also stored in SlideDeckVersion (spec §4.4).
+    deck_spec_json = Column(Text, nullable=True)
+
+    # Deck-level CSS (written by the foreman — single writer for the deck)
+    # Builders write only body HTML to their slides; deck CSS is centralized here.
+    css = Column(Text, nullable=True)
+
+    # Deck-level external script URLs (Chart.js CDN etc.), JSON array.
+    # REQUIRED, not optional: the export chain reads `external_scripts` off the deck
+    # dict (`src/api/routes/export.py:52`), and `SlideDeck._ensure_default_external_scripts`
+    # (`src/domain/slide_deck.py:74-77`) injects the Chart.js CDN into every deck. If the
+    # row path returns [] instead, EVERY export silently loses Chart.js and all charts
+    # render blank — the PRD §3 no-regression gate, failing invisibly.
+    external_scripts_json = Column(Text, nullable=True)
+
+    # Deck-level HTML <head> metadata (charset, viewport, other named metas),
+    # JSON object.  The third deck-level presentation field, lifted out of
+    # deck_json for the same reason as css and external_scripts_json: the row
+    # read path reconstructs the deck dict from columns, so a field left only in
+    # deck_json is DROPPED on the first row-path read and then made permanent by
+    # chat_service's round-trip back into deck_json (final review F5).
+    # SlideDeck.knit()/render_slide() fall back to a hardcoded
+    # `width=device-width, initial-scale=1.0` viewport when this is absent, so
+    # decks carrying a custom viewport silently re-render at the wrong scale.
+    head_meta_json = Column(Text, nullable=True)
 
     # Deck-level editing lock for chat-based edits (long-running operations).
     # When an agent is modifying slides, locked_by holds the username and
@@ -284,12 +313,51 @@ class SessionSlideDeck(Base):
     # Authorship
     modified_by = Column(String(255), nullable=True)
 
+    # Spec-dirty marker — the arc-review sweeper's work queue (B2.3).
+    #
+    # spec_dirty_at is set when an out-of-graph edit makes the committed spec stale;
+    # cleared when the sweeper finishes its re-review.
+    #
+    # spec_dirty_by records the human whose edit triggered the mark.  The sweeper tick
+    # has no HTTP request, so get_current_user() returns None and the Databricks client
+    # factory fails closed in production (SDR-4437 HIGH-6 removed the SP fallback
+    # outside non-prod).  Recording the author here gives the arc review's write a real
+    # modified_by, gives cost attribution a real user (PRD §8.1), and carries a
+    # permission provenance that was already checked on that human's route — with no new
+    # identity concept and no stored credential.
+    #
+    # spec_dirty_claimed_at is the worker lease.  UVICORN_WORKERS defaults to 4, so any
+    # periodic sweeper runs in all four workers simultaneously.  One worker claims the
+    # deck atomically by writing spec_dirty_claimed_at; the others see it and skip.
+    # A claim expires by age on the next sweep tick so a crashed worker does not block
+    # the deck permanently.
+    #
+    # NOT deck presentation state: deliberately absent from get_slide_deck's returned
+    # dict.  These fields drive internal sweep scheduling only.
+    spec_dirty_at = Column(DateTime, nullable=True)
+    spec_dirty_by = Column(String(255), nullable=True)
+    spec_dirty_claimed_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationship
     session = relationship("UserSession", back_populates="slide_deck")
+
+    # Partial index: the sweeper's "find dirty decks" query touches only the small
+    # subset where spec_dirty_at IS NOT NULL, so a whole-table index would be
+    # wasteful.  Declared on both dialects: SQLite has supported partial indexes
+    # since 3.8, so the unit suite exercises the same rule as PostgreSQL/Lakebase.
+    # _migrate_spec_dirty_marker creates it on already-provisioned databases.
+    __table_args__ = (
+        Index(
+            "ix_session_slide_decks_spec_dirty_at",
+            "spec_dirty_at",
+            postgresql_where=text("spec_dirty_at IS NOT NULL"),
+            sqlite_where=text("spec_dirty_at IS NOT NULL"),
+        ),
+    )
 
     def __repr__(self):
         return f"<SessionSlideDeck(session_id={self.session_id}, title='{self.title}')>"
@@ -326,6 +394,9 @@ class SlideDeckVersion(Base):
     # Chat history snapshot (JSON array of messages up to this point)
     chat_history_json = Column(Text, nullable=True)
 
+    # Deck spec snapshot at save-point time (must stay in sync with deck_json for restore)
+    deck_spec_json = Column(Text, nullable=True)
+
     # Relationship
     session = relationship("UserSession", back_populates="versions")
 
@@ -337,4 +408,59 @@ class SlideDeckVersion(Base):
 
     def __repr__(self):
         return f"<SlideDeckVersion(session_id={self.session_id}, version={self.version_number}, desc='{self.description}')>"
+
+
+class SessionSlide(Base):
+    """One row per slide in a session's deck.
+
+    Keyed by (session_id, position). Carries the Slide domain model fields
+    plus verification_record (per-row, keyed by content_hash) and deck_spec_slide
+    (the slide's fragment of the architecture spec).
+
+    Verification moved here from SessionSlideDeck.verification_map to allow
+    parallel per-slide writes without lost-update races (spec §5.2.4).
+    """
+
+    __tablename__ = "session_slides"
+
+    # Composite primary key: (session_id, position)
+    session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+        index=True,
+    )
+    position = Column(Integer, primary_key=True, nullable=False)
+
+    # Unique row ID (for external references if needed)
+    id = Column(String(64), unique=True, nullable=True)
+
+    # Slide content (from Slide domain model)
+    html = Column(Text, nullable=False)  # Body HTML only, not full document
+    slide_id = Column(String(255), nullable=True)  # Optional UUID
+    scripts = Column(Text, nullable=True)  # Chart.js, etc. per-slide code
+
+    # Authorship and timestamps
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    modified_by = Column(String(255), nullable=True)
+    modified_at = Column(DateTime, nullable=True)
+
+    # Per-slide verification record (keyed by content_hash if present)
+    # JSON format: {"content_hash": {findings from reviewer}}
+    verification_record = Column(Text, nullable=True)
+
+    # This slide's portion of the deck spec (architect-authored, foreman-distributed)
+    # JSON format: {position, purpose, content brief, assumes, hands_off, data_references}
+    deck_spec_slide = Column(Text, nullable=True)
+
+    # Indexes for efficient queries
+    __table_args__ = (
+        Index("ix_session_slides_session_position", "session_id", "position"),
+        Index("ix_session_slides_id", "id"),
+    )
+
+    def __repr__(self):
+        return f"<SessionSlide(session_id={self.session_id}, position={self.position})>"
 

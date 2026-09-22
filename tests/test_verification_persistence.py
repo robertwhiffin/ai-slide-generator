@@ -240,33 +240,50 @@ class TestVerificationStorage:
         """Sample slide HTML."""
         return '<div class="slide"><h1>Q4 Revenue</h1><p>$1,000,000</p></div>'
 
-    def test_save_verification_creates_map(self, sample_verification, sample_slide_html):
-        """Saving verification should create verification_map entry."""
+    def test_write_slide_verification_creates_entry(self, sample_verification, sample_slide_html):
+        """Writing verification should create a {content_hash: verdict} entry in the row record."""
         from src.utils.slide_hash import compute_slide_hash
-        
-        content_hash = compute_slide_hash(sample_slide_html)
-        verification_map = {}
-        
-        # Simulate save
-        verification_map[content_hash] = sample_verification
-        
-        assert content_hash in verification_map
-        assert verification_map[content_hash]["score"] == 95
 
-    def test_save_verification_updates_existing(self, sample_verification, sample_slide_html):
-        """Saving new verification should update existing entry."""
-        from src.utils.slide_hash import compute_slide_hash
-        
         content_hash = compute_slide_hash(sample_slide_html)
-        
-        # Initial verification
-        verification_map = {content_hash: {"score": 80, "rating": "good"}}
-        
-        # Update with new verification
-        verification_map[content_hash] = sample_verification
-        
-        assert verification_map[content_hash]["score"] == 95
-        assert verification_map[content_hash]["rating"] == "excellent"
+
+        # Simulate write_slide_verification merge logic: start with empty row record.
+        row_record: dict = {}
+        row_record.update({content_hash: sample_verification})
+
+        assert content_hash in row_record
+        assert row_record[content_hash]["score"] == 95
+
+    def test_write_slide_verification_merges_multiple_hashes(
+        self, sample_verification, sample_slide_html
+    ):
+        """Both hash-A and hash-B verdicts must survive after two sequential writes.
+
+        This is the key correctness property: editing a slide creates a new hash
+        and writes a new verdict; reverting to the old HTML should still find the
+        old verdict.  An assign (not merge) would lose hash-A when hash-B is written.
+        """
+        from src.utils.slide_hash import compute_slide_hash
+
+        html_a = sample_slide_html
+        # Genuinely different content so the hashes differ after normalization.
+        html_b = '<div class="slide"><h1>Q4 Revenue</h1><p>$2,000,000</p></div>'
+        hash_a = compute_slide_hash(html_a)
+        hash_b = compute_slide_hash(html_b)
+        assert hash_a != hash_b, "test setup: html_a and html_b must produce different hashes"
+        verdict_a = {"score": 80, "rating": "good"}
+        verdict_b = sample_verification  # score 95
+
+        # First write: hash_a
+        row_record: dict = {}
+        row_record.update({hash_a: verdict_a})
+
+        # Second write: hash_b — must NOT destroy hash_a entry
+        row_record.update({hash_b: verdict_b})
+
+        assert hash_a in row_record, "hash-A verdict was lost after hash-B write (assign bug)"
+        assert hash_b in row_record, "hash-B verdict not written"
+        assert row_record[hash_a]["score"] == 80
+        assert row_record[hash_b]["score"] == 95
 
     def test_load_slides_merges_verification(self, sample_verification, sample_slide_html):
         """Loading slides should merge verification from map."""

@@ -237,11 +237,20 @@ def test_init_database_invokes_encryption_boot_hook(monkeypatch):
         "src.core.migrate_profiles_to_agent_config.backfill_sessions", lambda sf: 0
     )
     monkeypatch.setattr(
+        "src.core.backfill_session_slides_startup.backfill_unmigrated_decks",
+        lambda sf: 0,
+    )
+    monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults",
         lambda include_databricks: None,
     )
     monkeypatch.setattr(
         "src.core.encryption.ensure_encryption_key", lambda: calls.append(1)
+    )
+    # B2.5's agent_config blob strip runs after ensure_encryption_key (it is the last
+    # step); stub it too so this stays a DB-free unit test.
+    monkeypatch.setattr(
+        "src.core.strip_retired_prompt_keys.strip_retired_prompt_keys", lambda sf: 0
     )
     run.init_database()
     assert calls == [1]
@@ -259,6 +268,10 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     )
     monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.backfill_sessions", lambda sf: 0
+    )
+    monkeypatch.setattr(
+        "src.core.backfill_session_slides_startup.backfill_unmigrated_decks",
+        lambda sf: 0,
     )
     monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults",

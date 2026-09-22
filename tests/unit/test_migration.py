@@ -8,8 +8,6 @@ def test_profile_with_genie_space_migrates():
         "prompts": {
             "selected_slide_style_id": 3,
             "selected_deck_prompt_id": 7,
-            "system_prompt": None,
-            "slide_editing_instructions": None,
         },
         "genie_spaces": [
             {"space_id": "abc", "space_name": "Sales", "description": "Revenue data"}
@@ -30,8 +28,6 @@ def test_profile_without_genie_space_migrates():
         "prompts": {
             "selected_slide_style_id": None,
             "selected_deck_prompt_id": None,
-            "system_prompt": None,
-            "slide_editing_instructions": None,
         },
         "genie_spaces": [],
     }
@@ -40,36 +36,10 @@ def test_profile_without_genie_space_migrates():
     assert config["slide_style_id"] is None
 
 
-def test_custom_prompts_preserved():
-    from src.core.migrate_profiles_to_agent_config import build_agent_config_from_profile
-
-    profile_data = {
-        "prompts": {
-            "selected_slide_style_id": None,
-            "selected_deck_prompt_id": None,
-            "system_prompt": "Custom system prompt",
-            "slide_editing_instructions": "Custom editing instructions",
-        },
-        "genie_spaces": [],
-    }
-    config = build_agent_config_from_profile(profile_data)
-    assert config["system_prompt"] == "Custom system prompt"
-    assert config["slide_editing_instructions"] == "Custom editing instructions"
+# DELETED with B2.4: test_custom_prompts_preserved asserted that a custom
+# system_prompt / slide_editing_instructions is CARRIED FORWARD into agent_config,
+# and test_default_prompts_become_none asserted that a value equal to the default
+# is normalised to None there. Both keys are retired — build_agent_config_from_profile
+# no longer emits them at all — so neither behaviour exists to assert.
 
 
-def test_default_prompts_become_none():
-    from src.core.defaults import DEFAULT_CONFIG
-    from src.core.migrate_profiles_to_agent_config import build_agent_config_from_profile
-
-    default_system = DEFAULT_CONFIG["prompts"]["system_prompt"]
-    profile_data = {
-        "prompts": {
-            "selected_slide_style_id": None,
-            "selected_deck_prompt_id": None,
-            "system_prompt": default_system,
-            "slide_editing_instructions": None,
-        },
-        "genie_spaces": [],
-    }
-    config = build_agent_config_from_profile(profile_data)
-    assert config["system_prompt"] is None

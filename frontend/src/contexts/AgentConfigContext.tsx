@@ -120,9 +120,7 @@ function isConfigMeaningful(config: AgentConfig): boolean {
     config.tools.length > 0 ||
     config.design_system_id != null ||
     config.slide_style_id != null ||
-    config.deck_prompt_id != null ||
-    config.system_prompt != null ||
-    config.slide_editing_instructions != null
+    config.deck_prompt_id != null
   );
 }
 
@@ -1133,9 +1131,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const hasConfig =
       agentConfig.tools.length > 0 ||
       agentConfig.slide_style_id !== null ||
-      agentConfig.deck_prompt_id !== null ||
-      agentConfig.system_prompt !== null ||
-      agentConfig.slide_editing_instructions !== null;
+      agentConfig.deck_prompt_id !== null;
     if (hasConfig) {
       const confirmed = window.confirm(
         'Loading a profile will replace your current configuration. Continue?',

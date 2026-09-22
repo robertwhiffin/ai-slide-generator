@@ -1,9 +1,10 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { SlideDeck } from '../../types/slide';
+import type { SlideDeck, Slide } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
-import { SlidePanel, type SlidePanelHandle } from '../SlidePanel/SlidePanel';
-import { SelectionRibbon } from '../SlidePanel/SelectionRibbon';
+import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
+import { SpecView } from '../SpecView/SpecView';
+import { useDeckExport } from '../../hooks/useDeckExport';
 import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
@@ -28,6 +29,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 import { api } from '../../services/api';
 import { configApi } from '../../api/config';
+import { Button } from '@/ui/button';
 import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
 import { PageHeader } from './page-header';
@@ -42,17 +44,80 @@ interface AppLayoutProps {
   viewOnly?: boolean;
 }
 
+/**
+ * E0 — pure helper for handleSlideReady.  Exported for unit testing only.
+ *
+ * Inserts `newSlide` at the correct ascending-index position in `slides`.
+ * If a slide with the same `index` already exists it is replaced in place.
+ * A later-arriving lower-index slide must appear BEFORE a higher-index one —
+ * this is what makes incremental rendering display the deck in the correct order
+ * even when the graph's reorder buffer releases slides out of sequence.
+ *
+ * Sabotage target (E0 unit test):
+ *   Replace the `findIndex(s => s.index > newSlide.index)` branch with a
+ *   simple `push`.  Out-of-order arrival then produces arrival-order output
+ *   rather than ascending order, and the unit test goes red.
+ */
+export function _insertSlideAscending<T extends { index: number }>(
+  slides: T[],
+  newSlide: T,
+): T[] {
+  const result = [...slides];
+  const existingIdx = result.findIndex(s => s.index === newSlide.index);
+  if (existingIdx >= 0) {
+    result[existingIdx] = newSlide;
+  } else {
+    const insertIdx = result.findIndex(s => s.index > newSlide.index);
+    if (insertIdx < 0) result.push(newSlide);
+    else result.splice(insertIdx, 0, newSlide);
+  }
+  return result;
+}
+
+/**
+ * E2b — pure helper for the "agentic deck review in progress" flag.
+ * Exported for unit testing only.
+ *
+ * The deck reviewer is the ONLY work left after every position has been
+ * released; once all slides are out and the turn is still running, the
+ * graph topology guarantees the only remaining node is deck_reviewer.
+ *
+ * Null guard: deckSpec is null until the architect has run, and is absent
+ * on client-side decks.  A null/undefined specSlideCount returns false so
+ * the flag stays off on a fresh session or a specless deck.
+ *
+ * Zero guard: if specSlideCount === 0 and releasedCount === 0, both sides
+ * match but nothing has been released, so the flag must stay off.
+ *
+ * Sabotage target (E2b unit test):
+ *   Replace `&& isGenerating` with `&& !isGenerating`.  The "on while turn
+ *   is still open" and "off when turn completes" assertions both invert and
+ *   go red.
+ */
+export function _isReviewInProgress(
+  releasedCount: number,
+  specSlideCount: number | null,
+  isGenerating: boolean,
+): boolean {
+  if (specSlideCount === null) return false;
+  if (releasedCount === 0) return false;
+  return releasedCount === specSlideCount && isGenerating;
+}
+
 export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', viewOnly = false }) => {
   const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
   const navigate = useNavigate();
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
+  // E0: tracks which slide positions have been released via slide_ready events in the
+  // current turn.  Resets when a new generation starts.  E2b reads this alongside
+  // isGenerating from GenerationContext: releasedPositions.size === deckSpec.slides.length && isGenerating
+  const [releasedPositions, setReleasedPositions] = useState<Set<number>>(new Set());
   const [rawHtml, setRawHtml] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialView);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
-  const [scrollTarget, setScrollTarget] = useState<{ index: number; key: number } | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [isDuplicating, setIsDuplicating] = useState(false);
   const isDuplicatingRef = useRef(false);
@@ -67,10 +132,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [revertTargetVersion, setRevertTargetVersion] = useState<number | null>(null);
   const [showDuplicateConfirm, setShowDuplicateConfirm] = useState(false);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
-  const slidePanelRef = useRef<SlidePanelHandle>(null);
+  const slideViewerRef = useRef<SlideViewerHandle>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
   const deckVersionRef = useRef<number>(0);
+  // Separate counter for reorder staleness guard — must NOT alias deckVersionRef
+  // (which is reserved exclusively for server-version gating in setSlideDeckGated).
+  const deckEditCounterRef = useRef<number>(0);
 
   const loadVersionsRef = useRef<(() => Promise<void>) | null>(null);
 
@@ -89,6 +157,39 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       loadVersionsRef.current?.();
     }
   }, []);
+
+  // E0: incremental slide delivery — called by ChatPanel on each slide_ready event.
+  // Inserts the released slide at the correct ascending-position slot in slideDeck,
+  // creating a minimal deck when slideDeck is null (first slide of a fresh build).
+  // One list of slides, updated in place — no parallel pending-slides structure.
+  const handleSlideReady = useCallback((position: number, html: string, scripts: string) => {
+    setReleasedPositions(prev => {
+      const next = new Set(prev);
+      next.add(position);
+      return next;
+    });
+    const newSlide: Slide = {
+      index: position,
+      slide_id: `build-${position}`,
+      html,
+      scripts,
+    };
+    setSlideDeck(prev => {
+      if (!prev) {
+        return {
+          title: '',
+          slide_count: 1,
+          css: '',
+          external_scripts: [],
+          scripts: '',
+          slides: [newSlide],
+        };
+      }
+      const slides = _insertSlideAscending(prev.slides, newSlide);
+      return { ...prev, slides, slide_count: slides.length };
+    });
+  }, []);
+
   const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
@@ -443,10 +544,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     deckVersionRef.current = 0;
   }, [sessionId]);
 
-  const handleSlideNavigate = useCallback((index: number) => {
-    setScrollTarget(prev => ({ index, key: (prev?.key ?? 0) + 1 }));
-  }, []);
-
   const handleSendMessage = useCallback((content: string, slideContext?: { indices: number[]; slide_htmls: string[] }) => {
     chatPanelRef.current?.sendMessage(content, slideContext);
   }, []);
@@ -666,17 +763,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
   const displayDeck = previewVersion != null && previewDeck ? previewDeck : slideDeck;
 
-  const handleExportPPTX = useCallback(() => {
-    slidePanelRef.current?.exportPPTX();
-  }, []);
+  // E2b: "agentic deck review in progress" flag.
+  // True only while all slide positions have been released AND the turn is still
+  // running — the only work left at that point is the whole-deck reviewer node.
+  // Null guard: slideDeck?.deck_spec can be absent (client-side deck) or null
+  // (specless / unparseable).  _isReviewInProgress returns false for null.
+  const reviewInProgress = _isReviewInProgress(
+    releasedPositions.size,
+    slideDeck?.deck_spec?.slides.length ?? null,
+    isGenerating,
+  );
 
-  const handleExportPDF = useCallback(() => {
-    slidePanelRef.current?.exportPDF();
-  }, []);
-
-  const handleExportHTML = useCallback(() => {
-    slidePanelRef.current?.exportHTML();
-  }, []);
+  const { handleExportPDF, handleExportPPTX, handleSaveAsHTML: handleExportHTML } = useDeckExport({
+    slideDeck: displayDeck,
+    sessionId,
+    onExportStatusChange: setExportStatus,
+  });
 
   const handleExportGoogleSlides = useCallback(async () => {
     if (!sessionId || !slideDeck) return;
@@ -747,7 +849,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, [sessionId, slideDeck, showToast, openOAuthPopup]);
 
   const handlePresent = useCallback(() => {
-    slidePanelRef.current?.openPresentationMode();
+    slideViewerRef.current?.openPresentationMode();
   }, []);
 
   const handleViewChange = useCallback(
@@ -763,6 +865,135 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     },
     [navigate]
   );
+
+  // Derive findings from the displayed deck.  get_slide_deck populates the
+  // findings key on all three of its read paths (session_manager.py :1827,
+  // :1916, :1943), so slideDeck.findings is never undefined on a deck returned
+  // from the API.  Memoised so SlideViewer does not see a new array reference
+  // on every render that does not change the deck.
+  const stableFindings = useMemo(
+    () => displayDeck?.findings ?? [],
+    [displayDeck],
+  );
+
+  // Reorder handler — lifted from SlidePanel so SlideViewer can call it.
+  const handleReorderSlides = useCallback(async (from: number, to: number) => {
+    if (!displayDeck || !sessionId || isReadOnly) return;
+    if (!sessionId) {
+      alert('Session not initialized');
+      return;
+    }
+    const newSlides = [...displayDeck.slides];
+    const [moved] = newSlides.splice(from, 1);
+    newSlides.splice(to, 0, moved);
+    // Optimistic update
+    setSlideDeckGated({ ...displayDeck, slides: newSlides }, displayDeck.version);
+    const editId = ++deckEditCounterRef.current;
+    try {
+      const newOrder = newSlides.map((_, idx) =>
+        displayDeck.slides.findIndex(s => s.slide_id === newSlides[idx].slide_id)
+      );
+      await api.reorderSlides(newOrder, sessionId);
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        setSlideDeckGated(result.slide_deck, result.slide_deck.version);
+      }
+    } catch (error) {
+      console.error('Failed to reorder slides:', error);
+      const isVersionConflict =
+        error instanceof Error && 'status' in error && (error as { status: unknown }).status === 409;
+      if (isVersionConflict) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        try {
+          const result = await api.getSlides(sessionId);
+          if (result.slide_deck) setSlideDeckGated(result.slide_deck, result.slide_deck.version, true);
+        } catch (refreshErr) {
+          console.error('Failed to refresh after conflict:', refreshErr);
+        }
+      } else {
+        // Revert optimistic update
+        setSlideDeckGated(displayDeck, displayDeck.version, true);
+        alert('Failed to reorder slides');
+      }
+    }
+  }, [displayDeck, sessionId, isReadOnly, setSlideDeckGated]);
+
+  // Nav sidebar collapse is owned by SidebarProvider, which persists to the
+  // `sidebar_state` cookie but never reads it back. Read it here so the nav
+  // panel's collapsed state survives a reload like the chat panel's does.
+  // Computed once per mount: the provider only consumes defaultOpen initially.
+  const navSidebarDefaultOpen = useMemo(() => {
+    const match = document.cookie.match(/(?:^|;\s*)sidebar_state=(true|false)/);
+    return match ? match[1] === 'true' : true;
+  }, []);
+
+  // Collapsible panel state, persisted across reloads.
+  const PANEL_STATE_KEY = 'tellr-panel-collapsed';
+  const [collapsed, setCollapsed] = useState<{ nav: boolean; chat: boolean }>(() => {
+    try {
+      const raw = localStorage.getItem(PANEL_STATE_KEY);
+      return raw ? { nav: false, chat: false, ...JSON.parse(raw) } : { nav: false, chat: false };
+    } catch {
+      return { nav: false, chat: false };
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(collapsed)); } catch { /* non-fatal */ }
+  }, [collapsed]);
+
+  // Which panel the main view shows on the right: the slides, or the deck spec.
+  //
+  // LOCAL STATE, NOT A ViewMode MEMBER, AND NOT PERSISTED.
+  //   - Not a ViewMode member, because ViewMode drives navigate() and a route
+  //     change unmounts both the ChatPanel and the SlideViewer.  That is the
+  //     hazard the chat-panel comment further down already warns about; adding
+  //     'spec' to the union walks straight into it.
+  //   - Not persisted (unlike `collapsed`), and never sent anywhere.  The view is
+  //     a HINT, never a mode: intent comes from language, so "tighten the arc"
+  //     edits the spec and "make slide 5 bolder" edits the slide whichever panel
+  //     is open.  Nothing about this flag may reach a request body.
+  const [showSpec, setShowSpec] = useState(false);
+
+  // The spec is read-only; every edit to it is conversational, so Discuss hands
+  // the user to the conversation rather than opening an editor.  It expands the
+  // chat if it is collapsed and does nothing else — in particular it sends no
+  // message, so clicking it cannot mutate the deck or the spec.
+  const handleDiscussSpec = useCallback(() => {
+    setCollapsed((prev) => (prev.chat ? { ...prev, chat: false } : prev));
+  }, []);
+
+  // ── Finding action handlers ────────────────────────────────────────────────
+  // The drawer calls these after its own internal state updates (dismiss updates
+  // the dismissed set and seenState; apply/discuss pass through unchanged).
+
+  // Apply: no dedicated backend endpoint today.  Route through chat so the agent
+  // can construct and deliver the fix.  Expand the chat so the user sees the
+  // response.
+  const handleApplyFinding = useCallback((findingId: string) => {
+    const finding = displayDeck?.findings?.find(f => f.id === findingId);
+    if (!finding) return;
+    setCollapsed((prev) => prev.chat ? { ...prev, chat: false } : prev);
+    handleSendMessage(
+      `Please apply this review suggestion for slide ${finding.slideIndex + 1}: ${finding.message}`,
+    );
+  }, [displayDeck, handleSendMessage]);
+
+  // Dismiss: SlideViewer's handleDismiss already updates the dismissed set and
+  // seenState.  No further server action for dismissal today.
+  const handleDismissFinding = useCallback((_findingId: string) => {
+    // intentional no-op — the drawer manages dismiss state internally
+  }, []);
+
+  // Discuss: expand the chat panel so the user can ask follow-up questions.
+  const handleDiscussFinding = useCallback((findingId: string) => {
+    const finding = displayDeck?.findings?.find(f => f.id === findingId);
+    setCollapsed((prev) => prev.chat ? { ...prev, chat: false } : prev);
+    if (finding) {
+      handleSendMessage(
+        `I'd like to discuss this review finding for slide ${finding.slideIndex + 1}: ${finding.message}`,
+      );
+    }
+  }, [displayDeck, handleSendMessage]);
 
   const viewOnlyReason =
     !isLockHolder && editingLockHolder
@@ -784,7 +1015,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       : 'Create a private copy in My Sessions';
 
   return (
-    <SidebarProvider className="h-svh max-h-svh">
+    // defaultOpen reads back the sidebar_state cookie that SidebarProvider
+    // writes on every toggle (ui/sidebar.tsx). Without it the provider always
+    // defaults to open, so the nav panel's collapsed state did not survive a
+    // reload — spec §2/§10 require BOTH left panels to persist.
+    <SidebarProvider className="h-svh max-h-svh" defaultOpen={navSidebarDefaultOpen}>
       <AppSidebar
         currentView={viewMode}
         onViewChange={handleViewChange}
@@ -852,61 +1087,161 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
             <div className="relative flex-1 overflow-hidden">
               <div className="absolute inset-0 flex">
-                <div className="w-[32%] min-w-[260px] border-r border-border bg-card flex flex-col" data-tour="chat-panel">
-                  <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
-                    <AgentConfigBar />
-                  </div>
-                  <ChatPanel
-                    key="chat-panel"
-                    ref={chatPanelRef}
-                    rawHtml={rawHtml}
-                    disabled={isReadOnly}
-                    onGenerationStart={onGenerationStart}
-                    previewMessages={previewVersion != null ? previewMessages : null}
-                    onSlidesGenerated={async (deck, raw) => {
-                      onGenerationComplete();
-                      setSlideDeckGated(deck, deck.version);
-                      setRawHtml(raw);
-                      setLastSavedTime(new Date());
-                      setSessionsRefreshKey((prev) => prev + 1);
-                      if (sessionId) {
-                        try {
-                          await loadVersions();
-                        } catch (e) {
-                          console.warn('Failed to refresh versions:', e);
+                {/* Chat panel — collapse hides but does NOT unmount to preserve state */}
+                <div
+                  className={`border-r border-border bg-card flex flex-col transition-all duration-200 ${collapsed.chat ? 'w-10 min-w-[2.5rem] overflow-hidden' : 'w-[32%] min-w-[260px]'}`}
+                  data-tour="chat-panel"
+                >
+                  {/* Chat collapse toggle */}
+                  <button
+                    data-testid="toggle-chat-panel"
+                    onClick={() => setCollapsed(prev => ({ ...prev, chat: !prev.chat }))}
+                    className="shrink-0 flex items-center justify-center h-8 border-b border-border bg-card hover:bg-accent text-muted-foreground"
+                    title={collapsed.chat ? 'Expand chat' : 'Collapse chat'}
+                    aria-expanded={!collapsed.chat}
+                  >
+                    <span className="text-xs">{collapsed.chat ? '›' : '‹'}</span>
+                  </button>
+                  {/* Stable key: React must reconcile this as the SAME element
+                      across collapse toggles, or ChatPanel remounts and the
+                      conversation state (and any in-flight stream) is lost. */}
+                  <div
+                    key="chat-panel-body"
+                    className={collapsed.chat ? 'hidden' : 'flex flex-col flex-1 min-h-0'}
+                  >
+                    <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
+                      <AgentConfigBar />
+                    </div>
+                    <ChatPanel
+                      key="chat-panel"
+                      ref={chatPanelRef}
+                      rawHtml={rawHtml}
+                      disabled={isReadOnly}
+                      onGenerationStart={() => {
+                        onGenerationStart();
+                        // E0: reset released-position tracking for the new turn.
+                        // Guarded BEHAVIOURALLY by the cross-turn test in
+                        // tests/e2e/deck-review-flag.spec.ts ("releasedPositions
+                        // resets between turns"): the source-text guard in
+                        // slideReadyEvent.test.ts is satisfied by a comment
+                        // containing this very line, so it is not the guard.
+                        setReleasedPositions(new Set());
+                      }}
+                      onSlideReady={handleSlideReady}
+                      previewMessages={previewVersion != null ? previewMessages : null}
+                      onSlidesGenerated={async (deck, raw) => {
+                        onGenerationComplete();
+                        setSlideDeckGated(deck, deck.version);
+                        setRawHtml(raw);
+                        setLastSavedTime(new Date());
+                        setSessionsRefreshKey((prev) => prev + 1);
+                        if (sessionId) {
+                          try {
+                            await loadVersions();
+                          } catch (e) {
+                            console.warn('Failed to refresh versions:', e);
+                          }
                         }
-                      }
-                    }}
-                    viewOnlyReason={viewOnlyReason}
-                  />
+                      }}
+                      viewOnlyReason={viewOnlyReason}
+                    />
+                  </div>
                 </div>
 
-                <div data-tour="selection-ribbon">
-                  <SelectionRibbon
-                    key={versionKey}
-                    slideDeck={displayDeck}
-                    onSlideNavigate={handleSlideNavigate}
-                    versionKey={versionKey}
-                  />
-                </div>
+                <div
+                  className="flex flex-1 flex-col bg-background min-w-0"
+                  data-tour="slide-viewer"
+                  data-released-count={releasedPositions.size}
+                >
+                  {/* View controls: slides ⇄ spec.
+                      `showSpec` is LOCAL state of the main view, deliberately NOT
+                      an entry in ViewMode. ViewMode drives route-level navigation
+                      through navigate(), so a 'spec' member would unmount the
+                      ChatPanel and the SlideViewer below — destroying the
+                      conversation, any in-flight stream, and the viewer's
+                      dismissed-findings set. The same hazard the chat-panel
+                      comment above warns about, arriving by a different door.
+                      AppLayoutSpecToggle.test.ts pins both halves. */}
+                  <div
+                    data-testid="main-view-controls"
+                    className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-1.5"
+                    role="group"
+                    aria-label="View controls"
+                  >
+                    <Button
+                      data-testid="view-toggle-slides"
+                      size="sm"
+                      variant={showSpec ? 'ghost' : 'secondary'}
+                      aria-pressed={!showSpec}
+                      onClick={() => setShowSpec(false)}
+                    >
+                      Slides
+                    </Button>
+                    <Button
+                      data-testid="view-toggle-spec"
+                      size="sm"
+                      variant={showSpec ? 'secondary' : 'ghost'}
+                      aria-pressed={showSpec}
+                      onClick={() => setShowSpec(true)}
+                    >
+                      Spec
+                    </Button>
+                  </div>
 
-                <div className="flex-1 bg-background" data-tour="slide-panel">
-                  <SlidePanel
-                    key={versionKey}
-                    ref={slidePanelRef}
-                    slideDeck={displayDeck}
-                    rawHtml={rawHtml}
-                    onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
-                      setSlideDeckGated(deck, deck.version);
-                    }}
-                    scrollToSlide={scrollTarget}
-                    onSendMessage={isReadOnly ? undefined : handleSendMessage}
-                    onExportStatusChange={setExportStatus}
-                    versionKey={versionKey}
-                    readOnly={isReadOnly}
-                    lockedBy={!isLockHolder ? editingLockHolder : null}
-                    onVerificationComplete={handleVerificationComplete}
-                  />
+                  {/* HIDDEN, NEVER UNMOUNTED — the same rule as the chat panel,
+                      for the same reason. SlideViewer holds `dismissed` in
+                      useState (reset on deckKey change), so conditionally
+                      rendering it away here would resurrect every dismissed
+                      finding on the round trip back from the spec. The stable key
+                      keeps React reconciling this as the SAME element across
+                      toggles; `versionKey` on SlideViewer itself is the ONLY
+                      thing entitled to remount it. */}
+                  <div
+                    key="slide-viewer-body"
+                    data-testid="slide-viewer-pane"
+                    // BLOCK, not a flex container. SlideViewer's own root is
+                    // `flex h-full min-h-0 flex-1` with no min-w-0, so making this
+                    // wrapper a flex container turns that root into a flex item
+                    // whose default min-width:auto refuses to shrink below its
+                    // content width: measured at 1072px inside a 778px column,
+                    // pushing the stage and its next arrow off-screen and failing
+                    // slide-viewer.spec.ts's "the viewer fits the viewport". A
+                    // block wrapper reproduces the containment SlideViewer already
+                    // had — width from the block, height from h-full.
+                    className={showSpec ? 'hidden' : 'min-h-0 flex-1'}
+                  >
+                    <SlideViewer
+                      ref={slideViewerRef}
+                      key={versionKey}
+                      slideDeck={displayDeck}
+                      deckKey={sessionId ?? 'no-session'}
+                      findings={stableFindings}
+                      callbacks={{
+                        onApplyFinding: handleApplyFinding,
+                        onDismissFinding: handleDismissFinding,
+                        onDiscussFinding: handleDiscussFinding,
+                      }}
+                      onReorder={handleReorderSlides}
+                      onSlideChange={isReadOnly ? undefined : (deck: SlideDeck) => {
+                        setSlideDeckGated(deck, deck.version);
+                      }}
+                      onSendMessage={isReadOnly ? undefined : handleSendMessage}
+                      readOnly={isReadOnly}
+                      lockedBy={!isLockHolder ? editingLockHolder : null}
+                      onVerificationComplete={handleVerificationComplete}
+                      sessionId={sessionId}
+                    />
+                  </div>
+
+                  {/* Also hidden rather than unmounted, so the two panes are
+                      symmetric and neither can be the one that loses state. */}
+                  <div
+                    key="spec-view-body"
+                    data-testid="spec-view-pane"
+                    className={showSpec ? 'min-h-0 flex-1' : 'hidden'}
+                  >
+                    <SpecView slideDeck={displayDeck} onDiscuss={handleDiscussSpec} reviewInProgress={reviewInProgress} />
+                  </div>
                 </div>
               </div>
             </div>

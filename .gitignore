@@ -112,3 +112,10 @@ prpm.lock
 # hiding a legitimately-named file deeper in the tree.
 /findings.md
 /frontend/findings.md
+
+# The workstream-4 test baseline is a tracked ARTEFACT, not a log, despite its
+# .log suffix (line 51's `*.log`). ws4a owns creating it and ws4b-e each compare
+# their suite result against it by CAUSE, re-deriving it whenever they touch
+# schemas, the ORM or dependencies -- so it has to live in git. The negation is
+# scoped to this one directory rather than loosening `*.log` repo-wide.
+!docs/superpowers/baselines/*.log

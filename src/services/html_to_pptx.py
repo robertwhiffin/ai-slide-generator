@@ -641,7 +641,7 @@ class HtmlToPptxConverterV3:
                         f"Saved client chart image: {filename}",
                         extra={
                             "canvas_id": canvas_id,
-                            "filename": filename,
+                            "image_filename": filename,
                             "file_size": file_size
                         }
                     )
@@ -777,7 +777,7 @@ class HtmlToPptxConverterV3:
                 filepath = Path(assets_dir) / filename
                 filepath.write_bytes(image_bytes)
                 filenames.append(filename)
-                logger.info("Extracted content image", extra={"filename": filename, "size": len(image_bytes)})
+                logger.info("Extracted content image", extra={"image_filename": filename, "size": len(image_bytes)})
             except Exception as e:
                 logger.warning("Failed to extract content image", exc_info=True, extra={"error": str(e)})
                 # Return original match unchanged on error

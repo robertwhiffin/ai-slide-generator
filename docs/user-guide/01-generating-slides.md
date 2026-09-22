@@ -63,11 +63,11 @@ Refine slides through follow-up messages in the same session:
 | Add a slide | "Add a new slide about \{X\} after this one" |
 | Regenerate all | "Regenerate all slides with more data" |
 
-## Selecting Specific Slides
+## Navigating Slides
 
-Click the checkbox on individual slides to select them. Selected slides can be:
-- Edited as a group
-- Verified for data accuracy
+Click any thumbnail in the ribbon on the left to jump to that slide. You can also use the arrow buttons on the stage, or keyboard arrow keys when the viewer is focused. The current slide is always kept in view in the ribbon.
+
+To refine a specific slide, navigate to it and describe the change in the chat panel — the AI will target the slide you are currently viewing.
 
 ## Returning to a Previous Session
 

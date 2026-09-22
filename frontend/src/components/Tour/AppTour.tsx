@@ -214,18 +214,18 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
   },
   {
-    target: '[data-tour="selection-ribbon"]',
+    target: '[data-testid="thumbnail-ribbon"]',
     title: 'Slide Thumbnails',
     content:
-      'This ribbon shows miniature thumbnails of every slide in your deck. Click a thumbnail to scroll to that slide.',
+      'This ribbon shows miniature thumbnails of every slide in your deck. Click a thumbnail to jump straight to that slide, or drag thumbnails to reorder them.',
     placement: 'left',
     skipBeacon: true,
   },
   {
-    target: '[data-tour="slide-panel"]',
-    title: 'Slide Panel',
+    target: '[data-tour="slide-viewer"]',
+    title: 'Slide Viewer',
     content:
-      'Your generated slides render here in full detail. Click any slide to edit its HTML directly. Drag slides to reorder them.',
+      'Your generated slides render here in full detail. Flip through them with the arrow keys or by clicking thumbnails. Use the toolbar above each slide to edit its HTML or delete it.',
     placement: 'left',
     skipBeacon: true,
   },
@@ -264,30 +264,30 @@ const TOUR_STEPS: Step[] = [
 
   // ── Demo: Phase 2 — slides + response appear ──────────────────
   {
-    target: '[data-tour="slide-panel"]',
+    target: '[data-tour="slide-viewer"]',
     title: 'Slides Generated!',
     content:
       'The AI created 3 fully styled slides in seconds! A title slide, key advantages, and future outlook. ' +
-      "This is exactly what happens every time you send a prompt.",
+      'This is exactly what happens every time you send a prompt.',
     placement: 'left',
     skipBeacon: true,
     before: loadDemoSlides,
   },
   // ── Post-demo: walkthrough of generated content ────────────────
   {
-    target: '[data-tour="selection-ribbon"]',
+    target: '[data-testid="thumbnail-ribbon"]',
     title: 'Browse Your Slides',
     content:
       'Each slide appears as a thumbnail here. Click any thumbnail to jump to that slide. ' +
-      'Select multiple slides to give the AI context when asking for targeted edits.',
+      'Drag thumbnails to reorder slides in your deck.',
     placement: 'left',
     skipBeacon: true,
   },
   {
-    target: '[data-tour="slide-panel"]',
+    target: '[data-tour="slide-viewer"]',
     title: 'Edit Any Slide',
     content:
-      'Click directly on any slide to edit its HTML. You can change text, restyle elements, or completely rewrite a slide. ' +
+      'Use the toolbar at the top of the viewer to edit a slide\'s HTML or delete it. ' +
       'You can also ask the AI in the chat to refine specific slides.',
     placement: 'left',
     skipBeacon: true,

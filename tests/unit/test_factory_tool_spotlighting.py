@@ -25,7 +25,7 @@ def test_factory_image_tool_wraps_output():
     tools = _build_tools(AgentConfig(), {"session_id": "s1"})
     image_tool = next(t for t in tools if t.name == "search_images")
     with patch(
-        "src.services.agent_factory.search_images",
+        "src.services.agent_resolution.search_images",
         return_value='{"images": []}',
     ):
         out = image_tool.func(query="logo")

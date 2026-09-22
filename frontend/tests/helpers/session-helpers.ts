@@ -4,6 +4,7 @@
  */
 import type { Page } from '@playwright/test';
 import { mockSlides, mockDefaultAgentConfig } from '../fixtures/mocks';
+import { mockFindings } from '../fixtures/findings';
 
 // Fixed session IDs for deterministic test URLs
 export const TEST_SESSION_ID = 'b1b4d8e3-6cf6-47cb-ad58-9fdc6ad205cc';
@@ -22,7 +23,11 @@ export const mockSessionDetail = {
   message_count: 3,
 };
 
-// Mock slides response in the format api.getSlides() returns
+// Mock slides response in the format api.getSlides() returns.
+// findings is the flat deck-level list (§E2): f1+f2 on slideIndex 1,
+// f3 on slideIndex 3 (unreachable in this 3-slide deck — kept to preserve
+// the 10 existing assertions in slide-viewer.spec.ts that rely on the
+// drawer showing empty-state on slide 2 at :319).
 export const mockSlidesResponse = {
   session_id: TEST_SESSION_ID,
   slide_deck: {
@@ -39,6 +44,7 @@ export const mockSlidesResponse = {
       content_hash: s.hash,
     })),
     html_content: mockSlides.map(s => s.html_content).join('\n'),
+    findings: mockFindings,
   },
 };
 
