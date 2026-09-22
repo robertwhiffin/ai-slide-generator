@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import FrozenInstanceError, replace
 from types import MappingProxyType
 from typing import Any
@@ -308,6 +309,99 @@ def test_guidance_model_copy_update_preserves_pydantic_and_omission_semantics() 
             "description",
         ),
     )
+
+
+def test_guidance_shallow_copies_preserve_nested_identity_and_copy_field_set() -> None:
+    original = CanonicalFieldGuidance.model_validate(
+        {
+            "description": "Original",
+            "examples": [{"nested": ["example"]}],
+            "forbidden": {"nested": ["extra"]},
+        }
+    )
+    original.model_fields_set.add("synthetic")
+
+    for copied in (original.model_copy(), copy.copy(original)):
+        assert copied is not original
+        assert copied.examples is original.examples
+        assert copied.examples[0] is original.examples[0]
+        assert copied.forbidden_properties() is not original.forbidden_properties()
+        assert (
+            copied.forbidden_properties()["forbidden"]
+            is original.forbidden_properties()["forbidden"]
+        )
+        assert copied.model_fields_set == original.model_fields_set
+        assert copied.model_fields_set is not original.model_fields_set
+
+
+def test_guidance_deep_copies_detach_nested_values_and_copy_field_set() -> None:
+    original = CanonicalFieldGuidance.model_validate(
+        {
+            "description": "Original",
+            "examples": [{"nested": ["example"]}],
+            "forbidden": {"nested": ["extra"]},
+        }
+    )
+    original.model_fields_set.add("synthetic")
+
+    for copied in (original.model_copy(deep=True), copy.deepcopy(original)):
+        assert copied is not original
+        assert copied.examples is not original.examples
+        assert copied.examples[0] is not original.examples[0]
+        assert copied.forbidden_properties() is not original.forbidden_properties()
+        assert (
+            copied.forbidden_properties()["forbidden"]
+            is not original.forbidden_properties()["forbidden"]
+        )
+        assert copied.model_fields_set == original.model_fields_set
+        assert copied.model_fields_set is not original.model_fields_set
+
+
+def test_guidance_model_copy_update_is_trusted_and_semantically_protected() -> None:
+    original = CanonicalFieldGuidance()
+    invalid_examples = object()
+
+    copied = original.model_copy(
+        update={
+            "description": 123,
+            "examples": invalid_examples,
+            "forbidden": 456,
+        }
+    )
+
+    assert copied.description == 123
+    assert copied.examples is invalid_examples
+    assert copied.forbidden == 456
+    assert copied.forbidden_properties() == {"forbidden": 456}
+    assert copied.model_fields_set == {"description", "examples", "forbidden"}
+    assert copied.serialized_mutations() == {
+        "description": 123,
+        "examples": invalid_examples,
+        "forbidden": 456,
+    }
+
+    mutable_examples = [{"nested": ["Kept example"]}]
+    copied_container = original.model_copy(update={"examples": mutable_examples})
+    mutable_examples[0]["nested"][0] = "Injected example"
+    assert copied_container.serialized_mutations() == {"examples": [{"nested": ["Kept example"]}]}
+    assert original.serialized_mutations() == {}
+
+    copied.__dict__ = {
+        "description": "Injected description",
+        "examples": ("Injected example",),
+    }
+    copied.__pydantic_extra__ = {"forbidden": "Injected extra"}
+    copied.__pydantic_private__ = {"semantic_state": "Injected private state"}
+    copied.model_fields_set.clear()
+
+    assert copied.description == 123
+    assert copied.examples is invalid_examples
+    assert copied.forbidden_properties() == {"forbidden": 456}
+    assert copied.serialized_mutations() == {
+        "description": 123,
+        "examples": invalid_examples,
+        "forbidden": 456,
+    }
 
 
 def test_retained_identity_tables_and_bundle_order_are_frozen_literals() -> None:
