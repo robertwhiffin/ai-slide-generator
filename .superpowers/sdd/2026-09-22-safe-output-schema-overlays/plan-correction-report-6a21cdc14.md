@@ -51,3 +51,14 @@ Re-corrected the plan after re-reading the full review and re-probing local refs
 | Important I3 — missing final-head/pre-merge gate | Added a final pre-local-merge gate that re-resolves final reviewed #261/#263/#265 heads and current local root, proves those heads and recorded `INTEGRATION_BASE` are ancestors of both local root and #264 `HEAD`, recomputes the reviewed `INTEGRATION_BASE..HEAD` diff, refuses merge if reconciliation changes that reviewed #264 diff, and requires integration/rebase plus refreshed corrections, baselines, affected task review, and final review if any predecessor advanced. |
 
 Preserved constraints: local-only order #265 -> #264 -> #266; Task 0/Task 1 isolation; exact package ranges; no remote refs/fetch/PR/push/merge; absolute shared pyenv pytest; no installs, `uv`, `pip`, or `.venv`.
+
+## Round 3 resolution — re-review `7e9ef7553`
+
+Re-corrected the matrix after re-reading the re-review and re-probing current local refs on 2026-09-22. Current observations are `feat/langgraph-core` at `76a88f238e84f17cc60eba8a62e00dc80fc26115`, `feat/conversation-pins-runtime-261` at `785d9aaca35a3a9103cd4283afdc6bda3b679882`, `feat/shared-graph-draft-editor-263` at `1d706e21b92aad68314da2e79bb4d1d5626663b7`, corrected #265 plan at `ae3d09f3437eb9ce45a6ac52c992c03a3a00c6ca`, and #264 plan head at `dbe957f5ea7ea20859d5b93843cec56817e7954e`. These remain observations only; execution still re-resolves final reviewed heads.
+
+| Review finding | Round 3 correction |
+|---|---|
+| Important I1 — incomplete #261 caller/pin matrix | Added current #261 `tests/unit/test_graph_builder.py`, `tests/unit/test_graph_routers.py`, and `tests/unit/test_graph_state.py` to both Task 3 and Task 7 unit commands. Retained `tests/integration/test_persisted_graph_runtime_failures_postgres.py` and added separate URL-prefixed Task 3 and Task 7 invocations for `tests/integration/test_conversation_pin_migration_postgres.py` and `tests/integration/test_conversation_pin_creation_postgres.py`. |
+| Important I2 — combined PostgreSQL command contradicted per-file zero-skip proof | Split Task 7 PostgreSQL commands so every named PostgreSQL file has its own `TELLR_TEST_POSTGRES_URL=... /Users/robert.whiffin/.pyenv/shims/python -m pytest -q <file>` invocation. `tests/integration/test_agent_definition_workbench_postgres.py` and `tests/integration/test_agent_schema_overlay_postgres.py` now run separately, and the plan requires zero skips recorded for each individual command. |
+
+Preserved constraints: all prior immutable base/range gates, final-head reconciliation, aggregate wire/error family, existing sink trace ordering, local-only #265 -> #264 -> #266 handoff, exact pyenv pytest usage, frontend-rooted browser/lint commands, and no remote refs, installs, PRs, pushes, merges, or implementation work.
