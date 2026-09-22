@@ -1,4 +1,4 @@
-# Issue #261 plan repair report — fourth correction
+# Issue #261 plan repair report — fifth correction
 
 **Plan:** docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md
 
@@ -92,3 +92,20 @@ only `version` and `digest`.
 This section supersedes the third-pass report’s provider-taxonomy, compatibility,
 error-value, and sink-order descriptions. No implementation, test suite, install,
 push, or merge was run for this planning-only fourth correction.
+
+## Fifth-pass correction for `.superpowers/issue-261-plan-rereview-4.md`
+
+Task 4 now requires each provider-family handler to preserve the original
+failure with `raise ModelProviderUnavailableError(...) from original_error`.
+The endpoint test no longer claims the OpenAI error is the pinned error’s direct
+cause. It asserts the exact chain instead:
+
+```python
+assert isinstance(pinned.__cause__, ModelProviderUnavailableError)
+assert pinned.__cause__.__cause__ is original_openai_error
+```
+
+This matches the specified callback, which then raises
+`PinnedInvocationEndpointError` from the provider wrapper before either identity
+sink observes it. No implementation, test suite, install, push, or merge was
+run for this planning-only fifth correction.
