@@ -12,27 +12,61 @@
 
 ## Global Constraints
 
-- Task 1 is the only pre-integration task. It starts from reviewed #260 code and creates only `model_endpoint_catalog.py` plus its focused test; it must not edit a file owned by #261, #263, #264, or #265.
+- Task 0 is a non-implementation, non-mutating preflight and is mandatory before Task 1. It fails if `.venv` exists, records the absolute shared interpreter, inventories Task 1's installed-SDK/fake/test seams, captures cause-based Task 1 baselines, and creates the overriding `.superpowers/sdd/2026-09-22-model-endpoint-discovery-validation/PLAN-CORRECTIONS.md`. Task 1 is the only pre-integration implementation task; it starts from reviewed #260 code and creates only `model_endpoint_catalog.py` plus its focused test, and must not edit a file owned by #261, #263, #264, or #265.
 - Before Task 2, rebase onto one concrete reviewed **local** `feat/langgraph-core` commit containing #260, #261, #263, #265, and #264; never use or fetch a remote integration branch and never use `447791d7a`. Record full predecessor heads, prove all five are ancestors, and prove the integration commit is an ancestor of the rebased branch `HEAD`.
 - Local shared-file integration order is exactly **#265, then #264, then #266**. #266 merges locally only after its whole-branch review; #267 starts only from that reviewed local #266 merge. No PR or push is part of this plan.
-- Use `/Users/robert.whiffin/.pyenv/shims/python` with `python -m pytest`; never run uv/pip/install/create `.venv`. Stop if `.venv` exists.
+- Use `/Users/robert.whiffin/.pyenv/shims/python -m pytest` literally in every backend command; never use bare `python`, run uv/pip/install, or create `.venv`. Stop if `.venv` exists.
 - SDK 0.112.0 supplies argument-free `WorkspaceClient.serving_endpoints.list() -> Iterator[ServingEndpoint]`, `get(name: str) -> ServingEndpointDetailed`, and Public Preview `get_open_api(name)`; `query()` has no `response_format` argument.
 - Include a discovered item only when non-null `config.served_entities[*].foundation_model` exists. Persist exact parent `endpoint.name`, not task/prefix/display/served-entity/family/alias. No dedicated `system.ai` API is verified.
 - The one list has no paging/search/filter: sort/search locally. Empty success is distinct from forbidden/unavailable. Never reuse `routes/tools.py` heuristic or exception-to-empty behavior.
-- Manual input is a name only: locally reject URL-shaped input, exact `get(name)`, exact returned-name equality, then READY/config-update state. Do not invent universal provider HTTP mappings.
+- Manual input is a name only. A deterministic local endpoint-name policy rejects URL-shaped input before stale comparison and makes no SDK call. Only after the locked snapshot is current does remote validation perform exact `get(name)`, exact returned-name equality, then READY/config-update state. Do not invent universal provider HTTP mappings.
 - List/get/model-serving scope does not establish inference permission. OpenAPI is diagnostic, not structured-output proof. Final capability acceptance is the #266-owned explicit saved-candidate endpoint probe under runtime identity at the actual `ChatDatabricks.with_structured_output` seam; it accepts no endpoint override and is not #267's versioned test-run system.
 - Seeded `databricks-claude-opus-4-6` and every saved name never auto-advance from discovery, refresh, retry, or rendering.
 - #263 remains the only writer/route. Save-time endpoint validation is registered in its pipeline; same-content explicit saves still lock/audit and return `changed:false`.
 - Every PostgreSQL module has `pytestmark = pytest.mark.postgres` and explicit CI collection enrollment. Every PostgreSQL command in this plan must execute with **zero skips**; an unavailable server is a failed gate, never accepted concurrency evidence.
-- Execute with `executing-plans-tellr` plus `superpowers:subagent-driven-development`. Before Task 2, write `PLAN-CORRECTIONS.md` with the complete per-task self-consistency and pairwise producer/consumer/shared-file tables, exact current owners/callers, and baseline failure/skip **causes**. Attach it to every implementer/reviewer brief; re-derive causes after runtime/schema changes. Every task is RED→GREEN with distinct controller/reviewer sabotage on executed production seams; assert calls, values, identities, locks, rollback, and codes—not counts alone.
+- Execute with `executing-plans-tellr` plus `superpowers:subagent-driven-development`. Task 0 creates `PLAN-CORRECTIONS.md` and attaches it to Task 1's implementer/reviewer briefs. Before Task 2, extend that same file—do not replace it—with the complete integrated per-task self-consistency and pairwise producer/consumer/shared-file tables, exact current owners/callers, and baseline failure/skip **causes**; attach it to every later implementer/reviewer brief and re-derive causes after runtime/schema changes. Every task is RED→GREEN with distinct controller/reviewer sabotage on executed production seams; assert calls, values, identities, locks, rollback, and codes—not counts alone.
 
-## Mandatory local integration and corrections gate (after Task 1, before Task 2)
+## Mandatory initial preflight (Task 0, before Task 1)
+
+Task 0 is read-only with respect to production and test implementation. It may create only the execution ledger `PLAN-CORRECTIONS.md`; it must not edit application/test files, install anything, create an environment, or touch remotes. Run every command from the repository root:
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+test ! -e .venv
+test -x /Users/robert.whiffin/.pyenv/shims/python
+/Users/robert.whiffin/.pyenv/shims/python --version
+/Users/robert.whiffin/.pyenv/shims/python -c 'import inspect; from importlib.metadata import version; from databricks.sdk.service import serving; print(version("databricks-sdk")); print(inspect.signature(serving.ServingEndpointsAPI.list)); print(inspect.signature(serving.ServingEndpointsAPI.get)); print("foundation_model" in inspect.signature(serving.ServedEntityOutput).parameters)'
+test ! -e src/services/model_endpoint_catalog.py
+test ! -e tests/unit/test_model_endpoint_catalog.py
+rg -n "WorkspaceClient|serving_endpoints|model_factory|client_factory|with_structured_output|Fake" \
+  src/services/agent_runtime.py tests/unit/test_agent_runtime.py \
+  src/api/routes/tools.py tests/unit/test_ci_collects_integration_tests.py
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/unit/test_agent_runtime.py \
+  tests/unit/test_ci_collects_integration_tests.py
+test ! -e .venv
+```
+
+Record the literal interpreter `/Users/robert.whiffin/.pyenv/shims/python`, its version, the installed SDK signatures/field result, current SDK owner/callers, the absent intended Task 1 paths, deterministic fake seams, CI test seam, and the exact pass/fail/skip/warning **causes** from the two-module baseline. Create `.superpowers/sdd/2026-09-22-model-endpoint-discovery-validation/PLAN-CORRECTIONS.md` with either explicit overrides or `No corrections`, the current full `IMPLEMENTATION_BASE`, and a Task 1 file/interface/test table. Attach this exact file to both Task 1 briefs. A missing module, changed SDK signature, unexpected baseline cause, any skip, or `.venv` blocks Task 1 until ruled on; do not normalize it to a count.
+
+### Task 0: Environment, Task 1 seam inventory, and cause baseline
+
+**Files:** Create only `.superpowers/sdd/2026-09-22-model-endpoint-discovery-validation/PLAN-CORRECTIONS.md` as an execution artifact. Do not modify production or test implementation.
+
+**Interfaces:** Produces the fixed implementation base, absolute-interpreter/SDK/fake/test inventory, exact baseline cause set, and binding correction ledger consumed by every implementer and reviewer.
+
+- [ ] Run the mandatory initial preflight exactly as written; stop on `.venv`, a missing required seam, any skip, or an unexplained failure/warning cause.
+- [ ] Write the exact observations and Task 1 consistency table to `PLAN-CORRECTIONS.md`; do not copy claims from this plan when the checked source disagrees.
+- [ ] Attach the ledger to Task 1's implementer and reviewer briefs and require explicit acknowledgment of every override. This task has no implementation commit.
+
+## Mandatory local integration and stricter corrections re-probe (after Task 1, before Task 2)
 
 Task 1 may run before this gate because both files are new and collision-free. Before Task 2, confirm #265 and #264 passed their task reviews and whole-branch reviews and were merged **locally** into `feat/langgraph-core` after reviewed #260, #261, and #263. Do not fetch, push, or refer to an `origin/integration/*` branch.
 
 Record full SHAs for the reviewed #260, #261, #263, #265, and #264 heads plus `INTEGRATION_BASE=$(git rev-parse feat/langgraph-core)`. For each reviewed head run `git merge-base --is-ancestor <head> "$INTEGRATION_BASE"`; all must return zero. Assert `INTEGRATION_BASE != 447791d7a`, rebase the #266 branch while retaining Task 1, and run `git merge-base --is-ancestor "$INTEGRATION_BASE" HEAD`; do **not** assert equality because Task 1 is intentionally retained above the base.
 
-Run the SDD workspace/pre-pass before Task 2. In `PLAN-CORRECTIONS.md`, record `/Users/robert.whiffin/.pyenv/shims/python`, fail if `.venv` exists, inventory every catalog/facade/writer/route/client/editor/runtime-probe owner and caller, record baseline failure and skip causes, and include one row for every task's code/test/file consistency plus every cross-task shared seam. Re-read the integrated #263 writer/envelope/frontend state, #264 schema registry/runtime composition, #265 assembly runtime/editor, #261 persisted failure and identity-sink behavior, current SDK source, PostgreSQL fixtures, and CI collection. Rule on every mismatch before dispatch; no second writer, remote base, `routes/tools.py` reuse, endpoint override, or compatibility guess is allowed.
+Run a stricter SDD workspace/pre-pass before Task 2. Re-run `test ! -e .venv`, re-probe with `/Users/robert.whiffin/.pyenv/shims/python`, and append an integration addendum to the existing `PLAN-CORRECTIONS.md`; never discard the Task 0 observations. Inventory every catalog/local-policy/facade/writer/route/client/editor/runtime-probe owner and caller, record baseline failure and skip causes, and include one row for every task's code/test/file consistency plus every cross-task shared seam. Re-read the integrated #263 writer/envelope/frontend state, #264 schema registry/runtime composition, #265 assembly runtime/editor, #261 persisted failure and identity-sink behavior, current SDK source, PostgreSQL fixtures, and CI collection. Rule on every mismatch before dispatch; no second writer, remote base, `routes/tools.py` reuse, endpoint override, or compatibility guess is allowed. The addendum may add renamed/final predecessor test files, but it may not remove any PostgreSQL module explicitly listed in Task 6's final matrix or accept a server-unavailable skip.
 
 ## Stable interfaces and error contracts
 
@@ -71,10 +105,14 @@ class EndpointValidationFailure(ValueError):
 
 class ModelEndpointCatalog(Protocol):
     def list_system_models(self) -> SystemModelDiscovery: ...
-    def validate_custom_endpoint(self, name: str) -> None: ...
+    def validate_custom_endpoint_remote(self, name: str) -> None: ...
+
+def validate_endpoint_name_policy(name: str) -> None: ...
 ```
 
 `DatabricksModelEndpointCatalog` calls `list()` once and includes a parent once when any served entity has `foundation_model`; display metadata comes only from that object. It never accesses `task`, deprecated `served_models`, OpenAPI, or query. `PermissionDenied` maps to forbidden, `ResourceDoesNotExist` from get to unknown, and other `DatabricksError`/transport errors to unavailable. A URL is a left-whitespace-tolerant `http://`, `https://`, `//`, or `<scheme>://` prefix; accepted names are never trimmed.
+
+`validate_endpoint_name_policy` is pure and owns only deterministic name policy, including URL rejection; it never receives or calls an SDK client. `validate_custom_endpoint_remote` assumes local policy already passed and owns only `get(name)`, exact returned-name equality, readiness, and update-state checks. The draft-save pipeline must call the local policy before comparing the submitted lock version, then call the remote method only after the existing locked snapshot has proved the request current. A stale request can therefore never cause remote I/O, while a stale request containing a locally invalid URL still receives the ordered local `422`.
 
 | Result | Code | Message | Retryable |
 | --- | --- | --- | --- |
@@ -119,22 +157,22 @@ Only an explicit structured-binding/capability rejection from the adapter maps t
 
 ---
 
-### Task 1: Catalog adapter and deterministic fake
+### Task 1: Catalog adapter, local endpoint-name policy, and deterministic fake
 
 **Files:**
 - Create: `src/services/model_endpoint_catalog.py`
 - Create: `tests/unit/test_model_endpoint_catalog.py`
 
-**Interfaces:** Produces the stable port above and `FakeModelEndpointCatalog` with queued discovery outcomes, name-keyed validation outcomes, `list_calls`, and `validated_names`.
+**Interfaces:** Consumes Task 0's attached `PLAN-CORRECTIONS.md`. Produces the stable pure `validate_endpoint_name_policy` function, remote-only catalog port above, and `FakeModelEndpointCatalog` with queued discovery outcomes, name-keyed remote-validation outcomes, `list_calls`, and `validated_names`.
 
 - [ ] **Step 1: Write failing adapter tests**
 
-Build SDK-shaped `SimpleNamespace` fixtures. Assert one no-argument list call, foundation-field selection, task-only exclusion, deduplication of two foundation entities under one parent, exact space-containing name, deterministic sort, and empty success. Assert forbidden/unavailable remain typed failures. Assert URL rejection makes zero SDK calls; accepted input calls get exactly once; returned-name mismatch, READY, every update state, unknown, forbidden, and unavailable map to the table. Assert neither OpenAPI nor query is accessed. Assert every fake outcome needs no SDK mock.
+Build SDK-shaped `SimpleNamespace` fixtures. Assert one no-argument list call, foundation-field selection, task-only exclusion, deduplication of two foundation entities under one parent, exact space-containing name, deterministic sort, and empty success. Assert forbidden/unavailable remain typed failures. Test `validate_endpoint_name_policy` independently: every URL shape maps to the URL table row without constructing or calling an SDK adapter, while accepted input is preserved verbatim. Test `validate_custom_endpoint_remote` independently: accepted input calls get exactly once; returned-name mismatch, READY, every update state, unknown, forbidden, and unavailable map to the table. Assert neither OpenAPI nor query is accessed. Assert every fake outcome needs no SDK mock.
 
 - [ ] **Step 2: Run RED**
 
 ```bash
-python -m pytest -q tests/unit/test_model_endpoint_catalog.py
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_model_endpoint_catalog.py
 ```
 
 Expected: collection fails because the module does not exist.
@@ -156,7 +194,7 @@ git commit -m "feat: add exact model endpoint catalog (#266)"
 
 ---
 
-### Task 2: One endpoint validator in #263's draft-save pipeline
+### Task 2: Two-phase endpoint validation in #263's one draft-save pipeline
 
 **Files:**
 - Modify: `src/services/graph_configuration_draft.py`
@@ -165,30 +203,33 @@ git commit -m "feat: add exact model endpoint catalog (#266)"
 - Modify: `tests/integration/test_agent_definition_workbench_postgres.py`
 - Modify: `tests/unit/test_ci_collects_integration_tests.py` and `.github/workflows/test.yml` only if the existing module is not explicitly collected.
 
-**Interfaces:** Consumes #263 `save_editable_model_draft`, `save_draft_content`, `_write_locked_content`, `DraftContentRejected`, and Task 1. Produces `EndpointDraftValidator(Protocol)` with `validate(content: DefinitionContent) -> None`, injected into the #263 facade.
+**Interfaces:** Consumes the extended `PLAN-CORRECTIONS.md`, #263 `save_editable_model_draft`, `save_draft_content`, `_write_locked_content`, `DraftContentRejected`, and Task 1. Produces two explicitly ordered phases in the #263 facade: pure `validate_endpoint_name_policy(content.model.endpoint_name)` before stale comparison and injected `RemoteEndpointDraftValidator(Protocol).validate(content: DefinitionContent) -> None` only after the locked snapshot is current. Production's validator delegates the exact unchanged `content.model.endpoint_name` to `ModelEndpointCatalog.validate_custom_endpoint_remote`.
 
 - [ ] **Step 1: Write failing pipeline and PostgreSQL tests**
 
-Use a recording fake validator. For both public saves, prove #263 command/round-trip/immutable validation runs first; a coherent aggregate is locked; a stale request returns the exact seven-role conflict without remote validation; and a non-stale complete reconstructed `DefinitionContent` is validated exactly once immediately before the existing writer. Assert every table error gives the exact ordered one-item issue and no content/hash/lock/audit/release/interval mutation. Assert valid same-content validates, advances audit/lock, and returns `changed:false`; force flush failure after validation and prove rollback from a fresh session.
+Use a recording fake remote validator. For both public saves, prove #263 command/round-trip/immutable and other deterministic local validation runs first and a coherent aggregate is locked. Prove exact ordering with two explicit cases: (1) URL-shaped endpoint plus stale lock returns the ordered one-item `422 invalid_draft` URL issue, writes nothing, and records zero SDK/remote-validator calls; (2) locally valid endpoint plus stale lock returns the coherent exact seven-role `409`, writes nothing, and records zero SDK/remote-validator calls. A non-stale complete reconstructed `DefinitionContent` is remotely validated exactly once immediately before the existing writer. Assert every remote table error gives the exact ordered one-item issue and no content/hash/lock/audit/release/interval mutation. Assert valid same-content validates, advances audit/lock, and returns `changed:false`; force flush failure after validation and prove rollback from a fresh session.
 
-In the PostgreSQL module add `pytestmark = pytest.mark.postgres` when absent. Use a blocking deterministic validator, prove two database PIDs plus a lock waiter, prove winner writes, and prove stale loser neither invokes validator nor overwrites. Inspect the CI guard/workflow; add the existing filename only if absent.
+In the PostgreSQL module add `pytestmark = pytest.mark.postgres` when absent. Use a blocking deterministic remote validator, prove two database PIDs plus a lock waiter, prove winner writes, and prove the locally valid stale loser neither invokes remote validation nor overwrites. Retain this stale-loser concurrency proof in addition to the unit ordering cases. Inspect the CI guard/workflow; add the existing filename only if absent.
 
 - [ ] **Step 2: Run RED**
 
 ```bash
-python -m pytest -q tests/unit/test_graph_configuration_draft.py -k endpoint
-python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py -k endpoint
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/unit/test_graph_configuration_draft.py -k endpoint
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_agent_definition_workbench_postgres.py -k endpoint
 ```
 
 Expected: unit tests fail because no endpoint extension exists. The PostgreSQL command must connect, exercise distinct real PIDs, and report zero skips; an unavailable-server skip is a failed gate and Task 2 cannot be reviewed complete.
 
 - [ ] **Step 3: Implement the one registered extension**
 
-After #263 reconstructs/round-trips `DefinitionContent` and checks immutable fields, take the existing locked snapshot. Return the stale result before catalog validation. Otherwise call the injected validator once, translate `EndpointValidationFailure` to the table `DraftValidationIssue`, then call the pre-existing `_write_locked_content`. Production composition makes the adapter with `get_system_client`; it never accepts host/token/name from a browser except the already persisted candidate name. Do not retry, log endpoint text, add an ORM column, query another selected row, or add a writer/hash/route.
+After #263 reconstructs/round-trips `DefinitionContent`, checks immutable fields, and takes the existing locked snapshot, execute the pure endpoint-name policy in the established deterministic local-validation order. Translate local `EndpointValidationFailure` immediately to the table `DraftValidationIssue`; this precedes stale comparison and performs no SDK work. If local validation succeeds, compare the submitted lock and return the coherent stale result before any remote work. Only for the current locked snapshot call the injected remote validator once, translate its `EndpointValidationFailure`, then call the pre-existing `_write_locked_content`. Production composition makes the adapter with `get_system_client`; it never accepts host/token/name from a browser except the candidate endpoint already reconstructed by #263. Do not retry, log endpoint text, add an ORM column, query another selected row, or add a writer/hash/route.
 
 - [ ] **Step 4: Run GREEN and falsify distinct paths**
 
-Run both Task 2 commands with PostgreSQL zero skips. Replace validation with `if False: self._endpoint_validator.validate(content)  # TASK2_VALIDATOR_BYPASS_SABOTAGE`; forbidden validation test must be RED because save writes. Restore and rerun GREEN. Reserve a different reviewer target: move stale return below validation under `TASK2_REVIEWER_STALE_REMOTE_SABOTAGE`; the stale test must be RED because the loser calls the fake catalog, then restore and rerun GREEN.
+Run both Task 2 commands with PostgreSQL zero skips. Replace remote validation with `if False: self._remote_endpoint_validator.validate(content)  # TASK2_VALIDATOR_BYPASS_SABOTAGE`; forbidden validation test must be RED because save writes. Restore and rerun GREEN. Reserve a different reviewer target: move the remote validator above the stale return under `TASK2_REVIEWER_STALE_REMOTE_SABOTAGE`; both the valid-stale unit test and stale-loser concurrency test must be RED because the loser calls the fake catalog, then restore and rerun GREEN. Separately confirm the invalid-plus-stale URL case remains `422` with zero remote calls.
 
 - [ ] **Step 5: Commit**
 
@@ -219,7 +260,9 @@ For PUT, use a secret-looking URL as a non-admin and assert authorization occurs
 - [ ] **Step 2: Run RED**
 
 ```bash
-python -m pytest -q tests/unit/test_agent_definition_workbench_routes.py -k 'model_endpoints or endpoint_validation or non_admin'
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/unit/test_agent_definition_workbench_routes.py \
+  -k 'model_endpoints or endpoint_validation or non_admin'
 ```
 
 Expected: new discovery contract fails because DTOs/route/dependency are absent.
@@ -257,6 +300,8 @@ Use #263's existing plain-record/exact-key parser helpers. Test populated names,
 
 Render `DefinitionEditor` with seed and catalog fixtures. Assert accessible **Refresh models**, labelled **Search discovered models**, exact-name selectable entries, and separately labelled advanced **Custom endpoint name**. Selection copies precisely item `name` into existing endpoint form state only; it leaves numeric values unchanged and makes no PUT. Search is local/case-insensitive and reports no match without changing selection. Empty says `No Databricks foundation-model endpoints are available to this identity.`; error preserves saved endpoint, exposes retry, and refresh replaces prior list only after success. URL-shaped custom input has accessible local table-message and zero PUT; newer item cannot move seed until explicit selection then Save; same-content Save remains enabled.
 
+Add two component-level manual-entry save flows using a non-URL exact name that does not appear in discovery. In the success flow, type the name, save once, inspect the JSON request, and assert #263's request contains only `lock_version` plus `candidate`, whose only editable leaves are exactly `prompt_text`, `model.endpoint_name`, `model.temperature`, `model.max_tokens`, and `model.top_p`; `endpoint_name` equals the typed text byte-for-byte and there is no discovery metadata, URL, host, token, display name, docs, description, task, or provider field. Return the normal #263 save response and prove the editor retains that exact saved name. In the failure/correction flow, return a typed one-item server `invalid_draft` issue for `candidate.model.endpoint_name` (for example `endpoint_unknown`), assert an accessible typed field error whose sanitized text contains neither the entered endpoint nor secret/provider payload, and prove all unsaved form values remain intact. Correct the endpoint explicitly and retry; the second PUT again has only the same five editable leaves and succeeds without remounting. Keep the URL-shaped local case as a separate zero-PUT proof.
+
 - [ ] **Step 2: Run RED**
 
 ```bash
@@ -288,7 +333,7 @@ export function getSystemModelEndpoints(): Promise<SystemModelEndpoint[]>;
 
 Read JSON once, require exact top/item keys and primitive/null values, and reject arrays/class instances as records. Never cache/coalesce refresh; each explicit click makes one GET, while a monotonic request ID prevents an older response overwriting the newest state.
 
-In `DefinitionEditor`, keep catalog state `idle | loading | ready | empty | error`, search, request ID, and last good list local to the workbench. Fetch on first Model-tab opening and explicit refresh. Loading/error announces with `aria-live="polite"`; failure uses `role="alert"`; refresh stays enabled for recovery. The custom field remains the #263 `endpoint_name` control and selection is only a setter. Match Task 1 URL detection locally; server 422 wins after Save. Do not transmit a display name, URL, token, host, or catalog metadata in save payload.
+In `DefinitionEditor`, keep catalog state `idle | loading | ready | empty | error`, search, request ID, and last good list local to the workbench. Fetch on first Model-tab opening and explicit refresh. Loading/error announces with `aria-live="polite"`; failure uses `role="alert"`; refresh stays enabled for recovery. The custom field remains the #263 `endpoint_name` control and selection is only a setter. Match Task 1 URL detection locally; when Save receives #263's typed server `invalid_draft`, bind `candidate.model.endpoint_name` to the custom field without clearing or normalizing any unsaved value, and allow explicit correction/retry through the same one writer. The PUT serializer remains closed to `lock_version` plus exactly the five editable candidate leaves. Do not transmit a display name, URL, token, host, or catalog metadata in save payload.
 
 - [ ] **Step 4: Run GREEN and falsify exact UI identity**
 
@@ -328,10 +373,10 @@ At the service/route boundary, seed different exact endpoints for two roles and 
 - [ ] **Step 2: Run RED**
 
 ```bash
-python -m pytest -q \
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
   tests/unit/test_model_endpoint_probe.py \
   tests/unit/test_agent_runtime.py -k 'structured_output or model_endpoint_probe'
-python -m pytest -q \
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
   tests/unit/test_graph_configuration_workbench.py \
   tests/unit/test_agent_definition_workbench_routes.py \
   -k 'model_endpoint_probe or auth_before_probe_body'
@@ -376,7 +421,7 @@ git commit -m "feat: probe saved endpoint structured output (#266)"
 
 Keep every Task 4 catalogue test. Add exact parser tests for all probe responses/statuses and malformed bodies. Prove Probe sends only `lock_version`; uses saved endpoint even when discovery shows a newer family member; makes no PUT; shares one pending gate across every role and Save/Upgrade/Probe; rejects stale/out-of-order request IDs; preserves A2→A3 and seven-role 409 recovery; clears an old probe result when the local endpoint changes; never claims approval; and renders sanitized unsupported/forbidden/unavailable messages with explicit retry only when `retryable:true`.
 
-In Playwright exercise first Model-tab fetch, local search, refresh exposing a newer entry while the seed remains exact, explicit selection/save of the exact name, then explicit Probe of that saved candidate. Cover success, unsupported structured output, forbidden, unavailable/retry recovery, empty discovery, URL rejection with zero PUT/probe, and catalogue 503 recovery without remount. Assert catalogue GET has no endpoint/token/host/URL query/body and probe POST has only the lock.
+In Playwright exercise first Model-tab fetch, local search, refresh exposing a newer entry while the seed remains exact, explicit selection/save of the exact name, then explicit Probe of that saved candidate. Add a separate manual non-URL custom endpoint success flow: enter an exact name absent from discovery, save, assert the PUT has only `lock_version` plus a candidate with the five editable leaves, contains the exact name, and has no discovery metadata, URL, host, token, display name, docs, description, task, or provider. Return success and prove exact retention before probing the saved candidate. Add a manual server-validation-failure flow: first PUT returns a typed one-item `candidate.model.endpoint_name` issue with sanitized non-leaking copy; assert the entire unsaved form remains, correct the name, retry explicitly through the same PUT, and prove success without remount. Cover success, unsupported structured output, forbidden, unavailable/retry recovery, empty discovery, URL rejection with zero PUT/probe, and catalogue 503 recovery without remount. Assert catalogue GET has no endpoint/token/host/URL query/body and probe POST has only the lock.
 
 - [ ] **Step 2: Run RED**
 
@@ -398,7 +443,7 @@ Parse before reducer dispatch; reuse the integrated request-ID/ref gate and save
 - [ ] **Step 4: Run the complete zero-skip/cause-based matrix**
 
 ```bash
-python -m pytest -q \
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
   tests/unit/test_model_endpoint_catalog.py \
   tests/unit/test_model_endpoint_probe.py \
   tests/unit/test_graph_configuration_draft.py \
@@ -408,9 +453,36 @@ python -m pytest -q \
   tests/unit/test_persisted_agent_runtime.py \
   tests/unit/test_prompt_assembler.py \
   tests/unit/test_agent_schema_registry.py \
-  tests/unit/test_ci_collects_integration_tests.py \
-  tests/integration/test_agent_definition_workbench_postgres.py \
+  tests/unit/test_ci_collects_integration_tests.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_graph_configuration_bootstrap_postgres.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_graph_configuration_constraints_postgres.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_persisted_graph_runtime_failures_postgres.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_conversation_pin_migration_postgres.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_conversation_pin_creation_postgres.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/integration/test_agent_definition_workbench_postgres.py
+
+TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres \
+  /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
   tests/integration/test_agent_schema_overlay_postgres.py
+
 (cd frontend && npm run test:unit)
 (cd frontend && npm run typecheck)
 (cd frontend && npx playwright test \
@@ -418,7 +490,7 @@ python -m pytest -q \
   --project=chromium --workers=1)
 ```
 
-Every PostgreSQL test must execute with zero skips. Compare exact failure/skip/warning causes with the corrections baseline, not counts. Add any renamed/final #261/#263/#264/#265 files from `PLAN-CORRECTIONS.md`; do not silently drop a missing path.
+Record a separate result line for each PostgreSQL command, including module name, passes, **zero skips**, and warning causes. A missing/unreachable server, missing concrete module, or server-unavailable skip fails that command and the final gate. The listed set is mandatory: graph configuration bootstrap/constraints, persisted runtime failures, conversation pin migration/creation, Task-owned workbench validation/concurrency, and predecessor schema overlay. Task 0 and the stricter re-probe may add renamed or final #261/#263/#264/#265 PostgreSQL modules to `PLAN-CORRECTIONS.md`, but may not remove, combine, replace, or waive any module in this concrete set. Compare exact failure/skip/warning causes with the corrections baseline, not counts.
 
 - [ ] **Step 5: Commit, exact-base whole-branch review, and local merge**
 
@@ -429,8 +501,9 @@ Commit UI/browser changes with `test: prove exact endpoint discovery and probe (
 - [ ] Use the mandatory local integration gate before Task 2 and retain its exact `INTEGRATION_BASE`; never defer the rebase until final review.
 - [ ] Re-probe installed 0.112.0 source: no list arguments, get/name present, `ServedEntityOutput.foundation_model` present, no assumed `system_ai` property.
 - [ ] Audit diff for `routes/tools.py`, `task.startswith`, `served_models`, exception-to-empty, URL forwarding, alias rewrite, auto-upgrade, `query(response_format`, and endpoint override fields; none is allowed.
-- [ ] Confirm deterministic catalog/probe fakes, route injection, writer validator, frontend mocks/intercepts, and runtime model/client factories; CI never invokes Databricks.
-- [ ] Confirm empty/forbidden/unavailable/unknown/name mismatch/readiness/update states/URL/unsupported/probe failure remain separately observable; confirm stale loser/no-call, same-content audit, rollback, exact seed, no alias drift, and recovery have cause-based coverage.
+- [ ] Confirm deterministic catalog/probe fakes, route injection, pure local endpoint-name policy, remote-after-current-lock writer validator, frontend mocks/intercepts, and runtime model/client factories; CI never invokes Databricks.
+- [ ] Confirm empty/forbidden/unavailable/unknown/name mismatch/readiness/update states/URL/unsupported/probe failure remain separately observable; confirm invalid-plus-stale URL is ordered `422`/no-write/zero-SDK, valid-plus-stale is coherent seven-role `409`/zero-remote-call, the concurrent stale loser never calls remote validation, and same-content audit, rollback, exact seed, no alias drift, and recovery have cause-based coverage.
+- [ ] Confirm component and Playwright evidence for manual non-URL success and typed server-failure/correction/retry: only #263's five editable candidate leaves, exact name retention, no discovery/URL/host/token fields, non-leaking typed error, retained unsaved form, and the separate URL zero-PUT proof.
 - [ ] Confirm no implementation dependency on #267 exists; #266 itself owns the explicit structured-output probe and #267 remains downstream.
 - [ ] Run `rg -n -i -e 'tb''d' -e 'to''do' -e 'implement'\ 'later' -e 'fill'\ 'in' -e 'appropriate'\ 'error' -e 'handle'\ 'edge' -e 'similar'\ 'to'\ 'task' docs/superpowers/plans/2026-09-22-model-endpoint-discovery-validation.md`; expect no matches. Remove all sabotage markers before final commit.
 
