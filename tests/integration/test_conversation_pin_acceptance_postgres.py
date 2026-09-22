@@ -295,11 +295,55 @@ def _expected_identities(session_id, turn, roles, release_id, mapping):
     ]
 
 
-def _actual_identities(session_id, turn, calls):
+def _observed_checkpoint_envelope(checkpointer, graph_result):
+    """Return the session and turn ordinal persisted for this graph execution.
+
+    ``invoke_graph`` mints an opaque ``turn_id``.  Every checkpoint for that
+    execution persists it alongside ``session_id`` in ``channel_values``.  Scan
+    all real checkpoint histories oldest-first, find that exact opaque id, and
+    derive A/1 versus A/2 from its distinct persisted position in its session's
+    history.  No caller-declared segment identity participates in this result.
+    """
+    persisted_turns: dict[str, list[str]] = {}
+    for checkpoint_tuple in reversed(list(checkpointer.list(None))):
+        values = checkpoint_tuple.checkpoint.get("channel_values") or {}
+        observed_session_id = values.get("session_id")
+        observed_turn_id = values.get("turn_id")
+        if not isinstance(observed_session_id, str) or not isinstance(observed_turn_id, str):
+            continue
+        session_turns = persisted_turns.setdefault(observed_session_id, [])
+        if observed_turn_id not in session_turns:
+            session_turns.append(observed_turn_id)
+
+    graph_turn_id = graph_result["turn_id"]
+    matches = [
+        (observed_session_id, turn_ids.index(graph_turn_id) + 1)
+        for observed_session_id, turn_ids in persisted_turns.items()
+        if graph_turn_id in turn_ids
+    ]
+    assert len(matches) == 1, (
+        f"graph turn {graph_turn_id!r} must occur in exactly one persisted "
+        f"session history, found {matches!r}"
+    )
+    observed_session_id, observed_turn = matches[0]
+    assert graph_result["session_id"] == observed_session_id
+
+    latest = checkpointer.get_tuple({"configurable": {"thread_id": observed_session_id}})
+    assert latest is not None
+    latest_values = latest.checkpoint.get("channel_values") or {}
+    assert (latest_values.get("session_id"), latest_values.get("turn_id")) == (
+        observed_session_id,
+        graph_turn_id,
+    )
+    return observed_session_id, observed_turn
+
+
+def _actual_identities(observed_envelope, calls):
+    observed_session_id, observed_turn = observed_envelope
     return [
         (
-            session_id,
-            turn,
+            observed_session_id,
+            observed_turn,
             identity.agent_key,
             identity.graph_release_id,
             identity.agent_definition_revision_id,
@@ -383,7 +427,8 @@ def test_persisted_conversation_pins_drive_three_real_compiled_graph_turns(
         return saved_send(node, arg)
 
     monkeypatch.setattr(routers, "Send", recording_send)
-    graph = build_graph(checkpointer=SqlAlchemyCheckpointSaver(session_factory=factory))
+    checkpointer = SqlAlchemyCheckpointSaver(session_factory=factory)
+    graph = build_graph(checkpointer=checkpointer)
     monkeypatch.setattr("src.services.graph.builder.get_session_local", lambda: factory)
     monkeypatch.setattr("src.services.graph.builder.get_graph", lambda: graph)
 
@@ -410,8 +455,9 @@ def test_persisted_conversation_pins_drive_three_real_compiled_graph_turns(
         assert [identity.graph_version for identity in segment_calls] == [
             expected_graph_version
         ] * len(roles)
-        assert _actual_identities(session_id, turn, segment_calls) == _expected_identities(
-            session_id, turn, roles, release_id, mapping
+        observed_envelope = _observed_checkpoint_envelope(checkpointer, result)
+        assert _actual_identities(observed_envelope, segment_calls) == (
+            _expected_identities(session_id, turn, roles, release_id, mapping)
         )
         assert result["graph_release_id"] == release_id
         assert adapter.calls[consumed : consumed + len(roles)] == list(roles)
