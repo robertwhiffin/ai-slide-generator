@@ -4,7 +4,12 @@
  */
 import type {
   AgentDefinitionWorkbenchResponse,
+  AgentKey,
   AssemblyRules,
+  DraftDefinition,
+  DraftSaveConflictResponse,
+  DraftSaveRequest,
+  DraftSaveSuccessResponse,
   ModelAgentNode,
 } from '../../src/api/agentDefinitions';
 
@@ -952,6 +957,23 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
   } satisfies ModelAgentNode;
 });
 
+export const syntheticDraftDefinitions = Object.fromEntries(
+  mockModelNodes.map((node) => [node.agent_key, structuredClone(node.draft)]),
+) as Record<AgentKey, DraftDefinition>;
+
+export const syntheticDraftSaveRequest = {
+  lock_version: 0,
+  candidate: {
+    prompt_text: 'Synthetic Architect edited prompt.',
+    model: {
+      endpoint_name: 'databricks-claude-opus-4-6',
+      temperature: 0.7,
+      max_tokens: 60000,
+      top_p: 0.95,
+    },
+  },
+} satisfies DraftSaveRequest;
+
 /** Complete Task 4 wire shape used by both component and browser tests. */
 export const syntheticAgentDefinitionWorkbench = {
   active_release: {
@@ -993,3 +1015,54 @@ export const syntheticAgentDefinitionWorkbench = {
     mockModelNodes[6],
   ],
 } satisfies AgentDefinitionWorkbenchResponse;
+
+export function syntheticDraftSaveSuccess(
+  agentKey: AgentKey,
+  request: DraftSaveRequest,
+  lockVersion: number,
+): DraftSaveSuccessResponse {
+  const definition = syntheticDraftDefinitions[agentKey];
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@test.com',
+      updated_at: `2026-09-22T12:00:0${lockVersion}Z`,
+    },
+    definition: {
+      ...structuredClone(definition),
+      prompt_text: request.candidate.prompt_text,
+      model: structuredClone(request.candidate.model),
+      candidate_hash: 'd'.repeat(64),
+    },
+    changed: true,
+  };
+}
+
+export function syntheticDraftSaveConflict(
+  request: DraftSaveRequest,
+  promptEdits: Partial<Record<AgentKey, string>> = {},
+  currentLockVersion = 1,
+): DraftSaveConflictResponse {
+  const definitions = structuredClone(syntheticDraftDefinitions);
+  for (const [agentKey, promptText] of Object.entries(promptEdits) as Array<[AgentKey, string]>) {
+    definitions[agentKey] = {
+      ...definitions[agentKey],
+      prompt_text: promptText,
+      candidate_hash: 'd'.repeat(64),
+    };
+  }
+  return {
+    code: 'stale_draft',
+    expected_lock_version: request.lock_version,
+    current_lock_version: currentLockVersion,
+    client_candidate: structuredClone(request.candidate),
+    server: {
+      draft: {
+        ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+        lock_version: currentLockVersion,
+      },
+      definitions,
+    },
+  };
+}

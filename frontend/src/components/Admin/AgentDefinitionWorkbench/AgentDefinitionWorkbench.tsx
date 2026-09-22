@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AgentDefinitionApiError,
   getAgentDefinitionWorkbench,
@@ -7,139 +6,18 @@ import {
 import type {
   AgentDefinitionWorkbenchResponse,
   AgentNode,
-  ModelAgentNode,
 } from '../../../api/agentDefinitions';
-
-const DEFINITION_TABS = ['prompt', 'model', 'output-schema', 'assembly'] as const;
-type DefinitionTab = (typeof DEFINITION_TABS)[number];
-
-const TAB_LABELS: Record<DefinitionTab, string> = {
-  prompt: 'Prompt',
-  model: 'Model',
-  'output-schema': 'Output Schema',
-  assembly: 'Assembly',
-};
-
-function DefinitionTabContent({ node, tab }: { node: ModelAgentNode; tab: DefinitionTab }) {
-  const definition = node.draft;
-
-  if (tab === 'prompt') {
-    return (
-      <pre className="whitespace-pre-wrap break-words font-mono text-sm text-gray-800">
-        {definition.prompt_text}
-      </pre>
-    );
-  }
-  if (tab === 'model') {
-    return (
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-3 text-sm">
-        <dt className="font-medium text-gray-600">Endpoint</dt><dd>{definition.model.endpoint_name}</dd>
-        <dt className="font-medium text-gray-600">Temperature</dt><dd>{definition.model.temperature}</dd>
-        <dt className="font-medium text-gray-600">Max tokens</dt><dd>{definition.model.max_tokens}</dd>
-        <dt className="font-medium text-gray-600">Top P</dt><dd>{definition.model.top_p}</dd>
-      </dl>
-    );
-  }
-  if (tab === 'output-schema') {
-    return (
-      <pre className="whitespace-pre-wrap break-words font-mono text-sm text-gray-800">
-        {JSON.stringify({
-          schema_overlay: definition.schema_overlay,
-          schema_contract: definition.schema_contract,
-        }, null, 2)}
-      </pre>
-    );
-  }
-  return (
-    <pre className="whitespace-pre-wrap break-words font-mono text-sm text-gray-800">
-      {JSON.stringify({
-        assembly_rules: definition.assembly_rules,
-        protected_assembly: definition.protected_assembly,
-      }, null, 2)}
-    </pre>
-  );
-}
-
-function DefinitionPanel({ node }: { node: ModelAgentNode }) {
-  const [activeTab, setActiveTab] = useState<DefinitionTab>('prompt');
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-
-  const selectTab = (tab: DefinitionTab, focus = false) => {
-    setActiveTab(tab);
-    if (focus) {
-      const index = DEFINITION_TABS.indexOf(tab);
-      queueMicrotask(() => tabRefs.current[index]?.focus());
-    }
-  };
-
-  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    let nextIndex: number | null = null;
-    if (event.key === 'ArrowRight') nextIndex = (index + 1) % DEFINITION_TABS.length;
-    if (event.key === 'ArrowLeft') nextIndex = (index - 1 + DEFINITION_TABS.length) % DEFINITION_TABS.length;
-    if (event.key === 'Home') nextIndex = 0;
-    if (event.key === 'End') nextIndex = DEFINITION_TABS.length - 1;
-    if (nextIndex === null) return;
-    event.preventDefault();
-    selectTab(DEFINITION_TABS[nextIndex], true);
-  };
-
-  return (
-    <>
-      <div
-        role="tablist"
-        aria-label={`${node.display_name} definition`}
-        className="mb-4 flex border-b border-gray-200"
-      >
-        {DEFINITION_TABS.map((tab, index) => {
-          const selected = activeTab === tab;
-          return (
-            <button
-              key={tab}
-              ref={(element) => { tabRefs.current[index] = element; }}
-              id={`${node.agent_key}-${tab}-tab`}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              aria-controls={`${node.agent_key}-${tab}-panel`}
-              tabIndex={selected ? 0 : -1}
-              onClick={() => selectTab(tab)}
-              onKeyDown={(event) => onTabKeyDown(event, index)}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${
-                selected
-                  ? 'border-blue-600 text-blue-700'
-                  : 'border-transparent text-gray-500 hover:text-gray-800'
-              }`}
-            >
-              {TAB_LABELS[tab]}
-            </button>
-          );
-        })}
-      </div>
-
-      {DEFINITION_TABS.map((tab) => (
-        <div
-          key={tab}
-          id={`${node.agent_key}-${tab}-panel`}
-          role="tabpanel"
-          aria-labelledby={`${node.agent_key}-${tab}-tab`}
-          hidden={activeTab !== tab}
-          className="min-h-72 rounded-md border border-gray-200 bg-gray-50 p-4"
-        >
-          <DefinitionTabContent node={node} tab={tab} />
-        </div>
-      ))}
-    </>
-  );
-}
+import { DefinitionEditor } from './DefinitionEditor';
+import { draftStatus, validateDraftForm } from './draftEditorState';
+import { useDraftEditor } from './useDraftEditor';
 
 function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchResponse }) {
   const [selectedKey, setSelectedKey] = useState(workbench.nodes[0]?.agent_key);
+  const editor = useDraftEditor(workbench);
   const selectedNode = workbench.nodes.find((node) => node.agent_key === selectedKey)
     ?? workbench.nodes[0];
 
-  if (!selectedNode) {
-    return <div role="alert">The Graph contains no nodes.</div>;
-  }
+  if (!selectedNode) return <div role="alert">The Graph contains no nodes.</div>;
 
   const selectNode = (node: AgentNode) => setSelectedKey(node.agent_key);
 
@@ -150,16 +28,16 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
           <h2 className="text-xl font-semibold text-gray-900">
             Graph Version {workbench.active_release.version_number}
           </h2>
-          <p className="mt-1 text-sm text-gray-500">Read-only Agent Definition browser</p>
+          <p className="mt-1 text-sm text-gray-500">Edit the shared Graph Draft explicitly</p>
         </div>
         <dl className="flex gap-5 text-sm text-gray-600">
           <div>
             <dt className="font-medium text-gray-500">Draft base</dt>
-            <dd>Graph Version {workbench.draft.base_version_number}</dd>
+            <dd>Graph Version {editor.state.draft.base_version_number}</dd>
           </div>
           <div>
             <dt className="font-medium text-gray-500">Lock version</dt>
-            <dd>{workbench.draft.lock_version}</dd>
+            <dd>{editor.state.draft.lock_version}</dd>
           </div>
         </dl>
       </header>
@@ -174,17 +52,22 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
             <div className="space-y-1">
               {workbench.nodes.map((node) => {
                 const selected = node.agent_key === selectedNode.agent_key;
+                const status = node.execution_kind === 'model'
+                  ? draftStatus(editor.state.byAgent[node.agent_key])
+                  : null;
                 return (
                   <button
                     key={node.agent_key}
                     type="button"
+                    aria-label={node.display_name}
                     aria-current={selected ? 'true' : undefined}
                     onClick={() => selectNode(node)}
                     className={`w-full rounded-md px-3 py-2 text-left text-sm ${
                       selected ? 'bg-blue-50 font-medium text-blue-800' : 'text-gray-700 hover:bg-gray-50'
                     }`}
                   >
-                    {node.display_name}
+                    <span>{node.display_name}</span>
+                    {status && <span className="mt-1 block text-xs font-normal text-gray-500">{status}</span>}
                   </button>
                 );
               })}
@@ -198,13 +81,31 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                 {selectedNode.execution_kind === 'model' ? 'Model agent' : 'Deterministic'}
               </span>
             </div>
-            {selectedNode.execution_kind === 'deterministic' ? (
+            {selectedNode.execution_kind === 'deterministic' && (
               <p className="rounded-md border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">
                 {selectedNode.read_only_reason}
               </p>
-            ) : (
-              <DefinitionPanel key={selectedNode.agent_key} node={selectedNode} />
             )}
+            {workbench.nodes.filter((node) => node.execution_kind === 'model').map((node) => {
+              if (node.execution_kind !== 'model') return null;
+              const entry = editor.state.byAgent[node.agent_key];
+              return (
+                <div key={node.agent_key} hidden={selectedNode.agent_key !== node.agent_key}>
+                  <DefinitionEditor
+                    agentKey={node.agent_key}
+                    node={node}
+                    entry={entry}
+                    saveDisabled={editor.state.pendingSave !== null || !validateDraftForm(entry.local).ok}
+                    onEdit={editor.edit}
+                    onSave={editor.save}
+                    onReloadServer={editor.reloadServer}
+                    onKeepLocal={editor.keepLocal}
+                    onRestoreRecovery={editor.restoreRecovery}
+                    onDismissRecovery={editor.dismissRecovery}
+                  />
+                </div>
+              );
+            })}
           </section>
 
           <aside className="rounded-lg border border-gray-200 bg-white p-5" aria-label="Isolated testing">
