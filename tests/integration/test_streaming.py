@@ -7,16 +7,17 @@ Run: pytest tests/integration/test_streaming.py -v
 """
 
 import json
-import pytest
+import logging
 from typing import Any, Dict, Generator, List
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import SessionNotFoundError
-
+from src.services.persisted_graph_release import GraphReleaseNotFoundError
 
 # ============================================
 # Helper Functions
@@ -457,6 +458,54 @@ class TestStreamingErrors:
         assert any(e["type"] == "assistant" for e in events)
         # The error is caught and converted to an error event
         assert any(e["type"] == "error" for e in events)
+
+    def test_pinned_graph_failure_is_one_safe_terminal_error(
+        self,
+        client,
+        mock_chat_service,
+        mock_session_manager,
+        standard_request_body,
+        caplog,
+    ):
+        """The SSE transport must not stringify a typed failure after its safe event."""
+        sentinel_release_id = 987654321
+
+        def generate_pinned_failure():
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                error="Pinned graph configuration is unavailable",
+                metadata={"code": "pinned_graph_configuration_unavailable"},
+            )
+            raise GraphReleaseNotFoundError(sentinel_release_id)
+
+        mock_chat_service.send_message_streaming.return_value = (
+            generate_pinned_failure()
+        )
+
+        with caplog.at_level(logging.ERROR, logger="src.api.routes.chat"):
+            events = collect_stream_events(client, standard_request_body)
+
+        error_events = [event for event in events if event["type"] == "error"]
+        assert len(error_events) == 1
+        assert error_events[0]["error"] == (
+            "Pinned graph configuration is unavailable"
+        )
+        assert error_events[0]["metadata"] == {
+            "code": "pinned_graph_configuration_unavailable"
+        }
+        rendered = json.dumps(events)
+        assert str(sentinel_release_id) not in rendered
+        assert "GraphReleaseNotFoundError" not in rendered
+
+        route_records = [
+            record
+            for record in caplog.records
+            if record.name == "src.api.routes.chat"
+        ]
+        assert str(sentinel_release_id) not in "\n".join(
+            record.getMessage() for record in route_records
+        )
+        assert all(record.exc_info is None for record in route_records)
 
     def test_session_not_found_error_yields_error_event(
         self, client, mock_chat_service, mock_session_manager, standard_request_body

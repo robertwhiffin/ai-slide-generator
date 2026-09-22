@@ -21,13 +21,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session as DBSession
 
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.schemas.agent_config import normalize_style_source_exclusivity
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.services.chat_service import get_chat_service, resolve_engine_mode_or
-from src.api.services.job_queue import enqueue_job
+from src.api.services.job_queue import (
+    PINNED_GRAPH_CONFIGURATION_ERROR,
+    enqueue_job,
+    is_pinned_graph_configuration_error_event,
+    pinned_graph_configuration_error_event_payload,
+)
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
@@ -36,7 +41,8 @@ from src.core.settings_db import get_default_design_system_id, get_default_slide
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.agent import UnsafeContentError
-from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
+from src.services.permission_service import PERMISSION_PRIORITY, get_permission_service
+from src.services.persisted_graph_release import PersistedRuntimeError
 from src.utils.pi_filter import scan_for_injection
 
 logger = logging.getLogger(__name__)
@@ -505,6 +511,8 @@ async def send_message_streaming(
         thread = threading.Thread(target=lambda: ctx.run(run_streaming), daemon=True)
         thread.start()
 
+        pinned_graph_configuration_error_emitted = False
+
         try:
             # Yield events as they arrive
             while True:
@@ -512,6 +520,8 @@ async def send_message_streaming(
                 event = await asyncio.to_thread(event_queue.get)
                 if event is None:
                     break
+                if is_pinned_graph_configuration_error_event(event):
+                    pinned_graph_configuration_error_emitted = True
                 yield event.to_sse()
 
             # Check for errors after completion
@@ -528,6 +538,11 @@ async def send_message_streaming(
                         type=StreamEventType.ERROR,
                         error=f"Session not found: {request.session_id}",
                     )
+                elif (
+                    isinstance(error, PersistedRuntimeError)
+                    and pinned_graph_configuration_error_emitted
+                ):
+                    return
                 else:
                     logger.error(f"Streaming chat request failed: {error}", exc_info=True)
                     error_event = StreamEvent(
@@ -760,6 +775,11 @@ async def poll_chat(
         for m in messages
         if m["role"] != "user"
     ]
+    if (
+        chat_request["status"] == "error"
+        and chat_request.get("error_message") == PINNED_GRAPH_CONFIGURATION_ERROR
+    ):
+        events.append(pinned_graph_configuration_error_event_payload())
 
     # ws4d D3 — incremental slides on the polling transport.  Projected into an
     # explicit response shape rather than returned as-is: the row query knows
