@@ -9,8 +9,11 @@ plan/research/review history. After Task 1, the integration gate replays the com
 allowed source interval onto the proven local integration base with an explicit
 `git rebase --onto "$INTEGRATION_BASE" "$PLAN_HISTORY_BASE"`.
 
-The ledger captures the pre-rebase source list, Task-1 commits, replayed head, and
-`git range-diff`; it rejects any #261/#263/#265/#264 predecessor or merge commit while
-admitting the required #266 planning/research/review commits. Final
-`IMPLEMENTATION_BASE` remains exactly `INTEGRATION_BASE`; per-task ranges remain
-separate, and final review packages the proven whole #266 range only.
+The ledger captures the pre-rebase source list, a separately recorded exact ordered
+Task 1 implementation/fix/report/review/re-review sequence, replayed head, and
+`git range-diff`. It requires exact ordered source equality—frozen
+`ALLOWED_PREINTEGRATION_266_HISTORY` followed by that Task 1 sequence—and rejects any
+#261/#263/#265/#264 predecessor or merge commit while admitting the required #266
+planning/research/review commits. Final `IMPLEMENTATION_BASE` remains exactly
+`INTEGRATION_BASE`; per-task ranges remain separate, and final review packages the
+proven whole #266 range only.
