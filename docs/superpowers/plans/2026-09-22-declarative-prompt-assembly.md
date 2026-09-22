@@ -12,12 +12,12 @@
 
 ## Global Constraints
 
-- Start only from one concrete, reviewed commit on the **local** `feat/langgraph-core` branch that contains the final reviewed #260, #261, and #263 heads. Current review evidence is #260 `29e03411487476383b34101b7b34513dbb917f26`, #261 `785d9aaca35a3a9103cd4283afdc6bda3b679882`, and #263 `1d706e21b92aad68314da2e79bb4d1d5626663b7`; re-resolve final reviewed heads and record their review evidence at execution. The active #261 branch moved during rereview from `77e42b3c170373407afddc1c98d982af5c3806fa` to observed `6d8fa37fbb63c2eff2716707a15f9d2c6677e032`; neither moving head is authority until final review names it or a successor. Record the local integration commit in `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`, prove all three reviewed heads are ancestors, prove `447791d7a` is neither the base nor a production source, rebase #265 locally, and prove the base is an ancestor of `HEAD`. Never fetch, name, create, or push `origin/integration/261-263`; never open a PR or push this work.
+- Start only from one concrete, reviewed commit on the **local** `feat/langgraph-core` branch that contains the final reviewed #260, #261, and #263 heads. Current review evidence is #260 `29e03411487476383b34101b7b34513dbb917f26`, #261 `785d9aaca35a3a9103cd4283afdc6bda3b679882`, and #263 `1d706e21b92aad68314da2e79bb4d1d5626663b7`; re-resolve final reviewed heads and record their review evidence at execution. The active #261 branch moved during rereview from `77e42b3c170373407afddc1c98d982af5c3806fa` through `6d8fa37fbb63c2eff2716707a15f9d2c6677e032` to locally observed `0b1b375016f70ff499175d7435b40ac4ac285548`; no moving head is authority until final review names it or a successor. Record the local integration commit in `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`, prove all three reviewed heads are ancestors, prove `447791d7a` is neither the base nor a production source, rebase #265 locally, and prove the base is an ancestor of `HEAD`. Never fetch, name, create, or push `origin/integration/261-263`; never open a PR or push this work.
 - Load `executing-plans-tellr` and `superpowers:subagent-driven-development`, create `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/PLAN-CORRECTIONS.md`, and attach it to **every** implementer and reviewer brief. Treat the plan as a hypothesis, not runtime evidence. Re-probe the concrete local base before Task 1 and again immediately before the first shared-file commit if any predecessor head changed.
 - Invoke `/Users/robert.whiffin/.pyenv/shims/python -m pytest` exactly; never run `uv`, `pip`, install dependencies, or create `.venv`. Stop if `.venv` exists.
 - `src/services/agent_definition_manifest_v1.py`, generated v1 JSON, v1 identities/digests, published revisions, and releases are historical. Never regenerate or mutate them for v2.
 - #261 owns persisted production resolution and its non-retaining identity/error sink. Preserve its exact public production interface: `AgentRuntime.run(agent_key, graph_release_id, payload, assembly_context) -> AgentInvocationResult`. Do not add a three-argument overload, source a release from active/latest/code defaults, bypass its callback/sink, or change its provider-error conversion. Any manifest-derived/code-owned compatibility loader is test-only and must reject production construction.
-- V1 remains exact: `DefinitionContent.validate_role_assembly` still compares a v1 document to `assembly_rules_for(agent_key)`. For v2, `DefinitionContent`, `AssemblyRulesV2`, and `CustomTextBlock` enforce only frozen wire shape, field types, extras, and discriminators; they deliberately permit shape-valid duplicate IDs, blank text, role/condition mismatches, and non-canonical anchor order so the single assembler issue producer can report the complete ordered semantic tuple. No writer may hash or persist v2 content before that checker succeeds.
+- V1 remains exact: `DefinitionContent.validate_role_assembly` still compares a v1 document to `assembly_rules_for(agent_key)`. For v2, `DefinitionContent`, `AssemblyRulesV2`, and `CustomTextBlock` enforce only frozen wire shape, field types, extras, and discriminators; they deliberately permit shape-valid duplicate IDs, blank text, role/condition mismatches, and non-canonical anchor order so the single assembler issue producer can report the complete ordered semantic tuple. `PromptAssembler.validate` also binds rules format 1 to the exact registered v1 protected-bundle identity and rules format 2 to the exact registered v2 identity; either hybrid is one stable semantic rejection. No writer may hash or persist content before that checker succeeds, and only the server-owned upgrade may transition a stored v1 pair to the v2 pair.
 - Conditions are exactly `always`, `design_system_active`, `design_system_inactive`, and `payload_has_deck_brief`; the latter is `bool(payload.get("deck_brief"))`. No stored code, expression, or caller-provided condition truth is permitted.
 - Only `PromptAssembler` serializes a v2 payload, exactly once with `json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)`, between code-owned `<untrusted-data>` delimiters. Only `DatabricksModelAdapter` calls `with_structured_output`.
 - Normal #263 saves retain both protected identities. An explicit protected-assembly upgrade shares #263's locked transaction, validation, canonical mapper/hash, audit update, lock increment, and conflict envelope; it is not a second writer. For Data Analyst and Build Reviewer only, that upgrade also replaces a provably pristine retained v1 composite `prompt_text` with its exact code-owned authored-only counterpart. It never mutates a published v1 revision and never guesses how to strip edited legacy text. Explicit same-content saves advance lock/audit once and return `changed:false`.
@@ -121,8 +121,10 @@ class PromptAssembler:
 ```
 
 `PromptAssembler` is the only assembly-domain issue authority. Its `validate` method is the
-only candidate-semantic issue producer; `upgrade_definition_to_v2` owns only the one
-transition-specific manual-resolution issue. `validate` walks custom blocks once in persisted
+only candidate-semantic issue producer; `upgrade_definition_to_v2` is the sole
+transition-state authority and owns the exact `already_current` and manual-resolution
+issues. After exact identity resolution and rules-format pairing, `validate` walks custom
+blocks once in persisted
 tuple order and raises the exact `PromptAssemblyIssue` tuple defined in the semantic table
 below. The draft local validator performs only a field-for-field structural
 conversion from `PromptAssemblyIssue` to #263 `DraftValidationIssue`; it contains no checks,
@@ -186,8 +188,21 @@ preserves legacy `INSTRUCTIONS` byte-for-byte, and guards both source composites
 checked-in generated v1 manifest. Production upgrade uses these retained literal records,
 never a manifest/runtime fallback or a live substring heuristic.
 
-`upgrade_definition_to_v2` compares the locked definition's exact prompt-transition source
-tuple `(agent_key, definition_version, protected_assembly, assembly_rules, prompt_text)`.
+Every `ProtectedAssemblyBundle` declares its one `assembly_rules_format_version`. The exact
+registered v1 identity `(1,
+e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852)` declares format 1;
+the exact import-time-guarded v2 identity declares format 2. `validate` first resolves the
+exact version/digest, then compares `definition.assembly_rules.format_version` with that
+declaration. An unknown version or digest remains `ProtectedAssemblyBundleUnavailable`; a
+resolved identity paired with the other rules version raises only the exact
+`assembly_bundle_mismatch` issue before block walking or protected-plan validation. The same
+method and ordering apply to editable candidates and persisted runtime content.
+
+`upgrade_definition_to_v2` first calls `validate` on the locked source. A valid definition
+already carrying the exact v2 identity/rules pair returns the sole exact `already_current`
+transition issue before any target is constructed. Otherwise it compares the locked
+definition's exact prompt-transition source tuple
+`(agent_key, definition_version, protected_assembly, assembly_rules, prompt_text)`.
 Model configuration, schema overlay, and schema identity are intentionally outside that tuple:
 they are separately editable content that the upgrade preserves and they cannot prove or
 disprove whether legacy protected prompt text was edited. For either affected role, an exact
@@ -195,8 +210,10 @@ source tuple produces a target with authored-only `prompt_text`, v2 identity, an
 custom blocks. If the v1 identity/rules are valid but `prompt_text` differs by even one code
 point, the method emits the manual-resolution issue below and returns no candidate. It never
 searches, slices, strips, normalizes, or guesses. Other roles retain `prompt_text` exactly
-while receiving v2 identity/rules. Published v1 revisions, releases, generated JSON, hashes,
-and bundle identities are never updated.
+while receiving v2 identity/rules. A successful return is the only operation allowed to
+construct a replacement v2 identity/rules pair for a stored v1 draft; ordinary saves may
+edit rules only when the stored identity already is the exact v2 identity. Published v1
+revisions, releases, generated JSON, hashes, and bundle identities are never updated.
 
 V2 stage order is authored prompt; legal custom blocks after authored prompt; generated Build Reviewer criteria for that role; conditional deck brief and its legal custom blocks; exactly one environment constraint and its legal custom blocks; notice; opening delimiter; canonical JSON; closing delimiter; terminal binding. V1 resolves forever with its existing stage order/raw serialization.
 
@@ -222,7 +239,7 @@ def upgrade_draft_protected_assembly(
     raise NotImplementedError
 ```
 
-Expose `POST /api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade`, strict body `{"lock_version": 4}`. No version/digest/stage/prompt/client actor is accepted. Under #263's existing locks, it calls `PromptAssembler.upgrade_definition_to_v2` on the selected stored content. That method server-constructs v2 identity/rules and, only for an exact Data Analyst or Build Reviewer transition source tuple, replaces the legacy composite with its authored-only target. It preserves model/overlay/schema identity and every unrelated field, then the existing `_write_locked_content` runs once. Existing v2 is `422 already_current`. A manual-resolution or other local issue is returned before stale comparison, invokes no post-stale validator, and writes nothing. A locally valid stale candidate returns #263's `409` and calls no post-stale validator. A current valid candidate runs post-stale validators before mapper/hash/flush/audit/lock. No second transition authority, mapper, writer, or route is permitted.
+Expose `POST /api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade`, strict body `{"lock_version": 4}`. No version/digest/stage/prompt/client actor is accepted. Under #263's existing locks, it calls `PromptAssembler.upgrade_definition_to_v2` on the selected stored content. That method server-constructs v2 identity/rules and, only for an exact Data Analyst or Build Reviewer transition source tuple, replaces the legacy composite with its authored-only target. It preserves model/overlay/schema identity and every unrelated field, then the existing `_write_locked_content` runs once. Existing valid v2 is the exact `422 already_current` issue emitted only by `upgrade_definition_to_v2`. An `already_current`, manual-resolution, or other local issue is returned before stale comparison, invokes no post-stale validator, and writes nothing. A locally valid stale candidate returns #263's `409` and calls no post-stale validator. A current valid candidate runs post-stale validators before mapper/hash/flush/audit/lock. No facade, route, or client may infer transition state, and no second transition authority, mapper, writer, or route is permitted.
 
 Upgrade `409` uses the existing `stale_draft` family with `client_candidate: null`, while an
 ordinary save retains its submitted candidate. `server.draft` and the exact seven keys in
@@ -262,14 +279,17 @@ locations):
 | missing required request field | exact dotted Pydantic location | `strict_type` | `Field required` |
 | any extra/protected request field | exact dotted Pydantic location | `extra_forbidden` | `Extra inputs are not permitted` |
 
-After parsing, assembler-owned issue contracts use the stable literals below. For v2 custom
-blocks, `PromptAssembler.validate` iterates tuple indices in order and, within each block,
+After parsing, assembler-owned issue contracts use the stable literals below.
+`PromptAssembler.validate` first resolves the exact protected identity and checks its declared
+rules format. An unavailable identity raises its dedicated subtype; a resolved hybrid emits
+only `assembly_bundle_mismatch`. For a correctly paired v2 definition it then iterates custom
+block tuple indices in order and, within each block,
 checks duplicate ID, blank text, role/anchor legality, anchor/condition legality, backwards
 rank, then protected placement in that exact order. It next checks protected singleton,
-payload, and terminal invariants. An unavailable identity raises its dedicated subtype rather
-than combining with block issues. The upgrade transition validates its retained v1
-identity/rules first and emits the manual-resolution issue only for an otherwise valid source
-whose prompt differs. The draft adapter copies these `PromptAssemblyIssue` values to
+payload, and terminal invariants. The upgrade transition calls that same validation first,
+then emits `already_current` for a valid v2 pair or the manual-resolution issue for an
+otherwise valid affected v1 source whose prompt differs. Transition issues are singular and
+cannot combine. The draft adapter copies these `PromptAssemblyIssue` values to
 `DraftValidationIssue` without reordering:
 
 | Condition | Field | Code | Message |
@@ -282,26 +302,29 @@ whose prompt differs. The draft adapter copies these `PromptAssemblyIssue` value
 | custom block placed after payload or terminal metadata | `candidate.assembly_rules.custom_blocks.<i>.anchor` | `invalid_protected_placement` | `Custom blocks may appear only at legal pre-payload anchors.` |
 | protected bundle version cannot resolve | `protected_assembly.version` | `protected_bundle_unavailable` | `Protected assembly bundle is unavailable.` |
 | protected bundle digest cannot resolve | `protected_assembly.digest` | `protected_bundle_unavailable` | `Protected assembly bundle is unavailable.` |
+| resolved bundle identity paired with the other assembly-rules format | `candidate.assembly_rules.format_version` | `assembly_bundle_mismatch` | `Assembly rules format must match the protected assembly bundle.` |
 | required protected singleton absent | `protected_assembly.stages.<stage_id>` | `missing_protected_stage` | `Required protected stage is missing.` |
 | protected singleton repeated | `protected_assembly.stages.<stage_id>` | `duplicate_protected_stage` | `Protected singleton stage must appear exactly once.` |
 | runtime payload stage missing, repeated, or outside its boundary | `protected_assembly.stages.runtime_payload` | `invalid_payload_stage` | `Runtime payload must appear exactly once between the protected delimiters.` |
 | terminal binding missing, altered, prompt-contributing, or non-final | `protected_assembly.stages.structured_output_binding` | `invalid_terminal_binding` | `Structured-output binding must be the final non-prompt protected stage.` |
+| valid definition already carries the exact current v2 identity/rules pair | `protected_assembly.version` | `already_current` | `Protected assembly is already current.` |
 | affected v1 composite prompt differs from its exact retained source | `prompt_text` | `legacy_prompt_manual_resolution_required` | `Legacy protected prompt content was edited. Restore the exact Graph Version 1 prompt before upgrading, then reapply authored edits.` |
 
 Parser tests assert the complete ordered parser tuple; assembler/facade tests assert the
 complete ordered semantic tuple. Route tests assert the exact
 `{"code":"invalid_draft","errors":[...]}` envelope for each reachable boundary, rather
 than claiming server-owned protected-plan failures can be supplied through a request DTO.
-The manual-resolution issue is an upgrade-only server-derived issue. It is emitted after
-validating the retained v1 identity/rules and before constructing or validating a v2
-candidate, before stale comparison, and before any post-stale validator. The client uses its
-existing exact `invalid_draft` parser, renders the message against the Prompt tab, retains the
-v1 definition and all local edits, exposes no v2 custom controls, and sends no follow-up
-request automatically.
+The `already_current` and manual-resolution issues are upgrade-only server-derived issues
+owned by `upgrade_definition_to_v2`. They are emitted in the method order above before
+constructing a candidate, stale comparison, or any post-stale validator. Facade and route
+copy them without detecting state. The client uses its existing exact `invalid_draft` parser,
+renders `already_current` against Assembly and manual resolution against Prompt, retains the
+authoritative definition and all safe local edits, exposes no controls inconsistent with the
+authoritative rules version, and sends no follow-up request automatically.
 
 ### Task 0: Prove the local integration base, run corrections pre-pass, and record baselines
 
-**Gate:** No tracked #265 implementation task may begin until final reviewed #260, #261, and #263 are ancestors of one concrete reviewed local integration commit. During this correction local `feat/langgraph-core` was `76a88f238e84f17cc60eba8a62e00dc80fc26115`: it contains final #263 `1d706e21b92aad68314da2e79bb4d1d5626663b7` but does not contain reviewed #261 `785d9aaca35a3a9103cd4283afdc6bda3b679882`, so it fails this gate. The active #261 line was observed moving through `77e42b3c170373407afddc1c98d982af5c3806fa` to `6d8fa37fbb63c2eff2716707a15f9d2c6677e032`; both remain observation only until final review evidence names an authoritative head. Repeat this task before Task 1 and before the first shared-file commit whenever a reviewed predecessor head or owner changes.
+**Gate:** No tracked #265 implementation task may begin until final reviewed #260, #261, and #263 are ancestors of one concrete reviewed local integration commit. During this correction local `feat/langgraph-core` was `76a88f238e84f17cc60eba8a62e00dc80fc26115`: it contains final #263 `1d706e21b92aad68314da2e79bb4d1d5626663b7` but does not contain reviewed #261 `785d9aaca35a3a9103cd4283afdc6bda3b679882`, so it fails this gate. The active #261 line was observed moving through `77e42b3c170373407afddc1c98d982af5c3806fa` and `6d8fa37fbb63c2eff2716707a15f9d2c6677e032` to local `0b1b375016f70ff499175d7435b40ac4ac285548`; all remain observation only until final review evidence names an authoritative head. Repeat this task before Task 1 and before the first shared-file commit whenever a reviewed predecessor head or owner changes.
 
 **Files:**
 - Create (ignored execution evidence): `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`
@@ -396,7 +419,9 @@ repeat Steps 1–3 before modifying a shared file.
 
 **Files:**
 - Modify: `src/services/graph_definition_manifest.py:47-239`
+- Modify: `src/services/agent_runtime.py` (the #261 compatibility loader's union parser only)
 - Modify: `tests/unit/test_graph_definition_manifest.py:1-442`
+- Modify: `tests/unit/test_persisted_graph_release.py`
 
 **Produces:** `AssemblyRulesV1`, `AssemblyRulesV2`, `CustomTextBlock`, and `AssemblyRules` for all following tasks.
 
@@ -413,6 +438,14 @@ tuples without rewriting or regrouping them. Those are deliberately deferred sem
 candidates for Task 2. Sibling order remains significant in hashing. This task imports no
 assembler symbol and asserts no semantic acceptance decision.
 
+Keep the union-producing commit green for every known #261 consumer. At reviewed #261
+`785d9aaca...` and locally observed `0b1b37501...`, `agent_runtime.py` calls
+`AssemblyRules.model_validate(...)` and `tests/unit/test_persisted_graph_release.py` uses
+`isinstance(..., AssemblyRules)`. Add loader coverage that parses persisted v1 and v2 wire
+values through the discriminated union and asserts the concrete result is respectively
+`AssemblyRulesV1` and `AssemblyRulesV2`; retain the suite's exact-release, no-active-fallback,
+and malformed-persisted-assembly cases.
+
 ```python
 def test_v2_hash_includes_custom_identity_and_order() -> None:
     first = _v2("architect", [_custom("00000000-0000-0000-0000-000000000001", "one"), _custom("00000000-0000-0000-0000-000000000002", "two")])
@@ -423,7 +456,7 @@ def test_v2_hash_includes_custom_identity_and_order() -> None:
 - [ ] **Step 2: Run RED**
 
 ```bash
-/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_graph_definition_manifest.py
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_graph_definition_manifest.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_graph_release.py
 test ! -e .venv
 ```
 
@@ -439,6 +472,12 @@ current equality for v1; for v2, return after Pydantic has enforced only discrim
 shape, types, literals, and extras. Do not add role/condition, duplicate, blank, placement, or
 order checks here; do not import the assembler or generated manifest.
 
+In `agent_runtime.py`, replace the invalid class-style union call with one module-owned
+`TypeAdapter(AssemblyRules).validate_python(...)` at the existing compatibility-loader seam;
+do not change production resolution, fallback boundaries, or runtime behavior in this task.
+Replace `isinstance(value, AssemblyRules)` assertions with concrete `AssemblyRulesV1`/
+`AssemblyRulesV2` assertions. Do not defer either known consumer until Task 3.
+
 - [ ] **Step 4: GREEN**
 
 Run Step 2 and compare the failure/skip cause set with Task 0.
@@ -446,7 +485,7 @@ Run Step 2 and compare the failure/skip cause set with Task 0.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/services/graph_definition_manifest.py tests/unit/test_graph_definition_manifest.py
+git add src/services/graph_definition_manifest.py src/services/agent_runtime.py tests/unit/test_graph_definition_manifest.py tests/unit/test_persisted_graph_release.py
 git commit -m "feat: define versioned prompt assembly rules (#265)"
 ```
 
@@ -499,6 +538,14 @@ produce that same tuple and that assembly emits no prompt. Also build a shape-va
 semantically invalid persisted definition and prove assembly rejects it before any adapter
 boundary is available.
 
+Construct both shape-valid hybrid directions: exact v1 identity with v2 rules, and exact v2
+identity with canonical v1 rules. For each, `validate` and `assemble` must emit only
+`candidate.assembly_rules.format_version / assembly_bundle_mismatch / Assembly rules format
+must match the protected assembly bundle.` before block/protected-plan processing and before
+prompt output. Fake version/digest remains the typed unavailable error and therefore precedes
+pairing. Prove a valid v1 pair and valid v2 pair pass this gate. This test fixes the bundle's
+declared rules format as digest-covered protected metadata.
+
 ```python
 @pytest.mark.parametrize("agent_key", GRAPH_V1_AGENT_KEYS)
 def test_hostile_payload_is_once_inside_owned_boundary(agent_key):
@@ -541,6 +588,10 @@ criteria-removed legacy authored bytes only by the exact `listed above` →
 `in the protected CRITERIA stage below` replacement, and the assembled order makes that
 reference true. A one-character composite edit must return exactly the
 manual-resolution issue and no candidate. No test derives the target by substring removal.
+Calling `upgrade_definition_to_v2` on any semantically valid current v2 definition must
+return exactly `protected_assembly.version / already_current / Protected assembly is already
+current.` and no candidate. A malformed current v2 definition first returns its ordinary
+`validate` issues; neither the facade nor a caller pre-detects this state.
 
 - [ ] **Step 2: Run RED**
 
@@ -568,11 +619,15 @@ Task 3 consumes persisted `DefinitionContent` supplied by #261. Registry keys ar
 `(version, digest)` and include v1/v2; v2 digest covers every protected text, the literal
 seven-role notice map, legal-anchor/rank map, stage order, delimiters, serialization config,
 display representation, terminal binding, `contributes_to_prompt`, and both transition
-records, with an import-time calculated-digest guard. `resolve_bundle` raises
+records plus the bundle's declared rules format, with an import-time calculated-digest
+guard. `resolve_bundle` raises
 `ProtectedAssemblyBundleUnavailable` for an unresolved version/digest without message
-parsing. `validate` is the sole semantic walker/issue producer and checks all rows in the
-declared order; `assemble` invokes it first. `upgrade_definition_to_v2` is the sole transition
-authority and never parses text. No JSON supplies executable values. `ResolvedPromptStage`
+parsing. `validate` is the sole semantic walker/issue producer: after exact resolution it
+rejects a v1/v2 hybrid before every other semantic check, then checks all remaining rows in
+the declared order; `assemble` invokes it first. `upgrade_definition_to_v2` is the sole
+transition-state authority, calls `validate`, emits the exact `already_current` or
+manual-resolution issue when applicable, and never parses text. No JSON supplies executable
+values. `ResolvedPromptStage`
 is the single source for exact prompt joining and adversarial provenance;
 `protected_stage_view` derives read-only display stages from the same bundle. Terminal
 binding is always final and non-contributing.
@@ -609,6 +664,7 @@ test must RED, then restore and GREEN.
 - Modify: `src/services/agent_runtime.py:33-510`
 - Modify: `tests/unit/test_agent_runtime.py:1-363`
 - Modify: `tests/unit/test_persisted_agent_runtime.py`
+- Modify: `tests/unit/test_persisted_graph_release.py`
 - Modify: `tests/unit/test_agent_resolution_prompt.py`
 - Modify: `tests/unit/test_graph_nodes.py`
 - Modify: `tests/unit/test_graph_definition_manifest.py:307-361`
@@ -623,10 +679,17 @@ Build v1 definitions from a persisted release selected by an explicit `graph_rel
 
 Raw `PromptAssemblyRejected` and `ProtectedAssemblyBundleUnavailable` are asserted only at the assembler boundary in Task 2. Here fake protected version and fake digest convert by exception type to `PersistedConfigurationUnavailableError(code="protected_bundle_unavailable")`; malformed persisted wire/plan shape and shape-valid semantic failures (including the same duplicate/blank/role/order multi-error tuple from Task 2) convert to `PersistedConfigurationUnavailableError(code="invalid_persisted_definition")`. Runtime reaches the same `PromptAssembler.validate`, not a loader-owned semantic checker. Neither path inspects exception messages. Both occur before model invocation with `RecordingModelAdapter.calls == []` and before the identity sink is invoked, matching #261's current observation order. Provider failure remains converted to `PinnedInvocationEndpointError` inside the callback before the identity sink observes `PinnedInvocationEndpointError`. Add search proof that `agent_runtime.py` and `graph/nodes.py` have no `json.dumps(payload` and only adapter code has `with_structured_output(`; include Builder/Fixer retry call sites. Add a test-only compatibility parity case that rejects an attempt to select an arbitrary persisted release or construct the production runtime from the compatibility loader.
 
+Persist each hybrid direction independently—v1 identity/v2 rules and v2 identity/v1 rules—
+through #261's exact release loader. Both must reach the assembler and convert the sole exact
+`assembly_bundle_mismatch` issue to `invalid_persisted_definition` before model and identity
+sink; neither may be normalized or accepted. Keep `tests/unit/test_persisted_graph_release.py`
+green here and retain its Task 1 concrete `AssemblyRulesV1`/`AssemblyRulesV2`, exact-release,
+no-active-fallback, and malformed-assembly assertions.
+
 - [ ] **Step 2: Run RED**
 
 ```bash
-/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_definition_manifest.py
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_persisted_graph_release.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_definition_manifest.py
 test ! -e .venv
 ```
 
@@ -642,7 +705,7 @@ the cause baseline because runtime resolution changed.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/services/agent_runtime.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_definition_manifest.py
+git add src/services/agent_runtime.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_persisted_graph_release.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_definition_manifest.py
 git commit -m "feat: route runtime prompts through assembler (#265)"
 ```
 
@@ -686,7 +749,19 @@ content/hash/lock/audit/revision/release mutation. This test must pass through P
 round-trip into the local validator; a generic `content/invalid_content` response or a second
 Pydantic semantic translation is a failure.
 
-Assert every parser-owned row above with exact dotted paths and messages, including malformed JSON, unsupported version, unknown kind/anchor/condition, strict types, and extras. Separately assert every assembler-owned semantic row for duplicate IDs, blank text, illegal role/anchor condition, cross-anchor disorder, fake version/digest, invalid protected placement, missing/duplicate singleton, payload stage, and terminal mismatch. Route assertions cover only request-reachable rows; direct assembler/facade tests cover server-owned protected-plan failures. A repeated valid same-content save returns `changed=False`, unchanged hash, but increments lock/audit exactly once.
+Assert every parser-owned row above with exact dotted paths and messages, including malformed JSON, unsupported version, unknown kind/anchor/condition, strict types, and extras. Separately assert every assembler-owned semantic row for duplicate IDs, blank text, illegal role/anchor condition, cross-anchor disorder, fake version/digest, invalid protected placement, missing/duplicate singleton, payload stage, and terminal mismatch. Route assertions cover only request-reachable rows; direct assembler/facade tests cover server-owned protected-plan failures.
+
+At both direct-facade and route boundaries, submit otherwise valid v2 rules to a stored v1
+draft. Require the sole exact `assembly_bundle_mismatch` `422`, including when the supplied
+lock is stale: local validation wins, no post-stale validator runs, and a fresh-session
+comparison proves content/hash/lock/audit/revision/release total no-write. Seed the reverse
+corrupted-persistence fixture (exact v2 identity with canonical v1 rules), submit an ordinary
+prompt/model save with rules omitted, and require the same one issue and no-write through
+both boundaries. Neither facade nor route detects or rewrites the pair; both results are
+structural copies from `PromptAssembler.validate`. Then prove the upgrade, and only the
+upgrade, constructs the valid v2 pair; a later ordinary v2 custom-block save may preserve and
+edit that pair. A repeated valid same-content save returns `changed=False`, unchanged hash,
+but increments lock/audit exactly once.
 
 Seed the real generated v1 definitions, then call the locked upgrade. For every role, only
 the fields specified by `upgrade_definition_to_v2`, candidate hash, parent audit, and lock may
@@ -705,7 +780,11 @@ For each affected role, first make a valid ordinary v1 prompt edit by one code p
 call upgrade with a stale lock. Require the one exact
 `prompt_text/legacy_prompt_manual_resolution_required` issue, `422` before stale comparison,
 no post-stale validator, and total no-write from a fresh session. Repeated upgrade is 422
-`already_current`; valid stale is the exact existing `stale_draft` family with
+`protected_assembly.version/already_current/Protected assembly is already current.` copied
+from `upgrade_definition_to_v2`, with the exact `invalid_draft` envelope, no stale
+comparison, no post-stale validator, and no write. Facade and route tests spy on the upgrade
+method and prove neither boundary derives current state. Valid stale is the exact existing
+`stale_draft` family with
 `client_candidate:null`, one coherent exact-seven server snapshot, and no mutation. POST
 accepts only lock; direct protected identity, terminal, format, digest, stage view, display
 text, prompt, or actor input is rejected. For the new route, non-admin callers with malformed
@@ -727,9 +806,16 @@ session, assemble, and prove authored-only storage plus exactly-once protected n
 as above while the published v1 revision remains byte/identity/hash exact. In the same test,
 reset from bootstrap, persist a one-code-point legacy prompt edit, attempt upgrade, and prove
 the manual-resolution `422` leaves row/hash/lock/audit/published revision unchanged. Retain
-the existing two-session race: first session holds #263 locks for a valid v2 save, second
-session upgrade waits, then sees stale 409. Assert distinct backend PIDs, observed waiter,
-winner lock 1, loser no mutation, and fresh upgrade at lock 1 yields lock 2.
+the existing two-session race with an explicit possible state: bootstrap is the pristine v1
+pair at lock 0; session one holds #263's locks for an ordinary **v1 same-content** save with
+rules omitted; session two submits upgrade with expected lock 0 and waits. The winner
+advances 0→1 with its normal same-content audit but preserves exact prompt bytes, v1 rules,
+v1 protected identity, content hash, transition tuple, and published revision. After the
+winner commits, the waiting upgrade constructs a valid candidate from that still-pristine
+v1 tuple, then sees lock 1 and returns stale 409 with no write. A fresh upgrade at expected
+lock 1 alone creates the valid v2 pair and advances 1→2. Assert distinct backend PIDs, an
+observed PostgreSQL waiter, exact coherent seven-role stale snapshot, all winner preservation
+facts, loser no-write, and fresh-upgrade authored-only prompt/rules/identity.
 
 - [ ] **Step 2: Run RED**
 
@@ -761,11 +847,16 @@ assembler validator owns duplicate/blank/role/condition/placement/order semantic
 reject v1 client rule records, identities, protected-stage records, display text, delimiters,
 serialization settings, and terminal binding. GET/success/409 definition serializers
 additionally return the server-derived `protected_stage_view` with exact read-only display.
-Normal saves keep strict protected identity comparison.
+Normal saves keep the server-owned protected identity, but the common local assembler
+validator must reject either rules/identity hybrid before stale comparison and before the
+common writer. Therefore supplying v2 rules cannot transition a v1 draft; only an already-v2
+draft can accept editable v2 rules.
 
 Upgrade obtains #263's selected locked aggregate and passes its stored `DefinitionContent`
 to `PromptAssembler.upgrade_definition_to_v2` before stale comparison. A transition issue is
-copied structurally into `DraftContentRejected`; a successful server-owned target then runs
+copied structurally into `DraftContentRejected`, including exact `already_current`; the
+facade does not inspect version, digest, or rule type to choose that result. A successful
+server-owned target then runs
 the same local validator phase, stale comparison, post-stale phase, and common writer once.
 Never derive authored text in the facade, direct-assign an ORM content column, re-query the
 selected row, or add another mapper/transition authority. Add strict admin POST only after
@@ -837,6 +928,12 @@ authored target. The exact server message instructs the admin to restore the exa
 Version 1 prompt before upgrading, then reapply authored edits; the workflow tests cover
 Restore, Save, Upgrade, then reapply.
 
+Parse and render the exact upgrade-only
+`protected_assembly.version/already_current/Protected assembly is already current.` row
+through that same generic parser. It clears only the matching Upgrade operation, is linked to
+the Assembly tab, leaves the authoritative v2 definition and every local form byte unchanged,
+and triggers no reload, save, retry, or second state check in the client.
+
 State tests extend #263's existing `draftEditorState.ts` owner. The existing aggregate
 `pendingSave` slot becomes a discriminated Save/Upgrade operation without creating a second
 gate; all current Save transitions and exact request-ID/lock guards remain. Add/edit/delete/
@@ -845,13 +942,36 @@ explicit Save. `useDraftEditor.addAssemblyBlock` calls `crypto.randomUUID()` bef
 the reducer is deterministic. The hook's existing `nextRequestIdRef` and
 `inFlightRequestIdRef` are shared by `save` and `upgradeProtectedAssembly`, so one pending
 operation disables every Save/Upgrade button globally while prompt/model/custom-block editing
-remains enabled. Prove rapid Save→Upgrade, Upgrade→Save, and cross-role attempts issue only
-the first request; late responses for either operation are referential no-ops.
+remains enabled except for the affected role's v1 legacy-composite prompt during its Upgrade
+request. Prove rapid Save→Upgrade, Upgrade→Save, and cross-role attempts issue only the first
+request; late responses for either operation are referential no-ops.
+
+For Data Analyst and Build Reviewer while still on v1, both the hook and reducer require the
+local prompt to equal the authoritative saved prompt byte-for-byte before an Upgrade may
+start. A dirty-before-start attempt allocates no request ID/ref and sends no POST; it retains
+the dirty form unchanged and appends the exact Unicode/whitespace-preserving string to an
+entry-owned `legacyPromptRecoveries` list in the existing reducer state. The UI shows a
+copyable manual-reapplication panel plus an explicit **Preserve and restore saved prompt**
+action. That action first appends the exact dirty string, then restores only the local prompt
+to the authoritative v1 bytes, and performs no network action; the admin explicitly clicks
+Upgrade afterward. Recovery strings are never read by candidate construction, never
+auto-stripped or auto-reapplied, and remain available after success until explicit discard.
+
+Once an affected-role Upgrade starts, its prompt control is disabled while safe model fields
+and other roles remain editable. The reducer is the backstop: any queued/programmatic
+affected prompt-change action during that pending Upgrade appends the proposed exact string
+to `legacyPromptRecoveries` but leaves the savable local prompt at the authoritative v1
+value. On success, the selected role's local prompt is replaced by the server's authored-only
+v2 target, never by a pre-request or in-flight legacy composite; safe model edits made while
+pending are still preserved. Hook, reducer, and integrated component tests exercise
+dirty-before-start, explicit preserve/restore, a quarantined edit during flight, success,
+then an immediate ordinary Save and prove its `candidate.prompt_text` is the server-authored
+v2 text (plus only later explicit manual edits), never any recovery string or v1 composite.
 
 Retain #263's ordinary A2→A3 and exact-seven-role 409 Reload/Keep local/recovery behavior.
-Upgrade success replaces the selected role's authoritative saved definition and v2 protected
-view while preserving prompt/model edits made while pending; only then are custom controls
-available. Upgrade 409 merges all seven server definitions through the existing reducer
+Upgrade success replaces the selected role's authoritative saved definition, affected-role
+prompt form, and v2 protected view while preserving safe model edits made while pending;
+only then are custom controls available. Upgrade 409 merges all seven server definitions through the existing reducer
 semantics without losing any dirty local form and never attempts to hydrate a candidate from
 the null wire field. V1 has no add/edit/delete/reorder controls.
 No edit, blur, selection, tab, conflict, or recovery action saves or upgrades.
@@ -863,6 +983,12 @@ legal pre-payload anchors (deck only for Build Reviewer), never after payload or
 Also prove locked label/condition/version/digest, block-id 422 alert, authoritative
 cross-anchor server-422 alert, role/tab/Admin-tab persistence, ordinary PUT and upgrade POST
 share both the hook ref gate and reducer gate, and POST body is exactly `{lock_version: 0}`.
+For each affected role, directly test dirty prompt blocks POST without changing a byte, the
+copyable recovery panel and explicit local-only preserve/restore action, disabled prompt
+during pending Upgrade, safe-field editing during that request, reducer quarantine of a
+queued prompt event, server-authored prompt replacement on success, and the next PUT's safe
+authored-only prompt. The same pending behavior on an unaffected role keeps its ordinary
+lossless prompt-edit semantics.
 Existing #263 tests for five-field editing, explicit Save, A2→A3, all-role conflict merge,
 and one post-visit GET remain green.
 
@@ -891,7 +1017,10 @@ Replace the existing read-only Assembly `<pre>` inside `DefinitionEditor.tsx` wi
 `AssemblyEditor`, and extend `DefinitionEditorProps` with the hook-owned add/edit/delete/
 move/condition callbacks plus `onUpgradeProtectedAssembly` and aggregate disabled state.
 Preserve `DefinitionEditor` as owner of the four tabs, explicit Save, conflict/recovery UI,
-and accessible editor controls. Preserve `AgentDefinitionWorkbench.tsx` as selection/
+the copyable legacy-prompt recovery panel, explicit preserve/restore action, and accessible
+editor controls. For an affected v1 role, disable only its prompt control while its Upgrade
+is pending; do not disable safe fields or rely on the DOM as the state invariant. Preserve
+`AgentDefinitionWorkbench.tsx` as selection/
 composition only: it passes the one `useDraftEditor(workbench)` result to each already-mounted
 role editor and derives all Save/Upgrade disabled state from the same aggregate pending slot.
 
@@ -899,12 +1028,17 @@ Extend, do not replace, `useDraftEditor.ts`: `save` continues to use the current
 the five #263 fields plus optional v2 rules in one candidate, the existing refs/request
 counter, and typed completion dispatch. New assembly edit callbacks only dispatch reducer
 actions. `upgradeProtectedAssembly` checks the same two existing gates, allocates/sets the
-same refs, sends exactly `{lock_version}`, dispatches
+same refs, and before allocation dispatches the byte-exact dirty-legacy recovery action and
+returns when an affected v1 prompt differs from its saved value. Once clean, it sends exactly
+`{lock_version}`, dispatches
 identity-tagged 200/409/422/failure actions, and clears the ref only when its request ID still
 matches. Its `422` action retains the exact ordered server issues and makes no optimistic
-definition mutation, including for `legacy_prompt_manual_resolution_required`. Extend
-`draftEditorState.ts` with assembly-local state and discriminated operation
-actions while preserving all current Save branches and lossless merge behavior. Do not add a
+definition mutation, including for `already_current` and
+`legacy_prompt_manual_resolution_required`. Extend `draftEditorState.ts` with assembly-local
+state, entry-owned append-only `legacyPromptRecoveries`, explicit preserve/restore, pending
+affected-prompt quarantine, server-authored v2 prompt replacement, and discriminated
+operation actions while preserving all current Save branches and lossless merge behavior.
+Candidate construction reads only the local form and can never read recovery entries. Do not add a
 controller to `AgentDefinitionWorkbench`, a second reducer/store, a second ref/counter, or a
 separate lock/status/conflict/autosave/refetch model.
 
@@ -937,7 +1071,7 @@ then restore/GREEN.
 
 - [ ] **Step 1: Add Playwright RED coverage**
 
-Mock GET/PUT/upgrade POST. Verify legal add/edit/reorder/delete, cross-anchor movement unavailable, no PUT until Save, authoritative success/Needs test, inline ordered 422, ordinary exact-seven 409 with a non-null candidate, upgrade exact-seven 409 with `client_candidate:null`, and both Reload/Keep-local recovery paths. Add the edited Data Analyst/Build Reviewer legacy-prompt upgrade rejection: exact manual-resolution issue is shown against Prompt, v1/custom-control state is unchanged, dirty edits survive, and there is no automatic prompt rewrite/save/retry. Verify pristine upgrade success returns authored-only prompt text and exactly-once protected display rows. Verify v1 has no custom controls until upgrade success, upgrade exact body/no identity/prompt, shared Save/Upgrade pending gate, exact protected display text with no protected controls, and repeated same-content save lock/audit response. Preserve lazy GET, topology, Foreman, keyboard tabs, errors, and overflow; replace only #260's obsolete “no Save Draft” guard, retaining Run/Approve/Publish/History/Rollback absence.
+Mock GET/PUT/upgrade POST. Verify legal add/edit/reorder/delete, cross-anchor movement unavailable, no PUT until Save, authoritative success/Needs test, inline ordered 422, ordinary exact-seven 409 with a non-null candidate, upgrade exact-seven 409 with `client_candidate:null`, and both Reload/Keep-local recovery paths. Add the edited Data Analyst/Build Reviewer legacy-prompt upgrade rejection: exact manual-resolution issue is shown against Prompt, v1/custom-control state is unchanged, dirty edits survive, and there is no automatic prompt rewrite/save/retry. For both affected roles, make the v1 prompt dirty before clicking Upgrade and prove zero POST, byte-exact copyable recovery, explicit local-only preserve/restore, then start Upgrade; while the response is held, prove the prompt is disabled, safe fields remain editable, and an injected queued prompt action is quarantined. Resolve success and prove the form/server payload use authored-only v2 text, recovery bytes remain manual-only, and the next PUT cannot contain the legacy composite. Verify pristine upgrade success returns authored-only prompt text and exactly-once protected display rows. Mock the exact `already_current` 422 and prove the Assembly-linked message, unchanged v2 form, and zero retry. Verify v1 has no custom controls until upgrade success, upgrade exact body/no identity/prompt, shared Save/Upgrade pending gate, exact protected display text with no protected controls, and repeated same-content save lock/audit response. Preserve lazy GET, topology, Foreman, keyboard tabs, errors, and overflow; replace only #260's obsolete “no Save Draft” guard, retaining Run/Approve/Publish/History/Rollback absence.
 
 - [ ] **Step 2: Run RED then finish only test fixture wiring**
 
@@ -950,7 +1084,7 @@ Expected RED until mocks match Tasks 4–5; then GREEN. Do not add production be
 - [ ] **Step 3: Run final matrix**
 
 ```bash
-/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_graph_definition_manifest.py tests/unit/test_prompt_assembler.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_definition_content_mapping.py tests/unit/test_graph_configuration_bootstrap.py tests/unit/test_graph_configuration_draft.py tests/unit/test_agent_definition_workbench_routes.py
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_graph_definition_manifest.py tests/unit/test_prompt_assembler.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_persisted_graph_release.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_definition_content_mapping.py tests/unit/test_graph_configuration_bootstrap.py tests/unit/test_graph_configuration_draft.py tests/unit/test_agent_definition_workbench_routes.py
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_persisted_graph_runtime_failures_postgres.py
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_graph_configuration_bootstrap_postgres.py
@@ -1001,11 +1135,15 @@ Generate the final package from exactly the full SHA in `IMPLEMENTATION_BASE` th
 `HEAD`, never from `HEAD~N` and never from `447791d7a`. Give the most capable available
 whole-branch reviewer the package, plan, spec, corrections file, ledger rulings/deferred
 findings, per-task reports, and cause baselines. Require: writer-by-writer route/facade table;
-v1/v2 identity and typed-failure matrix; exact Data Analyst/Build Reviewer pristine-transition
-and edited-legacy no-write matrix; seven-role hostile payload/provenance matrix;
+v1/v2 identity/rules-pair and typed-failure matrix, including both hybrid directions at
+assembler/facade/route/runtime boundaries and invalid-plus-stale no-write; exact Data
+Analyst/Build Reviewer pristine-transition, dirty-before-upgrade, edit-during-upgrade,
+manual-recovery, and edited-persisted-legacy no-write matrix; exact `already_current`
+owner/envelope/client/UI matrix; seven-role hostile payload/provenance matrix;
 canonical-anchor rejection table; auth-before-body proof; protected-content/non-editability
 UI proof; same-content lock/audit and invalid-plus-stale rulings; real PostgreSQL winner/loser
-proof; the zero-skip result from
+proof with v1 same-content lock 0→1, stale waiting upgrade, and fresh 1→2 upgrade; the
+`tests/unit/test_persisted_graph_release.py` concrete-union/exact-release result; the zero-skip result from
 `tests/integration/test_persisted_graph_runtime_failures_postgres.py`; exact #261/#263
 regression results; rollback/no-write ruling; and a local-integration verdict.
 
