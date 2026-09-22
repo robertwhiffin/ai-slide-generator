@@ -156,8 +156,31 @@ Keep existing-ID return before locking. For a new graph-capable row in the exist
 class PersistedRuntimeError(RuntimeError): pass
 class GraphReleaseNotFoundError(PersistedRuntimeError): pass
 class GraphReleaseIncompleteError(PersistedRuntimeError): pass
-class PersistedConfigurationUnavailableError(PersistedRuntimeError): pass
-class PinnedInvocationEndpointError(PersistedRuntimeError): pass
+
+@dataclass(frozen=True, slots=True)
+class PersistedConfigurationUnavailableError(PersistedRuntimeError):
+    code: Literal[
+        "lakebase_unavailable", "invalid_persisted_definition",
+        "protected_bundle_unavailable", "schema_contract_unavailable",
+        "conversation_pin_unavailable",
+    ]
+    def __post_init__(self) -> None:
+        PersistedRuntimeError.__init__(self, self.code)
+    def __str__(self) -> str:
+        return "Persisted graph configuration is unavailable"
+
+@dataclass(frozen=True, slots=True)
+class PinnedInvocationEndpointError(PersistedRuntimeError):
+    endpoint_name: str
+    graph_release_id: int
+    agent_definition_revision_id: int
+    def __post_init__(self) -> None:
+        PersistedRuntimeError.__init__(
+            self, self.endpoint_name, self.graph_release_id,
+            self.agent_definition_revision_id,
+        )
+    def __str__(self) -> str:
+        return "Pinned graph model endpoint is unavailable"
 
 class ResolvedDefinitionLoader(Protocol):
     def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition: ...
@@ -177,7 +200,7 @@ class PersistedGraphReleaseLoader:
         return self._load_complete_release(graph_release_id)[agent_key]
 ~~~
 
-- [ ] RED-test seven complete mappings, exact-ID cache, V1/V2 distinction, absent release, zero mapping, six mapping, null/missing revision, wrong/duplicate role, altered hash, and no active/latest lookup. Count exactly one release-anchored read before an uncached result. For all seven persisted V1 rows assert ResolvedDefinition.content is typed DefinitionContent, content.assembly_rules is typed AssemblyRules, and exact typed parsing rejects a wrong format_version, separator, block order, block condition, or terminal binding.
+- [ ] RED-test seven complete mappings, exact-ID cache, V1/V2 distinction, absent release, zero mapping, six mapping, null/missing revision, wrong/duplicate role, altered hash, and no active/latest lookup. Count exactly one release-anchored read before an uncached result. For all seven persisted V1 rows assert ResolvedDefinition.content is typed DefinitionContent, content.assembly_rules is typed AssemblyRules, and exact typed parsing rejects a wrong format_version, separator, block order, block condition, or terminal binding. Construct every declared configuration-error code and one endpoint error; assert their frozen fields, `str(error)` values above, and that endpoint `str`/`args` contain neither prompt nor payload while its explicit fields preserve only endpoint/release/revision identity.
 - [ ] Implement one GraphRelease-anchored outer-join query through mapping/revision. No release row raises NotFound; null mapping/revision, duplicate/unexpected/missing role raises Incomplete. Build each content with validate_definition_hash, which calls definition_content_from_row and therefore validates DefinitionContent/AssemblyRules. Catch **GraphConfigurationIntegrityError** (the actual wrapper for malformed typed content and altered hashes) at this loader boundary and raise PersistedConfigurationUnavailableError(code="invalid_persisted_definition") from it; also convert a direct Pydantic/ValueError from newly added loader-owned validation to that same code. Cache only the typed full snapshot after all seven validate. Never substitute current identity.
 - [ ] GREEN; sabotage outer join to inner and cache before validation; restore, commit.
 
@@ -204,10 +227,15 @@ class AgentInvocationIdentitySink(Protocol):
 class RecordingAgentInvocationIdentitySink:
     def __init__(self) -> None:
         self.calls: list[AgentInvocationIdentity] = []
+        self.error_classes: list[str] = []
     def invoke(self, identity: AgentInvocationIdentity,
                callback: Callable[[], BaseModel]) -> BaseModel:
         self.calls.append(identity)
-        return callback()
+        try:
+            return callback()
+        except Exception as exc:
+            self.error_classes.append(type(exc).__name__)
+            raise
 
 class LoggingAgentInvocationIdentitySink:
     def __init__(self, *, logger: logging.Logger) -> None:
@@ -227,7 +255,19 @@ class LoggingAgentInvocationIdentitySink:
         return result
 ~~~
 
-- [ ] RED-test construction with persisted_release_loader, model_adapter, identity_sink; invoke run("architect", 41, payload, AgentAssemblyContext(False)); assert persisted endpoint/schema/contracts/identity and all five identity fields. The logging sink test captures one record with only identity, outcome, error_class; assert no prompt, payload, output, session/user identifier, or model response. Make removed-endpoint provider call throw: require PinnedInvocationEndpointError contains endpoint plus release/revision identity, excludes prompt/payload, records error outcome, and never tries default endpoint. Test the adapter phases separately: a model/client factory or structured-model invoke fake raising ConnectionError becomes ModelProviderUnavailableError and then PinnedInvocationEndpointError; a fake `with_structured_output` provider failure follows the same path; a Pydantic ValidationError / LangChain structured-output parse failure remains its original ordinary exception and reaches node recovery; an unknown RuntimeError is re-raised unchanged.
+- [ ] RED-test construction with persisted_release_loader, model_adapter, identity_sink; invoke run("architect", 41, payload, AgentAssemblyContext(False)); assert persisted endpoint/schema/contracts/identity and all five identity fields. The logging sink test captures one record with only identity, outcome, error_class; assert no prompt, payload, output, session/user identifier, or model response. Use the pinned constructors, not look-alike built-ins, for every provider fake:
+
+~~~python
+request = httpx.Request("POST", "https://workspace/serving-endpoints/removed")
+response = httpx.Response(404, request=request)
+provider_errors = [
+    openai.APIConnectionError(request=request),
+    openai.APITimeoutError(request),
+    openai.NotFoundError("removed", response=response, body=None),
+]
+~~~
+
+Make the removed-endpoint provider call raise the real `openai.NotFoundError`: require PinnedInvocationEndpointError fields exactly equal endpoint/release/revision, its `str` excludes endpoint/release/revision/prompt/payload, the original error is its cause, no default endpoint is tried, and the safe graph event follows. For each `provider_errors` member, test model/client factory and structured-model invocation conversion; test a `with_structured_output` provider failure too. `openai.NotFoundError` proves the `openai.APIStatusError` boundary; APIConnectionError and APITimeoutError prove the actual transport family. Each becomes ModelProviderUnavailableError and then PinnedInvocationEndpointError. Run each endpoint case once with RecordingAgentInvocationIdentitySink and once with LoggingAgentInvocationIdentitySink: both runs raise PinnedInvocationEndpointError, the recording sink records exactly `["PinnedInvocationEndpointError"]`, and the logger emits exactly one error record with `error_class == "PinnedInvocationEndpointError"`. A Pydantic ValidationError / `langchain_core.exceptions.OutputParserException` remains its original ordinary exception and reaches node recovery; an unknown RuntimeError is re-raised unchanged by both sinks.
 - [ ] Replace constructor/method exactly:
 
 ~~~python
@@ -244,8 +284,35 @@ def run(self, agent_key: str, graph_release_id: int, payload: dict[str, Any],
 
 Implement _assemble_v1_prompt(content: DefinitionContent, protected: _ProtectedPromptBundle, payload: dict[str, Any], context: AgentAssemblyContext) -> str: require content.assembly_rules == AssemblyRules.model_validate(assembly_rules_for(content.agent_key)); append authored prompt; append each protected block only for its exact condition; append json.dumps(payload, indent=2, default=str) for payload_json; require structured_output_binding as terminal and use resolved schema for model binding; join text blocks with content.assembly_rules.separator. Require the V1 empty SchemaOverlay contract before schema resolution. Parity-test this evaluator against tests/unit/test_graph_definition_manifest.py literal replay for every role, design-system active/inactive, and build-reviewer deck-brief present/absent.
 - [ ] Change the adapter protocol and every fake to carry the role independently of the prompt: `AgentModelAdapter.invoke(*, agent_key: str, configuration: AgentModelConfiguration, schema: type[BaseModel], prompt: str) -> BaseModel`; `_run_resolved` passes `definition.agent_key`. DatabricksModelAdapter accepts but need not otherwise use `agent_key`. This is the required selection seam because Build Reviewer and Fix Reviewer share `SlideReviewOutput`, so their role cannot be inferred from the schema alone.
-- [ ] Define `ModelProviderUnavailableError(AgentRuntimeError)` in agent_runtime.py. In DatabricksModelAdapter.invoke, wrap **only** the provider phases -- model factory, client factory, `with_structured_output`, and `structured_model.invoke` -- and translate only `DatabricksClientError`, `databricks.sdk.errors.{NotFound, PermissionDenied, Unauthenticated, ResourceDoesNotExist, InternalError, Aborted, DeadlineExceeded, OperationFailed}`, `requests.exceptions.RequestException`, `httpx.HTTPError`, `ConnectionError`, `TimeoutError`, and `OSError` to ModelProviderUnavailableError. Do not catch Pydantic ValidationError, LangChain structured-output parser exceptions, review findings, or an arbitrary Exception/RuntimeError: those must propagate unchanged as ordinary node-recoverable failures. Inside `identity_sink.invoke(identity, callback)`, catch ModelProviderUnavailableError from the callback and raise PinnedInvocationEndpointError carrying only endpoint/release/revision identity. Thus the sink records error_class `PinnedInvocationEndpointError`, not the provider wrapper.
-- [ ] Convert exceptions at the loader/runtime seam: SQLAlchemyError or session-factory failure -> PersistedConfigurationUnavailableError(code="lakebase_unavailable"); GraphConfigurationIntegrityError, DefinitionContent/Pydantic validation -> code="invalid_persisted_definition"; ProtectedPromptBundleUnavailableError -> code="protected_bundle_unavailable"; IncompatibleSchemaContractError -> code="schema_contract_unavailable"; and only ModelProviderUnavailableError -> PinnedInvocationEndpointError. Do not convert ordinary model-output validation/review findings or unknown adapter exceptions: node recovery remains valid for those.
+- [ ] Define `ModelProviderUnavailableError(AgentRuntimeError)` in agent_runtime.py. In DatabricksModelAdapter.invoke, wrap **only** the provider phases -- model factory, client factory, `with_structured_output`, and `structured_model.invoke` -- and translate only `openai.APIConnectionError`, `openai.APITimeoutError`, and `openai.APIStatusError` (therefore `openai.NotFoundError`), plus `DatabricksClientError`, `databricks.sdk.errors.{NotFound, PermissionDenied, Unauthenticated, ResourceDoesNotExist, InternalError, Aborted, DeadlineExceeded, OperationFailed}`, `requests.exceptions.RequestException`, `httpx.HTTPError`, `ConnectionError`, `TimeoutError`, and `OSError` to ModelProviderUnavailableError. Import the OpenAI classes from the pinned `openai` package; do not catch broad `openai.APIError`. Do not catch Pydantic ValidationError, `langchain_core.exceptions.OutputParserException`, review findings, or an arbitrary Exception/RuntimeError: those must propagate unchanged as ordinary node-recoverable failures.
+- [ ] Make conversion occur in the callback, before **either** identity sink observes an exception. `_run_resolved` must pass this exact closure to `self._identity_sink.invoke(identity, callback)`:
+
+~~~python
+configuration = AgentModelConfiguration(
+    endpoint_name=definition.content.model.endpoint_name,
+    temperature=float(definition.content.model.temperature),
+    max_tokens=int(definition.content.model.max_tokens),
+    top_p=float(definition.content.model.top_p),
+)
+
+def callback() -> BaseModel:
+    try:
+        return self._model_adapter.invoke(
+            agent_key=definition.agent_key,
+            configuration=configuration, schema=schema, prompt=prompt,
+        )
+    except ModelProviderUnavailableError as exc:
+        raise PinnedInvocationEndpointError(
+            endpoint_name=definition.content.model.endpoint_name,
+            graph_release_id=definition.graph_release_id,
+            agent_definition_revision_id=definition.agent_definition_revision_id,
+        ) from exc
+
+output = self._identity_sink.invoke(identity, callback)
+~~~
+
+Neither sink converts, unwraps, or replaces exceptions; each records/rethrows the callback’s PinnedInvocationEndpointError. This gives identical raised types for recording and logging sinks and makes the logging sink’s error_class unambiguously `PinnedInvocationEndpointError`.
+- [ ] Convert exceptions at the loader/runtime seam: SQLAlchemyError or session-factory failure -> PersistedConfigurationUnavailableError(code="lakebase_unavailable"); GraphConfigurationIntegrityError, DefinitionContent/Pydantic validation -> code="invalid_persisted_definition"; ProtectedPromptBundleUnavailableError -> code="protected_bundle_unavailable"; IncompatibleSchemaContractError -> code="schema_contract_unavailable". ModelProviderUnavailableError is converted **only** by the callback above, before it reaches an identity sink. Do not convert ordinary model-output validation/review findings or unknown adapter exceptions: node recovery remains valid for those.
 - [ ] Add the test-only adapter in agent_runtime.py, with no production call site:
 
 ~~~python
@@ -267,7 +334,10 @@ class CompatibilityResolvedDefinitionLoader:
             "schema_overlay": {"field_overrides": {}, "additional_optional_fields": []},
             "assembly_rules": assembly_rules_for(definition.agent_key),
             "protected_assembly": definition.protected_prompt.__dict__,
-            "schema_contract": definition.schema_contract.__dict__,
+            "schema_contract": {
+                "version": definition.schema_contract.version,
+                "digest": definition.schema_contract.digest,
+            },
         })
         return ResolvedDefinition(
             graph_version=TEST_COMPATIBILITY_GRAPH_VERSION,
@@ -278,7 +348,7 @@ class CompatibilityResolvedDefinitionLoader:
         )
 ~~~
 
-`AgentRuntime.compatibility()` constructs this loader and RecordingAgentInvocationIdentitySink, retains the same four-argument run interface, and therefore requires release ID 1 rather than ignoring it. `get_agent_runtime()` constructs PersistedGraphReleaseLoader, DatabricksModelAdapter, and LoggingAgentInvocationIdentitySink; clear its LRU cache in the production-construction test and assert its `_persisted_release_loader` is not CompatibilityResolvedDefinitionLoader. Test the compatibility loader’s exact synthetic graph version/release/revision/hash and its rejection of any release other than 1. Migrate every named direct caller and its final gate: test_agent_resolution_prompt, test_agent_runtime, test_graph_definition_manifest, test_graph_configuration_bootstrap, test_deck_level_spec_change, tests/agentic/gates, and test_graph_live_real_model. Run focused suites, commit.
+`AgentRuntime.compatibility()` constructs this loader and RecordingAgentInvocationIdentitySink, retains the same four-argument run interface, and therefore requires release ID 1 rather than ignoring it. For **every one of all seven `GRAPH_V1_AGENT_KEYS`**, resolve through this loader, assert `DefinitionContent.model_validate(content.model_dump(mode="python"))` succeeds, assert `content.schema_contract` has exactly `version`/`digest` and no `agent_key`, and assert `content_hash == definition_content_hash(content)`; then test rejection of any release other than 1. `get_agent_runtime()` constructs PersistedGraphReleaseLoader, DatabricksModelAdapter, and LoggingAgentInvocationIdentitySink; clear its LRU cache in the production-construction test and assert its `_persisted_release_loader` is not CompatibilityResolvedDefinitionLoader. Test the compatibility loader’s exact synthetic graph version/release/revision/hash. Migrate every named direct caller and its final gate: test_agent_resolution_prompt, test_agent_runtime, test_graph_definition_manifest, test_graph_configuration_bootstrap, test_deck_level_spec_change, tests/agentic/gates, and test_graph_live_real_model. Run focused suites, commit.
 
 ### Task 5: Pin entry/state/fan-out propagation and all fixture migration
 
