@@ -282,13 +282,34 @@ describe('draft editor state', () => {
   it('initializes independent deep-copied entries for exactly seven model agents', () => {
     const source = workbench();
     const state = createDraftEditorState(source);
+    const sourceArchitect = source.nodes.find((node) => node.agent_key === 'architect');
+    if (!sourceArchitect || sourceArchitect.execution_kind !== 'model') throw new Error('missing architect');
+    const architect = state.byAgent.architect.saved;
+    const builder = state.byAgent.builder.saved;
     expect(Object.keys(state.byAgent)).toEqual(AGENT_KEYS);
     expect('foreman' in state.byAgent).toBe(false);
-    expect(state.byAgent.architect.saved).not.toBe(source.nodes[0].execution_kind === 'model' && source.nodes[0].draft);
-    state.byAgent.architect.local.prompt_text = 'mutated';
-    state.byAgent.architect.local.endpoint_name = 'mutated endpoint';
-    expect(state.byAgent.builder.local.prompt_text).not.toBe('mutated');
-    expect((source.nodes[0].execution_kind === 'model' && source.nodes[0].draft.prompt_text)).not.toBe('mutated');
+    expect(architect).not.toBe(sourceArchitect.draft);
+    expect(architect.model).not.toBe(sourceArchitect.draft.model);
+    expect(architect.model).not.toBe(builder.model);
+    expect(architect.schema_overlay).not.toBe(sourceArchitect.draft.schema_overlay);
+    expect(architect.schema_overlay.field_overrides).not.toBe(sourceArchitect.draft.schema_overlay.field_overrides);
+    expect(architect.schema_overlay.additional_optional_fields).not.toBe(sourceArchitect.draft.schema_overlay.additional_optional_fields);
+    expect(architect.assembly_rules).not.toBe(sourceArchitect.draft.assembly_rules);
+    expect(architect.assembly_rules.blocks).not.toBe(sourceArchitect.draft.assembly_rules.blocks);
+    expect(architect.assembly_rules.blocks[0]).not.toBe(sourceArchitect.draft.assembly_rules.blocks[0]);
+
+    const sourceEndpoint = sourceArchitect.draft.model.endpoint_name;
+    const builderEndpoint = builder.model.endpoint_name;
+    architect.model.endpoint_name = 'mutated endpoint';
+    architect.schema_overlay.field_overrides.injected = true;
+    architect.assembly_rules.blocks.push({ kind: 'authored_prompt', condition: 'always' });
+
+    expect(sourceArchitect.draft.model.endpoint_name).toBe(sourceEndpoint);
+    expect(builder.model.endpoint_name).toBe(builderEndpoint);
+    expect(sourceArchitect.draft.schema_overlay.field_overrides).not.toHaveProperty('injected');
+    expect(builder.schema_overlay.field_overrides).not.toHaveProperty('injected');
+    expect(sourceArchitect.draft.assembly_rules.blocks).toHaveLength(5);
+    expect(builder.assembly_rules.blocks).toHaveLength(5);
   });
 
   it('status precedence makes local unsaved changes dominate an untested saved baseline', () => {
