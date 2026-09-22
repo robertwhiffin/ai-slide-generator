@@ -4,7 +4,10 @@
  */
 import type {
   AgentDefinitionWorkbenchResponse,
+  AgentKey,
   AssemblyRules,
+  DraftDefinition,
+  DraftSaveRequest,
   ModelAgentNode,
 } from '../../src/api/agentDefinitions';
 
@@ -951,6 +954,23 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
     read_only_reason: null,
   } satisfies ModelAgentNode;
 });
+
+export const syntheticDraftDefinitions = Object.fromEntries(
+  mockModelNodes.map((node) => [node.agent_key, structuredClone(node.draft)]),
+) as Record<AgentKey, DraftDefinition>;
+
+export const syntheticDraftSaveRequest = {
+  lock_version: 0,
+  candidate: {
+    prompt_text: 'Synthetic Architect edited prompt.',
+    model: {
+      endpoint_name: 'databricks-claude-opus-4-6',
+      temperature: 0.7,
+      max_tokens: 60000,
+      top_p: 0.95,
+    },
+  },
+} satisfies DraftSaveRequest;
 
 /** Complete Task 4 wire shape used by both component and browser tests. */
 export const syntheticAgentDefinitionWorkbench = {
