@@ -159,6 +159,9 @@ class GraphReleaseIncompleteError(PersistedRuntimeError): pass
 class PersistedConfigurationUnavailableError(PersistedRuntimeError): pass
 class PinnedInvocationEndpointError(PersistedRuntimeError): pass
 
+class ResolvedDefinitionLoader(Protocol):
+    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition: ...
+
 @dataclass(frozen=True)
 class ResolvedDefinition:
     graph_version: int; graph_release_id: int; agent_key: str
@@ -175,7 +178,7 @@ class PersistedGraphReleaseLoader:
 ~~~
 
 - [ ] RED-test seven complete mappings, exact-ID cache, V1/V2 distinction, absent release, zero mapping, six mapping, null/missing revision, wrong/duplicate role, altered hash, and no active/latest lookup. Count exactly one release-anchored read before an uncached result. For all seven persisted V1 rows assert ResolvedDefinition.content is typed DefinitionContent, content.assembly_rules is typed AssemblyRules, and exact typed parsing rejects a wrong format_version, separator, block order, block condition, or terminal binding.
-- [ ] Implement one GraphRelease-anchored outer-join query through mapping/revision. No release row raises NotFound; null mapping/revision, duplicate/unexpected/missing role raises Incomplete. Build each content with validate_definition_hash, which calls definition_content_from_row and therefore validates DefinitionContent/AssemblyRules; convert Pydantic/ValueError to PersistedConfigurationUnavailableError with code invalid_persisted_definition. Cache only the typed full snapshot after all seven validate. Never substitute current identity.
+- [ ] Implement one GraphRelease-anchored outer-join query through mapping/revision. No release row raises NotFound; null mapping/revision, duplicate/unexpected/missing role raises Incomplete. Build each content with validate_definition_hash, which calls definition_content_from_row and therefore validates DefinitionContent/AssemblyRules. Catch **GraphConfigurationIntegrityError** (the actual wrapper for malformed typed content and altered hashes) at this loader boundary and raise PersistedConfigurationUnavailableError(code="invalid_persisted_definition") from it; also convert a direct Pydantic/ValueError from newly added loader-owned validation to that same code. Cache only the typed full snapshot after all seven validate. Never substitute current identity.
 - [ ] GREEN; sabotage outer join to inner and cache before validation; restore, commit.
 
 ### Task 4: Persisted runtime and trace interface
@@ -224,11 +227,11 @@ class LoggingAgentInvocationIdentitySink:
         return result
 ~~~
 
-- [ ] RED-test construction with persisted_release_loader, model_adapter, identity_sink; invoke run("architect", 41, payload, AgentAssemblyContext(False)); assert persisted endpoint/schema/contracts/identity and all five identity fields. The logging sink test captures one record with only identity, outcome, error_class; assert no prompt, payload, output, session/user identifier, or model response. Make removed-endpoint provider call throw: require PinnedInvocationEndpointError contains endpoint plus release/revision identity, excludes prompt/payload, records error outcome, and never tries default endpoint.
+- [ ] RED-test construction with persisted_release_loader, model_adapter, identity_sink; invoke run("architect", 41, payload, AgentAssemblyContext(False)); assert persisted endpoint/schema/contracts/identity and all five identity fields. The logging sink test captures one record with only identity, outcome, error_class; assert no prompt, payload, output, session/user identifier, or model response. Make removed-endpoint provider call throw: require PinnedInvocationEndpointError contains endpoint plus release/revision identity, excludes prompt/payload, records error outcome, and never tries default endpoint. Test the adapter phases separately: a model/client factory or structured-model invoke fake raising ConnectionError becomes ModelProviderUnavailableError and then PinnedInvocationEndpointError; a fake `with_structured_output` provider failure follows the same path; a Pydantic ValidationError / LangChain structured-output parse failure remains its original ordinary exception and reaches node recovery; an unknown RuntimeError is re-raised unchanged.
 - [ ] Replace constructor/method exactly:
 
 ~~~python
-def __init__(self, *, persisted_release_loader: PersistedGraphReleaseLoader,
+def __init__(self, *, persisted_release_loader: ResolvedDefinitionLoader,
              model_adapter: AgentModelAdapter, identity_sink: AgentInvocationIdentitySink) -> None:
     self._persisted_release_loader = persisted_release_loader
     self._model_adapter = model_adapter
@@ -240,8 +243,42 @@ def run(self, agent_key: str, graph_release_id: int, payload: dict[str, Any],
 ~~~
 
 Implement _assemble_v1_prompt(content: DefinitionContent, protected: _ProtectedPromptBundle, payload: dict[str, Any], context: AgentAssemblyContext) -> str: require content.assembly_rules == AssemblyRules.model_validate(assembly_rules_for(content.agent_key)); append authored prompt; append each protected block only for its exact condition; append json.dumps(payload, indent=2, default=str) for payload_json; require structured_output_binding as terminal and use resolved schema for model binding; join text blocks with content.assembly_rules.separator. Require the V1 empty SchemaOverlay contract before schema resolution. Parity-test this evaluator against tests/unit/test_graph_definition_manifest.py literal replay for every role, design-system active/inactive, and build-reviewer deck-brief present/absent.
-- [ ] Convert exceptions at the loader/runtime seam: SQLAlchemyError or session-factory failure -> PersistedConfigurationUnavailableError(code="lakebase_unavailable"); DefinitionContent/Pydantic validation -> code="invalid_persisted_definition"; ProtectedPromptBundleUnavailableError -> code="protected_bundle_unavailable"; IncompatibleSchemaContractError -> code="schema_contract_unavailable"; endpoint adapter exception -> PinnedInvocationEndpointError. Do not convert ordinary model output validation/review findings: node recovery remains valid for those.
-- [ ] get_agent_runtime() constructs persisted loader, Databricks adapter, and LoggingAgentInvocationIdentitySink. It never calls compatibility. Retain AgentRuntime.compatibility only as a test-only constructor backed by CodeOwnedAgentDefinitionSource and RecordingAgentInvocationIdentitySink; it accepts the same four-argument run interface and ignores graph_release_id only after validating it is positive. Migrate every named direct caller and its final gate: test_agent_resolution_prompt, test_agent_runtime, test_graph_definition_manifest, test_graph_configuration_bootstrap, test_deck_level_spec_change, tests/agentic/gates, and test_graph_live_real_model. Run focused suites, commit.
+- [ ] Change the adapter protocol and every fake to carry the role independently of the prompt: `AgentModelAdapter.invoke(*, agent_key: str, configuration: AgentModelConfiguration, schema: type[BaseModel], prompt: str) -> BaseModel`; `_run_resolved` passes `definition.agent_key`. DatabricksModelAdapter accepts but need not otherwise use `agent_key`. This is the required selection seam because Build Reviewer and Fix Reviewer share `SlideReviewOutput`, so their role cannot be inferred from the schema alone.
+- [ ] Define `ModelProviderUnavailableError(AgentRuntimeError)` in agent_runtime.py. In DatabricksModelAdapter.invoke, wrap **only** the provider phases -- model factory, client factory, `with_structured_output`, and `structured_model.invoke` -- and translate only `DatabricksClientError`, `databricks.sdk.errors.{NotFound, PermissionDenied, Unauthenticated, ResourceDoesNotExist, InternalError, Aborted, DeadlineExceeded, OperationFailed}`, `requests.exceptions.RequestException`, `httpx.HTTPError`, `ConnectionError`, `TimeoutError`, and `OSError` to ModelProviderUnavailableError. Do not catch Pydantic ValidationError, LangChain structured-output parser exceptions, review findings, or an arbitrary Exception/RuntimeError: those must propagate unchanged as ordinary node-recoverable failures. Inside `identity_sink.invoke(identity, callback)`, catch ModelProviderUnavailableError from the callback and raise PinnedInvocationEndpointError carrying only endpoint/release/revision identity. Thus the sink records error_class `PinnedInvocationEndpointError`, not the provider wrapper.
+- [ ] Convert exceptions at the loader/runtime seam: SQLAlchemyError or session-factory failure -> PersistedConfigurationUnavailableError(code="lakebase_unavailable"); GraphConfigurationIntegrityError, DefinitionContent/Pydantic validation -> code="invalid_persisted_definition"; ProtectedPromptBundleUnavailableError -> code="protected_bundle_unavailable"; IncompatibleSchemaContractError -> code="schema_contract_unavailable"; and only ModelProviderUnavailableError -> PinnedInvocationEndpointError. Do not convert ordinary model-output validation/review findings or unknown adapter exceptions: node recovery remains valid for those.
+- [ ] Add the test-only adapter in agent_runtime.py, with no production call site:
+
+~~~python
+TEST_COMPATIBILITY_GRAPH_RELEASE_ID = 1
+TEST_COMPATIBILITY_GRAPH_VERSION = 1
+
+class CompatibilityResolvedDefinitionLoader:
+    def __init__(self, source: CodeOwnedAgentDefinitionSource) -> None:
+        self._source = source
+    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+        if graph_release_id != TEST_COMPATIBILITY_GRAPH_RELEASE_ID:
+            raise ValueError("compatibility runtime requires graph release 1")
+        definition = self._source.resolve(agent_key)
+        content = DefinitionContent.model_validate({
+            "agent_key": definition.agent_key,
+            "definition_version": definition.definition_version,
+            "prompt_text": definition.prompt_text,
+            "model": definition.model_configuration.__dict__,
+            "schema_overlay": {"field_overrides": {}, "additional_optional_fields": []},
+            "assembly_rules": assembly_rules_for(definition.agent_key),
+            "protected_assembly": definition.protected_prompt.__dict__,
+            "schema_contract": definition.schema_contract.__dict__,
+        })
+        return ResolvedDefinition(
+            graph_version=TEST_COMPATIBILITY_GRAPH_VERSION,
+            graph_release_id=TEST_COMPATIBILITY_GRAPH_RELEASE_ID,
+            agent_key=agent_key,
+            agent_definition_revision_id=definition.definition_version,
+            content_hash=definition_content_hash(content), content=content,
+        )
+~~~
+
+`AgentRuntime.compatibility()` constructs this loader and RecordingAgentInvocationIdentitySink, retains the same four-argument run interface, and therefore requires release ID 1 rather than ignoring it. `get_agent_runtime()` constructs PersistedGraphReleaseLoader, DatabricksModelAdapter, and LoggingAgentInvocationIdentitySink; clear its LRU cache in the production-construction test and assert its `_persisted_release_loader` is not CompatibilityResolvedDefinitionLoader. Test the compatibility loader’s exact synthetic graph version/release/revision/hash and its rejection of any release other than 1. Migrate every named direct caller and its final gate: test_agent_resolution_prompt, test_agent_runtime, test_graph_definition_manifest, test_graph_configuration_bootstrap, test_deck_level_spec_change, tests/agentic/gates, and test_graph_live_real_model. Run focused suites, commit.
 
 ### Task 5: Pin entry/state/fan-out propagation and all fixture migration
 
@@ -267,7 +304,7 @@ Overwrite any initial pin in state.update; declare GraphState.graph_release_id; 
 
 **Files:** Modify src/services/graph/nodes.py, src/api/services/chat_service.py, tests/integration/test_graph_mode_turn.py; create tests/integration/test_persisted_graph_runtime_failures_postgres.py. This is the only Task 6 chat_service edit; Task 1 owns its selector delegation.
 
-- [ ] RED-test null pin at shipped graph seam; direct real-loader nonexistent ID; incomplete release; unavailable protected contract; database failure; removed endpoint; poisoned runtime on monolith. Seed newer active release and assert zero fallback calls. Corrupt Builder and Deck Reviewer mappings separately and require typed graph failure, not placeholder/advisory. For every case assert stream event has type ERROR, error exactly "Pinned graph configuration is unavailable", and metadata exactly {"code": "pinned_graph_configuration_unavailable"}; it includes no exception name, release ID, endpoint, prompt, payload, or output.
+- [ ] RED-test both null pin and missing session at the shipped graph seam; direct real-loader nonexistent ID; incomplete release; unavailable protected contract; database failure; removed endpoint; poisoned runtime on monolith. Seed newer active release and assert zero fallback calls. Separately persist malformed typed content and an altered content hash for Builder and Deck Reviewer, then invoke each later broad-recovery node and require the typed graph failure rather than a placeholder/advisory. For every case assert stream event has type ERROR, error exactly "Pinned graph configuration is unavailable", and metadata exactly {"code": "pinned_graph_configuration_unavailable"}; it includes no exception name, release ID, endpoint, prompt, payload, or output. Assert a spy on the generic `error=str(e)` graph-thread branch has zero calls for both pin exceptions.
 - [ ] Add:
 
 ~~~python
@@ -276,7 +313,7 @@ def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
         raise exc
 ~~~
 
-Call it first in broad recovery blocks for Builder, Build Reviewer, Fixer, Fix Reviewer, Deck Reviewer, and rereview. Preserve ordinary output/model recovery. At graph chat seam catch only PersistedRuntimeError, log exception class/release ID server-side through the identity-safe logger, and emit the exact safe stream event above; do not stringify the exception and do not change monolith path.
+Call it first in broad recovery blocks for Builder, Build Reviewer, Fixer, Fix Reviewer, Deck Reviewer, and rereview. Preserve ordinary output/model recovery. At the graph chat seam, explicitly catch `(PersistedRuntimeError, ConversationPinMissingError, ConversationSessionNotFoundError)`: convert either pin exception to the same persisted-configuration-unavailable handling before writing the safe event, log only the exception class/release ID server-side through the identity-safe logger, and emit the exact safe stream event above. Neither pin exception may enter the generic `error=str(e)` graph-thread branch; do not change the monolith path.
 - [ ] Do not defer a non-deferrable FK or delete immutable release to create dangling state. Direct loader proves absent ID; shipped seam proves null pin. GREEN; sabotage active fallback, one re-raise, and monolith isolation; restore, commit.
 
 ### Task 7: Safe session version projection
@@ -340,15 +377,15 @@ For normal creation, on 503 retain the freshly local null-version session and su
 **Files:** Create tests/integration/test_conversation_pin_acceptance_postgres.py; modify tests/integration/test_graph_mode_turn.py, .github/workflows/test.yml.
 
 - [ ] Build real PostgreSQL migration/models/bootstrap, real loader/runtime/compiled graph/checkpointer and RecordingAgentInvocationIdentitySink; replace only AgentModelAdapter. Capture real router sends without replacing the graph: save routers.Send, monkeypatch routers.Send with recording_send(node, arg) that appends copy.deepcopy(arg) to sent[node] then returns saved_Send(node, arg). Assert sent["builder"] and sent["build_reviewer"] after each turn.
-- [ ] Give the adapter a complete deque state machine. It extracts session_id from the final JSON payload in the assembled prompt, looks up (session_id, turn_number), verifies the next expected role, and returns its typed schema constructor. Execute A turn 1 fully before A turn 2, then B turn 1; no call is allowed after its deque is empty.
+- [ ] Give the adapter one complete **global ordered deque**, not a payload-derived per-conversation lookup: its three externally controlled, serial segments are A/1, A/2, then B/1. Each entry is `(expected_role, typed_output)`; compare expected_role with the explicit `agent_key` supplied to `AgentModelAdapter.invoke`, fail if it differs from the deque head, pop exactly one entry, and fail if invoked after the deque is empty. Execute A turn 1 fully and assert its sink/send segment before starting A turn 2; assert A/2 before starting B/1. This is intentionally a serial acceptance machine because Build Reviewer, Fixer, Fix Reviewer, and serial re-review payloads have no session ID, while Build Reviewer and Fix Reviewer also share a schema. After each segment, assert the ordered RecordingAgentInvocationIdentitySink calls against the segment’s declared `(session_id, turn, role, graph_release_id, revision_id, content_hash)` mapping and assert captured Send payload pins; no adapter claim derives absent conversation identity.
 
 | Conversation / turn | Exact role sequence and output |
 |---|---|
 | A / 1 on V1 | architect ask_data; data_analyst synthesis; architect build one SlideSpec; builder unsafe HTML; builder safe HTML retry; build_reviewer objective overflow Finding; fixer unsafe HTML; fixer safe HTML retry; fix_reviewer empty findings; deck_reviewer empty findings |
-| A / 2 on V1 | architect edit with changed deck-level audience; rereview build_reviewer objective overflow Finding; builder safe rebuilt HTML; build_reviewer empty findings; deck_reviewer empty findings |
+| A / 2 on V1 | architect edit `changed_spec` with changed deck-level audience and target `[0]`; serial rereview build_reviewer objective overflow Finding; builder safe rebuilt HTML; build_reviewer empty findings; deck_reviewer empty findings |
 | B / 1 on V2 | architect ask_data; data_analyst synthesis; architect build one SlideSpec; builder unsafe HTML; builder safe HTML retry; build_reviewer objective overflow Finding; fixer unsafe HTML; fixer safe HTML retry; fix_reviewer empty findings; deck_reviewer empty findings |
 
-Use exact current schemas: ArchitectOutput(intent="ask_data", message="need data", data_request=DataRequest(question="revenue")) then ArchitectOutput(intent="build", message="build", deck_spec=make_deck_spec(1)); AnalystOutput(outcome="success", synthesis="fixture synthesis", sources=["fixture://source"]); BuilderOutput(position=0, html=UNSAFE_HTML, scripts="") then BuilderOutput(position=0, html=SAFE_HTML, scripts=""); SlideReviewOutput(slide_index=0, verdict="surfaced", findings=[objective_finding(0)]) or SlideReviewOutput(slide_index=0, verdict="clean", findings=[]); FixerOutput(position=0, html=UNSAFE_HTML, scripts="", changed=True) then FixerOutput(position=0, html=SAFE_FIXED_HTML, scripts="", changed=True); DeckReviewOutput(findings=[]). Set UNSAFE_HTML to an img tag with source https://attacker.com/b.png; set SAFE_HTML to builder_html(0) and SAFE_FIXED_HTML to fixed_html(0). Assert expected ordered (session_id, turn, role, graph_release_id, revision_id, content_hash) after every turn, including two Builder and two Fixer calls in A/B first turns and the complete A-second-turn rebuild tail.
+Use exact current schemas: `ArchitectOutput(intent="ask_data", message="need data", data_request=DataRequest(metric="revenue"))`, then `ArchitectOutput(intent="build", message="build", deck_spec=make_deck_spec(1))`; `AnalystOutput(outcome="success", synthesis="fixture synthesis", sources=["fixture://source"])`; `BuilderOutput(position=0, html=UNSAFE_HTML, scripts="")` then `BuilderOutput(position=0, html=SAFE_HTML, scripts="")`; `SlideReviewOutput(slide_index=0, verdict="surfaced", findings=[objective_finding(0)])` or `SlideReviewOutput(slide_index=0, verdict="clean", findings=[])`; `FixerOutput(position=0, html=UNSAFE_HTML, scripts="", changed=True)` then `FixerOutput(position=0, html=SAFE_FIXED_HTML, scripts="", changed=True)`; and `DeckReviewOutput(findings=[])`. Before constructing the A/2 entry, set `changed_spec = make_deck_spec(1); changed_spec = changed_spec.model_copy(update={"audience": "Changed audience"})`, then use exactly `ArchitectOutput(intent="edit", message="change audience", deck_spec=changed_spec, target_positions=[0])`. Its deque tail is exactly that architect edit; serial rereview `build_reviewer` surfaced overflow; Builder safe rebuild; Build Reviewer clean; Deck Reviewer clean. Set UNSAFE_HTML to an img tag with source https://attacker.com/b.png; set SAFE_HTML to builder_html(0) and SAFE_FIXED_HTML to fixed_html(0). Assert expected ordered (session_id, turn, role, graph_release_id, revision_id, content_hash) after every completed segment, including two Builder and two Fixer calls in A/B first turns and the complete A-second-turn rebuild tail.
 - [ ] Explicitly create root A graph-capable on V1; test-publish complete V2; create B graph-capable; execute the state machine. Assert every identity matches persisted mapping; every log/recorded sink identity does likewise; both captured Send lists carry exact pins; Foreman has no sink call; A is still V1/old and B V2/active; latest makes C without changing A.
 - [ ] Add all four files to integration-graph: migration, creation, persisted-failures, acceptance. Run tests/unit/test_ci_collects_integration_tests.py; this task owns backend CI after Task 8's Playwright edit.
 - [ ] Run this concrete final gate; record failing causes and skipped test identities before/after each schema or runtime-interface change:

@@ -1,4 +1,4 @@
-# Issue #261 plan repair report — second correction
+# Issue #261 plan repair report — third correction
 
 **Plan:** docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md
 
@@ -48,3 +48,27 @@
 - Re-ran no-MLflow, no-uv, browser-intent, compatibility-caller, state-seed, and CI-enrollment searches after the second correction.
 - Ran git diff --check successfully.
 - No production code or tests were run or changed; this is planning-only work.
+
+## Third-pass correction for `.superpowers/issue-261-plan-rereview-2.md`
+
+**Code seams re-probed:** `validate_definition_hash` wraps malformed semantic
+content and altered hashes in `GraphConfigurationIntegrityError`; the current
+model adapter owns provider construction, `with_structured_output`, and
+invocation in one call; `DataRequest.metric` is required; an architect edit
+requires `target_positions`; and the Build Reviewer, Fixer, Fix Reviewer, and
+serial re-review payloads have no `session_id`. The existing graph-thread
+fallback stringifies exceptions as `error=str(e)`.
+
+| Residual finding | Third-pass correction |
+|---|---|
+| Pin loading is outside the persisted error family | Task 6 explicitly catches `ConversationPinMissingError` and `ConversationSessionNotFoundError` at the graph/chat boundary, sends the same safe persisted-configuration event, and proves neither reaches generic stringification. |
+| Invalid or altered persisted content escapes typed recovery | Task 3 catches the actual `GraphConfigurationIntegrityError` wrapper and converts it to `PersistedConfigurationUnavailableError(code="invalid_persisted_definition")`; Task 6 proves both malformed typed content and altered hashes through Builder and Deck Reviewer recovery. |
+| Payloads cannot key an A/1-A/2-B/1 adapter by session | Task 4 adds an explicit `agent_key` adapter argument (the two reviewer roles share a schema), and Task 9 uses it with a global ordered deque, serial segment boundaries, runtime-sink identity, and Send-pin assertions. |
+| Acceptance fixture constructors are invalid/incomplete | Task 9 now uses `DataRequest(metric="revenue")`, a `changed_spec` copied with audience `Changed audience`, and a valid edit output with `deck_spec=changed_spec` and `target_positions=[0]`, followed by the exact five-call rereview/rebuild tail. |
+| Endpoint availability and output validity have no seam | Task 4 names provider phases and provider exception classes that become `ModelProviderUnavailableError`; the identity-sink callback turns only that wrapper into `PinnedInvocationEndpointError`, while Pydantic/parser validation and unknown exceptions stay ordinary node-recoverable failures. |
+| Compatibility cannot manufacture persisted identity | Task 4 defines the test-only `CompatibilityResolvedDefinitionLoader`: synthetic graph/release ID 1, code-owned definition version as revision ID, and `definition_content_hash(content)`. It rejects other releases; cached production construction is cleared and proven not to use it. |
+
+The prior second-pass report is retained above as historical context; this section
+supersedes its former claims about typed failures, acceptance selection, endpoint
+classification, and compatibility construction. No implementation or tests were
+run for this planning-only third correction.
