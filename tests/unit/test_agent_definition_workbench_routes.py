@@ -29,6 +29,8 @@ from src.database.models.graph_configuration import (
     GraphReleaseAgent,
 )
 from src.services.graph_configuration import (
+    DraftContentRejected,
+    DraftValidationIssue,
     GraphConfiguration,
     GraphConfigurationIntegrityError,
 )
@@ -545,6 +547,11 @@ def test_put_save_draft_returns_exact_changed_contract_and_preserves_release(
     session_factory, monkeypatch
 ):
     _force_admin(monkeypatch, is_admin=True)
+    submitted_prompt = "Architect draft changed through the admin route."
+    submitted_endpoint = " custom-endpoint-name "
+    submitted_temperature = 0.25
+    submitted_max_tokens = 4096
+    submitted_top_p = 0.8
     with _app_for(session_factory) as client:
         before = _workbench(client)
         architect = _model_node(before, "architect")
@@ -552,12 +559,12 @@ def test_put_save_draft_returns_exact_changed_contract_and_preserves_release(
             "lock_version": before["draft"]["lock_version"],
             "candidate": _editable_candidate(
                 architect,
-                prompt_text="Architect draft changed through the admin route.",
+                prompt_text=submitted_prompt,
                 **{
-                    "model.endpoint_name": " custom-endpoint-name ",
-                    "model.temperature": 0.25,
-                    "model.max_tokens": 4096,
-                    "model.top_p": 0.8,
+                    "model.endpoint_name": submitted_endpoint,
+                    "model.temperature": submitted_temperature,
+                    "model.max_tokens": submitted_max_tokens,
+                    "model.top_p": submitted_top_p,
                 },
             ),
         }
@@ -571,6 +578,14 @@ def test_put_save_draft_returns_exact_changed_contract_and_preserves_release(
     assert body["draft"]["lock_version"] == 1
     assert body["draft"]["updated_by"] == "task4-user@example.com"
     assert body["definition"] == _model_node(after, "architect")["draft"]
+    for definition in (body["definition"], _model_node(after, "architect")["draft"]):
+        assert definition["prompt_text"] == submitted_prompt
+        assert definition["model"] == {
+            "endpoint_name": submitted_endpoint,
+            "temperature": submitted_temperature,
+            "max_tokens": submitted_max_tokens,
+            "top_p": submitted_top_p,
+        }
     assert after["active_release"] == before["active_release"]
     assert after["draft"]["base_release_id"] == before["draft"]["base_release_id"]
 
@@ -829,8 +844,16 @@ def test_put_malformed_json_has_stable_root_error(session_factory, monkeypatch):
         )
 
     assert response.status_code == 422
-    assert response.json()["code"] == "invalid_draft"
-    assert response.json()["errors"][0]["field"] == "$"
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "$",
+                "code": "invalid_json",
+                "message": "Request body must be valid JSON.",
+            }
+        ],
+    }
 
 
 def test_non_admin_put_rejects_before_body_or_writer_and_does_not_echo_secrets(
@@ -843,7 +866,12 @@ def test_non_admin_put_rejects_before_body_or_writer_and_does_not_echo_secrets(
         calls.append("write")
         raise AssertionError("authorization reached the draft writer")
 
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("authorization parsed the raw request body")
+
     monkeypatch.setattr(GraphConfiguration, "save_editable_model_draft", _must_not_write)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
     with _app_for(session_factory, raise_server_exceptions=False) as client:
         response = client.put(
             _draft_save_url(),
@@ -856,6 +884,53 @@ def test_non_admin_put_rejects_before_body_or_writer_and_does_not_echo_secrets(
     assert response.json() == {"detail": "Admin access required"}
     assert "SUPER_SECRET_PROMPT" not in response.text
     assert "private-endpoint" not in response.text
+
+
+def test_put_projects_ordered_domain_rejection_verbatim_at_route_boundary(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    first_issue = DraftValidationIssue(
+        field="candidate.prompt_text",
+        code="policy_rejected",
+        message="Prompt violates the configured policy.",
+    )
+    second_issue = DraftValidationIssue(
+        field="candidate.model.endpoint_name",
+        code="endpoint_rejected",
+        message="Endpoint is not approved for this draft.",
+    )
+
+    def _reject_draft(*_args, **_kwargs):
+        raise DraftContentRejected(first_issue, second_issue)
+
+    monkeypatch.setattr(GraphConfiguration, "save_editable_model_draft", _reject_draft)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        response = client.put(
+            _draft_save_url(),
+            json={
+                "lock_version": before["draft"]["lock_version"],
+                "candidate": _editable_candidate(_model_node(before, "architect")),
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "candidate.prompt_text",
+                "code": "policy_rejected",
+                "message": "Prompt violates the configured policy.",
+            },
+            {
+                "field": "candidate.model.endpoint_name",
+                "code": "endpoint_rejected",
+                "message": "Endpoint is not approved for this draft.",
+            },
+        ],
+    }
 
 
 @pytest.mark.parametrize("principal", [None, " \t "])
