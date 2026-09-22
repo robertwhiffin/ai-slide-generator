@@ -213,3 +213,14 @@ def test_persisted_graph_runtime_failures_are_collected_by_integration_graph():
         ".github/workflows/test.yml. Its exact-release failure and redaction "
         "assertions must execute against PostgreSQL."
     )
+
+
+def test_conversation_pin_acceptance_is_collected_by_integration_graph():
+    """The final persisted-runtime acceptance belongs in graph CI."""
+    target = "tests/integration/test_conversation_pin_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its compiled-graph pin assertions must "
+        "execute against PostgreSQL."
+    )
