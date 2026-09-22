@@ -452,6 +452,7 @@ def rereview_committed_slides(
     session_id: str,
     spec: DeckSpec,
     brand: Dict[str, Any],
+    graph_release_id: int,
 ) -> Dict[str, Any]:
     """Score every committed slide against the **new** spec, serially, here.
 
@@ -589,6 +590,7 @@ def rereview_committed_slides(
         try:
             out = get_agent_runtime().run(
                 "build_reviewer",
+                graph_release_id,
                 review_payload,
                 AgentAssemblyContext(design_system_active),
             ).output
@@ -1243,6 +1245,7 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
 
     return {
         "session_id": state["session_id"],
+        "graph_release_id": state["graph_release_id"],
         "turn_id": state["turn_id"],
         "initiated_by": state.get("initiated_by"),
         "position": position,
@@ -1386,6 +1389,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     out = get_agent_runtime().run(
         "architect",
+        state["graph_release_id"],
         payload,
         AgentAssemblyContext(brand["design_system_active"]),
     ).output
@@ -1549,7 +1553,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # user edits.  The pass runs serially inside rereview_committed_slides;
         # its docstring carries the measurement of why it cannot be the two-pass
         # turn the plan imagined.
-        verdicts = rereview_committed_slides(session_id, spec, brand)
+        verdicts = rereview_committed_slides(
+            session_id,
+            spec,
+            brand,
+            state["graph_release_id"],
+        )
         if not verdicts["committed"]:
             # Nothing committed to score (an unbuilt deck, or the row read
             # failed).  Coverage is left exactly as the architect set it: writing
@@ -1756,6 +1765,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     }
     out = get_agent_runtime().run(
         "data_analyst",
+        state["graph_release_id"],
         payload,
         AgentAssemblyContext(bool(state.get("design_system_active"))),
     ).output
@@ -1963,6 +1973,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     try:
         out = get_agent_runtime().run(
             "builder",
+            payload["graph_release_id"],
             skill_payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -1974,6 +1985,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             }
             return get_agent_runtime().run(
                 "builder",
+                payload["graph_release_id"],
                 retry_payload,
                 AgentAssemblyContext(design_system_active),
             ).output.html
@@ -1999,7 +2011,12 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             return {}
         return {"placeheld_positions": scoped(turn_id, {position})}
 
-    record = {**skill_payload, "html": html, "scripts": out.scripts}
+    record = {
+        **skill_payload,
+        "graph_release_id": payload["graph_release_id"],
+        "html": html,
+        "scripts": out.scripts,
+    }
     return {"slides": scoped(turn_id, {position: record})}
 
 
@@ -2070,6 +2087,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
         }
         out = get_agent_runtime().run(
             "build_reviewer",
+            payload["graph_release_id"],
             review_payload,
             AgentAssemblyContext(bool(payload.get("design_system_active"))),
         ).output
@@ -2293,6 +2311,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
     try:
         out = get_agent_runtime().run(
             "fixer",
+            state["graph_release_id"],
             fix_payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -2304,6 +2323,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             }
             return get_agent_runtime().run(
                 "fixer",
+                state["graph_release_id"],
                 retry_payload,
                 AgentAssemblyContext(design_system_active),
             ).output.html
@@ -2423,6 +2443,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             try:
                 out = get_agent_runtime().run(
                     "fix_reviewer",
+                    state["graph_release_id"],
                     review_payload,
                     AgentAssemblyContext(bool(payload.get("design_system_active"))),
                 ).output
@@ -2773,6 +2794,7 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
             }
             out = get_agent_runtime().run(
                 "deck_reviewer",
+                state["graph_release_id"],
                 review_payload,
                 AgentAssemblyContext(bool(state.get("design_system_active"))),
             ).output

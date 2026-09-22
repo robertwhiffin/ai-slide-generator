@@ -244,9 +244,15 @@ def async_turn_env(graph_turn_env, monkeypatch):
     recorder = env.recorder
     knobs: Dict[str, Any] = {"discuss": True, "reply": REPLY}
 
-    def stub_architect(name: str, payload: dict, design_system_active: bool):
+    def stub_architect(
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        design_system_active: bool,
+    ):
         out = recorder.run(
             name,
+            graph_release_id,
             payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -499,13 +505,19 @@ def test_the_analysts_answer_reaches_the_user_but_never_replays_as_the_architect
     env = async_turn_env
     architect_passes = {"n": 0}
 
-    def ask_then_discuss(name: str, payload: dict, design_system_active: bool):
+    def ask_then_discuss(
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        design_system_active: bool,
+    ):
         # The recorder is invoked ONLY for the architect: its own data_analyst
         # handler raises on purpose ("not part of any layer-1 scenario"), so
         # routing this skill through it would kill the turn.
         if name == "architect":
             env.recorder.run(
                 name,
+                graph_release_id,
                 payload,
                 AgentAssemblyContext(design_system_active),
             )

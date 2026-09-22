@@ -645,7 +645,7 @@ def test_the_re_review_shows_the_reviewer_the_new_deck_brief(graph_env):
     _seed_rows(env, ["<div>COMMITTED ZERO</div>", "<div>COMMITTED ONE</div>"])
     env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     payload = env.skills.calls_for("build_reviewer")[0]["payload"]
     assert set(payload) == REVIEWER_PAYLOAD_KEYS | {"deck_brief"}
@@ -664,7 +664,7 @@ def test_the_brief_shown_is_exactly_the_fields_that_trigger_a_re_review(graph_en
     _seed_rows(env, ["<div>zero</div>"])
     env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    rereview_committed_slides(env.session_id, _new_spec((0,)), _brand())
+    rereview_committed_slides(env.session_id, _new_spec((0,)), _brand(), 1)
 
     brief = env.skills.calls_for("build_reviewer")[0]["payload"]["deck_brief"]
     assert set(brief) == set(_DECK_LEVEL_FIELDS)
@@ -676,10 +676,11 @@ def test_the_re_review_scores_the_committed_html_against_the_new_spec(graph_env)
     _seed_rows(env, ["<div>COMMITTED ZERO</div>", "<div>COMMITTED ONE</div>"])
     env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     calls = env.skills.calls_for("build_reviewer")
     assert [c["payload"]["position"] for c in calls] == [0, 1]
+    assert [c["graph_release_id"] for c in calls] == [1, 1]
     assert calls[0]["payload"]["html"] == "<div>COMMITTED ZERO</div>"
     assert calls[1]["payload"]["html"] == "<div>COMMITTED ONE</div>"
     assert calls[0]["payload"]["slide_spec"]["position"] == 0
@@ -696,7 +697,7 @@ def test_brief_not_delivered_marks_a_slide_as_no_longer_serving_the_brief(graph_
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
     env.skills.set("build_reviewer", brief_aware_reviewer({1}))
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec(), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec(), _brand(), 1)
 
     assert verdicts["failing"] == {1}
     assert verdicts["reviewed"] == {0, 1, 2}
@@ -715,7 +716,7 @@ def test_an_objective_finding_still_marks_a_slide_for_rebuild(graph_env):
         ),
     )
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     assert verdicts["failing"] == {1}
 
@@ -734,7 +735,7 @@ def test_an_unrelated_subjective_finding_does_not_force_a_rebuild(graph_env):
         ),
     )
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     assert verdicts["failing"] == set()
     assert [f["criterion"] for f in verdicts["surfaced"]] == ["arc_gap"]
@@ -747,7 +748,7 @@ def test_every_finding_is_surfaced_including_the_subjective_ones(graph_env):
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>"])
     env.skills.set("build_reviewer", brief_aware_reviewer({1}))
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     assert verdicts["surfaced"] == [
         {
@@ -769,7 +770,7 @@ def test_a_placeholder_fails_by_definition_and_costs_no_model_call(graph_env):
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>"], placeheld={1})
     env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     assert verdicts["placeheld"] == {1}
     assert verdicts["failing"] == {1}
@@ -792,7 +793,7 @@ def test_an_unreviewable_slide_is_left_alone_rather_than_overwritten(graph_env):
         return passing(payload)
 
     env.skills.set("build_reviewer", _review)
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     assert verdicts["unreviewable"] == {1}
     assert verdicts["failing"] == set()
@@ -806,7 +807,7 @@ def test_a_row_the_new_spec_does_not_cover_is_not_re_reviewed(graph_env):
     _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
     env.skills.set("build_reviewer", brief_aware_reviewer(set()))
 
-    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand())
+    verdicts = rereview_committed_slides(env.session_id, _new_spec((0, 1)), _brand(), 1)
 
     assert verdicts["committed"] == {0, 1}
     assert [

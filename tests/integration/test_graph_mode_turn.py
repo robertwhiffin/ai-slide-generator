@@ -465,9 +465,12 @@ def _pin_the_design_contract(env, monkeypatch, *, ds_id=7, template_id=11):
 
     recorder = env.recorder
 
-    def invoke_with_a_pinned_spec(name, payload, design_system_active):
+    def invoke_with_a_pinned_spec(
+        name, graph_release_id, payload, design_system_active
+    ):
         out = recorder.run(
             name,
+            graph_release_id,
             payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -516,6 +519,32 @@ def _capture_initial_state(monkeypatch) -> List[Dict[str, Any]]:
         "src.services.graph.builder.invoke_graph", recording_invoke_graph
     )
     return seen
+
+
+def test_graph_turn_fixture_overwrites_a_hostile_release_id(graph_turn_env):
+    from src.database.models.session import UserSession
+
+    env = graph_turn_env
+    env.recorder.configure(slide_count=1)
+
+    db = env.factory()
+    try:
+        persisted_pin = (
+            db.query(UserSession.graph_release_id)
+            .filter(UserSession.session_id == env.session_id)
+            .scalar()
+        )
+    finally:
+        db.close()
+
+    final = env.run(initial={"graph_release_id": env.graph_release_id + 999})
+
+    assert persisted_pin == env.graph_release_id
+    assert final["graph_release_id"] == env.graph_release_id
+    assert env.recorder.calls
+    assert {
+        call["graph_release_id"] for call in env.recorder.calls
+    } == {env.graph_release_id}
 
 
 def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
@@ -576,7 +605,7 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
             architect_wrote.set()
         return result
 
-    def invoke_agent(name, payload, design_system_active):
+    def invoke_agent(name, graph_release_id, payload, design_system_active):
         if name == "architect" and naming_first:
             # The naming write must have LANDED before the architect resolves
             # the spec whose title it is about to write.
@@ -586,6 +615,7 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
             )
         return recorder.run(
             name,
+            graph_release_id,
             payload,
             AgentAssemblyContext(design_system_active),
         ).output
