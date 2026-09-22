@@ -29,6 +29,7 @@ from src.database.models.session import (
     UserSession,
 )
 from src.domain.finding import findings_from_record
+from src.services.conversation_pins import lock_active_graph_release
 
 logger = logging.getLogger(__name__)
 
@@ -693,6 +694,7 @@ class SessionManager:
         session_id: Optional[str] = None,
         created_by: Optional[str] = None,
         agent_config: Optional[Dict[str, Any]] = None,
+        graph_capable: bool = False,
     ) -> Dict[str, Any]:
         """Create a new session.
 
@@ -705,6 +707,7 @@ class SessionManager:
                 Normalized through the shared persistence serializer before storage
                 (see below), so a caller cannot persist a config that carries BOTH
                 style authorities.
+            graph_capable: Whether this explicit root pins the active graph release.
 
         Returns:
             Dictionary with session info including session_id
@@ -735,12 +738,17 @@ class SessionManager:
                     "created_at": existing.created_at.isoformat(),
                 }
 
+            graph_release_id = None
+            if graph_capable:
+                graph_release_id = lock_active_graph_release(db).release_id
+
             session = UserSession(
                 session_id=session_id,
                 user_id=user_id,
                 created_by=created_by,
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                 agent_config=agent_config,
+                graph_release_id=graph_release_id,
             )
             db.add(session)
             db.flush()
@@ -3349,4 +3357,3 @@ def get_session_manager() -> SessionManager:
         _session_manager = SessionManager()
 
     return _session_manager
-
