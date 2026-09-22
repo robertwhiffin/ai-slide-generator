@@ -122,6 +122,12 @@ export interface Session {
   parent_session_id?: string | null;
   /** Workspace-wide share level (root sessions only); null = private */
   global_permission?: 'CAN_VIEW' | 'CAN_EDIT' | null;
+  /** Public conversation graph version pinned to this session, if any. */
+  graph_version: number | null;
+  /** Public graph version newly-created graph-capable sessions receive. */
+  active_graph_version: number;
+  /** Whether this session remains pinned to an older graph version. */
+  is_older_than_active: boolean;
 }
 
 export interface DuplicateSessionResult {
@@ -380,7 +386,7 @@ export const api = {
   /**
    * Create a new session
    */
-  async createSession(options?: { sessionId?: string; title?: string }): Promise<Session> {
+  async createSession(options?: { sessionId?: string; title?: string; graphCapable?: boolean }): Promise<Session> {
     const response = await fetch(`${API_BASE_URL}/api/sessions`, {
       method: 'POST',
       headers: {
@@ -389,6 +395,7 @@ export const api = {
       body: JSON.stringify({
         session_id: options?.sessionId,
         title: options?.title,
+        graph_capable: options?.graphCapable ?? false,
       }),
     });
 

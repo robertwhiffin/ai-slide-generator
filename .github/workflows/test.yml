@@ -699,6 +699,7 @@ jobs:
           - agent-definition-workbench
           - api-route-matcher
           - chat-ui
+          - conversation-graph-version
           - css-bg-export
           - deck-integrity
           - deck-review-flag
