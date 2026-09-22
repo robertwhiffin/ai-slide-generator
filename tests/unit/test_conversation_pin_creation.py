@@ -70,6 +70,22 @@ def _session_pin(factory, session_id: str):
         )
 
 
+def _seed_active_release(factory, release_id: int = 41, version: int = 7) -> None:
+    """Create the release that a Task 2 creation fixture refers to."""
+    now = datetime.now(timezone.utc)
+    with factory.begin() as db:
+        db.add(
+            GraphRelease(
+                id=release_id,
+                version_number=version,
+                release_note="active creation test release",
+                published_by="unit-test@example.com",
+                published_at=now,
+                effective_from=now,
+            )
+        )
+
+
 def test_request_defaults_graph_capable_to_false():
     """Changing the request default would accidentally pin non-browser callers."""
     assert CreateSessionRequest().graph_capable is False
@@ -77,6 +93,7 @@ def test_request_defaults_graph_capable_to_false():
 
 def test_non_graph_capable_root_stays_unpinned(factory):
     """Removing the false branch would write a graph identity for legacy roots."""
+    _seed_active_release(factory)
     manager = SessionManager()
     with patch(
         "src.api.services.session_manager.get_db_session", _database_context(factory)
@@ -91,6 +108,7 @@ def test_non_graph_capable_root_stays_unpinned(factory):
 
 def test_graph_capable_root_is_pinned_to_the_locked_active_release(factory):
     """Omitting the lock result from a new root would make it release-ambiguous."""
+    _seed_active_release(factory)
     manager = SessionManager()
     with patch(
         "src.api.services.session_manager.get_db_session", _database_context(factory)
@@ -106,6 +124,7 @@ def test_graph_capable_root_is_pinned_to_the_locked_active_release(factory):
 
 def test_existing_explicit_id_returns_before_locking_or_repinning(factory):
     """Moving duplicate detection below locking would mutate/relock an existing root."""
+    _seed_active_release(factory)
     manager = SessionManager()
     with patch(
         "src.api.services.session_manager.get_db_session", _database_context(factory)
@@ -119,7 +138,7 @@ def test_existing_explicit_id_returns_before_locking_or_repinning(factory):
         "src.api.services.session_manager.get_db_session", _database_context(factory)
     ), patch(
         "src.api.services.session_manager.lock_active_graph_release",
-        return_value=PinnedRelease(release_id=99, graph_version=8),
+        return_value=PinnedRelease(release_id=41, graph_version=7),
     ) as lock_active:
         result = manager.create_session(session_id="same-root", graph_capable=True)
 
@@ -225,6 +244,7 @@ def test_explicit_sessions_post_omitted_or_false_capability_stays_unpinned(
     """A route default that turns false/omitted into true would pin browser roots."""
     from src.api.routes.sessions import router
 
+    _seed_active_release(factory)
     app = FastAPI()
     app.include_router(router)
     manager = SessionManager()
