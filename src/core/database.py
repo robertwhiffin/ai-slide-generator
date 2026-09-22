@@ -619,11 +619,13 @@ def _run_migrations(engine, schema: str | None = None):
 def _install_graph_configuration_mutation_guards(
     conn, schema: str | None, is_sqlite: bool
 ) -> None:
-    """Install idempotent PostgreSQL guards for immutable published graph rows.
+    """Install idempotent PostgreSQL guards for published graph rows.
 
     Definition revisions and release mappings reject every update/delete. A release
     rejects delete and every update except its first ``effective_to`` transition from
-    NULL to a non-NULL value with all other fields unchanged.
+    NULL to a non-NULL value with all other fields unchanged. A deferred constraint
+    trigger also requires exactly one active release at transaction end, while allowing
+    the atomic close-and-insert transition used by publication.
     """
     if is_sqlite:
         return
@@ -638,6 +640,8 @@ def _install_graph_configuration_mutation_guards(
 
     reject_function = qualified("reject_graph_published_mutation")
     release_function = qualified("guard_graph_release_mutation")
+    exactly_one_function = qualified("enforce_graph_release_exactly_one_active")
+    release_table = qualified("graph_release")
 
     conn.execute(
         text(
@@ -649,6 +653,35 @@ def _install_graph_configuration_mutation_guards(
             BEGIN
                 RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME
                     USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {exactly_one_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            DECLARE
+                active_release_count bigint;
+            BEGIN
+                SELECT count(*)
+                INTO active_release_count
+                FROM {release_table}
+                WHERE effective_to IS NULL;
+
+                IF active_release_count <> 1 THEN
+                    RAISE EXCEPTION
+                        'graph_release must have exactly one active release; found %',
+                        active_release_count
+                        USING ERRCODE = '23514',
+                              CONSTRAINT = 'trg_graph_release_exactly_one_active';
+                END IF;
+
+                RETURN NULL;
             END;
             $$
             """
@@ -704,7 +737,6 @@ def _install_graph_configuration_mutation_guards(
             )
         )
 
-    release_table = qualified("graph_release")
     release_trigger = preparer.quote("trg_graph_release_immutable")
     conn.execute(
         text(f"DROP TRIGGER IF EXISTS {release_trigger} ON {release_table}")
@@ -714,6 +746,19 @@ def _install_graph_configuration_mutation_guards(
             f"CREATE TRIGGER {release_trigger} "
             f"BEFORE UPDATE OR DELETE ON {release_table} "
             f"FOR EACH ROW EXECUTE FUNCTION {release_function}()"
+        )
+    )
+
+    exactly_one_trigger = preparer.quote("trg_graph_release_exactly_one_active")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {exactly_one_trigger} ON {release_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE CONSTRAINT TRIGGER {exactly_one_trigger} "
+            f"AFTER INSERT OR UPDATE OR DELETE ON {release_table} "
+            "DEFERRABLE INITIALLY DEFERRED "
+            f"FOR EACH ROW EXECUTE FUNCTION {exactly_one_function}()"
         )
     )
 
