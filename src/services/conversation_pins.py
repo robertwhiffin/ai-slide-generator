@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SessionMessage, UserSession
@@ -17,6 +17,59 @@ class BackfillResult:
     graph_release_id: int
     graph_version: int
     pinned_count: int
+
+
+@dataclass(frozen=True)
+class PinnedRelease:
+    """The immutable identity selected while creating a graph-capable root."""
+
+    release_id: int
+    graph_version: int
+
+
+class ActiveGraphReleaseUnavailableError(RuntimeError):
+    """No active release existed across the bounded lock scans."""
+
+
+class ConversationPinMissingError(RuntimeError):
+    """A known conversation has no persisted graph-release identity."""
+
+
+class ConversationSessionNotFoundError(RuntimeError):
+    """The requested conversation does not exist."""
+
+
+MAX_ACTIVE_RELEASE_LOCK_SCANS = 2
+
+
+def _active_release_for_update():
+    return (
+        select(GraphRelease)
+        .where(GraphRelease.effective_to.is_(None))
+        .with_for_update()
+    )
+
+
+def lock_active_graph_release(db: Session) -> PinnedRelease:
+    """Lock the active release, retrying only the publication handoff once."""
+    for scan in range(MAX_ACTIVE_RELEASE_LOCK_SCANS):
+        release = db.execute(_active_release_for_update()).scalar_one_or_none()
+        if release is not None:
+            return PinnedRelease(release.id, release.version_number)
+        if scan == 0:
+            continue
+    raise ActiveGraphReleaseUnavailableError("no active Graph Release")
+
+
+def load_conversation_pin(session_factory: sessionmaker, session_id: str) -> int:
+    """Return exactly the persisted pin, never an active/latest substitute."""
+    with session_factory() as db:
+        row = db.scalar(select(UserSession).where(UserSession.session_id == session_id))
+        if row is None:
+            raise ConversationSessionNotFoundError(session_id)
+        if not isinstance(row.graph_release_id, int):
+            raise ConversationPinMissingError(session_id)
+        return row.graph_release_id
 
 
 def backfill_conversation_pins(session_factory: sessionmaker) -> BackfillResult:

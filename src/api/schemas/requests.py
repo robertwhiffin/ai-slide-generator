@@ -134,6 +134,10 @@ class CreateSessionRequest(BaseModel):
         description="Optional session title",
         max_length=255,
     )
+    graph_capable: bool = Field(
+        default=False,
+        description="Whether this explicit root session pins the active graph release",
+    )
 
 
 class DuplicateSessionRequest(BaseModel):
