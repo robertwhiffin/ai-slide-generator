@@ -123,7 +123,7 @@ Ordinary-save `409` remains #263's body with the submitted aggregate `client_can
 **Files:** modify the integrated owners, expected `src/services/agent_runtime.py`, `src/services/agent_runtime_identity.py`, `tests/unit/test_agent_runtime.py`, `tests/unit/test_persisted_agent_runtime.py`; extend `tests/unit/test_agent_schema_registry.py`. Record replacements in corrections before dispatch.
 
 - [ ] Write RED tests across all seven roles for composed v2 adapter schemas; canonical validators; undeclared/unselected optional rejection; original canonical output class; immutable diagnostics; and exact `{}`/null/empty-list values in both diagnostics and successful recording/logging traces. For both sinks, invalid canonical and invalid optional output must record/log one error outcome and no success fields. Retain provider conversion inside callback and pre-sink persisted-config failure. Re-run exact-ID loader, four-argument callers/retries, typed failures, and no-fallback tests from final #261.
-- [ ] Run `test ! -e .venv`; then `/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_persisted_graph_release.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py`; then `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_persisted_graph_runtime_failures_postgres.py`; then `test ! -e .venv`. The PostgreSQL file is current #261 failure/no-fallback coverage and must execute with zero skips. Compare failure and skip causes per named file.
+- [ ] Run `test ! -e .venv`; then `/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py tests/unit/test_agent_runtime.py tests/unit/test_persisted_agent_runtime.py tests/unit/test_persisted_graph_release.py tests/unit/test_agent_resolution_prompt.py tests/unit/test_graph_nodes.py tests/unit/test_graph_builder.py tests/unit/test_graph_routers.py tests/unit/test_graph_state.py`; then run each current #261 PostgreSQL regression file as its own URL-prefixed command: `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_persisted_graph_runtime_failures_postgres.py`; then `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_conversation_pin_migration_postgres.py`; then `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_conversation_pin_creation_postgres.py`; then `test ! -e .venv`. Each PostgreSQL command must execute with zero skips recorded for that individual file. Compare failure and skip causes per named file.
 - [ ] Extend the existing sink protocol/classes; do not add a parallel trace sink. Put adapter conversion plus `validate_output` inside the callback. The runtime consumes the returned `ValidatedAgentOutput`, exposes canonical output to graph logic, and copies the same frozen mapping into diagnostics. Preserve exact release selection, latency, protected assembly, retries, and error typing.
 - [ ] GREEN. Controller removes raw-key comparison; reviewer moves validation after sink success (or drops trace fields). Each targeted test must RED/restored GREEN.
 - [ ] Commit runtime, identity sink, and focused tests with `feat: trace validated schema overlay output`.
@@ -174,6 +174,9 @@ Ordinary-save `409` remains #263's body with the submitted aggregate `client_can
     tests/unit/test_persisted_graph_release.py \
     tests/unit/test_agent_resolution_prompt.py \
     tests/unit/test_graph_nodes.py \
+    tests/unit/test_graph_builder.py \
+    tests/unit/test_graph_routers.py \
+    tests/unit/test_graph_state.py \
     tests/unit/test_graph_definition_content_mapping.py \
     tests/unit/test_graph_configuration_bootstrap.py \
     tests/unit/test_graph_configuration_models.py \
@@ -189,11 +192,14 @@ Ordinary-save `409` remains #263's body with the submitted aggregate `client_can
   TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_graph_configuration_bootstrap_postgres.py
   TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_graph_configuration_constraints_postgres.py
   TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_persisted_graph_runtime_failures_postgres.py
-  TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py tests/integration/test_agent_schema_overlay_postgres.py
+  TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_conversation_pin_migration_postgres.py
+  TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_conversation_pin_creation_postgres.py
+  TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py
+  TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_agent_schema_overlay_postgres.py
   test ! -e .venv
   ```
 
-  These are the required #260 bootstrap/constraint, current #261 persisted-runtime failure, #263/#265 workbench, and #264 overlay PostgreSQL suites. Task 0 may reconcile renamed files, but it may not drop `tests/integration/test_persisted_graph_runtime_failures_postgres.py` coverage or accept skips for any named PostgreSQL file.
+  These are the required #260 bootstrap/constraint, current #261 persisted-runtime failure and conversation-pin migration/creation, #263/#265 workbench, and #264 overlay PostgreSQL suites. Task 0 may reconcile renamed files, but it may not drop `tests/integration/test_persisted_graph_runtime_failures_postgres.py`, `tests/integration/test_conversation_pin_migration_postgres.py`, or `tests/integration/test_conversation_pin_creation_postgres.py` coverage or accept skips for any named PostgreSQL file. Record zero skips separately for every PostgreSQL command above.
 - [ ] Run final #263/#265/#264 frontend verification exactly:
 
   ```bash
