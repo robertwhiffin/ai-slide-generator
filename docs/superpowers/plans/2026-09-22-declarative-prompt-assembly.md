@@ -157,7 +157,7 @@ not just membership.
 
 ### Task 0: Prove the local integration base, run corrections pre-pass, and record baselines
 
-**Gate:** No tracked #265 implementation task may begin until reviewed #260, #261, and #263 are ancestors of one concrete reviewed commit on local `feat/langgraph-core`. At plan-correction time the reviewed predecessor heads were #260 `29e03411487476383b34101b7b34513dbb917f26`, #261 `9e9be573ebb585bff3af0cb9e0aea76b5d095213`, and #263 `8f4a59133fec35960cd699deafc65895e29bbb61`; these are evidence to re-probe, not permission to proceed if a newer reviewed head exists. Repeat this task before the first shared-file commit if any reviewed predecessor head changes.
+**Gate:** No tracked #265 implementation task may begin until reviewed #260, #261, and #263 are ancestors of one concrete reviewed commit on local `feat/langgraph-core`. At this correction the reviewed predecessor checkpoints were #260 `29e03411487476383b34101b7b34513dbb917f26`, #261 `9e9be573ebb585bff3af0cb9e0aea76b5d095213`, and #263 through approved Task 5 `49989d4a9bb40d66203e17f200bebbba2334af33`. #263 Task 6 was still running, so these are evidence to re-probe, not permission to proceed if its final reviewed head is newer. Repeat this task before Task 1 and before the first shared-file commit whenever a reviewed predecessor head or owner changes.
 
 **Files:**
 - Create (ignored execution evidence): `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`
@@ -179,7 +179,7 @@ test "$IMPLEMENTATION_BASE_SHA" != 447791d7af34aafc18612cecead6a90805b367ec
 if git merge-base --is-ancestor 447791d7af34aafc18612cecead6a90805b367ec "$IMPLEMENTATION_BASE_SHA"; then exit 1; fi
 git merge-base --is-ancestor 29e03411487476383b34101b7b34513dbb917f26 "$IMPLEMENTATION_BASE_SHA"
 git merge-base --is-ancestor 9e9be573ebb585bff3af0cb9e0aea76b5d095213 "$IMPLEMENTATION_BASE_SHA"
-git merge-base --is-ancestor 8f4a59133fec35960cd699deafc65895e29bbb61 "$IMPLEMENTATION_BASE_SHA"
+git merge-base --is-ancestor 49989d4a9bb40d66203e17f200bebbba2334af33 "$IMPLEMENTATION_BASE_SHA"
 git rebase "$IMPLEMENTATION_BASE_SHA"
 git merge-base --is-ancestor "$IMPLEMENTATION_BASE_SHA" HEAD
 ```
@@ -201,11 +201,17 @@ Make the first line state that `PLAN-CORRECTIONS.md` overrides this plan. Includ
 - #263's one locked writer/mapper/hash/audit path, local validation order, protected identity
   rejection, authorization-before-body parsing, 200/409/422 serialization, and PostgreSQL
   locks; and
-- the actual frontend ownership. At reviewed #263 head `AgentDefinitionWorkbench.tsx` owns
-  tabs and read-only rendering, `draftEditorState.ts` owns aggregate state/pending/A2→A3/409
-  recovery, and `agentDefinitions.ts` owns transport/parsing; no component request controller
-  is wired. `DefinitionEditor.tsx` and `useDraftEditor.ts` do not exist and must not be
-  treated as inherited interfaces.
+- the actual frontend ownership. At approved #263 Task 5 commit
+  `49989d4a9bb40d66203e17f200bebbba2334af33`, `useDraftEditor.ts` is the sole save
+  side-effect owner and owns `nextRequestIdRef` plus `inFlightRequestIdRef`;
+  `DefinitionEditor.tsx` owns the four definition tabs, five-field editor, explicit Save,
+  conflict/recovery UI, and current read-only Assembly panel; `AgentDefinitionWorkbench.tsx`
+  owns selection and composes one mounted editor per model role; `draftEditorState.ts` owns
+  the aggregate `pendingSave` gate, request-ID/lock checks, A2→A3 preservation, and exact-seven
+  409 merge/recovery; `agentDefinitions.ts` owns transport/parsing. #265 must extend these
+  owners rather than create another controller, store, pending gate, or request-ID source.
+  Re-probe all five files and their tests after #263 Task 6 receives final review, and record
+  any later ownership change as an explicit correction before Task 1.
 
 Record every mismatch and ruling before Task 1; never silently adapt production code to the
 plan. Attach this corrections file to every later implementer and reviewer brief.
@@ -481,6 +487,8 @@ do not use that as either sabotage target in this task.
 - Modify: `frontend/src/api/agentDefinitions.ts`
 - Create: `frontend/src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.tsx`
 - Create: `frontend/src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.test.tsx`
+- Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/DefinitionEditor.tsx`
+- Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/useDraftEditor.ts`
 - Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.tsx`
 - Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx`
 - Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts`
@@ -491,15 +499,39 @@ do not use that as either sabotage target in this task.
 
 Add recursive exact parsers for v1/v2 rules, UUIDs, closed anchors/conditions, exact protected-stage display views, and upgrade responses. Reject non-records, extras, unknown literals, duplicate IDs, cross-anchor disorder, bad digest, and response mismatch. A v2 editable save candidate carries custom blocks; a v1 candidate omits assembly rules and keeps #263's model/prompt save behavior. Protected identities, stage display text, delimiters, serialization settings, and terminal text are response-only.
 
-State tests extend #263's existing `draftEditorState.ts` owner: add/edit/delete/reorder is local to the selected role, `crypto.randomUUID()` is called by `AgentDefinitionWorkbench.tsx` before dispatch (never by the reducer), status becomes Unsaved, and no PUT occurs before explicit Save. One aggregate pending-operation slot covers both ordinary Save and Upgrade, disables every Save/Upgrade button globally while allowing typing, ignores late request IDs, and preserves existing A2→A3 edits plus exact-seven-role 409 Reload/Keep local/recovery behavior for ordinary saves. Upgrade success replaces the selected role's authoritative server snapshot and only then enables custom editing; v1 has no add/edit/delete/reorder controls. Upgrade 409 merges all seven server definitions through the same recovery semantics. No edit causes autosave.
+State tests extend #263's existing `draftEditorState.ts` owner. The existing aggregate
+`pendingSave` slot becomes a discriminated Save/Upgrade operation without creating a second
+gate; all current Save transitions and exact request-ID/lock guards remain. Add/edit/delete/
+same-anchor reorder is local to the selected role, marks Unsaved, and sends no request before
+explicit Save. `useDraftEditor.addAssemblyBlock` calls `crypto.randomUUID()` before dispatch;
+the reducer is deterministic. The hook's existing `nextRequestIdRef` and
+`inFlightRequestIdRef` are shared by `save` and `upgradeProtectedAssembly`, so one pending
+operation disables every Save/Upgrade button globally while prompt/model/custom-block editing
+remains enabled. Prove rapid Save→Upgrade, Upgrade→Save, and cross-role attempts issue only
+the first request; late responses for either operation are referential no-ops.
+
+Retain #263's ordinary A2→A3 and exact-seven-role 409 Reload/Keep local/recovery behavior.
+Upgrade success replaces the selected role's authoritative saved definition and v2 protected
+view while preserving prompt/model edits made while pending; only then are custom controls
+available. Upgrade 409 merges all seven server definitions through the existing reducer
+semantics without losing any dirty local form. V1 has no add/edit/delete/reorder controls.
+No edit, blur, selection, tab, conflict, or recovery action saves or upgrades.
 
 Component tests render every required server-derived protected row for the applicable role/
 condition and its exact `display_text`. For each protected row directly assert the absence of
 textbox, delete, move-up/down, condition, and anchor controls. Custom controls appear only at
 legal pre-payload anchors (deck only for Build Reviewer), never after payload or terminal.
 Also prove locked label/condition/version/digest, block-id 422 alert, cross-anchor parser
-rejection, role/tab persistence, ordinary PUT and upgrade POST share the aggregate gate, and
-POST body is exactly `{lock_version: 0}`.
+rejection, role/tab/Admin-tab persistence, ordinary PUT and upgrade POST share both the hook
+ref gate and reducer gate, and POST body is exactly `{lock_version: 0}`. Existing #263 tests
+for five-field editing, explicit Save, A2→A3, all-role conflict merge, and one post-visit GET
+remain green.
+
+Place pure protected/custom rendering tests in `AssemblyEditor.test.tsx`, reducer/operation
+identity and seven-role merge tests in `draftEditorState.test.ts`, and the integrated
+`DefinitionEditor` + `useDraftEditor` + `AgentDefinitionWorkbench` request/lifecycle tests in
+`AgentDefinitionWorkbench.test.tsx`; do not leave either real owner covered only indirectly by
+the browser task.
 
 - [ ] **Step 2: Run RED**
 
@@ -510,7 +542,30 @@ POST body is exactly `{lock_version: 0}`.
 
 - [ ] **Step 3: Implement local-only editor through the existing owners**
 
-Keep types/parsers/save/upgrade transport in `agentDefinitions.ts`. `AssemblyEditor` takes immutable v2 rules, server protected view, and `onAssemblyRulesChange`; it never fetches. Render exact protected display rows as locked and expose controls only for custom siblings at a legal anchor; arrows cannot cross an anchor, delete uses UUID, and the text label includes UUID. Compose it from the existing `DefinitionPanel` in `AgentDefinitionWorkbench.tsx`, retaining that file's tab/render ownership and adding the missing request controller there. Extend the existing `draftEditorState.ts` aggregate rather than inventing a second store: its pending record becomes a discriminated Save/Upgrade operation with one request-id/ref gate and the same parsed 200/409/422 recovery. Do not claim or modify nonexistent inherited `DefinitionEditor.tsx` or `useDraftEditor.ts`; do not create a second lock/status/conflict/autosave/refetch model.
+Keep types/parsers/save/upgrade transport in `agentDefinitions.ts`. `AssemblyEditor` takes
+immutable local v2 rules, the server protected view, and granular custom-block callbacks; it
+never fetches. It renders exact protected display rows as locked and exposes controls only
+for custom siblings at a legal anchor; arrows cannot cross an anchor and delete/edit target
+the UUID.
+
+Replace the existing read-only Assembly `<pre>` inside `DefinitionEditor.tsx` with
+`AssemblyEditor`, and extend `DefinitionEditorProps` with the hook-owned add/edit/delete/
+move/condition callbacks plus `onUpgradeProtectedAssembly` and aggregate disabled state.
+Preserve `DefinitionEditor` as owner of the four tabs, explicit Save, conflict/recovery UI,
+and accessible editor controls. Preserve `AgentDefinitionWorkbench.tsx` as selection/
+composition only: it passes the one `useDraftEditor(workbench)` result to each already-mounted
+role editor and derives all Save/Upgrade disabled state from the same aggregate pending slot.
+
+Extend, do not replace, `useDraftEditor.ts`: `save` continues to use the current validation,
+the five #263 fields plus optional v2 rules in one candidate, the existing refs/request
+counter, and typed completion dispatch. New assembly edit callbacks only dispatch reducer
+actions. `upgradeProtectedAssembly` checks the same two existing gates, allocates/sets the
+same refs, sends exactly `{lock_version}`, dispatches
+identity-tagged 200/409/422/failure actions, and clears the ref only when its request ID still
+matches. Extend `draftEditorState.ts` with assembly-local state and discriminated operation
+actions while preserving all current Save branches and lossless merge behavior. Do not add a
+controller to `AgentDefinitionWorkbench`, a second reducer/store, a second ref/counter, or a
+separate lock/status/conflict/autosave/refetch model.
 
 - [ ] **Step 4: GREEN**
 
@@ -519,13 +574,13 @@ Run Step 2 and compare the frontend failure/skip cause set with Task 0.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/api/agentDefinitions.ts frontend/src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.test.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.test.ts frontend/tests/fixtures/mocks.ts
+git add frontend/src/api/agentDefinitions.ts frontend/src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.test.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/DefinitionEditor.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/useDraftEditor.ts frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.test.ts frontend/tests/fixtures/mocks.ts
 git commit -m "feat: edit anchored prompt blocks (#265)"
 ```
 
 - [ ] **Post-commit controller/reviewer sabotage gate**
 
-Controller: inject an ordinary Save call into the custom-text change handler under
+Controller: inject an ordinary Save call into `DefinitionEditor`'s custom-text change path under
 `TASK5_ASSEMBLY_AUTOSAVE_SABOTAGE`; the focused zero-PUT/no-autosave test must RED, then
 restore/GREEN. Reviewer uses a distinct target: render an edit/delete control on a protected
 notice row under `TASK5_PROTECTED_CONTROL_SABOTAGE`; the direct non-editability test must RED,
@@ -558,6 +613,7 @@ Expected RED until mocks match Tasks 4–5; then GREEN. Do not add production be
 TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_agent_definition_workbench_postgres.py
 /Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/integration/test_graph_configuration_bootstrap_postgres.py
 test ! -e .venv
+(cd frontend && npm run test:unit -- src/components/Admin/AgentDefinitionWorkbench/AssemblyEditor.test.tsx src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx src/components/Admin/AgentDefinitionWorkbench/draftEditorState.test.ts)
 (cd frontend && npm run test:unit)
 (cd frontend && npm run typecheck)
 (cd frontend && npx playwright test tests/e2e/agent-definition-workbench.spec.ts --project=chromium --workers=1)

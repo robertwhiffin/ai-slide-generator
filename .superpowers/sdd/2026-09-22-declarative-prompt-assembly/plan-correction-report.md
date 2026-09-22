@@ -10,7 +10,7 @@
 | C1 remote integration base and impossible `HEAD` equality | Task 0 now records one concrete reviewed commit from local `feat/langgraph-core`, proves reviewed #260/#261/#263 ancestry, excludes research commit `447791d7af34aafc18612cecead6a90805b367ec`, rebases locally, and checks the recorded base is an ancestor of `HEAD`. No remote integration ref, fetch, push, or PR is permitted. Final local order is #265, #264, #266 after #260+#261+#263. |
 | C2 raw assembler failure escaped #261 | Raw `PromptAssemblyRejected` is limited to assembler tests. Runtime tests and implementation preserve `invalid_persisted_definition`, `protected_bundle_unavailable`, pre-sink validation, provider conversion inside the callback, zero model calls, and sink observations. |
 | C3 hostile delimiter test was not falsifiable | `AssembledPrompt` now exposes code-owned stage provenance. Tests locate notice/open/payload/close/terminal by unique `stage_id`, assert exact stage reconstruction and payload-stage uniqueness, and prove the closing-after-terminal sabotage fails even when attacker text contains both delimiters and stage names. |
-| I1 fictional #263 frontend owners | The plan records the reviewed #263 reality: `AgentDefinitionWorkbench.tsx` owns tabs/read-only rendering, `draftEditorState.ts` owns aggregate pending/recovery state, and `agentDefinitions.ts` owns transport/parsing. Task 5 modifies those files, explicitly adds missing orchestration to the existing component, adds `draftEditorState.test.ts`, and does not claim nonexistent inherited editor/hook modules. |
+| I1 stale #263 frontend ownership | The first correction removed nonexistent-owner claims against the then-reviewed head. The approved #263 Task 5 commit `49989d4a9bb40d66203e17f200bebbba2334af33` subsequently created the real owners. Task 0 and Task 5 now record and extend `DefinitionEditor.tsx` (tabs/rendering), `useDraftEditor.ts` (sole side-effect owner and shared request-ID refs), `AgentDefinitionWorkbench.tsx` (selection/composition), `draftEditorState.ts` (aggregate pending/lossless transitions), and `agentDefinitions.ts` (transport/parsing). File, test, and commit lists include all affected owners; #265 is forbidden from adding a second controller, store, ref/counter, or gate. |
 | I2 incomplete corrections pre-pass/baselines | Task 0 requires the complete SDD per-task and pairwise file/interface table, exact caller/constructor inventory, authoritative overrides/rulings, exact pyenv path, and cause-based failure/skip baselines. The corrections file goes to every implementer and reviewer. Cause sets are re-derived after manifest/runtime/schema changes. |
 | I3 Task 1 could not turn GREEN | Task 1 now owns only manifest grammar/hash/order tests and never imports the assembler. `test_prompt_assembler.py` is created in Task 2. |
 | I4 no canonical flat-block ordering | Anchor ranks are explicit and non-decreasing; sibling order is preserved and significant; cross-anchor input is rejected, never regrouped. Manifest, assembler, writer/422, client parser/state, component, and browser tests cover it. |
@@ -29,8 +29,10 @@
 
 ## Residual execution concern
 
-The current local `feat/langgraph-core` head visible during this correction is
+The current local `feat/langgraph-core` head visible during these corrections is
 `774703e4487877bf65e0eeff173892d3e00ceac5`, which does not yet contain the reviewed #261
-and #263 heads. This is intentionally a hard Task 0 gate: implementation cannot start until
-those reviewed heads are integrated into, and reviewed as, one newer concrete local
-`feat/langgraph-core` commit.
+and #263 heads. #263 Task 5 is approved at
+`49989d4a9bb40d66203e17f200bebbba2334af33`, but Task 6 is still running and may change
+owners/tests. This is intentionally a hard Task 0 gate: implementation cannot start until
+the final reviewed predecessor heads are re-probed, integrated into, and reviewed as one
+newer concrete local `feat/langgraph-core` commit.
