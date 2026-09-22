@@ -16,14 +16,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, admin_usage, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
-from src.api.routes.deck_contributors import router as deck_contributors_router
-from src.core.databricks_client import get_or_create_user_client, set_user_client
-from src.core.user_context import get_current_user as get_ctx_user, set_current_user
-from src.core.permission_context import (
-    build_permission_context,
-    set_permission_context,
+from src.api.routes import (
+    admin,
+    admin_usage,
+    agent_config,
+    agent_definitions,
+    chat,
+    export,
+    feedback,
+    google_slides,
+    images,
+    local_version,
+    profiles,
+    sessions,
+    setup,
+    slides,
+    tools,
+    tour,
+    verification,
+    version,
 )
+from src.api.routes.deck_contributors import router as deck_contributors_router
 from src.api.routes.settings import (
     contributors_router,
     deck_prompts_router,
@@ -38,6 +51,10 @@ from src.core.database import (
     start_token_refresh,
     stop_token_refresh,
 )
+from src.core.databricks_client import get_or_create_user_client, set_user_client
+from src.core.permission_context import build_permission_context, set_permission_context
+from src.core.user_context import get_current_user as get_ctx_user
+from src.core.user_context import set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +481,7 @@ async def user_client_required_handler(request: Request, exc: UserClientRequired
 app.include_router(admin.router)
 app.include_router(admin_usage.router)
 app.include_router(agent_config.router)
+app.include_router(agent_definitions.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
 app.include_router(images.router)
@@ -501,6 +519,7 @@ app.include_router(design_systems_router, prefix="/api/settings", tags=["setting
 # default internal route would be ``/mcp`` and external requests would
 # need to hit ``/mcp/mcp``.
 from src.api.mcp_server import mcp as tellr_mcp  # noqa: E402
+
 tellr_mcp.settings.streamable_http_path = "/"
 app.mount("/mcp", tellr_mcp.streamable_http_app())
 logger.info("MCP server mounted at /mcp")
