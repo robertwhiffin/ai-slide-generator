@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TypeAlias, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_serializer, model_validator
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | Mapping[str, "JsonValue"] | tuple["JsonValue", ...]
@@ -54,9 +54,18 @@ class CanonicalFieldGuidance(BaseModel):
 
     description: str | None = None
     examples: tuple[object, ...] | None = None
+    _supplied_mutations: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
     @model_validator(mode="after")
     def freeze_recursive_values(self) -> CanonicalFieldGuidance:
+        self._supplied_mutations = frozenset(
+            name for name in ("description", "examples") if name in self.__pydantic_fields_set__
+        )
+        object.__setattr__(
+            self,
+            "__pydantic_fields_set__",
+            frozenset(self.__pydantic_fields_set__),
+        )
         if self.examples is not None:
             object.__setattr__(
                 self,
@@ -76,11 +85,14 @@ class CanonicalFieldGuidance(BaseModel):
             )
         return self
 
+    def mutation_is_supplied(self, name: str) -> bool:
+        return name in self._supplied_mutations
+
     def serialized_mutations(self) -> dict[str, object]:
         result: dict[str, object] = {}
-        if "description" in self.model_fields_set:
+        if self.mutation_is_supplied("description"):
             result["description"] = self.description
-        if "examples" in self.model_fields_set:
+        if self.mutation_is_supplied("examples"):
             result["examples"] = thaw_json_containers(self.examples)
         if self.__pydantic_extra__:
             result.update(
