@@ -484,3 +484,88 @@ Result: all checks passed.
   changed; no sabotage marker remains.
 
 Fix-round concerns: none.
+
+## Fix round 4/5 — Pydantic-compatible protected copies
+
+Rereview source: `task-1-rereview-3.md`. Fix commit: the commit containing
+this section.
+
+### Installed-behavior probe and genuine RED
+
+The absolute shared interpreter reports Pydantic `2.12.4`. Direct source and
+behavior probes confirmed its contract:
+
+- `model_copy(deep=False)` delegates to `__copy__`, while `deep=True`
+  delegates to `__deepcopy__`;
+- shallow copies preserve field/nested value identity, but copy the outer
+  extra mapping and `__pydantic_fields_set__`;
+- deep copies recursively detach nested values and copy the field-set;
+- `update=` writes trusted values without validation and adds every update key
+  to the copied field-set.
+
+Regressions were written first for `model_copy()`, `copy.copy()`,
+`model_copy(deep=True)`, `copy.deepcopy()`, copied field-set equality and
+independence, a nonconforming trusted update, recursively protected mutable
+update input, and normal/private/`__dict__` mutation resistance on the copied
+value.
+
+Guarded targeted command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py -k 'guidance_shallow_copies or guidance_deep_copies or guidance_model_copy_update_is_trusted'
+```
+
+Real RED against `2500b50f4`: `3 failed, 36 deselected, 5 warnings in 0.17s`.
+The failures were exactly the open finding: shallow nested identity was lost,
+the copied field-set dropped the synthetic entry, and the nonconforming
+trusted update raised Pydantic `ValidationError`.
+
+### Fix
+
+`CanonicalFieldGuidance` now implements a narrow copy kernel at its deep-module
+boundary instead of serializing and revalidating:
+
+- shallow copy mirrors Pydantic's public bookkeeping, shares field/nested
+  values, independently copies the outer extras and field-set, and installs a
+  new protected slot state over the shared immutable values;
+- deep copy mirrors Pydantic's bookkeeping and uses a memo-aware recursive
+  copier for frozen tuples and mapping proxies, which standard `deepcopy`
+  cannot pickle;
+- `model_copy(update=...)` applies update values without Pydantic validation,
+  records their supplied/omitted/null semantics in a new slot state, updates
+  the copied field-set, and recursively freezes JSON containers so caller or
+  public-storage mutation cannot change semantic serialization;
+- all serializers, validators, and composers continue to read only the
+  slot-backed state, so the round-3 direct-`__dict__` fix remains intact.
+
+Restored targeted result: `3 passed, 36 deselected, 5 warnings in 0.03s`.
+The broader copy/mutation selection passed `9 passed, 30 deselected, 5 warnings
+in 0.12s`.
+
+### Falsification and final verification
+
+After GREEN, shallow copying was sabotaged on the executed slot-state
+construction by replacing `examples=state.examples` with a newly allocated
+tuple marked `TASK1_FIX4_SHALLOW_COPY_SABOTAGE`. `rg -n -C 3` located the
+marker on that path, and the direct shallow-copy node failed its identity
+assertion: `1 failed, 5 warnings in 0.11s`. Restoring the exact line removed
+the marker and returned the identical node to `1 passed, 5 warnings in 0.03s`.
+
+Fresh focused suite after the implementation: `39 passed, 5 warnings in
+0.46s`. Fresh combined Task 1/manifest/runtime suite:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py tests/unit/test_graph_definition_manifest.py tests/unit/test_agent_runtime.py
+```
+
+Result: `96 passed, 5 warnings in 7.11s`; no failures or skips. The warning
+cause set remains the two repository Pydantic class-config deprecations, the
+repository `langchain-community` sunset warning, and the two established
+third-party Pydantic warnings. No cause was added or replaced.
+
+Ruff format and lint checks cover the same three Task 1 files with the absolute
+interpreter and `.venv` absence guards: `3 files already formatted`; `All
+checks passed!`. No dependency, environment, remote, PR, or push operation was
+performed.
+
+Fix-round concerns: none.

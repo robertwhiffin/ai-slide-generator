@@ -47,6 +47,48 @@ def thaw_json_containers(value: object) -> object:
     return value
 
 
+def _deepcopy_frozen_containers(value: object, memo: dict[int, object]) -> object:
+    """Deep-copy recursively frozen values without asking pickle to copy proxies."""
+    value_id = id(value)
+    if value_id in memo:
+        return memo[value_id]
+    if isinstance(value, MappingProxyType):
+        copied = MappingProxyType(
+            {
+                _deepcopy_frozen_containers(key, memo): _deepcopy_frozen_containers(item, memo)
+                for key, item in value.items()
+            }
+        )
+        memo[value_id] = copied
+        return copied
+    if isinstance(value, dict):
+        copied_dict: dict[object, object] = {}
+        memo[value_id] = copied_dict
+        copied_dict.update(
+            {
+                _deepcopy_frozen_containers(key, memo): _deepcopy_frozen_containers(item, memo)
+                for key, item in value.items()
+            }
+        )
+        return copied_dict
+    if isinstance(value, list):
+        copied_list: list[object] = []
+        memo[value_id] = copied_list
+        copied_list.extend(_deepcopy_frozen_containers(item, memo) for item in value)
+        return copied_list
+    if isinstance(value, tuple):
+        copied_items = tuple(_deepcopy_frozen_containers(item, memo) for item in value)
+        copied_tuple = (
+            value
+            if len(copied_items) == len(value)
+            and all(copied is original for copied, original in zip(copied_items, value))
+            else copied_items
+        )
+        memo[value_id] = copied_tuple
+        return copied_tuple
+    return copy.deepcopy(value, memo)
+
+
 def is_json_value(value: object) -> bool:
     if value is None or isinstance(value, (str, bool, int)):
         return True
@@ -168,19 +210,118 @@ class CanonicalFieldGuidance(BaseModel):
         update: Mapping[str, object] | None = None,
         deep: bool = False,
     ) -> CanonicalFieldGuidance:
-        values = self.serialized_mutations()
+        copied = self.__deepcopy__() if deep else self.__copy__()
         if update:
-            values.update(update)
-        if deep:
-            values = copy.deepcopy(values)
-        return type(self).model_validate(values)
+            state = copied._semantic_state()
+            description = state.description
+            examples = state.examples
+            extra_properties = dict(state.extra_properties)
+            for key, value in update.items():
+                protected_value = freeze_json_containers(value)
+                if key == "description":
+                    description = protected_value
+                    copied.__dict__[key] = protected_value
+                elif key == "examples":
+                    examples = protected_value
+                    copied.__dict__[key] = protected_value
+                else:
+                    extra_properties[key] = protected_value
+
+            protected_extras = MappingProxyType(extra_properties)
+            object.__setattr__(copied, "__pydantic_extra__", protected_extras)
+            object.__setattr__(
+                copied,
+                "_semantic_state_slot",
+                _CanonicalFieldGuidanceState(
+                    description=description,
+                    examples=examples,
+                    extra_properties=protected_extras,
+                ),
+            )
+            copied.__pydantic_fields_set__.update(update)
+        return copied
 
     def __copy__(self) -> CanonicalFieldGuidance:
-        return self.model_copy()
+        cls = type(self)
+        copied = cls.__new__(cls)
+        state = self._semantic_state()
+        protected_extras = MappingProxyType(dict(state.extra_properties))
+        field_values = copy.copy(self.__dict__)
+        field_values["description"] = state.description
+        field_values["examples"] = state.examples
+        object.__setattr__(copied, "__dict__", field_values)
+        object.__setattr__(copied, "__pydantic_extra__", protected_extras)
+        object.__setattr__(
+            copied, "__pydantic_fields_set__", copy.copy(self.__pydantic_fields_set__)
+        )
+        if not hasattr(self, "__pydantic_private__") or self.__pydantic_private__ is None:
+            object.__setattr__(copied, "__pydantic_private__", None)
+        else:
+            object.__setattr__(
+                copied,
+                "__pydantic_private__",
+                {
+                    key: value
+                    for key, value in self.__pydantic_private__.items()
+                    if value is not PydanticUndefined
+                },
+            )
+        object.__setattr__(
+            copied,
+            "_semantic_state_slot",
+            _CanonicalFieldGuidanceState(
+                description=state.description,
+                examples=state.examples,
+                extra_properties=protected_extras,
+            ),
+        )
+        return copied
 
     def __deepcopy__(self, memo: dict[int, object] | None = None) -> CanonicalFieldGuidance:
-        del memo
-        return self.model_copy(deep=True)
+        memo = {} if memo is None else memo
+        cls = type(self)
+        copied = cls.__new__(cls)
+        memo[id(self)] = copied
+        state = self._semantic_state()
+        copied_description = _deepcopy_frozen_containers(state.description, memo)
+        copied_examples = _deepcopy_frozen_containers(state.examples, memo)
+        copied_extras = cast(
+            Mapping[str, object],
+            _deepcopy_frozen_containers(state.extra_properties, memo),
+        )
+        field_values = cast(dict[str, object], _deepcopy_frozen_containers(self.__dict__, memo))
+        field_values["description"] = copied_description
+        field_values["examples"] = copied_examples
+        object.__setattr__(copied, "__dict__", field_values)
+        object.__setattr__(copied, "__pydantic_extra__", copied_extras)
+        object.__setattr__(
+            copied, "__pydantic_fields_set__", copy.copy(self.__pydantic_fields_set__)
+        )
+        if not hasattr(self, "__pydantic_private__") or self.__pydantic_private__ is None:
+            object.__setattr__(copied, "__pydantic_private__", None)
+        else:
+            object.__setattr__(
+                copied,
+                "__pydantic_private__",
+                _deepcopy_frozen_containers(
+                    {
+                        key: value
+                        for key, value in self.__pydantic_private__.items()
+                        if value is not PydanticUndefined
+                    },
+                    memo,
+                ),
+            )
+        object.__setattr__(
+            copied,
+            "_semantic_state_slot",
+            _CanonicalFieldGuidanceState(
+                description=copied_description,
+                examples=copied_examples,
+                extra_properties=copied_extras,
+            ),
+        )
+        return copied
 
     @model_serializer(mode="plain")
     def serialize_guidance(self) -> dict[str, object]:
