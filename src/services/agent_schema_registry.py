@@ -395,8 +395,8 @@ class AgentSchemaRegistry:
                 elif not all(is_json_value(item) for item in guidance.examples):
                     issues.append(_issue("overlay_examples_invalid_json", *path, "examples"))
 
-            if guidance.__pydantic_extra__:
-                for property_name in guidance.__pydantic_extra__:
+            if guidance.forbidden_properties():
+                for property_name in guidance.forbidden_properties():
                     issues.append(
                         _issue(
                             "overlay_guidance_property_forbidden",

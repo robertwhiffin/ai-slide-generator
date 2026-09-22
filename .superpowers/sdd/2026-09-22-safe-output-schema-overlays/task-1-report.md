@@ -260,7 +260,8 @@ Fix-round concerns: none.
 
 ## Fix round 2/5 — value-owned omission semantics
 
-Rereview source: `task-1-rereview-1.md`. Fix commit: `PENDING_FIX_ROUND_2_COMMIT`.
+Rereview source: `task-1-rereview-1.md`. Fix commit:
+`82417e533a0d356aa110e736db5fb099b9586cac`.
 
 ### Finding verification and RED
 
@@ -369,5 +370,117 @@ Result: `3 files already formatted`; all checks passed.
 - The tracked diff is limited to `agent_schema_types.py` and its Task 1 unit
   test; identity literals, catalogs, registry order, and integrations are
   unchanged.
+
+Fix-round concerns: none.
+
+## Fix round 3/5 — slot-backed immutable semantic state
+
+Rereview source: `task-1-rereview-2.md`. Fix commit: the commit containing
+this section.
+
+### Finding verification and RED
+
+The residual Important finding reproduced against review commit
+`5540310492d95f8355a262f94fb83c02424466a9`. Regressions were added first that
+successfully:
+
+- replace supplied `description`/`examples` entries in `__dict__` with
+  `PydanticUndefined`;
+- remove both entries;
+- replace both entries with injected values;
+- replace the entire `__dict__` mapping;
+- inject values into an originally omitted guidance object;
+- replace an explicit-null field entry.
+
+Each case then checks serialization, ordered overlay validation, and composed
+schema guidance (or, for invalid explicit null, the unchanged ordered
+validation result).
+
+Command, guarded by `test ! -e .venv` before and after:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py -k 'guidance_supplied_mutations or guidance_semantics_ignore_direct_dict_mutation or guidance_model_copy'
+```
+
+Real RED: `5 failed, 30 deselected, 5 warnings in 0.31s`. The failures showed
+all three mutations changing supplied/omitted/null serialization; key removal
+also caused an attribute/serialization error. These were the exact residual
+paths identified by rereview.
+
+### Fix
+
+`CanonicalFieldGuidance` now snapshots description, examples, and frozen extra
+properties into a frozen, slotted `_CanonicalFieldGuidanceState`. The state is
+stored in a dedicated instance slot rather than Pydantic's public `__dict__` or
+private-state dictionary.
+
+- `description`/`examples` attribute reads resolve through the slot.
+- Serialization, validation, and composition use only the slot-backed state.
+- Direct `__dict__` item mutation, removal, or whole-dictionary replacement is
+  permitted but semantically inert.
+- Normal slot replacement/deletion is blocked; the state dataclass and nested
+  containers are frozen.
+- Revalidation of an existing instance retains its original slot state rather
+  than resnapshotting tampered Pydantic storage.
+- `model_copy(update=...)`, shallow copy, and deep copy rebuild through
+  validation from protected serialized state.
+- Pydantic continues to own an ordinary mutable `__pydantic_fields_set__`;
+  existing successful clear/add regression coverage remains unchanged.
+- Forbidden extra-property serialization/validation also reads the protected
+  snapshot rather than replaceable Pydantic extra storage.
+
+### GREEN and regression evidence
+
+Restored targeted command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py -k 'guidance_supplied_mutations or guidance_semantics_ignore_direct_dict_mutation or guidance_model_copy'
+```
+
+Result: `5 passed, 30 deselected, 5 warnings in 0.11s`.
+
+Full focused suite:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py
+```
+
+Result: `36 passed, 5 warnings in 0.47s`; no failures or skips.
+
+Combined manifest/runtime regression after formatting:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_agent_schema_registry.py tests/unit/test_graph_definition_manifest.py tests/unit/test_agent_runtime.py
+```
+
+Result: `93 passed, 5 warnings in 6.82s`; no failures or skips.
+
+Cause-set comparison: warnings remain exactly the two repository Pydantic
+class-config deprecations, the repository `langchain-community` sunset warning,
+and the two established third-party Pydantic warnings. There is no new failure,
+skip, or warning cause.
+
+Ruff verification used the absolute interpreter and `.venv` guards:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m ruff format src/services/agent_schema_types.py src/services/agent_schema_registry.py tests/unit/test_agent_schema_registry.py
+/Users/robert.whiffin/.pyenv/shims/python -m ruff check src/services/agent_schema_types.py src/services/agent_schema_registry.py tests/unit/test_agent_schema_registry.py
+```
+
+Result: all checks passed.
+
+### Fix-round self-review
+
+- The semantic state is absent from `__dict__` and `__pydantic_private__`;
+  successful mutations of both are proven inert.
+- Normal state-slot assignment and deletion are blocked, while the stored
+  dataclass and extra-property mapping are recursively immutable.
+- Pydantic field-set mutation and `model_copy(update=...)` remain covered and
+  GREEN.
+- Existing-instance revalidation cannot resnapshot tampered public storage.
+- The production diff is limited to the Task 1 types/registry seam; tests cover
+  supplied, omitted, and explicit-null behavior through all applicable paths.
+- No identity literal, descriptor metadata, role order, or integration owner
+  changed; no sabotage marker remains.
 
 Fix-round concerns: none.

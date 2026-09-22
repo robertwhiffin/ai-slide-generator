@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,13 @@ from pydantic_core import PydanticUndefined
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | Mapping[str, "JsonValue"] | tuple["JsonValue", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CanonicalFieldGuidanceState:
+    description: object
+    examples: object
+    extra_properties: Mapping[str, object]
 
 
 def freeze_json_containers(value: object) -> object:
@@ -58,6 +66,8 @@ class CanonicalFieldGuidance(BaseModel):
     ordered domain diagnostic instead of leaking Pydantic's implementation message.
     """
 
+    __slots__ = ("_semantic_state_slot",)
+
     model_config = ConfigDict(extra="allow", frozen=True, arbitrary_types_allowed=True)
 
     description: str | None = Field(default_factory=lambda: cast(object, PydanticUndefined))
@@ -67,31 +77,75 @@ class CanonicalFieldGuidance(BaseModel):
 
     @model_validator(mode="after")
     def freeze_recursive_values(self) -> CanonicalFieldGuidance:
-        if self.mutation_is_supplied("examples") and self.examples is not None:
-            object.__setattr__(
-                self,
-                "examples",
-                tuple(freeze_json_containers(item) for item in self.examples),
-            )
+        try:
+            object.__getattribute__(self, "_semantic_state_slot")
+        except AttributeError:
+            pass
+        else:
+            return self
+
+        field_values = object.__getattribute__(self, "__dict__")
+        description = field_values.get("description", PydanticUndefined)
+        examples = field_values.get("examples", PydanticUndefined)
+        if examples is not PydanticUndefined and examples is not None:
+            examples = tuple(freeze_json_containers(item) for item in examples)
+            field_values["examples"] = examples
+
+        extra_properties: Mapping[str, object] = MappingProxyType({})
         if self.__pydantic_extra__:
+            extra_properties = MappingProxyType(
+                {key: freeze_json_containers(item) for key, item in self.__pydantic_extra__.items()}
+            )
             object.__setattr__(
                 self,
                 "__pydantic_extra__",
-                MappingProxyType(
-                    {
-                        key: freeze_json_containers(item)
-                        for key, item in self.__pydantic_extra__.items()
-                    }
-                ),
+                extra_properties,
             )
+
+        object.__setattr__(
+            self,
+            "_semantic_state_slot",
+            _CanonicalFieldGuidanceState(
+                description=description,
+                examples=examples,
+                extra_properties=extra_properties,
+            ),
+        )
         return self
 
+    def __getattribute__(self, name: str) -> object:
+        if name in {"description", "examples"}:
+            try:
+                state = object.__getattribute__(self, "_semantic_state_slot")
+            except AttributeError:
+                pass
+            else:
+                return getattr(state, name)
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_semantic_state_slot":
+            raise AttributeError("Canonical guidance semantic state is immutable.")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name == "_semantic_state_slot":
+            raise AttributeError("Canonical guidance semantic state is immutable.")
+        super().__delattr__(name)
+
+    def _semantic_state(self) -> _CanonicalFieldGuidanceState:
+        return object.__getattribute__(self, "_semantic_state_slot")
+
     def mutation_is_supplied(self, name: str) -> bool:
+        state = self._semantic_state()
         if name == "description":
-            return self.description is not PydanticUndefined
+            return state.description is not PydanticUndefined
         if name == "examples":
-            return self.examples is not PydanticUndefined
+            return state.examples is not PydanticUndefined
         raise ValueError(f"Unknown canonical guidance mutation {name!r}")
+
+    def forbidden_properties(self) -> Mapping[str, object]:
+        return self._semantic_state().extra_properties
 
     def serialized_mutations(self) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -99,11 +153,34 @@ class CanonicalFieldGuidance(BaseModel):
             result["description"] = self.description
         if self.mutation_is_supplied("examples"):
             result["examples"] = thaw_json_containers(self.examples)
-        if self.__pydantic_extra__:
+        if self.forbidden_properties():
             result.update(
-                {key: thaw_json_containers(item) for key, item in self.__pydantic_extra__.items()}
+                {
+                    key: thaw_json_containers(item)
+                    for key, item in self.forbidden_properties().items()
+                }
             )
         return result
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, object] | None = None,
+        deep: bool = False,
+    ) -> CanonicalFieldGuidance:
+        values = self.serialized_mutations()
+        if update:
+            values.update(update)
+        if deep:
+            values = copy.deepcopy(values)
+        return type(self).model_validate(values)
+
+    def __copy__(self) -> CanonicalFieldGuidance:
+        return self.model_copy()
+
+    def __deepcopy__(self, memo: dict[int, object] | None = None) -> CanonicalFieldGuidance:
+        del memo
+        return self.model_copy(deep=True)
 
     @model_serializer(mode="plain")
     def serialize_guidance(self) -> dict[str, object]:
