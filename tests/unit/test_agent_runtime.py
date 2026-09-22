@@ -26,14 +26,13 @@ from src.services.agent_runtime import (
     AgentRuntime,
     CodeOwnedAgentDefinitionSource,
     DatabricksModelAdapter,
-    IncompatibleSchemaContractError,
-    ProtectedPromptBundleUnavailableError,
     ProtectedPromptIdentity,
     UnknownAgentKeyError,
     _canonical_digest,
     _schema_contract_material,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+from src.services.persisted_graph_release import PersistedConfigurationUnavailableError
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -64,6 +63,7 @@ class RecordingModelAdapter:
     def invoke(
         self,
         *,
+        agent_key: str,
         configuration: AgentModelConfiguration,
         schema: type[BaseModel],
         prompt: str,
@@ -112,6 +112,7 @@ def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_
 
     result = runtime.run(
         agent_key,
+        1,
         payload,
         AgentAssemblyContext(design_system_active=False),
     )
@@ -152,6 +153,7 @@ def test_design_system_prompt_preserves_precedence_and_omits_frame_constraints()
 
     runtime.run(
         "builder",
+        1,
         payload,
         AgentAssemblyContext(design_system_active=True),
     )
@@ -173,6 +175,7 @@ def test_build_reviewer_deck_brief_preserves_conditional_instruction_order():
 
     runtime.run(
         "build_reviewer",
+        1,
         payload,
         AgentAssemblyContext(design_system_active=False),
     )
@@ -200,8 +203,7 @@ def test_code_owned_contract_identities_are_stable_literals():
         EXPECTED_PROTECTED_PROMPT_DIGEST
     }
     assert {
-        key: definition.schema_contract.digest
-        for key, definition in definitions.items()
+        key: definition.schema_contract.digest for key, definition in definitions.items()
     } == EXPECTED_SCHEMA_DIGESTS
 
 
@@ -268,7 +270,7 @@ def test_unknown_or_deterministic_role_fails_before_model_invocation(agent_key):
     runtime = AgentRuntime.compatibility(model_adapter=model)
 
     with pytest.raises(UnknownAgentKeyError, match=agent_key):
-        runtime.run(agent_key, {}, AgentAssemblyContext(False))
+        runtime.run(agent_key, 1, {}, AgentAssemblyContext(False))
 
     assert model.calls == []
 
@@ -285,9 +287,10 @@ def test_unavailable_protected_bundle_fails_before_model_invocation():
         definition_source=StaticDefinitionSource(unavailable),
     )
 
-    with pytest.raises(ProtectedPromptBundleUnavailableError, match="999"):
-        runtime.run("architect", {}, AgentAssemblyContext(False))
+    with pytest.raises(PersistedConfigurationUnavailableError) as raised:
+        runtime.run("architect", 1, {}, AgentAssemblyContext(False))
 
+    assert raised.value.code == "protected_bundle_unavailable"
     assert model.calls == []
 
 
@@ -304,9 +307,10 @@ def test_incompatible_schema_contract_fails_before_model_invocation():
         definition_source=StaticDefinitionSource(incompatible),
     )
 
-    with pytest.raises(IncompatibleSchemaContractError, match="architect"):
-        runtime.run("architect", {}, AgentAssemblyContext(False))
+    with pytest.raises(PersistedConfigurationUnavailableError) as raised:
+        runtime.run("architect", 1, {}, AgentAssemblyContext(False))
 
+    assert raised.value.code == "schema_contract_unavailable"
     assert model.calls == []
 
 
@@ -338,6 +342,7 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     )
 
     actual = adapter.invoke(
+        agent_key="data_analyst",
         configuration=AgentModelConfiguration(
             endpoint_name="databricks-claude-opus-4-6",
             temperature=0.7,

@@ -125,13 +125,13 @@ class _CallBudget:
         self.limit = limit
         self.calls: list[tuple[str, object]] = []
 
-    def run(self, name: str, payload: dict, assembly_context):
+    def run(self, name: str, graph_release_id: int, payload: dict, assembly_context):
         if len(self.calls) >= self.limit:
             raise _BudgetExceeded(
                 f"call budget of {self.limit} reached; calls so far: {self.counts()}"
             )
         self.calls.append((name, (payload or {}).get("position")))
-        return self._real.run(name, payload, assembly_context)
+        return self._real.run(name, graph_release_id, payload, assembly_context)
 
     def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}

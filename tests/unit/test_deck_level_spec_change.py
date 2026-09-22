@@ -1008,7 +1008,7 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
         def __init__(self):
             self.prompts = []
 
-        def invoke(self, *, configuration, schema, prompt):
+        def invoke(self, *, agent_key, configuration, schema, prompt):
             self.prompts.append(prompt)
             return schema.model_construct()
 
@@ -1021,9 +1021,10 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
     capture = Capture()
     runtime = AgentRuntime.compatibility(model_adapter=capture)
 
-    runtime.run("build_reviewer", build_payload, AgentAssemblyContext(False))
+    runtime.run("build_reviewer", 1, build_payload, AgentAssemblyContext(False))
     runtime.run(
         "build_reviewer",
+        1,
         {**build_payload, "deck_brief": {"audience": NEW_AUDIENCE}},
         AgentAssemblyContext(False),
     )
@@ -1035,7 +1036,7 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
     # be able to see each other's instructions, and the build path that runs after
     # a re-review must get the same prompt as one that runs before it.
     assert load_skill("build_reviewer").instructions == baseline
-    runtime.run("build_reviewer", build_payload, AgentAssemblyContext(False))
+    runtime.run("build_reviewer", 1, build_payload, AgentAssemblyContext(False))
     assert capture.prompts[2] == capture.prompts[0]
 
 
@@ -1058,7 +1059,7 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
         def __init__(self):
             self.prompts = []
 
-        def invoke(self, *, configuration, schema, prompt):
+        def invoke(self, *, agent_key, configuration, schema, prompt):
             self.prompts.append(prompt)
             return schema.model_construct()
 
@@ -1076,6 +1077,7 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
         capture = Capture()
         AgentRuntime.compatibility(model_adapter=capture).run(
             "build_reviewer",
+            1,
             payload,
             AgentAssemblyContext(design_system_active),
         )
