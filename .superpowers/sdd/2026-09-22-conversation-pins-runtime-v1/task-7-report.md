@@ -135,3 +135,44 @@ The five fixture failures described above are the remaining concern. They are
 consistent with the Task 7 integrity contract, but mean the full targeted
 creation regression command is not all-green until the out-of-scope Task 2
 fixtures seed their active graph release.
+
+## Follow-up fixture correction
+
+Controller ruling authorized the smallest fixture-only correction in
+`tests/unit/test_conversation_pin_creation.py`. No production code or response
+semantics changed.
+
+The correction adds `_seed_active_release()`, which persists active release ID
+41/version 7 before each Task 2 creation test that returns a projected session
+response. The mocked `PinnedRelease(41, 7)` values now refer to that real row.
+The idempotent-create test's second mocked return was changed from the dangling
+`PinnedRelease(99, 8)` to the same persisted `PinnedRelease(41, 7)`; its
+original assertion (`lock_active.assert_not_called()`) remains the protection
+against an unwanted second lock/re-pin call.
+
+Required focused command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_pin_creation.py
+```
+
+Result: `14 passed, 5 warnings in 0.43s`. The five warning causes are unchanged
+Pydantic deprecation warnings plus existing LangChain/Unity Catalog warnings.
+
+Required combined command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q -rs tests/unit/test_conversation_graph_version_responses.py tests/unit/test_conversation_pin_creation.py tests/integration/test_api_routes.py
+```
+
+Result: `102 passed, 2 skipped, 10 warnings in 3.03s`.
+
+The additional five warnings relative to the unit-only command are established
+route-module Pydantic deprecation warnings. Both skips are unchanged and have
+the exact reason `MLflow mocking requires complex setup - mlflow is imported
+inside function`, at `tests/integration/test_api_routes.py:1193` and `:1216`.
+
+Follow-up self-review: the fixture creates the active database state required
+by the new public projection, preserves every original Task 2 assertion, and
+does not catch or suppress `ConversationGraphReleaseIntegrityError`. The
+previous concern is resolved; the required combined suite is all green.
