@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -205,6 +207,43 @@ def test_lock_active_graph_release_returns_the_exact_active_release(factory):
 
     with factory() as db:
         assert lock_active_graph_release(db) == PinnedRelease(1, 7)
+
+
+@pytest.mark.parametrize(
+    ("body", "session_id"),
+    [
+        ({"session_id": "route-omitted"}, "route-omitted"),
+        (
+            {"session_id": "route-explicit-false", "graph_capable": False},
+            "route-explicit-false",
+        ),
+    ],
+)
+def test_explicit_sessions_post_omitted_or_false_capability_stays_unpinned(
+    factory, body, session_id
+):
+    """A route default that turns false/omitted into true would pin browser roots."""
+    from src.api.routes.sessions import router
+
+    app = FastAPI()
+    app.include_router(router)
+    manager = SessionManager()
+    with patch(
+        "src.api.services.session_manager.get_db_session", _database_context(factory)
+    ), patch(
+        "src.api.services.session_manager.lock_active_graph_release",
+        return_value=PinnedRelease(release_id=41, graph_version=7),
+    ) as lock_active, patch(
+        "src.api.routes.sessions.get_current_user", return_value="route-user@example.com"
+    ), patch("src.api.routes.sessions.get_session_manager", return_value=manager), TestClient(
+        app
+    ) as client:
+        response = client.post("/api/sessions", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == session_id
+    assert _session_pin(factory, session_id) is None
+    lock_active.assert_not_called()
 
 
 def test_explicit_sessions_route_forwards_only_graph_capability():
