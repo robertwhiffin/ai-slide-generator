@@ -1,5 +1,5 @@
 import { expect, Page, test } from '@playwright/test';
-import { mockAgentDefinitionWorkbench } from '../fixtures/mocks';
+import { syntheticAgentDefinitionWorkbench } from '../fixtures/mocks';
 
 const WORKBENCH_ENDPOINT = '**/api/admin/agent-definitions/workbench';
 const NODE_ORDER = [
@@ -30,7 +30,7 @@ async function installExactIdentityMock(page: Page) {
   }));
 }
 
-async function installWorkbenchMock(page: Page, status = 200, body: unknown = mockAgentDefinitionWorkbench) {
+async function installWorkbenchMock(page: Page, status = 200, body: unknown = syntheticAgentDefinitionWorkbench) {
   let requestCount = 0;
   await page.route(WORKBENCH_ENDPOINT, (route) => {
     requestCount += 1;

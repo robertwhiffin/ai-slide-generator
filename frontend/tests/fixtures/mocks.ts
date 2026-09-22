@@ -2,6 +2,11 @@
  * Mock data for API responses based on observed network traffic.
  * These mocks simulate the backend responses for testing.
  */
+import type {
+  AgentDefinitionWorkbenchResponse,
+  AssemblyRules,
+  ModelAgentNode,
+} from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
 export const mockProfiles = [
@@ -896,7 +901,7 @@ const mockAssemblyRules = {
       terminal: true,
     },
   ],
-};
+} satisfies AssemblyRules;
 
 const workbenchAgentNames = [
   ["architect", "Architect"],
@@ -944,11 +949,11 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
       ...definition,
     },
     read_only_reason: null,
-  };
+  } satisfies ModelAgentNode;
 });
 
 /** Complete Task 4 wire shape used by both component and browser tests. */
-export const mockAgentDefinitionWorkbench = {
+export const syntheticAgentDefinitionWorkbench = {
   active_release: {
     release_id: 41,
     version_number: 1,
@@ -987,4 +992,4 @@ export const mockAgentDefinitionWorkbench = {
     mockModelNodes[5],
     mockModelNodes[6],
   ],
-};
+} satisfies AgentDefinitionWorkbenchResponse;
