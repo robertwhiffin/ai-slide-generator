@@ -38,6 +38,11 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
         lambda sf: calls.append(("bootstrap_graph_configuration", sf))
         or SimpleNamespace(release_id=1, version_number=1, created=True),
     )
+    monkeypatch.setattr(
+        "src.services.conversation_pins.backfill_conversation_pins",
+        lambda sf: calls.append(("backfill_conversation_pins", sf))
+        or SimpleNamespace(graph_release_id=1, graph_version=1, pinned_count=3),
+    )
     # These two record into `calls` as well, so the ORDER assertion at the end is
     # real: with them silent, "the strip ran last" held even when the strip was moved
     # ahead of both — an assertion that could not fail.
@@ -78,6 +83,7 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
     assert calls == [
         ("init_db", None),
         ("bootstrap_graph_configuration", "SESSION_FACTORY"),
+        ("backfill_conversation_pins", "SESSION_FACTORY"),
         ("migrate_profiles", "SESSION_FACTORY"),
         ("backfill_sessions", "SESSION_FACTORY"),
         ("backfill_unmigrated_decks", "SESSION_FACTORY"),
@@ -119,6 +125,44 @@ def test_init_database_bootstrap_failure_aborts_before_later_stages(monkeypatch)
     ]
 
 
+def test_init_database_backfill_failure_aborts_before_later_stages(monkeypatch):
+    import pytest
+
+    run = _load_run_module()
+    calls = []
+    monkeypatch.setattr(
+        "src.core.database.init_db", lambda: calls.append(("init_db", None))
+    )
+    monkeypatch.setattr("src.core.database.get_session_local", lambda: "SESSION_FACTORY")
+    monkeypatch.setattr(
+        "src.services.graph_configuration.bootstrap_graph_configuration",
+        lambda sf: calls.append(("bootstrap_graph_configuration", sf))
+        or SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+
+    def fail_backfill(sf):
+        calls.append(("backfill_conversation_pins", sf))
+        raise RuntimeError("pin backfill failed")
+
+    monkeypatch.setattr(
+        "src.services.conversation_pins.backfill_conversation_pins", fail_backfill
+    )
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.migrate_profiles",
+        lambda sf: calls.append(("migrate_profiles", sf)),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        run.init_database()
+
+    assert exc.value.code == 1
+    assert calls == [
+        ("init_db", None),
+        ("bootstrap_graph_configuration", "SESSION_FACTORY"),
+        ("backfill_conversation_pins", "SESSION_FACTORY"),
+    ]
+
+
 def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     """A profile-migration failure must abort the boot command (set -e), so a
     broken migration can never leave workers serving against a half-migrated DB."""
@@ -131,6 +175,12 @@ def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     monkeypatch.setattr(
         "src.services.graph_configuration.bootstrap_graph_configuration",
         lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+    monkeypatch.setattr(
+        "src.services.conversation_pins.backfill_conversation_pins",
+        lambda sf: SimpleNamespace(
+            graph_release_id=1, graph_version=1, pinned_count=0
+        ),
     )
     monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults", lambda include_databricks: None

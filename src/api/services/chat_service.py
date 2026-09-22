@@ -27,6 +27,10 @@ from src.core.databricks_client import (
     get_service_principal_folder,
     get_system_client,
 )
+from src.domain.conversation_engine import (
+    AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
+    selects_graph_engine,
+)
 from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
@@ -115,9 +119,6 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
 # if it ever outlives testing it needs a strict form (exact prefix, first
 # message only) plus an authorisation check, because a phrase matched anywhere
 # in user text can be tripped by pasted content.  Recorded, not built.
-AGENT_MODE_PHRASE = "USE AGENT MODE"
-
-
 def _selects_agent_mode(content: Optional[str]) -> bool:
     """Whether one message's text selects the graph engine.
 
@@ -125,7 +126,7 @@ def _selects_agent_mode(content: Optional[str]) -> bool:
     ``SessionManager.duplicate_session``'s marker carry so the two cannot
     disagree about what a marker is.
     """
-    return bool(content) and AGENT_MODE_PHRASE in content
+    return selects_graph_engine(content)
 
 
 def resolve_engine_mode(session_id: Optional[str]) -> str:

@@ -114,6 +114,16 @@ class UserSession(Base):
         nullable=True,
         index=True,
     )
+    graph_release_id = Column(
+        Integer,
+        ForeignKey(
+            "graph_release.id",
+            name="fk_user_sessions_graph_release",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+    )
 
     # Session metadata
     title = Column(String(255))  # Optional session title/name
@@ -183,6 +193,7 @@ class UserSession(Base):
             passive_deletes=True,
         ),
     )
+    graph_release = relationship("GraphRelease", foreign_keys=[graph_release_id])
 
     # Indexes for common queries
     __table_args__ = (
@@ -463,4 +474,3 @@ class SessionSlide(Base):
 
     def __repr__(self):
         return f"<SessionSlide(session_id={self.session_id}, position={self.position})>"
-
