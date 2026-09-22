@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -19,6 +20,7 @@ from src.services.conversation_pins import (
     ConversationGraphReleaseIntegrityError,
     PinnedRelease,
     get_conversation_graph_version,
+    get_conversation_graph_versions,
 )
 
 
@@ -169,6 +171,50 @@ def test_missing_active_release_is_an_integrity_error(factory):
         session = db.query(UserSession).filter_by(session_id="no-active").one()
         with pytest.raises(ConversationGraphReleaseIntegrityError):
             get_conversation_graph_version(db, session)
+
+
+def test_non_integer_single_session_pin_is_an_integrity_error(factory):
+    """Accepting a string pin would turn an invalid persisted identity into a lookup."""
+    _seed_releases_and_sessions(factory)
+    invalid_pin = UserSession(session_id="invalid-pin", graph_release_id="not-an-id")
+
+    with factory() as db:
+        with pytest.raises(ConversationGraphReleaseIntegrityError, match="invalid"):
+            get_conversation_graph_version(db, invalid_pin)
+
+
+def test_batch_projection_rejects_dangling_pinned_release(factory):
+    """Treating an outer-join miss as null would silently unpin a corrupted session."""
+    _seed_releases_and_sessions(factory)
+    with factory.begin() as db:
+        db.add(UserSession(session_id="batch-dangling", graph_release_id=999))
+
+    with factory() as db:
+        dangling = db.query(UserSession).filter_by(session_id="batch-dangling").one()
+        with pytest.raises(ConversationGraphReleaseIntegrityError, match="missing pinned"):
+            get_conversation_graph_versions(db, [dangling])
+
+
+def test_batch_projection_rejects_requested_session_absent_from_rows(factory, monkeypatch):
+    """Returning a partial batch would otherwise omit a requested session silently."""
+    _seed_releases_and_sessions(factory)
+    with factory() as db:
+        requested = db.query(UserSession).filter_by(session_id="active").one()
+        real_execute = db.execute
+        execute_count = 0
+
+        def execute(statement, *args, **kwargs):
+            nonlocal execute_count
+            execute_count += 1
+            if execute_count == 2:
+                return SimpleNamespace(all=lambda: [])
+            return real_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db, "execute", execute)
+        with pytest.raises(ConversationGraphReleaseIntegrityError, match="missing session"):
+            get_conversation_graph_versions(db, [requested])
+
+    assert execute_count == 2
 
 
 def test_create_get_and_list_merge_public_versions_without_private_identity(factory, monkeypatch):
