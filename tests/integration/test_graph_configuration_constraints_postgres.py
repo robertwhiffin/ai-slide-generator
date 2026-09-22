@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from src.core.database import _run_migrations
@@ -156,6 +156,78 @@ def test_postgres_enforces_one_active_release_valid_intervals_and_singleton_draf
         assert conn.scalars(select(GraphDraft.id)).all() == [1]
 
 
+def test_postgres_rejects_commit_that_closes_the_sole_active_release(
+    postgres_engine,
+) -> None:
+    with postgres_engine.begin() as conn:
+        release_id = _insert_release(conn, 1)
+
+    closed_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+    with pytest.raises(IntegrityError, match="exactly one active release"):
+        with postgres_engine.begin() as conn:
+            result = conn.execute(
+                update(GraphRelease)
+                .where(GraphRelease.id == release_id)
+                .values(effective_to=closed_at)
+            )
+            assert result.rowcount == 1
+            assert conn.scalar(
+                select(GraphRelease.effective_to).where(GraphRelease.id == release_id)
+            ) == closed_at
+
+    with postgres_engine.connect() as conn:
+        assert conn.scalar(
+            select(GraphRelease.effective_to).where(GraphRelease.id == release_id)
+        ) is None
+        assert conn.scalar(
+            select(func.count())
+            .select_from(GraphRelease)
+            .where(GraphRelease.effective_to.is_(None))
+        ) == 1
+
+
+def test_postgres_allows_atomic_close_and_successor_publication(postgres_engine) -> None:
+    with postgres_engine.begin() as conn:
+        first_release_id = _insert_release(conn, 1)
+
+    closed_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+    successor_values = _release_values(2)
+    successor_values["previous_release_id"] = first_release_id
+    successor_values["published_at"] = closed_at
+    successor_values["effective_from"] = closed_at
+    with postgres_engine.begin() as conn:
+        assert (
+            conn.execute(
+                update(GraphRelease)
+                .where(GraphRelease.id == first_release_id)
+                .values(effective_to=closed_at)
+            ).rowcount
+            == 1
+        )
+        successor_id = conn.execute(
+            GraphRelease.__table__.insert()
+            .values(**successor_values)
+            .returning(GraphRelease.id)
+        ).scalar_one()
+
+    with postgres_engine.connect() as conn:
+        assert conn.execute(
+            select(
+                GraphRelease.id,
+                GraphRelease.version_number,
+                GraphRelease.effective_to,
+            ).order_by(GraphRelease.version_number)
+        ).all() == [
+            (first_release_id, 1, closed_at),
+            (successor_id, 2, None),
+        ]
+        assert conn.scalar(
+            select(func.count())
+            .select_from(GraphRelease)
+            .where(GraphRelease.effective_to.is_(None))
+        ) == 1
+
+
 def test_postgres_restricts_deletion_of_referenced_release_and_revision(postgres_engine) -> None:
     with postgres_engine.begin() as conn:
         revision_id = _insert_revision(conn, "architect")
@@ -212,6 +284,10 @@ def test_postgres_mutation_guards_execute_trigger_bodies_and_allow_only_first_cl
         _expect_integrity_error(postgres_engine, statement)
 
     closed_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+    successor_values = _release_values(2)
+    successor_values["previous_release_id"] = release_id
+    successor_values["published_at"] = closed_at
+    successor_values["effective_from"] = closed_at
     with postgres_engine.begin() as conn:
         assert (
             conn.execute(
@@ -221,6 +297,7 @@ def test_postgres_mutation_guards_execute_trigger_bodies_and_allow_only_first_cl
             ).rowcount
             == 1
         )
+        conn.execute(GraphRelease.__table__.insert().values(**successor_values))
 
     _expect_integrity_error(
         postgres_engine,
@@ -235,8 +312,12 @@ def test_postgres_mutation_guards_execute_trigger_bodies_and_allow_only_first_cl
 
     with postgres_engine.connect() as conn:
         assert conn.scalar(select(AgentDefinitionRevision.prompt_text)) == "prompt for architect"
-        assert conn.scalar(select(GraphRelease.release_note)) == "release 1"
-        assert conn.scalar(select(GraphRelease.effective_to)) == closed_at
+        assert conn.scalar(
+            select(GraphRelease.release_note).where(GraphRelease.id == release_id)
+        ) == "release 1"
+        assert conn.scalar(
+            select(GraphRelease.effective_to).where(GraphRelease.id == release_id)
+        ) == closed_at
         assert conn.scalar(select(GraphReleaseAgent.agent_key)) == "architect"
 
 
@@ -249,7 +330,8 @@ def test_postgres_mutation_guard_migration_is_idempotent_and_schema_objects_are_
     with postgres_engine.connect() as conn:
         triggers = conn.execute(
             text(
-                "SELECT c.relname, t.tgname FROM pg_trigger t "
+                "SELECT c.relname, t.tgname, t.tgdeferrable, t.tginitdeferred "
+                "FROM pg_trigger t "
                 "JOIN pg_class c ON c.oid = t.tgrelid "
                 "WHERE NOT t.tgisinternal AND c.relname IN "
                 "('agent_definition_revision', 'graph_release_agent', 'graph_release') "
@@ -257,10 +339,29 @@ def test_postgres_mutation_guard_migration_is_idempotent_and_schema_objects_are_
             )
         ).all()
     assert triggers == [
-        ("agent_definition_revision", "trg_agent_definition_revision_immutable"),
-        ("graph_release", "trg_graph_release_immutable"),
-        ("graph_release_agent", "trg_graph_release_agent_immutable"),
+        (
+            "agent_definition_revision",
+            "trg_agent_definition_revision_immutable",
+            False,
+            False,
+        ),
+        ("graph_release", "trg_graph_release_exactly_one_active", True, True),
+        ("graph_release", "trg_graph_release_immutable", False, False),
+        (
+            "graph_release_agent",
+            "trg_graph_release_agent_immutable",
+            False,
+            False,
+        ),
     ]
+
+    with postgres_engine.begin() as conn:
+        release_id = _insert_release(conn, 1)
+    _run_migrations(postgres_engine)
+    with postgres_engine.connect() as conn:
+        assert conn.scalar(
+            select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
+        ) == release_id
 
     with postgres_engine.begin() as conn:
         revision_id = _insert_revision(conn, "builder")
