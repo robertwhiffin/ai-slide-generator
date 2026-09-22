@@ -35,6 +35,14 @@ from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
 from src.services.agent_factory import build_agent_for_request
+from src.services.conversation_pins import (
+    ConversationPinMissingError,
+    ConversationSessionNotFoundError,
+)
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+    PersistedRuntimeError,
+)
 from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
@@ -66,6 +74,24 @@ _BLANK_DECK_SPEC_ENTRY: Dict[str, Any] = {
     "hands_off": "",
     "data_references": [],
 }
+
+
+def _pinned_graph_failure_release_id(
+    exc: PersistedRuntimeError,
+    session_id: str,
+) -> Optional[int]:
+    release_id = getattr(exc, "graph_release_id", None)
+    if isinstance(release_id, int):
+        return release_id
+    if exc.args and isinstance(exc.args[0], int):
+        return exc.args[0]
+    try:
+        from src.core.database import get_session_local
+        from src.services.conversation_pins import load_conversation_pin
+
+        return load_conversation_pin(get_session_local(), session_id)
+    except Exception:
+        return None
 
 
 def resolve_active_design_system_id(session_id: Optional[str]) -> Optional[int]:
@@ -1882,6 +1908,44 @@ class ChatService:
                     {"architect_message": message},
                     emitter=event_queue,
                     request_id=request_id,
+                )
+            except (
+                PersistedRuntimeError,
+                ConversationPinMissingError,
+                ConversationSessionNotFoundError,
+            ) as e:
+                graph_release_id = (
+                    _pinned_graph_failure_release_id(e, session_id)
+                    if isinstance(e, PersistedRuntimeError)
+                    else None
+                )
+                logger.error(
+                    "pinned_graph_configuration_unavailable",
+                    extra={
+                        "error_class": type(e).__name__,
+                        "graph_release_id": graph_release_id,
+                    },
+                )
+                if isinstance(
+                    e,
+                    (ConversationPinMissingError, ConversationSessionNotFoundError),
+                ):
+                    graph_error: PersistedRuntimeError = (
+                        PersistedConfigurationUnavailableError(
+                            code="conversation_pin_unavailable"
+                        )
+                    )
+                else:
+                    graph_error = e
+                error_container["error"] = graph_error
+                event_queue.put(
+                    StreamEvent(
+                        type=StreamEventType.ERROR,
+                        error="Pinned graph configuration is unavailable",
+                        metadata={
+                            "code": "pinned_graph_configuration_unavailable"
+                        },
+                    )
                 )
             except Exception as e:
                 logger.error(

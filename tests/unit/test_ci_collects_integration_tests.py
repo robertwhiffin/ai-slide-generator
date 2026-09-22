@@ -202,3 +202,14 @@ def test_conversation_pin_creation_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its PostgreSQL lock-order assertions must "
         "run in the graph job's PostgreSQL environment."
     )
+
+
+def test_persisted_graph_runtime_failures_are_collected_by_integration_graph():
+    """Persisted runtime failure coverage requires the graph job's PostgreSQL."""
+    target = "tests/integration/test_persisted_graph_runtime_failures_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its exact-release failure and redaction "
+        "assertions must execute against PostgreSQL."
+    )
