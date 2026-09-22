@@ -14,6 +14,7 @@ from src.database.models.graph_configuration import (
     GraphRelease,
 )
 from src.services.graph_configuration import GraphConfiguration
+from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import definition_content_hash
 
 pytestmark = pytest.mark.postgres
@@ -74,7 +75,7 @@ def test_workbench_parent_share_lock_prevents_mixed_read_committed_snapshot(
                     GraphDraftAgent.agent_key == "architect"
                 )
             )
-            content = GraphConfiguration._content_from_draft(draft).model_copy(
+            content = definition_content_from_row(draft).model_copy(
                 update={"prompt_text": draft.prompt_text + "\n\nConcurrent edit."}
             )
             draft.prompt_text = content.prompt_text

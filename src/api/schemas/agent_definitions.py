@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
 
 from src.services.graph_definition_manifest import AgentKey, AssemblyCondition
 
@@ -75,28 +75,47 @@ class ContentIdentityResponse(_AttributeResponse):
     digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
-class PublishedDefinitionResponse(_AttributeResponse):
+def _content_field(name: str):
+    """Accept the legacy flat shape or read the shared snapshot content record."""
+    return Field(validation_alias=AliasChoices(name, AliasPath("content", name)))
+
+
+class _DefinitionContentResponse(_AttributeResponse):
+    """Flatten the shared snapshot content record onto the existing wire shape."""
+
+    definition_version: int = _content_field("definition_version")
+    prompt_text: str = _content_field("prompt_text")
+    model: WorkbenchModelResponse = _content_field("model")
+    schema_overlay: SchemaOverlayResponse = _content_field("schema_overlay")
+    assembly_rules: AssemblyRulesResponse = _content_field("assembly_rules")
+    protected_assembly: ContentIdentityResponse = _content_field("protected_assembly")
+    schema_contract: ContentIdentityResponse = _content_field("schema_contract")
+
+
+class _PublishedDefinitionIdentityResponse(_AttributeResponse):
     revision_id: int
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    definition_version: int
-    prompt_text: str
-    model: WorkbenchModelResponse
-    schema_overlay: SchemaOverlayResponse
-    assembly_rules: AssemblyRulesResponse
-    protected_assembly: ContentIdentityResponse
-    schema_contract: ContentIdentityResponse
 
 
-class DraftDefinitionResponse(_AttributeResponse):
+# Pydantic collects multiple-base fields right-to-left.  Keep the identity base
+# second so the serialized key order remains identical to the original wire contract.
+class PublishedDefinitionResponse(
+    _DefinitionContentResponse,
+    _PublishedDefinitionIdentityResponse,
+):
+    """Published identity plus shared definition content."""
+
+
+class _DraftDefinitionIdentityResponse(_AttributeResponse):
     base_revision_id: int
     candidate_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    definition_version: int
-    prompt_text: str
-    model: WorkbenchModelResponse
-    schema_overlay: SchemaOverlayResponse
-    assembly_rules: AssemblyRulesResponse
-    protected_assembly: ContentIdentityResponse
-    schema_contract: ContentIdentityResponse
+
+
+class DraftDefinitionResponse(
+    _DefinitionContentResponse,
+    _DraftDefinitionIdentityResponse,
+):
+    """Draft identity plus shared definition content."""
 
 
 class ModelAgentNodeResponse(_AttributeResponse):

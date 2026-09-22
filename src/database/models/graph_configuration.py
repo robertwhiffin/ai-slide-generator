@@ -23,6 +23,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import declared_attr, mapped_column
 
 from src.core.database import Base
 
@@ -31,6 +32,22 @@ GRAPH_AGENT_KEY_CHECK = (
     "'fixer', 'fix_reviewer', 'deck_reviewer')"
 )
 _JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
+
+DEFINITION_CONTENT_COLUMN_NAMES = (
+    "agent_key",
+    "definition_version",
+    "prompt_text",
+    "endpoint_name",
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "schema_overlay",
+    "assembly_rules",
+    "protected_assembly_version",
+    "protected_assembly_digest",
+    "schema_contract_version",
+    "schema_contract_digest",
+)
 
 
 def _definition_checks(table_name: str, hash_column: str) -> tuple[CheckConstraint, ...]:
@@ -88,28 +105,64 @@ def _definition_checks(table_name: str, hash_column: str) -> tuple[CheckConstrai
     )
 
 
-class AgentDefinitionRevision(Base):
+def _definition_content_column(
+    column_type,
+    *,
+    sort_order: int | None,
+    agent_key: bool = False,
+):
+    @declared_attr
+    def column(cls):
+        resolved_sort_order = (
+            cls.__definition_version_sort_order__
+            if sort_order is None
+            else sort_order
+        )
+        return mapped_column(
+            column_type,
+            nullable=False,
+            primary_key=agent_key and cls.__definition_agent_key_primary_key__,
+            sort_order=resolved_sort_order,
+        )
+
+    return column
+
+
+class DefinitionContentColumns:
+    """The one SQLAlchemy column shape shared by revisions and draft candidates."""
+
+    __definition_agent_key_primary_key__ = False
+    __definition_version_sort_order__ = 20
+
+    agent_key = _definition_content_column(String(32), sort_order=10, agent_key=True)
+    definition_version = _definition_content_column(Integer, sort_order=None)
+    prompt_text = _definition_content_column(Text, sort_order=40)
+    endpoint_name = _definition_content_column(Text, sort_order=50)
+    temperature = _definition_content_column(Numeric(7, 6), sort_order=60)
+    max_tokens = _definition_content_column(Integer, sort_order=70)
+    top_p = _definition_content_column(Numeric(7, 6), sort_order=80)
+    schema_overlay = _definition_content_column(_JSON_DOCUMENT, sort_order=90)
+    assembly_rules = _definition_content_column(_JSON_DOCUMENT, sort_order=100)
+    protected_assembly_version = _definition_content_column(Integer, sort_order=110)
+    protected_assembly_digest = _definition_content_column(String(64), sort_order=120)
+    schema_contract_version = _definition_content_column(Integer, sort_order=130)
+    schema_contract_digest = _definition_content_column(String(64), sort_order=140)
+
+
+class AgentDefinitionRevision(DefinitionContentColumns, Base):
     """One immutable semantic revision for a model-driven graph role."""
 
     __tablename__ = "agent_definition_revision"
 
-    id = Column(Integer, primary_key=True)
-    agent_key = Column(String(32), nullable=False)
-    definition_version = Column(Integer, nullable=False)
-    content_hash = Column(String(64), nullable=False)
-    prompt_text = Column(Text, nullable=False)
-    endpoint_name = Column(Text, nullable=False)
-    temperature = Column(Numeric(7, 6), nullable=False)
-    max_tokens = Column(Integer, nullable=False)
-    top_p = Column(Numeric(7, 6), nullable=False)
-    schema_overlay = Column(_JSON_DOCUMENT, nullable=False)
-    assembly_rules = Column(_JSON_DOCUMENT, nullable=False)
-    protected_assembly_version = Column(Integer, nullable=False)
-    protected_assembly_digest = Column(String(64), nullable=False)
-    schema_contract_version = Column(Integer, nullable=False)
-    schema_contract_digest = Column(String(64), nullable=False)
-    created_by = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    id = mapped_column(Integer, primary_key=True, sort_order=0)
+    content_hash = mapped_column(String(64), nullable=False, sort_order=30)
+    created_by = mapped_column(Text, nullable=False, sort_order=150)
+    created_at = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        sort_order=160,
+    )
 
     __table_args__ = (
         *_definition_checks(__tablename__, "content_hash"),
@@ -244,26 +297,15 @@ class GraphDraft(Base):
     )
 
 
-class GraphDraftAgent(Base):
+class GraphDraftAgent(DefinitionContentColumns, Base):
     """Mutable candidate content for one role in the singleton draft."""
 
     __tablename__ = "graph_draft_agent"
+    __definition_agent_key_primary_key__ = True
+    __definition_version_sort_order__ = 30
 
-    graph_draft_id = Column(SmallInteger, primary_key=True)
-    agent_key = Column(String(32), primary_key=True)
-    candidate_hash = Column(String(64), nullable=False)
-    definition_version = Column(Integer, nullable=False)
-    prompt_text = Column(Text, nullable=False)
-    endpoint_name = Column(Text, nullable=False)
-    temperature = Column(Numeric(7, 6), nullable=False)
-    max_tokens = Column(Integer, nullable=False)
-    top_p = Column(Numeric(7, 6), nullable=False)
-    schema_overlay = Column(_JSON_DOCUMENT, nullable=False)
-    assembly_rules = Column(_JSON_DOCUMENT, nullable=False)
-    protected_assembly_version = Column(Integer, nullable=False)
-    protected_assembly_digest = Column(String(64), nullable=False)
-    schema_contract_version = Column(Integer, nullable=False)
-    schema_contract_digest = Column(String(64), nullable=False)
+    graph_draft_id = mapped_column(SmallInteger, primary_key=True, sort_order=0)
+    candidate_hash = mapped_column(String(64), nullable=False, sort_order=20)
 
     __table_args__ = (
         ForeignKeyConstraint(
