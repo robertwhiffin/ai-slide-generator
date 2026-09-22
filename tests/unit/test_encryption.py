@@ -1,6 +1,7 @@
 """Tests for the Lakebase-backed Fernet encryption utility (SDR-4437 CRITICAL-3)."""
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
@@ -230,6 +231,10 @@ def test_init_database_invokes_encryption_boot_hook(monkeypatch):
     # them (and the session factory) so this stays a DB-free unit test.
     monkeypatch.setattr("src.core.database.get_session_local", lambda: None)
     monkeypatch.setattr(
+        "src.services.graph_configuration.bootstrap_graph_configuration",
+        lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+    monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.migrate_profiles", lambda sf: 0
     )
     monkeypatch.setattr(
@@ -263,6 +268,10 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     # encryption-key failure path specifically, not a DB connection.
     monkeypatch.setattr("src.core.database.get_session_local", lambda: None)
     monkeypatch.setattr(
+        "src.services.graph_configuration.bootstrap_graph_configuration",
+        lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+    monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.migrate_profiles", lambda sf: 0
     )
     monkeypatch.setattr(
@@ -277,10 +286,14 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
         lambda include_databricks: None,
     )
 
+    encryption_hook_calls = []
+
     def _boom():
+        encryption_hook_calls.append(1)
         raise RuntimeError("no grant")
 
     monkeypatch.setattr("src.core.encryption.ensure_encryption_key", _boom)
     with pytest.raises(SystemExit) as exc:
         run.init_database()
     assert exc.value.code == 1
+    assert encryption_hook_calls == [1]
