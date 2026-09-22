@@ -194,15 +194,15 @@ export const AdminPage: React.FC = () => {
           <AdminJudgeSettings />
         </div>
 
-        {activeTab === 'agent_definitions' && (
-          <div
-            role="tabpanel"
-            id="agent-definitions-panel"
-            aria-labelledby="agent-definitions-tab"
-          >
-            <AgentDefinitionWorkbench />
-          </div>
-        )}
+        <div
+          role="tabpanel"
+          id="agent-definitions-panel"
+          aria-labelledby="agent-definitions-tab"
+          hidden={activeTab !== 'agent_definitions'}
+          className={activeTab !== 'agent_definitions' ? 'sr-only' : ''}
+        >
+          {activeTab === 'agent_definitions' && <AgentDefinitionWorkbench />}
+        </div>
       </div>
     </div>
   );

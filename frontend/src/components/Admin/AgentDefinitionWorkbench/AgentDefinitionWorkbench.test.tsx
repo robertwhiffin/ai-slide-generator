@@ -192,16 +192,28 @@ describe('AgentDefinitionWorkbench', () => {
     );
   });
 
-  it('does not mount or request the workbench until the Agent Definitions admin tab is selected', async () => {
+  it('keeps the inactive tab panel target while deferring the workbench mount and request until selection', async () => {
     mockFetchResponse(200, syntheticAgentDefinitionWorkbench);
     render(<AdminPage />);
     const workbenchCalls = () => vi.mocked(fetch).mock.calls.filter(([url]) =>
       String(url).endsWith('/api/admin/agent-definitions/workbench'),
     );
+    const tab = screen.getByRole('tab', { name: 'Agent Definitions' });
+    const panel = document.getElementById(tab.getAttribute('aria-controls')!);
 
+    expect(panel).toBeInTheDocument();
+    expect(panel).toHaveAttribute('role', 'tabpanel');
+    expect(panel).toHaveAttribute('aria-labelledby', tab.id);
+    expect(panel).toHaveAttribute('hidden');
+    expect(panel).not.toBeVisible();
+    expect(screen.queryByTestId('agent-definition-workbench')).not.toBeInTheDocument();
     expect(workbenchCalls()).toHaveLength(0);
-    fireEvent.click(screen.getByRole('tab', { name: 'Agent Definitions' }));
+    fireEvent.click(tab);
     await loadedNodeNavigation();
+
+    expect(panel).not.toHaveAttribute('hidden');
+    expect(panel).toBeVisible();
+    expect(within(panel!).getByTestId('agent-definition-workbench')).toBeVisible();
     expect(workbenchCalls()).toHaveLength(1);
   });
 });
