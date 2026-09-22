@@ -4,7 +4,7 @@
 
 **Goal:** Give every model-driven graph role a versioned declarative prompt assembler with editable custom blocks only at protected legal anchors.
 
-**Architecture:** `PromptAssembler` owns protected bundle resolution, validation, condition evaluation, serialization, and assembly. `AgentRuntime` remains the sole graph-facing caller and model adapter owner. Frozen v1 definitions retain their historical byte-compatible plan; v2 persists only custom blocks and enters a draft through #263's one locked writer and an explicit server-owned identity upgrade.
+**Architecture:** `PromptAssembler` owns protected bundle resolution, validation, condition evaluation, serialization, and assembly. `AgentRuntime` remains the sole graph-facing caller and model adapter owner behind #261's persisted-release resolution, identity sink, provider-error conversion, and exact four-argument public call. Frozen v1 releases remain resolvable forever with their historical byte-compatible plan; v2 persists only custom blocks and enters a draft through #263's one locked writer and an explicit server-owned identity upgrade.
 
 **Tech Stack:** Python 3.11, Pydantic v2, SQLAlchemy 2, PostgreSQL 15, FastAPI, React 19, TypeScript 5.9, Vitest, Playwright.
 
@@ -12,16 +12,18 @@
 
 ## Global Constraints
 
-- Start only from a reviewed merge base containing completed #260 and #263. Write its full SHA to `.superpowers/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`; do not use research branch/commit `447791d7a` as a base or source of production changes.
-- Load `executing-plans-tellr` and `superpowers:subagent-driven-development`, create `PLAN-CORRECTIONS.md`, and re-probe all interfaces before Task 1. The plan is not runtime evidence.
+- Start only from a reviewed integration base containing completed #260, #261, and #263. Before any tracked implementation work, rebase onto that reviewed base, record its full SHA in `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`, and re-probe #261's persisted runtime/identity-sink/provider-error interfaces plus #263's locked writer, route authorization/body ordering, frontend state, and exact public callers. Do not use research branch/commit `447791d7a` as a base or source of production changes.
+- Load `executing-plans-tellr` and `superpowers:subagent-driven-development`, create `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/PLAN-CORRECTIONS.md`, and attach it to every implementer/reviewer brief. Treat the plan as a hypothesis, not runtime evidence. A final #261 rebase/re-probe is mandatory before Task 1 and again immediately before the first shared-file commit.
 - Use `/Users/robert.whiffin/.pyenv/shims/python` with `python -m pytest`; never run `uv`, `pip`, install dependencies, or create `.venv`. Stop if `.venv` exists.
 - `src/services/agent_definition_manifest_v1.py`, generated v1 JSON, v1 identities/digests, published revisions, and releases are historical. Never regenerate or mutate them for v2.
+- #261 owns persisted production resolution and its non-retaining identity/error sink. Preserve its exact public production interface: `AgentRuntime.run(agent_key, graph_release_id, payload, assembly_context) -> AgentInvocationResult`. Do not add a three-argument overload, source a release from active/latest/code defaults, bypass its callback/sink, or change its provider-error conversion. Any manifest-derived/code-owned compatibility loader is test-only and must reject production construction.
 - V1 remains exact: `DefinitionContent.validate_role_assembly` must still compare a v1 document to `assembly_rules_for(agent_key)`. V2 must validate against a code-owned bundle plan, not a loosened v1 literal.
 - Conditions are exactly `always`, `design_system_active`, `design_system_inactive`, and `payload_has_deck_brief`; the latter is `bool(payload.get("deck_brief"))`. No stored code, expression, or caller-provided condition truth is permitted.
 - Only `PromptAssembler` serializes a v2 payload, exactly once with `json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)`, between code-owned `<untrusted-data>` delimiters. Only `DatabricksModelAdapter` calls `with_structured_output`.
 - Normal #263 saves retain both protected identities. An explicit protected-assembly upgrade shares #263's locked transaction, validation, canonical mapper/hash, audit update, lock increment, and conflict envelope; it is not a second writer. Explicit same-content saves advance lock/audit once and return `changed:false`.
-- Isolated modules/tests may be prepared concurrently, but all shared manifest/runtime/draft-writer/route/client/workbench integration is serialized after reviewed #264 and before #266. Rebase and re-probe immediately before Task 4.
-- No #264 overlay policy, #266 endpoint policy, migration/DDL, publication/evidence, graph payload construction, tool wiring, or Foreman change is in scope.
+- This is the first shared integration slice: #265 lands before #264 and then #266. It must neither depend on later policy/code nor reserve their behavior. Add only a narrow, ordered validator-registration seam in the #263 writer: #265 registers the assembly validator and the writer invokes registered validators before its one mapper/hash/write. A future feature can register another validator without modifying #265's bundle grammar, upgrade operation, runtime, routes, or UI.
+- Only read-only inventory and disposable, uncommitted sketches confined to new `prompt_assembler.py`/its dedicated test file may be prepared before the final integration rebase. All tracked work that touches the manifest, runtime, legacy skill constants, writer/facade, route/schema, client, workbench/editor, mocks, E2E, or their shared tests must wait for the reviewed #260+#261+#263 base and the Task 0 re-probe; #265 then commits those shared files serially in this task order.
+- No overlay policy, endpoint policy, migration/DDL, publication/evidence, graph payload construction, tool wiring, or Foreman change is in scope.
 - Every task is RED → minimal GREEN → sabotage RED → restore GREEN and ends in its listed commit. PostgreSQL coverage must execute rather than skip.
 
 ## Stable interfaces
@@ -87,7 +89,7 @@ class PromptAssembler:
 
 V2 stage order is authored prompt; legal custom blocks after authored prompt; generated Build Reviewer criteria for that role; conditional deck brief and its legal custom blocks; exactly one environment constraint and its legal custom blocks; notice; opening delimiter; canonical JSON; closing delimiter; terminal binding. V1 resolves forever with its existing stage order/raw serialization.
 
-After #263/#264 integration, extend the existing facade rather than creating a service/route writer:
+After the Task 0 rebase/re-probe, extend #263's existing facade rather than creating a service/route writer. Its immutable construction seam accepts an ordered tuple of content validators; #265 supplies one validator that calls `PromptAssembler.validate(definition=content)`. The common locked writer invokes #263's existing local validation and then every supplied validator before canonical mapping/hash/flush/audit/lock. The tuple is immutable after construction, validators receive a complete rehydrated `DefinitionContent`, and a validator failure is a structured no-write `422`. This is deliberately generic: it names neither a later feature nor a later field policy.
 
 ```python
 def upgrade_draft_protected_assembly(
@@ -97,7 +99,43 @@ def upgrade_draft_protected_assembly(
     raise NotImplementedError
 ```
 
-Expose `POST /api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade`, strict body `{"lock_version": 4}`. No version/digest/stage/client actor is accepted. Under #263's existing locks, it replaces only stored v1 identity/rules with the server's v2 identity and empty custom blocks; it preserves authored/model/overlay/schema identity and calls `_write_locked_content` once. Existing v2 is `422 already_current`; stale is #263's 409. The existing one writer validates endpoint, #264 schema, then `PromptAssembler.validate`, before mapping/hash/flush/audit/lock.
+Expose `POST /api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade`, strict body `{"lock_version": 4}`. No version/digest/stage/client actor is accepted. Under #263's existing locks, it replaces only stored v1 identity/rules with the server's v2 identity and empty custom blocks; it preserves authored/model/overlay/schema identity and calls `_write_locked_content` once. Existing v2 is `422 already_current`; stale is #263's 409. The existing writer executes its #263-owned checks and the registered `PromptAssembler.validate` before mapping/hash/flush/audit/lock; no second mapper, writer, or route is permitted.
+
+### Task 0: Rebase, prove the integration base, and record corrections
+
+**Gate:** No tracked #265 implementation task may begin until #260, #261, and #263 are each reviewed and merged into one integration base. This task is repeated immediately before the first shared-file commit if any of those heads changed during preparation.
+
+**Files:**
+- Create (ignored execution evidence): `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE`
+- Create (ignored execution ledger): `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/PLAN-CORRECTIONS.md`
+- Create (ignored execution reports): `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/reports/`
+- Create (ignored review packages): `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/packages/`
+
+- [ ] **Step 1: Rebase and capture the only permitted base**
+
+Rebase onto the reviewed integration commit, then record only its full SHA:
+
+```bash
+git fetch origin integration/261-263
+git rebase origin/integration/261-263
+git rev-parse origin/integration/261-263 > .superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE
+test "$(git rev-parse HEAD)" = "$(cat .superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE)"
+git merge-base --is-ancestor 29e03411487476383b34101b7b34513dbb917f26 HEAD
+```
+
+Expected: the recorded full SHA is exactly the reviewed `origin/integration/261-263` head and contains reviewed #260, #261, and #263; it is not a research branch/commit selection.
+
+- [ ] **Step 2: Re-probe the contracts that own this task's boundaries**
+
+Record exact paths, constructors, call signatures, and test call sites in `PLAN-CORRECTIONS.md`. The ledger must confirm #261's exact `AgentRuntime.run(agent_key, graph_release_id, payload, assembly_context)` call, persisted release loader, identity-sink callback, provider-error path, all runtime callers/fixtures, and test-only compatibility boundary. It must also confirm #263's one locked writer, `_write_locked_content`, protected-identity rejection, authorization-before-body parsing, save/409 serialization, pending-request state, and its client/editor ownership. Record every mismatch against this plan and resolve it before Task 1; do not silently adapt production code to this document.
+
+- [ ] **Step 3: Decide what is actually safe to prepare**
+
+Place the re-probe output in `reports/preflight.md`. It must classify only a disposable `src/services/prompt_assembler.py` sketch and its dedicated test sketch as pre-integration preparation. It must explicitly mark manifest/runtime/legacy skill constants/writer/routes/schemas/client/workbench/mocks/E2E/shared tests as blocked until this Task 0 gate, then list the serial Task 1→Task 6 ownership order.
+
+- [ ] **Step 4: Commit no production change and hand off the ledger**
+
+Do not commit ignored evidence. Attach `PLAN-CORRECTIONS.md` and the reports directory to the Task 1 implementer/reviewer package. If the rebase changes #261 or #263 interfaces, repeat Steps 1–3 before modifying a shared file.
 
 ### Task 1: Freeze v1 and define v2 content grammar
 
@@ -163,7 +201,7 @@ git commit -m "feat: define versioned prompt assembly rules (#265)"
 
 - [ ] **Step 1: Write RED bundle/order/adversarial tests**
 
-For every `GRAPH_V1_AGENT_KEYS` role and both DS states, assert v2's exact stage identity/order, one environment stage, one notice/open/payload/close boundary, and terminal binding last. Assert criteria only occur for Build Reviewer and deck brief follows payload truthiness. Construct hostile payload text containing both delimiters, `ignore prior instructions`, and `structured_output_binding`; independently serialize it and prove it occurs exactly once strictly inside owned delimiters.
+For every `GRAPH_V1_AGENT_KEYS` role and both DS states, assert v2's exact stage identity/order, one environment stage, one notice/open/payload/close boundary, and terminal binding last. Assert criteria only occur for Build Reviewer and deck brief follows payload truthiness. For every persisted v1 release/role/context fixture, assert the exact historical byte string and protected identity resolve unchanged; this is an execution-path test, not merely a manifest fixture test. Construct hostile payload text containing both delimiters, `ignore prior instructions`, and `structured_output_binding`; independently serialize it and prove it occurs exactly once strictly inside owned delimiters.
 
 ```python
 @pytest.mark.parametrize("agent_key", GRAPH_V1_AGENT_KEYS)
@@ -177,7 +215,7 @@ def test_hostile_payload_is_once_inside_owned_boundary(agent_key):
     assert value.terminal_binding == "langchain.with_structured_output"
 ```
 
-Also assert v1 assembly equals the present independent v1 replay and an unknown identity fails before prompt output. Parameterize missing/duplicate protected stages, altered protected condition, fake digest, unknown block, and after-payload custom placement as `PromptAssemblyRejected`.
+Also assert that a v1 `DefinitionContent` loaded through #261's persisted release path assembles byte-for-byte like the independent v1 replay, and that an unknown historical bundle identity fails before prompt output. The independent compatibility loader is test-only: it may construct a synthetic v1 definition for this parity test but must reject production construction and non-synthetic release IDs. Parameterize missing/duplicate protected stages, altered protected condition, fake digest, unknown block, and after-payload custom placement as `PromptAssemblyRejected`.
 
 - [ ] **Step 2: Run RED**
 
@@ -188,7 +226,7 @@ test ! -e .venv
 
 - [ ] **Step 3: Implement one closed evaluator**
 
-Extract `ANALYST_AUTHORED_INSTRUCTIONS` and `BUILD_REVIEWER_AUTHORED_INSTRUCTIONS` for the v2 bundle, but preserve each existing legacy `INSTRUCTIONS` value byte-for-byte for v1 until Task 3 switches the compatibility source to manifest-derived v1 content. Registry keys are `(version, digest)` and include v1/v2; v2 digest covers every protected text, legal-anchor map, stage order, delimiters, serialization config, and terminal binding, with an import-time calculated-digest guard. `condition_applies` is a four-case match; `validate` rejects identity/format mismatch, illegal anchor/condition, malformed protected singleton, and terminal mismatch. No JSON supplies executable values.
+Extract `ANALYST_AUTHORED_INSTRUCTIONS` and `BUILD_REVIEWER_AUTHORED_INSTRUCTIONS` for the v2 bundle, but preserve every legacy `INSTRUCTIONS` byte-for-byte for v1. Task 3 consumes persisted `DefinitionContent` supplied by #261; it does not replace #261's production loader with a manifest/code fallback. Registry keys are `(version, digest)` and include v1/v2; v2 digest covers every protected text, legal-anchor map, stage order, delimiters, serialization config, and terminal binding, with an import-time calculated-digest guard. `condition_applies` is a four-case match; `validate` rejects identity/format mismatch, illegal anchor/condition, malformed protected singleton, and terminal mismatch. No JSON supplies executable values.
 
 - [ ] **Step 4: GREEN and boundary sabotage**
 
@@ -215,11 +253,13 @@ git commit -m "feat: add protected prompt assembler (#265)"
 - Modify: `tests/unit/test_agent_runtime.py:1-363`
 - Modify: `tests/unit/test_graph_definition_manifest.py:307-361`
 
-**Produces:** `AgentDefinition.assembly_rules` and one v1/v2 runtime assembly path, preserving the public `run(agent_key, payload, assembly_context)` interface.
+**Consumes:** #261's persisted `ResolvedDefinition`, release-ID loader, identity-sink callback, and provider-error conversion.
+
+**Produces:** `AgentDefinition.assembly_rules` and one v1/v2 resolved-definition assembly path while preserving the exact public production interface `run(agent_key, graph_release_id, payload, assembly_context) -> AgentInvocationResult`.
 
 - [ ] **Step 1: Write RED runtime tests**
 
-Build v1 definitions from manifest content and assert exact present prompts across seven roles/DS states. Build v2 definitions and assert hostile boundary/diagnostic equality. Each malformed v2 definition must raise `PromptAssemblyRejected` and leave `RecordingModelAdapter.calls == []`. Add search proof that `agent_runtime.py` and `graph/nodes.py` have no `json.dumps(payload` and only adapter code has `with_structured_output(`; include Builder/Fixer retry call sites.
+Build v1 definitions from a persisted release selected by an explicit `graph_release_id` and assert exact historical prompts across seven roles/DS states. Build v2 definitions and assert hostile boundary/diagnostic equality. Assert each production caller and fixture passes four arguments, with the pinned ID unchanged across Builder/Fixer retries. Each malformed v2 definition must raise `PromptAssemblyRejected` before model invocation while preserving #261's identity/error callback behavior and leave `RecordingModelAdapter.calls == []`. Add search proof that `agent_runtime.py` and `graph/nodes.py` have no `json.dumps(payload` and only adapter code has `with_structured_output(`; include Builder/Fixer retry call sites. Add a test-only compatibility parity case that rejects an attempt to select an arbitrary persisted release or construct the production runtime from the compatibility loader.
 
 - [ ] **Step 2: Run RED**
 
@@ -230,7 +270,7 @@ test ! -e .venv
 
 - [ ] **Step 3: Make runtime an assembler client**
 
-Add `assembly_rules` to `AgentDefinition`. Make `CodeOwnedAgentDefinitionSource` derive v1 content from `load_graph_v1_manifest()` rather than independently recreating rules. Replace private `_assemble_prompt`/bundle registry use with `PromptAssembler.assemble`; require terminal binding then call unchanged adapter. Preserve unknown role/schema-contract behavior and do not edit graph nodes.
+Add `assembly_rules` to the resolved `AgentDefinition` value. Replace private `_assemble_prompt`/bundle registry use with `PromptAssembler.assemble` inside #261's resolved-definition execution path; retain its explicit release-ID lookup, identity-sink callback order, typed provider-error conversion, terminal binding, and unchanged adapter invocation. A test-only `CodeOwnedAgentDefinitionSource` may derive synthetic v1 content from `load_graph_v1_manifest()` for parity only; `get_agent_runtime()` and every production graph path must continue to use the persisted loader. Preserve unknown role/schema-contract behavior and do not edit graph nodes except for any already-required four-argument #261 caller wiring revealed by Task 0.
 
 - [ ] **Step 4: GREEN and delegation sabotage**
 
@@ -252,7 +292,7 @@ git commit -m "feat: route runtime prompts through assembler (#265)"
 
 ### Task 4: Serialize #265 backend integration through #263's writer
 
-**Gate:** #264 must be reviewed and merged first. Rebase, record its SHA and actual interface corrections in the ledger, then inspect the single resulting validation pipeline. This is #265's shared backend integration before #266.
+**Gate:** This is #265's first shared backend integration slice. Rebase/re-probe the reviewed #260+#261+#263 base immediately before Step 1, update `.superpowers/sdd/2026-09-22-declarative-prompt-assembly/PLAN-CORRECTIONS.md`, then inspect the one resulting locked pipeline. Do not wait for, refer to, or depend on a later feature's policy/code.
 
 **Files:**
 - Modify: `src/services/graph_configuration_draft.py`
@@ -265,7 +305,7 @@ git commit -m "feat: route runtime prompts through assembler (#265)"
 
 - [ ] **Step 1: Write RED writer/route/PostgreSQL tests**
 
-Valid v2 trusted content writes via `definition_content_values`, hash, lock/audit once, and preserves schema identity. Fake digest, invalid placement, payload block, duplicate terminal, and unknown condition return structured 422 before any row/lock/audit mutation or model call. A valid stale candidate produces coherent #263 409/no mutation. A repeated valid same-content save returns `changed=False`, unchanged hash, but increments lock/audit exactly once.
+Valid v2 trusted content writes via `definition_content_values`, hash, lock/audit once, and preserves schema identity. A sentinel registered content validator proves the tuple runs after #263's local checks but before mapper/hash/write, returning its structured 422 with no row/lock/audit/model mutation. Fake digest, invalid placement, payload block, duplicate terminal, and unknown condition return structured 422 before any row/lock/audit mutation or model call. A valid stale candidate produces coherent #263 409/no mutation. A repeated valid same-content save returns `changed=False`, unchanged hash, but increments lock/audit exactly once.
 
 Seed v1 then call the upgrade: only `assembly_rules`, protected identity, candidate hash, parent audit/lock change; prompt/model/overlay/schema/base revision/release/published v1 remain identical. Repeated upgrade is 422 `already_current`; stale is 409. POST accepts only lock; direct protected identity, terminal, format, digest, or actor input is rejected.
 
@@ -281,11 +321,11 @@ test ! -e .venv
 
 - [ ] **Step 3: Extend the one transaction**
 
-In existing #263 writer path invoke endpoint validation, #264 schema validation, then `PromptAssembler.validate`, before `definition_content_hash`, `definition_content_values`, flush, audit, and lock increment. Extend the strict editable save DTO with optional `candidate.assembly_rules`: omission retains the stored rules for a v1 model/prompt save; when supplied it must be the exact v2 `{format_version: 2, custom_blocks: [...]}` record, which the server rehydrates onto stored server-owned fields. It must reject v1 client rule records, identities, protected-stage records, delimiters, serialization settings, and terminal binding. GET/success/409 definition serializers additionally return the server-derived `protected_stage_view` (stage label, condition, locked boolean, bundle version/digest, and legal anchors), never raw bundle material. Normal saves keep strict protected identity comparison. Upgrade obtains #263 locked aggregate/stale result, server-constructs `AssemblyRulesV2(format_version=2, custom_blocks=())` and v2 identity, then calls the same validator/writer once; never direct-assign an ORM content column or re-query selected row. Add strict admin POST after existing authorization/body ordering and reuse #263 serializers/errors.
+In the existing #263 writer, preserve all existing validation, then invoke the immutable ordered content-validator tuple containing `PromptAssembler.validate`, before `definition_content_hash`, `definition_content_values`, flush, audit, and lock increment. Extend the strict editable save DTO with optional `candidate.assembly_rules`: omission retains the stored rules for a v1 model/prompt save; when supplied it must be the exact v2 `{format_version: 2, custom_blocks: [...]}` record, which the server rehydrates onto stored server-owned fields. It must reject v1 client rule records, identities, protected-stage records, delimiters, serialization settings, and terminal binding. GET/success/409 definition serializers additionally return the server-derived `protected_stage_view` (stage label, condition, locked boolean, bundle version/digest, and legal anchors), never raw bundle material. Normal saves keep strict protected identity comparison. Upgrade obtains #263 locked aggregate/stale result, server-constructs `AssemblyRulesV2(format_version=2, custom_blocks=())` and v2 identity, then calls the same validator/writer once; never direct-assign an ORM content column or re-query selected row. Add strict admin POST only after existing authorization succeeds and its body-ordering behavior is re-probed; reuse #263 serializers/errors and never parse or echo a non-admin request body.
 
 - [ ] **Step 4: GREEN and writer sabotages**
 
-Run Step 2. Directly assign `locked.selected_row.protected_assembly_version = 2` before common writer with `TASK4_SECOND_WRITER_SABOTAGE`; focused upgrade/hash tests must RED. Restore. Remove same-content lock increment with `TASK4_SAME_CONTENT_LOCK_SABOTAGE`; the repeated-save test must RED. Restore and rerun Step 2 GREEN.
+Run Step 2. Omit the registered-validator tuple invocation with `TASK4_VALIDATOR_HOOK_BYPASS_SABOTAGE`; the sentinel/no-write test must RED. Restore. Directly assign `locked.selected_row.protected_assembly_version = 2` before common writer with `TASK4_SECOND_WRITER_SABOTAGE`; focused upgrade/hash tests must RED. Restore. Remove same-content lock increment with `TASK4_SAME_CONTENT_LOCK_SABOTAGE`; the repeated-save test must RED. Restore and rerun Step 2 GREEN.
 
 - [ ] **Step 5: Commit**
 
@@ -374,14 +414,14 @@ Make `payload_has_deck_brief` always true (`TASK6_DECK_BRIEF_CONDITION_SABOTAGE`
 
 ```bash
 rg -n 'json\.dumps\(payload|with_structured_output\(' src/services/agent_runtime.py src/services/graph/nodes.py src/services/prompt_assembler.py
-git diff --name-only "$(cat .superpowers/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE)"..HEAD
+git diff --name-only "$(cat .superpowers/sdd/2026-09-22-declarative-prompt-assembly/IMPLEMENTATION_BASE)"..HEAD
 git diff --check
 git status --short
 git add frontend/tests/e2e/agent-definition-workbench.spec.ts tests/unit/test_agent_runtime.py tests/unit/test_prompt_assembler.py tests/integration/test_agent_definition_workbench_postgres.py
 git commit -m "test: verify protected prompt assembly flows (#265)"
 ```
 
-Expected: only assembler has `json.dumps(payload`; only adapter has `with_structured_output`; no generated v1, migration, graph-node production, package, #264, or #266 files changed.
+Expected: only assembler has `json.dumps(payload`; only adapter has `with_structured_output`; no generated v1, migration, graph-node production, package, overlay-policy, or endpoint-policy files changed. The #261 persisted loader, four-argument call, identity sink, and provider-error conversion remain present and exercised.
 
 ## Final review handoff
 
