@@ -57,7 +57,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const navigate = useNavigate();
-  const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
+  const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
@@ -157,7 +157,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
     // A browser-local root must be made graph-capable before a graph turn.
     // Failed persistence deliberately sends no chat request.
-    if (isPreSession && !await ensureGraphCapableRoot()) {
+    if (!isSessionPersisted && !await ensureGraphCapableRoot()) {
       return;
     }
 

@@ -34,6 +34,96 @@ async function allowEditing(page: import('@playwright/test').Page) {
 }
 
 test.describe('conversation graph versions', () => {
+  test('failed restore persists its fresh local root before the first USE AGENT MODE turn', async ({ page }) => {
+    await setupMocks(page);
+    const requests: Array<{ kind: 'create' | 'chat'; body: Record<string, unknown> }> = [];
+
+    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+      if (request.method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...sessionResponse(SESSION_A, 1, 2, true), has_slide_deck: true }),
+      });
+    });
+    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}/slides`, async (route) => {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Restore failed' }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/sessions', async (route, request) => {
+      if (request.method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+      const body = request.postDataJSON() as Record<string, unknown>;
+      requests.push({ kind: 'create', body });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sessionResponse(body.session_id as string, 2, 2, false)),
+      });
+    });
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route, request) => {
+      requests.push({ kind: 'chat', body: request.postDataJSON() as Record<string, unknown> });
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"type":"complete"}\n\n' });
+    });
+    await allowEditing(page);
+
+    await page.goto(`/sessions/${SESSION_A}/edit`);
+    await page.getByTestId('chat-input').fill('USE AGENT MODE recover this deck');
+    await page.getByTestId('chat-input').press('Enter');
+
+    await expect.poll(() => requests.length).toBe(2);
+    expect(requests.map(({ kind }) => kind)).toEqual(['create', 'chat']);
+    expect(requests[0].body).toMatchObject({ graph_capable: true });
+    expect(requests[0].body.session_id).not.toBe(SESSION_A);
+    expect(requests[1].body).toMatchObject({ session_id: requests[0].body.session_id });
+  });
+
+  test('failed restore sends no graph turn when fresh-root persistence fails', async ({ page }) => {
+    await setupMocks(page);
+    const creationBodies: Array<Record<string, unknown>> = [];
+    const graphTurns: Array<Record<string, unknown>> = [];
+
+    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+      if (request.method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...sessionResponse(SESSION_A, 1, 2, true), has_slide_deck: true }),
+      });
+    });
+    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}/slides`, async (route) => {
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Restore failed' }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/sessions', async (route, request) => {
+      if (request.method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+      creationBodies.push(request.postDataJSON() as Record<string, unknown>);
+      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Graph runtime is unavailable' }) });
+    });
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route, request) => {
+      graphTurns.push(request.postDataJSON() as Record<string, unknown>);
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' });
+    });
+    await allowEditing(page);
+
+    await page.goto(`/sessions/${SESSION_A}/edit`);
+    await page.getByTestId('chat-input').fill('USE AGENT MODE recover this deck');
+    await page.getByTestId('chat-input').press('Enter');
+
+    await expect.poll(() => creationBodies.length).toBe(1);
+    expect(creationBodies[0]).toMatchObject({ graph_capable: true });
+    expect(graphTurns).toEqual([]);
+  });
+
   test('initial root persists a graph-capable root before its first USE AGENT MODE turn', async ({ page }) => {
     await setupMocks(page);
     const requests: Array<{ kind: 'create' | 'chat'; body: Record<string, unknown> }> = [];

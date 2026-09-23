@@ -200,6 +200,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     activeGraphVersion,
     isGraphVersionOlder,
     createNewSession,
+    markSessionPersisted,
     switchSession,
     renameSession,
     setConversationGraphVersion,
@@ -599,6 +600,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     setViewMode('main');
     try {
       const created = await api.createSession({ sessionId: newId, graphCapable: true });
+      markSessionPersisted();
       setConversationGraphVersion(created);
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
@@ -606,13 +608,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       console.error('Failed to create session:', err);
       showToast('Failed to create a new session', 'error');
     }
-  }, [createNewSession, navigate, setConversationGraphVersion, showToast]);
+  }, [createNewSession, markSessionPersisted, navigate, setConversationGraphVersion, showToast]);
 
   const ensureGraphCapableRoot = useCallback(async (): Promise<boolean> => {
     if (!sessionId) return false;
 
     try {
       const created = await api.createSession({ sessionId, graphCapable: true });
+      markSessionPersisted();
       setConversationGraphVersion(created);
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${created.session_id}/edit`, { replace: true });
@@ -622,7 +625,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       showToast('Failed to create a new session', 'error');
       return false;
     }
-  }, [navigate, sessionId, setConversationGraphVersion, showToast]);
+  }, [markSessionPersisted, navigate, sessionId, setConversationGraphVersion, showToast]);
 
   const handleStartLatest = useCallback(async () => {
     setIsStartingLatest(true);
