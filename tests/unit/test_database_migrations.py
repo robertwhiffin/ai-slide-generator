@@ -294,3 +294,235 @@ def test_shared_deck_mutation_schema_backfills_legacy_sqlite_rows_once(
         "graph_release_id",
         "occurred_at",
     ) in index_columns
+
+
+# ---------------------------------------------------------------------------
+# collaboration_identity server-side generation (C-11 R1)
+# ---------------------------------------------------------------------------
+#
+# ``collaboration_identity`` is ``nullable=False`` on both ``user_sessions`` and
+# ``session_slide_decks``.  A Python-side ``default=uuid.uuid4`` fires only on an
+# ORM-mapper insert, so every non-ORM writer — raw SQL, ``insert().values()``
+# omitting the column, a bulk insert — violates the constraint.  The column needs
+# a *server*-side default, on the fresh ``create_all`` shape and on the legacy
+# shape the migration ALTERs into place.
+
+
+def _raw_insert_session(conn, session_id: str) -> int:
+    """Insert a ``user_sessions`` row through raw SQL, omitting the identity.
+
+    Raw SQL is the point: it is the shape every non-ORM writer has, and the only
+    shape that proves the default is enforced by the database rather than by the
+    ORM mapper.
+    """
+    conn.execute(
+        text(
+            "INSERT INTO user_sessions "
+            "(session_id, created_by, created_at, last_activity, is_processing) "
+            "VALUES (:sid, 'raw@example.com', CURRENT_TIMESTAMP, "
+            "CURRENT_TIMESTAMP, 0)"
+        ),
+        {"sid": session_id},
+    )
+    return conn.execute(
+        text("SELECT id FROM user_sessions WHERE session_id = :sid"),
+        {"sid": session_id},
+    ).scalar()
+
+
+def _raw_insert_deck(conn, owner_row_id: int) -> None:
+    """Insert a ``session_slide_decks`` row through raw SQL, omitting the identity."""
+    conn.execute(
+        text(
+            "INSERT INTO session_slide_decks "
+            "(session_id, version, created_at, updated_at) "
+            "VALUES (:owner, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ),
+        {"owner": owner_row_id},
+    )
+
+
+def _identities(conn, table: str) -> list:
+    return [
+        row[0]
+        for row in conn.execute(
+            text(f"SELECT collaboration_identity FROM {table} ORDER BY id")
+        ).fetchall()
+    ]
+
+
+def test_collaboration_identity_column_declares_a_server_default_per_dialect():
+    """Break caught: the default lives only in a startup migration, so the schema
+    create_all() produces is wrong until a repair migration fixes it.
+
+    The ORM column is the single source of truth here. On PostgreSQL the mutation
+    migration also runs ``ALTER COLUMN ... SET DEFAULT gen_random_uuid()``, which
+    masks a missing column default on that dialect alone — so a dialect-independent
+    assertion on the column itself is what actually pins the invariant.
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+    from sqlalchemy.schema import CreateTable
+
+    from src.database.models.session import SessionSlideDeck, UserSession
+
+    for model in (UserSession, SessionSlideDeck):
+        column = model.__table__.c.collaboration_identity
+        assert column.nullable is False
+        assert column.server_default is not None, (
+            f"{model.__tablename__}.collaboration_identity has no server-side "
+            "default; every non-ORM insert omitting it would violate NOT NULL"
+        )
+        # Python-side default retained too: an ORM insert still gets its UUID
+        # without a RETURNING round-trip.
+        assert column.default is not None
+
+        postgres_ddl = str(
+            CreateTable(model.__table__).compile(dialect=postgresql.dialect())
+        )
+        sqlite_ddl = str(
+            CreateTable(model.__table__).compile(dialect=sqlite_dialect.dialect())
+        )
+        assert "collaboration_identity UUID DEFAULT gen_random_uuid() NOT NULL" in (
+            postgres_ddl
+        )
+        assert (
+            "collaboration_identity CHAR(32) DEFAULT "
+            "(lower(hex(randomblob(16)))) NOT NULL"
+        ) in sqlite_ddl
+
+
+def test_collaboration_identity_is_server_generated_on_a_fresh_schema(sqlite_engine):
+    """Break caught: the identity column carries only a Python-side ORM default, so
+    every raw-SQL/bulk insert that omits it fails NOT NULL."""
+    Base.metadata.create_all(bind=sqlite_engine)
+    _run_migrations(sqlite_engine, schema=None)
+
+    with sqlite_engine.begin() as conn:
+        first_owner = _raw_insert_session(conn, "raw-sess-1")
+        second_owner = _raw_insert_session(conn, "raw-sess-2")
+        _raw_insert_deck(conn, first_owner)
+        _raw_insert_deck(conn, second_owner)
+
+    with sqlite_engine.connect() as conn:
+        session_identities = _identities(conn, "user_sessions")
+        deck_identities = _identities(conn, "session_slide_decks")
+
+    assert len(session_identities) == 2
+    assert len(deck_identities) == 2
+    for label, identities in (
+        ("user_sessions", session_identities),
+        ("session_slide_decks", deck_identities),
+    ):
+        assert all(value for value in identities), (
+            f"{label}.collaboration_identity was not populated by the database "
+            f"for a raw-SQL insert: {identities}"
+        )
+        assert len(set(identities)) == len(identities), (
+            f"{label}.collaboration_identity is not distinct per row: {identities}"
+        )
+
+    # The column stays NOT NULL: the default is what makes the insert legal, not a
+    # relaxed constraint.
+    inspector = inspect(sqlite_engine)
+    for table in ("user_sessions", "session_slide_decks"):
+        column = next(
+            column
+            for column in inspector.get_columns(table)
+            if column["name"] == "collaboration_identity"
+        )
+        assert column["nullable"] is False, (
+            f"{table}.collaboration_identity must stay NOT NULL"
+        )
+
+
+def test_collaboration_identity_backfill_and_default_on_the_legacy_alter_path(
+    sqlite_engine,
+):
+    """Break caught: the migration adds the column without backfilling historical rows
+    with distinct identities, or leaves later non-ORM inserts with no identity."""
+    migration = getattr(database_module, "_migrate_shared_deck_mutation_schema", None)
+    assert migration is not None
+
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE user_sessions ("
+                "id INTEGER PRIMARY KEY, session_id VARCHAR(64) NOT NULL, "
+                "created_by VARCHAR(255), created_at DATETIME, "
+                "last_activity DATETIME, is_processing BOOLEAN)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE session_slide_decks ("
+                "id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, "
+                "version INTEGER, created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+        conn.execute(text("CREATE TABLE graph_release (id INTEGER PRIMARY KEY)"))
+        conn.execute(
+            text(
+                "INSERT INTO user_sessions (id, session_id) VALUES "
+                "(1, 'legacy-root'), (2, 'legacy-actor'), (3, 'legacy-third')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO session_slide_decks (id, session_id) VALUES "
+                "(10, 1), (11, 2)"
+            )
+        )
+
+    def run_migration():
+        with sqlite_engine.begin() as conn:
+            migration(conn, inspect(conn), None, lambda table: f'"{table}"', True)
+
+    run_migration()
+
+    with sqlite_engine.connect() as conn:
+        backfilled_sessions = _identities(conn, "user_sessions")
+        backfilled_decks = _identities(conn, "session_slide_decks")
+
+    assert len(backfilled_sessions) == 3
+    assert len(backfilled_decks) == 2
+    for label, identities in (
+        ("user_sessions", backfilled_sessions),
+        ("session_slide_decks", backfilled_decks),
+    ):
+        assert all(value for value in identities), (
+            f"legacy {label} rows were not backfilled: {identities}"
+        )
+        assert len(set(identities)) == len(identities), (
+            f"legacy {label} rows share a backfilled identity: {identities}"
+        )
+
+    # A non-ORM insert AFTER the migration must also receive an identity; otherwise
+    # every mutation on that row fails in shared_deck_attribution with
+    # "collaboration identities must exist before mutation evidence".
+    with sqlite_engine.begin() as conn:
+        new_owner = _raw_insert_session(conn, "post-migration-sess")
+        _raw_insert_deck(conn, new_owner)
+
+    with sqlite_engine.connect() as conn:
+        sessions_after = _identities(conn, "user_sessions")
+        decks_after = _identities(conn, "session_slide_decks")
+
+    assert len(sessions_after) == 4
+    assert len(decks_after) == 3
+    for label, identities in (
+        ("user_sessions", sessions_after),
+        ("session_slide_decks", decks_after),
+    ):
+        assert all(value for value in identities), (
+            f"a post-migration raw insert into {label} got no identity: {identities}"
+        )
+        assert len(set(identities)) == len(identities), (
+            f"{label} identities are not distinct after a raw insert: {identities}"
+        )
+
+    # Idempotent: a second pass neither rewrites existing identities nor raises.
+    run_migration()
+    with sqlite_engine.connect() as conn:
+        assert _identities(conn, "user_sessions") == sessions_after
+        assert _identities(conn, "session_slide_decks") == decks_after

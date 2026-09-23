@@ -22,10 +22,47 @@ from sqlalchemy import (
     inspect,
     text,
 )
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import backref, relationship
+from sqlalchemy.sql.functions import FunctionElement
 
 from src.core.database import Base
 from src.database.types import NormalizedAgentConfig
+
+
+# Lowercase by SQLAlchemy convention: a FunctionElement subclass names the SQL
+# function it renders, so CapWords would misname it.
+class collaboration_identity_default(FunctionElement):  # noqa: N801
+    """Server-side generator for a stable collaboration identity.
+
+    ``collaboration_identity`` is ``nullable=False``, and a Python-side
+    ``default=uuid.uuid4`` fires only on an ORM-mapper insert.  Every other writer —
+    raw SQL, ``insert().values()`` that omits the column, a bulk insert, a migration
+    backfill — would violate the constraint.  Declaring the default on the *column*
+    makes ``create_all`` emit it for whichever dialect is in play, so the database,
+    not the mapper, is what guarantees an identity exists.
+
+    Rendered per dialect below.  The SQLite spelling produces the same 32-character
+    lowercase hex form that ``Uuid(as_uuid=True)`` stores in its ``CHAR(32)`` column,
+    and both ``randomblob`` and ``gen_random_uuid`` are evaluated per row, so every
+    row gets a distinct identity.  SQLite only accepts an expression default when it
+    is parenthesised; SQLAlchemy's SQLite DDL compiler adds those parentheses, which
+    is why they are absent here.
+    """
+
+    name = "collaboration_identity_default"
+    type = Uuid(as_uuid=True)
+    inherit_cache = True
+
+
+@compiles(collaboration_identity_default)
+def _render_collaboration_identity_default(element, compiler, **kw) -> str:
+    return "gen_random_uuid()"
+
+
+@compiles(collaboration_identity_default, "sqlite")
+def _render_collaboration_identity_default_sqlite(element, compiler, **kw) -> str:
+    return "lower(hex(randomblob(16)))"
 
 
 class ChatRequest(Base):
@@ -107,6 +144,7 @@ class UserSession(Base):
     collaboration_identity = Column(
         Uuid(as_uuid=True),
         default=uuid.uuid4,
+        server_default=collaboration_identity_default(),
         nullable=False,
     )
     user_id = Column(String(255), nullable=True, index=True)  # Legacy — kept for backward compat
@@ -274,6 +312,7 @@ class SessionSlideDeck(Base):
     collaboration_identity = Column(
         Uuid(as_uuid=True),
         default=uuid.uuid4,
+        server_default=collaboration_identity_default(),
         nullable=False,
     )
     session_id = Column(
