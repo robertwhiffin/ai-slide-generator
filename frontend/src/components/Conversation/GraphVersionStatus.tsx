@@ -18,7 +18,7 @@ export function GraphVersionStatus({
   if (graphVersion === null) {
     return (
       <div data-testid="graph-version-status" className="px-3 py-1.5 text-xs text-muted-foreground">
-        Agent version unavailable
+        Pinned Graph Version unavailable
       </div>
     );
   }
@@ -29,7 +29,7 @@ export function GraphVersionStatus({
       className="flex items-center gap-2 border-b border-border bg-card px-3 py-1.5 text-xs text-muted-foreground"
     >
       <span>
-        Agent version {graphVersion}{isOlder ? `; latest is ${activeGraphVersion}` : ''}
+        Pinned Graph Version {graphVersion}{isOlder ? `; latest is ${activeGraphVersion}` : ''}
       </span>
       {isOlder && (
         <Button

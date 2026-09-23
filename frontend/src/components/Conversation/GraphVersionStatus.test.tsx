@@ -57,6 +57,46 @@ describe('conversation graph-version state', () => {
     fetchMock.mockRestore();
   });
 
+  it('serializes omitted graph capability as false', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ session_id: 'default-root' }), { status: 200 }),
+    );
+
+    await api.createSession({ sessionId: 'default-root' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/sessions'),
+      expect.objectContaining({
+        body: JSON.stringify({
+          session_id: 'default-root',
+          title: undefined,
+          graph_capable: false,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('serializes explicit non-graph capability as false', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ session_id: 'legacy-root' }), { status: 200 }),
+    );
+
+    await api.createSession({ sessionId: 'legacy-root', graphCapable: false });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/sessions'),
+      expect.objectContaining({
+        body: JSON.stringify({
+          session_id: 'legacy-root',
+          title: undefined,
+          graph_capable: false,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('restores returned graph versions and clears them for a fresh local session', async () => {
     render(
       <SessionProvider>
@@ -92,7 +132,7 @@ describe('GraphVersionStatus', () => {
       />,
     );
 
-    expect(screen.getByTestId('graph-version-status')).toHaveTextContent('Agent version 2');
+    expect(screen.getByTestId('graph-version-status')).toHaveTextContent('Pinned Graph Version 2');
     expect(screen.queryByRole('button', { name: 'Start latest' })).not.toBeInTheDocument();
   });
 
@@ -107,7 +147,7 @@ describe('GraphVersionStatus', () => {
       />,
     );
 
-    expect(screen.getByTestId('graph-version-status')).toHaveTextContent('Agent version 1; latest is 2');
+    expect(screen.getByTestId('graph-version-status')).toHaveTextContent('Pinned Graph Version 1; latest is 2');
     fireEvent.click(screen.getByRole('button', { name: 'Start latest' }));
     expect(onStartLatest).toHaveBeenCalledOnce();
   });
@@ -123,7 +163,7 @@ describe('GraphVersionStatus', () => {
       />,
     );
 
-    expect(screen.getByTestId('graph-version-status')).toHaveTextContent('Agent version unavailable');
+    expect(screen.getByTestId('graph-version-status')).toHaveTextContent('Pinned Graph Version unavailable');
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 });
