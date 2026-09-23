@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from datetime import timezone
 from types import MappingProxyType
-from typing import Generic, Mapping, TypeVar
+from typing import Callable, Generic, Literal, Mapping, TypeVar
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -26,9 +26,11 @@ from src.services.graph_configuration_workbench import (
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
+    AssemblyRulesV2,
     DefinitionContent,
     definition_content_hash,
 )
+from src.services.prompt_assembler import PromptAssembler, PromptAssemblyRejected
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class EditableModelDraft:
     temperature: float
     max_tokens: int
     top_p: float
+    assembly_rules: AssemblyRulesV2 | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,25 @@ class DraftSaveResult:
 class DraftAggregateSnapshot:
     draft: DraftMetadataSnapshot
     definitions: Mapping[AgentKey, DraftDefinitionSnapshot]
+
+
+@dataclass(frozen=True)
+class DraftLegacyPromptSourceRecord:
+    """Server-authored retained Graph Version 1 prompt source for one role."""
+
+    prompt_text: str
+    revision_id: int
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class DraftLegacyPromptSource:
+    """Read-only recovery result; it carries no candidate and causes no write."""
+
+    draft: DraftMetadataSnapshot
+    agent_key: AgentKey
+    lock_version: int
+    source: DraftLegacyPromptSourceRecord
 
 
 ClientCandidateT = TypeVar("ClientCandidateT")
@@ -84,6 +106,60 @@ class DraftContentRejected(ValueError):  # noqa: N818 - stable public domain nam
         super().__init__("; ".join(issue.message for issue in issues))
 
 
+_PROMPT_ASSEMBLER = PromptAssembler()
+
+#: One ordered tuple of validators over a complete rehydrated ``DefinitionContent``.
+#: A validator owns no persistence and returns its issues in its own declared order.
+DraftCandidateValidator = Callable[[DefinitionContent], tuple[DraftValidationIssue, ...]]
+
+_LEGACY_SOURCE_ROLES: tuple[Literal["data_analyst", "build_reviewer"], ...] = (
+    "data_analyst",
+    "build_reviewer",
+)
+_LEGACY_SOURCE_UNSUPPORTED = DraftValidationIssue(
+    "agent_key",
+    "legacy_prompt_source_unsupported",
+    "Legacy Graph Version 1 prompt recovery is supported only for Data Analyst "
+    "and Build Reviewer.",
+)
+_LEGACY_SOURCE_NOT_REQUIRED = DraftValidationIssue(
+    "prompt_text",
+    "legacy_prompt_source_not_required",
+    "The draft already uses the exact Graph Version 1 prompt.",
+)
+_EDITABLE_RULES_INVALID = DraftValidationIssue(
+    "candidate.assembly_rules",
+    "invalid_content",
+    "Assembly rules must satisfy the persisted assembly contract.",
+)
+_LEGACY_SOURCE_UNAVAILABLE = DraftValidationIssue(
+    "prompt_text",
+    "legacy_prompt_source_unavailable",
+    "The exact published Graph Version 1 prompt source is unavailable for this draft.",
+)
+
+
+def _copied_assembly_issues(
+    rejection: PromptAssemblyRejected,
+) -> tuple[DraftValidationIssue, ...]:
+    """Copy assembler-owned field/code/message values in order; own no policy."""
+    return tuple(
+        DraftValidationIssue(issue.field, issue.code, issue.message)
+        for issue in rejection.issues
+    )
+
+
+def _assembly_candidate_validator(
+    content: DefinitionContent,
+) -> tuple[DraftValidationIssue, ...]:
+    """Structural adapter for ``PromptAssembler.validate``; it adds no semantics."""
+    try:
+        _PROMPT_ASSEMBLER.validate(definition=content)
+    except PromptAssemblyRejected as rejection:
+        return _copied_assembly_issues(rejection)
+    return ()
+
+
 _EXPECTED_AGENT_KEYS = frozenset(GRAPH_V1_AGENT_KEYS)
 _IMMUTABLE_DRAFT_FIELDS = (
     "definition_version",
@@ -112,6 +188,26 @@ _IMMUTABLE_ISSUES = {
 class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
     """Own complete draft reconstruction, validation, hashing, and audit writes."""
 
+    #: Deterministic/local validators; they run before the stale comparison.
+    local_candidate_validators: tuple[DraftCandidateValidator, ...] = (
+        _assembly_candidate_validator,
+    )
+    #: Remote/expensive validators; they run only for a current candidate and
+    #: immediately before the one mapper/hash/flush/audit/lock write.
+    post_stale_validators: tuple[DraftCandidateValidator, ...] = ()
+
+    def _run_candidate_validators(
+        self,
+        validators: tuple[DraftCandidateValidator, ...],
+        content: DefinitionContent,
+    ) -> None:
+        """Aggregate one reached phase in validator order, then issue order."""
+        issues: list[DraftValidationIssue] = []
+        for validator in validators:
+            issues.extend(validator(content))
+        if issues:
+            raise DraftContentRejected(*issues)
+
     def save_editable_model_draft(
         self,
         session: Session,
@@ -132,13 +228,6 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 session,
                 agent_key=agent_key,
             )
-            if expected_lock_version != locked.snapshot.draft.lock_version:
-                return DraftSaveConflict(
-                    expected_lock_version=expected_lock_version,
-                    current_lock_version=locked.snapshot.draft.lock_version,
-                    client_candidate=candidate,
-                    server=self._draft_aggregate_snapshot(locked.snapshot),
-                )
             payload = locked.selected.draft.content.model_dump(mode="python")
             payload["prompt_text"] = candidate.prompt_text
             payload["model"] = {
@@ -147,7 +236,23 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 "max_tokens": candidate.max_tokens,
                 "top_p": candidate.top_p,
             }
-            content = DefinitionContent.model_validate(payload)
+            if candidate.assembly_rules is not None:
+                payload["assembly_rules"] = candidate.assembly_rules.model_dump(
+                    mode="python"
+                )
+            try:
+                content = DefinitionContent.model_validate(payload)
+            except (TypeError, ValueError) as exc:
+                raise DraftContentRejected(_EDITABLE_RULES_INVALID) from exc
+            self._run_candidate_validators(self.local_candidate_validators, content)
+            if expected_lock_version != locked.snapshot.draft.lock_version:
+                return DraftSaveConflict(
+                    expected_lock_version=expected_lock_version,
+                    current_lock_version=locked.snapshot.draft.lock_version,
+                    client_candidate=candidate,
+                    server=self._draft_aggregate_snapshot(locked.snapshot),
+                )
+            self._run_candidate_validators(self.post_stale_validators, content)
             return self._write_locked_content(
                 session,
                 locked=locked,
@@ -197,6 +302,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             )
             if issues:
                 raise DraftContentRejected(*issues)
+            self._run_candidate_validators(self.local_candidate_validators, validated)
             if expected_lock_version != locked.snapshot.draft.lock_version:
                 return DraftSaveConflict(
                     expected_lock_version=expected_lock_version,
@@ -204,12 +310,116 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     client_candidate=validated,
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
+            self._run_candidate_validators(self.post_stale_validators, validated)
             return self._write_locked_content(
                 session,
                 locked=locked,
                 content=validated,
                 actor=actor,
             )
+
+    def upgrade_draft_protected_assembly(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+        expected_lock_version: int,
+        actor: str,
+    ) -> DraftSaveResult | DraftSaveConflict[None]:
+        """Apply the one permitted v1 to v2 protected-assembly transition."""
+        self._validate_common(actor, expected_lock_version, agent_key)
+        with session.begin():
+            locked = self._read_workbench_for_draft_write(
+                session,
+                agent_key=agent_key,
+            )
+            if expected_lock_version != locked.snapshot.draft.lock_version:
+                return DraftSaveConflict(
+                    expected_lock_version=expected_lock_version,
+                    current_lock_version=locked.snapshot.draft.lock_version,
+                    client_candidate=None,
+                    server=self._draft_aggregate_snapshot(locked.snapshot),
+                )
+            try:
+                target = _PROMPT_ASSEMBLER.upgrade_definition_to_v2(
+                    definition=locked.selected.draft.content
+                )
+            except PromptAssemblyRejected as rejection:
+                raise DraftContentRejected(
+                    *_copied_assembly_issues(rejection)
+                ) from rejection
+            self._run_candidate_validators(self.local_candidate_validators, target)
+            self._run_candidate_validators(self.post_stale_validators, target)
+            return self._write_locked_content(
+                session,
+                locked=locked,
+                content=target,
+                actor=actor,
+            )
+
+    def get_draft_legacy_prompt_source(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+        expected_lock_version: int,
+        actor: str,
+    ) -> DraftLegacyPromptSource | DraftSaveConflict[None]:
+        """Read the retained Graph Version 1 prompt source; never write anything."""
+        self._validate_common(actor, expected_lock_version, agent_key)
+        with session.begin():
+            locked = self._read_workbench_for_draft_write(
+                session,
+                agent_key=agent_key,
+            )
+            if expected_lock_version != locked.snapshot.draft.lock_version:
+                return DraftSaveConflict(
+                    expected_lock_version=expected_lock_version,
+                    current_lock_version=locked.snapshot.draft.lock_version,
+                    client_candidate=None,
+                    server=self._draft_aggregate_snapshot(locked.snapshot),
+                )
+            return self._legacy_prompt_source(locked, agent_key=agent_key)
+
+    @staticmethod
+    def _legacy_prompt_source(
+        locked: _LockedDraftWriteAggregate,
+        *,
+        agent_key: AgentKey,
+    ) -> DraftLegacyPromptSource:
+        if agent_key not in _LEGACY_SOURCE_ROLES:
+            raise DraftContentRejected(_LEGACY_SOURCE_UNSUPPORTED)
+        transition = _PROMPT_ASSEMBLER.legacy_v1_prompt_source(agent_key=agent_key)
+        draft = locked.selected.draft.content
+        if (
+            draft.definition_version != transition.source_definition_version
+            or draft.protected_assembly != transition.source_protected_assembly
+            or draft.assembly_rules != transition.source_assembly_rules
+        ):
+            raise DraftContentRejected(_LEGACY_SOURCE_UNAVAILABLE)
+        if draft.prompt_text == transition.source_composite_prompt:
+            raise DraftContentRejected(_LEGACY_SOURCE_NOT_REQUIRED)
+        published = locked.selected.published
+        if (
+            published.content.agent_key != agent_key
+            or published.content.definition_version
+            != transition.source_definition_version
+            or published.content.protected_assembly
+            != transition.source_protected_assembly
+            or published.content.assembly_rules != transition.source_assembly_rules
+            or published.content.prompt_text != transition.source_composite_prompt
+        ):
+            raise DraftContentRejected(_LEGACY_SOURCE_UNAVAILABLE)
+        return DraftLegacyPromptSource(
+            draft=locked.snapshot.draft,
+            agent_key=agent_key,
+            lock_version=locked.snapshot.draft.lock_version,
+            source=DraftLegacyPromptSourceRecord(
+                prompt_text=transition.source_composite_prompt,
+                revision_id=published.revision_id,
+                content_hash=published.content_hash,
+            ),
+        )
 
     @staticmethod
     def _validate_common(actor: object, lock_version: object, agent_key: object) -> None:
@@ -332,6 +542,16 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 field="candidate.model.top_p",
                 label="Top-p",
             )
+            if candidate.assembly_rules is not None and not isinstance(
+                candidate.assembly_rules, AssemblyRulesV2
+            ):
+                issues.append(
+                    DraftValidationIssue(
+                        "candidate.assembly_rules",
+                        "strict_type",
+                        "Assembly rules must be the current editable custom-block record.",
+                    )
+                )
         if issues:
             raise DraftContentRejected(*issues)
 

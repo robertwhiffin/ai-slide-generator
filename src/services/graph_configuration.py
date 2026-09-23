@@ -15,7 +15,10 @@ from src.services.graph_configuration_bootstrap import (
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_configuration_draft import (
     DraftAggregateSnapshot,
+    DraftCandidateValidator,
     DraftContentRejected,
+    DraftLegacyPromptSource,
+    DraftLegacyPromptSourceRecord,
     DraftSaveConflict,
     DraftSaveResult,
     DraftValidationIssue,
@@ -56,8 +59,11 @@ __all__ = [
     "BootstrapResult",
     "DeterministicAgentNodeSnapshot",
     "DraftAggregateSnapshot",
+    "DraftCandidateValidator",
     "DraftContentRejected",
     "DraftDefinitionSnapshot",
+    "DraftLegacyPromptSource",
+    "DraftLegacyPromptSourceRecord",
     "DraftMetadataSnapshot",
     "DraftSaveConflict",
     "DraftSaveResult",
