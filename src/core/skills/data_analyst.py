@@ -11,9 +11,7 @@ from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE
 
 TOOL_GRANTS: list[str] = ["genie", "vector_index"]
 
-INSTRUCTIONS: str = (
-    UNTRUSTED_DATA_NOTICE
-    + "\n\n"
+ANALYST_AUTHORED_INSTRUCTIONS: str = (
     "You are a data analyst.  Retrieve the metrics requested in the data_request "
     "payload and return a synthesised result.\n\n"
     "TOOLS AVAILABLE:\n"
@@ -36,3 +34,5 @@ INSTRUCTIONS: str = (
     "  no_tool       — set reason to why no tool applies\n\n"
     "Return an AnalystOutput."
 )
+
+INSTRUCTIONS: str = UNTRUSTED_DATA_NOTICE + "\n\n" + ANALYST_AUTHORED_INSTRUCTIONS

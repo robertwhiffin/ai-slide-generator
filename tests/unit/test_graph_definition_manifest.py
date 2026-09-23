@@ -378,6 +378,19 @@ def test_manifest_assembly_replays_exact_runtime_prompt(
     assert replayed.terminal_binding == "langchain.with_structured_output"
 
 
+def test_frozen_v1_manifest_identity_remains_exact_for_protected_assembler() -> None:
+    """Catches changing historical v1 identity while introducing its v2 successor."""
+    from src.services.prompt_assembler import V1_PROTECTED_ASSEMBLY_IDENTITY
+
+    assert V1_PROTECTED_ASSEMBLY_IDENTITY.model_dump() == {
+        "version": 1,
+        "digest": "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852",
+    }
+    assert {
+        definition.protected_assembly for definition in load_graph_v1_manifest().definitions
+    } == {V1_PROTECTED_ASSEMBLY_IDENTITY}
+
+
 @pytest.mark.parametrize("deck_brief", [None, "", "Synthetic brief"])
 def test_build_reviewer_deck_brief_block_tracks_payload_truthiness(deck_brief: str | None):
     payload = {"deck_brief": deck_brief}
