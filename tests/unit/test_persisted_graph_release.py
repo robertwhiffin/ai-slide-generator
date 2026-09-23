@@ -23,8 +23,10 @@ from src.services.graph_configuration import GraphConfiguration
 from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
-    AssemblyRules,
+    AssemblyRulesV1,
+    AssemblyRulesV2,
     DefinitionContent,
+    definition_content_hash,
 )
 from src.services.persisted_graph_release import (
     GraphReleaseIncompleteError,
@@ -135,9 +137,45 @@ def test_resolves_the_complete_typed_v1_snapshot_and_caches_exact_release_id(
         assert definition.graph_release_id == v1_release_id
         assert definition.agent_key == key
         assert isinstance(definition.content, DefinitionContent)
-        assert isinstance(definition.content.assembly_rules, AssemblyRules)
+        assert isinstance(definition.content.assembly_rules, AssemblyRulesV1)
         assert definition.content.agent_key == key
         assert definition.content_hash == definition.content_hash.lower()
+
+
+def test_loader_parses_persisted_v1_and_v2_assembly_wire_values(
+    session_factory, v1_release_id
+):
+    v1 = PersistedGraphReleaseLoader(session_factory=session_factory).resolve(
+        v1_release_id, "architect"
+    )
+    assert isinstance(v1.content.assembly_rules, AssemblyRulesV1)
+
+    with session_factory.begin() as db:
+        revision = db.scalar(
+            select(AgentDefinitionRevision).where(
+                AgentDefinitionRevision.agent_key == "architect"
+            )
+        )
+        assert revision is not None
+        revision.assembly_rules = {
+            "format_version": 2,
+            "custom_blocks": [
+                {
+                    "kind": "custom_text",
+                    "block_id": "00000000-0000-0000-0000-000000000001",
+                    "anchor": "after_authored_prompt",
+                    "condition": "always",
+                    "text": "persisted custom text",
+                }
+            ],
+        }
+        v2_content = definition_content_from_row(revision)
+        revision.content_hash = definition_content_hash(v2_content)
+
+    v2 = PersistedGraphReleaseLoader(session_factory=session_factory).resolve(
+        v1_release_id, "architect"
+    )
+    assert isinstance(v2.content.assembly_rules, AssemblyRulesV2)
 
 
 def test_resolves_v1_and_v2_by_their_persisted_ids_not_active_release(

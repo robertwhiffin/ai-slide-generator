@@ -15,6 +15,7 @@ from decimal import Decimal
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Annotated, Literal, TypeAlias, cast
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -49,6 +50,11 @@ AssemblyCondition: TypeAlias = Literal[
     "design_system_active",
     "design_system_inactive",
     "payload_has_deck_brief",
+]
+CustomAnchor: TypeAlias = Literal[
+    "after_authored_prompt",
+    "after_deck_brief",
+    "after_environment_constraints",
 ]
 _LOWERCASE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
@@ -147,7 +153,7 @@ class StructuredOutputBindingBlock(_FrozenModel):
     terminal: Literal[True]
 
 
-AssemblyBlock: TypeAlias = Annotated[
+AssemblyBlockV1: TypeAlias = Annotated[
     AuthoredPromptBlock
     | ProtectedBlock
     | PayloadJsonBlock
@@ -156,10 +162,29 @@ AssemblyBlock: TypeAlias = Annotated[
 ]
 
 
-class AssemblyRules(_FrozenModel):
+class AssemblyRulesV1(_FrozenModel):
     format_version: Literal[1]
     separator: Literal["\n\n"]
-    blocks: tuple[AssemblyBlock, ...]
+    blocks: tuple[AssemblyBlockV1, ...]
+
+
+class CustomTextBlock(_FrozenModel):
+    kind: Literal["custom_text"]
+    block_id: UUID
+    anchor: CustomAnchor
+    condition: AssemblyCondition
+    text: str
+
+
+class AssemblyRulesV2(_FrozenModel):
+    format_version: Literal[2]
+    custom_blocks: tuple[CustomTextBlock, ...]
+
+
+AssemblyRules: TypeAlias = Annotated[
+    AssemblyRulesV1 | AssemblyRulesV2,
+    Field(discriminator="format_version"),
+]
 
 
 class ContentIdentity(_FrozenModel):
@@ -231,7 +256,9 @@ class DefinitionContent(_FrozenModel):
 
     @model_validator(mode="after")
     def validate_role_assembly(self) -> DefinitionContent:
-        expected = AssemblyRules.model_validate(assembly_rules_for(self.agent_key))
+        if not isinstance(self.assembly_rules, AssemblyRulesV1):
+            return self
+        expected = AssemblyRulesV1.model_validate(assembly_rules_for(self.agent_key))
         if self.assembly_rules != expected:
             raise ValueError(
                 f"assembly rules for {self.agent_key!r} do not match Graph Version 1"
@@ -281,6 +308,8 @@ def _normalize_canonical_value(value: object) -> object:
         return [_normalize_canonical_value(item) for item in value]
     if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
         return value
+    if isinstance(value, UUID):
+        return str(value)
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError("canonical numeric values must be finite")
