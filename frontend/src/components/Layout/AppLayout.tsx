@@ -608,6 +608,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [createNewSession, navigate, setConversationGraphVersion, showToast]);
 
+  const ensureGraphCapableRoot = useCallback(async (): Promise<boolean> => {
+    if (!sessionId) return false;
+
+    try {
+      const created = await api.createSession({ sessionId, graphCapable: true });
+      setConversationGraphVersion(created);
+      setSessionsRefreshKey(prev => prev + 1);
+      navigate(`/sessions/${created.session_id}/edit`, { replace: true });
+      return true;
+    } catch (err) {
+      console.error('Failed to create graph-capable root session:', err);
+      showToast('Failed to create a new session', 'error');
+      return false;
+    }
+  }, [navigate, sessionId, setConversationGraphVersion, showToast]);
+
   const handleStartLatest = useCallback(async () => {
     setIsStartingLatest(true);
     try {
@@ -1176,6 +1192,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         setReleasedPositions(new Set());
                       }}
                       onSlideReady={handleSlideReady}
+                      ensureGraphCapableRoot={ensureGraphCapableRoot}
                       previewMessages={previewVersion != null ? previewMessages : null}
                       onSlidesGenerated={async (deck, raw) => {
                         onGenerationComplete();

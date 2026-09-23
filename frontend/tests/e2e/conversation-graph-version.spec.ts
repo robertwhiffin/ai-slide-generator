@@ -34,6 +34,44 @@ async function allowEditing(page: import('@playwright/test').Page) {
 }
 
 test.describe('conversation graph versions', () => {
+  test('initial root persists a graph-capable root before its first USE AGENT MODE turn', async ({ page }) => {
+    await setupMocks(page);
+    const requests: Array<{ kind: 'create' | 'chat'; body: Record<string, unknown> }> = [];
+
+    await page.route('http://127.0.0.1:8000/api/sessions', async (route, request) => {
+      if (request.method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+      const body = request.postDataJSON() as Record<string, unknown>;
+      requests.push({ kind: 'create', body });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sessionResponse(body.session_id as string, 2, 2, false)),
+      });
+    });
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route, request) => {
+      requests.push({ kind: 'chat', body: request.postDataJSON() as Record<string, unknown> });
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type":"complete"}\n\n',
+      });
+    });
+    await allowEditing(page);
+
+    await page.goto('/');
+    await page.getByTestId('chat-input').fill('USE AGENT MODE build a deck about puffins');
+    await page.getByTestId('chat-input').press('Enter');
+
+    await expect.poll(() => requests.length).toBe(2);
+    expect(requests.map(({ kind }) => kind)).toEqual(['create', 'chat']);
+    expect(requests[0].body).toMatchObject({ graph_capable: true });
+    expect(requests[0].body.session_id).toMatch(/[0-9a-f-]{36}/);
+    expect(requests[1].body).toMatchObject({ session_id: requests[0].body.session_id });
+  });
+
   test('New Deck persists a graph-capable root before its first USE AGENT MODE turn', async ({ page }) => {
     await setupMocks(page);
     const creations: Array<Record<string, unknown>> = [];
@@ -128,7 +166,7 @@ test.describe('conversation graph versions', () => {
     await allowEditing(page);
 
     await page.goto(`/sessions/${SESSION_A}/edit`);
-    await expect(page.getByTestId('graph-version-status')).toContainText('Agent version 1; latest is 2');
+    await expect(page.getByTestId('graph-version-status')).toContainText('Pinned Graph Version 1; latest is 2');
     await page.getByRole('button', { name: 'Start latest' }).click();
 
     await expect(page).toHaveURL(new RegExp(`/sessions/${SESSION_B}/edit`));
@@ -169,12 +207,12 @@ test.describe('conversation graph versions', () => {
     await allowEditing(page);
 
     await page.goto(`/sessions/${SESSION_A}/edit`);
-    await expect(page.getByTestId('graph-version-status')).toContainText('Agent version 1; latest is 2');
+    await expect(page.getByTestId('graph-version-status')).toContainText('Pinned Graph Version 1; latest is 2');
     await page.getByRole('button', { name: 'Start latest' }).click();
 
     await expect(page.locator('[data-testid="toast"]').first()).toContainText('Failed to start the latest conversation');
     await expect(page).toHaveURL(new RegExp(`/sessions/${SESSION_A}/edit`));
-    await expect(page.getByTestId('graph-version-status')).toContainText('Agent version 1; latest is 2');
+    await expect(page.getByTestId('graph-version-status')).toContainText('Pinned Graph Version 1; latest is 2');
     expect(creationBodies).toEqual([{ graph_capable: true }]);
     expect(graphTurns).toEqual([]);
     expect(oldSessionMutations).toEqual([]);
@@ -206,7 +244,7 @@ test.describe('conversation graph versions', () => {
 
     await expect(page.locator('[data-testid="toast"]').first()).toContainText('Failed to create a new session');
     await expect(page).toHaveURL('/');
-    await expect(page.getByTestId('graph-version-status')).toContainText('Agent version unavailable');
+    await expect(page.getByTestId('graph-version-status')).toContainText('Pinned Graph Version unavailable');
     expect(graphTurns).toEqual([]);
   });
 });
