@@ -18,7 +18,13 @@ from src.api.schemas.agent_definitions import (
     DraftValidationErrorResponse,
 )
 from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE
-from src.core.skills.build_reviewer import BUILD_REVIEWER_CRITERIA_STAGE
+from src.core.skills.build_reviewer import (
+    BUILD_REVIEWER_AUTHORED_PREFIX,
+    BUILD_REVIEWER_CRITERIA_STAGE,
+    BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
+    BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+)
+from src.core.skills.data_analyst import ANALYST_AUTHORED_INSTRUCTIONS
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     GraphDraft,
@@ -455,6 +461,22 @@ def test_workbench_parent_share_lock_prevents_mixed_read_committed_snapshot(
 
 
 AFFECTED_ROLES = ("data_analyst", "build_reviewer")
+#: Recomposed from the reviewed skill constants rather than from ``PromptAssembler``, so the
+#: expected and actual sides of a transition assertion are not both the assembler's output.
+INDEPENDENT_TRANSITION_LITERALS = {
+    "data_analyst": (
+        UNTRUSTED_DATA_NOTICE + "\n\n" + ANALYST_AUTHORED_INSTRUCTIONS,
+        ANALYST_AUTHORED_INSTRUCTIONS,
+    ),
+    "build_reviewer": (
+        BUILD_REVIEWER_AUTHORED_PREFIX
+        + "\n\n"
+        + BUILD_REVIEWER_CRITERIA_STAGE
+        + "\n\n"
+        + BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
+        BUILD_REVIEWER_AUTHORED_PREFIX + "\n\n" + BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+    ),
+}
 MANUAL_RESOLUTION_TUPLE = (
     (
         "prompt_text",
@@ -545,7 +567,10 @@ def _assert_authored_only_persisted_v2(
         if agent_key == "data_analyst"
         else BUILD_REVIEWER_CRITERIA_STAGE
     )
+    independent_source, independent_target = INDEPENDENT_TRANSITION_LITERALS[agent_key]
     assert reloaded.prompt_text == transition.target_authored_prompt
+    assert reloaded.prompt_text == independent_target
+    assert reloaded.prompt_text != independent_source
     assert displaced not in reloaded.prompt_text
     assert reloaded.assembly_rules == AssemblyRulesV2(format_version=2, custom_blocks=())
     assert reloaded.protected_assembly == V2_PROTECTED_ASSEMBLY_IDENTITY
@@ -595,6 +620,7 @@ def test_locked_persisted_protected_assembly_transition_and_recovery(
     assert bootstrap_content.protected_assembly == transition.source_protected_assembly
     assert bootstrap_content.assembly_rules == transition.source_assembly_rules
     assert bootstrap_content.prompt_text == transition.source_composite_prompt
+    assert bootstrap_content.prompt_text == INDEPENDENT_TRANSITION_LITERALS[agent_key][0]
     assert bootstrap_hash == definition_content_hash(bootstrap_content)
 
     with factory() as session:

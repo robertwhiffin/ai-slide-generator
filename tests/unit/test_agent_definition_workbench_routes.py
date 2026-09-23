@@ -561,13 +561,32 @@ def test_corrupt_graph_maps_to_stable_nonleaking_500(
 def test_main_app_registers_the_dedicated_workbench_route():
     from src.api.main import app
 
-    matches = [
-        route
-        for route in app.routes
-        if getattr(route, "path", None) == "/api/admin/agent-definitions/workbench"
-    ]
-    assert len(matches) == 1
-    assert matches[0].methods == {"GET"}
+    expected_methods = {
+        "/api/admin/agent-definitions/workbench": {"GET"},
+        "/api/admin/agent-definitions/draft/{agent_key}": {"PUT"},
+        "/api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade": {
+            "POST"
+        },
+        "/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source": {"POST"},
+    }
+    for path, methods in expected_methods.items():
+        matches = [
+            route for route in app.routes if getattr(route, "path", None) == path
+        ]
+        assert len(matches) == 1, path
+        assert matches[0].methods == methods, path
+    assert (
+        len(
+            [
+                route
+                for route in app.routes
+                if str(getattr(route, "path", "")).startswith(
+                    "/api/admin/agent-definitions"
+                )
+            ]
+        )
+        == len(expected_methods)
+    )
 
 
 def test_put_save_draft_returns_exact_changed_contract_and_preserves_release(
@@ -1931,29 +1950,79 @@ def test_upgrade_route_manual_resolution_and_stale_precedence(
     assert after == before
 
 
+EXTRA_FORBIDDEN_MESSAGE = "Extra inputs are not permitted"
+
+
+def _extra_forbidden_errors(field: str) -> list[dict[str, str]]:
+    return [
+        {
+            "field": field,
+            "code": "extra_forbidden",
+            "message": EXTRA_FORBIDDEN_MESSAGE,
+        }
+    ]
+
+
 @pytest.mark.parametrize("url_builder", [_upgrade_url, _source_url])
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        ({"lock_version": -1}, ("lock_version", "out_of_range")),
-        ({"lock_version": "0"}, ("lock_version", "strict_type")),
-        ({}, ("lock_version", "strict_type")),
-        ({"lock_version": 0, "actor": "attacker"}, ("actor", "extra_forbidden")),
+        (
+            {"lock_version": -1},
+            [
+                {
+                    "field": "lock_version",
+                    "code": "out_of_range",
+                    "message": "Input should be greater than or equal to 0",
+                }
+            ],
+        ),
+        (
+            {"lock_version": "0"},
+            [
+                {
+                    "field": "lock_version",
+                    "code": "strict_type",
+                    "message": "Input should be a valid integer",
+                }
+            ],
+        ),
+        (
+            {},
+            [
+                {
+                    "field": "lock_version",
+                    "code": "strict_type",
+                    "message": "Field required",
+                }
+            ],
+        ),
+        ({"lock_version": 0, "actor": "attacker"}, _extra_forbidden_errors("actor")),
         (
             {"lock_version": 0, "protected_assembly": {"version": 2, "digest": "f" * 64}},
-            ("protected_assembly", "extra_forbidden"),
+            _extra_forbidden_errors("protected_assembly"),
         ),
-        ({"lock_version": 0, "prompt_text": "spoofed"}, ("prompt_text", "extra_forbidden")),
+        (
+            {"lock_version": 0, "prompt_text": "spoofed"},
+            _extra_forbidden_errors("prompt_text"),
+        ),
         (
             {"lock_version": 0, "protected_stage_view": []},
-            ("protected_stage_view", "extra_forbidden"),
+            _extra_forbidden_errors("protected_stage_view"),
         ),
         (
             {"lock_version": 0, "assembly_rules": {"format_version": 2, "custom_blocks": []}},
-            ("assembly_rules", "extra_forbidden"),
+            _extra_forbidden_errors("assembly_rules"),
         ),
-        ({"lock_version": 0, "display_text": "x"}, ("display_text", "extra_forbidden")),
-        ({"lock_version": 0, "terminal": True}, ("terminal", "extra_forbidden")),
+        (
+            {"lock_version": 0, "display_text": "x"},
+            _extra_forbidden_errors("display_text"),
+        ),
+        ({"lock_version": 0, "terminal": True}, _extra_forbidden_errors("terminal")),
+        (
+            {"lock_version": 0, "digest": "f" * 64, "format_version": 2},
+            _extra_forbidden_errors("digest") + _extra_forbidden_errors("format_version"),
+        ),
     ],
 )
 def test_both_post_routes_accept_only_a_strict_lock_version_body(
@@ -1978,9 +2047,7 @@ def test_both_post_routes_accept_only_a_strict_lock_version_body(
 
     assert calls == []
     assert response.status_code == 422
-    payload = response.json()
-    assert payload["code"] == "invalid_draft"
-    assert (payload["errors"][0]["field"], payload["errors"][0]["code"]) == expected
+    assert response.json() == {"code": "invalid_draft", "errors": expected}
 
 
 @pytest.mark.parametrize("url_builder", [_upgrade_url, _source_url])

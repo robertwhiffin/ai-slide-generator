@@ -8,6 +8,7 @@ from datetime import timezone
 from types import MappingProxyType
 from typing import Callable, Generic, Literal, Mapping, TypeVar
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -129,7 +130,7 @@ _LEGACY_SOURCE_NOT_REQUIRED = DraftValidationIssue(
 )
 _EDITABLE_RULES_INVALID = DraftValidationIssue(
     "candidate.assembly_rules",
-    "invalid_content",
+    "invalid_protected_placement",
     "Assembly rules must satisfy the persisted assembly contract.",
 )
 _LEGACY_SOURCE_UNAVAILABLE = DraftValidationIssue(
@@ -236,13 +237,18 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 "max_tokens": candidate.max_tokens,
                 "top_p": candidate.top_p,
             }
-            if candidate.assembly_rules is not None:
+            supplied_rules = candidate.assembly_rules is not None
+            if supplied_rules:
                 payload["assembly_rules"] = candidate.assembly_rules.model_dump(
                     mode="python"
                 )
             try:
                 content = DefinitionContent.model_validate(payload)
-            except (TypeError, ValueError) as exc:
+            except ValidationError as exc:
+                if not supplied_rules or any(
+                    error["loc"][:1] != ("assembly_rules",) for error in exc.errors()
+                ):
+                    raise
                 raise DraftContentRejected(_EDITABLE_RULES_INVALID) from exc
             self._run_candidate_validators(self.local_candidate_validators, content)
             if expected_lock_version != locked.snapshot.draft.lock_version:

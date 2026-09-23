@@ -12,7 +12,13 @@ from sqlalchemy.pool import StaticPool
 import src.database.models  # noqa: F401
 from src.core.database import Base
 from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE
-from src.core.skills.build_reviewer import BUILD_REVIEWER_CRITERIA_STAGE
+from src.core.skills.build_reviewer import (
+    BUILD_REVIEWER_AUTHORED_PREFIX,
+    BUILD_REVIEWER_CRITERIA_STAGE,
+    BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
+    BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+)
+from src.core.skills.data_analyst import ANALYST_AUTHORED_INSTRUCTIONS
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     GraphDraft,
@@ -638,6 +644,24 @@ LEGACY_SOURCE_UNAVAILABLE_TUPLE = (
 )
 
 
+#: Recomposed from the reviewed skill constants, never from ``PromptAssembler``, so a wrong
+#: retained literal cannot round-trip undetected through the assembler's own output.
+INDEPENDENT_TRANSITION_LITERALS = {
+    "data_analyst": (
+        UNTRUSTED_DATA_NOTICE + "\n\n" + ANALYST_AUTHORED_INSTRUCTIONS,
+        ANALYST_AUTHORED_INSTRUCTIONS,
+    ),
+    "build_reviewer": (
+        BUILD_REVIEWER_AUTHORED_PREFIX
+        + "\n\n"
+        + BUILD_REVIEWER_CRITERIA_STAGE
+        + "\n\n"
+        + BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
+        BUILD_REVIEWER_AUTHORED_PREFIX + "\n\n" + BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+    ),
+}
+
+
 @dataclasses.dataclass(frozen=True)
 class _Context:
     design_system_active: bool
@@ -746,7 +770,7 @@ def _install_write_spy(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> None:
     monkeypatch.setattr(GraphConfiguration, "_write_locked_content", staticmethod(_spy))
 
 
-def test_valid_v2_trusted_content_write_uses_one_mapper_hash_and_audit(
+def test_valid_v2_editable_save_uses_one_mapper_hash_and_audit(
     session_factory,
 ) -> None:
     """Catches a second writer, a skipped hash rebuild, or lost schema identity."""
@@ -1102,7 +1126,7 @@ def test_five_issue_v2_candidate_with_stale_lock_is_ordered_422_at_the_facade(
             (
                 (
                     "candidate.assembly_rules",
-                    "invalid_content",
+                    "invalid_protected_placement",
                     "Assembly rules must satisfy the persisted assembly contract.",
                 ),
             ),
@@ -1751,4 +1775,206 @@ def test_legacy_prompt_source_is_unavailable_for_a_published_source_mismatch(
         )
 
     assert _issue_tuples(caught) == LEGACY_SOURCE_UNAVAILABLE_TUPLE
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("agent_key", ["data_analyst", "build_reviewer"])
+def test_persisted_upgrade_matches_independent_literal_transition_bytes(
+    session_factory, agent_key
+) -> None:
+    """Catches a wrong retained literal that round-trips through the assembler's own output."""
+    source_literal, target_literal = INDEPENDENT_TRANSITION_LITERALS[agent_key]
+    generated = next(
+        item
+        for item in load_graph_v1_manifest().definitions
+        if item.agent_key == agent_key
+    )
+    bootstrapped, _ = _stored_content(session_factory, agent_key)
+    assert generated.prompt_text == source_literal
+    assert bootstrapped.prompt_text == source_literal
+
+    _upgrade(session_factory, agent_key, lock_version=0)
+
+    persisted, _ = _stored_content(session_factory, agent_key)
+    assert persisted.prompt_text == target_literal
+    assert persisted.prompt_text != source_literal
+    published, _, _ = _published_content(session_factory, agent_key)
+    assert published.prompt_text == source_literal
+
+
+def test_valid_v2_trusted_content_save_uses_one_mapper_hash_and_audit(
+    session_factory, monkeypatch
+) -> None:
+    """Catches a second writer, hash, or audit increment on the trusted-content path."""
+    before_db = _database_snapshot(session_factory)
+    _upgrade(session_factory, "architect", lock_version=0)
+    after_upgrade, upgrade_hash = _stored_content(session_factory)
+    block = _custom_block(SECOND_BLOCK_ID, "Trusted operator guidance.")
+    proposed = after_upgrade.model_copy(
+        update={
+            "assembly_rules": _v2_rules(block),
+            "schema_overlay": after_upgrade.schema_overlay.model_copy(
+                update={"additional_optional_fields": ("task_265_added",)}
+            ),
+        }
+    )
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    with session_factory() as session:
+        result = GraphConfiguration().save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=1,
+            content=proposed,
+            actor="test:trusted-v2",
+        )
+
+    persisted, persisted_hash = _stored_content(session_factory)
+    after_db = _database_snapshot(session_factory)
+    assert isinstance(result, DraftSaveResult)
+    assert result.changed is True
+    assert write_log == ["write"]
+    assert persisted == proposed
+    assert persisted.assembly_rules == _v2_rules(block)
+    assert persisted.protected_assembly == V2_PROTECTED_ASSEMBLY_IDENTITY
+    assert persisted.definition_version == after_upgrade.definition_version
+    assert persisted.schema_contract == after_upgrade.schema_contract
+    assert persisted_hash == definition_content_hash(persisted)
+    assert persisted_hash != upgrade_hash
+    assert result.definition.candidate_hash == persisted_hash
+    assert _draft_audit(session_factory)[:2] == (2, "test:trusted-v2")
+    assert after_db["revisions"] == before_db["revisions"]
+    assert after_db["releases"] == before_db["releases"]
+    assert after_db["mappings"] == before_db["mappings"]
+
+
+def test_trusted_content_validator_phases_run_in_order_around_stale_comparison(
+    session_factory, monkeypatch
+) -> None:
+    """Catches reordered phases or a post-stale validator running after the writer."""
+    log: list[str] = []
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "local_candidate_validators",
+        (
+            _recording_validator(log, "local-1"),
+            _recording_validator(log, "local-2"),
+        ),
+    )
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "post_stale_validators",
+        (
+            _recording_validator(log, "post-1"),
+            _recording_validator(log, "post-2"),
+        ),
+    )
+    _install_write_spy(monkeypatch, log)
+    current, _ = _stored_content(session_factory)
+
+    with session_factory() as session:
+        result = GraphConfiguration().save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            content=current.model_copy(update={"prompt_text": "trusted ordered edit"}),
+            actor="test:trusted-phases",
+        )
+
+    assert isinstance(result, DraftSaveResult)
+    assert log == ["local-1", "local-2", "post-1", "post-2", "write"]
+
+
+def test_trusted_content_local_invalid_stale_request_is_ordered_422(
+    session_factory, monkeypatch
+) -> None:
+    """Catches stale comparison outranking a local rejection on the trusted path."""
+    log: list[str] = []
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "local_candidate_validators",
+        (
+            _recording_validator(
+                log,
+                "local-1",
+                ("candidate.first", "first_code", "First recorded issue."),
+                ("candidate.second", "second_code", "Second recorded issue."),
+            ),
+            _recording_validator(
+                log, "local-2", ("candidate.third", "third_code", "Third recorded issue.")
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "post_stale_validators",
+        (_recording_validator(log, "post-1"),),
+    )
+    _install_write_spy(monkeypatch, log)
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=7,
+            content=current.model_copy(
+                update={"prompt_text": "trusted local invalid and stale"}
+            ),
+            actor="test:trusted-local-invalid-stale",
+        )
+
+    assert _issue_tuples(caught) == (
+        ("candidate.first", "first_code", "First recorded issue."),
+        ("candidate.second", "second_code", "Second recorded issue."),
+        ("candidate.third", "third_code", "Third recorded issue."),
+    )
+    assert log == ["local-1", "local-2"]
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_trusted_content_local_valid_stale_request_is_coherent_409(
+    session_factory, monkeypatch
+) -> None:
+    """Catches a post-stale validator running for a stale trusted-content request."""
+    log: list[str] = []
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "local_candidate_validators",
+        (_recording_validator(log, "local-1"),),
+    )
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "post_stale_validators",
+        (_recording_validator(log, "post-1"),),
+    )
+    _install_write_spy(monkeypatch, log)
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+
+    with session_factory() as session:
+        result = GraphConfiguration().save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=4,
+            content=current.model_copy(
+                update={"prompt_text": "trusted local valid but stale"}
+            ),
+            actor="test:trusted-local-valid-stale",
+        )
+
+    assert isinstance(result, DraftSaveConflict)
+    assert result.expected_lock_version == 4
+    assert result.current_lock_version == 0
+    assert set(result.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+    assert len(result.server.definitions) == 7
+    assert log == ["local-1"]
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory) == before_audit
     assert _database_snapshot(session_factory) == before_db
