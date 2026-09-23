@@ -501,6 +501,39 @@ class TestAuthorizedCollaborationRootReturnsNone:
             is None
         )
 
+    def test_an_empty_clause_list_denies_by_construction(self, db, shared_deck):
+        """The predicate must deny even if EVERY check contributed no clause.
+
+        Break caught: ``or_(*clauses)`` over an empty list produces an empty
+        clause that SQLAlchemy drops from the WHERE entirely, so the predicate
+        vanishes and the select admits every root — fail-OPEN in an
+        authorization path. Today no caller can empty the list because check 5
+        is unconditional, which makes that safety incidental to the ordering of
+        unrelated code rather than structural. This pins the structure.
+
+        The caller here is the deck OWNER, so the owner clause would admit them
+        if the clause list were consulted at all. The list is emptied at source
+        and the real scoped select is run against the real database, so the only
+        thing that can produce ``None`` is the ``false()`` seed.
+        """
+        import src.services.collaboration_history as module
+
+        owner = _ctx(user_id="owner-uid", user_name="owner@example.com")
+        assert (
+            authorized_collaboration_root(
+                db, requested_session_id="sess-root-1", permission_context=owner
+            )
+            is not None
+        ), "precondition: this caller IS admitted when the clauses are present"
+
+        with patch.object(module, "_can_view_clauses", return_value=[]):
+            assert (
+                authorized_collaboration_root(
+                    db, requested_session_id="sess-root-1", permission_context=owner
+                )
+                is None
+            )
+
     def test_grant_on_the_contributor_row_does_not_admit(self, db, shared_deck):
         """Grants live on the root deck; a row hung off a contributor grants nothing."""
         _grant(
@@ -1076,11 +1109,32 @@ class TestGetCollaborationHistory:
         assert statements[0].lstrip().upper().startswith("SELECT")
         assert "GROUP BY" in statements[0].upper()
 
-    def test_evidence_survives_actor_and_deck_row_deletion(self, db, mixed_release_history):
-        """The SET NULL design keeps the opaque snapshot groupable."""
+    def test_grouping_survives_all_three_fk_columns_being_nulled(
+        self, db, mixed_release_history
+    ):
+        """Renamed from ...survives_actor_and_deck_row_deletion, which overclaimed.
+
+        This test nulls the FK columns directly; it does NOT delete anything and
+        therefore proves nothing about a cascade. The rename is the honest fix
+        rather than converting it to a real delete, because this fixture's
+        in-memory SQLite reports ``PRAGMA foreign_keys = 0`` — FK constraints are
+        not enforced at all, so a real ``DELETE`` here would leave a DANGLING
+        ``actor_session_id`` pointing at a removed row instead of firing
+        ``ON DELETE SET NULL``. That would be a more misleading test, not a
+        better one.
+
+        The real cascade is proved where foreign keys are actually enforced, in
+        tests/integration/test_collaboration_history_api_postgres.py:
+        ``test_evidence_survives_deleting_every_actor_session``,
+        ``..._the_deck_row`` and ``..._the_root_session``.
+
+        What this test does own is the post-cascade *state*: all three FK columns
+        NULL, all three opaque identities intact, grouping and labelling
+        unaffected.
+        """
         db.execute(
             SharedDeckMutationEvent.__table__.update().values(
-                actor_session_id=None, root_session_id=None
+                actor_session_id=None, root_session_id=None, root_deck_id=None
             )
         )
         db.commit()
@@ -1095,6 +1149,70 @@ class TestGetCollaborationHistory:
             "Contributor 1",
             "Contributor 2",
             "Contributor 3",
+        ]
+        surviving = db.execute(
+            select(SharedDeckMutationEvent.actor_session_identity)
+        ).all()
+        assert len({row[0] for row in surviving}) == 3
+
+    def test_two_actors_with_null_ids_on_one_release_do_not_collapse(self, db):
+        """The decisive opaque-key guard, run without needing PostgreSQL.
+
+        Break caught: grouping on ``actor_session_id`` instead of
+        ``actor_session_identity``. Two LIVE actors have distinct primary keys, so
+        the substitution is invisible; and actors on DIFFERENT releases stay
+        separate even under the wrong key, because the release is part of the key
+        too. Only "same release, both FK columns NULL" forces a collapse — which
+        is the post-cascade state this projection is designed to read.
+        """
+        db.commit()
+        r2 = _release(db, version_number=2, active=True)
+        root = _root(db, "sess-collapse", created_by="owner@example.com")
+        deck = _deck(db, root)
+        actor_a = _contributor(db, root, "sess-col-a", created_by="a@example.com")
+        actor_b = _contributor(db, root, "sess-col-b", created_by="b@example.com")
+        _event(db, root=root, deck=deck, actor=actor_a, release=r2,
+               occurred_at=_BASE_TIME + timedelta(minutes=1))
+        _event(db, root=root, deck=deck, actor=actor_b, release=r2,
+               occurred_at=_BASE_TIME + timedelta(minutes=2))
+        db.execute(
+            SharedDeckMutationEvent.__table__.update().values(actor_session_id=None)
+        )
+        db.commit()
+
+        rows = db.execute(
+            select(
+                SharedDeckMutationEvent.actor_session_id,
+                SharedDeckMutationEvent.actor_session_identity,
+                SharedDeckMutationEvent.graph_release_id,
+            ).order_by(SharedDeckMutationEvent.id)
+        ).all()
+        assert [row[0] for row in rows] == [None, None]
+        assert rows[0][1] != rows[1][1]
+        assert rows[0][2] == rows[1][2] == r2.id
+
+        warning, legacy, groups = get_collaboration_history(
+            db,
+            root=AuthorizedCollaborationRoot(
+                root_session_id=root.id, root_deck_id=deck.id
+            ),
+        )
+
+        assert warning is False
+        assert legacy is False
+        assert groups == [
+            CollaborationReleaseGroup(
+                actor_label="Contributor 1",
+                graph_version=2,
+                mutation_count=1,
+                last_mutation_at=_BASE_TIME + timedelta(minutes=2),
+            ),
+            CollaborationReleaseGroup(
+                actor_label="Contributor 2",
+                graph_version=2,
+                mutation_count=1,
+                last_mutation_at=_BASE_TIME + timedelta(minutes=1),
+            ),
         ]
 
     def test_rejects_anything_but_an_authorized_root(self, db, mixed_release_history):
@@ -1366,6 +1484,14 @@ class TestCollaborationHistoryRoute:
     def test_unauthorized_real_id_and_unknown_id_are_indistinguishable(
         self, db, mixed_release_history, route_client
     ):
+        """The same caller must not be able to tell a real id from a fake one.
+
+        The two requests differ ONLY in the id, and the id is echoed in the
+        detail, so byte-equality of whole bodies would be false by construction.
+        The disclosure question is whether anything BESIDE the echoed id differs
+        — status, headers, or the response shape — so that is what is compared,
+        with the echoed id substituted out.
+        """
         real_but_forbidden = _as(
             route_client,
             _history_url("sess-hist-root"),
@@ -1374,13 +1500,26 @@ class TestCollaborationHistoryRoute:
         )
         fabricated = _as(
             route_client,
-            _history_url("sess-hist-root"),
+            _history_url("sess-never-existed"),
             user_name="stranger@example.com",
             user_id="stranger-uid",
         )
 
-        assert real_but_forbidden.status_code == fabricated.status_code == 404
-        assert real_but_forbidden.content == fabricated.content
+        assert real_but_forbidden.status_code == 404
+        assert fabricated.status_code == 404
+        assert real_but_forbidden.json() == {
+            "detail": "Session not found: sess-hist-root"
+        }
+        assert fabricated.json() == {"detail": "Session not found: sess-never-existed"}
+        # Identical once the echoed id is normalised away: same body template,
+        # same content type, same length modulo the id itself.
+        assert real_but_forbidden.content.replace(
+            b"sess-hist-root", b"<ID>"
+        ) == fabricated.content.replace(b"sess-never-existed", b"<ID>")
+        assert (
+            real_but_forbidden.headers["content-type"]
+            == fabricated.headers["content-type"]
+        )
 
     def test_authorized_path_also_avoids_the_legacy_seams(
         self, db, mixed_release_history, route_client

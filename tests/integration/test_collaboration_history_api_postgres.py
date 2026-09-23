@@ -241,9 +241,17 @@ def mixed_release_deck(pg_client):
     )
     actor_a = _contributor(db, root, "pg-actor-a", created_by="a@example.com", release=v1)
     actor_b = _contributor(db, root, "pg-actor-b", created_by="b@example.com", release=v2)
+    # The legacy (null-release) actor is a CONTRIBUTOR, not the root, so that
+    # test_evidence_survives_deleting_every_actor_session can really delete
+    # every actor while the root and its deck row survive. Making the root the
+    # legacy actor would force that test to delete the root, which CASCADEs the
+    # deck away and takes the projection's own join with it.
+    actor_legacy = _contributor(
+        db, root, "pg-actor-legacy", created_by="legacy@example.com", release=None
+    )
 
     # Written oldest-first, so the projection must return them newest-first.
-    legacy = _record(db, root=root, deck=deck, actor=root, release=None)
+    legacy = _record(db, root=root, deck=deck, actor=actor_legacy, release=None)
     _a_first = _record(db, root=root, deck=deck, actor=actor_a, release=v1)
     a_latest = _record(db, root=root, deck=deck, actor=actor_a, release=v1)
     b_only = _record(db, root=root, deck=deck, actor=actor_b, release=v2)
@@ -260,6 +268,7 @@ def mixed_release_deck(pg_client):
         "deck": deck,
         "actor_a": actor_a,
         "actor_b": actor_b,
+        "actor_legacy": actor_legacy,
         "v1": v1,
         "v2": v2,
         # The exact timestamps the real writer stamped, newest-group first.
@@ -550,29 +559,56 @@ def test_history_is_root_deck_constrained_over_postgres(mixed_release_deck):
 # ---------------------------------------------------------------------------
 
 
-def test_evidence_survives_real_actor_deletion(mixed_release_deck):
-    """Deleting the actor session nulls actor_session_id but keeps the group."""
-    db, root, deck, actor_a = (
+def test_evidence_survives_deleting_every_actor_session(mixed_release_deck):
+    """A real DELETE of EVERY actor nulls every actor_session_id, and grouping holds.
+
+    Two properties, and the second is why every actor goes rather than one:
+
+    1. The ``ON DELETE SET NULL`` cascade on
+       ``fk_shared_deck_mutation_event_actor_session`` really fires — asserted on
+       the database, not on the ORM's idea of it — while the opaque
+       ``actor_session_identity`` snapshot is untouched.
+    2. With no actor row left alive, no distinct live primary key remains to mask
+       a wrong-column grouping. Group on ``actor_session_id`` instead of
+       ``actor_session_identity`` and every row's key becomes NULL, so the
+       response-local labels collapse.
+    """
+    db, root, deck = (
         mixed_release_deck["db"],
         mixed_release_deck["root"],
         mixed_release_deck["deck"],
-        mixed_release_deck["actor_a"],
     )
-    actor_a_identity = actor_a.collaboration_identity
+    actors = [
+        mixed_release_deck["actor_a"],
+        mixed_release_deck["actor_b"],
+        mixed_release_deck["actor_legacy"],
+    ]
+    identities_before = sorted(str(actor.collaboration_identity) for actor in actors)
 
     db.execute(
-        text("DELETE FROM user_sessions WHERE id = :id"), {"id": actor_a.id}
+        text("DELETE FROM user_sessions WHERE id = ANY(:ids)"),
+        {"ids": [actor.id for actor in actors]},
     )
     db.commit()
 
-    surviving = db.execute(
+    # The cascade fired: no actor row survives, and no event still points at one.
+    assert (
+        db.execute(
+            text("SELECT count(*) FROM user_sessions WHERE parent_session_id = :rid"),
+            {"rid": root.id},
+        ).scalar()
+        == 0
+    )
+    rows = db.execute(
         select(
             SharedDeckMutationEvent.actor_session_id,
             SharedDeckMutationEvent.actor_session_identity,
-        ).where(SharedDeckMutationEvent.actor_session_identity == actor_a_identity)
+        ).order_by(SharedDeckMutationEvent.id)
     ).all()
-    assert len(surviving) == 2
-    assert [row[0] for row in surviving] == [None, None]
+    assert len(rows) == 4
+    assert [row[0] for row in rows] == [None, None, None, None]
+    # The opaque snapshot survived intact and still distinguishes three actors.
+    assert sorted({str(row[1]) for row in rows}) == identities_before
 
     warning, legacy, groups = get_collaboration_history(
         db,
@@ -589,6 +625,162 @@ def test_evidence_survives_real_actor_deletion(mixed_release_deck):
         ("Contributor 2", 1, 2),
         ("Contributor 3", None, 1),
     ]
+
+
+def test_two_deleted_actors_on_one_release_do_not_collapse(pg_client):
+    """The decisive opaque-key guard: same release, both actors really deleted.
+
+    This is the shape that catches substituting ``actor_session_id`` for
+    ``actor_session_identity`` in the grouping key. Two live actors have distinct
+    primary keys, so the substitution is invisible while either row survives; and
+    actors on DIFFERENT releases stay separate even under the wrong key, because
+    the release is also part of the key. Only "same release, both keys NULL"
+    forces the two groups to collapse into one.
+    """
+    _, db = pg_client
+    v2 = _release(db, version_number=2, active=True)
+    root, deck = _root_with_deck(db, "pg-collapse", created_by="owner@example.com")
+    actor_a = _contributor(db, root, "pg-col-a", created_by="a@example.com", release=v2)
+    actor_b = _contributor(db, root, "pg-col-b", created_by="b@example.com", release=v2)
+    _record(db, root=root, deck=deck, actor=actor_a, release=v2)
+    _record(db, root=root, deck=deck, actor=actor_b, release=v2)
+    db.commit()
+
+    db.execute(
+        text("DELETE FROM user_sessions WHERE id = ANY(:ids)"),
+        {"ids": [actor_a.id, actor_b.id]},
+    )
+    db.commit()
+
+    rows = db.execute(
+        select(
+            SharedDeckMutationEvent.actor_session_id,
+            SharedDeckMutationEvent.actor_session_identity,
+            SharedDeckMutationEvent.graph_release_id,
+        ).order_by(SharedDeckMutationEvent.id)
+    ).all()
+    assert [row[0] for row in rows] == [None, None], "both FK columns must be NULL"
+    assert rows[0][1] != rows[1][1], "the opaque identities must still differ"
+    assert rows[0][2] == rows[1][2] == v2.id, "both must be on the SAME release"
+
+    warning, legacy, groups = get_collaboration_history(
+        db,
+        root=AuthorizedCollaborationRoot(
+            root_session_id=root.id, root_deck_id=deck.id
+        ),
+    )
+
+    assert warning is False
+    assert legacy is False
+    assert [(group.actor_label, group.graph_version, group.mutation_count)
+            for group in groups] == [
+        ("Contributor 1", 2, 1),
+        ("Contributor 2", 2, 1),
+    ]
+
+
+def test_evidence_survives_deleting_the_deck_row(mixed_release_deck):
+    """A real DELETE of the deck row nulls root_deck_id and keeps the snapshot.
+
+    It also records, rather than hides, the projection's real scope: the grouped
+    query joins ``session_slide_decks`` through the deck's immutable
+    ``collaboration_identity``, so once the deck row is gone the projection can
+    no longer reach the evidence. That is consistent and not a gap — the
+    resolver's deck join denies first, so the endpoint 404s and the projection is
+    never called. Audit-time retention of the rows themselves is Task 1b's
+    contract, covered in test_shared_deck_mutation_lifecycle_postgres.py.
+    """
+    db, root, deck = (
+        mixed_release_deck["db"],
+        mixed_release_deck["root"],
+        mixed_release_deck["deck"],
+    )
+    deck_identity = str(deck.collaboration_identity)
+
+    db.execute(
+        text("DELETE FROM session_slide_decks WHERE id = :id"), {"id": deck.id}
+    )
+    db.commit()
+
+    rows = db.execute(
+        select(
+            SharedDeckMutationEvent.root_deck_id,
+            SharedDeckMutationEvent.root_deck_identity,
+            SharedDeckMutationEvent.root_session_id,
+        ).order_by(SharedDeckMutationEvent.id)
+    ).all()
+    assert len(rows) == 4
+    assert [row[0] for row in rows] == [None, None, None, None]
+    assert {str(row[1]) for row in rows} == {deck_identity}
+    assert [row[2] for row in rows] == [root.id] * 4
+
+    # The root itself is now un-authorizable: no deck row to return.
+    assert (
+        authorized_collaboration_root(
+            db,
+            requested_session_id="pg-root",
+            permission_context=_ctx(
+                user_id="owner-uid", user_name="owner@example.com"
+            ),
+        )
+        is None
+    )
+    # And the projection, if reached with a stale proof, returns nothing.
+    assert get_collaboration_history(
+        db,
+        root=AuthorizedCollaborationRoot(
+            root_session_id=root.id, root_deck_id=deck.id
+        ),
+    ) == (False, False, [])
+
+
+def test_evidence_survives_deleting_the_root_session(mixed_release_deck):
+    """A real DELETE of the root fires all three cascades at once.
+
+    ``root_session_id`` is SET NULL directly; the deck and every contributor are
+    CASCADE-deleted, which SET NULLs ``root_deck_id`` and ``actor_session_id`` in
+    turn. All three opaque identities must survive, because they carry no FK.
+    """
+    db, root = mixed_release_deck["db"], mixed_release_deck["root"]
+    before = db.execute(
+        select(
+            SharedDeckMutationEvent.root_session_identity,
+            SharedDeckMutationEvent.root_deck_identity,
+            SharedDeckMutationEvent.actor_session_identity,
+        ).order_by(SharedDeckMutationEvent.id)
+    ).all()
+
+    db.execute(text("DELETE FROM user_sessions WHERE id = :id"), {"id": root.id})
+    db.commit()
+
+    assert db.execute(text("SELECT count(*) FROM user_sessions")).scalar() == 0
+    assert db.execute(text("SELECT count(*) FROM session_slide_decks")).scalar() == 0
+
+    after = db.execute(
+        select(
+            SharedDeckMutationEvent.root_session_id,
+            SharedDeckMutationEvent.root_deck_id,
+            SharedDeckMutationEvent.actor_session_id,
+            SharedDeckMutationEvent.root_session_identity,
+            SharedDeckMutationEvent.root_deck_identity,
+            SharedDeckMutationEvent.actor_session_identity,
+        ).order_by(SharedDeckMutationEvent.id)
+    ).all()
+    assert len(after) == 4
+    for row in after:
+        assert (row[0], row[1], row[2]) == (None, None, None)
+    assert [(row[3], row[4], row[5]) for row in after] == before
+
+    assert (
+        authorized_collaboration_root(
+            db,
+            requested_session_id="pg-root",
+            permission_context=_ctx(
+                user_id="owner-uid", user_name="owner@example.com"
+            ),
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -767,12 +959,16 @@ def test_route_discloses_only_the_permitted_values(mixed_release_deck):
         "pg-root",
         "pg-actor-a",
         "pg-actor-b",
+        "pg-actor-legacy",
         "owner@example.com",
         "a@example.com",
         "b@example.com",
+        "legacy@example.com",
         "owner-uid",
         str(history["root"].collaboration_identity),
         str(history["actor_a"].collaboration_identity),
+        str(history["actor_b"].collaboration_identity),
+        str(history["actor_legacy"].collaboration_identity),
         str(history["deck"].collaboration_identity),
         "update_slide",
         "slide-1",
