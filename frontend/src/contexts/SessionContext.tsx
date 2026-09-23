@@ -28,9 +28,11 @@ interface SessionContextType {
   graphVersion: number | null;
   activeGraphVersion: number | null;
   isGraphVersionOlder: boolean;
+  isSessionPersisted: boolean;
   isInitializing: boolean;
   error: string | null;
   createNewSession: () => string;
+  markSessionPersisted: () => void;
   switchSession: (sessionId: string, existingSessionInfo?: OptionalSessionInfo, isCancelled?: () => boolean) => Promise<SessionRestoreResult>;
   renameSession: (title: string, slideCount?: number) => Promise<void>;
   setSessionTitle: (title: string | null) => void;
@@ -47,6 +49,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [graphVersion, setGraphVersion] = useState<number | null>(null);
   const [activeGraphVersion, setActiveGraphVersion] = useState<number | null>(null);
   const [isGraphVersionOlder, setIsGraphVersionOlder] = useState(false);
+  const [isSessionPersisted, setIsSessionPersisted] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Set the session ID in the API service on initial render
@@ -68,9 +71,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setGraphVersion(null);
     setActiveGraphVersion(null);
     setIsGraphVersionOlder(false);
+    setIsSessionPersisted(false);
     setError(null);
     api.setCurrentSessionId(newSessionId);
     return newSessionId;
+  }, []);
+
+  const markSessionPersisted = useCallback(() => {
+    setIsSessionPersisted(true);
   }, []);
 
   const setConversationGraphVersion = useCallback((info: Pick<OptionalSessionInfo, 'graph_version' | 'active_graph_version' | 'is_older_than_active'>) => {
@@ -139,6 +147,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           api.setCurrentSessionId(newSessionId);
           setExperimentUrl(sessionInfo.experiment_url ?? null);
           setConversationGraphVersion(sessionInfo);
+          setIsSessionPersisted(true);
         }
 
         return { slideDeck, rawHtml };
@@ -183,9 +192,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         graphVersion,
         activeGraphVersion,
         isGraphVersionOlder,
+        isSessionPersisted,
         isInitializing,
         error,
         createNewSession,
+        markSessionPersisted,
         switchSession,
         renameSession,
         setSessionTitle,
