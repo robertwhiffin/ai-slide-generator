@@ -265,3 +265,24 @@ def test_shared_deck_mutation_lifecycle_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its cascade and per-candidate transaction "
         "assertions must execute against PostgreSQL."
     )
+
+
+def test_collaboration_history_api_is_collected_by_integration_graph():
+    """The authorization-scoped collaboration history API requires PostgreSQL.
+
+    Its load-bearing assertions are dialect-specific: the five-check CAN_VIEW
+    predicate against real ``uuid``/``varchar`` columns and PostgreSQL's NULL
+    semantics for ``IN``, newest-first grouped aggregation despite PostgreSQL's
+    ``NULLS FIRST`` default for ``DESC``, and evidence surviving real
+    ``ON DELETE SET NULL`` cascades. None of that is proven by the SQLite unit
+    suite, so an unenrolled file would leave the authorization boundary untested
+    on the deployment dialect.
+    """
+    target = "tests/integration/test_collaboration_history_api_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its five-check CAN_VIEW predicate, grouped "
+        "projection ordering and SET NULL survival assertions must execute "
+        "against PostgreSQL."
+    )

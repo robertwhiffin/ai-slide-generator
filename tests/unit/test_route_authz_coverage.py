@@ -54,6 +54,20 @@ _PERMISSION_CALL_RE = re.compile(
     # three mutations — including the is_default condition — is pinned by
     # test_design_system_mutations_have_the_intended_permission_levels below.
     r"|_require_creator_or_admin"
+    # GET /api/sessions/{session_id}/collaboration-history (#262 Task 4 slice 4A).
+    # Verified enforcing, and stricter than the deck-permission helpers: it is a
+    # single authorization-scoped SELECT that resolves the requested session to
+    # its deck-owning root and applies a SQL CAN_VIEW predicate reproducing all
+    # five live PermissionService.get_deck_permission checks (owner, direct grant
+    # by identity_id, the identity_name fallback, group grant, and workspace
+    # share filtered to VALID_DECK_GLOBAL_PERMISSIONS). It returns None — never a
+    # row — for an unauthorized caller, and the route turns that into the same
+    # 404 an unknown session id produces, so it discloses less than a 403 would.
+    # Equivalence with get_deck_permission in BOTH directions is pinned by
+    # tests/unit/test_collaboration_history.py::
+    # TestPredicateMatchesTheLivePermissionService and by the PostgreSQL
+    # differential in tests/integration/test_collaboration_history_api_postgres.py.
+    r"|authorized_collaboration_root"
     r")\s*[(,]"
     # images.py PUT/DELETE enforce HIGH-1 owner-scoping with a bespoke inline
     # check rather than a deck-permission helper: `if image.uploaded_by !=

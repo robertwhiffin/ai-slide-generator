@@ -1345,3 +1345,163 @@ class TestErrorResponses:
             headers={"Content-Type": "application/json"}
         )
         assert response.status_code == 422
+
+
+# ============================================
+# Collaboration history endpoint (#262 Task 4 slice 4A)
+# ============================================
+
+
+class TestCollaborationHistoryRouteHttpLayer:
+    """HTTP-layer contracts for GET /api/sessions/{id}/collaboration-history.
+
+    The projection and the five-check CAN_VIEW predicate are owned by
+    tests/unit/test_collaboration_history.py and
+    tests/integration/test_collaboration_history_api_postgres.py. What belongs
+    here is what only the real app object can prove: that the new path is
+    registered exactly once, that it is not swallowed by the pre-existing
+    ``GET /api/sessions/{session_id}`` catch-all declared in the same router, and
+    that the 404/401 shapes match the rest of the router.
+    """
+
+    _URL = "/api/sessions/{session_id}/collaboration-history"
+
+    @staticmethod
+    def _perm_ctx():
+        from src.core.permission_context import PermissionContext
+
+        return PermissionContext(user_id="test-uid", user_name="test@local.dev")
+
+    def _get(self, client, session_id, *, user_name="test@local.dev"):
+        ctx = self._perm_ctx()
+        with patch("src.api.routes.sessions.get_current_user", return_value=user_name), \
+             patch("src.api.routes.sessions.get_permission_context", return_value=ctx):
+            return client.get(self._URL.format(session_id=session_id))
+
+    def test_path_is_registered_exactly_once(self):
+        """A duplicate registration would make which handler wins undefined."""
+        from src.api.main import app
+
+        matching = [
+            route
+            for route in app.routes
+            if getattr(route, "path", None)
+            == "/api/sessions/{session_id}/collaboration-history"
+        ]
+        assert len(matching) == 1
+        assert sorted(matching[0].methods) == ["GET"]
+
+    def test_the_get_session_catch_all_does_not_swallow_the_suffix(
+        self, client, test_db
+    ):
+        """``GET /api/sessions/{session_id}`` must not match the two-segment path.
+
+        If it did, the history route would be dead code and the suffix would
+        arrive as part of the session id.
+
+        Resolution is asserted through Starlette's own matcher rather than by
+        patching ``sessions.get_session``: the router captured that function
+        object at decoration time, so a module-level patch of it can never be
+        reached from inside another handler and an assertion on its call count
+        could never fail. The 404 *detail* is the second, independent proof —
+        had the catch-all matched, the id would read
+        ``test-123/collaboration-history``.
+        """
+        from starlette.routing import Match
+
+        from src.api.main import app
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/sessions/test-123/collaboration-history",
+            "headers": [],
+            "root_path": "",
+            "path_params": {},
+        }
+        fully_matched = [
+            route.endpoint.__name__
+            for route in app.routes
+            if route.matches(scope)[0] == Match.FULL
+        ]
+        assert fully_matched == ["get_collaboration_history_for_session"]
+
+        response = self._get(client, "test-123")
+
+        # 404 because the seeded session has no slide deck row, not because the
+        # request was routed to the wrong handler.
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Session not found: test-123"}
+
+    def test_unauthenticated_request_is_401(self, client):
+        with patch("src.api.routes.sessions.get_current_user", return_value=None), \
+             patch("src.api.routes.sessions.get_permission_context", return_value=None):
+            response = client.get(self._URL.format(session_id="test-123"))
+
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Authentication required"}
+
+    def test_unknown_session_is_404_without_touching_the_history_query(self, client):
+        with patch(
+            "src.api.routes.sessions.get_collaboration_history", autospec=True
+        ) as history:
+            response = self._get(client, "no-such-session")
+
+        assert history.call_count == 0
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Session not found: no-such-session"}
+
+    def test_authorized_owner_with_an_empty_deck_gets_empty_history(
+        self, client, test_db
+    ):
+        """An authorized root with a deck but no evidence yields empty, not 404."""
+        from src.database.models.session import SessionSlideDeck, UserSession
+
+        root = (
+            test_db.query(UserSession)
+            .filter(UserSession.session_id == "test-123")
+            .one()
+        )
+        test_db.add(SessionSlideDeck(session_id=root.id, title="Deck for test-123"))
+        test_db.commit()
+
+        response = self._get(client, "test-123")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "mixed_release_warning": False,
+            "has_legacy_evidence": False,
+            "groups": [],
+        }
+
+    def test_unauthorized_caller_gets_the_same_404_as_an_unknown_id(
+        self, client, test_db
+    ):
+        """Existence must not be disclosed: both bodies are byte-identical in shape."""
+        from src.database.models.session import SessionSlideDeck, UserSession
+
+        root = (
+            test_db.query(UserSession)
+            .filter(UserSession.session_id == "test-123")
+            .one()
+        )
+        test_db.add(SessionSlideDeck(session_id=root.id, title="Deck for test-123"))
+        test_db.commit()
+
+        from src.core.permission_context import PermissionContext
+
+        stranger = PermissionContext(
+            user_id="stranger-uid", user_name="stranger@example.com"
+        )
+        with patch(
+            "src.api.routes.sessions.get_current_user",
+            return_value="stranger@example.com",
+        ), patch(
+            "src.api.routes.sessions.get_permission_context", return_value=stranger
+        ):
+            forbidden = client.get(self._URL.format(session_id="test-123"))
+            unknown = client.get(self._URL.format(session_id="no-such-session"))
+
+        assert forbidden.status_code == unknown.status_code == 404
+        assert forbidden.json() == {"detail": "Session not found: test-123"}
+        assert unknown.json() == {"detail": "Session not found: no-such-session"}
