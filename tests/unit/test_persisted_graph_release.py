@@ -19,6 +19,9 @@ from src.database.models.graph_configuration import (
     GraphRelease,
     GraphReleaseAgent,
 )
+from src.domain.skill_io import OUTPUT_SCHEMAS
+from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+from src.services.agent_runtime_identity import RecordingAgentInvocationIdentitySink
 from src.services.graph_configuration import GraphConfiguration
 from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import (
@@ -35,6 +38,7 @@ from src.services.persisted_graph_release import (
     PersistedGraphReleaseLoader,
     PinnedInvocationEndpointError,
 )
+from src.services.prompt_assembler import V2_PROTECTED_ASSEMBLY_IDENTITY
 
 
 @pytest.fixture
@@ -176,6 +180,51 @@ def test_loader_parses_persisted_v1_and_v2_assembly_wire_values(
         v1_release_id, "architect"
     )
     assert isinstance(v2.content.assembly_rules, AssemblyRulesV2)
+
+
+@pytest.mark.parametrize("hybrid", ["v1_identity_v2_rules", "v2_identity_v1_rules"])
+def test_exact_persisted_release_hybrids_reach_runtime_assembler_and_fail_pre_sink(
+    session_factory, v1_release_id, hybrid
+):
+    with session_factory.begin() as db:
+        revision = db.scalar(
+            select(AgentDefinitionRevision).where(
+                AgentDefinitionRevision.agent_key == "architect"
+            )
+        )
+        assert revision is not None
+        if hybrid == "v1_identity_v2_rules":
+            revision.assembly_rules = {"format_version": 2, "custom_blocks": []}
+        else:
+            revision.protected_assembly_version = V2_PROTECTED_ASSEMBLY_IDENTITY.version
+            revision.protected_assembly_digest = V2_PROTECTED_ASSEMBLY_IDENTITY.digest
+        content = definition_content_from_row(revision)
+        revision.content_hash = definition_content_hash(content)
+
+    class RecordingAdapter:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def invoke(self, **kwargs):
+            self.calls.append(kwargs)
+            return OUTPUT_SCHEMAS["architect"].model_construct()
+
+    adapter = RecordingAdapter()
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(
+            session_factory=session_factory
+        ),
+        model_adapter=adapter,
+        identity_sink=sink,
+    )
+
+    with pytest.raises(PersistedConfigurationUnavailableError) as caught:
+        runtime.run("architect", v1_release_id, {}, AgentAssemblyContext(False))
+
+    assert caught.value.code == "invalid_persisted_definition"
+    assert adapter.calls == []
+    assert sink.calls == []
 
 
 def test_resolves_v1_and_v2_by_their_persisted_ids_not_active_release(

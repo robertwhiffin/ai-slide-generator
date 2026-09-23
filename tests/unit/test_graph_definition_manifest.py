@@ -19,13 +19,15 @@ from scripts.generate_graph_definition_manifest_v1 import (
     build_manifest_json,
     render_manifest_module,
 )
+from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
+from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
 from src.services.agent_definition_manifest_v1 import GRAPH_VERSION_1_MANIFEST_JSON
 from src.services.agent_runtime import (
     MODEL_DRIVEN_AGENT_KEYS,
     AgentAssemblyContext,
-    AgentRuntime,
     CodeOwnedAgentDefinitionSource,
 )
+from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_definition_manifest import (
     AssemblyRulesV1,
     AssemblyRulesV2,
@@ -36,6 +38,7 @@ from src.services.graph_definition_manifest import (
     definition_content_hash,
     load_graph_v1_manifest,
 )
+from src.services.prompt_assembler import PromptAssembler, PromptAssemblyRejected
 
 EXPECTED_COMMON_BLOCKS = [
     ("authored_prompt", "always", None),
@@ -111,13 +114,10 @@ def _replay_literal_v1_rules(
     payload: dict[str, Any],
     design_system_active: bool,
 ) -> ReplayedAssembly:
-    runtime = AgentRuntime.compatibility()
-    current = CodeOwnedAgentDefinitionSource().resolve(content.agent_key)
-    protected = runtime._protected_prompts.resolve(current.protected_prompt)
     protected_values = {
-        "build_reviewer_deck_brief": protected.build_reviewer_deck_brief,
-        "slide_frame_constraints": protected.slide_frame_constraints,
-        "design_system_precedence": protected.design_system_precedence,
+        "build_reviewer_deck_brief": DECK_BRIEF_REVIEW,
+        "slide_frame_constraints": _SLIDE_FRAME_CONSTRAINTS,
+        "design_system_precedence": DESIGN_SYSTEM_PRECEDENCE,
     }
     expected_blocks = (
         EXPECTED_BUILD_REVIEWER_BLOCKS
@@ -358,17 +358,12 @@ def test_manifest_assembly_replays_exact_runtime_prompt(
         if agent_key == "build_reviewer"
         else {"synthetic": True}
     )
-    runtime = AgentRuntime.compatibility()
     manifest_definition = _definition_by_key(load_graph_v1_manifest(), agent_key)
-    protected = runtime._protected_prompts.resolve(
-        CodeOwnedAgentDefinitionSource().resolve(agent_key).protected_prompt
-    )
-    actual = runtime._assemble_v1_prompt(
-        manifest_definition,
-        protected,
-        payload,
-        AgentAssemblyContext(design_system_active),
-    )
+    actual = PromptAssembler().assemble(
+        definition=manifest_definition,
+        payload=payload,
+        context=AgentAssemblyContext(design_system_active),
+    ).prompt
     replayed = _replay_literal_v1_rules(
         manifest_definition,
         payload,
@@ -395,32 +390,22 @@ def test_frozen_v1_manifest_identity_remains_exact_for_protected_assembler() -> 
 def test_build_reviewer_deck_brief_block_tracks_payload_truthiness(deck_brief: str | None):
     payload = {"deck_brief": deck_brief}
     content = _definition_by_key(load_graph_v1_manifest(), "build_reviewer")
-    runtime = AgentRuntime.compatibility()
-    protected = runtime._protected_prompts.resolve(
-        CodeOwnedAgentDefinitionSource().resolve("build_reviewer").protected_prompt
-    )
-    actual = runtime._assemble_v1_prompt(
-        content,
-        protected,
-        payload,
-        AgentAssemblyContext(False),
-    )
+    actual = PromptAssembler().assemble(
+        definition=content,
+        payload=payload,
+        context=AgentAssemblyContext(False),
+    ).prompt
     assert _replay_literal_v1_rules(content, payload, False).prompt == actual
 
 
 def test_non_build_reviewer_ignores_deck_brief_protected_block():
     payload = {"deck_brief": "Synthetic brief"}
     content = _definition_by_key(load_graph_v1_manifest(), "architect")
-    runtime = AgentRuntime.compatibility()
-    protected = runtime._protected_prompts.resolve(
-        CodeOwnedAgentDefinitionSource().resolve("architect").protected_prompt
-    )
-    actual = runtime._assemble_v1_prompt(
-        content,
-        protected,
-        payload,
-        AgentAssemblyContext(False),
-    )
+    actual = PromptAssembler().assemble(
+        definition=content,
+        payload=payload,
+        context=AgentAssemblyContext(False),
+    ).prompt
     assert _replay_literal_v1_rules(content, payload, False).prompt == actual
 
 
@@ -621,22 +606,18 @@ def test_v2_wire_grammar_preserves_deferred_semantic_candidates() -> None:
     )
 
 
-def test_legacy_runtime_rejects_v2_rules_without_assembling_them() -> None:
+def test_assembler_rejects_v2_rules_paired_with_v1_identity() -> None:
     content = _v2(
         "architect",
         [_custom("00000000-0000-0000-0000-000000000001", "custom")],
     )
-    runtime = AgentRuntime.compatibility()
-    protected = runtime._protected_prompts.resolve(
-        CodeOwnedAgentDefinitionSource().resolve("architect").protected_prompt
-    )
-    with pytest.raises(ValueError, match="persisted assembly rules do not match"):
-        runtime._assemble_v1_prompt(
-            content,
-            protected,
-            {"synthetic": True},
-            AgentAssemblyContext(False),
+    with pytest.raises(PromptAssemblyRejected) as caught:
+        PromptAssembler().assemble(
+            definition=content,
+            payload={"synthetic": True},
+            context=AgentAssemblyContext(False),
         )
+    assert [issue.code for issue in caught.value.issues] == ["assembly_bundle_mismatch"]
 
 
 @pytest.mark.parametrize(

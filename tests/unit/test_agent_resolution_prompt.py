@@ -175,10 +175,10 @@ class TestAgentRuntimePromptAssembly:
 
 
 class TestSlideFrameConstraintsProvenance:
-    def test_runtime_imports_frame_constraints_from_the_compiler(self):
-        import src.services.agent_runtime as agent_runtime_module
+    def test_prompt_assembler_imports_frame_constraints_from_the_compiler(self):
+        import src.services.prompt_assembler as prompt_assembler_module
 
-        source = inspect.getsource(agent_runtime_module)
+        source = inspect.getsource(prompt_assembler_module)
         assert (
             "from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS"
             in source
