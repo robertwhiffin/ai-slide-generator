@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     AliasChoices,
@@ -19,7 +20,13 @@ from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
     AssemblyCondition,
+    CustomAnchor,
+    DefinitionContent,
 )
+from src.services.prompt_assembler import PromptAssembler
+
+_LOWERCASE_SHA256 = r"^[0-9a-f]{64}$"
+_PROTECTED_STAGE_VIEW_ASSEMBLER = PromptAssembler()
 
 
 class _AttributeResponse(BaseModel):
@@ -76,15 +83,47 @@ AssemblyBlockResponse = Annotated[
 ]
 
 
-class AssemblyRulesResponse(_AttributeResponse):
+class AssemblyRulesV1Response(_AttributeResponse):
     format_version: Literal[1]
     separator: Literal["\n\n"]
     blocks: tuple[AssemblyBlockResponse, ...]
 
 
+class CustomTextBlockResponse(_AttributeResponse):
+    kind: Literal["custom_text"]
+    block_id: UUID
+    anchor: CustomAnchor
+    condition: AssemblyCondition
+    text: str
+
+
+class AssemblyRulesV2Response(_AttributeResponse):
+    format_version: Literal[2]
+    custom_blocks: tuple[CustomTextBlockResponse, ...]
+
+
+AssemblyRulesResponse = Annotated[
+    AssemblyRulesV1Response | AssemblyRulesV2Response,
+    Field(discriminator="format_version"),
+]
+
+
+class ProtectedStageViewResponse(_AttributeResponse):
+    """One locked, server-derived protected stage row; never a request field."""
+
+    stage_id: str
+    label: str
+    condition: AssemblyCondition
+    locked: Literal[True]
+    display_text: str
+    bundle_version: int
+    bundle_digest: str = Field(pattern=_LOWERCASE_SHA256)
+    legal_adjacent_custom_anchors: tuple[CustomAnchor, ...]
+
+
 class ContentIdentityResponse(_AttributeResponse):
     version: int
-    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    digest: str = Field(pattern=_LOWERCASE_SHA256)
 
 
 def _content_field(name: str):
@@ -102,11 +141,25 @@ class _DefinitionContentResponse(_AttributeResponse):
     assembly_rules: AssemblyRulesResponse = _content_field("assembly_rules")
     protected_assembly: ContentIdentityResponse = _content_field("protected_assembly")
     schema_contract: ContentIdentityResponse = _content_field("schema_contract")
+    protected_stage_view: tuple[ProtectedStageViewResponse, ...] = Field(
+        validation_alias=AliasChoices("protected_stage_view", "content")
+    )
+
+    @field_validator("protected_stage_view", mode="before")
+    @classmethod
+    def derive_protected_stage_view(cls, value: object) -> object:
+        """Read the locked protected view from the assembler, never from a client."""
+        if isinstance(value, DefinitionContent):
+            return _PROTECTED_STAGE_VIEW_ASSEMBLER.protected_stage_view(
+                agent_key=value.agent_key,
+                identity=value.protected_assembly,
+            )
+        return value
 
 
 class _PublishedDefinitionIdentityResponse(_AttributeResponse):
     revision_id: int
-    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern=_LOWERCASE_SHA256)
 
 
 # Pydantic collects multiple-base fields right-to-left.  Keep the identity base
@@ -120,7 +173,7 @@ class PublishedDefinitionResponse(
 
 class _DraftDefinitionIdentityResponse(_AttributeResponse):
     base_revision_id: int
-    candidate_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
 
 
 class DraftDefinitionResponse(
@@ -203,9 +256,23 @@ class EditableModelDraftModelRequest(_StrictDraftRequest):
         return value
 
 
+class CustomTextBlockRequest(_StrictDraftRequest):
+    kind: Literal["custom_text"]
+    block_id: Annotated[UUID, Field(strict=False)]
+    anchor: CustomAnchor
+    condition: AssemblyCondition
+    text: str
+
+
+class EditableAssemblyRulesRequest(_StrictDraftRequest):
+    format_version: Literal[2]
+    custom_blocks: list[CustomTextBlockRequest]
+
+
 class EditableModelDraftRequest(_StrictDraftRequest):
     prompt_text: str
     model: EditableModelDraftModelRequest
+    assembly_rules: EditableAssemblyRulesRequest | None = None
 
     @field_validator("prompt_text", mode="after")
     @classmethod
@@ -218,6 +285,12 @@ class EditableModelDraftRequest(_StrictDraftRequest):
 class DraftSaveRequest(_StrictDraftRequest):
     lock_version: Annotated[int, Field(ge=0)]
     candidate: EditableModelDraftRequest
+
+
+class DraftLockRequest(_StrictDraftRequest):
+    """The only accepted body for the upgrade and legacy-source POST routes."""
+
+    lock_version: Annotated[int, Field(ge=0)]
 
 
 class DraftSaveSuccessResponse(_AttributeResponse):
@@ -252,5 +325,20 @@ class DraftSaveConflictResponse(BaseModel):
     code: Literal["stale_draft"]
     expected_lock_version: int
     current_lock_version: int
-    client_candidate: EditableModelDraftRequest
+    #: An ordinary save echoes its submitted candidate; upgrade and legacy-source
+    #: recovery carry no candidate at all.
+    client_candidate: EditableModelDraftRequest | None
     server: DraftSaveConflictServerResponse
+
+
+class LegacyPromptSourceRecordResponse(_AttributeResponse):
+    prompt_text: str
+    revision_id: int
+    content_hash: str = Field(pattern=_LOWERCASE_SHA256)
+
+
+class LegacyPromptSourceResponse(_AttributeResponse):
+    draft: DraftMetadataResponse
+    agent_key: AgentKey
+    lock_version: int
+    source: LegacyPromptSourceRecordResponse
