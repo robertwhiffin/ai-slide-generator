@@ -40,7 +40,9 @@ from src.core.permission_context import get_permission_context
 from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
+from src.domain.conversation_engine import selects_graph_engine
 from src.services.agent import UnsafeContentError
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.permission_service import PERMISSION_PRIORITY, get_permission_service
 from src.services.persisted_graph_release import PersistedRuntimeError
 from src.utils.pi_filter import scan_for_injection
@@ -258,10 +260,33 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         return {**config_data, "template_id": None}
 
     if request.session_id:
-        # Session ID provided — only sync if client explicitly sent agent_config
+        # Existence is independent of agent_config presence. A supplied browser
+        # ID that has not been persisted yet is still a creation boundary and
+        # must take the same message-aware graph-release lock as a generated ID.
+        try:
+            session_manager.get_session(request.session_id)
+        except SessionNotFoundError:
+            current_user = get_current_user()
+            session_manager.create_session(
+                session_id=request.session_id,
+                agent_config=_without_template_pin(
+                    _seeded_for_new_session(agent_config_data)
+                ),
+                created_by=current_user,
+                graph_capable=selects_graph_engine(request.message),
+            )
+            logger.info(
+                "Created session from client-generated ID",
+                extra={"session_id": request.session_id},
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load session before agent_config sync: {e}")
+            return False
+
+        # The row exists. Sync config only when the client supplied it.
         if explicit_config:
             try:
-                session_manager.get_session(request.session_id)
                 # Session exists — update agent_config via DB
                 from src.core.database import get_db_session
                 from src.database.models import UserSession
@@ -276,22 +301,6 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                             "Synced agent_config from chat request",
                             extra={"session_id": request.session_id},
                         )
-            except SessionNotFoundError:
-                # Session ID was generated client-side but never persisted.
-                # Create it now with the agent_config.
-                current_user = get_current_user()
-                session_manager.create_session(
-                    session_id=request.session_id,
-                    agent_config=_without_template_pin(
-                        _seeded_for_new_session(agent_config_data)
-                    ),
-                    created_by=current_user,
-                )
-                logger.info(
-                    "Created session from client-generated ID with agent_config",
-                    extra={"session_id": request.session_id},
-                )
-                return True
             except Exception as e:
                 logger.warning(f"Failed to sync agent_config: {e}")
         return False
@@ -300,6 +309,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     session = session_manager.create_session(
         agent_config=_without_template_pin(_seeded_for_new_session(agent_config_data)),
         created_by=current_user,
+        graph_capable=selects_graph_engine(request.message),
     )
     request.session_id = session["session_id"]
     return True
@@ -342,7 +352,13 @@ async def send_message(
     session_manager = get_session_manager()
 
     # Create session on the fly if none provided
-    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    try:
+        created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     new_session_id = request.session_id if created else None
 
     # Acquire session lock to prevent concurrent modifications
@@ -446,7 +462,13 @@ async def send_message_streaming(
     current_user = get_current_user()
 
     # Create session on the fly if none provided
-    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    try:
+        created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     new_session_id = request.session_id if created else None
 
     # Acquire session lock to prevent concurrent modifications
@@ -624,7 +646,13 @@ async def submit_chat_async(
     current_user = get_current_user()
 
     # Create session on the fly if none provided
-    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    try:
+        created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     new_session_id = request.session_id if created else None
 
     # Check session lock first
@@ -693,6 +721,14 @@ async def submit_chat_async(
             result["session_id"] = new_session_id
         return result
 
+    except SessionNotFoundError as e:
+        await asyncio.to_thread(
+            session_manager.release_session_lock, request.session_id
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {request.session_id}",
+        ) from e
     except Exception as e:
         # Release lock on failure
         await asyncio.to_thread(

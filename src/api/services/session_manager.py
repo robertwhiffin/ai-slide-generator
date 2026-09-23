@@ -887,11 +887,13 @@ class SessionManager:
                     "created_at": existing.created_at.isoformat(),
                 }
 
+            graph_release_id = lock_active_graph_release(db).release_id
             contributor = UserSession(
                 session_id=secrets.token_urlsafe(32),
                 created_by=created_by,
                 title=parent.title,
                 parent_session_id=parent.id,
+                graph_release_id=graph_release_id,
             )
             db.add(contributor)
             db.flush()
@@ -1218,6 +1220,23 @@ class SessionManager:
             else:
                 new_title = _default_duplicate_title(base_title)
 
+            # Determine graph capability before constructing the new actor. The
+            # duplicate owns a fresh immutable pin selected under the active-row
+            # lock; the source's older pin is never copied or rewritten.
+            marker = (
+                db.query(SessionMessage)
+                .filter(
+                    SessionMessage.session_id == deck_owner.id,
+                    SessionMessage.role == "user",
+                )
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .first()
+            )
+            carried_marker = marker is not None and _selects_agent_mode(marker.content)
+            graph_release_id = None
+            if carried_marker:
+                graph_release_id = lock_active_graph_release(db).release_id
+
             new_session = UserSession(
                 session_id=secrets.token_urlsafe(32),
                 created_by=created_by,
@@ -1229,6 +1248,7 @@ class SessionManager:
                 experiment_id=None,
                 google_slides_presentation_id=None,
                 google_slides_url=None,
+                graph_release_id=graph_release_id,
             )
             db.add(new_session)
             db.flush()
@@ -1268,16 +1288,6 @@ class SessionManager:
             # For a graph-mode duplicate that title suppression is accepted:
             # the carried row is metadata, not conversation, and the title
             # should come from the new conversation.
-            marker = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == deck_owner.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
-            carried_marker = marker is not None and _selects_agent_mode(marker.content)
             if carried_marker:
                 db.add(
                     SessionMessage(
@@ -3045,7 +3055,7 @@ class SessionManager:
     ) -> str:
         """Create a new chat request, return request_id.
 
-        Auto-creates the session if it doesn't exist.
+        Requires the route or service boundary to have created the session.
 
         Args:
             session_id: Session to create request for
@@ -3057,26 +3067,7 @@ class SessionManager:
         request_id = secrets.token_urlsafe(24)
 
         with get_db_session() as db:
-            # Get or create session
-            session = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == session_id)
-                .first()
-            )
-
-            if not session:
-                # Auto-create session on first request
-                session = UserSession(
-                    session_id=session_id,
-                    title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-                    created_by=created_by,
-                )
-                db.add(session)
-                db.flush()
-                logger.info(
-                    "Auto-created session for chat request",
-                    extra={"session_id": session_id},
-                )
+            session = self._get_session_or_raise(db, session_id)
 
             chat_request = ChatRequest(
                 request_id=request_id,

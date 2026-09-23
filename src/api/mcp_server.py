@@ -512,6 +512,7 @@ async def _create_deck_impl(
             session = session_manager.create_session(
                 created_by=identity.user_name,
                 agent_config=agent_config,
+                graph_capable=False,
             )
             # create_session returns a dict (see SessionManager.create_session);
             # guard against a model-object return defensively so this stays

@@ -52,6 +52,7 @@ def _phase1_create_session(created_by: str) -> dict:
     session = sm.create_session(
         title=fixture["title"],
         created_by=created_by,
+        graph_capable=False,
     )
     session_id = session["session_id"]
 

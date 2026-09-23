@@ -453,6 +453,8 @@ jobs:
             tests/integration/test_shared_deck_mutation_migration_postgres.py \
             tests/integration/test_shared_deck_mutation_lifecycle_postgres.py \
             tests/integration/test_conversation_pin_creation_postgres.py \
+            tests/integration/test_mixed_release_creation_postgres.py \
+            tests/integration/test_conversation_creator_exclusions_postgres.py \
             tests/integration/test_persisted_graph_runtime_failures_postgres.py \
             tests/integration/test_conversation_pin_acceptance_postgres.py \
             tests/integration/test_agent_definition_workbench_postgres.py \

@@ -16,6 +16,7 @@ Two assertions
    load-bearing of the previously-uncollected files; a future re-drop must be
    loud).
 """
+import pytest
 import yaml
 from pathlib import Path
 
@@ -201,6 +202,24 @@ def test_conversation_pin_creation_is_collected_by_integration_graph():
         f"{target!r} is not named in integration-graph's run block in "
         ".github/workflows/test.yml. Its PostgreSQL lock-order assertions must "
         "run in the graph job's PostgreSQL environment."
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "test_mixed_release_creation_postgres.py",
+        "test_conversation_creator_exclusions_postgres.py",
+    ],
+)
+def test_remaining_creation_lock_suites_are_collected_by_integration_graph(filename):
+    """Task-2 creator ordering and exclusions require graph-job PostgreSQL."""
+    target = f"tests/integration/{filename}"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Task-2 creator lock and exclusion coverage "
+        "must execute against PostgreSQL."
     )
 
 
