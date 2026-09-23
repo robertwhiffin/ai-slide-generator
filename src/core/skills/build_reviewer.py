@@ -10,36 +10,50 @@ from src.domain.finding import CRITERIA
 TOOL_GRANTS: list[str] = []
 
 
-def build_instructions() -> str:
-    """Generate the build_reviewer instructions from the live CRITERIA registry.
-
-    Called once at module load time to produce INSTRUCTIONS, and available to tests
-    that need to verify the generation is dynamic.  The falsifiable test: add a
-    criterion to CRITERIA, call this function, and assert the new name appears in the
-    result — a hand-written block would not include it.
-    """
+def _criteria_stage() -> str:
     criteria_lines = "\n".join(
-        f"  {name} ({crit.category}, {crit.level}, "
-        f"objective={crit.objective}): {crit.description}"
+        f"  {name} ({crit.category}, {crit.level}, objective={crit.objective}): {crit.description}"
         for name, crit in CRITERIA.items()
     )
+    return "CRITERIA:\n" + criteria_lines
+
+
+BUILD_REVIEWER_AUTHORED_PREFIX: str = (
+    "You are a build reviewer.  Inspect the built slide against every criterion "
+    "below and return a SlideReviewOutput."
+)
+BUILD_REVIEWER_CRITERIA_STAGE: str = _criteria_stage()
+BUILD_REVIEWER_V1_AUTHORED_SUFFIX: str = (
+    "FINDING RULES:\n"
+    "  - Use only the criterion names listed above\n"
+    "  - Set criterion to the exact name from the list\n"
+    "  - Set category to the value shown in parentheses\n"
+    "  - Set objective to the boolean shown\n"
+    "  - Set slide_index to the slide's position integer\n"
+    "  - Write a concrete, specific message — not a restatement of the description\n\n"
+    "VERDICT RULES:\n"
+    "  clean    → no findings\n"
+    "  surfaced → one or more findings are present\n"
+    "  (never emit 'fixed' — that verdict belongs to the fix reviewer)\n\n"
+    "Return a SlideReviewOutput with findings and verdict."
+)
+BUILD_REVIEWER_V2_AUTHORED_SUFFIX: str = BUILD_REVIEWER_V1_AUTHORED_SUFFIX.replace(
+    "Use only the criterion names listed above",
+    "Use only the criterion names in the protected CRITERIA stage below",
+)
+BUILD_REVIEWER_AUTHORED_INSTRUCTIONS: str = (
+    BUILD_REVIEWER_AUTHORED_PREFIX + "\n\n" + BUILD_REVIEWER_V2_AUTHORED_SUFFIX
+)
+
+
+def build_instructions() -> str:
+    """Generate the byte-compatible Graph Version 1 composite instructions."""
     return (
-        "You are a build reviewer.  Inspect the built slide against every criterion "
-        "below and return a SlideReviewOutput.\n\n"
-        "CRITERIA:\n"
-        f"{criteria_lines}\n\n"
-        "FINDING RULES:\n"
-        "  - Use only the criterion names listed above\n"
-        "  - Set criterion to the exact name from the list\n"
-        "  - Set category to the value shown in parentheses\n"
-        "  - Set objective to the boolean shown\n"
-        "  - Set slide_index to the slide's position integer\n"
-        "  - Write a concrete, specific message — not a restatement of the description\n\n"
-        "VERDICT RULES:\n"
-        "  clean    → no findings\n"
-        "  surfaced → one or more findings are present\n"
-        "  (never emit 'fixed' — that verdict belongs to the fix reviewer)\n\n"
-        "Return a SlideReviewOutput with findings and verdict."
+        BUILD_REVIEWER_AUTHORED_PREFIX
+        + "\n\n"
+        + _criteria_stage()
+        + "\n\n"
+        + BUILD_REVIEWER_V1_AUTHORED_SUFFIX
     )
 
 
