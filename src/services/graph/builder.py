@@ -66,12 +66,15 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy.orm import sessionmaker
 
 from src.core.checkpointer import get_checkpointer
+from src.core.database import get_session_local
 from src.core.user_context import get_current_user
+from src.services.conversation_pins import load_conversation_pin
 from src.services.foreman_service import CAP
 from src.services.graph.event_emitter import (
     set_chat_request_id,
@@ -192,6 +195,7 @@ def invoke_graph(
     principal: Optional[str] = None,
     describe_only: bool = False,
     request_id: Optional[str] = None,
+    pin_loader: Callable[[sessionmaker, str], int] = load_conversation_pin,
 ) -> Dict[str, Any]:
     """Run one turn of the graph for *session_id*.
 
@@ -249,6 +253,7 @@ def invoke_graph(
     1's poll would receive turn 2's reply and turn 2's own poll would never see
     it.
     """
+    graph_release_id = pin_loader(get_session_local(), session_id)
     turn_id = uuid.uuid4().hex
     initiated_by = principal or get_current_user()
 
@@ -259,6 +264,7 @@ def invoke_graph(
     state.update(
         {
             "session_id": session_id,
+            "graph_release_id": graph_release_id,
             "turn_id": turn_id,
             "initiated_by": initiated_by,
             "describe_only": scoped(turn_id, bool(describe_only)),

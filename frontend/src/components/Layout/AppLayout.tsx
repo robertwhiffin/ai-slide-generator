@@ -36,6 +36,7 @@ import { PageHeader } from './page-header';
 import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { GraphVersionStatus } from '../Conversation/GraphVersionStatus';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
 
@@ -120,6 +121,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   const [sessionsRefreshKey, setSessionsRefreshKey] = useState<number>(0);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [isDuplicating, setIsDuplicating] = useState(false);
+  const [isStartingLatest, setIsStartingLatest] = useState(false);
   const isDuplicatingRef = useRef(false);
   // Save Points / versioning
   const [versions, setVersions] = useState<SavePointVersion[]>([]);
@@ -190,7 +192,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     });
   }, []);
 
-  const { sessionTitle, sessionId, experimentUrl, createNewSession, switchSession, renameSession } = useSession();
+  const {
+    sessionTitle,
+    sessionId,
+    experimentUrl,
+    graphVersion,
+    activeGraphVersion,
+    isGraphVersionOlder,
+    createNewSession,
+    markSessionPersisted,
+    switchSession,
+    renameSession,
+    setConversationGraphVersion,
+  } = useSession();
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
@@ -478,7 +492,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
 
         const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
           urlSessionId,
-          { title: sessionInfo.title, has_slide_deck: sessionInfo.has_slide_deck, experiment_url: sessionInfo.experiment_url },
+          {
+            title: sessionInfo.title,
+            has_slide_deck: sessionInfo.has_slide_deck,
+            experiment_url: sessionInfo.experiment_url,
+            graph_version: sessionInfo.graph_version,
+            active_graph_version: sessionInfo.active_graph_version,
+            is_older_than_active: sessionInfo.is_older_than_active,
+          },
           () => cancelled,
         );
         if (!cancelled) {
@@ -578,13 +599,52 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     const newId = createNewSession();
     setViewMode('main');
     try {
-      await api.createSession({ sessionId: newId });
+      const created = await api.createSession({ sessionId: newId, graphCapable: true });
+      markSessionPersisted();
+      setConversationGraphVersion(created);
       setSessionsRefreshKey(prev => prev + 1);
       navigate(`/sessions/${newId}/edit`);
     } catch (err) {
       console.error('Failed to create session:', err);
+      showToast('Failed to create a new session', 'error');
     }
-  }, [createNewSession, navigate]);
+  }, [createNewSession, markSessionPersisted, navigate, setConversationGraphVersion, showToast]);
+
+  const ensureGraphCapableRoot = useCallback(async (): Promise<boolean> => {
+    if (!sessionId) return false;
+
+    try {
+      const created = await api.createSession({ sessionId, graphCapable: true });
+      markSessionPersisted();
+      setConversationGraphVersion(created);
+      setSessionsRefreshKey(prev => prev + 1);
+      navigate(`/sessions/${created.session_id}/edit`, { replace: true });
+      return true;
+    } catch (err) {
+      console.error('Failed to create graph-capable root session:', err);
+      showToast('Failed to create a new session', 'error');
+      return false;
+    }
+  }, [markSessionPersisted, navigate, sessionId, setConversationGraphVersion, showToast]);
+
+  const handleStartLatest = useCallback(async () => {
+    setIsStartingLatest(true);
+    try {
+      const latest = await api.createSession({ graphCapable: true });
+      const restored = await switchSession(latest.session_id, latest);
+      setSlideDeck(restored.slideDeck);
+      setRawHtml(restored.rawHtml);
+      setLastSavedTime(new Date());
+      setSessionsRefreshKey(prev => prev + 1);
+      setViewMode('main');
+      navigate(`/sessions/${latest.session_id}/edit`);
+    } catch (err) {
+      console.error('Failed to start latest conversation:', err);
+      showToast('Failed to start the latest conversation', 'error');
+    } finally {
+      setIsStartingLatest(false);
+    }
+  }, [navigate, showToast, switchSession]);
 
   const handleSaveAs = useCallback(async (title: string) => {
     try {
@@ -1112,6 +1172,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
                       <AgentConfigBar />
                     </div>
+                    <GraphVersionStatus
+                      graphVersion={graphVersion}
+                      activeGraphVersion={activeGraphVersion ?? graphVersion ?? 0}
+                      isOlder={isGraphVersionOlder}
+                      onStartLatest={handleStartLatest}
+                      isStartingLatest={isStartingLatest}
+                    />
                     <ChatPanel
                       key="chat-panel"
                       ref={chatPanelRef}
@@ -1128,6 +1195,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         setReleasedPositions(new Set());
                       }}
                       onSlideReady={handleSlideReady}
+                      ensureGraphCapableRoot={ensureGraphCapableRoot}
                       previewMessages={previewVersion != null ? previewMessages : null}
                       onSlidesGenerated={async (deck, raw) => {
                         onGenerationComplete();

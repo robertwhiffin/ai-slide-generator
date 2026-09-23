@@ -1,0 +1,227 @@
+# Task 7 report — safe session graph-version projection
+
+## Scope and implementation
+
+Implementation commit: `677fade7f875351d21b4c8fed7f4cb2792da48b0`
+
+Changed files:
+
+- `src/services/conversation_pins.py`
+  - Added the immutable `ConversationGraphVersion` public projection.
+  - Added strict active/pinned loaders that reject missing or invalid release
+    referents with `ConversationGraphReleaseIntegrityError`.
+  - Added a batch projection that uses one active-release lookup and one
+    `UserSession`-to-`GraphRelease` outer join.
+- `src/api/services/session_manager.py`
+  - Merged exactly `graph_version`, `active_graph_version`, and
+    `is_older_than_active` into new, idempotently-existing, get, and list
+    session response dictionaries.
+- `tests/unit/test_conversation_graph_version_responses.py`
+  - Added real SQLite behavior coverage for active, historical, and null pins;
+    absent active/pinned referents; recursive private graph-field rejection;
+    create/get/list projection; and the list query shape.
+- `tests/integration/test_api_routes.py`
+  - Added route pass-through coverage for create/get/list public fields and
+    absence of release identity fields.
+
+`src/api/routes/sessions.py` was reviewed but intentionally has no source
+change: each of its existing responses returns the manager dictionary unchanged
+(`create`), wraps the existing session dictionaries (`list`), or expands that
+dictionary (`get`). The integration coverage verifies all three paths preserve
+the public fields without introducing a second projection boundary.
+
+No chat auto-create, contributor/duplicate creation, runtime construction,
+mixed-release handling, or frontend code was changed.
+
+## TDD evidence
+
+RED command, before the projection implementation:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_graph_version_responses.py
+```
+
+Result: collection failed as expected with `ImportError: cannot import name
+'ConversationGraphReleaseIntegrityError' from 'src.services.conversation_pins'`.
+
+GREEN command after the minimal production implementation:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_graph_version_responses.py
+```
+
+Result: `6 passed` (before the subsequently added explicit missing-active case).
+
+Final focused verification:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_graph_version_responses.py tests/integration/test_api_routes.py
+```
+
+Result: `88 passed, 2 skipped`.
+
+## Sabotage evidence
+
+The controller-reserved query-shape/count sabotage target was not used.
+
+| Marker and mutated production line | RED command/result | Restore/GREEN evidence |
+| --- | --- | --- |
+| `TASK7_SABOTAGE_RELEASE_COMPARISON`: changed `pinned.version_number < active.version_number` to `>` in `get_conversation_graph_version` | `python -m pytest -q tests/unit/test_conversation_graph_version_responses.py::test_projection_uses_persisted_pin_and_exposes_only_public_version_fields` → `1 failed, 2 passed`; the historical projection became `(1, 2, False)` rather than `(1, 2, True)` | Marker was removed and the same explicit-pyenv command returned `3 passed`; marker-absence check exited 0. |
+| `TASK7_SABOTAGE_PRIVATE_ID_LEAK`: added `graph_release_id` to the new-session response | `python -m pytest -q tests/unit/test_conversation_graph_version_responses.py::test_create_get_and_list_merge_public_versions_without_private_identity` → `1 failed`; recursive public-payload assertion found `graph_release_id` | Marker was removed and the same explicit-pyenv command returned `1 passed`; marker-absence check exited 0. |
+| `TASK7_SABOTAGE_NULL_PIN`: changed null-pin `graph_version` from `None` to the active version | `python -m pytest -q tests/unit/test_conversation_graph_version_responses.py::test_projection_uses_persisted_pin_and_exposes_only_public_version_fields` → `1 failed, 2 passed`; the null pin became `(2, 2, False)` rather than `(None, 2, False)` | Marker was removed and the same explicit-pyenv command returned `3 passed`; combined marker-absence check exited 0. |
+
+In every RED run, `rg -n` first located the marker on the mutated production
+line. Final marker verification was:
+
+```text
+if rg -n "TASK7_SABOTAGE_NULL_PIN|TASK7_SABOTAGE_RELEASE_COMPARISON|TASK7_SABOTAGE_PRIVATE_ID_LEAK" src/services/conversation_pins.py src/api/services/session_manager.py; then exit 1; fi
+```
+
+It exited 0 before final focused verification.
+
+## Regression and baseline notes
+
+The scoped Task 7 suite above is green. The broader command below reported five
+failures, all one cause rather than five independent regressions:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_graph_version_responses.py tests/unit/test_conversation_pin_creation.py tests/integration/test_api_routes.py
+```
+
+Result: `5 failed, 97 passed, 2 skipped`.
+
+Cause: five pre-existing Task 2 creation tests construct a database with no
+active `GraphRelease` (and, in graph-capable cases, mock a lock result whose
+release ID does not exist in that database). Task 7's binding requirement makes
+a missing active release or pinned referent an integrity error rather than a
+fallback, so the new public response projection correctly raises
+`ConversationGraphReleaseIntegrityError`. Updating those test fixtures to seed
+a real active release would resolve the cause, but
+`tests/unit/test_conversation_pin_creation.py` is outside Task 7's declared
+owned-file set and was intentionally left untouched.
+
+Lint checks:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m ruff check tests/unit/test_conversation_graph_version_responses.py
+```
+
+Result: `All checks passed!`
+
+`ruff check` against all changed code reported exactly the same 14 pre-existing
+violations in `src/api/services/session_manager.py` (4) and
+`tests/integration/test_api_routes.py` (10). This was confirmed by running
+ruff against each file from base
+`77e42b3c170373407afddc1c98d982af5c3806fa`; no new lint issue remains in the
+Task 7 diff. `git diff --check` passed before the implementation commit.
+
+## Self-review
+
+- The only graph fields appended to public session dictionaries are the three
+  specified fields. No release ID, revision, prompt, endpoint, schema, or
+  release-object data is copied into those dictionaries.
+- Null pins project exactly `(None, active version, False)`; historical pins
+  compare immutable version numbers, not release IDs.
+- Missing active releases, dangling pinned releases, and non-integer pins
+  raise integrity errors; no latest/active substitution is used.
+- Listing performs the required single active lookup and one pinned outer join,
+  guarded by executed SQL-shape coverage and no per-row helper call.
+- Existing response keys remain intact; this task only merges the three public
+  fields.
+
+## Concern
+
+The five fixture failures described above are the remaining concern. They are
+consistent with the Task 7 integrity contract, but mean the full targeted
+creation regression command is not all-green until the out-of-scope Task 2
+fixtures seed their active graph release.
+
+## Follow-up fixture correction
+
+Controller ruling authorized the smallest fixture-only correction in
+`tests/unit/test_conversation_pin_creation.py`. No production code or response
+semantics changed.
+
+The correction adds `_seed_active_release()`, which persists active release ID
+41/version 7 before each Task 2 creation test that returns a projected session
+response. The mocked `PinnedRelease(41, 7)` values now refer to that real row.
+The idempotent-create test's second mocked return was changed from the dangling
+`PinnedRelease(99, 8)` to the same persisted `PinnedRelease(41, 7)`; its
+original assertion (`lock_active.assert_not_called()`) remains the protection
+against an unwanted second lock/re-pin call.
+
+Required focused command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_pin_creation.py
+```
+
+Result: `14 passed, 5 warnings in 0.43s`. The five warning causes are unchanged
+Pydantic deprecation warnings plus existing LangChain/Unity Catalog warnings.
+
+Required combined command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q -rs tests/unit/test_conversation_graph_version_responses.py tests/unit/test_conversation_pin_creation.py tests/integration/test_api_routes.py
+```
+
+Result: `102 passed, 2 skipped, 10 warnings in 3.03s`.
+
+The additional five warnings relative to the unit-only command are established
+route-module Pydantic deprecation warnings. Both skips are unchanged and have
+the exact reason `MLflow mocking requires complex setup - mlflow is imported
+inside function`, at `tests/integration/test_api_routes.py:1193` and `:1216`.
+
+Follow-up self-review: the fixture creates the active database state required
+by the new public projection, preserves every original Task 2 assertion, and
+does not catch or suppress `ConversationGraphReleaseIntegrityError`. The
+previous concern is resolved; the required combined suite is all green.
+
+## Fix round 1 — batch integrity regression coverage
+
+Reviewer finding addressed (test-only): added three focused tests to
+`tests/unit/test_conversation_graph_version_responses.py`; no production or
+fixture behavior changed in this round.
+
+- `test_non_integer_single_session_pin_is_an_integrity_error` calls the public
+  single-session projection with a real `UserSession` carrying the string pin
+  `"not-an-id"`. It executes the `isinstance(..., int)` guard and would fail if
+  that guard were removed.
+- `test_batch_projection_rejects_dangling_pinned_release` uses real SQLite rows:
+  a non-null `graph_release_id=999` has no `GraphRelease`, so the production
+  batch outer join returns a null version and the dangling-pin guard raises.
+  Removing that guard would make the test fail.
+- `test_batch_projection_rejects_requested_session_absent_from_rows` uses a
+  controlled result seam only for the production batch query's second execute;
+  the active-release lookup is real and the seam returns an empty `.all()`
+  result. This executes the production `len(versions) != len(session_ids)`
+  guard rather than duplicating it in test code. Removing that guard would make
+  the test fail.
+
+Focused command:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q tests/unit/test_conversation_graph_version_responses.py
+```
+
+Result: `10 passed, 5 warnings in 0.17s`. Warning causes are unchanged:
+Pydantic v2 compatibility deprecations (two route schemas, Unity Catalog, and
+Databricks AI Bridge) plus the established LangChain community deprecation.
+
+Combined command with skip causes:
+
+```text
+/Users/robert.whiffin/.pyenv/shims/python -m pytest -q -rs tests/unit/test_conversation_graph_version_responses.py tests/unit/test_conversation_pin_creation.py tests/integration/test_api_routes.py
+```
+
+Result: `105 passed, 2 skipped, 10 warnings in 2.69s`. The two skips are
+unchanged: `MLflow mocking requires complex setup - mlflow is imported inside
+function` at `tests/integration/test_api_routes.py:1193` and `:1216`. The five
+additional warnings relative to the focused unit command are the same existing
+route-module Pydantic deprecation causes recorded in the prior follow-up.
+
+Fix-round self-review: the tests are confined to the declared test file, each
+asserts `ConversationGraphReleaseIntegrityError` from a distinct existing
+production guard, and the omitted-row seam only supplies the batch SQL result
+needed to make the guard reachable. No production behavior, response shape,
+or Task 2 creation semantics was modified.

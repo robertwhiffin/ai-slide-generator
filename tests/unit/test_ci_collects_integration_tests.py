@@ -59,6 +59,23 @@ def _collect_run_blocks() -> list[str]:
     return run_blocks
 
 
+def _collect_job_run_blocks(job_name: str) -> list[str]:
+    """Return run blocks for one named workflow job, failing on a stale job name."""
+    with open(WORKFLOW) as f:
+        wf = yaml.safe_load(f)
+
+    job = (wf.get("jobs") or {}).get(job_name)
+    assert job is not None, (
+        f"{job_name!r} is absent from {WORKFLOW}; update the job-specific CI guard "
+        "to the replacement job rather than letting it pass over an empty set."
+    )
+    return [
+        step["run"]
+        for step in (job.get("steps") or [])
+        if isinstance(step, dict) and "run" in step
+    ]
+
+
 def _integration_test_names() -> set[str]:
     """All test_*.py filenames directly in tests/integration/ (non-recursive)."""
     return {p.name for p in INTEGRATION_DIR.glob("test_*.py")}
@@ -162,4 +179,48 @@ def test_slide_row_identity_and_verdicts_is_collected():
         f"'tests/integration/{target}' is not named in any CI job's run block in "
         ".github/workflows/test.yml.  It is PR1's row-per-slide identity and "
         "verdict suite that the entire workstream builds on — restore it to a job."
+    )
+
+
+def test_conversation_pin_migration_is_collected_by_integration_graph():
+    """The Conversation Pin PostgreSQL migration belongs in the graph CI job."""
+    target = "tests/integration/test_conversation_pin_migration_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its PostgreSQL upgrade/backfill assertions "
+        "must run in the graph job's PostgreSQL environment."
+    )
+
+
+def test_conversation_pin_creation_is_collected_by_integration_graph():
+    """The Conversation Pin PostgreSQL linearization tests belong in graph CI."""
+    target = "tests/integration/test_conversation_pin_creation_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its PostgreSQL lock-order assertions must "
+        "run in the graph job's PostgreSQL environment."
+    )
+
+
+def test_persisted_graph_runtime_failures_are_collected_by_integration_graph():
+    """Persisted runtime failure coverage requires the graph job's PostgreSQL."""
+    target = "tests/integration/test_persisted_graph_runtime_failures_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its exact-release failure and redaction "
+        "assertions must execute against PostgreSQL."
+    )
+
+
+def test_conversation_pin_acceptance_is_collected_by_integration_graph():
+    """The final persisted-runtime acceptance belongs in graph CI."""
+    target = "tests/integration/test_conversation_pin_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its compiled-graph pin assertions must "
+        "execute against PostgreSQL."
     )

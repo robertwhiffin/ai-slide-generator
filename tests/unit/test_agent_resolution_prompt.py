@@ -35,6 +35,7 @@ class PromptCaptureAdapter:
     def invoke(
         self,
         *,
+        agent_key: str,
         configuration: AgentModelConfiguration,
         schema: type[BaseModel],
         prompt: str,
@@ -52,6 +53,7 @@ def _assembled_prompt(
     model = PromptCaptureAdapter()
     result = AgentRuntime.compatibility(model_adapter=model).run(
         agent_key,
+        1,
         payload,
         AgentAssemblyContext(design_system_active),
     )

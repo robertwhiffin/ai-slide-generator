@@ -12,7 +12,8 @@ import queue
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from src.api.schemas.streaming import StreamEventType
+from src.api.schemas.streaming import StreamEvent, StreamEventType
+from src.services.persisted_graph_release import PersistedRuntimeError
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,31 @@ JOB_HARD_TIMEOUT_SECONDS = 600
 # Shorter values catch stuck jobs faster but scan more often; 60 is
 # the sweet spot given the 10-minute stuck-job cutoff.
 TIMEOUT_SWEEP_INTERVAL_SECONDS = 60
+
+PINNED_GRAPH_CONFIGURATION_ERROR = "Pinned graph configuration is unavailable"
+PINNED_GRAPH_CONFIGURATION_METADATA = {
+    "code": "pinned_graph_configuration_unavailable"
+}
+
+
+class _PinnedGraphConfigurationTerminalError(Exception):
+    """The safe pinned-configuration event was already emitted."""
+
+
+def is_pinned_graph_configuration_error_event(event: StreamEvent) -> bool:
+    return (
+        event.type == StreamEventType.ERROR
+        and event.error == PINNED_GRAPH_CONFIGURATION_ERROR
+        and event.metadata == PINNED_GRAPH_CONFIGURATION_METADATA
+    )
+
+
+def pinned_graph_configuration_error_event_payload() -> dict:
+    return {
+        "type": StreamEventType.ERROR.value,
+        "error": PINNED_GRAPH_CONFIGURATION_ERROR,
+        "metadata": dict(PINNED_GRAPH_CONFIGURATION_METADATA),
+    }
 
 
 async def enqueue_job(request_id: str, payload: dict) -> None:
@@ -170,6 +196,13 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         session_manager.set_chat_request_result(request_id, result)
         session_manager.update_chat_request_status(request_id, "completed")
 
+    except _PinnedGraphConfigurationTerminalError:
+        session_manager.update_chat_request_status(
+            request_id,
+            "error",
+            PINNED_GRAPH_CONFIGURATION_ERROR,
+        )
+
     except Exception as e:
         logger.error(f"Job failed: {e}", extra={"request_id": request_id})
         session_manager.update_chat_request_status(request_id, "error", str(e))
@@ -213,16 +246,24 @@ def _run_streaming_generator(
         List of all events from the generator
     """
     events = []
-    for event in chat_service.send_message_streaming(
-        session_id=session_id,
-        message=message,
-        slide_context=slide_context,
-        request_id=request_id,
-        is_first_message_override=is_first_message,
-        image_ids=image_ids,
-        engine_mode=engine_mode,
-    ):
-        events.append(event)
+    try:
+        for event in chat_service.send_message_streaming(
+            session_id=session_id,
+            message=message,
+            slide_context=slide_context,
+            request_id=request_id,
+            is_first_message_override=is_first_message,
+            image_ids=image_ids,
+            engine_mode=engine_mode,
+        ):
+            events.append(event)
+    except PersistedRuntimeError as exc:
+        if any(
+            is_pinned_graph_configuration_error_event(event)
+            for event in events
+        ):
+            raise _PinnedGraphConfigurationTerminalError() from exc
+        raise
     return events
 
 
@@ -378,4 +419,3 @@ async def mark_timed_out_jobs_loop() -> None:
                 exc_info=True,
                 extra={"error": str(e)},
             )
-

@@ -44,15 +44,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import logging
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
 
+from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.chat_service import ChatService
 from src.domain.skill_io import ArchitectOutput
 from src.services.agent_runtime import AgentAssemblyContext
 from src.services.graph.nodes import _advisory_text
+from src.services.persisted_graph_release import GraphReleaseIncompleteError
 from tests.integration.conftest_stub_skills import CallableAgentRuntime
 
 #: The architect's reply.  A sentence no default, no stub and no other node
@@ -244,9 +248,15 @@ def async_turn_env(graph_turn_env, monkeypatch):
     recorder = env.recorder
     knobs: Dict[str, Any] = {"discuss": True, "reply": REPLY}
 
-    def stub_architect(name: str, payload: dict, design_system_active: bool):
+    def stub_architect(
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        design_system_active: bool,
+    ):
         out = recorder.run(
             name,
+            graph_release_id,
             payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -274,6 +284,86 @@ def async_turn_env(graph_turn_env, monkeypatch):
 # ===========================================================================
 # Guard 1 — a polling client receives the architect's reply
 # ===========================================================================
+
+
+def test_a_pinned_graph_failure_reaches_poll_as_one_safe_terminal_error(
+    async_turn_env, monkeypatch, caplog
+):
+    """The async transport must not persist or log a typed failure's identity."""
+    from src.api.services import job_queue as job_queue_module
+
+    sentinel_release_id = 987654321
+
+    def generate_pinned_failure(**_kwargs):
+        yield StreamEvent(
+            type=StreamEventType.ERROR,
+            error="Pinned graph configuration is unavailable",
+            metadata={"code": "pinned_graph_configuration_unavailable"},
+        )
+        raise GraphReleaseIncompleteError(sentinel_release_id)
+
+    service = MagicMock()
+    service.send_message_streaming.side_effect = generate_pinned_failure
+    monkeypatch.setattr(
+        "src.api.services.chat_service.get_chat_service", lambda: service
+    )
+
+    async def run_worker_once(request_id: str, payload: dict) -> None:
+        from src.api.services.session_manager import get_session_manager
+
+        session_manager = get_session_manager()
+        job_queue_module.jobs[request_id] = {
+            "status": "pending",
+            "session_id": payload["session_id"],
+        }
+        worker_task = asyncio.create_task(job_queue_module.worker())
+        await job_queue_module.job_queue.put((request_id, payload))
+        try:
+            for _ in range(50):
+                chat_request = await asyncio.to_thread(
+                    session_manager.get_chat_request, request_id
+                )
+                if chat_request and chat_request["status"] in {
+                    "completed",
+                    "error",
+                }:
+                    return
+                await asyncio.sleep(0.1)
+            raise AssertionError("worker did not finish the request")
+        finally:
+            worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker_task
+
+    request_id, payload = async_turn_env.submit()
+    with caplog.at_level(logging.ERROR, logger="src.api.services.job_queue"):
+        asyncio.run(run_worker_once(request_id, payload))
+
+    body = async_turn_env.poll(request_id)
+    error_events = [event for event in body["events"] if event["type"] == "error"]
+
+    assert body["status"] == "error"
+    assert body["error"] == "Pinned graph configuration is unavailable"
+    assert len(error_events) == 1
+    assert error_events[0]["error"] == (
+        "Pinned graph configuration is unavailable"
+    )
+    assert error_events[0]["metadata"] == {
+        "code": "pinned_graph_configuration_unavailable"
+    }
+
+    public = json.dumps(body)
+    assert str(sentinel_release_id) not in public
+    assert "GraphReleaseIncompleteError" not in public
+    job_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "src.api.services.job_queue"
+    )
+    assert "Job failed" not in job_logs
+    assert "Worker job failed" not in job_logs
+    assert str(sentinel_release_id) not in job_logs
+    assert "GraphReleaseIncompleteError" not in job_logs
 
 
 def test_a_polling_client_receives_the_architects_reply(async_turn_env):
@@ -499,13 +589,19 @@ def test_the_analysts_answer_reaches_the_user_but_never_replays_as_the_architect
     env = async_turn_env
     architect_passes = {"n": 0}
 
-    def ask_then_discuss(name: str, payload: dict, design_system_active: bool):
+    def ask_then_discuss(
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        design_system_active: bool,
+    ):
         # The recorder is invoked ONLY for the architect: its own data_analyst
         # handler raises on purpose ("not part of any layer-1 scenario"), so
         # routing this skill through it would kill the turn.
         if name == "architect":
             env.recorder.run(
                 name,
+                graph_release_id,
                 payload,
                 AgentAssemblyContext(design_system_active),
             )

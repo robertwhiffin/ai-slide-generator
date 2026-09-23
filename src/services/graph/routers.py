@@ -186,7 +186,10 @@ def build_reviewer_refan_router(state: dict) -> Union[str, List[Send]]:
     slides = scoped_vals(state, "slides")
     reviewed = scoped_vals(state, "reviewed_positions")
     sends = [
-        Send("build_reviewer", dict(record))
+        Send(
+            "build_reviewer",
+            {**dict(record), "graph_release_id": state["graph_release_id"]},
+        )
         for position, record in sorted(slides.items())
         if record is not None and position not in reviewed
     ]

@@ -16,7 +16,8 @@ from sqlalchemy.pool import StaticPool
 from unittest.mock import patch
 
 import src.database.models  # noqa: F401 - register models with Base
-from src.core.database import Base, init_db, _run_migrations
+import src.core.database as database_module
+from src.core.database import Base, _run_migrations, init_db
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +175,40 @@ def test_migration_is_idempotent(sqlite_engine):
         assert count == 1
         rows = conn.execute(text("SELECT google_credentials_encrypted FROM config_profiles")).fetchall()
         assert all(r[0] is None for r in rows)
+
+
+def test_conversation_pin_schema_migrates_pre_column_sqlite_table_idempotently(
+    sqlite_engine,
+):
+    """The additive migration owns the legacy-table path, not ``create_all``."""
+    migration = getattr(database_module, "_migrate_conversation_pin_schema", None)
+    assert migration is not None
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE user_sessions ("
+                "id INTEGER PRIMARY KEY, session_id VARCHAR(64) NOT NULL)"
+            )
+        )
+
+    for _ in range(2):
+        with sqlite_engine.begin() as conn:
+            inspector = inspect(conn)
+            migration(
+                conn,
+                inspector,
+                None,
+                lambda table: f'"{table}"',
+                True,
+            )
+
+    inspector = inspect(sqlite_engine)
+    column = next(
+        column
+        for column in inspector.get_columns("user_sessions")
+        if column["name"] == "graph_release_id"
+    )
+    assert column["nullable"] is True
+    assert {index["name"] for index in inspector.get_indexes("user_sessions")} == {
+        "ix_user_sessions_graph_release_id"
+    }
