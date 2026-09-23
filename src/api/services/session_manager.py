@@ -35,6 +35,13 @@ from src.services.conversation_pins import (
     get_conversation_graph_versions,
     lock_active_graph_release,
 )
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    MutationActor,
+    MutationObjectType,
+    MutationOperation,
+    record_shared_deck_mutation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1532,6 +1539,7 @@ class SessionManager:
         deck_dict: Optional[Dict[str, Any]] = None,
         modified_by: Optional[str] = None,
         expected_version: Optional[int] = None,
+        mutation: Optional[DeckMutationContext] = None,
     ) -> Dict[str, Any]:
         """Save or update slide deck for a session.
 
@@ -1684,6 +1692,39 @@ class SessionManager:
             session.last_activity = datetime.utcnow()
             if session.id != deck_owner.id:
                 deck_owner.last_activity = datetime.utcnow()
+
+            db.flush()
+            generic_actor = MutationActor(
+                session.session_id, session.graph_release_id
+            )
+            contexts = [mutation] if mutation is not None else []
+            if mutation is None or not mutation.suppress_nested_events:
+                contexts.append(
+                    DeckMutationContext(
+                        actor=generic_actor,
+                        operation="save_deck",
+                        object_type="deck",
+                    )
+                )
+            if deck_dict and (mutation is None or not mutation.suppress_nested_events):
+                contexts.append(
+                    DeckMutationContext(
+                        actor=generic_actor,
+                        operation="save_deck_slides",
+                        object_type="deck",
+                    )
+                )
+            for context in contexts:
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=context.actor,
+                    operation=context.operation,
+                    object_type=context.object_type,
+                    object_id=context.object_id,
+                )
 
             logger.info(
                 "Saved slide deck",
@@ -2777,6 +2818,23 @@ class SessionManager:
                 # strategy — see _prune_slide_rows_beyond).
                 _prune_slide_rows_beyond(db, deck_owner.id, len(restored_slides))
 
+                db.flush()
+                restore_mutation = DeckMutationContext(
+                    actor=MutationActor(session.session_id, session.graph_release_id),
+                    operation="restore_version",
+                    object_type="deck",
+                )
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=restore_mutation.actor,
+                    operation=restore_mutation.operation,
+                    object_type=restore_mutation.object_type,
+                    object_id=restore_mutation.object_id,
+                )
+
             logger.info(
                 "Restored to save point",
                 extra={
@@ -3352,6 +3410,25 @@ class SessionManager:
             )
 
         return count
+
+    def deck_mutation_context(
+        self,
+        session_id: str,
+        *,
+        operation: MutationOperation,
+        object_type: MutationObjectType,
+        object_id: Optional[str] = None,
+    ) -> DeckMutationContext:
+        """Snapshot an immutable session pin for a forthcoming deck write."""
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            return DeckMutationContext(
+                actor=MutationActor(session.session_id, session.graph_release_id),
+                operation=operation,
+                object_type=object_type,
+                object_id=object_id,
+                suppress_nested_events=True,
+            )
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.

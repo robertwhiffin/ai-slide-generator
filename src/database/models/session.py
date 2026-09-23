@@ -443,7 +443,8 @@ class SharedDeckMutationEvent(Base):
             "(object_type = 'slide' AND operation IN ('write_slide', 'delete_slide')) "
             "OR (object_type = 'deck' AND operation IN "
             "('save_deck', 'save_deck_slides', 'write_deck_level', 'insert_slide', "
-            "'update_slide', 'duplicate_slide', 'reorder_slides', 'restore_version'))",
+            "'update_slide', 'duplicate_slide', 'delete_slide', 'reorder_slides', "
+            "'restore_version'))",
             name="ck_shared_deck_mutation_event_operation_object",
         ),
         Index(

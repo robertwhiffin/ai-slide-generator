@@ -42,10 +42,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from src.api.services.session_manager import VersionConflictError, get_session_manager
-from src.database.models.session import SessionSlide, UserSession
+from src.database.models.session import (
+    SessionSlide,
+    SharedDeckMutationEvent,
+    UserSession,
+)
 from src.services.graph.builder import invoke_graph
 from src.services.spec_sync import claim_due_marker, mark_dirty, run_arc_review
 from tests.integration.conftest import _make_fake_db
@@ -129,6 +133,72 @@ def _age_the_marker(env, seconds: int = 400) -> None:
 
 
 class TestASweeperTurnDoesNotRebuildTheDeck:
+    def test_pinned_root_records_one_normal_graph_deck_event(self, sweeper_env):
+        """A describe-only sweep is still an attributed graph deck write."""
+        env = sweeper_env
+        env.recorder.slide_count = 2
+        env.run()
+        mark_dirty(env.session_id, _AUTHOR)
+        with env.factory() as db:
+            before = len(list(db.scalars(select(SharedDeckMutationEvent))))
+            root = db.scalar(
+                select(UserSession).where(UserSession.session_id == env.session_id)
+            )
+
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+
+        with env.factory() as db:
+            events = list(
+                db.scalars(
+                    select(SharedDeckMutationEvent).order_by(
+                        SharedDeckMutationEvent.id
+                    )
+                )
+            )
+        assert len(events) == before + 1
+        event = events[-1]
+        assert (event.operation, event.object_type, event.object_id) == (
+            "write_deck_level",
+            "deck",
+            None,
+        )
+        assert event.root_session_id == root.id
+        assert event.actor_session_id == root.id
+        assert (event.graph_release_id, event.graph_version) == (
+            env.graph_release_id,
+            1,
+        )
+
+    def test_null_pinned_legacy_root_stays_retryable_without_write_or_event(
+        self, sweeper_env
+    ):
+        """C-3: never infer active/latest provenance for a legacy root."""
+        env = sweeper_env
+        env.recorder.slide_count = 2
+        env.run()
+        assert mark_dirty(env.session_id, _AUTHOR) is True
+        with env.factory() as db:
+            root = db.scalar(
+                select(UserSession).where(UserSession.session_id == env.session_id)
+            )
+            root.graph_release_id = None
+            deck = root.slide_deck
+            before_deck = (deck.deck_spec_json, deck.version, deck.updated_at)
+            before_events = len(list(db.scalars(select(SharedDeckMutationEvent))))
+            db.commit()
+
+        assert run_arc_review(env.session_id, _AUTHOR) is False
+
+        with env.factory() as db:
+            root = db.scalar(
+                select(UserSession).where(UserSession.session_id == env.session_id)
+            )
+            deck = root.slide_deck
+            assert (deck.deck_spec_json, deck.version, deck.updated_at) == before_deck
+            assert len(list(db.scalars(select(SharedDeckMutationEvent)))) == before_events
+            assert deck.spec_dirty_at is not None
+            assert deck.spec_dirty_claimed_at is None
+
     def test_the_hand_edit_survives_the_arc_review(self, sweeper_env):
         """The property, stated as the user would state it.
 
