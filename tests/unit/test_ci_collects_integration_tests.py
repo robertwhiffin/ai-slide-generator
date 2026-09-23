@@ -274,9 +274,16 @@ def test_collaboration_history_api_is_collected_by_integration_graph():
     predicate against real ``uuid``/``varchar`` columns and PostgreSQL's NULL
     semantics for ``IN``, newest-first grouped aggregation despite PostgreSQL's
     ``NULLS FIRST`` default for ``DESC``, and evidence surviving real
-    ``ON DELETE SET NULL`` cascades. None of that is proven by the SQLite unit
-    suite, so an unenrolled file would leave the authorization boundary untested
-    on the deployment dialect.
+    ``ON DELETE SET NULL`` cascades.
+
+    That last claim is the one this docstring must actually be able to cash, and
+    only PostgreSQL can cash it: the unit fixture's in-memory SQLite reports
+    ``PRAGMA foreign_keys = 0``, so no cascade fires there at all and a ``DELETE``
+    would leave a dangling FK rather than a nulled one. The PostgreSQL module
+    therefore owns three real deletions — every actor, the deck row, and the root
+    session — plus the two-actors-on-one-release guard that is the only shape able
+    to catch grouping on ``actor_session_id`` instead of the opaque
+    ``actor_session_identity``.
     """
     target = "tests/integration/test_collaboration_history_api_postgres.py"
     run_blocks = _collect_job_run_blocks("integration-graph")

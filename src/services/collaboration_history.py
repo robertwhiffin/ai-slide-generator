@@ -58,10 +58,25 @@ Privacy
 Only ``actor_label``, ``graph_version``, ``mutation_count`` and
 ``last_mutation_at`` leave this module, plus the two summary booleans. No actor
 session id, session name, raw collaboration UUID, internal release id, pin,
-prompt, content, user id or principal. Grouping keys on the opaque
-``actor_session_identity`` — never ``actor_session_id`` — so evidence stays
-groupable after the ``ON DELETE SET NULL`` columns are nulled by root, actor or
-deck deletion.
+prompt, content, user id or principal.
+
+Grouping and the SET NULL design
+--------------------------------
+Grouping keys on the opaque ``actor_session_identity`` — never
+``actor_session_id`` — so evidence stays groupable after the ``ON DELETE SET
+NULL`` columns are nulled. Two live actors have distinct primary keys, which
+makes a wrong-column substitution invisible; the guard that catches it therefore
+needs two actors on the SAME release with both FK columns NULL, and it lives at
+``test_two_deleted_actors_on_one_release_do_not_collapse`` (PostgreSQL, real
+``DELETE``) and its SQLite twin.
+
+Scope note, stated rather than implied: the grouped query joins
+``session_slide_decks`` through the deck's immutable ``collaboration_identity``,
+so once the deck ROW is gone the projection can no longer reach the evidence. That
+is consistent, not a gap — ``authorized_collaboration_root``'s deck join denies
+first, so the endpoint 404s and the projection is never called. Retention of the
+rows themselves after deletion is Task 1b's contract, covered in
+``tests/integration/test_shared_deck_mutation_lifecycle_postgres.py``.
 """
 
 from __future__ import annotations
@@ -69,7 +84,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, false, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from src.core.permission_context import PermissionContext
@@ -121,13 +136,17 @@ def _deck_grant_exists(root, *clauses):
     )
 
 
-def _can_view_predicate(root, permission_context: PermissionContext | None):
-    """The five live CAN_VIEW checks as one disjunction over the resolved root.
+def _can_view_clauses(root, permission_context: PermissionContext | None) -> list:
+    """The five live CAN_VIEW checks as a list of independent clauses.
 
     A check contributes no clause when the caller carries nothing to match it
     with, exactly as the live service skips it. Check 5 always contributes
     because it depends on the deck's own column rather than on the caller, which
     is the live behaviour of ``get_deck_permission``'s workspace-share check.
+
+    Split out from ``_can_view_predicate`` so the empty-list case is directly
+    testable: the fail-open risk lives in how the clauses are combined, and a
+    test cannot pin that while the list is unreachable.
     """
     user_id = permission_context.user_id if permission_context else None
     user_name = permission_context.user_name if permission_context else None
@@ -173,7 +192,23 @@ def _can_view_predicate(root, permission_context: PermissionContext | None):
     # other value (CAN_MANAGE included) yield NULL/false rather than access.
     clauses.append(root.global_permission.in_(_VALID_GLOBAL_SHARE_VALUES))
 
-    return or_(*clauses)
+    return clauses
+
+
+def _can_view_predicate(root, permission_context: PermissionContext | None):
+    """Combine the five CAN_VIEW checks, denying by construction when empty.
+
+    ``false()`` is the seed, not decoration. ``or_()`` over an empty list
+    produces an empty clause that SQLAlchemy drops from the WHERE entirely, so
+    the predicate would vanish and the select would admit EVERY root — a
+    fail-OPEN degradation in an authorization path. Today only check 5 being
+    unconditional keeps the list non-empty, which makes that correctness
+    incidental: it rests on the ordering of unrelated code rather than on the
+    structure here. Seeding with ``false()`` makes an empty clause list deny by
+    construction. Pinned by
+    ``test_an_empty_clause_list_denies_by_construction``.
+    """
+    return or_(false(), *_can_view_clauses(root, permission_context))
 
 
 def _authorized_root_select(
