@@ -123,24 +123,24 @@ class _CallBudget:
     def __init__(self, real, limit: int):
         self._real = real
         self.limit = limit
-        self.calls: list[tuple[str, object]] = []
+        self.calls: list[tuple[str, int, object]] = []
 
-    def run(self, name: str, payload: dict, assembly_context):
+    def run(self, name: str, graph_release_id: int, payload: dict, assembly_context):
         if len(self.calls) >= self.limit:
             raise _BudgetExceeded(
                 f"call budget of {self.limit} reached; calls so far: {self.counts()}"
             )
-        self.calls.append((name, (payload or {}).get("position")))
-        return self._real.run(name, payload, assembly_context)
+        self.calls.append((name, graph_release_id, (payload or {}).get("position")))
+        return self._real.run(name, graph_release_id, payload, assembly_context)
 
     def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
-        for name, _ in self.calls:
+        for name, _, _ in self.calls:
             out[name] = out.get(name, 0) + 1
         return out
 
     def positions(self, skill: str) -> list[object]:
-        return [pos for name, pos in self.calls if name == skill]
+        return [pos for name, _, pos in self.calls if name == skill]
 
 
 @pytest.fixture

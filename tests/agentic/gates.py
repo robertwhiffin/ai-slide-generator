@@ -210,6 +210,7 @@ def invoke_agent(agent_key: str, payload: dict, design_system_active: bool):
 
     return get_agent_runtime().run(
         agent_key,
+        1,
         payload,
         AgentAssemblyContext(design_system_active),
     ).output

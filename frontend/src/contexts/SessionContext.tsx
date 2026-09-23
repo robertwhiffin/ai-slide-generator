@@ -16,19 +16,28 @@ export interface OptionalSessionInfo {
   title: string | null;
   has_slide_deck?: boolean;
   experiment_url?: string | null;
+  graph_version?: number | null;
+  active_graph_version?: number | null;
+  is_older_than_active?: boolean;
 }
 
 interface SessionContextType {
   sessionId: string | null;
   sessionTitle: string | null;
   experimentUrl: string | null;
+  graphVersion: number | null;
+  activeGraphVersion: number | null;
+  isGraphVersionOlder: boolean;
+  isSessionPersisted: boolean;
   isInitializing: boolean;
   error: string | null;
   createNewSession: () => string;
+  markSessionPersisted: () => void;
   switchSession: (sessionId: string, existingSessionInfo?: OptionalSessionInfo, isCancelled?: () => boolean) => Promise<SessionRestoreResult>;
   renameSession: (title: string, slideCount?: number) => Promise<void>;
   setSessionTitle: (title: string | null) => void;
   setExperimentUrl: (url: string | null) => void;
+  setConversationGraphVersion: (info: Pick<OptionalSessionInfo, 'graph_version' | 'active_graph_version' | 'is_older_than_active'>) => void;
 }
 
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
@@ -37,6 +46,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [sessionId, setSessionId] = useState<string | null>(() => generateLocalSessionId());
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [experimentUrl, setExperimentUrl] = useState<string | null>(null);
+  const [graphVersion, setGraphVersion] = useState<number | null>(null);
+  const [activeGraphVersion, setActiveGraphVersion] = useState<number | null>(null);
+  const [isGraphVersionOlder, setIsGraphVersionOlder] = useState(false);
+  const [isSessionPersisted, setIsSessionPersisted] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Set the session ID in the API service on initial render
@@ -55,9 +68,23 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setSessionId(newSessionId);
     setSessionTitle(null);
     setExperimentUrl(null);
+    setGraphVersion(null);
+    setActiveGraphVersion(null);
+    setIsGraphVersionOlder(false);
+    setIsSessionPersisted(false);
     setError(null);
     api.setCurrentSessionId(newSessionId);
     return newSessionId;
+  }, []);
+
+  const markSessionPersisted = useCallback(() => {
+    setIsSessionPersisted(true);
+  }, []);
+
+  const setConversationGraphVersion = useCallback((info: Pick<OptionalSessionInfo, 'graph_version' | 'active_graph_version' | 'is_older_than_active'>) => {
+    setGraphVersion(info.graph_version ?? null);
+    setActiveGraphVersion(info.active_graph_version ?? null);
+    setIsGraphVersionOlder(info.is_older_than_active ?? false);
   }, []);
 
   /**
@@ -75,16 +102,26 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setIsInitializing(true);
       setError(null);
       try {
-        let sessionInfo: { title: string | null; has_slide_deck?: boolean; experiment_url?: string | null };
+        let sessionInfo: OptionalSessionInfo;
         if (existingSessionInfo != null) {
           sessionInfo = {
             title: existingSessionInfo.title ?? null,
             has_slide_deck: existingSessionInfo.has_slide_deck,
             experiment_url: existingSessionInfo.experiment_url,
+            graph_version: existingSessionInfo.graph_version,
+            active_graph_version: existingSessionInfo.active_graph_version,
+            is_older_than_active: existingSessionInfo.is_older_than_active,
           };
         } else {
           const full = await api.getSession(newSessionId);
-          sessionInfo = { title: full.title, has_slide_deck: full.has_slide_deck, experiment_url: full.experiment_url };
+          sessionInfo = {
+            title: full.title,
+            has_slide_deck: full.has_slide_deck,
+            experiment_url: full.experiment_url,
+            graph_version: full.graph_version,
+            active_graph_version: full.active_graph_version,
+            is_older_than_active: full.is_older_than_active,
+          };
         }
 
         // Get slide deck if it has one
@@ -109,6 +146,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setSessionId(newSessionId);
           api.setCurrentSessionId(newSessionId);
           setExperimentUrl(sessionInfo.experiment_url ?? null);
+          setConversationGraphVersion(sessionInfo);
+          setIsSessionPersisted(true);
         }
 
         return { slideDeck, rawHtml };
@@ -125,7 +164,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setIsInitializing(false);
       }
     },
-    [createNewSession],
+    [createNewSession, setConversationGraphVersion],
   );
 
   /**
@@ -150,13 +189,19 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         sessionId,
         sessionTitle,
         experimentUrl,
+        graphVersion,
+        activeGraphVersion,
+        isGraphVersionOlder,
+        isSessionPersisted,
         isInitializing,
         error,
         createNewSession,
+        markSessionPersisted,
         switchSession,
         renameSession,
         setSessionTitle,
         setExperimentUrl,
+        setConversationGraphVersion,
       }}
     >
       {children}

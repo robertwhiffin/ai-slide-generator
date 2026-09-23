@@ -553,8 +553,17 @@ class _GraphTurnEnv:
       wakes(state)          — this turn's foreman_wakes, read through scoped_vals
     """
 
-    def __init__(self, session_id: str, engine, factory, recorder, graph):
+    def __init__(
+        self,
+        session_id: str,
+        graph_release_id: int,
+        engine,
+        factory,
+        recorder,
+        graph,
+    ):
         self.session_id = session_id
+        self.graph_release_id = graph_release_id
         self.engine = engine
         self.factory = factory
         self.recorder = recorder
@@ -568,11 +577,13 @@ class _GraphTurnEnv:
         self.last_turn_id = turn
         state: Dict[str, Any] = {
             "session_id": self.session_id,
+            "graph_release_id": self.graph_release_id,
             "turn_id": turn,
             "initiated_by": "graph-user@example.com",
             "architect_message": "build me a deck",
         }
         state.update(initial or {})
+        state["graph_release_id"] = self.graph_release_id
         return state
 
     def _config(self, max_concurrency: Optional[int]):
@@ -718,16 +729,25 @@ def graph_turn_env(monkeypatch, tmp_path):
     turn 2 resumes the same thread through the same checkpoint rows.
     """
     from src.core.checkpointer import SqlAlchemyCheckpointSaver
+    from src.services.graph_configuration import bootstrap_graph_configuration
     from src.services.graph.builder import build_graph
     from tests.integration.conftest_stub_skills import SkillRecorder
 
     engine = _make_graph_engine(str(tmp_path / "graph_turn.db"))
     factory = _make_factory(engine)
+    monkeypatch.setattr("src.services.graph.builder.get_session_local", lambda: factory)
+    graph_release_id = bootstrap_graph_configuration(factory).release_id
     session_id = _new_session_id()
 
     db = factory()
     try:
-        db.add(UserSession(session_id=session_id, created_by="owner@example.com"))
+        db.add(
+            UserSession(
+                session_id=session_id,
+                created_by="owner@example.com",
+                graph_release_id=graph_release_id,
+            )
+        )
         db.commit()
     except Exception:
         db.rollback()
@@ -757,6 +777,18 @@ def graph_turn_env(monkeypatch, tmp_path):
         checkpointer=SqlAlchemyCheckpointSaver(session_factory=factory)
     )
 
-    yield _GraphTurnEnv(session_id, engine, factory, recorder, graph)
-
-    engine.dispose()
+    env = _GraphTurnEnv(
+        session_id,
+        graph_release_id,
+        engine,
+        factory,
+        recorder,
+        graph,
+    )
+    try:
+        yield env
+        assert all(
+            call["graph_release_id"] == graph_release_id for call in recorder.calls
+        ), recorder.calls
+    finally:
+        engine.dispose()

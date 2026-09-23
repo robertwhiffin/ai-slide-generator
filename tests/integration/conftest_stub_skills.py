@@ -246,13 +246,20 @@ class SkillRecorder:
 
     # -- the AgentRuntime surface ------------------------------------------
 
-    def run(self, name: str, payload: dict, assembly_context: Any) -> Any:
+    def run(
+        self,
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        assembly_context: Any,
+    ) -> Any:
         """Record one runtime invocation and return its canonical output."""
         design_system_active = assembly_context.design_system_active
         with self._lock:
             self.calls.append(
                 {
                     "name": name,
+                    "graph_release_id": graph_release_id,
                     "payload": payload,
                     "design_system_active": design_system_active,
                 }
@@ -355,11 +362,27 @@ class CallableAgentRuntime:
 
     def __init__(self, function) -> None:
         self._function = function
+        self.calls: List[Dict[str, Any]] = []
 
-    def run(self, name: str, payload: dict, assembly_context: Any) -> Any:
+    def run(
+        self,
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        assembly_context: Any,
+    ) -> Any:
+        self.calls.append(
+            {
+                "name": name,
+                "graph_release_id": graph_release_id,
+                "payload": payload,
+                "design_system_active": assembly_context.design_system_active,
+            }
+        )
         return SimpleNamespace(
             output=self._function(
                 name,
+                graph_release_id,
                 payload,
                 assembly_context.design_system_active,
             )

@@ -138,11 +138,18 @@ class SkillStub:
     def calls_for(self, name: str) -> List[Dict[str, Any]]:
         return [c for c in self.calls if c["name"] == name]
 
-    def run(self, name: str, payload: dict, assembly_context: Any) -> Any:
+    def run(
+        self,
+        name: str,
+        graph_release_id: int,
+        payload: dict,
+        assembly_context: Any,
+    ) -> Any:
         design_system_active = assembly_context.design_system_active
         self.calls.append(
             {
                 "name": name,
+                "graph_release_id": graph_release_id,
                 "payload": payload,
                 "design_system_active": design_system_active,
             }
@@ -251,6 +258,7 @@ class GraphEnv:
         """A minimal turn state; override any key."""
         base: Dict[str, Any] = {
             "session_id": self.session_id,
+            "graph_release_id": 1,
             "turn_id": "turn-1",
             "initiated_by": "graph-user@example.com",
         }

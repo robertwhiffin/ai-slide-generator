@@ -637,6 +637,65 @@ class TestSlideEndpoints:
 class TestSessionEndpoints:
     """Tests for /api/sessions endpoints."""
 
+    def test_session_routes_preserve_only_public_graph_version_fields(
+        self, client, mock_session_manager
+    ):
+        """Dropping a field in a route would make create/get/list disagree about pins."""
+        public_versions = {
+            "graph_version": None,
+            "active_graph_version": 2,
+            "is_older_than_active": False,
+        }
+        mock_session_manager.create_session.return_value = {
+            "session_id": "created",
+            "created_by": "test@local.dev",
+            "title": "Created",
+            "created_at": "2026-09-22T12:00:00",
+            **public_versions,
+        }
+        mock_session_manager.list_sessions.return_value = [
+            {
+                "session_id": "historical",
+                "created_by": "test@local.dev",
+                "title": "Historical",
+                "graph_version": 1,
+                "active_graph_version": 2,
+                "is_older_than_active": True,
+            }
+        ]
+        mock_session_manager.get_session.return_value = {
+            "id": 1,
+            "session_id": "active",
+            "created_by": "test@local.dev",
+            "title": "Active",
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
+            "graph_version": 2,
+            "active_graph_version": 2,
+            "is_older_than_active": False,
+        }
+        mock_session_manager.get_messages.return_value = []
+        mock_session_manager.get_slide_deck.return_value = None
+
+        created = client.post("/api/sessions", json={}).json()
+        listed = client.get("/api/sessions").json()["sessions"]
+        detail = client.get("/api/sessions/active").json()
+
+        assert {key: created[key] for key in public_versions} == public_versions
+        assert {key: listed[0][key] for key in public_versions} == {
+            "graph_version": 1,
+            "active_graph_version": 2,
+            "is_older_than_active": True,
+        }
+        assert {key: detail[key] for key in public_versions} == {
+            "graph_version": 2,
+            "active_graph_version": 2,
+            "is_older_than_active": False,
+        }
+        for payload in (created, listed[0], detail):
+            assert "graph_release_id" not in payload
+            assert "release_id" not in payload
+
     def test_list_sessions_success(self, client, mock_session_manager):
         """GET /api/sessions returns list of sessions scoped to the current user."""
         mock_session_manager.list_sessions.return_value = [

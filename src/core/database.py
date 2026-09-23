@@ -603,6 +603,11 @@ def _run_migrations(engine, schema: str | None = None):
         # three siblings.
         _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- Conversation Pins: nullable release identity on every session ---
+        # Keep this before graph mutation guards and owner reassignment so its
+        # constraint/index are present and re-homed during the same boot.
+        _migrate_conversation_pin_schema(conn, inspector, schema, _qual, is_sqlite)
+
         # --- Graph Configuration: database-enforced published-row immutability ---
         # create_all owns the six fresh table definitions. These PostgreSQL-only
         # guards add the mutation boundary that constraints alone cannot express.
@@ -614,6 +619,56 @@ def _run_migrations(engine, schema: str | None = None):
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_conversation_pin_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add the nullable Conversation Pin column, FK, and lookup index."""
+    from sqlalchemy import text
+
+    table_name = "user_sessions"
+    try:
+        columns = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema=schema)
+        }
+    except Exception:
+        return
+    if not columns:
+        return
+
+    qualified_sessions = _qual(table_name)
+    if "graph_release_id" not in columns:
+        logger.info("Migration: adding graph_release_id to user_sessions")
+        conn.execute(
+            text(
+                f"ALTER TABLE {qualified_sessions} "
+                "ADD COLUMN graph_release_id INTEGER NULL"
+            )
+        )
+
+    if not is_sqlite:
+        foreign_keys = {
+            foreign_key.get("name")
+            for foreign_key in inspector.get_foreign_keys(table_name, schema=schema)
+        }
+        if "fk_user_sessions_graph_release" not in foreign_keys:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_sessions} "
+                    "ADD CONSTRAINT fk_user_sessions_graph_release "
+                    "FOREIGN KEY (graph_release_id) "
+                    f"REFERENCES {_qual('graph_release')}(id) ON DELETE RESTRICT"
+                )
+            )
+
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_user_sessions_graph_release_id "
+            f"ON {qualified_sessions} (graph_release_id)"
+        )
+    )
 
 
 def _install_graph_configuration_mutation_guards(

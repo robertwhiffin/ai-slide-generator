@@ -30,6 +30,7 @@ interface ChatPanelProps {
   /** E0: called for each slide_ready event; position + content arrive one slide at a
    *  time as the graph's reorder buffer releases them.  Called before `complete`. */
   onSlideReady?: (position: number, html: string, scripts: string) => void;
+  ensureGraphCapableRoot: () => Promise<boolean>;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
   viewOnlyReason?: string;  // When provided, show why the user cannot edit
@@ -40,6 +41,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   onSlidesGenerated,
   onGenerationStart,
   onSlideReady,
+  ensureGraphCapableRoot,
   disabled = false,
   previewMessages = null,
   viewOnlyReason,
@@ -55,7 +57,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const navigate = useNavigate();
-  const { sessionId, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
+  const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
@@ -153,8 +155,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       return;
     }
 
-    // In pre-session mode, the backend creates the session on first message.
-    // sessionId may be empty — that's OK.
+    // A browser-local root must be made graph-capable before a graph turn.
+    // Failed persistence deliberately sends no chat request.
+    if (!isSessionPersisted && !await ensureGraphCapableRoot()) {
+      return;
+    }
 
     setIsLoading(true);
     setIsGenerating(true);

@@ -44,6 +44,7 @@ def _dispatch_state(spec, wake, stamped):
     now = time.time()
     return {
         "session_id": "sess-1",
+        "graph_release_id": 41,
         "turn_id": TURN,
         "initiated_by": "user@example.com",
         "deck_spec": spec,
@@ -177,6 +178,7 @@ class TestForemanRouterTakesTheBatchFromTheLastWake:
         assert isinstance(result, list)
         assert [s.node for s in result] == ["builder"] * 3
         assert [s.arg["position"] for s in result] == [0, 1, 2]
+        assert [s.arg["graph_release_id"] for s in result] == [41, 41, 41]
 
     def test_partial_batch_fans_out_the_wake_s_positions_not_the_recomputed_ones(self):
         """A recomputing router would dispatch position 1 — the one NOT in the wake."""
@@ -282,10 +284,16 @@ class TestBuildReviewerRefan:
     def _branch_state(self, positions, reviewed=()):
         return {
             "turn_id": TURN,
+            "graph_release_id": 41,
             "slides": scoped(
                 TURN,
                 {
-                    p: {"position": p, "html": f"<p>{p}</p>", "scripts": ""}
+                    p: {
+                        "position": p,
+                        "graph_release_id": 999,
+                        "html": f"<p>{p}</p>",
+                        "scripts": "",
+                    }
                     for p in positions
                 },
             ),
@@ -297,6 +305,7 @@ class TestBuildReviewerRefan:
         assert [s.node for s in result] == ["build_reviewer"]
         assert result[0].arg["position"] == 3
         assert result[0].arg["html"] == "<p>3</p>"
+        assert result[0].arg["graph_release_id"] == 41
 
     def test_a_merged_view_still_produces_one_send_per_position(self):
         """Guards the one-reviewer-writes-one-row invariant and the n-not-3n cost."""

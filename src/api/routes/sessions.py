@@ -34,6 +34,7 @@ from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import UserSession
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.permission_service import (
     VALID_DECK_GLOBAL_PERMISSIONS,
     get_permission_service,
@@ -96,6 +97,7 @@ async def create_session(request: CreateSessionRequest = None):
             session_id=request.session_id,
             title=request.title,
             created_by=current_user,
+            graph_capable=request.graph_capable,
         )
 
         logger.info(
@@ -105,6 +107,12 @@ async def create_session(request: CreateSessionRequest = None):
 
         return result
 
+    except ActiveGraphReleaseUnavailableError as e:
+        logger.error(f"No active Graph Release available: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except Exception as e:
         logger.error(f"Failed to create session: {e}", exc_info=True)
         raise HTTPException(

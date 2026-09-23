@@ -465,9 +465,12 @@ def _pin_the_design_contract(env, monkeypatch, *, ds_id=7, template_id=11):
 
     recorder = env.recorder
 
-    def invoke_with_a_pinned_spec(name, payload, design_system_active):
+    def invoke_with_a_pinned_spec(
+        name, graph_release_id, payload, design_system_active
+    ):
         out = recorder.run(
             name,
+            graph_release_id,
             payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -516,6 +519,32 @@ def _capture_initial_state(monkeypatch) -> List[Dict[str, Any]]:
         "src.services.graph.builder.invoke_graph", recording_invoke_graph
     )
     return seen
+
+
+def test_graph_turn_fixture_overwrites_a_hostile_release_id(graph_turn_env):
+    from src.database.models.session import UserSession
+
+    env = graph_turn_env
+    env.recorder.configure(slide_count=1)
+
+    db = env.factory()
+    try:
+        persisted_pin = (
+            db.query(UserSession.graph_release_id)
+            .filter(UserSession.session_id == env.session_id)
+            .scalar()
+        )
+    finally:
+        db.close()
+
+    final = env.run(initial={"graph_release_id": env.graph_release_id + 999})
+
+    assert persisted_pin == env.graph_release_id
+    assert final["graph_release_id"] == env.graph_release_id
+    assert env.recorder.calls
+    assert {
+        call["graph_release_id"] for call in env.recorder.calls
+    } == {env.graph_release_id}
 
 
 def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
@@ -576,7 +605,7 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
             architect_wrote.set()
         return result
 
-    def invoke_agent(name, payload, design_system_active):
+    def invoke_agent(name, graph_release_id, payload, design_system_active):
         if name == "architect" and naming_first:
             # The naming write must have LANDED before the architect resolves
             # the spec whose title it is about to write.
@@ -586,6 +615,7 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
             )
         return recorder.run(
             name,
+            graph_release_id,
             payload,
             AgentAssemblyContext(design_system_active),
         ).output
@@ -605,6 +635,129 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
 
 def _types(events: List[StreamEvent]) -> List[StreamEventType]:
     return [event.type for event in events]
+
+
+def _collect_until_graph_failure(stream, expected_exception):
+    events: List[StreamEvent] = []
+    with pytest.raises(expected_exception) as raised:
+        for event in stream:
+            events.append(event)
+    return events, raised.value
+
+
+def _assert_safe_pinned_configuration_event(event: StreamEvent) -> None:
+    assert event.type is StreamEventType.ERROR
+    assert event.error == "Pinned graph configuration is unavailable"
+    assert event.metadata == {
+        "code": "pinned_graph_configuration_unavailable"
+    }
+    public = event.model_dump(mode="json", exclude_none=True)
+    rendered = repr(public)
+    for forbidden in (
+        "ConversationPinMissingError",
+        "ConversationSessionNotFoundError",
+        "PersistedRuntimeError",
+        "graph_release_id",
+        "endpoint",
+        "prompt",
+        "payload",
+        "output",
+    ):
+        assert forbidden not in rendered
+
+
+@pytest.mark.parametrize("pin_state", ["null_pin", "missing_session"])
+def test_pin_failures_use_the_exact_safe_graph_error_envelope(
+    graph_chat_env, monkeypatch, caplog, pin_state
+):
+    from src.api.services import chat_service as chat_service_module
+    from src.database.models.session import UserSession
+    from src.services.persisted_graph_release import (
+        PersistedConfigurationUnavailableError,
+    )
+
+    stream_event_calls: List[Dict[str, Any]] = []
+    real_stream_event = StreamEvent
+
+    def recording_stream_event(**kwargs):
+        stream_event_calls.append(dict(kwargs))
+        return real_stream_event(**kwargs)
+
+    monkeypatch.setattr(chat_service_module, "StreamEvent", recording_stream_event)
+
+    if pin_state == "null_pin":
+        db = graph_chat_env._env.factory()
+        try:
+            row = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == graph_chat_env.session_id)
+                .one()
+            )
+            row.graph_release_id = None
+            db.commit()
+        finally:
+            db.close()
+        session_id = graph_chat_env.session_id
+        stream = graph_chat_env.service._send_message_streaming_graph(
+            session_id,
+            MESSAGE,
+        )
+    else:
+        session_id = "missing-pinned-graph-session"
+        stream = graph_chat_env.service._send_message_streaming_graph(
+            session_id,
+            MESSAGE,
+        )
+
+    events, error = _collect_until_graph_failure(
+        stream, PersistedConfigurationUnavailableError
+    )
+
+    assert len(events) == 1
+    _assert_safe_pinned_configuration_event(events[0])
+    # Spy on the generic `error=str(e)` branch: neither pin exception may use it.
+    assert [
+        call for call in stream_event_calls if call.get("error") == session_id
+    ] == []
+    assert error.code == "conversation_pin_unavailable"
+    identity_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "pinned_graph_configuration_unavailable"
+    ]
+    assert len(identity_logs) == 1
+    assert identity_logs[0].error_class in {
+        "ConversationPinMissingError",
+        "ConversationSessionNotFoundError",
+    }
+    assert identity_logs[0].graph_release_id is None
+    assert session_id not in identity_logs[0].getMessage()
+
+
+def test_a_poisoned_persisted_runtime_does_not_change_the_monolith_path(
+    graph_chat_env, monkeypatch
+):
+    from src.services.graph import nodes
+    from src.services.persisted_graph_release import (
+        PersistedConfigurationUnavailableError,
+    )
+
+    def poisoned_runtime():
+        raise PersistedConfigurationUnavailableError(
+            code="invalid_persisted_definition"
+        )
+
+    monkeypatch.setattr(nodes, "get_agent_runtime", poisoned_runtime)
+
+    with pytest.raises(_MonolithReached):
+        list(
+            graph_chat_env._stream(
+                engine_mode="monolith",
+                is_first_message=False,
+                message=PLAIN_MESSAGE,
+                request_id="monolith-request",
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

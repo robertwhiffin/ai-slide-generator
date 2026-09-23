@@ -235,6 +235,12 @@ def test_init_database_invokes_encryption_boot_hook(monkeypatch):
         lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
     )
     monkeypatch.setattr(
+        "src.services.conversation_pins.backfill_conversation_pins",
+        lambda sf: SimpleNamespace(
+            graph_release_id=1, graph_version=1, pinned_count=0
+        ),
+    )
+    monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.migrate_profiles", lambda sf: 0
     )
     monkeypatch.setattr(
@@ -270,6 +276,12 @@ def test_init_database_exits_1_when_key_seed_fails(monkeypatch):
     monkeypatch.setattr(
         "src.services.graph_configuration.bootstrap_graph_configuration",
         lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+    monkeypatch.setattr(
+        "src.services.conversation_pins.backfill_conversation_pins",
+        lambda sf: SimpleNamespace(
+            graph_release_id=1, graph_version=1, pinned_count=0
+        ),
     )
     monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.migrate_profiles", lambda sf: 0

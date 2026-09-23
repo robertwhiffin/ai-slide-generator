@@ -377,7 +377,7 @@ class TestGraphStateAnnotations:
     }
 
     _SINGLE_WRITER_KEYS = {
-        "session_id", "turn_id", "initiated_by", "fix_target",
+        "session_id", "graph_release_id", "turn_id", "initiated_by", "fix_target",
         "deck_spec", "architect_intent", "architect_message",
         "target_positions", "title",
         "token_css", "deterministic_css", "template_layout_html", "resolved_style",

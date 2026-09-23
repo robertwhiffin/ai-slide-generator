@@ -15,20 +15,57 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import textwrap
 import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Protocol, cast
 
-from pydantic import BaseModel
+import httpx
+import openai
+import requests
+from databricks.sdk.errors import (
+    Aborted,
+    DeadlineExceeded,
+    InternalError,
+    NotFound,
+    OperationFailed,
+    PermissionDenied,
+    ResourceDoesNotExist,
+    Unauthenticated,
+)
+from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
+from src.core.databricks_client import DatabricksClientError
 from src.core.defaults import DEFAULT_CONFIG
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE, UNTRUSTED_DATA_NOTICE
 from src.core.skills import load_skill
 from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW, build_instructions
 from src.domain.skill_io import OUTPUT_SCHEMAS
+from src.services.agent_runtime_identity import (
+    AgentInvocationIdentity,
+    AgentInvocationIdentitySink,
+    LoggingAgentInvocationIdentitySink,
+    RecordingAgentInvocationIdentitySink,
+)
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+from src.services.graph_configuration_content import GraphConfigurationIntegrityError
+from src.services.graph_definition_manifest import (
+    AssemblyRules,
+    DefinitionContent,
+    assembly_rules_for,
+    definition_content_hash,
+)
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+    PersistedGraphReleaseLoader,
+    PersistedRuntimeError,
+    PinnedInvocationEndpointError,
+    ResolvedDefinition,
+    ResolvedDefinitionLoader,
+)
 
 MODEL_DRIVEN_AGENT_KEYS = (
     "architect",
@@ -75,6 +112,10 @@ class IncompatibleSchemaContractError(AgentRuntimeError):
 
 class RuntimeContractIdentityError(AgentRuntimeError):
     """Code-owned contract material changed without an explicit identity update."""
+
+
+class ModelProviderUnavailableError(AgentRuntimeError):
+    """A pinned serving endpoint or its transport is unavailable."""
 
 
 @dataclass(frozen=True)
@@ -139,6 +180,7 @@ class AgentModelAdapter(Protocol):
     def invoke(
         self,
         *,
+        agent_key: str,
         configuration: AgentModelConfiguration,
         schema: type[BaseModel],
         prompt: str,
@@ -392,19 +434,89 @@ class DatabricksModelAdapter:
     def invoke(
         self,
         *,
+        agent_key: str,
         configuration: AgentModelConfiguration,
         schema: type[BaseModel],
         prompt: str,
     ) -> BaseModel:
-        model = self._model_factory(
-            endpoint=configuration.endpoint_name,
-            temperature=configuration.temperature,
-            max_tokens=configuration.max_tokens,
-            top_p=configuration.top_p,
-            workspace_client=self._client_factory(),
+        # ``agent_key`` is deliberately a separate selection seam.  In particular,
+        # Build Reviewer and Fix Reviewer have the same output schema.
+        del agent_key
+        provider_errors = (
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+            openai.APIStatusError,
+            DatabricksClientError,
+            NotFound,
+            PermissionDenied,
+            Unauthenticated,
+            ResourceDoesNotExist,
+            InternalError,
+            Aborted,
+            DeadlineExceeded,
+            OperationFailed,
+            requests.exceptions.RequestException,
+            httpx.HTTPError,
+            ConnectionError,
+            TimeoutError,
+            OSError,
         )
-        structured_model = model.with_structured_output(schema)
-        return structured_model.invoke(prompt)
+        try:
+            model = self._model_factory(
+                endpoint=configuration.endpoint_name,
+                temperature=configuration.temperature,
+                max_tokens=configuration.max_tokens,
+                top_p=configuration.top_p,
+                workspace_client=self._client_factory(),
+            )
+            structured_model = model.with_structured_output(schema)
+            return structured_model.invoke(prompt)
+        except provider_errors as original_error:
+            raise ModelProviderUnavailableError(
+                "pinned model provider unavailable"
+            ) from original_error
+
+
+TEST_COMPATIBILITY_GRAPH_RELEASE_ID = 1
+TEST_COMPATIBILITY_GRAPH_VERSION = 1
+
+
+class CompatibilityResolvedDefinitionLoader:
+    """Test-only bridge from legacy code-owned records to persisted content."""
+
+    def __init__(self, source: CodeOwnedAgentDefinitionSource) -> None:
+        self._source = source
+
+    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+        if graph_release_id != TEST_COMPATIBILITY_GRAPH_RELEASE_ID:
+            raise ValueError("compatibility runtime requires graph release 1")
+        definition = self._source.resolve(agent_key)
+        content = DefinitionContent.model_validate(
+            {
+                "agent_key": definition.agent_key,
+                "definition_version": definition.definition_version,
+                "prompt_text": definition.prompt_text,
+                "model": definition.model_configuration.__dict__,
+                "schema_overlay": {
+                    "field_overrides": {},
+                    "additional_optional_fields": [],
+                },
+                "assembly_rules": assembly_rules_for(definition.agent_key),
+                "protected_assembly": definition.protected_prompt.__dict__,
+                "schema_contract": {
+                    "version": definition.schema_contract.version,
+                    "digest": definition.schema_contract.digest,
+                },
+            }
+        )
+        return ResolvedDefinition(
+            graph_version=TEST_COMPATIBILITY_GRAPH_VERSION,
+            graph_release_id=TEST_COMPATIBILITY_GRAPH_RELEASE_ID,
+            agent_key=agent_key,
+            agent_definition_revision_id=definition.definition_version,
+            content_hash=definition_content_hash(content),
+            content=content,
+        )
 
 
 class AgentRuntime:
@@ -413,11 +525,13 @@ class AgentRuntime:
     def __init__(
         self,
         *,
-        definition_source: AgentDefinitionSource,
+        persisted_release_loader: ResolvedDefinitionLoader,
         model_adapter: AgentModelAdapter,
+        identity_sink: AgentInvocationIdentitySink,
     ) -> None:
-        self._definition_source = definition_source
+        self._persisted_release_loader = persisted_release_loader
         self._model_adapter = model_adapter
+        self._identity_sink = identity_sink
         self._protected_prompts = _ProtectedPromptBundleRegistry()
         self._schema_contracts = _SchemaContractRegistry()
 
@@ -427,90 +541,170 @@ class AgentRuntime:
         *,
         model_adapter: AgentModelAdapter | None = None,
         definition_source: AgentDefinitionSource | None = None,
+        identity_sink: AgentInvocationIdentitySink | None = None,
     ) -> AgentRuntime:
         """Build the temporary runtime backed by current code-owned definitions."""
         return cls(
-            definition_source=definition_source or CodeOwnedAgentDefinitionSource(),
+            persisted_release_loader=CompatibilityResolvedDefinitionLoader(
+                cast(
+                    CodeOwnedAgentDefinitionSource,
+                    definition_source or CodeOwnedAgentDefinitionSource(),
+                )
+            ),
             model_adapter=model_adapter or DatabricksModelAdapter(),
+            identity_sink=identity_sink or RecordingAgentInvocationIdentitySink(),
         )
 
     def run(
         self,
         agent_key: str,
+        graph_release_id: int,
         payload: dict[str, Any],
         assembly_context: AgentAssemblyContext,
     ) -> AgentInvocationResult:
-        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
-            raise UnknownAgentKeyError(
-                f"Unknown model-driven agent key {agent_key!r}; "
-                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
-            )
+        try:
+            definition = self._persisted_release_loader.resolve(graph_release_id, agent_key)
+        except PersistedRuntimeError:
+            raise
+        except SQLAlchemyError as exc:
+            raise PersistedConfigurationUnavailableError(code="lakebase_unavailable") from exc
+        except (GraphConfigurationIntegrityError, ValidationError, TypeError) as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="invalid_persisted_definition"
+            ) from exc
+        return self._run_resolved(definition, payload, assembly_context)
 
-        definition = self._definition_source.resolve(agent_key)
-        if definition.agent_key != agent_key:
-            raise UnknownAgentKeyError(
-                f"Definition source returned {definition.agent_key!r} for requested "
-                f"agent key {agent_key!r}"
+    def _run_resolved(
+        self,
+        definition: ResolvedDefinition,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+    ) -> AgentInvocationResult:
+        try:
+            content = DefinitionContent.model_validate(definition.content.model_dump(mode="python"))
+            if content.agent_key != definition.agent_key:
+                raise ValueError("resolved definition role does not match its content")
+            if (
+                content.schema_overlay.field_overrides
+                or content.schema_overlay.additional_optional_fields
+            ):
+                raise IncompatibleSchemaContractError(
+                    "Graph Version 1 requires an empty schema overlay"
+                )
+            protected_prompt = self._protected_prompts.resolve(
+                ProtectedPromptIdentity(
+                    version=content.protected_assembly.version,
+                    digest=content.protected_assembly.digest,
+                )
             )
+            schema_identity = SchemaContractIdentity(
+                agent_key=definition.agent_key,
+                version=content.schema_contract.version,
+                digest=content.schema_contract.digest,
+            )
+            schema = self._schema_contracts.resolve(definition.agent_key, schema_identity)
+            prompt = self._assemble_v1_prompt(content, protected_prompt, payload, assembly_context)
+        except ProtectedPromptBundleUnavailableError as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="protected_bundle_unavailable"
+            ) from exc
+        except IncompatibleSchemaContractError as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="schema_contract_unavailable"
+            ) from exc
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="invalid_persisted_definition"
+            ) from exc
 
-        protected_prompt = self._protected_prompts.resolve(
-            definition.protected_prompt
+        configuration = AgentModelConfiguration(
+            endpoint_name=content.model.endpoint_name,
+            temperature=float(content.model.temperature),
+            max_tokens=int(content.model.max_tokens),
+            top_p=float(content.model.top_p),
         )
-        schema = self._schema_contracts.resolve(
-            agent_key,
-            definition.schema_contract,
+        identity = AgentInvocationIdentity(
+            graph_version=definition.graph_version,
+            graph_release_id=definition.graph_release_id,
+            agent_key=definition.agent_key,
+            agent_definition_revision_id=definition.agent_definition_revision_id,
+            content_hash=definition.content_hash,
         )
-        prompt = self._assemble_prompt(
-            definition,
-            protected_prompt,
-            payload,
-            assembly_context,
-        )
+
+        def callback() -> BaseModel:
+            try:
+                return self._model_adapter.invoke(
+                    agent_key=definition.agent_key,
+                    configuration=configuration,
+                    schema=schema,
+                    prompt=prompt,
+                )
+            except ModelProviderUnavailableError as exc:
+                raise PinnedInvocationEndpointError(
+                    endpoint_name=content.model.endpoint_name,
+                    graph_release_id=definition.graph_release_id,
+                    agent_definition_revision_id=definition.agent_definition_revision_id,
+                ) from exc
 
         started = time.perf_counter()
-        output = self._model_adapter.invoke(
-            configuration=definition.model_configuration,
-            schema=schema,
-            prompt=prompt,
-        )
+        output = self._identity_sink.invoke(identity, callback)
         latency_ms = (time.perf_counter() - started) * 1000
 
         return AgentInvocationResult(
             output=output,
             diagnostics=AgentInvocationDiagnostics(
-                agent_key=agent_key,
-                definition_version=definition.definition_version,
+                agent_key=definition.agent_key,
+                definition_version=definition.agent_definition_revision_id,
                 assembled_prompt=prompt,
-                model_configuration=definition.model_configuration,
-                protected_prompt=definition.protected_prompt,
-                schema_contract=definition.schema_contract,
+                model_configuration=configuration,
+                protected_prompt=protected_prompt.identity,
+                schema_contract=schema_identity,
                 latency_ms=latency_ms,
             ),
         )
 
     @staticmethod
-    def _assemble_prompt(
-        definition: AgentDefinition,
+    def _assemble_v1_prompt(
+        content: DefinitionContent,
         protected_prompt: _ProtectedPromptBundle,
         payload: dict[str, Any],
-        assembly_context: AgentAssemblyContext,
+        context: AgentAssemblyContext,
     ) -> str:
-        instructions = definition.prompt_text
-        if definition.agent_key == "build_reviewer" and payload.get("deck_brief"):
-            instructions = "\n\n".join(
-                [instructions, protected_prompt.build_reviewer_deck_brief]
-            )
-
-        parts = [instructions]
-        if not assembly_context.design_system_active:
-            parts.append(protected_prompt.slide_frame_constraints)
-        if assembly_context.design_system_active:
-            parts.append(protected_prompt.design_system_precedence)
-        parts.append(json.dumps(payload, indent=2, default=str))
-        return "\n\n".join(parts)
+        expected = AssemblyRules.model_validate(assembly_rules_for(content.agent_key))
+        if content.assembly_rules != expected:
+            raise ValueError("persisted assembly rules do not match Graph Version 1")
+        parts: list[str] = []
+        for index, block in enumerate(content.assembly_rules.blocks):
+            if block.kind == "authored_prompt":
+                parts.append(content.prompt_text)
+            elif block.kind == "protected":
+                enabled = {
+                    "payload_has_deck_brief": bool(payload.get("deck_brief")),
+                    "design_system_active": context.design_system_active,
+                    "design_system_inactive": not context.design_system_active,
+                }[block.condition]
+                if enabled:
+                    parts.append(getattr(protected_prompt, block.name))
+            elif block.kind == "payload_json":
+                parts.append(json.dumps(payload, indent=2, default=str))
+            elif block.kind == "structured_output_binding":
+                if index != len(content.assembly_rules.blocks) - 1 or not block.terminal:
+                    raise ValueError("structured output binding must be terminal")
+            else:  # pragma: no cover - DefinitionContent's discriminated union
+                raise ValueError("unknown persisted assembly block")
+        terminal = content.assembly_rules.blocks[-1]
+        if terminal.kind != "structured_output_binding" or not terminal.terminal:
+            raise ValueError("structured output binding must be terminal")
+        return content.assembly_rules.separator.join(parts)
 
 
 @lru_cache(maxsize=1)
 def get_agent_runtime() -> AgentRuntime:
-    """Return the process-wide immutable compatibility runtime."""
-    return AgentRuntime.compatibility()
+    """Return the process-wide immutable persisted-release runtime."""
+    from src.core.database import get_session_local
+
+    return AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=get_session_local()),
+        model_adapter=DatabricksModelAdapter(),
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=logging.getLogger(__name__)),
+    )

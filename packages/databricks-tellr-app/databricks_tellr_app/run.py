@@ -68,6 +68,23 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to bootstrap Graph Configuration: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    logger.info("Backfilling Conversation Pins...")
+    try:
+        from src.core.database import get_session_local
+        from src.services.conversation_pins import backfill_conversation_pins
+
+        result = backfill_conversation_pins(get_session_local())
+        logger.info(
+            "Conversation Pins ready: release_id=%s version=%s pinned=%s",
+            result.graph_release_id,
+            result.graph_version,
+            result.pinned_count,
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to backfill Conversation Pins: {e}\n{tb}")
+        raise SystemExit(1) from e
+
     # Data migrations/backfills that used to run in the FastAPI lifespan now run
     # HERE, once, before the server forks its workers — the uvicorn workers must
     # never execute migration code (4 of them racing the migration chain on boot
