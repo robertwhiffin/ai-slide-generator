@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import (
@@ -3304,6 +3305,15 @@ class SessionManager:
             return count
 
     # Cleanup operations
+    def _delete_expired_session(self, session_id: int) -> bool:
+        """Delete one expiry candidate in its own committed transaction."""
+        with get_db_session() as db:
+            session = db.get(UserSession, session_id)
+            if session is None:
+                return False
+            db.delete(session)
+        return True
+
     def cleanup_expired_sessions(self) -> int:
         """Delete sessions that have exceeded TTL.
 
@@ -3320,23 +3330,37 @@ class SessionManager:
         cutoff = datetime.utcnow() - timedelta(hours=self.session_ttl_hours)
 
         with get_db_session() as db:
-            expired = (
-                db.query(UserSession)
+            expired_session_ids = [
+                session_id
+                for (session_id,) in db.query(UserSession.id)
                 .filter(UserSession.last_activity < cutoff)
+                .order_by(UserSession.id)
                 .all()
+            ]
+
+        count = 0
+        for session_id in expired_session_ids:
+            try:
+                deleted = self._delete_expired_session(session_id)
+            except SQLAlchemyError as exc:
+                logger.error(
+                    "Failed to delete expired session",
+                    extra={
+                        "session_id": session_id,
+                        "exception_class": type(exc).__name__,
+                    },
+                )
+                continue
+            if deleted:
+                count += 1
+
+        if count > 0:
+            logger.info(
+                "Cleaned up expired sessions",
+                extra={"count": count, "cutoff": cutoff.isoformat()},
             )
 
-            count = len(expired)
-            for session in expired:
-                db.delete(session)
-
-            if count > 0:
-                logger.info(
-                    "Cleaned up expired sessions",
-                    extra={"count": count, "cutoff": cutoff.isoformat()},
-                )
-
-            return count
+        return count
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.
