@@ -66,6 +66,8 @@ def record_shared_deck_mutation(
         raise ValueError("illegal shared-deck mutation operation/object pair")
     if actor.actor_session_id != requesting_session.session_id:
         raise ValueError("mutation actor must equal the requesting session")
+    if requesting_session.id is None:
+        raise ValueError("requesting session must be persisted before attribution")
     if deck_owner.id is None or deck.id is None or deck.session_id != deck_owner.id:
         raise ValueError("deck must belong to the supplied deck owner")
 
@@ -80,10 +82,7 @@ def record_shared_deck_mutation(
         )
         if persisted_actor is None:
             raise ValueError("mutation actor session does not exist")
-        if (
-            requesting_session.id is not None
-            and persisted_actor.id != requesting_session.id
-        ):
+        if persisted_actor.id != requesting_session.id:
             raise ValueError("mutation actor must equal the requesting session")
         if persisted_actor.graph_release_id != actor.graph_release_id:
             raise ValueError("mutation actor pin does not match its persisted pin")
