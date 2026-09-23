@@ -717,6 +717,30 @@ def _migrate_shared_deck_mutation_schema(
                     "WHERE collaboration_identity IS NULL"
                 )
             )
+            # The column definition in src/database/models/session.py carries the
+            # server-side default, so any table create_all() built already generates
+            # an identity for non-ORM inserts. A legacy table reached here through
+            # ALTER TABLE ADD COLUMN cannot: SQLite rejects a non-constant default in
+            # ADD COLUMN ("Cannot add a column with non-constant default") and has no
+            # ALTER COLUMN SET DEFAULT. Without this trigger such a table would let a
+            # raw-SQL insert store NULL, and every later mutation on that row would
+            # fail in shared_deck_attribution with "collaboration identities must
+            # exist before mutation evidence". The trigger is the SQLite equivalent of
+            # the PostgreSQL DEFAULT below, fires only when the writer supplied no
+            # identity, and so never touches an identity that already exists.
+            conn.execute(
+                text(
+                    f"CREATE TRIGGER IF NOT EXISTS "
+                    f"trg_{table_name}_collaboration_identity_default "
+                    f"AFTER INSERT ON {qualified_table} "
+                    "WHEN NEW.collaboration_identity IS NULL "
+                    "BEGIN "
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE rowid = NEW.rowid; "
+                    "END"
+                )
+            )
         else:
             conn.execute(
                 text(

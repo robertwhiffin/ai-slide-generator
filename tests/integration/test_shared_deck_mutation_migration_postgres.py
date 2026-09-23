@@ -315,3 +315,77 @@ def test_postgres_migrates_append_only_evidence_and_allows_only_parent_delete_se
             event.occurred_at,
         ) == immutable_before
         assert db.scalar(select(event_model.id).where(event_model.id == event_id)) == event_id
+
+
+def test_non_orm_insert_on_a_fresh_postgres_schema_gets_a_server_identity(
+    postgres_engine,
+):
+    """Break caught: the identity column relies on a Python-side ORM default, so
+    every non-ORM insert (raw SQL, bulk, insert().values() omitting the column)
+    fails NOT NULL on a freshly created schema.
+
+    The fixture builds the schema in the production ordering (create_all then
+    _run_migrations), so this is the shape a new deployment actually has. The
+    legacy ALTER path is covered above; this covers the create_all path, which is
+    where the defect measured as correction C-11 R1 lived.
+    """
+    now = datetime.now(timezone.utc)
+    with postgres_engine.begin() as conn:
+        session_ids = [
+            conn.execute(
+                text(
+                    "INSERT INTO user_sessions "
+                    "(session_id, created_by, created_at, last_activity, is_processing) "
+                    "VALUES (:sid, 'raw@example.com', :now, :now, false) RETURNING id"
+                ),
+                {"sid": f"raw-non-orm-{index}", "now": now},
+            ).scalar_one()
+            for index in range(2)
+        ]
+        deck_ids = [
+            conn.execute(
+                text(
+                    "INSERT INTO session_slide_decks "
+                    "(session_id, title, version, created_at, updated_at) "
+                    "VALUES (:owner, 'Raw deck', 1, :now, :now) RETURNING id"
+                ),
+                {"owner": owner_id, "now": now},
+            ).scalar_one()
+            for owner_id in session_ids
+        ]
+
+    with postgres_engine.connect() as conn:
+        session_identities = [
+            conn.execute(
+                text(
+                    "SELECT collaboration_identity FROM user_sessions WHERE id = :id"
+                ),
+                {"id": row_id},
+            ).scalar_one()
+            for row_id in session_ids
+        ]
+        deck_identities = [
+            conn.execute(
+                text(
+                    "SELECT collaboration_identity FROM session_slide_decks "
+                    "WHERE id = :id"
+                ),
+                {"id": row_id},
+            ).scalar_one()
+            for row_id in deck_ids
+        ]
+
+    identities = session_identities + deck_identities
+    assert all(value is not None for value in identities)
+    assert len({uuid.UUID(str(value)) for value in identities}) == 4
+
+    # NOT NULL is what the default makes satisfiable — it is not relaxed.
+    inspector = inspect(postgres_engine)
+    for table_name in ("user_sessions", "session_slide_decks"):
+        identity_column = next(
+            column
+            for column in inspector.get_columns(table_name)
+            if column["name"] == "collaboration_identity"
+        )
+        assert identity_column["nullable"] is False
+        assert "gen_random_uuid" in str(identity_column["default"])
