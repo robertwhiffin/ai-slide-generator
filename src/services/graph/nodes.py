@@ -1013,7 +1013,7 @@ def _write_reviewed_row(
     verdict: str,
     slide_spec: Any,
     initiated_by: Optional[str],
-    graph_release_id: Optional[int],
+    mutation: DeckMutationContext,
 ) -> str:
     """Commit one reviewed slide row and return its content hash.
 
@@ -1049,12 +1049,7 @@ def _write_reviewed_row(
         ),
         deck_spec_slide=slide_spec if isinstance(slide_spec, dict) else None,
         modified_by=initiated_by,
-        mutation=_deck_mutation_context(
-            session_id,
-            graph_release_id,
-            operation="write_slide",
-            object_type="slide",
-        ),
+        mutation=mutation,
     )
     return content_hash
 
@@ -1112,7 +1107,7 @@ def _placehold_failed_position(
     session_id: str,
     node: str,
     reason: str,
-    graph_release_id: Optional[int],
+    mutation: DeckMutationContext,
 ) -> bool:
     """Commit a terminal placeholder for one failed branch, visibly.
 
@@ -1171,12 +1166,7 @@ def _placehold_failed_position(
             session_id,
             position,
             error_message=reason,
-            mutation=_deck_mutation_context(
-                session_id,
-                graph_release_id,
-                operation="write_slide",
-                object_type="slide",
-            ),
+            mutation=mutation,
         )
         row = writer.get_slide(session_id, position) or {}
     except Exception:
@@ -2023,6 +2013,12 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     session_id = payload["session_id"]
     turn_id = payload["turn_id"]
     design_system_active = bool(payload.get("design_system_active"))
+    mutation = _deck_mutation_context(
+        session_id,
+        payload.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     skill_payload = dict(payload)
 
@@ -2064,7 +2060,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="builder",
             reason=type(exc).__name__,
-            graph_release_id=payload.get("graph_release_id"),
+            mutation=mutation,
         ):
             return {}
         return {"placeheld_positions": scoped(turn_id, {position})}
@@ -2131,6 +2127,12 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     html = payload["html"]
     scripts = payload.get("scripts") or ""
     initiated_by = payload.get("initiated_by")
+    mutation = _deck_mutation_context(
+        session_id,
+        payload.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     try:
         content_hash = compute_slide_hash(html)
@@ -2166,7 +2168,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
                 verdict=verdict,
                 slide_spec=payload.get("slide_spec"),
                 initiated_by=initiated_by,
-                graph_release_id=payload.get("graph_release_id"),
+                mutation=mutation,
             )
             _emit(
                 StreamEventType.ASSISTANT,
@@ -2203,7 +2205,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="build_reviewer",
             reason=type(exc).__name__,
-            graph_release_id=payload.get("graph_release_id"),
+            mutation=mutation,
         ):
             return {}
         # reviewed_positions too: the position is committed as a placeholder, so
@@ -2225,7 +2227,7 @@ def _land_original(
     *,
     session_id: str,
     initiated_by: Optional[str],
-    graph_release_id: Optional[int],
+    mutation: DeckMutationContext,
 ) -> List[Finding]:
     """Write the pre-fix HTML back with its findings surfaced, and return them."""
     payload = entry.get("payload") or {}
@@ -2239,7 +2241,7 @@ def _land_original(
         verdict="surfaced",
         slide_spec=payload.get("slide_spec"),
         initiated_by=initiated_by,
-        graph_release_id=graph_release_id,
+        mutation=mutation,
     )
     return findings
 
@@ -2249,7 +2251,7 @@ def _reconcile_stale_fixes(
     *,
     session_id: str,
     initiated_by: Optional[str],
-    graph_release_id: Optional[int],
+    mutation: DeckMutationContext,
 ) -> List[Finding]:
     """Land the originals for fixes left ``in_flight`` by a dead process.
 
@@ -2291,7 +2293,7 @@ def _reconcile_stale_fixes(
                     entry,
                     session_id=session_id,
                     initiated_by=initiated_by,
-                    graph_release_id=graph_release_id,
+                    mutation=mutation,
                 )
             )
         except Exception:
@@ -2330,6 +2332,12 @@ def fixer_node(state: dict) -> Dict[str, Any]:
     session_id = state["session_id"]
     initiated_by = state.get("initiated_by")
     fix_map = scoped_vals(state, "fix_map")
+    mutation = _deck_mutation_context(
+        session_id,
+        state.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     candidates = [
         position
@@ -2347,7 +2355,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 stale,
                 session_id=session_id,
                 initiated_by=initiated_by,
-                graph_release_id=state.get("graph_release_id"),
+                mutation=mutation,
             )
             return {
                 "fix_target": None,
@@ -2414,7 +2422,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             entry,
             session_id=session_id,
             initiated_by=initiated_by,
-            graph_release_id=state.get("graph_release_id"),
+            mutation=mutation,
         )
         return {
             "fix_map": scoped(turn_id, {position: None}),
@@ -2480,6 +2488,12 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
     position = state.get("fix_target")
     if position is None:
         return {}
+    mutation = _deck_mutation_context(
+        session_id,
+        state.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     fix_map = scoped_vals(state, "fix_map")
     entry = fix_map.get(position) or {}
@@ -2568,7 +2582,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             verdict=verdict,
             slide_spec=payload.get("slide_spec"),
             initiated_by=initiated_by,
-            graph_release_id=state.get("graph_release_id"),
+            mutation=mutation,
         )
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
@@ -2606,7 +2620,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="fix_reviewer",
             reason=type(exc).__name__,
-            graph_release_id=state.get("graph_release_id"),
+            mutation=mutation,
         ):
             updates["placeheld_positions"] = scoped(turn_id, {position})
         return updates
@@ -2674,6 +2688,12 @@ def placeholder_node(state: dict) -> Dict[str, Any]:
     turn_id = state["turn_id"]
     session_id = state["session_id"]
     positions = stalled_positions(state, time.time())
+    mutation = _deck_mutation_context(
+        session_id,
+        state.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     placeheld: set = set()
     for position in positions:
@@ -2682,7 +2702,7 @@ def placeholder_node(state: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="placeholder",
             reason=_STALL_REASON,
-            graph_release_id=state.get("graph_release_id"),
+            mutation=mutation,
         ):
             placeheld.add(position)
 

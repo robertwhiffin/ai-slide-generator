@@ -19,6 +19,7 @@ from src.api.services.chat_service import ChatService
 from src.api.services.deck_level_writer import write_deck_level_columns
 from src.api.services.session_manager import SessionManager
 from src.api.services.slide_repository import SlideWriter
+from src.core.backfill_session_slides_startup import backfill_session
 from src.core.database import Base
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import (
@@ -35,6 +36,7 @@ from src.services.shared_deck_attribution import (
     DeckMutationContext,
     MutationActor,
 )
+from src.services.spec_sync import claim_due_marker, mark_dirty
 
 
 @pytest.fixture()
@@ -63,6 +65,7 @@ def writer_env(monkeypatch):
         "src.api.services.session_manager.get_db_session",
         "src.api.services.slide_repository.get_db_session",
         "src.api.services.deck_level_writer.get_db_session",
+        "src.services.spec_sync.get_db_session",
     ):
         monkeypatch.setattr(target, db_session)
 
@@ -111,6 +114,8 @@ def writer_env(monkeypatch):
             "root_identity": root.collaboration_identity,
             "contributor_pk": contributor.id,
             "contributor_identity": contributor.collaboration_identity,
+            "legacy_pk": legacy.id,
+            "legacy_identity": legacy.collaboration_identity,
             "r1": r1.id,
             "r2": r2.id,
         }
@@ -140,14 +145,14 @@ def _events(factory):
         )
 
 
-def _seed_direct_deck(factory):
+def _seed_direct_deck(factory, session_id="contributor-r2"):
     slides = [
         {"slide_id": "slide-a", "html": '<div class="slide">A</div>'},
         {"slide_id": "slide-b", "html": '<div class="slide">B</div>'},
         {"slide_id": "slide-c", "html": '<div class="slide">C</div>'},
     ]
     SessionManager().save_slide_deck(
-        "contributor-r2",
+        session_id,
         "Shared",
         "".join(slide["html"] for slide in slides),
         slide_count=3,
@@ -158,29 +163,78 @@ def _seed_direct_deck(factory):
         db.commit()
 
 
-def _run_direct(service, operation):
+def _run_direct(service, operation, session_id="contributor-r2"):
     if operation == "insert_slide":
         return service.insert_slide(
-            "contributor-r2", 1, html='<div class="slide">new</div>'
+            session_id, 1, html='<div class="slide">new</div>'
         )
     if operation == "update_slide":
         return service.update_slide(
-            "contributor-r2", 1, '<div class="slide">updated</div>'
+            session_id, 1, '<div class="slide">updated</div>'
         )
     if operation == "duplicate_slide":
-        return service.duplicate_slide("contributor-r2", 1)
+        return service.duplicate_slide(session_id, 1)
     if operation == "delete_slide":
-        return service.delete_slide("contributor-r2", 1)
+        return service.delete_slide(session_id, 1)
     if operation == "reorder_slides":
-        return service.reorder_slides("contributor-r2", [2, 0, 1])
+        return service.reorder_slides(session_id, [2, 0, 1])
     raise AssertionError(operation)
 
 
-def test_monolith_save_records_literal_root_r1_event_order(writer_env):
-    """Break caught: full-deck save omits or reorders deck/slides evidence."""
+@pytest.mark.parametrize(
+    (
+        "actor_session_id",
+        "release_key",
+        "version",
+        "root_key",
+        "root_identity_key",
+        "actor_key",
+        "actor_identity_key",
+    ),
+    [
+        (
+            "root-r1",
+            "r1",
+            101,
+            "root_pk",
+            "root_identity",
+            "root_pk",
+            "root_identity",
+        ),
+        (
+            "contributor-r2",
+            "r2",
+            202,
+            "root_pk",
+            "root_identity",
+            "contributor_pk",
+            "contributor_identity",
+        ),
+        (
+            "legacy-null",
+            None,
+            None,
+            "legacy_pk",
+            "legacy_identity",
+            "legacy_pk",
+            "legacy_identity",
+        ),
+    ],
+)
+def test_monolith_save_records_order_for_each_actor_classification(
+    writer_env,
+    actor_session_id,
+    release_key,
+    version,
+    root_key,
+    root_identity_key,
+    actor_key,
+    actor_identity_key,
+):
+    """Full-deck save emits ordered evidence with the requester's exact pin."""
     factory, ids = writer_env
     SessionManager().save_slide_deck(
-        "root-r1",
+        actor_session_id,
         "Shared",
         '<div class="slide">one</div>',
         slide_count=1,
@@ -194,12 +248,16 @@ def test_monolith_save_records_literal_root_r1_event_order(writer_env):
     assert [event.object_type for event in events] == ["deck", "deck"]
     assert [event.object_id for event in events] == [None, None]
     assert len(events) == 2
+    release_id = ids[release_key] if release_key else None
     for event in events:
-        assert event.root_session_id == ids["root_pk"]
-        assert event.actor_session_id == ids["root_pk"]
-        assert event.root_session_identity == ids["root_identity"]
-        assert event.actor_session_identity == ids["root_identity"]
-        assert (event.graph_release_id, event.graph_version) == (ids["r1"], 101)
+        assert event.root_session_id == ids[root_key]
+        assert event.actor_session_id == ids[actor_key]
+        assert event.root_session_identity == ids[root_identity_key]
+        assert event.actor_session_identity == ids[actor_identity_key]
+        assert (event.graph_release_id, event.graph_version) == (
+            release_id,
+            version,
+        )
 
 
 def test_contributor_named_save_uses_root_r1_actor_r2_and_no_generic_event(writer_env):
@@ -309,6 +367,76 @@ def test_row_and_deck_writers_record_stable_slide_id_and_legacy_null(writer_env)
     ]
 
 
+@pytest.mark.parametrize(
+    ("actor_session_id", "release_key", "version", "root_key", "actor_key"),
+    [
+        ("root-r1", "r1", 101, "root_pk", "root_pk"),
+        ("contributor-r2", "r2", 202, "root_pk", "contributor_pk"),
+        ("legacy-null", None, None, "legacy_pk", "legacy_pk"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("writer_name", "operation", "object_id"),
+    [
+        ("write_slide", "write_slide", "matrix-slide"),
+        ("delete_slide", "delete_slide", "slide-b"),
+        ("commit_placeholder", "write_slide", "slide-b"),
+        ("write_deck_level", "write_deck_level", None),
+    ],
+)
+def test_each_explicit_writer_preserves_every_applicable_actor_classification(
+    writer_env,
+    actor_session_id,
+    release_key,
+    version,
+    root_key,
+    actor_key,
+    writer_name,
+    operation,
+    object_id,
+):
+    """Root R1, contributor R2, and legacy-null use every explicit seam."""
+    factory, ids = writer_env
+    _seed_direct_deck(factory, actor_session_id)
+    release_id = ids[release_key] if release_key else None
+    mutation = DeckMutationContext(
+        actor=MutationActor(actor_session_id, release_id),
+        operation=operation,
+        object_type="deck" if writer_name == "write_deck_level" else "slide",
+    )
+
+    if writer_name == "write_slide":
+        SlideWriter().write_slide(
+            actor_session_id,
+            3,
+            '<div class="slide">matrix</div>',
+            slide_id=object_id,
+            mutation=mutation,
+        )
+    elif writer_name == "delete_slide":
+        SlideWriter().delete_slide(actor_session_id, 1, mutation=mutation)
+    elif writer_name == "commit_placeholder":
+        SlideWriter().commit_placeholder(
+            actor_session_id, 1, error_message="matrix", mutation=mutation
+        )
+    else:
+        write_deck_level_columns(
+            actor_session_id, title="Matrix", mutation=mutation
+        )
+
+    [event] = _events(factory)
+    assert (event.operation, event.object_type, event.object_id) == (
+        operation,
+        mutation.object_type,
+        object_id,
+    )
+    assert (event.root_session_id, event.actor_session_id) == (
+        ids[root_key],
+        ids[actor_key],
+    )
+    assert (event.graph_release_id, event.graph_version) == (release_id, version)
+
+
 def test_event_failure_rolls_back_slide_content(writer_env, monkeypatch):
     """Break caught: event insert failure leaves the row committed by itself."""
     factory, ids = writer_env
@@ -336,6 +464,45 @@ def test_event_failure_rolls_back_slide_content(writer_env, monkeypatch):
     with factory() as db:
         assert db.scalar(select(SessionSlide)) is None
         assert db.scalar(select(SharedDeckMutationEvent)) is None
+
+
+def test_deck_level_event_failure_rolls_back_content_and_event(
+    writer_env, monkeypatch
+):
+    """Break caught: deck columns commit before rejected evidence is inserted."""
+    factory, ids = writer_env
+    _seed_direct_deck(factory)
+    with factory() as db:
+        deck = db.scalar(select(SessionSlideDeck))
+        before = (deck.title, deck.version, deck.updated_at)
+
+    def fail_event(*args, **kwargs):
+        assert kwargs["actor"] == MutationActor("contributor-r2", ids["r2"])
+        assert (kwargs["operation"], kwargs["object_type"]) == (
+            "write_deck_level",
+            "deck",
+        )
+        raise RuntimeError("deck event failed")
+
+    monkeypatch.setattr(
+        "src.api.services.deck_level_writer.record_shared_deck_mutation",
+        fail_event,
+    )
+    with pytest.raises(RuntimeError, match="deck event failed"):
+        write_deck_level_columns(
+            "contributor-r2",
+            title="Must roll back",
+            mutation=DeckMutationContext(
+                actor=MutationActor("contributor-r2", ids["r2"]),
+                operation="write_deck_level",
+                object_type="deck",
+            ),
+        )
+
+    with factory() as db:
+        deck = db.scalar(select(SessionSlideDeck))
+        assert (deck.title, deck.version, deck.updated_at) == before
+    assert _events(factory) == []
 
 
 def test_row_delete_records_stable_slide_id_and_contributor_release(writer_env):
@@ -411,13 +578,28 @@ def test_row_delete_event_failure_rolls_back_deleted_slide(writer_env, monkeypat
         ("reorder_slides", None),
     ],
 )
-def test_direct_crud_records_exactly_one_named_contributor_event(
-    writer_env, operation, object_id
+@pytest.mark.parametrize(
+    ("actor_session_id", "release_key", "version", "root_key", "actor_key"),
+    [
+        ("root-r1", "r1", 101, "root_pk", "root_pk"),
+        ("contributor-r2", "r2", 202, "root_pk", "contributor_pk"),
+        ("legacy-null", None, None, "legacy_pk", "legacy_pk"),
+    ],
+)
+def test_direct_crud_records_exactly_one_named_event_for_each_actor_classification(
+    writer_env,
+    operation,
+    object_id,
+    actor_session_id,
+    release_key,
+    version,
+    root_key,
+    actor_key,
 ):
-    """Break caught: direct CRUD emits generic nested events or loses R2."""
+    """Direct CRUD emits one named event with its requesting actor's exact pin."""
     factory, ids = writer_env
-    _seed_direct_deck(factory)
-    _run_direct(ChatService(), operation)
+    _seed_direct_deck(factory, actor_session_id)
+    _run_direct(ChatService(), operation, actor_session_id)
 
     [event] = _events(factory)
     assert (event.operation, event.object_type) == (operation, "deck")
@@ -428,10 +610,11 @@ def test_direct_crud_records_exactly_one_named_contributor_event(
     else:
         assert event.object_id not in {None, "slide-a", "slide-b", "slide-c"}
     assert (event.root_session_id, event.actor_session_id) == (
-        ids["root_pk"],
-        ids["contributor_pk"],
+        ids[root_key],
+        ids[actor_key],
     )
-    assert (event.graph_release_id, event.graph_version) == (ids["r2"], 202)
+    release_id = ids[release_key] if release_key else None
+    assert (event.graph_release_id, event.graph_version) == (release_id, version)
 
 
 @pytest.mark.parametrize(
@@ -826,4 +1009,65 @@ def test_read_time_legacy_authorship_repair_emits_no_user_event(writer_env):
     repaired = SessionManager().get_slide_deck("root-r1")
 
     assert repaired["slides"][0]["created_by"] == "owner@example.com"
+    assert _events(factory) == []
+
+
+def test_startup_backfill_emits_no_user_mutation_event(writer_env):
+    """Historical row materialisation is migration state, not a user mutation."""
+    factory, ids = writer_env
+    _seed_direct_deck(factory, "root-r1")
+    with factory() as db:
+        db.query(SessionSlide).delete()
+        db.query(SharedDeckMutationEvent).delete()
+        deck = db.scalar(select(SessionSlideDeck))
+        deck.deck_json = (
+            '{"title":"Legacy","slides":['
+            '{"slide_id":"backfilled","html":"<div class=\\"slide\\">x</div>"}]}'
+        )
+        db.commit()
+        result = backfill_session(db, ids["root_pk"], dry_run=False)
+
+    assert result["slides_inserted"] == 1
+    assert _events(factory) == []
+
+
+def test_dirty_marker_and_claim_emit_no_user_mutation_event(writer_env):
+    """Spec recovery leases change marker metadata, never collaboration evidence."""
+    factory, _ids = writer_env
+    _seed_direct_deck(factory, "root-r1")
+
+    assert mark_dirty("root-r1", "owner@example.com") is True
+    with factory() as db:
+        deck = db.scalar(select(SessionSlideDeck))
+        deck.spec_dirty_at = datetime.utcnow() - timedelta(minutes=10)
+        db.commit()
+
+    assert claim_due_marker(datetime.utcnow()) == (
+        "root-r1",
+        "owner@example.com",
+    )
+    assert _events(factory) == []
+
+
+def test_verdict_only_write_emits_no_user_mutation_event(writer_env):
+    """Verification metadata does not claim that slide content changed."""
+    factory, _ids = writer_env
+    _seed_direct_deck(factory, "root-r1")
+
+    SessionManager().write_slide_verification(
+        "root-r1", 0, {"content-hash": {"score": 90}}
+    )
+
+    assert _events(factory) == []
+
+
+def test_export_metadata_write_emits_no_user_mutation_event(writer_env):
+    """An export pointer is session metadata outside the shared-deck aggregate."""
+    factory, _ids = writer_env
+    _seed_direct_deck(factory, "root-r1")
+
+    SessionManager().set_google_slides_info(
+        "root-r1", "presentation-id", "https://slides.example/presentation-id"
+    )
+
     assert _events(factory) == []

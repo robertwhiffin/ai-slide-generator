@@ -49,6 +49,10 @@ from src.services.graph.state import (
     turn_scoped_concat,
     turn_scoped_merge,
 )
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    MutationActor,
+)
 from src.utils.slide_hash import compute_slide_hash
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
     DEFAULT_STYLE,
@@ -92,6 +96,99 @@ def _branch_payload(env, position=0, html=None, scripts="", spec=None, **extra):
         payload["scripts"] = scripts
     payload.update(extra)
     return payload
+
+
+def test_write_reviewed_row_preserves_the_exact_mutation_context(monkeypatch):
+    """The graph boundary owns provenance; the final writer must not rebuild it."""
+    mutation = DeckMutationContext(
+        actor=MutationActor("actor-session", 41),
+        operation="write_slide",
+        object_type="slide",
+        object_id="boundary-object",
+        suppress_nested_events=True,
+    )
+    seen = {}
+
+    class RecordingWriter:
+        def write_slide(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(nodes, "SlideWriter", RecordingWriter)
+
+    nodes._write_reviewed_row(
+        session_id="actor-session",
+        position=3,
+        html="<p>reviewed</p>",
+        scripts="",
+        findings=[],
+        verdict="clean",
+        slide_spec=None,
+        initiated_by=USER,
+        mutation=mutation,
+    )
+
+    assert seen["mutation"] is mutation
+
+
+def test_placehold_failed_position_preserves_the_exact_mutation_context(monkeypatch):
+    mutation = DeckMutationContext(
+        actor=MutationActor("actor-session", 42),
+        operation="write_slide",
+        object_type="slide",
+        object_id="placeholder-object",
+        suppress_nested_events=True,
+    )
+    seen = {}
+
+    class RecordingWriter:
+        def commit_placeholder(self, *args, **kwargs):
+            seen.update(kwargs)
+
+        def get_slide(self, *args, **kwargs):
+            return {"verification_record": {"hash": {"error": True}}}
+
+    monkeypatch.setattr(nodes, "SlideWriter", RecordingWriter)
+
+    assert nodes._placehold_failed_position(
+        4,
+        session_id="actor-session",
+        node="builder",
+        reason="failure",
+        mutation=mutation,
+    )
+    assert seen["mutation"] is mutation
+
+
+def test_stale_fix_reconciliation_preserves_the_exact_mutation_context(monkeypatch):
+    """Reconciliation must carry one boundary context through both helpers."""
+    mutation = DeckMutationContext(
+        actor=MutationActor("actor-session", 43),
+        operation="write_slide",
+        object_type="slide",
+        object_id="stale-object",
+        suppress_nested_events=True,
+    )
+    seen = []
+
+    def record_reviewed_row(**kwargs):
+        seen.append(kwargs["mutation"])
+
+    monkeypatch.setattr(nodes, "_write_reviewed_row", record_reviewed_row)
+    entry = {
+        "original_html": "<p>original</p>",
+        "original_scripts": "",
+        "findings": [],
+        "payload": {},
+    }
+
+    assert nodes._reconcile_stale_fixes(
+        {2: entry},
+        session_id="actor-session",
+        initiated_by=USER,
+        mutation=mutation,
+    ) == []
+    assert len(seen) == 1
+    assert seen[0] is mutation
 
 
 class TestAgentRuntimeSeam:
@@ -691,6 +788,28 @@ class TestForemanWakeIsWrappedNotBare:
 
 
 class TestBuilderNode:
+    def test_failure_constructs_literal_mutation_context_at_the_branch_boundary(
+        self, graph_env, monkeypatch
+    ):
+        graph_env.skills.set(
+            "builder", lambda payload: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        seen = {}
+
+        def placehold(position, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        monkeypatch.setattr(nodes, "_placehold_failed_position", placehold)
+
+        builder_node(_branch_payload(graph_env, 0))
+
+        assert seen["mutation"] == DeckMutationContext(
+            actor=MutationActor(graph_env.session_id, 1),
+            operation="write_slide",
+            object_type="slide",
+        )
+
     def test_carries_its_whole_payload_forward_for_the_refan(self, graph_env):
         graph_env.skills.set("builder", builder_out)
         payload = _branch_payload(graph_env, 2, spec=make_spec((2,)))
@@ -779,6 +898,25 @@ class TestBuilderNode:
 
 
 class TestBuildReviewerRowWrite:
+    def test_constructs_literal_mutation_context_at_the_branch_boundary(
+        self, graph_env, monkeypatch
+    ):
+        graph_env.skills.set("build_reviewer", lambda payload: review_out(0))
+        seen = {}
+
+        def write_reviewed_row(**kwargs):
+            seen.update(kwargs)
+
+        monkeypatch.setattr(nodes, "_write_reviewed_row", write_reviewed_row)
+
+        build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert seen["mutation"] == DeckMutationContext(
+            actor=MutationActor(graph_env.session_id, 1),
+            operation="write_slide",
+            object_type="slide",
+        )
+
     def test_a_reviewer_written_row_has_a_non_null_author_and_a_parsed_spec(
         self, graph_env
     ):
@@ -1046,6 +1184,28 @@ def _fix_entry(position, html="<p>original</p>", **extra):
 
 
 class TestFixerNode:
+    def test_failure_constructs_literal_mutation_context_at_the_state_boundary(
+        self, graph_env, monkeypatch
+    ):
+        graph_env.skills.set(
+            "fixer", lambda payload: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        seen = {}
+
+        def land_original(position, entry, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(nodes, "_land_original", land_original)
+
+        fixer_node(_fix_state(graph_env, {0: _fix_entry(0)}))
+
+        assert seen["mutation"] == DeckMutationContext(
+            actor=MutationActor(graph_env.session_id, 1),
+            operation="write_slide",
+            object_type="slide",
+        )
+
     def test_picks_the_lowest_candidate_and_marks_it_in_flight(self, graph_env):
         graph_env.skills.set("fixer", fixer_out)
         state = _fix_state(graph_env, {2: _fix_entry(2), 0: _fix_entry(0)})
@@ -1184,6 +1344,25 @@ class TestFixReviewerNode:
             fix_target=0,
             fix_map=scoped(TURN, {0: entry}),
             fixed=scoped(TURN, {0: {"html": fixed_html, "scripts": "", "changed": True}}),
+        )
+
+    def test_constructs_literal_mutation_context_at_the_state_boundary(
+        self, graph_env, monkeypatch
+    ):
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+        seen = {}
+
+        def write_reviewed_row(**kwargs):
+            seen.update(kwargs)
+
+        monkeypatch.setattr(nodes, "_write_reviewed_row", write_reviewed_row)
+
+        fix_reviewer_node(self._state(graph_env))
+
+        assert seen["mutation"] == DeckMutationContext(
+            actor=MutationActor(graph_env.session_id, 1),
+            operation="write_slide",
+            object_type="slide",
         )
 
     def test_a_clean_re_review_writes_the_fix_and_marks_the_finding_fixed(
@@ -1447,6 +1626,32 @@ class TestFixReviewerUndeliverableRowIsTerminalNotFatal:
 
 
 class TestPlaceholderNode:
+    def test_constructs_one_literal_context_for_all_stalled_positions(
+        self, graph_env, monkeypatch
+    ):
+        mutations = []
+
+        def placehold(position, **kwargs):
+            mutations.append(kwargs.get("mutation"))
+            return True
+
+        monkeypatch.setattr(nodes, "_placehold_failed_position", placehold)
+        state = graph_env.state(
+            turn_id=TURN,
+            deck_spec=make_spec((0, 1)),
+            foreman_wakes=scoped(TURN, [[0, 1], []]),
+            dispatched_at=scoped(TURN, {0: time.time(), 1: time.time()}),
+        )
+
+        placeholder_node(state)
+
+        assert mutations[0] is mutations[1]
+        assert mutations[0] == DeckMutationContext(
+            actor=MutationActor(graph_env.session_id, 1),
+            operation="write_slide",
+            object_type="slide",
+        )
+
     def test_commits_a_detectable_placeholder_for_every_stalled_position(
         self, graph_env
     ):
