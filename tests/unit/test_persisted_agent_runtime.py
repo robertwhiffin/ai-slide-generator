@@ -49,6 +49,7 @@ from src.services.persisted_graph_release import (
 )
 from src.services.prompt_assembler import (
     V2_PROTECTED_ASSEMBLY_IDENTITY,
+    ResolvedPromptStage,
 )
 
 EXPECTED_ROLE_NOTICES = {
@@ -184,11 +185,14 @@ def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
         content=content,
     )
     payload = {"deck_brief": "brief"} if agent_key == "build_reviewer" else {"x": 1}
-    adapter = _Adapter(OUTPUT_SCHEMAS[agent_key].model_construct())
+    output = OUTPUT_SCHEMAS[agent_key].model_construct()
+    adapter = _Adapter(output)
+    loader = _Loader(definition)
+    sink = RecordingAgentInvocationIdentitySink()
     runtime = AgentRuntime(
-        persisted_release_loader=_Loader(definition),
+        persisted_release_loader=loader,
         model_adapter=adapter,
-        identity_sink=RecordingAgentInvocationIdentitySink(),
+        identity_sink=sink,
     )
 
     result = runtime.run(
@@ -207,8 +211,91 @@ def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
         else _SLIDE_FRAME_CONSTRAINTS
     )
     expected_parts.append(json.dumps(payload, indent=2, default=str))
-    assert result.diagnostics.assembled_prompt == "\n\n".join(expected_parts)
-    assert adapter.calls[0]["prompt"] == result.diagnostics.assembled_prompt
+    expected_prompt = "\n\n".join(expected_parts)
+    expected_stages = [
+        ResolvedPromptStage(
+            "authored_prompt", content.prompt_text, "always", "authored", True
+        )
+    ]
+    if agent_key == "build_reviewer":
+        expected_stages.append(
+            ResolvedPromptStage(
+                "build_reviewer_deck_brief",
+                DECK_BRIEF_REVIEW,
+                "payload_has_deck_brief",
+                "protected",
+                True,
+            )
+        )
+    expected_stages.extend(
+        [
+            ResolvedPromptStage(
+                (
+                    "design_system_precedence"
+                    if design_system_active
+                    else "slide_frame_constraints"
+                ),
+                (
+                    DESIGN_SYSTEM_PRECEDENCE
+                    if design_system_active
+                    else _SLIDE_FRAME_CONSTRAINTS
+                ),
+                (
+                    "design_system_active"
+                    if design_system_active
+                    else "design_system_inactive"
+                ),
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "runtime_payload",
+                json.dumps(payload, indent=2, default=str),
+                "always",
+                "payload",
+                True,
+            ),
+            ResolvedPromptStage(
+                "structured_output_binding",
+                "langchain.with_structured_output",
+                "always",
+                "terminal",
+                False,
+            ),
+        ]
+    )
+    expected_identity = AgentInvocationIdentity(
+        graph_version=1,
+        graph_release_id=41,
+        agent_key=agent_key,
+        agent_definition_revision_id=23,
+        content_hash="a" * 64,
+    )
+    assert loader.calls == [(41, agent_key)]
+    assert sink.calls == [expected_identity]
+    assert adapter.calls == [
+        {
+            "agent_key": agent_key,
+            "configuration": AgentModelConfiguration(
+                endpoint_name="databricks-claude-opus-4-6",
+                temperature=0.7,
+                max_tokens=60000,
+                top_p=0.95,
+            ),
+            "schema": OUTPUT_SCHEMAS[agent_key],
+            "prompt": expected_prompt,
+        }
+    ]
+    assert result.output is output
+    assert result.diagnostics.agent_key == agent_key
+    assert result.diagnostics.definition_version == 23
+    assert result.diagnostics.assembled_prompt == expected_prompt
+    assert result.diagnostics.protected_prompt.version == 1
+    assert (
+        result.diagnostics.protected_prompt.digest
+        == "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
+    )
+    assert result.diagnostics.assembly_stages == tuple(expected_stages)
 
 
 @pytest.mark.parametrize("agent_key", GRAPH_V1_AGENT_KEYS)
@@ -245,19 +332,78 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
         if design_system_active
         else _SLIDE_FRAME_CONSTRAINTS
     )
-    expected_ids = ["authored_prompt", "custom:00000000-0000-0000-0000-000000000001"]
     expected_parts = [f"{agent_key} authored prompt", f"{agent_key} custom prompt"]
+    expected_stages = [
+        ResolvedPromptStage(
+            "authored_prompt",
+            f"{agent_key} authored prompt",
+            "always",
+            "authored",
+            True,
+        ),
+        ResolvedPromptStage(
+            "custom:00000000-0000-0000-0000-000000000001",
+            f"{agent_key} custom prompt",
+            "always",
+            "custom",
+            True,
+        ),
+    ]
     if agent_key == "build_reviewer":
-        expected_ids.append("build_reviewer_criteria")
         expected_parts.append(BUILD_REVIEWER_CRITERIA_STAGE)
-    expected_ids.extend(
+        expected_stages.append(
+            ResolvedPromptStage(
+                "build_reviewer_criteria",
+                BUILD_REVIEWER_CRITERIA_STAGE,
+                "always",
+                "protected",
+                True,
+            )
+        )
+    expected_stages.extend(
         [
-            environment_id,
-            "untrusted_data_notice",
-            "untrusted_data_open",
-            "runtime_payload",
-            "untrusted_data_close",
-            "structured_output_binding",
+            ResolvedPromptStage(
+                environment_id,
+                environment_text,
+                (
+                    "design_system_active"
+                    if design_system_active
+                    else "design_system_inactive"
+                ),
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "untrusted_data_notice",
+                EXPECTED_ROLE_NOTICES[agent_key],
+                "always",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "untrusted_data_open",
+                "<untrusted-data>",
+                "always",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "runtime_payload", '{"a":1,"z":2}', "always", "payload", True
+            ),
+            ResolvedPromptStage(
+                "untrusted_data_close",
+                "</untrusted-data>",
+                "always",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "structured_output_binding",
+                "langchain.with_structured_output",
+                "always",
+                "terminal",
+                False,
+            ),
         ]
     )
     expected_parts.extend(
@@ -293,43 +439,153 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
         }
     ]
     assert result.output is output
+    assert result.diagnostics.agent_key == agent_key
+    assert result.diagnostics.definition_version == 101
     assert result.diagnostics.assembled_prompt == expected_prompt
     assert result.diagnostics.protected_prompt.version == 2
     assert (
         result.diagnostics.protected_prompt.digest
         == "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
     )
-    assert [stage.stage_id for stage in result.diagnostics.assembly_stages] == expected_ids
-    assert result.diagnostics.assembly_stages[-1].rendered_text == (
-        "langchain.with_structured_output"
-    )
-    assert result.diagnostics.assembly_stages[-1].contributes_to_prompt is False
+    assert result.diagnostics.assembly_stages == tuple(expected_stages)
 
 
 @pytest.mark.parametrize("deck_brief", [None, "", "a real brief"])
 def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) -> None:
     definition = _v2_resolved("build_reviewer")
-    adapter = _Adapter(OUTPUT_SCHEMAS["build_reviewer"].model_construct())
+    output = OUTPUT_SCHEMAS["build_reviewer"].model_construct()
+    adapter = _Adapter(output)
+    loader = _Loader(definition)
+    sink = RecordingAgentInvocationIdentitySink()
     runtime = AgentRuntime(
-        persisted_release_loader=_Loader(definition),
+        persisted_release_loader=loader,
         model_adapter=adapter,
-        identity_sink=RecordingAgentInvocationIdentitySink(),
+        identity_sink=sink,
     )
+    payload = {"deck_brief": deck_brief}
 
     result = runtime.run(
         "build_reviewer",
         73,
-        {"deck_brief": deck_brief},
+        payload,
         AgentAssemblyContext(False),
     )
 
-    stages = result.diagnostics.assembly_stages
-    assert sum(stage.stage_id == "build_reviewer_deck_brief" for stage in stages) == bool(
-        deck_brief
+    raw_payload = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
     )
-    assert result.diagnostics.assembled_prompt.count(DECK_BRIEF_REVIEW) == int(
-        bool(deck_brief)
+    expected_stages = [
+        ResolvedPromptStage(
+            "authored_prompt",
+            "build_reviewer authored prompt",
+            "always",
+            "authored",
+            True,
+        ),
+        ResolvedPromptStage(
+            "custom:00000000-0000-0000-0000-000000000001",
+            "build_reviewer custom prompt",
+            "always",
+            "custom",
+            True,
+        ),
+        ResolvedPromptStage(
+            "build_reviewer_criteria",
+            BUILD_REVIEWER_CRITERIA_STAGE,
+            "always",
+            "protected",
+            True,
+        ),
+    ]
+    if deck_brief:
+        expected_stages.append(
+            ResolvedPromptStage(
+                "build_reviewer_deck_brief",
+                DECK_BRIEF_REVIEW,
+                "payload_has_deck_brief",
+                "protected",
+                True,
+            )
+        )
+    expected_stages.extend(
+        [
+            ResolvedPromptStage(
+                "slide_frame_constraints",
+                _SLIDE_FRAME_CONSTRAINTS,
+                "design_system_inactive",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "untrusted_data_notice",
+                EXPECTED_ROLE_NOTICES["build_reviewer"],
+                "always",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "untrusted_data_open",
+                "<untrusted-data>",
+                "always",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "runtime_payload", raw_payload, "always", "payload", True
+            ),
+            ResolvedPromptStage(
+                "untrusted_data_close",
+                "</untrusted-data>",
+                "always",
+                "protected",
+                True,
+            ),
+            ResolvedPromptStage(
+                "structured_output_binding",
+                "langchain.with_structured_output",
+                "always",
+                "terminal",
+                False,
+            ),
+        ]
     )
+    expected_prompt = "\n\n".join(
+        stage.rendered_text for stage in expected_stages if stage.contributes_to_prompt
+    )
+    expected_identity = AgentInvocationIdentity(
+        graph_version=2,
+        graph_release_id=73,
+        agent_key="build_reviewer",
+        agent_definition_revision_id=101,
+        content_hash="b" * 64,
+    )
+    assert loader.calls == [(73, "build_reviewer")]
+    assert sink.calls == [expected_identity]
+    assert adapter.calls == [
+        {
+            "agent_key": "build_reviewer",
+            "configuration": AgentModelConfiguration(
+                endpoint_name="databricks-claude-opus-4-6",
+                temperature=0.7,
+                max_tokens=60000,
+                top_p=0.95,
+            ),
+            "schema": OUTPUT_SCHEMAS["build_reviewer"],
+            "prompt": expected_prompt,
+        }
+    ]
+    assert result.output is output
+    assert result.diagnostics.assembled_prompt == expected_prompt
+    assert result.diagnostics.protected_prompt.version == 2
+    assert (
+        result.diagnostics.protected_prompt.digest
+        == "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+    )
+    assert result.diagnostics.assembly_stages == tuple(expected_stages)
 
 
 def test_hostile_v2_payload_uses_stage_provenance_not_attacker_text() -> None:
