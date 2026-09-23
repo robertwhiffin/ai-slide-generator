@@ -575,6 +575,7 @@ class ChatService:
             # Auto-create session on first message
             db_session = session_manager.create_session(
                 session_id=session_id,
+                graph_capable=selects_graph_engine(message),
             )
             logger.info(
                 "Auto-created session on first message",
@@ -1079,6 +1080,7 @@ class ChatService:
         except SessionNotFoundError:
             db_session = session_manager.create_session(
                 session_id=session_id,
+                graph_capable=selects_graph_engine(message),
             )
             logger.info(
                 "Auto-created session on first streaming message",

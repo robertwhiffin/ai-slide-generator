@@ -366,6 +366,11 @@ async def get_or_create_contributor_session(
 
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -550,6 +555,11 @@ async def duplicate_session(
         )
     except SessionAccessDeniedError as e:
         raise HTTPException(status_code=403, detail=e.message) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except HTTPException:
         raise
     except ValueError as e:
