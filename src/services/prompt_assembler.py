@@ -522,6 +522,11 @@ class PromptAssembler:
         for stage in bundle.stages:
             by_id.setdefault(stage.stage_id, []).append(stage)
         issues: list[PromptAssemblyIssue] = []
+        terminal_values = by_id.get("structured_output_binding", [])
+        terminal_invalid = (
+            len(terminal_values) != 1
+            or terminal_values[0] != expected["structured_output_binding"]
+        )
         for stage_id, expected_stage in expected.items():
             values = by_id.get(stage_id, [])
             if stage_id == "runtime_payload":
@@ -535,7 +540,7 @@ class PromptAssembler:
                     )
                 continue
             if stage_id == "structured_output_binding":
-                if len(values) != 1 or values[0] != expected_stage:
+                if terminal_invalid:
                     issues.append(
                         PromptAssemblyIssue(
                             "protected_assembly.stages.structured_output_binding",
@@ -606,13 +611,10 @@ class PromptAssembler:
                         _PAYLOAD_STAGE_MESSAGE,
                     )
                 )
-        if (
+        if not terminal_invalid and (
             not ids
             or ids[-1] != "structured_output_binding"
-            or (
-                by_id.get("structured_output_binding")
-                and by_id["structured_output_binding"][0].contributes_to_prompt
-            )
+            or terminal_values[0].contributes_to_prompt
         ):
             issues.append(
                 PromptAssemblyIssue(

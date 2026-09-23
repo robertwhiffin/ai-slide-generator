@@ -570,6 +570,85 @@ def test_corrupt_protected_plans_are_rejected_by_exact_issue_type() -> None:
         assert any(issue.code == code for issue in caught.value.issues)
 
 
+def test_terminal_plan_failures_emit_one_exact_stable_issue() -> None:
+    """Catches terminal validation reporting its one stable issue more than once."""
+    bundle = PromptAssembler().resolve_bundle(V2_PROTECTED_ASSEMBLY_IDENTITY)
+    stages = list(bundle.stages)
+    terminal = next(stage for stage in stages if stage.stage_id == "structured_output_binding")
+    non_final = [stage for stage in stages if stage.stage_id != "structured_output_binding"]
+    non_final.insert(0, terminal)
+    cases = (
+        (
+            "missing",
+            tuple(stage for stage in stages if stage.stage_id != "structured_output_binding"),
+            (
+                PromptAssemblyIssue(
+                    field="protected_assembly.stages.structured_output_binding",
+                    code="invalid_terminal_binding",
+                    message=(
+                        "Structured-output binding must be the final non-prompt protected stage."
+                    ),
+                ),
+            ),
+        ),
+        (
+            "altered",
+            tuple(
+                dataclasses.replace(stage, display_text="altered")
+                if stage.stage_id == "structured_output_binding"
+                else stage
+                for stage in stages
+            ),
+            (
+                PromptAssemblyIssue(
+                    field="protected_assembly.stages.structured_output_binding",
+                    code="invalid_terminal_binding",
+                    message=(
+                        "Structured-output binding must be the final non-prompt protected stage."
+                    ),
+                ),
+            ),
+        ),
+        (
+            "prompt_contributing",
+            tuple(
+                dataclasses.replace(stage, contributes_to_prompt=True)
+                if stage.stage_id == "structured_output_binding"
+                else stage
+                for stage in stages
+            ),
+            (
+                PromptAssemblyIssue(
+                    field="protected_assembly.stages.structured_output_binding",
+                    code="invalid_terminal_binding",
+                    message=(
+                        "Structured-output binding must be the final non-prompt protected stage."
+                    ),
+                ),
+            ),
+        ),
+        (
+            "non_final",
+            tuple(non_final),
+            (
+                PromptAssemblyIssue(
+                    field="protected_assembly.stages.structured_output_binding",
+                    code="invalid_terminal_binding",
+                    message=(
+                        "Structured-output binding must be the final non-prompt protected stage."
+                    ),
+                ),
+            ),
+        ),
+    )
+    for _name, corrupt_stages, expected in cases:
+        corrupt = dataclasses.replace(bundle, stages=corrupt_stages)
+        assembler = PromptAssembler(bundles={bundle.identity_key: corrupt})
+        with pytest.raises(PromptAssemblyRejected) as caught:
+            assembler.validate(definition=_v2("architect", []))
+        assert caught.value.issues == expected
+
+
 def test_legacy_transition_records_match_manifest_and_upgrade_losslessly() -> None:
     """Catches source drift, text parsing, or unrelated-field loss during v1 upgrade."""
     assembler = PromptAssembler()
