@@ -54,6 +54,43 @@ def _normalized(sql: str) -> str:
     return " ".join(sql.lower().replace('"', "").split())
 
 
+def test_postgres_migration_upgrades_direct_delete_to_a_deck_operation(
+    postgres_engine,
+):
+    """Break caught: an interim Task-1 table rejects Task-3 direct deletes."""
+    _run_migrations(postgres_engine)
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE shared_deck_mutation_event "
+                "DROP CONSTRAINT ck_shared_deck_mutation_event_operation_object"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE shared_deck_mutation_event ADD CONSTRAINT "
+                "ck_shared_deck_mutation_event_operation_object CHECK ("
+                "(object_type = 'slide' AND operation IN ('write_slide', 'delete_slide')) "
+                "OR (object_type = 'deck' AND operation IN "
+                "('save_deck', 'save_deck_slides', 'write_deck_level', 'insert_slide', "
+                "'update_slide', 'duplicate_slide', 'reorder_slides', 'restore_version')))"
+            )
+        )
+
+    _run_migrations(postgres_engine)
+
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO shared_deck_mutation_event "
+                "(root_session_identity, root_deck_identity, actor_session_identity, "
+                "operation, object_type, object_id, occurred_at) VALUES "
+                "(gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), "
+                "'delete_slide', 'deck', 'deleted-slide', now())"
+            )
+        )
+
+
 def test_postgres_migrates_append_only_evidence_and_allows_only_parent_delete_set_null(
     postgres_engine,
 ):

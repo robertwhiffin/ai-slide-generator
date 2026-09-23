@@ -29,17 +29,18 @@ MutationOperation = Literal[
 ]
 MutationObjectType = Literal["deck", "slide"]
 
-_OPERATION_OBJECT_TYPES: dict[str, str] = {
-    "save_deck": "deck",
-    "save_deck_slides": "deck",
-    "write_slide": "slide",
-    "delete_slide": "slide",
-    "write_deck_level": "deck",
-    "insert_slide": "deck",
-    "update_slide": "deck",
-    "duplicate_slide": "deck",
-    "reorder_slides": "deck",
-    "restore_version": "deck",
+_OPERATION_OBJECT_TYPES: dict[str, frozenset[str]] = {
+    "save_deck": frozenset({"deck"}),
+    "save_deck_slides": frozenset({"deck"}),
+    "write_slide": frozenset({"slide"}),
+    # The row repository deletes one slide; direct CRUD rewrites the whole deck.
+    "delete_slide": frozenset({"slide", "deck"}),
+    "write_deck_level": frozenset({"deck"}),
+    "insert_slide": frozenset({"deck"}),
+    "update_slide": frozenset({"deck"}),
+    "duplicate_slide": frozenset({"deck"}),
+    "reorder_slides": frozenset({"deck"}),
+    "restore_version": frozenset({"deck"}),
 }
 
 
@@ -47,6 +48,17 @@ _OPERATION_OBJECT_TYPES: dict[str, str] = {
 class MutationActor:
     actor_session_id: str
     graph_release_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeckMutationContext:
+    """Complete provenance for one content mutation transaction."""
+
+    actor: MutationActor
+    operation: MutationOperation
+    object_type: MutationObjectType
+    object_id: str | None = None
+    suppress_nested_events: bool = False
 
 
 def record_shared_deck_mutation(
@@ -62,7 +74,7 @@ def record_shared_deck_mutation(
 ) -> SharedDeckMutationEvent:
     """Append evidence inside the caller's transaction without committing it."""
     expected_object_type = _OPERATION_OBJECT_TYPES.get(operation)
-    if expected_object_type != object_type:
+    if expected_object_type is None or object_type not in expected_object_type:
         raise ValueError("illegal shared-deck mutation operation/object pair")
     if actor.actor_session_id != requesting_session.session_id:
         raise ValueError("mutation actor must equal the requesting session")

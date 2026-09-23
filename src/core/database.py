@@ -757,6 +757,31 @@ def _migrate_shared_deck_mutation_schema(
     sessions_table = qualified("user_sessions")
     decks_table = qualified("session_slide_decks")
 
+    # Task 3 classifies the direct CRUD delete as a whole-deck rewrite while
+    # SlideWriter.delete_slide remains a row deletion.  Upgrade an interim
+    # Task-1 table as well as fresh installs, so the same operation is valid for
+    # both explicitly classified object types.
+    operation_object_check = preparer.quote(
+        "ck_shared_deck_mutation_event_operation_object"
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} DROP CONSTRAINT IF EXISTS "
+            f"{operation_object_check}"
+        )
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} ADD CONSTRAINT {operation_object_check} "
+            "CHECK ((object_type = 'slide' AND operation IN "
+            "('write_slide', 'delete_slide')) OR "
+            "(object_type = 'deck' AND operation IN "
+            "('save_deck', 'save_deck_slides', 'write_deck_level', "
+            "'insert_slide', 'update_slide', 'duplicate_slide', "
+            "'delete_slide', 'reorder_slides', 'restore_version')))"
+        )
+    )
+
     conn.execute(
         text(
             f"""

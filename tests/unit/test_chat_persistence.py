@@ -16,20 +16,26 @@ Each test verifies:
 4. The deck can be restored after cache clear
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
-from typing import Dict, Any, Optional, List, Generator
+from typing import Any, Dict, Generator, List, Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from src.api.schemas.streaming import StreamEvent, StreamEventType
+from src.api.services.chat_service import ChatService
 from src.domain.slide import Slide
 from src.domain.slide_deck import SlideDeck
-from src.api.services.chat_service import ChatService
-from src.api.schemas.streaming import StreamEvent, StreamEventType
-
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    MutationActor,
+    MutationObjectType,
+    MutationOperation,
+)
 from tests.fixtures.html import (
+    generate_chart_slide,
+    generate_content_slide,
     load_3_slide_deck,
     load_6_slide_deck,
-    generate_content_slide,
-    generate_chart_slide,
 )
 
 
@@ -51,6 +57,7 @@ class MockSessionManager:
         deck_dict: Optional[Dict[str, Any]] = None,
         modified_by: Optional[str] = None,
         expected_version: Optional[int] = None,
+        mutation: Optional[DeckMutationContext] = None,
     ) -> Dict[str, Any]:
         """Record save call and store data."""
         self.save_calls.append({
@@ -60,6 +67,7 @@ class MockSessionManager:
             "scripts_content": scripts_content,
             "slide_count": slide_count,
             "deck_dict": deck_dict,
+            "mutation": mutation,
         })
 
         self.saved_decks[session_id] = {
@@ -73,6 +81,23 @@ class MockSessionManager:
         }
 
         return {"session_id": session_id, "slide_count": slide_count}
+
+    def deck_mutation_context(
+        self,
+        session_id: str,
+        *,
+        operation: MutationOperation,
+        object_type: MutationObjectType,
+        object_id: Optional[str] = None,
+    ) -> DeckMutationContext:
+        """Mirror the production context factory used by direct deck mutations."""
+        return DeckMutationContext(
+            actor=MutationActor(session_id, None),
+            operation=operation,
+            object_type=object_type,
+            object_id=object_id,
+            suppress_nested_events=True,
+        )
 
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Return saved deck."""

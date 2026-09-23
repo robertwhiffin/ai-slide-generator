@@ -3430,6 +3430,11 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="reorder_slides",
+                object_type="deck",
+            ),
         )
         self._record_deck_version(session_id, save_result)
 
@@ -3530,6 +3535,12 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="update_slide",
+                object_type="deck",
+                object_id=new_slide.slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
 
@@ -3612,6 +3623,12 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="duplicate_slide",
+                object_type="deck",
+                object_id=cloned.slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
 
@@ -3729,6 +3746,12 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="insert_slide",
+                object_type="deck",
+                object_id=new_slide.slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
 
@@ -4022,6 +4045,8 @@ class ChatService:
         if len(current_deck.slides) <= 1:
             raise ValueError("Cannot delete last slide")
 
+        deleted_slide_id = current_deck.slides[index].slide_id
+
         # Remove slide
         current_deck.remove_slide(index)
 
@@ -4038,6 +4063,12 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="delete_slide",
+                object_type="deck",
+                object_id=deleted_slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
 

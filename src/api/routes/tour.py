@@ -116,6 +116,11 @@ def _phase2_add_slides(session_id: str, created_by: str) -> dict:
         session_id,
         deck_spec=fixture["deck_spec"],
         modified_by=created_by,
+        mutation=sm.deck_mutation_context(
+            session_id,
+            operation="write_deck_level",
+            object_type="deck",
+        ),
     )
 
     assistant_reply = fixture["chat_reply"]
