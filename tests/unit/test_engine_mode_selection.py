@@ -17,7 +17,7 @@ the behaviour, not on a real-database connection error.
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +26,7 @@ from src.api.services.chat_service import (
     AGENT_MODE_PHRASE,
     resolve_engine_mode,
 )
+from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SessionMessage, UserSession
 from tests.unit.conftest import _make_factory, _make_fake_db
 
@@ -68,6 +69,83 @@ def _add_message(factory, session_id: str, *, role: str, content: str,
             )
         )
         db.commit()
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Graph Release seeding for the duplicate tests.
+#
+# duplicate_session decides graph capability and then locks the ACTIVE Graph
+# Release before constructing the copy's UserSession (correction C-2), because
+# #261 makes a graph-capable conversation's pin immutable from creation. A
+# marker-carrying duplicate therefore requires a live active release to exist.
+#
+# Two releases are published, and the SOURCE session is pinned to the SUPERSEDED
+# one. That is what gives the pin assertions their teeth: duplication must never
+# copy the source's pin, and must never infer "latest" by ordering instead of
+# locking the active row — either regression would come back with
+# _SUPERSEDED_RELEASE_ID.
+# ---------------------------------------------------------------------------
+
+_SUPERSEDED_RELEASE_ID = 501
+_ACTIVE_RELEASE_ID = 502
+
+
+def _seed_releases_pinning_source_to_the_superseded_one(
+    factory, source_session_id: str
+) -> None:
+    """Publish a superseded release plus the active one; pin *source* to the old one."""
+    published = datetime.now(timezone.utc) - timedelta(days=2)
+    retired = published + timedelta(days=1)
+    db = factory()
+    try:
+        db.add(
+            GraphRelease(
+                id=_SUPERSEDED_RELEASE_ID,
+                version_number=1,
+                release_note="superseded engine-mode fixture release",
+                published_by="fixture@example.com",
+                published_at=published,
+                effective_from=published,
+                effective_to=retired,
+            )
+        )
+        db.add(
+            GraphRelease(
+                id=_ACTIVE_RELEASE_ID,
+                version_number=2,
+                release_note="active engine-mode fixture release",
+                published_by="fixture@example.com",
+                published_at=retired,
+                effective_from=retired,
+                effective_to=None,
+            )
+        )
+        source = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == source_session_id)
+            .one()
+        )
+        source.graph_release_id = _SUPERSEDED_RELEASE_ID
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _pin_of(factory, session_id: str):
+    """Return *session_id*'s persisted graph_release_id."""
+    db = factory()
+    try:
+        return (
+            db.query(UserSession)
+            .filter(UserSession.session_id == session_id)
+            .one()
+            .graph_release_id
+        )
     finally:
         db.close()
 
@@ -371,6 +449,9 @@ class TestDuplicateCarriesTheMarker:
         self, deck_with_three_rows
     ):
         factory = deck_with_three_rows._factory
+        _seed_releases_pinning_source_to_the_superseded_one(
+            factory, deck_with_three_rows.session_id
+        )
         _add_message(
             factory,
             deck_with_three_rows.session_id,
@@ -387,10 +468,18 @@ class TestDuplicateCarriesTheMarker:
         with _patched(factory):
             assert resolve_engine_mode(copy["session_id"]) == "graph"
 
+        # The copy owns a FRESH pin taken under the active-row lock — not the
+        # source's superseded pin, and not a "latest by ordering" guess.
+        assert _pin_of(factory, copy["session_id"]) == _ACTIVE_RELEASE_ID
+        assert _pin_of(factory, deck_with_three_rows.session_id) == (
+            _SUPERSEDED_RELEASE_ID
+        )
+
     def test_only_the_marker_row_is_copied(self, deck_with_three_rows):
         """Copying more rows would replay a phantom conversation into the copy."""
         factory = deck_with_three_rows._factory
         sid = deck_with_three_rows.session_id
+        _seed_releases_pinning_source_to_the_superseded_one(factory, sid)
         _add_message(factory, sid, role="user", content=_PHRASE_MESSAGE,
                      message_type="user_query")
         _add_message(factory, sid, role="assistant", content="here you go",
@@ -413,6 +502,9 @@ class TestDuplicateCarriesTheMarker:
     ):
         """The standing guarantee: a duplicate carries no chat history."""
         factory = deck_with_three_rows._factory
+        _seed_releases_pinning_source_to_the_superseded_one(
+            factory, deck_with_three_rows.session_id
+        )
         _add_message(
             factory,
             deck_with_three_rows.session_id,
@@ -427,11 +519,18 @@ class TestDuplicateCarriesTheMarker:
         with _patched(factory):
             assert resolve_engine_mode(copy["session_id"]) == "monolith"
 
+        # An active release is available here too, and the monolith copy still
+        # takes no pin: capability decides whether a pin is selected at all.
+        assert _pin_of(factory, copy["session_id"]) is None
+
     def test_duplicate_from_a_contributor_session_carries_the_owner_marker(
         self, contributor_session
     ):
         """A contributor duplicating a graph-mode deck gets a graph-mode copy."""
         factory = contributor_session._factory
+        _seed_releases_pinning_source_to_the_superseded_one(
+            factory, contributor_session._owner_session_id
+        )
         _add_message(
             factory,
             contributor_session._owner_session_id,
@@ -451,6 +550,13 @@ class TestDuplicateCarriesTheMarker:
         with _patched(factory):
             assert resolve_engine_mode(copy["session_id"]) == "graph"
 
+        # Resolving the contributor to the deck owner decides capability; the pin
+        # is still the copy's own, taken from the active row.
+        assert _pin_of(factory, copy["session_id"]) == _ACTIVE_RELEASE_ID
+        assert _pin_of(factory, contributor_session._owner_session_id) == (
+            _SUPERSEDED_RELEASE_ID
+        )
+
     def test_the_carried_marker_predates_the_copys_own_rows(
         self, deck_with_three_rows
     ):
@@ -458,6 +564,9 @@ class TestDuplicateCarriesTheMarker:
         older than anything the new conversation writes — it keeps the source
         row's created_at, which is older than the copy itself."""
         factory = deck_with_three_rows._factory
+        _seed_releases_pinning_source_to_the_superseded_one(
+            factory, deck_with_three_rows.session_id
+        )
         _add_message(
             factory,
             deck_with_three_rows.session_id,
