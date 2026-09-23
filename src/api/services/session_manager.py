@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, delete, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
@@ -3308,11 +3308,11 @@ class SessionManager:
     def _delete_expired_session(self, session_id: int) -> bool:
         """Delete one expiry candidate in its own committed transaction."""
         with get_db_session() as db:
-            session = db.get(UserSession, session_id)
-            if session is None:
-                return False
-            db.delete(session)
-        return True
+            result = db.execute(
+                delete(UserSession).where(UserSession.id == session_id)
+            )
+            deleted = result.rowcount == 1
+        return deleted
 
     def cleanup_expired_sessions(self) -> int:
         """Delete sessions that have exceeded TTL.
