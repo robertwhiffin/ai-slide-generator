@@ -202,6 +202,30 @@ def test_missing_actor_row_is_rejected(db):
         )
 
 
+def test_transient_requester_cannot_impersonate_existing_actor_session(db):
+    """Break caught: id-less requester borrows evidence identity via a copied session ID."""
+    real_actor, deck = _root_and_deck(
+        db,
+        session_id="real-actor",
+        release_id=None,
+    )
+    transient_requester = UserSession(
+        session_id="real-actor",
+        created_by="impersonator@example.com",
+    )
+
+    with pytest.raises(ValueError, match="persisted"):
+        _record(
+            db,
+            requester=transient_requester,
+            owner=real_actor,
+            deck=deck,
+            release_id=None,
+        )
+
+    assert db.scalar(select(func.count()).select_from(_event_model())) == 0
+
+
 def test_missing_exact_release_is_rejected(db):
     """Break caught: a dangling actor pin falls back to active/latest release metadata."""
     _release(db, 1, active=True)
