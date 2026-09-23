@@ -452,6 +452,7 @@ jobs:
             tests/integration/test_conversation_pin_migration_postgres.py \
             tests/integration/test_shared_deck_mutation_migration_postgres.py \
             tests/integration/test_shared_deck_mutation_lifecycle_postgres.py \
+            tests/integration/test_collaboration_history_api_postgres.py \
             tests/integration/test_shared_deck_mutation_attribution.py \
             tests/integration/test_conversation_pin_creation_postgres.py \
             tests/integration/test_mixed_release_creation_postgres.py \
