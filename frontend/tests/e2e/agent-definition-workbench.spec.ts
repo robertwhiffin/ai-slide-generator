@@ -138,7 +138,10 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
   await expect(page.getByRole('tabpanel', { name: 'Output Schema' })).toContainText('speaker_notes');
 
   await page.getByRole('tab', { name: 'Assembly' }).click();
-  await expect(page.getByRole('tabpanel', { name: 'Assembly' })).toContainText('slide_frame_constraints');
+  // Task 5 replaced the read-only assembly JSON with server-derived locked rows, so the
+  // stage is asserted by its accessible group name rather than by its raw stage_id.
+  await expect(page.getByRole('tabpanel', { name: 'Assembly' })
+    .getByRole('group', { name: 'Protected stage: Slide frame constraints' })).toBeVisible();
   await expect(page.getByRole('tabpanel', { name: 'Assembly' })).toContainText('langchain.with_structured_output');
 
   await navigation.getByRole('button', { name: 'Foreman' }).click();
