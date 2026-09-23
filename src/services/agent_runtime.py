@@ -35,7 +35,7 @@ from databricks.sdk.errors import (
     ResourceDoesNotExist,
     Unauthenticated,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.databricks_client import DatabricksClientError
@@ -77,6 +77,7 @@ MODEL_DRIVEN_AGENT_KEYS = (
     "deck_reviewer",
 )
 _MODEL_DRIVEN_AGENT_KEY_SET = frozenset(MODEL_DRIVEN_AGENT_KEYS)
+_ASSEMBLY_RULES_ADAPTER = TypeAdapter(AssemblyRules)
 
 _PROTECTED_PROMPT_VERSION = 1
 _PROTECTED_PROMPT_DIGEST = (
@@ -670,7 +671,9 @@ class AgentRuntime:
         payload: dict[str, Any],
         context: AgentAssemblyContext,
     ) -> str:
-        expected = AssemblyRules.model_validate(assembly_rules_for(content.agent_key))
+        expected = _ASSEMBLY_RULES_ADAPTER.validate_python(
+            assembly_rules_for(content.agent_key)
+        )
         if content.assembly_rules != expected:
             raise ValueError("persisted assembly rules do not match Graph Version 1")
         parts: list[str] = []
