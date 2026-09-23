@@ -32,6 +32,7 @@ from src.services.agent_runtime import (
     _schema_contract_material,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+from src.services.graph_definition_manifest import AssemblyRulesV1
 from src.services.persisted_graph_release import PersistedConfigurationUnavailableError
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
@@ -205,6 +206,10 @@ def test_code_owned_contract_identities_are_stable_literals():
     assert {
         key: definition.schema_contract.digest for key, definition in definitions.items()
     } == EXPECTED_SCHEMA_DIGESTS
+    assert all(
+        isinstance(definition.assembly_rules, AssemblyRulesV1)
+        for definition in definitions.values()
+    )
 
 
 def test_schema_contract_identity_changes_when_validator_behavior_changes():
@@ -316,6 +321,7 @@ def test_incompatible_schema_contract_fails_before_model_invocation():
 
 def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     output = _output_for("data_analyst")
+    structured_bindings: list[type[BaseModel]] = []
 
     class StructuredModel:
         def invoke(self, prompt: str) -> BaseModel:
@@ -327,6 +333,7 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
             raise AssertionError(f"legacy tool grants must stay inert: {tools}")
 
         def with_structured_output(self, schema):
+            structured_bindings.append(schema)
             assert schema is OUTPUT_SCHEMAS["data_analyst"]
             return StructuredModel()
 
@@ -354,6 +361,7 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     )
 
     assert actual is output
+    assert structured_bindings == [OUTPUT_SCHEMAS["data_analyst"]]
     assert constructed == [
         {
             "endpoint": "databricks-claude-opus-4-6",
@@ -373,3 +381,17 @@ def test_agent_runtime_is_the_only_prompt_and_model_invocation_owner():
     assert not hasattr(skills, "_with_conditional_instructions")
     assert not hasattr(agent_resolution, "assemble_skill_prompt")
     assert not hasattr(agent_resolution, "get_structured_model")
+
+
+def test_runtime_and_nodes_have_no_prompt_serialization_or_binding_bypass():
+    import inspect
+
+    import src.services.agent_runtime as agent_runtime
+    import src.services.graph.nodes as nodes
+
+    runtime_source = inspect.getsource(agent_runtime)
+    node_source = inspect.getsource(nodes)
+    assert "json.dumps(payload" not in runtime_source
+    assert "json.dumps(payload" not in node_source
+    assert runtime_source.count("with_structured_output(") == 1
+    assert "with_structured_output(" not in node_source
