@@ -235,3 +235,14 @@ def test_shared_deck_mutation_migration_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its trigger and FK lifecycle assertions must "
         "execute against PostgreSQL."
     )
+
+
+def test_shared_deck_mutation_lifecycle_is_collected_by_integration_graph():
+    """The evidence-preserving deletion/expiry lifecycle requires PostgreSQL."""
+    target = "tests/integration/test_shared_deck_mutation_lifecycle_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its cascade and per-candidate transaction "
+        "assertions must execute against PostgreSQL."
+    )
