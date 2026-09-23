@@ -435,21 +435,25 @@ def test_direct_crud_records_exactly_one_named_contributor_event(
 
 
 @pytest.mark.parametrize(
-    "operation",
+    ("operation", "expected_object_id"),
     [
-        "insert_slide",
-        "update_slide",
-        "duplicate_slide",
-        "delete_slide",
-        "reorder_slides",
+        ("insert_slide", "direct-new-slide"),
+        ("update_slide", "slide-b"),
+        ("duplicate_slide", "direct-new-slide"),
+        ("delete_slide", "slide-b"),
+        ("reorder_slides", None),
     ],
 )
 def test_direct_event_failure_rolls_back_and_stops_followup_work(
-    writer_env, monkeypatch, operation
+    writer_env, monkeypatch, operation, expected_object_id
 ):
     """Break caught: rejected evidence leaves content or reaches spec/savepoint work."""
-    factory, _ids = writer_env
+    factory, ids = writer_env
     _seed_direct_deck(factory)
+    monkeypatch.setattr(
+        "src.api.services.chat_service.uuid.uuid4",
+        lambda: "direct-new-slide",
+    )
     with factory() as db:
         before_deck = SessionManager().get_slide_deck("root-r1")
         before_rows = [
@@ -459,6 +463,10 @@ def test_direct_event_failure_rolls_back_and_stops_followup_work(
         before_version = SessionManager().get_slide_deck_version("root-r1")
 
     def fail_event(*args, **kwargs):
+        assert kwargs["operation"] == operation
+        assert kwargs["object_type"] == "deck"
+        assert kwargs["object_id"] == expected_object_id
+        assert kwargs["actor"] == MutationActor("contributor-r2", ids["r2"])
         raise RuntimeError("event insert failed")
 
     def forbidden(*args, **kwargs):
