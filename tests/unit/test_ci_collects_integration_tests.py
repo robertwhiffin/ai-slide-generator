@@ -224,3 +224,14 @@ def test_conversation_pin_acceptance_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its compiled-graph pin assertions must "
         "execute against PostgreSQL."
     )
+
+
+def test_shared_deck_mutation_migration_is_collected_by_integration_graph():
+    """The append-only evidence migration/lifecycle suite requires PostgreSQL."""
+    target = "tests/integration/test_shared_deck_mutation_migration_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its trigger and FK lifecycle assertions must "
+        "execute against PostgreSQL."
+    )

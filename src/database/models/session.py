@@ -3,11 +3,13 @@
 These models support multi-session functionality in production deployments
 where session state is stored in Lakebase for persistence across app restarts.
 """
+import uuid
 from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -15,6 +17,9 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
+    event,
+    inspect,
     text,
 )
 from sqlalchemy.orm import backref, relationship
@@ -99,6 +104,11 @@ class UserSession(Base):
 
     id = Column(Integer, primary_key=True)
     session_id = Column(String(64), unique=True, nullable=False, index=True)
+    collaboration_identity = Column(
+        Uuid(as_uuid=True),
+        default=uuid.uuid4,
+        nullable=False,
+    )
     user_id = Column(String(255), nullable=True, index=True)  # Legacy — kept for backward compat
     created_by = Column(String(255), nullable=True, index=True)  # Username of session creator
 
@@ -261,6 +271,11 @@ class SessionSlideDeck(Base):
     __tablename__ = "session_slide_decks"
 
     id = Column(Integer, primary_key=True)
+    collaboration_identity = Column(
+        Uuid(as_uuid=True),
+        default=uuid.uuid4,
+        nullable=False,
+    )
     session_id = Column(
         Integer,
         ForeignKey("user_sessions.id", ondelete="CASCADE"),
@@ -372,6 +387,93 @@ class SessionSlideDeck(Base):
 
     def __repr__(self):
         return f"<SessionSlideDeck(session_id={self.session_id}, title='{self.title}')>"
+
+
+class SharedDeckMutationEvent(Base):
+    """Append-only, privacy-safe evidence for one shared-deck mutation."""
+
+    __tablename__ = "shared_deck_mutation_event"
+
+    id = Column(Integer, primary_key=True)
+    root_session_id = Column(
+        Integer,
+        ForeignKey(
+            "user_sessions.id",
+            name="fk_shared_deck_mutation_event_root_session",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    root_deck_id = Column(
+        Integer,
+        ForeignKey(
+            "session_slide_decks.id",
+            name="fk_shared_deck_mutation_event_root_deck",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    actor_session_id = Column(
+        Integer,
+        ForeignKey(
+            "user_sessions.id",
+            name="fk_shared_deck_mutation_event_actor_session",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    root_session_identity = Column(Uuid(as_uuid=True), nullable=False)
+    root_deck_identity = Column(Uuid(as_uuid=True), nullable=False)
+    actor_session_identity = Column(Uuid(as_uuid=True), nullable=False)
+
+    graph_release_id = Column(Integer, nullable=True)
+    graph_version = Column(Integer, nullable=True)
+    operation = Column(String(32), nullable=False)
+    object_type = Column(String(16), nullable=False)
+    object_id = Column(String(128), nullable=True)
+    occurred_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(graph_release_id IS NULL) = (graph_version IS NULL)",
+            name="ck_shared_deck_mutation_event_release_pair",
+        ),
+        CheckConstraint(
+            "(object_type = 'slide' AND operation IN ('write_slide', 'delete_slide')) "
+            "OR (object_type = 'deck' AND operation IN "
+            "('save_deck', 'save_deck_slides', 'write_deck_level', 'insert_slide', "
+            "'update_slide', 'duplicate_slide', 'reorder_slides', 'restore_version'))",
+            name="ck_shared_deck_mutation_event_operation_object",
+        ),
+        Index(
+            "ix_shared_deck_event_root_deck_actor_release",
+            "root_deck_identity",
+            "actor_session_identity",
+            "graph_release_id",
+        ),
+        Index(
+            "ix_shared_deck_event_root_session_actor_release_time",
+            "root_session_identity",
+            "actor_session_identity",
+            "graph_release_id",
+            "occurred_at",
+        ),
+    )
+
+
+@event.listens_for(UserSession, "before_update")
+@event.listens_for(SessionSlideDeck, "before_update")
+def _reject_collaboration_identity_change(_mapper, _connection, target) -> None:
+    if inspect(target).attrs.collaboration_identity.history.has_changes():
+        raise ValueError("collaboration identity is immutable")
+
+
+@event.listens_for(SharedDeckMutationEvent, "before_update")
+@event.listens_for(SharedDeckMutationEvent, "before_delete")
+def _reject_shared_deck_mutation_event_change(*_args) -> None:
+    """Keep SQLite/application ORM paths append-only; PostgreSQL also has a trigger."""
+    raise ValueError("shared deck mutation events are append-only")
 
 
 class SlideDeckVersion(Base):

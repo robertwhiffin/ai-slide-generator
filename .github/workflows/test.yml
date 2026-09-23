@@ -450,6 +450,7 @@ jobs:
             tests/integration/test_graph_configuration_bootstrap_postgres.py \
             tests/integration/test_graph_configuration_constraints_postgres.py \
             tests/integration/test_conversation_pin_migration_postgres.py \
+            tests/integration/test_shared_deck_mutation_migration_postgres.py \
             tests/integration/test_conversation_pin_creation_postgres.py \
             tests/integration/test_persisted_graph_runtime_failures_postgres.py \
             tests/integration/test_conversation_pin_acceptance_postgres.py \

@@ -212,3 +212,85 @@ def test_conversation_pin_schema_migrates_pre_column_sqlite_table_idempotently(
     assert {index["name"] for index in inspector.get_indexes("user_sessions")} == {
         "ix_user_sessions_graph_release_id"
     }
+
+
+def test_shared_deck_mutation_schema_backfills_legacy_sqlite_rows_once(
+    sqlite_engine,
+):
+    """Break caught: additive migration skips legacy identities/table or rewrites UUIDs."""
+    migration = getattr(database_module, "_migrate_shared_deck_mutation_schema", None)
+    assert migration is not None
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE user_sessions ("
+                "id INTEGER PRIMARY KEY, session_id VARCHAR(64) NOT NULL)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE session_slide_decks ("
+                "id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL)"
+            )
+        )
+        conn.execute(text("CREATE TABLE graph_release (id INTEGER PRIMARY KEY)"))
+        conn.execute(
+            text(
+                "INSERT INTO user_sessions (id, session_id) VALUES "
+                "(1, 'legacy-root'), (2, 'legacy-actor')"
+            )
+        )
+        conn.execute(
+            text("INSERT INTO session_slide_decks (id, session_id) VALUES (10, 1)")
+        )
+
+    def run_migration():
+        with sqlite_engine.begin() as conn:
+            migration(
+                conn,
+                inspect(conn),
+                None,
+                lambda table: f'"{table}"',
+                True,
+            )
+
+    run_migration()
+    with sqlite_engine.connect() as conn:
+        first = conn.execute(
+            text(
+                "SELECT "
+                "(SELECT collaboration_identity FROM user_sessions WHERE id = 1), "
+                "(SELECT collaboration_identity FROM user_sessions WHERE id = 2), "
+                "(SELECT collaboration_identity FROM session_slide_decks WHERE id = 10)"
+            )
+        ).one()
+    run_migration()
+    with sqlite_engine.connect() as conn:
+        second = conn.execute(
+            text(
+                "SELECT "
+                "(SELECT collaboration_identity FROM user_sessions WHERE id = 1), "
+                "(SELECT collaboration_identity FROM user_sessions WHERE id = 2), "
+                "(SELECT collaboration_identity FROM session_slide_decks WHERE id = 10)"
+            )
+        ).one()
+
+    assert second == first
+    assert all(value is not None for value in first)
+    inspector = inspect(sqlite_engine)
+    assert "shared_deck_mutation_event" in inspector.get_table_names()
+    index_columns = {
+        tuple(index["column_names"])
+        for index in inspector.get_indexes("shared_deck_mutation_event")
+    }
+    assert (
+        "root_deck_identity",
+        "actor_session_identity",
+        "graph_release_id",
+    ) in index_columns
+    assert (
+        "root_session_identity",
+        "actor_session_identity",
+        "graph_release_id",
+        "occurred_at",
+    ) in index_columns
