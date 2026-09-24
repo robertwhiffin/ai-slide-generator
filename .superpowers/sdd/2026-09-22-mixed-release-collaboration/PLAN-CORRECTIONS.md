@@ -763,3 +763,70 @@ re-aimed" has been such a reliable quality signal in this epic: the agents that 
 the ones whose harnesses can detect them.
 
 Cost if wrong: a clause recorded as guarded by a mutation that actually exercised a different line.
+
+### C-29 — EPIC-WIDE: an anchor-count assertion is necessary but NOT sufficient
+
+C-27 required every mutation harness to assert its anchor count, on the grounds that a non-unique
+anchor silently mutates the wrong line and yields a RED proving something else. That rule is right
+and it has already caught four mis-aims. Slice 4B found its limit.
+
+Its **M9d REDed nothing with a perfectly correct anchor count of 1.** The patch filtered the session
+IDs out of `**dict(record)` in the build-reviewer re-fan — the right line, uniquely matched — while
+the explicit re-declaration immediately below **silently restored them**. The mutation was
+syntactically precise and semantically inert.
+
+**So the anchor count proves you patched the line you aimed at. It does not prove the patch changed
+behaviour.** A zero with a correct anchor count means one of two things and you must distinguish
+them: your aim is wrong, or your aim is right and something downstream compensates. The second is
+the more dangerous reading, because the compensating path is usually the thing your clause was
+supposed to pin.
+
+**Binding addition: when a mutation REDs nothing at a correct anchor count, prove the patch was
+observed** — assert the mutated value actually reaches the assertion under test, or mutate the
+compensating path as well. Do not record the zero and move on, and do not conclude the clause is
+unguarded without that check. Slice 4B re-aimed to M9e rather than reporting a blank, which is the
+correct handling.
+
+Cost if wrong: a clause recorded as unguarded when it is guarded, or recorded as guarded by a
+mutation that never changed anything.
+
+### C-30 — C-9's slice-4B file list was incomplete; nodes.py and routers.py are required
+
+**Controller error.** C-9 defined slice 4B's Modify list as `agent_runtime_identity.py`,
+`agent_runtime.py`, `graph/builder.py`, `graph/state.py` and `tests/unit/test_graph_nodes.py`. That
+list cannot satisfy the bullets it was written to scope.
+
+**Six of plan Task 4 bullet 1's seven named handoffs live in `src/services/graph/nodes.py`**, and the
+`dict(record)` re-fan that bullet 2 names explicitly lives in `src/services/graph/routers.py`.
+Neither file appears in C-9's list for either slice, nor in the plan's own Task 4 Files block — so
+the omission is inherited from the plan and C-9 reproduced it rather than catching it.
+
+Slice 4B exceeded the list by exactly those two files and disclosed it. Both are disjoint from slice
+4A's surface and from #265's integrated diff, so nothing collided. **Ruling: the two files are added
+to slice 4B's authorized set retroactively.** This is the same class as C-18 — a boundary written
+from the plan's text rather than from the code the text describes.
+
+Cost if wrong: an implementer either stops and asks on a boundary that was never satisfiable, or
+exceeds it silently. Disclosing it was the right response to a defective list.
+
+### C-31 — plan Task 4 bullet 2's isolation requirement is self-contradictory as worded
+
+Bullet 2 requires a sabotage that removes root/actor/release from the reviewer's `dict(record)`
+re-fan such that "only the re-review identity test must go RED". Slice 4B measured that this is
+unachievable as written, and the reason is in the plan itself.
+
+**Two distinct clauses share that one expression**: the reviewer must *receive* the provenance, and
+the re-fan must *re-declare* it from state rather than trust a checkpointed record. Any sabotage of
+that expression REDs both, because both are true properties of the same line. The literal version —
+stripping the release as well — REDs **six pre-existing tests**. And making the re-fan the *sole*
+source would require `build_branch_payload` not to declare the IDs, which bullet 2 **also mandates**.
+
+**Ruling: the achievable and correct reading is the discrimination the requirement protects, not the
+count it names.** Slice 4B's best-aimed variant, M9e, REDs three tests — all three re-fan and trace
+tests — with **zero pre-existing tests and zero other node's identity test** affected. That is
+precisely the property "only the re-review identity test" was reaching for: the sabotage must not
+disturb any other node's identity handling. Accept three REDs with that isolation over one RED that
+cannot exist.
+
+Cost if wrong: a reviewer holds the slice to a literal count that no implementation can produce, and
+the loop burns rounds on an unsatisfiable clause.
