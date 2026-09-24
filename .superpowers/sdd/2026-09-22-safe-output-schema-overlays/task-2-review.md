@@ -764,3 +764,372 @@ Recorded because the epic's practice is to reward the behaviours that catch real
   the persisting form. Only the accompanying blindness finding is wrong.
 - **Correction C-24 followed without prompting**: 23 exact digests carried as hand-written
   literals, none imported from the implementation.
+
+---
+
+# Fix round 1 re-review — scoped to the five findings
+
+**Reviewer:** same independent reviewer as round 1. Narrow scope: verdict my three Important and
+two Minor findings, verify the extension, spot-check the re-run, flag new breakage **in the fix
+diff only**. The original task is not re-reviewed.
+
+- Fix range in scope: `caa304201027e5b477fcadd110c8da0c002c8e00..275a94a89c328ec5302206bfa5abd14d45394a2c`
+  — production fix `1fe251549` (`graph_definition_manifest.py` +11, `test_graph_definition_manifest.py` +103)
+  plus the report appendix and ledger. HEAD `ead1d58a53ab323c4d754393e2aabc11014fcb41` adds
+  corrections 31-33, docs only.
+- **Triple check clean at entry and exit.** No commits, no push, no PR, no merge, no subagents.
+- `test ! -e .venv` passed. No `pip`, `uv`, `uv run`. **No frontend command issued.**
+- Driver at `/tmp/t2rev2/mutate.py`, **outside** the repo. Per **C-27** every mutation asserts its
+  anchor count and hard-fails on anything but 1. Per **C-32** backups are taken **fresh at mutation
+  time from the current tree**, the driver **refuses to mutate** if a stale backup set is present or
+  the tree is already dirty, and every restore asserts `git diff --name-only HEAD` is empty — i.e.
+  it verifies the restore reproduces the committed tree, not merely that a file was written back.
+
+## VERDICT SUMMARY
+
+**All five findings ADDRESSED.** One new Minor finding in the fix diff (a gate over-claimed in the
+report, not a code defect). **GO for dispatching Task 3.**
+
+| # | Finding | Verdict |
+| --- | --- | --- |
+| 1 | F1 — mode-blindness claim | **ADDRESSED** |
+| 2 | F3 — the M7 row | **ADDRESSED** |
+| 3 | F2 — fail-closed key half | **ADDRESSED**, guard restored, no hash moved |
+| 4 | F6 — relaxed required fields | **ADDRESSED** (already tested; my brief was wrong, its correction stands) |
+| 5 | F4 scope declaration / F5 overstated comment | **ADDRESSED** |
+| — | c33 both-halves extension | **VERIFIED** — correct, and sharper than either of us managed in round 1 |
+
+---
+
+## ITEM 1 — F1, the mode-blindness claim: **ADDRESSED**
+
+Anchor `dumped = self.model_dump(mode="python")`, count asserted == 1.
+
+| Scope | Report | Reviewer measured |
+| --- | ---: | ---: |
+| named (`…_mode_is_load_bearing_for_the_finiteness_guard`) | 1 | **1 failed** |
+| focused (144) | 6 | **6 failed, 138 passed** |
+
+The six are exactly the six the report names, in the same order:
+
+```
+FAILED test_hash_normalizes_manifest_floats_and_database_decimals
+FAILED test_hash_rejects_non_finite_numeric_values[temperature-value2]
+FAILED test_hash_rejects_non_finite_numeric_values[top_p-value3]
+FAILED test_hashing_still_fails_closed_on_a_non_json_guidance_value
+FAILED test_canonical_payload_mode_is_load_bearing_for_the_finiteness_guard
+FAILED test_hashing_rejects_non_string_object_keys_inside_guidance
+6 failed, 138 passed, 5 warnings in 7.69s
+```
+
+**The divergence from my round-1 number of 4 is fully accounted for and is not a discrepancy.** My
+4 was measured against the pre-fix tree; the fix adds three tests, two of which RED under the
+swap (`…_mode_is_load_bearing…` and `…_rejects_non_string_object_keys…`). 4 + 2 = 6. The third new
+test (`…_defaults_two_fields…`) compares two empty-overlay hashes, which are mode-invariant, so it
+correctly does not RED. Both figures are right for the tree each was measured on.
+
+**Is the two-scope declaration honest, or a way of keeping the original number alive?** Honest. I
+checked specifically for that failure mode. The M2 row's `named` column reads **1**, not 0 — the
+row's selector was re-pointed at the new load-bearing test, and I measured that selector at 1. The
+zero appears only in the narrative, explicitly labelled as the *round-1* row's selector and
+explicitly withdrawn ("both **false and withdrawn**"). Correction 27 is titled "WITHDRAWN RULING",
+and `2cf82b34e` (`docs: withdraw the mode-blindness ruling — it was false`) removes it from the
+ledger rather than annotating it. No live figure in the table preserves the old claim.
+
+---
+
+## ITEM 2 — F3, the M7 row: **ADDRESSED**
+
+Anchor `        agent_key=agent_key,\n`, count asserted == 1.
+
+| Scope | Report | Reviewer measured |
+| --- | ---: | ---: |
+| named (`…_resolves_the_exact_role_and_version_bundle` ×12 + registry bridge) | 13 | **13 failed, 2 passed** |
+| focused (144) | 13 | **13 failed, 131 passed** |
+
+```
+=== the node the OLD row wrongly named ===
+tests/unit/test_graph_definition_manifest.py::test_stored_identity_resolution_fails_closed
+6 passed, 5 warnings in 0.26s
+```
+
+Matches my round-1 measurement of 13 exactly, and confirms the corrected row names the right
+nodes: the twelve non-architect role × version parametrisations plus the registry bridge test, with
+`test_stored_identity_resolution_fails_closed` staying **6/6 green** because `_resolve`
+(`agent_schema_registry.py:361-367`) keys the bundle lookup on the `agent_key` **argument**. The
+`named` and `focused` columns agreeing at 13 is itself correct — there is nothing else in the
+focused suite for this mutation to reach.
+
+The residual is correctly restated: not "guarded by one node" (wrong) but "no test distinguishes
+the role *direction*" (right). I agree with the decision **not** to add a test for it.
+`ContentIdentity` carries no role, so a test could only assert something the type system makes
+unconstructible — and I confirmed in round 1 that the registry's `bundle.identity != identity`
+check backstops it anyway. Concern 5 and forward item (d) are struck, correctly.
+
+---
+
+## ITEM 3 — F2, the fail-closed key half: **ADDRESSED. Guard restored, and no hash moved.**
+
+The guard is placed in `_normalize_canonical_value`
+(`src/services/graph_definition_manifest.py:317-329`) — the same hashing boundary the value half
+lives at, and inside the task's own authorized file. Shipped behaviour, probed directly:
+
+```
+  int key {1:'a'}   -> TypeError: canonical object keys must be strings, received 1
+  str key {'1':'a'} -> 3b0f99866da532e835babeb7e646943ead92cb42d103d4bedd773baeb7b82ef0
+```
+
+Mixed keys and nested non-string keys are covered too — the test asserts all three of
+`{1: "a"}`, `{1: "a", "b": "c"}` and `{"nested": {2: "b"}}`, and the guard recurses because each
+nested dict re-enters the same branch.
+
+I re-confirmed the write-path reachability claim: `_write_locked_content` computes
+`definition_content_hash(content)` at `graph_configuration_draft.py:637`, **before**
+`definition_content_values(content)` at `:638`; `revision_from_definition` and
+`draft_from_definition` both pass the mapper and the hash as sibling arguments so the raise
+propagates before the ORM row is constructed; `validate_definition_hash` catches
+`TypeError`/`ValueError` on read. Every write path reaches the guard.
+
+### My independent check that no existing content hash moved
+
+The coordinator was right that this is the claim to verify independently — a guard that silently
+moved a content hash in a content-addressed system would be worse than the defect it fixed. I did
+not take the report's single-hash spot-check. I built a **35-entry hash corpus** and diffed it
+between the shipped tree and a tree with the guard neutralised (`if not isinstance(key, str):` →
+`if False:`, anchor count asserted == 1):
+
+Corpus: all 7 packaged v1 definitions, all 7 `upgrade_content_to_v2` results, all 7
+`PromptAssembler().upgrade_definition_to_v2` results, all 7 `Decimal`-shaped (database-form)
+variants, and 7 diverse string-keyed overlay payloads — empty, defaults-only, the `{"1": "a"}`
+sibling, deep nesting, explicit nulls, retained extra properties, and mixed numeric leaves.
+
+```
+=== DIFF: shipped vs guard-neutralised (empty = no hash moved) ===
+[NO DIFFERENCE — the guard moved no existing content hash]
+```
+
+Structurally this is what must happen — the guard only raises, and returns the identical dict
+comprehension otherwise — but it is now measured rather than reasoned. Additionally:
+
+- All seven packaged v1 content hashes still equal their pre-fix literals at HEAD (checked
+  programmatically against the literals in the test file, which were authored pre-fix from the
+  recomputed oracle): **all seven match**.
+- **Residual risk I probed on my own initiative**, not raised by the coordinator: the guard would
+  be a live regression if any legitimate payload carried a non-string mapping key. The only
+  candidate is the v2 assembly rules' `UUID` material. Probed: `UUID` appears as a *value*
+  (handled by the existing `UUID` branch); every key in a `custom_blocks` dump is `str`, and a
+  v2-with-custom-blocks record hashes cleanly (`ac3e6832…`). No regression.
+- M17 re-measured: **named 1, focused 1** — matches the table.
+
+---
+
+## ITEM 4 — F6, the relaxed required fields: **ADDRESSED**
+
+`test_converged_overlay_defaults_two_fields_the_removed_carrier_required` exists in the committed
+tree, passes, and pins the behaviour on three axes: that `schema_overlay: {}` validates to an empty
+overlay, that the defaults equal the packaged values so no v1 hash can move, and that it is a
+**defaults-only** relaxation — `{"unexpected_key": True}` still raises `ValidationError`. That
+third assertion is the one that makes the test a guard rather than a description.
+
+The implementer's correction to the re-dispatch brief is right and I confirm it: the test landed in
+`1fe251549`, before the session died, so only the prose disclosure was outstanding. The coordinator
+reading "no fix report" as "no test" was a reasonable inference from the evidence available, and
+the implementer checked rather than accepted it — which is the behaviour the epic wants.
+
+Teeth verified as part of the spot-checks below (M18: named 1, focused 46).
+
+---
+
+## ITEM 5 — F4 and F5: **ADDRESSED**
+
+**F4.** The table now carries two columns, `named` and `focused`, with the scope defined in prose
+above it: "named" is the row's own selectors, "focused" is the whole 144-test focused suite, and
+"Neither number is the full-suite radius." All 19 rows populate both. This became **correction 31**,
+binding epic-wide, and its second part is the right generalisation — a zero at a narrow scope
+licenses no statement about any wider scope. C-31 also names the controller's share of the round-1
+failure (ratifying the claim after verifying a different proposition), which is the part most
+likely to recur.
+
+**F5.** Corrected in `1fe251549`. The comment now reads "the exact value the one landed mapper
+hands to the JSON column … it is not a capture of the bytes SQLAlchemy itself emits." Accurate.
+
+---
+
+## The c33 both-halves extension: **VERIFIED**
+
+This is the sharpest thing in the round and it holds exactly. Probed in both trees, same script:
+
+```
+########## MUTATED TREE (mode='json') ##########
+-- HALF 1: non-finite Decimal --
+  temperature=Decimal('NaN')      -> SILENTLY HASHED 140de6a94eff1e1399a5f8ba2fc09a4d097c94df1d158e0e459bd8ac0ce446f6
+  temperature=Decimal('Infinity') -> SILENTLY HASHED 3c8b2e6d9b9c380a2521a4a46b6cdc6337941bc7e2bc144c512dcea3781b5d15
+-- HALF 1b: Decimal('0.700000') hashes equal to float 0.7: False
+-- HALF 2: non-string object key --
+  int key {1:'a'}  -> GUARD DID NOT FIRE, hash=3b0f99866da532e835babeb7e646943ead92cb42d103d4bedd773baeb7b82ef0
+  str key {'1':'a'} -> hash=3b0f99866da532e835babeb7e646943ead92cb42d103d4bedd773baeb7b82ef0
+  COLLISION: True
+
+########## SHIPPED TREE (mode='python') ##########
+-- HALF 1: ValueError: canonical numeric values must be finite   (both Decimals)
+-- HALF 1b: Decimal('0.700000') hashes equal to float 0.7: True
+-- HALF 2: TypeError: canonical object keys must be strings, received 1
+```
+
+`140de6a9…` reproduces byte-for-byte. The extension is correct: `mode='json'` coerces an `int` key
+to `"1"` **before** `_normalize_canonical_value` can see it, so the new c29 guard cannot fire and
+the collision returns. The dump mode therefore protects **three** things — Decimal normalisation,
+the finiteness fail-closed guard, and now the non-string-key fail-closed guard — and it is a
+single point of failure for all of them. That is a sharper and more useful statement than either
+of us made in round 1, and it inverts the original claim completely: the mode is not free to
+change, it is the most load-bearing single token in the hashing path.
+
+**Note for Task 3 and later, not a defect:** the c29 guard's effectiveness is now *conditional on*
+the dump mode, so `test_canonical_payload_mode_is_load_bearing_for_the_finiteness_guard` is
+load-bearing for the key guard too despite its name mentioning only finiteness. The pairing is
+guarded from both directions — the mode swap REDs the key test as well — so nothing is exposed;
+the name is simply narrower than the protection.
+
+---
+
+## Spot-checks of the re-run focused numbers
+
+A stale backup biases every measurement in the same direction, so a consistent-looking table is
+exactly what it produces. The discriminating test is whether my independent numbers match the
+table or come in **one lower** — one lower would mean the discarded, inflated first run was still
+in the table. Three rows, each anchor count asserted == 1:
+
+| Row | Table `named` | Reviewer | Table `focused` | Reviewer | |
+| --- | ---: | ---: | ---: | ---: | --- |
+| **M18** (remove `field_overrides`' default) | 1 | **1** | 46 | **46** | ✅ |
+| **M2b** (overlay serializer emits `_probe`) | 1 | **1** | 18 | **18** | ✅ |
+| **M8** (shadowing local `SchemaOverlay`) | 2 | — | 20 | **20** | ✅ |
+
+```
+M18  named: 1 failed          focused: 46 failed, 98 passed
+M2b  named: 1 failed          focused: 18 failed, 126 passed
+M8                            focused: 20 failed, 124 passed
+```
+
+**None is one lower than the table.** The re-baseline was genuine, the inflated column really was
+discarded, and correction 32's remediation is verified rather than asserted. M18's 46 — the
+largest and most surprising figure in the table — reproduces exactly, which is the strongest
+single confirmation available here, because much of the focused suite constructs overlays relying
+on that default and any baseline error would show up loudly at that magnitude.
+
+Both C-27 firings are, in my assessment, reported honestly and are the rule working as intended:
+in both cases the anchor assertion converted a silent wrong measurement into a hard failure, and
+in the second case it surfaced a bias that nothing else in the run would have revealed.
+
+---
+
+## Gates — all independently re-run
+
+| Gate | Reported | Reviewer measured | |
+| --- | --- | --- | --- |
+| Focused | 144 / 0 / 0 | **144 passed, 0 failed, 0 skipped** | ✅ |
+| Task 7 unit matrix (17 files) | 847 / 0 / 0 | **847 passed, 0 failed, 0 skipped, 131 warnings** | ✅ |
+| Full `tests/unit` | 14 / 5541 / 110, 136 warnings | **14 failed, 5541 passed, 110 skipped, 136 warnings** | ✅ |
+| Six-file split | 1 / 2 / 2 / 3 / 1 / 5 | **1 / 2 / 2 / 3 / 1 / 5** | ✅ |
+| Causes by traceback | 9 @ `:83`, 3 @ `:79`, 2 assertions | **9 / 3 / 2, re-verified** | ✅ |
+| PostgreSQL, 6 files, separate invocations | 34, zero skips | **15+2+1+2+7+7 = 34 passed, 0 failed, 0 skipped** | ✅ |
+| PostgreSQL acceptance suite | 1 passed | **1 passed** | ✅ |
+| `ruff check` on changed files | clean | **All checks passed!** | ✅ |
+| `ruff format --check` on changed files | clean | **"2 files would be reformatted"** | ❌ see F7 |
+
+The 14 failures are node-for-node identical to round 1 — same six files, same nodes. **Zero new
+failure causes**, and the new guard's message
+(`canonical object keys must be strings`) appears **0 times** anywhere in the full-suite output, so
+the guard fires on nothing the suite exercises legitimately. PostgreSQL was correctly re-run in
+full given the change sits on `_normalize_canonical_value`, which every persistence write crosses.
+
+All mutations in this review were applied and restored **before** the full-suite run started, and
+every restore asserted an empty `git diff --name-only HEAD`, so no measurement here contaminated
+another.
+
+---
+
+## New breakage in the fix diff
+
+**One new Minor finding. No new code breakage.**
+
+**F7 (Minor) — the gate table over-claims `ruff format --check`.** The report's gate row reads
+"`ruff check` / `ruff format --check` on changed files | clean". `ruff check` is clean, but
+`ruff format --check` is not:
+
+```
+Would reformat: src/services/graph_definition_manifest.py
+Would reformat: tests/unit/test_graph_definition_manifest.py
+2 files would be reformatted
+```
+
+and one of the offending sites is the fix's **own** new code — the `raise TypeError(...)` is
+hand-wrapped over three lines where ruff's formatter would put it on one 88-character line.
+
+Why this is Minor rather than breakage, all verified:
+
+- `ruff format` is **not a gate in this repo**: 155 of 204 files under `src` would reformat. The
+  configured gate is `[tool.ruff.lint] select = ["E", "F", "I", "N", "W"]` at `line-length = 100`
+  (`pyproject.toml:80-86`), i.e. `ruff check` — which passes.
+- The fix's hand-wrapping **matches the surrounding file's own convention**: the adjacent
+  `raise ValueError(...)` calls at `:120` and `:273`, both untouched by this fix, are wrapped
+  identically and appear in the same reformat diff.
+- Every line the fix adds is ≤ 87 characters, within the 100 limit.
+
+So the code is locally consistent and passes the real gate; the defect is that a gate was reported
+clean when running it does not produce a clean result. I flag it only because this epic's whole
+discipline rests on reported gates being true, and F1 was the same species of error — a claim
+stated more broadly than what was measured. **Fix: drop `ruff format --check` from the gate row,
+or run it and report the actual result.**
+
+Nothing else. Specifically checked and clear: no hash moved (35-entry corpus diff), no new failure
+cause, no legitimate payload reaches the new guard, the guard recurses correctly into nested
+mappings, and UUID-bearing v2 assembly rules are unaffected.
+
+## Scope discipline — held across the whole task
+
+`git diff --name-only caa304201..ead1d58a5 -- src tests` is exactly
+`src/services/graph_definition_manifest.py` and `tests/unit/test_graph_definition_manifest.py`.
+Across the **whole task** (`f94757d3..ead1d58a5`), all UNCHANGED:
+`agent_runtime.py`, `agent_schema_registry.py`, `agent_schema_types.py`,
+`api/schemas/agent_definitions.py`, `graph_configuration_draft.py`,
+`graph_configuration_content.py`, `frontend/src/api/agentDefinitions.ts`.
+`SchemaContractIdentity` still defined exactly once in each of two modules. The `isinstance` gate
+at `agent_schema_registry.py:556` is still byte-unchanged — notable because the c29 fix could
+plausibly have been argued into that file and was not.
+
+## Recorded, not required
+
+- **The `3b0f9986…` second home.** `test_hashing_rejects_non_string_object_keys_inside_guidance`
+  asserts that literal for the string-keyed sibling. Deliberate — it is what proves the guard moved
+  no existing hash, and I used the same value in my own corpus check. Accepted as disclosed: a
+  future legitimate change to guidance serialisation must update both homes. Recorded, no change
+  required.
+- **Frontend baseline** still outstanding under correction 24; four commands owed. No #264 task may
+  be signed off as matrix-complete while it is open, and this round does not claim otherwise.
+- **The three deferred forward items** are unchanged, and the report accepts my narrowing of the
+  `extra="allow"` window (unreachable from any client path today) in the safe direction.
+
+---
+
+## GO / NO-GO for Task 3
+
+# GO
+
+All five findings are addressed. The one restored guard is the right fix in the right place, and I
+verified independently — with a 35-entry corpus diff rather than a spot-check — that it moved no
+existing content hash. The two report corrections are honest: the withdrawn ruling is withdrawn
+from the ledger rather than annotated, and the two-scope table does not preserve the old number as
+a live figure. Every gate reproduces, including the full-suite split node-for-node and the
+PostgreSQL matrix at 34 with zero skips. The re-run after the stale-backup bias is confirmed
+genuine by three independent spot-checks, none of which came in one lower.
+
+The single new finding (F7) is a gate over-claimed in prose, with no code consequence, and does not
+gate Task 3.
+
+Task 3 inherits a clean handover: `SchemaContractIdentity` still duplicated at
+`agent_runtime.py:126` and `agent_schema_types.py:367`, and the silently-failing `isinstance` gate
+at `agent_schema_registry.py:556` still byte-unchanged and still unfixed — both left deliberately,
+which is what its scope needs. Task 3 should also carry correction 33 forward: the canonical dump
+mode is a single point of failure for three guarantees, so `canonical_payload`'s `mode="python"` is
+not a free token to change.
