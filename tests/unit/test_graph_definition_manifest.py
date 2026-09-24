@@ -6,9 +6,11 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 from uuid import UUID
 
@@ -31,9 +33,12 @@ from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_definition_manifest import (
     AssemblyRulesV1,
     AssemblyRulesV2,
+    CanonicalFieldGuidance,
+    ContentIdentity,
     CustomTextBlock,
     DefinitionContent,
     GraphV1Manifest,
+    SchemaOverlay,
     assembly_rules_for,
     definition_content_hash,
     load_graph_v1_manifest,
@@ -304,15 +309,26 @@ def test_cached_manifest_overlay_cannot_mutate_shared_or_canonical_state():
 
 
 def test_nested_overlay_containers_are_immutable_but_dump_as_json_containers():
+    """Nested JSON inside a typed guidance entry stays frozen but dumps as JSON.
+
+    Under the typed overlay grammar arbitrary nested JSON reaches the carrier as a
+    guidance entry's retained extra properties, so the frozen containers must be
+    reached through ``forbidden_properties()``.  Subscripting the guidance model
+    itself would raise ``TypeError`` merely because a model is not subscriptable,
+    which would make this guard pass without measuring immutability at all.
+    """
     original = load_graph_v1_manifest().definitions[0]
     raw = original.model_dump(mode="python")
     raw["schema_overlay"]["field_overrides"] = {
-        "outer": {"values": [{"enabled": True}]}
+        "message": {"outer": {"values": [{"enabled": True}]}}
     }
     candidate = DefinitionContent.model_validate(raw)
     before_hash = definition_content_hash(candidate)
-    overrides = cast(Any, candidate.schema_overlay.field_overrides)
+    guidance = candidate.schema_overlay.field_overrides["message"]
+    overrides = cast(Any, guidance.forbidden_properties())
 
+    assert isinstance(overrides["outer"], MappingProxyType)
+    assert isinstance(overrides["outer"]["values"], tuple)
     with pytest.raises(TypeError):
         overrides["outer"]["added"] = False
     with pytest.raises(TypeError):
@@ -712,3 +728,384 @@ def test_generator_runs_via_documented_direct_script_invocation(tmp_path: Path):
     )
     assert completed.returncode == 0, completed.stderr
     assert output_path.read_text() == render_manifest_module(build_manifest_json())
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (#264): typed overlay grammar integrated into the storage carrier.
+#
+# Every exact value below is written as a literal rather than imported from the
+# implementation (epic correction C-24): a test that imports the constant it
+# asserts agrees with the code by construction and can never disagree with the
+# requirement.
+# ---------------------------------------------------------------------------
+
+# The seven packaged v1 content hashes, recomputed from landed source and used
+# here as the byte-identity oracle for the grammar change.
+PACKAGED_V1_CONTENT_HASHES = {
+    "architect": "e77e69b18cb9d843a1754dab65a79941ede8cfa7c8266292580ff7566d1dcb33",
+    "data_analyst": "1ffb1fb3f31a20b9424007eefdf918620f1058386a2ba81bfd22347510ce6803",
+    "builder": "1549a4231b3a4a6221842f3eca6699097199b28d8283b8995af7c90b406fe5c4",
+    "build_reviewer": "1a895f4bee426041088635f7fa182200827db14ab35a229def6f8932d1516b18",
+    "fixer": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+    "fix_reviewer": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+    "deck_reviewer": "8c876db55cddbaa2f9015321117e36adb5b63fb7c47dbb067a432d04c30cf54e",
+}
+
+V1_SCHEMA_CONTRACT_DIGESTS = {
+    "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
+    "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
+    "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
+    "fixer": "7a4e984c602d16ea73c2f5f3f26ac385c440527001fa14b1cfb5c1245de12297",
+    "fix_reviewer": "31ff0a6d02cefb7db4cd2c499b4e7905fdadcda789c658e1c7605cdde01020df",
+    "deck_reviewer": "56c7ce141e07a70fc2c57f614e915ebb9e3914d24b3c11057401c4cc1c637467",
+}
+
+V2_SCHEMA_CONTRACT_DIGESTS = {
+    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
+    "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
+    "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
+    "fixer": "a77a9896705534109179e75a542eec212dbb25fd78582dff256d6b6c976a6143",
+    "fix_reviewer": "bbe6bf025d5c2e5dcbe1c23db029caff425890602f7e3819c6472c46e7fdfd99",
+    "deck_reviewer": "c466043b24678ceef8c80d3707f7e80672275415a8b1c0e4385f94bfea7104d3",
+}
+
+
+def test_manifest_overlay_is_the_one_typed_grammar_and_not_a_second_definition() -> None:
+    """Clause: import/re-export the typed grammar; leave no competing definition."""
+    import src.services.agent_schema_types as typed_module
+    import src.services.graph_definition_manifest as manifest_module
+
+    assert manifest_module.SchemaOverlay is typed_module.SchemaOverlay
+    # The class must be *homed* in the public types module, not redefined here.
+    assert manifest_module.SchemaOverlay.__module__ == "src.services.agent_schema_types"
+    assert DefinitionContent.model_fields["schema_overlay"].annotation is (
+        typed_module.SchemaOverlay
+    )
+    # The overlay field values are the typed guidance model, not raw JSON objects.
+    assert (
+        manifest_module.SchemaOverlay.model_fields["field_overrides"].annotation
+        == Mapping[str, typed_module.CanonicalFieldGuidance]
+    )
+    # The freeze helper converged too: no third copy of the #260 pattern here.
+    assert not hasattr(manifest_module, "_freeze_json_containers")
+    assert not hasattr(manifest_module, "_thaw_json_containers")
+
+
+def test_packaged_v1_overlay_payload_is_byte_identical_under_the_chosen_mode() -> None:
+    """Clause: byte-identical v1 payloads.
+
+    The decision is recorded in the assertions rather than left implicit:
+    ``mode='json'`` is the storage/wire serialization (it is what
+    ``definition_content_values`` writes to the JSON column), and it yields
+    ``[]``.  ``mode='python'`` yields ``()`` and is asserted separately so a
+    future silent swap of one for the other cannot pass.
+    """
+    from src.services.graph_configuration_content import definition_content_values
+
+    for definition in load_graph_v1_manifest().definitions:
+        assert definition.model_dump(mode="json")["schema_overlay"] == {
+            "field_overrides": {},
+            "additional_optional_fields": [],
+        }
+        assert definition.model_dump(mode="python")["schema_overlay"] == {
+            "field_overrides": {},
+            "additional_optional_fields": (),
+        }
+        # The exact persisted bytes for the JSON column.
+        persisted = definition_content_values(definition)["schema_overlay"]
+        assert json.dumps(persisted, sort_keys=True, separators=(",", ":")) == (
+            '{"additional_optional_fields":[],"field_overrides":{}}'
+        )
+
+
+def test_packaged_v1_content_hashes_are_the_seven_frozen_literals() -> None:
+    """Clause: byte-identical v1 hashes, against the recomputed landed oracle."""
+    actual = {
+        definition.agent_key: definition_content_hash(definition)
+        for definition in load_graph_v1_manifest().definitions
+    }
+    assert actual == PACKAGED_V1_CONTENT_HASHES
+
+
+def test_typed_guidance_round_trips_through_the_storage_carrier() -> None:
+    """Clause: typed guidance round-trip, including absent-versus-null retention."""
+    original = _definition_by_key(load_graph_v1_manifest(), "architect")
+    raw = original.model_dump(mode="python")
+    raw["schema_overlay"] = {
+        "field_overrides": {
+            "message": {
+                "description": "Explain the selected intent.",
+                "examples": [{"nested": {"values": [1, 2]}}, "flat"],
+            },
+            "intent": {"description": None},
+            "deck_spec": {"examples": ["only examples supplied"]},
+        },
+        "additional_optional_fields": ("diagnostic_notes",),
+    }
+    content = DefinitionContent.model_validate(raw)
+
+    wire = content.model_dump(mode="json")
+    assert wire["schema_overlay"] == {
+        "field_overrides": {
+            "message": {
+                "description": "Explain the selected intent.",
+                "examples": [{"nested": {"values": [1, 2]}}, "flat"],
+            },
+            "intent": {"description": None},
+            "deck_spec": {"examples": ["only examples supplied"]},
+        },
+        "additional_optional_fields": ["diagnostic_notes"],
+    }
+
+    restored = DefinitionContent.model_validate(wire)
+    assert restored.model_dump(mode="json") == wire
+    assert definition_content_hash(restored) == definition_content_hash(content)
+
+    for carrier in (content, restored):
+        overrides = carrier.schema_overlay.field_overrides
+        message = overrides["message"]
+        assert type(message).__name__ == "CanonicalFieldGuidance"
+        assert message.mutation_is_supplied("description") is True
+        assert message.mutation_is_supplied("examples") is True
+        # Explicit null is retained as supplied-and-null.
+        assert overrides["intent"].mutation_is_supplied("description") is True
+        assert overrides["intent"].description is None
+        # An omitted mutation stays absent rather than becoming null.
+        assert overrides["intent"].mutation_is_supplied("examples") is False
+        assert overrides["deck_spec"].mutation_is_supplied("description") is False
+        assert overrides["deck_spec"].mutation_is_supplied("examples") is True
+
+
+def test_typed_guidance_nested_containers_are_frozen_inside_the_carrier() -> None:
+    """Clause: the #260 recursive freeze reaches through the typed grammar."""
+    original = _definition_by_key(load_graph_v1_manifest(), "architect")
+    raw = original.model_dump(mode="python")
+    raw["schema_overlay"] = {
+        "field_overrides": {
+            "message": {"examples": [{"outer": {"values": [{"enabled": True}]}}]}
+        },
+        "additional_optional_fields": (),
+    }
+    content = DefinitionContent.model_validate(raw)
+    before_hash = definition_content_hash(content)
+
+    overrides = cast(Any, content.schema_overlay.field_overrides)
+    with pytest.raises(TypeError):
+        overrides["message"] = None
+    examples = cast(Any, overrides["message"].examples)
+    assert isinstance(examples, tuple)
+    with pytest.raises(TypeError):
+        examples[0]["added"] = False
+    with pytest.raises(TypeError):
+        examples[0]["outer"]["added"] = False
+    with pytest.raises(TypeError):
+        examples[0]["outer"]["values"][0]["enabled"] = False
+    with pytest.raises(TypeError):
+        examples[0]["outer"]["values"][0] = {"enabled": False}
+
+    # Frozen in memory, plain JSON containers on the wire, hash unchanged.
+    assert content.model_dump(mode="json")["schema_overlay"]["field_overrides"] == {
+        "message": {"examples": [{"outer": {"values": [{"enabled": True}]}}]}
+    }
+    assert definition_content_hash(content) == before_hash
+
+
+@pytest.mark.parametrize(
+    "agent_key",
+    [
+        "architect",
+        "data_analyst",
+        "builder",
+        "build_reviewer",
+        "fixer",
+        "fix_reviewer",
+        "deck_reviewer",
+    ],
+)
+def test_schema_contract_upgrade_changes_the_hash_and_only_the_schema_identity(
+    agent_key: str,
+) -> None:
+    """Clauses: v2 hash change, all v1/v2 identities, no client-selected identity."""
+    from src.services.agent_schema_registry import upgrade_content_to_v2
+
+    original = _definition_by_key(load_graph_v1_manifest(), agent_key)
+    assert original.schema_contract.model_dump() == {
+        "version": 1,
+        "digest": V1_SCHEMA_CONTRACT_DIGESTS[agent_key],
+    }
+
+    upgraded = upgrade_content_to_v2(original)
+
+    # The storage/wire carrier is retained: still ContentIdentity(version, digest).
+    assert type(upgraded.schema_contract) is type(original.schema_contract)
+    assert upgraded.schema_contract.model_dump() == {
+        "version": 2,
+        "digest": V2_SCHEMA_CONTRACT_DIGESTS[agent_key],
+    }
+    assert definition_content_hash(upgraded) != definition_content_hash(original)
+    assert definition_content_hash(original) == PACKAGED_V1_CONTENT_HASHES[agent_key]
+
+    # Schema and assembly versions are not coupled: the #265 assembly identity,
+    # its rules and the prompt are untouched by a schema-contract upgrade.
+    assert upgraded.protected_assembly.model_dump() == {
+        "version": 1,
+        "digest": "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852",
+    }
+    assert upgraded.assembly_rules == original.assembly_rules
+    assert upgraded.prompt_text == original.prompt_text
+    assert upgraded.definition_version == original.definition_version
+    assert upgraded.model == original.model
+
+
+def test_assembly_upgrade_leaves_the_schema_contract_untouched() -> None:
+    """Clause: independent #265 assembly identity validation, the other direction."""
+    original = _definition_by_key(load_graph_v1_manifest(), "architect")
+    upgraded = PromptAssembler().upgrade_definition_to_v2(definition=original)
+
+    assert upgraded.protected_assembly.model_dump() == {
+        "version": 2,
+        "digest": "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a",
+    }
+    assert upgraded.schema_contract.model_dump() == {
+        "version": 1,
+        "digest": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    }
+    assert upgraded.schema_overlay == original.schema_overlay
+
+
+@pytest.mark.parametrize(
+    "agent_key",
+    [
+        "architect",
+        "data_analyst",
+        "builder",
+        "build_reviewer",
+        "fixer",
+        "fix_reviewer",
+        "deck_reviewer",
+    ],
+)
+@pytest.mark.parametrize("version", [1, 2])
+def test_stored_identity_resolves_the_exact_role_and_version_bundle(
+    agent_key: str, version: int
+) -> None:
+    """Clause: all v1/v2 identities resolve from the retained storage carrier."""
+    from src.services.agent_schema_registry import AgentSchemaRegistry
+    from src.services.graph_definition_manifest import schema_contract_identity
+
+    expected = (V1_SCHEMA_CONTRACT_DIGESTS if version == 1 else V2_SCHEMA_CONTRACT_DIGESTS)
+    stored = ContentIdentity(version=version, digest=expected[agent_key])
+    identity = schema_contract_identity(agent_key, stored)
+
+    assert (identity.agent_key, identity.version, identity.digest) == (
+        agent_key,
+        version,
+        expected[agent_key],
+    )
+    registry = AgentSchemaRegistry()
+    assert registry.validate_overlay(agent_key, identity, SchemaOverlay()) == ()
+
+
+@pytest.mark.parametrize(
+    ("agent_key", "version", "digest", "reason"),
+    [
+        (
+            "not_a_role",
+            1,
+            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "unknown role",
+        ),
+        (
+            "architect",
+            3,
+            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "unknown version",
+        ),
+        (
+            "architect",
+            1,
+            "0" * 64,
+            "mismatched digest",
+        ),
+        (
+            "builder",
+            1,
+            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "another role's digest",
+        ),
+        (
+            "architect",
+            2,
+            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "v1 digest under v2",
+        ),
+        (
+            "architect",
+            1,
+            "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+            "v2 digest under v1",
+        ),
+    ],
+)
+def test_stored_identity_resolution_fails_closed(
+    agent_key: str, version: int, digest: str, reason: str
+) -> None:
+    """Clause: fail-closed missing/mismatched role, version and digest."""
+    from src.services.agent_schema_registry import AgentSchemaRegistry
+    from src.services.graph_definition_manifest import schema_contract_identity
+
+    identity = schema_contract_identity(
+        agent_key, ContentIdentity(version=version, digest=digest)
+    )
+    issues = AgentSchemaRegistry().validate_overlay(agent_key, identity, SchemaOverlay())
+    assert [issue.code for issue in issues] == ["overlay_schema_contract_unavailable"], reason
+    assert [issue.path for issue in issues] == [()], reason
+
+
+def test_schema_contract_upgrade_does_not_regenerate_graph_v1() -> None:
+    """Clause: do not regenerate Graph V1.
+
+    The packaged snapshot and its cached manifest must be unchanged by an
+    upgrade, which returns a new record rather than mutating the shared one.
+    """
+    from src.services.agent_schema_registry import upgrade_content_to_v2
+
+    before_snapshot = GRAPH_VERSION_1_MANIFEST_JSON
+    manifest = load_graph_v1_manifest()
+    before = {item.agent_key: definition_content_hash(item) for item in manifest.definitions}
+
+    for definition in manifest.definitions:
+        upgraded = upgrade_content_to_v2(definition)
+        assert upgraded is not definition
+
+    again = load_graph_v1_manifest()
+    assert again is manifest
+    assert {
+        item.agent_key: definition_content_hash(item) for item in again.definitions
+    } == before
+    assert before == PACKAGED_V1_CONTENT_HASHES
+    assert GRAPH_VERSION_1_MANIFEST_JSON is before_snapshot
+
+
+def test_hashing_still_fails_closed_on_a_non_json_guidance_value() -> None:
+    """The converged grammar retains invalid leaves; hashing must still refuse them.
+
+    The removed local freeze helper rejected non-JSON overlay values at validation
+    time.  The typed grammar deliberately retains them so the registry can return
+    its own ordered domain diagnostic, so the fail-closed guarantee has to be
+    asserted at the hashing boundary instead of silently disappearing with it.
+    """
+    original = _definition_by_key(load_graph_v1_manifest(), "architect")
+    guidance = CanonicalFieldGuidance.model_validate({"examples": [object()]})
+    candidate = original.model_copy(
+        update={
+            "schema_overlay": SchemaOverlay(
+                field_overrides={"message": guidance},
+                additional_optional_fields=(),
+            )
+        }
+    )
+    with pytest.raises(TypeError):
+        definition_content_hash(candidate)

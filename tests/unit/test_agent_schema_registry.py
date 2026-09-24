@@ -855,3 +855,149 @@ def test_upgrade_content_to_v2_preserves_content_and_uses_server_owned_identity(
     assert upgraded.prompt_text == original.prompt_text
     assert upgraded.schema_overlay == original.schema_overlay
     assert upgraded.schema_contract == V2_SCHEMA_IDENTITIES["architect"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (#264): the registry's typed grammar is the one the storage carrier uses.
+# Exact values are literals rather than imports (epic correction C-24).
+# ---------------------------------------------------------------------------
+
+
+def test_registry_overlay_grammar_is_the_storage_carriers_overlay_grammar() -> None:
+    """There is one overlay type; the manifest re-exports it rather than redefining it."""
+    import src.services.graph_definition_manifest as manifest_module
+
+    assert manifest_module.SchemaOverlay is SchemaOverlay
+    assert manifest_module.CanonicalFieldGuidance is CanonicalFieldGuidance
+    assert (
+        manifest_module.DefinitionContent.model_fields["schema_overlay"].annotation is SchemaOverlay
+    )
+
+
+def test_registry_resolves_identities_bridged_from_the_stored_content_identity() -> None:
+    """The stored (version, digest) carrier resolves only for its own role."""
+    from src.services.graph_definition_manifest import (
+        ContentIdentity,
+        load_graph_v1_manifest,
+        schema_contract_identity,
+    )
+
+    registry = AgentSchemaRegistry()
+    for definition in load_graph_v1_manifest().definitions:
+        identity = schema_contract_identity(definition.agent_key, definition.schema_contract)
+        assert (
+            registry.validate_overlay(definition.agent_key, identity, definition.schema_overlay)
+            == ()
+        )
+
+        # The same stored pair under a different role must not resolve.
+        other = "builder" if definition.agent_key != "builder" else "architect"
+        mismatched = schema_contract_identity(other, definition.schema_contract)
+        assert [
+            issue.code for issue in registry.validate_overlay(other, mismatched, SchemaOverlay())
+        ] == ["overlay_schema_contract_unavailable"]
+
+        # A stored version the registry does not publish must not resolve either.
+        unpublished = schema_contract_identity(
+            definition.agent_key,
+            ContentIdentity(version=3, digest=definition.schema_contract.digest),
+        )
+        assert [
+            issue.code
+            for issue in registry.validate_overlay(
+                definition.agent_key, unpublished, SchemaOverlay()
+            )
+        ] == ["overlay_schema_contract_unavailable"]
+
+
+def test_upgrade_content_to_v2_keeps_the_manifest_identity_carrier_type() -> None:
+    """The v2 upgrade writes server-owned values into the retained wire carrier."""
+    from src.services.graph_definition_manifest import (
+        ContentIdentity,
+        definition_content_hash,
+        load_graph_v1_manifest,
+    )
+
+    definition = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == "deck_reviewer"
+    )
+    upgraded = upgrade_content_to_v2(definition)
+
+    assert isinstance(upgraded.schema_contract, ContentIdentity)
+    assert upgraded.schema_contract.model_dump() == {
+        "version": 2,
+        "digest": "c466043b24678ceef8c80d3707f7e80672275415a8b1c0e4385f94bfea7104d3",
+    }
+    assert isinstance(upgraded.schema_overlay, SchemaOverlay)
+    assert definition_content_hash(definition) == (
+        "8c876db55cddbaa2f9015321117e36adb5b63fb7c47dbb067a432d04c30cf54e"
+    )
+    assert definition_content_hash(upgraded) != definition_content_hash(definition)
+    # The #265 assembly identity is not coupled to the schema contract version.
+    assert upgraded.protected_assembly.model_dump() == {
+        "version": 1,
+        "digest": "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852",
+    }
+
+
+def test_upgraded_content_round_trips_through_the_persistence_mapper() -> None:
+    """A v2 schema contract survives the one landed row mapper unchanged.
+
+    The mapper writes ``schema_overlay`` with ``mode='json'``, so the fresh value
+    per call matters: each assertion re-reads from a newly built row rather than
+    reusing one already-consumed mapping.
+    """
+    from src.services.graph_configuration_content import (
+        definition_content_from_row,
+        definition_content_values,
+    )
+    from src.services.graph_definition_manifest import (
+        definition_content_hash,
+        load_graph_v1_manifest,
+    )
+
+    definition = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == "architect"
+    )
+    upgraded = upgrade_content_to_v2(definition).model_copy(
+        update={
+            "schema_overlay": SchemaOverlay(
+                field_overrides={
+                    "message": CanonicalFieldGuidance.model_validate(
+                        {"description": "Say why.", "examples": [{"a": [1, 2]}]}
+                    )
+                },
+                additional_optional_fields=("diagnostic_notes",),
+            )
+        }
+    )
+
+    class _Row:
+        pass
+
+    def fresh_row() -> _Row:
+        row = _Row()
+        for name, value in definition_content_values(upgraded).items():
+            setattr(row, name, value)
+        return row
+
+    first = definition_content_from_row(fresh_row())
+    second = definition_content_from_row(fresh_row())
+
+    assert first is not second
+    assert definition_content_values(upgraded)["schema_overlay"] == {
+        "field_overrides": {"message": {"description": "Say why.", "examples": [{"a": [1, 2]}]}},
+        "additional_optional_fields": ["diagnostic_notes"],
+    }
+    for restored in (first, second):
+        assert isinstance(restored.schema_overlay, SchemaOverlay)
+        guidance = restored.schema_overlay.field_overrides["message"]
+        assert isinstance(guidance, CanonicalFieldGuidance)
+        assert guidance.description == "Say why."
+        assert guidance.mutation_is_supplied("examples") is True
+        assert restored.schema_overlay.additional_optional_fields == ("diagnostic_notes",)
+        assert restored.schema_contract.model_dump() == {
+            "version": 2,
+            "digest": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+        }
+        assert definition_content_hash(restored) == definition_content_hash(upgraded)
