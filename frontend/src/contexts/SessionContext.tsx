@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
-import { api, ApiError } from '../services/api';
+import { api, ApiError, type CollaborationHistory } from '../services/api';
 import type { SlideDeck } from '../types/slide';
 
 function generateLocalSessionId(): string {
@@ -28,6 +28,21 @@ interface SessionContextType {
   graphVersion: number | null;
   activeGraphVersion: number | null;
   isGraphVersionOlder: boolean;
+  /**
+   * Privacy-safe collaboration evidence for the CURRENT session's shared deck,
+   * or null when none has been loaded for it. Loaded only by a successful
+   * switchSession, cleared by createNewSession — never inferred from the root
+   * session's own pinned version, and never carried across a session change.
+   */
+  collaborationHistory: CollaborationHistory | null;
+  /**
+   * True when the collaboration-history load for the current session failed.
+   * Deliberately a single boolean with no status or detail: the endpoint's 404
+   * is byte-identical for an unauthorized real id and a fabricated one, so the
+   * client keeps exactly one generic failure state and cannot become an
+   * existence oracle.
+   */
+  collaborationHistoryFailed: boolean;
   isSessionPersisted: boolean;
   isInitializing: boolean;
   error: string | null;
@@ -49,6 +64,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [graphVersion, setGraphVersion] = useState<number | null>(null);
   const [activeGraphVersion, setActiveGraphVersion] = useState<number | null>(null);
   const [isGraphVersionOlder, setIsGraphVersionOlder] = useState(false);
+  const [collaborationHistory, setCollaborationHistory] = useState<CollaborationHistory | null>(null);
+  const [collaborationHistoryFailed, setCollaborationHistoryFailed] = useState(false);
   const [isSessionPersisted, setIsSessionPersisted] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +88,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setGraphVersion(null);
     setActiveGraphVersion(null);
     setIsGraphVersionOlder(false);
+    setCollaborationHistory(null);
+    setCollaborationHistoryFailed(false);
     setIsSessionPersisted(false);
     setError(null);
     api.setCurrentSessionId(newSessionId);
@@ -124,6 +143,25 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           };
         }
 
+        // Collaboration evidence for this session's shared deck. Started HERE,
+        // before the slides fetch, so it runs in PARALLEL with it and adds no
+        // serial round-trip to a restore.
+        //
+        // It deliberately does NOT block the commit below. Awaiting it there
+        // would delay the title, sessionId and pinned Graph Version behind a
+        // provenance query — a restore that renders later than it does today,
+        // for a badge that is not part of the deck. The commit handler is
+        // attached AFTER a successful commit instead (see below).
+        //
+        // The `.catch` is attached at creation, not at the consumer, so a
+        // rejected history load can never surface as an unhandled rejection —
+        // including on the path where the slides fetch throws first and no
+        // consumer is ever attached.
+        const collaborationLoad = api
+          .getCollaborationHistory(newSessionId)
+          .then((history) => ({ history, failed: false }))
+          .catch(() => ({ history: null as CollaborationHistory | null, failed: true }));
+
         // Get slide deck if it has one
         let slideDeck: SlideDeck | null = null;
         let rawHtml: string | null = null;
@@ -147,7 +185,27 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           api.setCurrentSessionId(newSessionId);
           setExperimentUrl(sessionInfo.experiment_url ?? null);
           setConversationGraphVersion(sessionInfo);
+          // Clear the OUTGOING session's evidence in the same batch. Without
+          // this, the previous deck's contributor rows would stay on screen
+          // against the new conversation until the new load lands.
+          setCollaborationHistory(null);
+          setCollaborationHistoryFailed(false);
           setIsSessionPersisted(true);
+
+          // Attached only on the committed path, so an abandoned restore (the
+          // catch below calls createNewSession) can never have its in-flight
+          // history land on the session that replaced it.
+          void collaborationLoad.then((collaboration) => {
+            // Two guards, both EXISTING mechanisms rather than a new generation
+            // counter: the caller's cancellation predicate (a superseded
+            // concurrent restore) and the api module's current-session id (any
+            // session change while this load was in flight — createNewSession,
+            // Start latest, another restore).
+            if (isCancelled?.()) return;
+            if (api.getCurrentSessionId() !== newSessionId) return;
+            setCollaborationHistory(collaboration.history);
+            setCollaborationHistoryFailed(collaboration.failed);
+          });
         }
 
         return { slideDeck, rawHtml };
@@ -192,6 +250,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         graphVersion,
         activeGraphVersion,
         isGraphVersionOlder,
+        collaborationHistory,
+        collaborationHistoryFailed,
         isSessionPersisted,
         isInitializing,
         error,

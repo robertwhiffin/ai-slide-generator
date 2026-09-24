@@ -38,6 +38,15 @@ export function DeckHistory({
   refreshKey,
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
+  // Deliberately carries NO mixed-release / change-provenance indicator.
+  // `GET /api/sessions` returns no collaboration summary, and adding one would
+  // mean either an N+1 (one collaboration-history request per listed deck) or a
+  // per-row summary on the list response — both ruled out: the list summary was
+  // deliberately deferred because the same plan task forbids an N+1, so the
+  // mixed-release warning lives on the conversation surface
+  // (MixedReleaseWarning, beside the pinned-version badge) where exactly one
+  // authorized request answers for exactly one deck. Do not add a per-row fetch
+  // here to "fix" the absence.
   const [sessions, setSessions] = useState<Session[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)

@@ -130,6 +130,46 @@ export interface Session {
   is_older_than_active: boolean;
 }
 
+/**
+ * One opaque contributor's mutations on one exact Graph Release.
+ *
+ * These four fields are the ENTIRE privacy-safe contract of
+ * `GET /api/sessions/{id}/collaboration-history`. The endpoint deliberately
+ * emits no actor session id, session name, collaboration UUID, internal
+ * release id, pin, prompt, content, user id or principal, and
+ * `api.getCollaborationHistory` deliberately NARROWS the response to exactly
+ * these four keys so that a future server-side widening cannot reach the UI
+ * without a deliberate change here.
+ *
+ * `graph_version === null` means legacy / no graph release. It is never
+ * "active". The API emits no display vocabulary at all — no "Legacy" string
+ * exists in the payload, and a backend privacy test forbids one — so the
+ * wording is owned by MixedReleaseWarning, not by the server.
+ */
+export interface CollaborationReleaseGroup {
+  /** Response-local opaque label, e.g. "Contributor 1". Never a username. */
+  actor_label: string;
+  /** Persisted Graph Version, or null for legacy / no graph release. */
+  graph_version: number | null;
+  mutation_count: number;
+  last_mutation_at: string;
+}
+
+/**
+ * Privacy-safe collaboration summary plus its grouped evidence.
+ *
+ * `groups` arrives newest first. One actor spanning two releases keeps ONE
+ * `actor_label` across two groups, so `actor_label` is not a unique key —
+ * `actor_label` + `graph_version` is.
+ */
+export interface CollaborationHistory {
+  /** True only when two or more persisted non-null Graph Versions appear. */
+  mixed_release_warning: boolean;
+  /** True when any evidence has no persisted Graph Release. */
+  has_legacy_evidence: boolean;
+  groups: CollaborationReleaseGroup[];
+}
+
 export interface DuplicateSessionResult {
   session_id: string;
   title: string;
@@ -505,6 +545,49 @@ export const api = {
     }
 
     return response.json();
+  },
+
+  /**
+   * Grouped, privacy-safe collaboration history for one shared deck.
+   *
+   * THE 404 CONTRACT. Every denied and no-row path — unknown id, unauthorized
+   * caller, guessed contributor id, missing or deleted root, deckless root —
+   * returns the byte-identical 404 that `GET /api/sessions/{id}` returns for
+   * an unknown id, emitted before any history query runs. An unauthorized real
+   * id and a fabricated id are therefore indistinguishable, and this client
+   * must not defeat that: it never reads the error detail, never branches on
+   * it, and never retries to probe existence. One generic failure covers every
+   * non-ok response, so the UI can only ever show one generic unavailable
+   * state.
+   *
+   * The response is narrowed to the four documented group keys rather than
+   * passed through, so a server that later grew an identifying field could not
+   * reach a consumer through this function.
+   */
+  async getCollaborationHistory(sessionId: string): Promise<CollaborationHistory> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/collaboration-history`,
+    );
+
+    if (!response.ok) {
+      // Deliberately does NOT read response.json().detail: the detail is the
+      // byte-identical "Session not found" for both a real-but-unauthorized id
+      // and a fabricated one, and branching on it is how a client turns an
+      // indistinguishable 404 into an existence oracle.
+      throw new ApiError(response.status, 'Failed to get collaboration history');
+    }
+
+    const payload = (await response.json()) as CollaborationHistory;
+    return {
+      mixed_release_warning: payload.mixed_release_warning === true,
+      has_legacy_evidence: payload.has_legacy_evidence === true,
+      groups: (payload.groups ?? []).map((group) => ({
+        actor_label: group.actor_label,
+        graph_version: group.graph_version ?? null,
+        mutation_count: group.mutation_count,
+        last_mutation_at: group.last_mutation_at,
+      })),
+    };
   },
 
   /**

@@ -37,6 +37,7 @@ import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { GraphVersionStatus } from '../Conversation/GraphVersionStatus';
+import { MixedReleaseWarning } from '../Conversation/MixedReleaseWarning';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
 
@@ -199,6 +200,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     graphVersion,
     activeGraphVersion,
     isGraphVersionOlder,
+    collaborationHistory,
+    collaborationHistoryFailed,
+    isSessionPersisted,
     createNewSession,
     markSessionPersisted,
     switchSession,
@@ -1178,6 +1182,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       isOlder={isGraphVersionOlder}
                       onStartLatest={handleStartLatest}
                       isStartingLatest={isStartingLatest}
+                    />
+                    {/* BESIDE the #261 badge, never inside it: a failed
+                        collaboration-history load must not erase the pinned
+                        Graph Version, and a sibling makes that structural
+                        rather than a thing a future edit can regress. Rendered
+                        exactly ONCE in the app — a second instance (e.g. in the
+                        share dialog) would put two identical "Change
+                        provenance" accessible names on screen together, which
+                        is the strict-mode collision this epic has already paid
+                        for twice. */}
+                    <MixedReleaseWarning
+                      history={collaborationHistory}
+                      loadFailed={collaborationHistoryFailed}
+                      isSessionPersisted={isSessionPersisted}
                     />
                     <ChatPanel
                       key="chat-panel"

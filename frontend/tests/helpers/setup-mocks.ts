@@ -186,6 +186,29 @@ export async function setupMocks(page: Page) {
     });
   });
 
+  // Mock collaboration history (GET /api/sessions/:id/collaboration-history).
+  //
+  // Registered AFTER the `/api/sessions**` catch-all above ON PURPOSE: Playwright
+  // matches routes in reverse registration order, so this more specific handler
+  // must come later to win. Without it the catch-all's final `else` answers 404,
+  // and every spec that restores a session would render the conversation's
+  // generic "Collaboration history unavailable" state — test-only noise that has
+  // nothing to do with what those specs assert.
+  //
+  // Defaults to no evidence, which renders nothing at all. Specs that need
+  // populated groups register their own route after calling setupMocks.
+  await page.route(/\/api\/sessions\/[^/]+\/collaboration-history$/, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        mixed_release_warning: false,
+        has_legacy_evidence: false,
+        groups: [],
+      }),
+    });
+  });
+
   // Mock version check endpoint
   await page.route('http://127.0.0.1:8000/api/version', (route) => {
     route.fulfill({
