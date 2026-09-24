@@ -1,10 +1,29 @@
 import { expect, Page, Route, test } from '@playwright/test';
-import type { AgentKey, DraftSaveRequest } from '../../src/api/agentDefinitions';
+import type {
+  AgentDefinitionWorkbenchResponse,
+  AgentKey,
+  DraftDefinition,
+  DraftSaveRequest,
+} from '../../src/api/agentDefinitions';
 import {
+  ALREADY_CURRENT_REJECTION,
+  DIRTY_LEGACY_PROMPT,
+  EMPTY_V2_ASSEMBLY_RULES,
+  LEGACY_COMPOSITE_ROLES,
+  MANUAL_RESOLUTION_REJECTION,
+  PUBLISHED_V1_PROMPT_SOURCE,
+  V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
+  syntheticDraftDefinitions,
   syntheticDraftSaveConflict,
   syntheticDraftSaveSuccess,
+  syntheticLegacyPromptSource,
+  syntheticNullCandidateConflict,
+  syntheticUpgradeSuccess,
+  syntheticV2DraftDefinition,
+  v2ProtectedStageView,
 } from '../fixtures/mocks';
+import { ALLOWED_ACTION_NAMES, forbidsActionName } from '../fixtures/forbiddenActionNames';
 
 const WORKBENCH_ENDPOINT = '**/api/admin/agent-definitions/workbench';
 const SAVE_ENDPOINT = '**/api/admin/agent-definitions/draft/*';
@@ -138,7 +157,10 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
   await expect(page.getByRole('tabpanel', { name: 'Output Schema' })).toContainText('speaker_notes');
 
   await page.getByRole('tab', { name: 'Assembly' }).click();
-  await expect(page.getByRole('tabpanel', { name: 'Assembly' })).toContainText('slide_frame_constraints');
+  // Task 5 replaced the read-only assembly JSON with server-derived locked rows, so the
+  // stage is asserted by its accessible group name rather than by its raw stage_id.
+  await expect(page.getByRole('tabpanel', { name: 'Assembly' })
+    .getByRole('group', { name: 'Protected stage: Slide frame constraints' })).toBeVisible();
   await expect(page.getByRole('tabpanel', { name: 'Assembly' })).toContainText('langchain.with_structured_output');
 
   await navigation.getByRole('button', { name: 'Foreman' }).click();
@@ -423,3 +445,1234 @@ test('small viewports deliberately overflow the fixed three-pane canvas', async 
   expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth);
   await expect(page.getByTestId('workbench-grid')).toHaveCSS('grid-template-columns', /.+ .+ .+/);
 });
+
+// ===========================================================================
+// #265 declarative prompt assembly in the browser.
+//
+// Everything below drives the real client against mocked GET / PUT / upgrade
+// POST / legacy-source POST routes. The protected `display_text` values in the
+// fixtures are synthetic on purpose — that is what proves the client renders the
+// bytes the server sent instead of reconstructing protected text. The real bytes
+// are joined to these fixtures by the PostgreSQL route suite, which is the only
+// place the Python and TypeScript literals meet.
+// ===========================================================================
+
+const UPGRADE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/protected-assembly-upgrade';
+const SOURCE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/legacy-prompt-source';
+
+/**
+ * The affected-role matrix, fixed by this file rather than read from the shared
+ * fixture. Narrowing `LEGACY_COMPOSITE_ROLES` in `mocks.ts` used to shrink every loop
+ * below and still report all-green; now the cardinality is owned here and the
+ * agreement test asserts the fixture, the production constant and the server's
+ * canonical transition list all still say the same thing.
+ */
+const AFFECTED_ROLES = ['data_analyst', 'build_reviewer'] as const;
+
+interface CapturedPost {
+  agentKey: AgentKey;
+  body: Record<string, unknown>;
+}
+
+async function installPostMock(
+  page: Page,
+  endpoint: string,
+  respond: (route: Route, post: CapturedPost, call: number) => Promise<void> | void,
+) {
+  const posts: CapturedPost[] = [];
+  await page.route(endpoint, async (route) => {
+    const segments = route.request().url().split('/');
+    const post: CapturedPost = {
+      agentKey: segments.at(-2) as AgentKey,
+      body: route.request().postDataJSON() as Record<string, unknown>,
+    };
+    posts.push(post);
+    await respond(route, post, posts.length - 1);
+  });
+  return posts;
+}
+
+function cloneWorkbench(): AgentDefinitionWorkbenchResponse {
+  return structuredClone(syntheticAgentDefinitionWorkbench) as AgentDefinitionWorkbenchResponse;
+}
+
+/** A workbench whose named roles carry the supplied persisted draft definition. */
+function workbenchWith(drafts: Partial<Record<AgentKey, DraftDefinition>>) {
+  const body = cloneWorkbench();
+  for (const node of body.nodes) {
+    if (node.execution_kind !== 'model') continue;
+    const replacement = drafts[node.agent_key];
+    if (replacement !== undefined) node.draft = structuredClone(replacement);
+  }
+  return body;
+}
+
+function v1DraftWithPrompt(agentKey: AgentKey, promptText: string): DraftDefinition {
+  return { ...structuredClone(syntheticDraftDefinitions[agentKey]), prompt_text: promptText };
+}
+
+/** A save 200 that echoes a v2 candidate, including its custom blocks. */
+function v2SaveSuccess(agentKey: AgentKey, request: DraftSaveRequest, lockVersion: number) {
+  return {
+    ...syntheticDraftSaveSuccess(agentKey, request, lockVersion),
+    definition: syntheticV2DraftDefinition(agentKey, {
+      prompt_text: request.candidate.prompt_text,
+      model: structuredClone(request.candidate.model),
+      assembly_rules: structuredClone(
+        request.candidate.assembly_rules ?? EMPTY_V2_ASSEMBLY_RULES,
+      ),
+      candidate_hash: 'd'.repeat(64),
+    }),
+  };
+}
+
+/** The coherent 200 for whichever candidate shape a save actually submitted. */
+function saveSuccessFor(save: CapturedSave) {
+  const lockVersion = save.body.lock_version + 1;
+  return save.body.candidate.assembly_rules
+    ? v2SaveSuccess(save.agentKey, save.body, lockVersion)
+    : syntheticDraftSaveSuccess(save.agentKey, save.body, lockVersion);
+}
+
+/** An ordinary save 409 whose coherent server snapshot has moved roles to v2. */
+function crossVersionSaveConflict(
+  request: DraftSaveRequest,
+  v2Roles: readonly AgentKey[],
+  currentLockVersion = 1,
+) {
+  const conflict = syntheticDraftSaveConflict(request, {}, currentLockVersion);
+  for (const agentKey of v2Roles) {
+    conflict.server.definitions[agentKey] = syntheticV2DraftDefinition(agentKey);
+  }
+  return conflict;
+}
+
+/** The exact edited-by-one-code-point persisted Graph Version 1 composite. */
+function oneCodePointEdit(agentKey: 'data_analyst' | 'build_reviewer'): string {
+  const published = PUBLISHED_V1_PROMPT_SOURCE[agentKey];
+  return `${published.slice(0, -1)}é`;
+}
+
+async function openAssemblyTab(page: Page, displayName: string) {
+  await page.getByRole('navigation', { name: 'Graph nodes' })
+    .getByRole('button', { name: displayName }).click();
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+}
+
+function assemblyPanel(page: Page) {
+  return page.getByRole('tabpanel', { name: 'Assembly' });
+}
+
+function protectedRows(page: Page) {
+  return assemblyPanel(page).getByRole('group', { name: /^Protected stage: / });
+}
+
+async function protectedStageIds(page: Page): Promise<string[]> {
+  return protectedRows(page).evaluateAll(
+    (rows) => rows.map((row) => row.getAttribute('data-stage-id') ?? ''),
+  );
+}
+
+function retainedRegion(page: Page) {
+  return page.getByRole('region', { name: 'Values retained for recovery' });
+}
+
+function retainedAlternative(page: Page, index: number) {
+  return retainedRegion(page).getByRole('group', { name: `Retained alternative ${index}` });
+}
+
+const DISPLAY_NAMES: Record<AgentKey, string> = {
+  architect: 'Architect',
+  data_analyst: 'Data Analyst',
+  builder: 'Builder',
+  build_reviewer: 'Build Reviewer',
+  fixer: 'Fixer',
+  fix_reviewer: 'Fix Reviewer',
+  deck_reviewer: 'Deck Reviewer',
+};
+
+test('a Graph Version 1 role offers Upgrade, the exact locked protected text, and no custom or protected controls', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+  const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(route, 500, {}));
+  await openWorkbench(page);
+  await openAssemblyTab(page, 'Build Reviewer');
+
+  await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+    .toBeEnabled();
+  await expect(assemblyPanel(page)).toContainText(
+    'Custom text blocks require the Graph Version 2 protected assembly.',
+  );
+  await expect(assemblyPanel(page).getByRole('group', { name: /^Custom blocks: / })).toHaveCount(0);
+  await expect(assemblyPanel(page).getByRole('button', { name: /^Add custom block / })).toHaveCount(0);
+
+  const expected = syntheticDraftDefinitions.build_reviewer.protected_stage_view;
+  await expect(protectedRows(page)).toHaveCount(expected.length);
+  expect(await protectedStageIds(page)).toEqual(expected.map((row) => row.stage_id));
+  for (const row of expected) {
+    const group = assemblyPanel(page).getByRole('group', { name: `Protected stage: ${row.label}` });
+    await expect(group).toContainText(row.display_text);
+    await expect(group).toContainText('Locked');
+    // A locked row is display only: it contributes no control of any kind.
+    await expect(group.getByRole('button')).toHaveCount(0);
+    await expect(group.getByRole('textbox')).toHaveCount(0);
+    await expect(group.getByRole('combobox')).toHaveCount(0);
+    // And no protected label may become a heading that collides by name substring.
+    await expect(group.getByRole('heading')).toHaveCount(0);
+  }
+  await expect(assemblyPanel(page)).toContainText('Protected assembly version 1');
+  expect(saves).toHaveLength(0);
+  expect(upgrades).toHaveLength(0);
+});
+
+test('a Graph Version 2 role offers custom blocks at legal anchors, exactly-once protected rows, and no Upgrade', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    build_reviewer: syntheticV2DraftDefinition('build_reviewer'),
+  }));
+  await openWorkbench(page);
+  await openAssemblyTab(page, 'Build Reviewer');
+
+  await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+    .toHaveCount(0);
+  await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
+
+  const expected = v2ProtectedStageView('build_reviewer');
+  const stageIds = await protectedStageIds(page);
+  expect(stageIds).toEqual(expected.map((row) => row.stage_id));
+  expect(new Set(stageIds).size).toBe(stageIds.length);
+  for (const row of expected) {
+    await expect(
+      assemblyPanel(page).getByRole('group', { name: `Protected stage: ${row.label}` }),
+    ).toContainText(row.display_text);
+  }
+
+  // The client offers exactly the anchors the server view declares, plus the one
+  // pre-protected authored-prompt anchor.
+  const declared = new Set(expected.flatMap((row) => row.legal_adjacent_custom_anchors));
+  const anchorGroups = await assemblyPanel(page)
+    .getByRole('group', { name: /^Custom blocks: / })
+    .evaluateAll((groups) => groups.map((group) => group.getAttribute('aria-label') ?? ''));
+  expect(anchorGroups).toEqual([
+    'Custom blocks: After authored prompt',
+    'Custom blocks: After deck-brief re-review',
+    'Custom blocks: After environment constraints',
+  ]);
+  expect(declared).toEqual(new Set(['after_deck_brief', 'after_environment_constraints']));
+});
+
+test('custom blocks are added, edited, reordered and deleted locally, and only an explicit Save writes them', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    architect: syntheticV2DraftDefinition('architect'),
+  }));
+  const saves = await installSaveMock(page, (route, save) => fulfillJson(
+    route,
+    200,
+    v2SaveSuccess(save.agentKey, save.body, 1),
+  ));
+  await openWorkbench(page);
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+
+  const authored = assemblyPanel(page).getByRole('group', { name: 'Custom blocks: After authored prompt' });
+  const environment = assemblyPanel(page).getByRole('group', { name: 'Custom blocks: After environment constraints' });
+  await authored.getByRole('button', { name: 'Add custom block After authored prompt' }).click();
+  await authored.getByRole('button', { name: 'Add custom block After authored prompt' }).click();
+  await environment.getByRole('button', { name: 'Add custom block After environment constraints' }).click();
+
+  const first = assemblyPanel(page).getByRole('group', { name: 'Custom block 1 at After authored prompt' });
+  const second = assemblyPanel(page).getByRole('group', { name: 'Custom block 2 at After authored prompt' });
+  const lone = assemblyPanel(page).getByRole('group', { name: 'Custom block 1 at After environment constraints' });
+  await first.getByRole('textbox', { name: 'Block text' }).fill('Authored sibling one');
+  await second.getByRole('textbox', { name: 'Block text' }).fill('Authored sibling two');
+  await lone.getByRole('textbox', { name: 'Block text' }).fill('Environment sibling');
+  await lone.getByRole('combobox', { name: 'Condition' }).selectOption('design_system_active');
+
+  // Movement is offered only inside an anchor group, so no arrow can cross an anchor.
+  await expect(first.getByRole('button', { name: 'Move up' })).toHaveCount(0);
+  await expect(first.getByRole('button', { name: 'Move down' })).toHaveCount(1);
+  await expect(second.getByRole('button', { name: 'Move up' })).toHaveCount(1);
+  await expect(second.getByRole('button', { name: 'Move down' })).toHaveCount(0);
+  await expect(lone.getByRole('button', { name: 'Move up' })).toHaveCount(0);
+  await expect(lone.getByRole('button', { name: 'Move down' })).toHaveCount(0);
+
+  const idsBefore = await assemblyPanel(page).getByRole('group', { name: /^Custom block / })
+    .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-block-id') ?? ''));
+  await first.getByRole('button', { name: 'Move down' }).click();
+  const idsAfter = await assemblyPanel(page).getByRole('group', { name: /^Custom block / })
+    .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-block-id') ?? ''));
+  expect(idsAfter).toEqual([idsBefore[1], idsBefore[0], idsBefore[2]]);
+  await expect(
+    assemblyPanel(page).getByRole('group', { name: 'Custom block 1 at After authored prompt' })
+      .getByRole('textbox', { name: 'Block text' }),
+  ).toHaveValue('Authored sibling two');
+
+  await assemblyPanel(page).getByRole('group', { name: 'Custom block 2 at After authored prompt' })
+    .getByRole('button', { name: 'Delete' }).click();
+  await expect(assemblyPanel(page).getByRole('group', { name: /^Custom block / })).toHaveCount(2);
+
+  expect(saves).toHaveLength(0);
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0].body).toEqual({
+    lock_version: 0,
+    candidate: {
+      prompt_text: V2_AUTHORED_PROMPT.architect,
+      model: {
+        endpoint_name: 'databricks-claude-opus-4-6',
+        temperature: 0.7,
+        max_tokens: 60000,
+        top_p: 0.95,
+      },
+      assembly_rules: {
+        format_version: 2,
+        custom_blocks: [
+          {
+            kind: 'custom_text',
+            block_id: idsBefore[1],
+            anchor: 'after_authored_prompt',
+            condition: 'always',
+            text: 'Authored sibling two',
+          },
+          {
+            kind: 'custom_text',
+            block_id: idsBefore[2],
+            anchor: 'after_environment_constraints',
+            condition: 'design_system_active',
+            text: 'Environment sibling',
+          },
+        ],
+      },
+    },
+  });
+  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+  await expect(page.getByRole('navigation', { name: 'Graph nodes' })
+    .getByRole('button', { name: 'Architect' })).toContainText('Needs test');
+});
+
+test('an ordered three-issue 422 renders inline beside its field and keeps every other issue in exact server order', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    architect: syntheticV2DraftDefinition('architect'),
+  }));
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 422, {
+    code: 'invalid_draft',
+    errors: [
+      {
+        field: 'candidate.assembly_rules.custom_blocks.*.text',
+        code: 'blank',
+        message: 'Custom block text must not be blank.',
+      },
+      {
+        field: 'candidate.prompt_text',
+        code: 'rejected',
+        message: 'Prompt blocked by policy.',
+      },
+      {
+        field: 'candidate.assembly_rules.custom_blocks.*.anchor',
+        code: 'invalid_anchor_order',
+        message: 'Custom blocks must be ordered by protected anchor.',
+      },
+    ],
+  }));
+  await openWorkbench(page);
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveAttribute(
+    'aria-describedby',
+    'architect-prompt-error',
+  );
+  await expect(page.locator('#architect-prompt-error')).toHaveText('Prompt blocked by policy.');
+
+  const issues = page.getByRole('region', { name: 'Server rejected this request' });
+  // The inline owner is not repeated in the ordered region; the other two keep order.
+  await expect(issues.getByRole('listitem')).toHaveCount(2);
+  await expect(issues.getByRole('listitem').nth(0)).toContainText(
+    'candidate.assembly_rules.custom_blocks.*.text — blank',
+  );
+  await expect(issues.getByRole('listitem').nth(1)).toContainText(
+    'candidate.assembly_rules.custom_blocks.*.anchor — invalid_anchor_order',
+  );
+  await expect(issues.getByRole('button', { name: 'Go to Assembly tab' })).toHaveCount(2);
+  expect(saves).toHaveLength(1);
+});
+
+test('an upgrade 409 carries client_candidate null, reconciles the crossed snapshot, and sends no retry', async ({ page }) => {
+  await installExactIdentityMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+  const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    409,
+    syntheticNullCandidateConflict(0, 1, ['data_analyst']),
+  ));
+  await openWorkbench(page);
+  await openAssemblyTab(page, 'Data Analyst');
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+
+  const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
+  await expect(conflict.getByRole('group', { name: 'Server values' })).toBeVisible();
+  // An operation that submitted no candidate must never render one.
+  await expect(conflict.getByRole('group', { name: 'Submitted values' })).toHaveCount(0);
+  await expect(conflict).toContainText('Expected lock 0');
+  await expect(conflict).toContainText('Current lock 1');
+  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt text' }))
+    .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+  await conflict.getByRole('button', { name: 'Keep local' }).click();
+  await expect(page.getByRole('region', { name: 'Draft changed on the server' })).toHaveCount(0);
+
+  expect(upgrades).toHaveLength(1);
+  expect(saves).toHaveLength(0);
+  await expect.poll(workbenchRequestCount).toBe(1);
+});
+
+for (const agentKey of AFFECTED_ROLES) {
+  test(`${DISPLAY_NAMES[agentKey]}: a locally edited legacy prompt refuses the Upgrade with zero POST and a local restore`, async ({ page }) => {
+    await installExactIdentityMock(page);
+    await installWorkbenchMock(page);
+    const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+    const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(route, 500, {}));
+    await openWorkbench(page);
+    const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+    await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
+    const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+    const saved = syntheticDraftDefinitions[agentKey].prompt_text;
+    await prompt.fill(DIRTY_LEGACY_PROMPT);
+
+    await page.getByRole('tab', { name: 'Assembly' }).click();
+    await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+
+    // No request ID is allocated and no POST is sent.
+    expect(upgrades).toHaveLength(0);
+    expect(saves).toHaveLength(0);
+    await expect(retainedAlternative(page, 1)).toContainText(
+      'Upgrade needs the exact Graph Version 1 prompt.',
+    );
+    await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(DIRTY_LEGACY_PROMPT);
+    await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveAttribute('aria-readonly', 'true');
+
+    await page.getByRole('tab', { name: 'Prompt' }).click();
+    await expect(prompt).toHaveValue(DIRTY_LEGACY_PROMPT);
+    await page.getByRole('button', { name: 'Restore saved prompt' }).click();
+    await expect(prompt).toHaveValue(saved);
+    expect(upgrades).toHaveLength(0);
+    expect(saves).toHaveLength(0);
+  });
+}
+
+for (const agentKey of AFFECTED_ROLES) {
+  test(`${DISPLAY_NAMES[agentKey]}: the server's manual-resolution 422 is shown against Prompt with no automatic rewrite, save or retry`, async ({ page }) => {
+    const edited = oneCodePointEdit(agentKey);
+    await installExactIdentityMock(page);
+    await installWorkbenchMock(page, 200, workbenchWith({
+      [agentKey]: v1DraftWithPrompt(agentKey, edited),
+    }));
+    const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+    const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+      route,
+      422,
+      MANUAL_RESOLUTION_REJECTION,
+    ));
+    await openWorkbench(page);
+    await openAssemblyTab(page, DISPLAY_NAMES[agentKey]);
+    const stageIdsBefore = await protectedStageIds(page);
+    await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+
+    const issues = page.getByRole('region', { name: 'Server rejected this request' });
+    await expect(issues.getByRole('listitem')).toHaveCount(1);
+    await expect(issues).toContainText(
+      `${MANUAL_RESOLUTION_REJECTION.errors[0].field} — ${MANUAL_RESOLUTION_REJECTION.errors[0].code}`,
+    );
+    await expect(issues).toContainText(MANUAL_RESOLUTION_REJECTION.errors[0].message);
+    await expect(issues.getByRole('button', { name: 'Go to Prompt tab' })).toHaveCount(1);
+
+    // The v1 and custom-control state is untouched, and the edited bytes survive.
+    expect(await protectedStageIds(page)).toEqual(stageIdsBefore);
+    await expect(assemblyPanel(page).getByRole('button', { name: /^Add custom block / })).toHaveCount(0);
+    await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+      .toBeEnabled();
+    await page.getByRole('tab', { name: 'Prompt' }).click();
+    await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(edited);
+    await expect(page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }))
+      .toBeEnabled();
+    expect(upgrades).toHaveLength(1);
+    expect(saves).toHaveLength(0);
+  });
+}
+
+for (const agentKey of AFFECTED_ROLES) {
+  test(`${DISPLAY_NAMES[agentKey]}: the whole route-backed 422 to authored-only v2 sequence loses no bytes and never writes on its own`, async ({ page }) => {
+    const edited = oneCodePointEdit(agentKey);
+    const published = PUBLISHED_V1_PROMPT_SOURCE[agentKey];
+    await installExactIdentityMock(page);
+    const workbenchRequestCount = await installWorkbenchMock(page, 200, workbenchWith({
+      [agentKey]: v1DraftWithPrompt(agentKey, edited),
+    }));
+    const saves = await installSaveMock(page, (route, save) => fulfillJson(
+      route,
+      200,
+      saveSuccessFor(save),
+    ));
+    const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route, _post, call) => (call === 0
+      ? fulfillJson(route, 422, MANUAL_RESOLUTION_REJECTION)
+      : fulfillJson(route, 200, syntheticUpgradeSuccess(agentKey, 2))));
+    const sources = await installPostMock(page, SOURCE_ENDPOINT, (route) => fulfillJson(
+      route,
+      200,
+      syntheticLegacyPromptSource(agentKey, 0),
+    ));
+    await openWorkbench(page);
+    const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+
+    // 1. Upgrade is refused by the server for the persisted one-code-point edit.
+    await openAssemblyTab(page, DISPLAY_NAMES[agentKey]);
+    await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+    await expect(page.getByRole('region', { name: 'Server rejected this request' })).toBeVisible();
+    expect(upgrades[0].body).toEqual({ lock_version: 0 });
+    expect(Object.keys(upgrades[0].body)).toEqual(['lock_version']);
+    expect(saves).toHaveLength(0);
+
+    // 2. The strict source POST installs the exact published prompt and writes nothing.
+    await page.getByRole('tab', { name: 'Prompt' }).click();
+    await page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }).click();
+    await expect(prompt).toHaveValue(published);
+    expect(sources[0].body).toEqual({ lock_version: 0 });
+    expect(Object.keys(sources[0].body)).toEqual(['lock_version']);
+    expect(saves).toHaveLength(0);
+    await expect(page.getByText('Lock version').locator('..')).toContainText('0');
+
+    // Both displaced alternatives are retained byte-exactly and stay copyable.
+    await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(edited);
+    await expect(retainedAlternative(page, 2).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(edited);
+    // No substring of the composite was stripped on the way in.
+    await expect(prompt).not.toHaveValue(edited);
+    expect(published.includes(edited)).toBe(false);
+
+    // 3. An explicit ordinary v1 Save is the only thing that writes.
+    await page.getByRole('button', { name: 'Save Draft' }).click();
+    await expect.poll(() => saves.length).toBe(1);
+    expect(saves[0].body).toEqual({
+      lock_version: 0,
+      candidate: {
+        prompt_text: published,
+        model: {
+          endpoint_name: 'databricks-claude-opus-4-6',
+          temperature: 0.7,
+          max_tokens: 60000,
+          top_p: 0.95,
+        },
+      },
+    });
+    await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+
+    // 4. Only an explicit Upgrade produces the authored-only v2 definition.
+    await page.getByRole('tab', { name: 'Assembly' }).click();
+    await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+    await expect.poll(() => upgrades.length).toBe(2);
+    expect(upgrades[1].body).toEqual({ lock_version: 1 });
+    await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
+    expect(await protectedStageIds(page)).toEqual(
+      v2ProtectedStageView(agentKey).map((row) => row.stage_id),
+    );
+    await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+      .toHaveCount(0);
+    await page.getByRole('tab', { name: 'Prompt' }).click();
+    await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+
+    // Every displaced byte is still retained, and none of it is savable.
+    await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(edited);
+    await expect(retainedAlternative(page, 2).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(edited);
+    await expect(retainedAlternative(page, 3).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(published);
+    await expect(retainedAlternative(page, 1).getByRole('group', { name: 'Retained values 1' }))
+      .toContainText(V2_AUTHORED_PROMPT[agentKey]);
+
+    // 5. The next PUT can contain no legacy or manual-only prompt at all.
+    await page.getByRole('button', { name: 'Save Draft' }).click();
+    await expect.poll(() => saves.length).toBe(2);
+    const body = JSON.stringify(saves[1].body);
+    expect(body).toContain(V2_AUTHORED_PROMPT[agentKey]);
+    expect(body).not.toContain(published);
+    expect(body).not.toContain(edited);
+    expect(saves[1].body.candidate.assembly_rules).toEqual({ format_version: 2, custom_blocks: [] });
+
+    // 6. Nothing automatic happened anywhere in the sequence.
+    expect(sources).toHaveLength(1);
+    expect(upgrades).toHaveLength(2);
+    expect(saves).toHaveLength(2);
+    await expect.poll(workbenchRequestCount).toBe(1);
+  });
+}
+
+test('while an Upgrade is in flight the prompt is frozen, safe fields stay editable, and a queued prompt action is retained', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+  let heldRoute: Route | null = null;
+  const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => { heldRoute = route; });
+  await openWorkbench(page);
+  const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+  await navigation.getByRole('button', { name: 'Data Analyst' }).click();
+  const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+  const saved = syntheticDraftDefinitions.data_analyst.prompt_text;
+
+  // A refused dirty Upgrade leaves one pre-existing alternative to queue later.
+  await prompt.fill(DIRTY_LEGACY_PROMPT);
+  await page.getByRole('tab', { name: 'Model' }).click();
+  await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-retained-A');
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  expect(upgrades).toHaveLength(0);
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await page.getByRole('button', { name: 'Restore saved prompt' }).click();
+  await expect(prompt).toHaveValue(saved);
+
+  // Now a clean Upgrade really starts and is held open.
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await expect.poll(() => heldRoute !== null).toBe(true);
+  await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+    .toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(prompt).toBeDisabled();
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const endpoint = page.getByRole('textbox', { name: 'Endpoint' });
+  await expect(endpoint).toBeEnabled();
+  await endpoint.fill('endpoint-local-B');
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toBeEnabled();
+
+  // Restoring an alternative mid-flight is a prompt action: it is queued, not applied.
+  await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
+  await expect(endpoint).toHaveValue('endpoint-retained-A');
+  await expect(retainedAlternative(page, 2)).toContainText(
+    'Prompt edits are not accepted while this Upgrade is in flight.',
+  );
+  await expect(retainedAlternative(page, 2).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+    .toHaveValue(DIRTY_LEGACY_PROMPT);
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(prompt).toHaveValue(saved);
+
+  await fulfillJson(heldRoute!, 200, syntheticUpgradeSuccess('data_analyst', 1));
+  await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+  await page.getByRole('tab', { name: 'Model' }).click();
+  // Safe edits made while pending survive the authoritative adoption.
+  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-retained-A');
+  expect(upgrades).toHaveLength(1);
+  expect(saves).toHaveLength(0);
+});
+
+test('one aggregate gate holds Save, Upgrade and source recovery across roles until the first settles', async ({ page }) => {
+  const edited = oneCodePointEdit('data_analyst');
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    data_analyst: v1DraftWithPrompt('data_analyst', edited),
+  }));
+  let heldRoute: Route | null = null;
+  const saves = await installSaveMock(page, (route, save, call) => {
+    if (call === 0) heldRoute = route;
+    else return fulfillJson(route, 200, syntheticDraftSaveSuccess(save.agentKey, save.body, 2));
+  });
+  const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    422,
+    MANUAL_RESOLUTION_REJECTION,
+  ));
+  const sources = await installPostMock(page, SOURCE_ENDPOINT, (route) => fulfillJson(
+    route,
+    200,
+    syntheticLegacyPromptSource('data_analyst', 0),
+  ));
+  await openWorkbench(page);
+  const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+
+  // Provoke the 422 first so the source-recovery control exists at all.
+  await openAssemblyTab(page, 'Data Analyst');
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await expect(page.getByRole('region', { name: 'Server rejected this request' })).toBeVisible();
+
+  // Hold an unrelated role's Save open.
+  await navigation.getByRole('button', { name: 'Architect' }).click();
+  await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => heldRoute !== null).toBe(true);
+
+  await navigation.getByRole('button', { name: 'Data Analyst' }).click();
+  await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+    .toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }))
+    .toBeDisabled();
+  expect(upgrades).toHaveLength(1);
+  expect(sources).toHaveLength(0);
+  expect(saves).toHaveLength(1);
+
+  await fulfillJson(heldRoute!, 200, syntheticDraftSaveSuccess('architect', saves[0].body, 1));
+  await expect(page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }))
+    .toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+  await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+    .toBeEnabled();
+});
+
+for (const agentKey of AFFECTED_ROLES) {
+  for (const operation of ['save', 'upgrade'] as const) {
+    test(`${DISPLAY_NAMES[agentKey]}: a selected ${operation} 409 crossing to Graph Version 2 appends, restores by ID, and never resubmits v1 bytes`, async ({ page }) => {
+      await installExactIdentityMock(page);
+      await installWorkbenchMock(page);
+      const saves = await installSaveMock(page, (route, save, call) => (
+        operation === 'save' && call === 0
+          ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
+          : fulfillJson(route, 200, saveSuccessFor(save))));
+      const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+        route,
+        409,
+        syntheticNullCandidateConflict(0, 1, [agentKey]),
+      ));
+      await openWorkbench(page);
+      const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+      await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
+      const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+      const saved = syntheticDraftDefinitions[agentKey].prompt_text;
+
+      // A pre-existing retained v1 alternative carrying its own sentinels.
+      await prompt.fill(DIRTY_LEGACY_PROMPT);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-retained-A');
+      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.11');
+      await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('1111');
+      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.11');
+      await page.getByRole('tab', { name: 'Assembly' }).click();
+      await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+      expect(upgrades).toHaveLength(0);
+      await expect(retainedAlternative(page, 1)).toBeVisible();
+
+      // Current local carries distinct sentinels; the prompt is dirty only when an
+      // ordinary Save is what crosses the version, because the reducer refuses to
+      // start an Upgrade from a dirty affected prompt at all.
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-local-B');
+      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.22');
+      await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('2222');
+      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.22');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      if (operation === 'upgrade') {
+        await page.getByRole('button', { name: 'Restore saved prompt' }).click();
+        await expect(prompt).toHaveValue(saved);
+        await page.getByRole('tab', { name: 'Assembly' }).click();
+        await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+        await expect.poll(() => upgrades.length).toBe(1);
+      } else {
+        await expect(prompt).toHaveValue(DIRTY_LEGACY_PROMPT);
+        await page.getByRole('button', { name: 'Save Draft' }).click();
+        await expect.poll(() => saves.length).toBe(1);
+      }
+
+      // The crossed snapshot installs the server's v2 prompt and rules.
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-local-B');
+      await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.22');
+
+      // Reload appends a further alternative rather than overwriting either one.
+      const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
+      await expect(retainedAlternative(page, 2)).toBeVisible();
+      await conflict.getByRole('button', { name: 'Reload server' }).click();
+      await expect(retainedAlternative(page, 3)).toBeVisible();
+      const retainedIds = await retainedRegion(page).getByRole('group', { name: /^Retained alternative / })
+        .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-retained-id') ?? ''));
+      expect(retainedIds).toHaveLength(3);
+      expect(new Set(retainedIds).size).toBe(3);
+
+      // Every manual-only record stays copyable, and every sanitized form is v2.
+      for (let index = 1; index <= 3; index += 1) {
+        const alternative = retainedAlternative(page, index);
+        await expect(alternative.getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+          .toHaveAttribute('aria-readonly', 'true');
+        await expect(alternative.getByRole('group', { name: `Retained values ${index}` }))
+          .toContainText(V2_AUTHORED_PROMPT[agentKey]);
+        await expect(alternative.getByRole('group', { name: `Retained values ${index}` }))
+          .toContainText('Custom blocks');
+      }
+      await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveValue(DIRTY_LEGACY_PROMPT);
+
+      // Each stable ID restores its own safe fields and never its prompt.
+      await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-retained-A');
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('1111');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+
+      await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-local-B');
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('2222');
+
+      // The immediate PUT can contain none of the v1 or manual-only strings.
+      const before = saves.length;
+      await page.getByRole('button', { name: 'Save Draft' }).click();
+      await expect.poll(() => saves.length).toBe(before + 1);
+      const body = JSON.stringify(saves[before].body);
+      expect(body).toContain(V2_AUTHORED_PROMPT[agentKey]);
+      expect(body).not.toContain(saved);
+      expect(body).not.toContain('Edited');
+      expect(body).not.toContain('nonce');
+    });
+  }
+}
+
+for (const agentKey of AFFECTED_ROLES) {
+  for (const operation of ['save', 'upgrade'] as const) {
+    test(`${DISPLAY_NAMES[agentKey]}: an unselected affected entry in an ${operation} 409 is quarantined and restorable by ID`, async ({ page }) => {
+      await installExactIdentityMock(page);
+      await installWorkbenchMock(page);
+      const saves = await installSaveMock(page, (route, save, call) => (
+        operation === 'save' && call === 0
+          ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
+          : fulfillJson(route, 200, saveSuccessFor(save))));
+      const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+        route,
+        409,
+        syntheticNullCandidateConflict(0, 1, [agentKey]),
+      ));
+      await openWorkbench(page);
+      const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+
+      // Dirty the affected role, then leave it while Architect drives the conflict.
+      await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
+      await page.getByRole('textbox', { name: 'Prompt text' }).fill(DIRTY_LEGACY_PROMPT);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-unselected-A');
+      await navigation.getByRole('button', { name: 'Architect' }).click();
+      if (operation === 'save') {
+        await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
+        await page.getByRole('button', { name: 'Save Draft' }).click();
+        await expect.poll(() => saves.length).toBe(1);
+      } else {
+        await page.getByRole('tab', { name: 'Assembly' }).click();
+        await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+        await expect.poll(() => upgrades.length).toBe(1);
+      }
+
+      // The unselected affected entry crossed to v2 and quarantined its v1 bytes.
+      await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(page.getByRole('textbox', { name: 'Prompt text' }))
+        .toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+      // Selection never decides whether a conflict region appears.
+      await expect(page.getByRole('region', { name: 'Draft changed on the server' })).toHaveCount(0);
+      await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveValue(DIRTY_LEGACY_PROMPT);
+      await expect(retainedAlternative(page, 1).getByRole('group', { name: 'Retained values 1' }))
+        .toContainText(V2_AUTHORED_PROMPT[agentKey]);
+      await page.getByRole('tab', { name: 'Assembly' }).click();
+      await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
+      expect(await protectedStageIds(page)).toEqual(
+        v2ProtectedStageView(agentKey).map((row) => row.stage_id),
+      );
+
+      await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-unselected-A');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(page.getByRole('textbox', { name: 'Prompt text' }))
+        .toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+
+      const before = saves.length;
+      await page.getByRole('button', { name: 'Save Draft' }).click();
+      await expect.poll(() => saves.length).toBe(before + 1);
+      const body = JSON.stringify(saves[before].body);
+      expect(body).toContain(V2_AUTHORED_PROMPT[agentKey]);
+      expect(body).not.toContain('Edited');
+      expect(body).not.toContain(syntheticDraftDefinitions[agentKey].prompt_text);
+    });
+  }
+}
+
+test('the exact already_current 422 links to Assembly, leaves the form untouched, and is unreachable once v2 is installed', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+  const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route, _post, call) => (call === 0
+    ? fulfillJson(route, 422, ALREADY_CURRENT_REJECTION)
+    : fulfillJson(route, 200, syntheticUpgradeSuccess('architect', 1))));
+  await openWorkbench(page);
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+  const stageIdsBefore = await protectedStageIds(page);
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+
+  const issues = page.getByRole('region', { name: 'Server rejected this request' });
+  await expect(issues.getByRole('listitem')).toHaveCount(1);
+  await expect(issues).toContainText(
+    `${ALREADY_CURRENT_REJECTION.errors[0].field} — ${ALREADY_CURRENT_REJECTION.errors[0].code}`,
+  );
+  await expect(issues).toContainText(ALREADY_CURRENT_REJECTION.errors[0].message);
+  await expect(issues.getByRole('button', { name: 'Go to Assembly tab' })).toHaveCount(1);
+  expect(await protectedStageIds(page)).toEqual(stageIdsBefore);
+  await expect(page.getByText('Lock version').locator('..')).toContainText('0');
+  expect(upgrades).toHaveLength(1);
+
+  // A successful upgrade removes the only control that can issue the request, so
+  // an already-current v2 form structurally cannot retry it.
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await expect.poll(() => upgrades.length).toBe(2);
+  await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
+  await expect(assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }))
+    .toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Server rejected this request' })).toHaveCount(0);
+  expect(upgrades).toHaveLength(2);
+  expect(saves).toHaveLength(0);
+});
+
+for (const agentKey of ['architect', 'data_analyst', 'build_reviewer'] as const) {
+  test(`${DISPLAY_NAMES[agentKey]}: a pristine upgrade returns the authored-only prompt and exactly-once protected rows`, async ({ page }) => {
+    await installExactIdentityMock(page);
+    await installWorkbenchMock(page);
+    const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+      route,
+      200,
+      syntheticUpgradeSuccess(agentKey, 1),
+    ));
+    await openWorkbench(page);
+    await openAssemblyTab(page, DISPLAY_NAMES[agentKey]);
+    await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+    await expect.poll(() => upgrades.length).toBe(1);
+
+    const expected = v2ProtectedStageView(agentKey);
+    const stageIds = await protectedStageIds(page);
+    expect(stageIds).toEqual(expected.map((row) => row.stage_id));
+    expect(new Set(stageIds).size).toBe(stageIds.length);
+    for (const row of expected) {
+      const group = assemblyPanel(page).getByRole('group', { name: `Protected stage: ${row.label}` });
+      await expect(group).toHaveCount(1);
+      await expect(group).toContainText(row.display_text);
+    }
+    await page.getByRole('tab', { name: 'Prompt' }).click();
+    await expect(page.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+    // Even a pristine upgrade displaces the Graph Version 1 prompt, which is the
+    // only local copy left once the authored-only prompt is installed, so exactly
+    // one alternative is retained and its savable form is already v2.
+    await expect(retainedRegion(page).getByRole('group', { name: /^Retained alternative / }))
+      .toHaveCount(1);
+    await expect(retainedAlternative(page, 1)).toContainText(
+      'The server moved this role to Graph Version 2.',
+    );
+    await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(syntheticDraftDefinitions[agentKey].prompt_text);
+    await expect(retainedAlternative(page, 1).getByRole('group', { name: 'Retained values 1' }))
+      .toContainText(V2_AUTHORED_PROMPT[agentKey]);
+  });
+}
+
+test('a repeated same-content save is accepted with changed false and still advances the server lock', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route, save, call) => fulfillJson(route, 200, {
+    ...syntheticDraftSaveSuccess(save.agentKey, save.body, call + 1),
+    changed: call === 0,
+  }));
+  await openWorkbench(page);
+  await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(2);
+  expect(saves[1].body).toEqual({ ...saves[0].body, lock_version: 1 });
+  await expect(page.getByText('Lock version').locator('..')).toContainText('2');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Graph nodes' })
+    .getByRole('button', { name: 'Architect' })).toContainText('Needs test');
+});
+
+test('a legacy source response whose role or lock disagrees is contained without a write', async ({ page }) => {
+  const edited = oneCodePointEdit('data_analyst');
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    data_analyst: v1DraftWithPrompt('data_analyst', edited),
+  }));
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+  await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    422,
+    MANUAL_RESOLUTION_REJECTION,
+  ));
+  const sources = await installPostMock(page, SOURCE_ENDPOINT, (route) => fulfillJson(
+    route,
+    200,
+    // The lock the route reports has moved, which this client-only contract refuses.
+    syntheticLegacyPromptSource('data_analyst', 4),
+  ));
+  await openWorkbench(page);
+  await openAssemblyTab(page, 'Data Analyst');
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await expect(page.getByRole('region', { name: 'Server rejected this request' })).toBeVisible();
+
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'Unable to save draft because the server response was invalid.',
+  );
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(edited);
+  await expect(retainedRegion(page)).toHaveCount(0);
+  expect(sources).toHaveLength(1);
+  expect(saves).toHaveLength(0);
+});
+
+test('the forbidden-action rule fires on every banned name and spares the legitimate restore controls', () => {
+  // Asserted separately from the sweep so the sweep cannot pass merely because a
+  // matching control happened to be absent from the state it walked.
+  for (const forbidden of [
+    'Run isolated test', 'Approve draft', 'Reject draft', 'Review & publish',
+    'Publish draft', 'Publishes the release', 'Publishing', 'Release history', 'Rollback release',
+    // All four were missed while the stem was word-bounded, which is the wrong trade for
+    // one legitimate name and wrong toward #264's and #266's own publish-adjacent work.
+    'Republish release', 'Unpublish draft', 'Publisher settings', 'Published versions',
+  ]) {
+    expect(forbidsActionName(forbidden)).toBe(true);
+  }
+  for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
+  expect(ALLOWED_ACTION_NAMES).toHaveLength(3);
+  // An exempt name is removed from the string, not read as a licence for the rest of it.
+  expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
+});
+
+test('no control in the panel ever offers execution, review, publication, history, or rollback', async ({ page }) => {
+  const edited = oneCodePointEdit('data_analyst');
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    build_reviewer: syntheticV2DraftDefinition('build_reviewer'),
+    data_analyst: v1DraftWithPrompt('data_analyst', edited),
+  }));
+  await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    422,
+    MANUAL_RESOLUTION_REJECTION,
+  ));
+  await openWorkbench(page);
+  const panel = page.getByRole('tabpanel', { name: 'Agent Definitions' });
+  await expect(panel.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+  await expect(panel).toContainText('Isolated testing is not available in this release.');
+
+  // Put the legitimate `Restore published Graph Version 1 prompt` control on screen,
+  // so the sweep below is exercised in the state that used to be one away from a
+  // false alarm rather than only in the states where it is absent.
+  await openAssemblyTab(page, 'Data Analyst');
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }))
+    .toBeVisible();
+
+  const sweep = async () => {
+    const names = await panel.locator('button, a')
+      .evaluateAll((controls) => controls.map((control) => (
+        `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
+      )));
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(forbidsActionName(name)).toBe(false);
+    return names;
+  };
+
+  // v1 with the recovery control live, v1 plain, and v2 with custom-block controls.
+  const withRecovery = await sweep();
+  expect(withRecovery.some((name) => name.includes('Restore published Graph Version 1 prompt')))
+    .toBe(true);
+  for (const displayName of ['Architect', 'Build Reviewer']) {
+    await page.getByRole('navigation', { name: 'Graph nodes' })
+      .getByRole('button', { name: displayName }).click();
+    for (const tab of ['Prompt', 'Model', 'Output Schema', 'Assembly']) {
+      await page.getByRole('tab', { name: tab }).click();
+      await sweep();
+    }
+  }
+});
+
+test('a safe-field edit hides the published-source recovery until the rejection is provoked again', async ({ page }) => {
+  // M-8, characterized rather than fixed: clearing `responseIssues` on any edit
+  // withdraws the only route back to the published composite. Nothing is lost, but
+  // the admin has to re-provoke the 422. Pinned here so a future change is visible.
+  const edited = oneCodePointEdit('build_reviewer');
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWith({
+    build_reviewer: v1DraftWithPrompt('build_reviewer', edited),
+  }));
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
+  const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    422,
+    MANUAL_RESOLUTION_REJECTION,
+  ));
+  await openWorkbench(page);
+  await openAssemblyTab(page, 'Build Reviewer');
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+
+  const restore = page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' });
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(restore).toBeVisible();
+
+  await page.getByRole('tab', { name: 'Model' }).click();
+  await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.42');
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(restore).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Server rejected this request' })).toHaveCount(0);
+  // No bytes were lost: the persisted composite is still exactly what it was.
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(edited);
+
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await expect.poll(() => upgrades.length).toBe(2);
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(restore).toBeVisible();
+  expect(saves).toHaveLength(0);
+});
+
+test('the affected-role browser matrix cannot silently narrow', () => {
+  // Task 6's first round keyed every affected-role loop off the shared fixture copy
+  // of LEGACY_COMPOSITE_ROLES. Narrowing that copy removed seven tests from this file
+  // and still reported all-green, which is worse than a missing test because it looks
+  // like coverage. The loops now run off AFFECTED_ROLES above, and this asserts the
+  // fixture still agrees; the server's canonical transition list is joined to both by
+  // `test_every_affected_role_copy_matches_the_canonical_transition_list`.
+  expect([...AFFECTED_ROLES]).toEqual([...LEGACY_COMPOSITE_ROLES]);
+  expect(AFFECTED_ROLES).toHaveLength(2);
+  expect(new Set(AFFECTED_ROLES).size).toBe(AFFECTED_ROLES.length);
+  for (const agentKey of AFFECTED_ROLES) {
+    // Each role must really be a legacy composite in the fixture world, or the
+    // matrix would be running its sequences against a role with no published source.
+    expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).toBeTruthy();
+    expect(V2_AUTHORED_PROMPT[agentKey]).toBeTruthy();
+    expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).not.toEqual(V2_AUTHORED_PROMPT[agentKey]);
+  }
+});
+
+for (const agentKey of AFFECTED_ROLES) {
+  for (const operation of ['save', 'upgrade'] as const) {
+    test(`${DISPLAY_NAMES[agentKey]}: Keep local after a ${operation} 409 crossing to Graph Version 2 retains every alternative and resubmits no v1 bytes`, async ({ page }) => {
+      await installExactIdentityMock(page);
+      const workbenchRequestCount = await installWorkbenchMock(page);
+      const saves = await installSaveMock(page, (route, save, call) => (
+        operation === 'save' && call === 0
+          ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
+          : fulfillJson(route, 200, saveSuccessFor(save))));
+      const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+        route,
+        409,
+        syntheticNullCandidateConflict(0, 1, [agentKey]),
+      ));
+      await openWorkbench(page);
+      const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+      await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
+      const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+      const saved = syntheticDraftDefinitions[agentKey].prompt_text;
+
+      // A pre-existing retained v1 alternative with its own safe sentinels.
+      await prompt.fill(DIRTY_LEGACY_PROMPT);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-keep-A');
+      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.33');
+      await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('3333');
+      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.33');
+      await page.getByRole('tab', { name: 'Assembly' }).click();
+      await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+      expect(upgrades).toHaveLength(0);
+      await expect(retainedAlternative(page, 1)).toBeVisible();
+
+      // Distinct current-local sentinels, and a dirty prompt only where the reducer
+      // permits the operation to start at all.
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-keep-B');
+      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.44');
+      await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('4444');
+      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.44');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      if (operation === 'upgrade') {
+        await page.getByRole('button', { name: 'Restore saved prompt' }).click();
+        await expect(prompt).toHaveValue(saved);
+        await page.getByRole('tab', { name: 'Assembly' }).click();
+        await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+        await expect.poll(() => upgrades.length).toBe(1);
+      } else {
+        await page.getByRole('button', { name: 'Save Draft' }).click();
+        await expect.poll(() => saves.length).toBe(1);
+      }
+
+      const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
+      await expect(conflict).toBeVisible();
+      await expect(retainedAlternative(page, 2)).toBeVisible();
+      const idsBeforeKeep = await retainedRegion(page)
+        .getByRole('group', { name: /^Retained alternative / })
+        .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-retained-id') ?? ''));
+      expect(idsBeforeKeep).toHaveLength(2);
+
+      // Keep local closes the conflict WITHOUT discarding anything that was displaced.
+      await conflict.getByRole('button', { name: 'Keep local' }).click();
+      await expect(page.getByRole('region', { name: 'Draft changed on the server' })).toHaveCount(0);
+      const idsAfterKeep = await retainedRegion(page)
+        .getByRole('group', { name: /^Retained alternative / })
+        .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-retained-id') ?? ''));
+      expect(idsAfterKeep).toEqual(idsBeforeKeep);
+      await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveValue(DIRTY_LEGACY_PROMPT);
+      for (let index = 1; index <= 2; index += 1) {
+        const alternative = retainedAlternative(page, index);
+        await expect(alternative.getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+          .toHaveAttribute('aria-readonly', 'true');
+        // Every sanitized savable form is already on the server's Graph Version 2.
+        await expect(alternative.getByRole('group', { name: `Retained values ${index}` }))
+          .toContainText(V2_AUTHORED_PROMPT[agentKey]);
+        await expect(alternative.getByRole('group', { name: `Retained values ${index}` }))
+          .toContainText('Custom blocks');
+      }
+
+      // Keeping local keeps the safe fields, never the displaced v1 prompt or rules.
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-B');
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('4444');
+      await page.getByRole('tab', { name: 'Assembly' }).click();
+      await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
+
+      // Each retained ID still restores its own safe tuple independently after Keep local.
+      await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-A');
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('3333');
+      await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-B');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+
+      // The immediate PUT after Keep local carries none of the v1 or manual-only bytes.
+      const before = saves.length;
+      await page.getByRole('button', { name: 'Save Draft' }).click();
+      await expect.poll(() => saves.length).toBe(before + 1);
+      const body = JSON.stringify(saves[before].body);
+      expect(body).toContain(V2_AUTHORED_PROMPT[agentKey]);
+      expect(body).not.toContain(saved);
+      expect(body).not.toContain('Edited');
+      expect(body).not.toContain('nonce');
+      expect(saves[before].body.candidate.assembly_rules)
+        .toEqual({ format_version: 2, custom_blocks: [] });
+      await expect.poll(workbenchRequestCount).toBe(1);
+    });
+  }
+}

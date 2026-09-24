@@ -1,8 +1,24 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { syntheticAgentDefinitionWorkbench } from '../../../../tests/fixtures/mocks';
+import {
+  ALREADY_CURRENT_REJECTION,
+  DIRTY_LEGACY_PROMPT,
+  MANUAL_RESOLUTION_REJECTION,
+  PUBLISHED_V1_PROMPT_SOURCE,
+  V2_AUTHORED_PROMPT,
+  syntheticAgentDefinitionWorkbench,
+  syntheticLegacyPromptSource,
+  syntheticNullCandidateConflict,
+  syntheticUpgradeSuccess,
+  syntheticV2DraftDefinition,
+} from '../../../../tests/fixtures/mocks';
+import {
+  ALLOWED_ACTION_NAMES,
+  forbidsActionName,
+} from '../../../../tests/fixtures/forbiddenActionNames';
 import type {
   AgentKey,
+  AssemblyRulesV2,
   DraftSaveConflictResponse,
   DraftSaveRequest,
   DraftSaveSuccessResponse,
@@ -10,6 +26,8 @@ import type {
 } from '../../../api/agentDefinitions';
 import { AdminPage } from '../AdminPage';
 import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
+import { LEGACY_COMPOSITE_ROLES } from './draftEditorState';
+import { useDraftEditor } from './useDraftEditor';
 
 vi.mock('../UsageDashboard', () => ({ UsageDashboard: () => <div>Usage panel fixture</div> }));
 vi.mock('../../Feedback/FeedbackDashboard', () => ({ FeedbackDashboard: () => <div>Feedback panel fixture</div> }));
@@ -29,16 +47,40 @@ const NODE_ORDER = [
   'Deck Reviewer',
 ];
 
-const FORBIDDEN_ACTION_NAME = /\brun\b|approve|reject|review\s*&\s*publish|publish|history|rollback/i;
+/**
+ * The affected-role matrix for this file, owned here rather than hand-typed at each
+ * `it.each`. Two matrices carried their own copy of the pair and a third hand-typed the
+ * display-name-to-key mapping, so narrowing any of them dropped the Build Reviewer half
+ * with an all-green report. The agreement test below makes narrowing this RED, and the
+ * server's canonical transition list is joined to `LEGACY_COMPOSITE_ROLES` by
+ * `test_every_affected_role_copy_matches_the_canonical_transition_list`.
+ */
+const AFFECTED_ROLES = [
+  ['Data Analyst', 'data_analyst'],
+  ['Build Reviewer', 'build_reviewer'],
+] as const;
+const AFFECTED_ROLE_KEYS = AFFECTED_ROLES.map(([, agentKey]) => agentKey);
 
 function interactiveControls() {
   return [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link')];
 }
 
 function expectNoForbiddenActionNames() {
-  for (const control of interactiveControls()) {
-    expect(control).not.toHaveAccessibleName(FORBIDDEN_ACTION_NAME);
-  }
+  // `name` as a predicate hands the sweep each control's *computed* accessible name, so
+  // aria-labelledby, `title` and `alt` resolve exactly as a screen reader resolves them,
+  // and the shared rule decides. Collecting the offenders reports the names rather than
+  // DOM nodes, which is what a failure needs to be actionable.
+  const offenders: string[] = [];
+  const collect = (accessibleName: string) => {
+    if (!forbidsActionName(accessibleName)) return false;
+    offenders.push(accessibleName);
+    return true;
+  };
+  screen.queryAllByRole('button', { name: collect });
+  screen.queryAllByRole('link', { name: collect });
+  expect(offenders).toEqual([]);
+  // Not vacuous: the sweep must have had at least one control to walk.
+  expect(interactiveControls().length).toBeGreaterThan(0);
 }
 
 function mockFetchResponse(status: number, body: unknown) {
@@ -178,6 +220,57 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('the forbidden-action guard', () => {
+  it('fires on every banned name, including the four a word-bounded publish stem spared', () => {
+    for (const forbidden of [
+      'Run isolated test', 'Approve draft', 'Reject draft', 'Review & publish',
+      'Publish draft', 'Publishes the release', 'Publishing', 'Release history',
+      'Rollback release',
+      // Regression guard: all four of these were missed while the stem was word-bounded.
+      'Republish release', 'Unpublish draft', 'Publisher settings', 'Published versions',
+    ]) {
+      expect(forbidsActionName(forbidden)).toBe(true);
+    }
+  });
+
+  it('spares the panel\'s legitimate restore controls without spared names shielding a stem', () => {
+    for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
+    expect(ALLOWED_ACTION_NAMES).toHaveLength(3);
+    // An exempt name is removed, not treated as a licence for the rest of the string.
+    expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
+    expect(forbidsActionName('Restore retained values, then approve')).toBe(true);
+  });
+
+  it('spares every other name the panel actually renders', () => {
+    for (const name of [
+      'Save Draft', 'Keep local', 'Reload server', 'Upgrade protected assembly',
+      'Add custom block After authored prompt', 'Add custom block After deck brief',
+      'Add custom block After environment constraints', 'Go to Assembly tab',
+      'Go to Prompt tab', 'Delete custom block 1 at After authored prompt',
+      'Move custom block 1 up', 'Move custom block 1 down', 'Discard retained values',
+      ...NODE_ORDER,
+    ]) {
+      expect(forbidsActionName(name)).toBe(false);
+    }
+  });
+});
+
+describe('the affected-role Vitest matrix', () => {
+  it('cannot silently narrow', () => {
+    expect([...AFFECTED_ROLE_KEYS]).toEqual([...LEGACY_COMPOSITE_ROLES]);
+    expect(AFFECTED_ROLES).toHaveLength(2);
+    expect(new Set(AFFECTED_ROLE_KEYS).size).toBe(AFFECTED_ROLE_KEYS.length);
+    for (const [displayName, agentKey] of AFFECTED_ROLES) {
+      // The display name each matrix clicks must be the one the panel renders for that
+      // key, or a narrowed or mistyped pair would select the wrong role and still pass.
+      expect(NODE_ORDER).toContain(displayName);
+      expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).toBeTruthy();
+      expect(V2_AUTHORED_PROMPT[agentKey]).toBeTruthy();
+      expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).not.toEqual(V2_AUTHORED_PROMPT[agentKey]);
+    }
+  });
+});
+
 describe('AgentDefinitionWorkbench', () => {
   it('shows a contained loading status until the workbench request resolves', async () => {
     let resolveResponse!: (response: object) => void;
@@ -232,12 +325,12 @@ describe('AgentDefinitionWorkbench', () => {
     );
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Assembly' }));
-    expect(screen.getByRole('tabpanel', { name: 'Assembly' })).toHaveTextContent(
-      'slide_frame_constraints',
-    );
-    expect(screen.getByRole('tabpanel', { name: 'Assembly' })).toHaveTextContent(
-      'langchain.with_structured_output',
-    );
+    const assembly = screen.getByRole('tabpanel', { name: 'Assembly' });
+    expect(within(assembly).getByRole('group', { name: 'Protected stage: Slide frame constraints' }))
+      .toBeVisible();
+    expect(within(assembly).getByRole('group', { name: 'Protected stage: Structured-output binding' }))
+      .toHaveTextContent('langchain.with_structured_output');
+    expect(within(assembly).getByText('Protected assembly version 1')).toBeVisible();
   });
 
   it('replaces the model definition tabs with only the deterministic Foreman explanation', async () => {
@@ -572,7 +665,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
     expect(recovery).toHaveTextContent('Architect A3');
-    fireEvent.click(within(recovery).getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(within(recovery).getByRole('button', { name: 'Discard retained values' }));
     expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect server A1');
     expect(putCalls(fetchMock)).toHaveLength(1);
@@ -707,5 +800,777 @@ describe('AgentDefinitionWorkbench', () => {
       .getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
     expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET')).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+});
+
+// ============================================================
+// #265 protected-assembly upgrade, source recovery, custom blocks
+// ============================================================
+
+const UPGRADE_SUFFIX = '/protected-assembly-upgrade';
+const SOURCE_SUFFIX = '/legacy-prompt-source';
+
+type RouteResponder = (
+  agentKey: AgentKey,
+  body: Record<string, unknown>,
+  call: number,
+) => Promise<object> | object;
+
+function mockWorkbenchApi(routes: {
+  put?: RouteResponder;
+  upgrade?: RouteResponder;
+  source?: RouteResponder;
+}) {
+  const counts = { put: 0, upgrade: 0, source: 0 };
+  const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+    if (init?.method === 'GET') return apiResponse(200, syntheticAgentDefinitionWorkbench);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (url.endsWith(UPGRADE_SUFFIX)) {
+      const agentKey = url.slice(0, -UPGRADE_SUFFIX.length).split('/').at(-1) as AgentKey;
+      if (!routes.upgrade) throw new Error('unexpected upgrade POST');
+      return routes.upgrade(agentKey, body, counts.upgrade++);
+    }
+    if (url.endsWith(SOURCE_SUFFIX)) {
+      const agentKey = url.slice(0, -SOURCE_SUFFIX.length).split('/').at(-1) as AgentKey;
+      if (!routes.source) throw new Error('unexpected legacy-source POST');
+      return routes.source(agentKey, body, counts.source++);
+    }
+    const agentKey = url.split('/').at(-1) as AgentKey;
+    if (!routes.put) throw new Error('unexpected PUT');
+    return routes.put(agentKey, body, counts.put++);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+function callsTo(fetchMock: ReturnType<typeof vi.fn>, suffix: string) {
+  return fetchMock.mock.calls.filter(([url]) => String(url).endsWith(suffix));
+}
+
+function upgradeCalls(fetchMock: ReturnType<typeof vi.fn>) {
+  return callsTo(fetchMock, UPGRADE_SUFFIX);
+}
+
+function sourceCalls(fetchMock: ReturnType<typeof vi.fn>) {
+  return callsTo(fetchMock, SOURCE_SUFFIX);
+}
+
+async function selectRole(name: string) {
+  const navigation = await loadedNodeNavigation();
+  fireEvent.click(within(navigation).getByRole('button', { name: new RegExp(name) }));
+  return navigation;
+}
+
+function assemblyPanel() {
+  fireEvent.click(screen.getByRole('tab', { name: 'Assembly' }));
+  return screen.getByRole('tabpanel', { name: 'Assembly' });
+}
+
+function promptPanel() {
+  fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
+  return screen.getByRole('tabpanel', { name: 'Prompt' });
+}
+
+describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
+  it('sends exactly one lock-only POST and installs the server-authored v2 prompt', async () => {
+    const fetchMock = mockWorkbenchApi({
+      upgrade: (agentKey) => apiResponse(200, syntheticUpgradeSuccess(agentKey, 1)),
+      put: (agentKey, body) => apiResponse(200, {
+        ...syntheticUpgradeSuccess(agentKey, 2),
+        definition: {
+          ...syntheticV2DraftDefinition(agentKey),
+          prompt_text: (body.candidate as { prompt_text: string }).prompt_text,
+        },
+      }),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await selectRole('Data Analyst');
+    const panel = assemblyPanel();
+
+    // v1 offers no custom-block control at all.
+    expect(within(panel).queryByRole('button', { name: /^Add custom block/ })).not.toBeInTheDocument();
+    expect(within(panel).getByText('Custom text blocks require the Graph Version 2 protected assembly.'))
+      .toBeVisible();
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
+    const [url, init] = upgradeCalls(fetchMock)[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/draft\/data_analyst\/protected-assembly-upgrade$/);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ lock_version: 0 });
+    expect(String(init.body)).toBe('{"lock_version":0}');
+
+    await waitFor(() => expect(screen.getByText('Lock version').parentElement)
+      .toHaveTextContent('Lock version1'));
+    expect(promptPanel()).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+
+    // Only now are custom-block controls available.
+    const upgraded = assemblyPanel();
+    expect(within(upgraded).getByRole('button', { name: 'Add custom block After authored prompt' }))
+      .toBeEnabled();
+    expect(within(upgraded).getByRole('button', { name: 'Add custom block After environment constraints' }))
+      .toBeEnabled();
+    expect(within(upgraded).queryByRole('button', { name: 'Upgrade protected assembly' }))
+      .not.toBeInTheDocument();
+    expect(within(upgraded).getByRole('group', { name: 'Protected stage: Untrusted-data opening delimiter' }))
+      .toBeVisible();
+
+    // The next ordinary PUT carries the authored-only v2 prompt plus v2 rules.
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    const putBody = JSON.parse(String((putCalls(fetchMock)[0][1] as RequestInit).body)) as DraftSaveRequest;
+    expect(putBody).toEqual({
+      lock_version: 1,
+      candidate: {
+        prompt_text: V2_AUTHORED_PROMPT.data_analyst,
+        model: structuredClone(modelNode('data_analyst').draft.model),
+        assembly_rules: { format_version: 2, custom_blocks: [] },
+      },
+    });
+  });
+
+  it.each(AFFECTED_ROLES)(
+    '%s with a dirty prompt sends no POST and retains the exact bytes for manual reapplication',
+    async (displayName) => {
+      const fetchMock = mockWorkbenchApi({});
+      render(<AgentDefinitionWorkbench />);
+      await selectRole(displayName);
+      const prompt = screen.getByRole('textbox', { name: 'Prompt text' });
+      const savedPrompt = String((prompt as HTMLTextAreaElement).value);
+      fireEvent.change(prompt, { target: { value: DIRTY_LEGACY_PROMPT } });
+
+      fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+
+      expect(upgradeCalls(fetchMock)).toHaveLength(0);
+      expect(putCalls(fetchMock)).toHaveLength(0);
+      expect(sourceCalls(fetchMock)).toHaveLength(0);
+      // Not one byte of the dirty prompt changed.
+      expect(promptPanel()).toBeVisible();
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(DIRTY_LEGACY_PROMPT);
+
+      const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+      const retained = within(recovery).getByRole('group', { name: 'Retained alternative 1' });
+      // The entry container and its values group must not be prefix-related, or any
+      // name-substring query resolves to both.
+      expect(within(recovery).getAllByRole('group', { name: /Retained alternative/ })).toHaveLength(1);
+      expect(within(recovery).getAllByRole('group', { name: /Retained values/ })).toHaveLength(1);
+      expect(within(retained).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveValue(DIRTY_LEGACY_PROMPT);
+      expect(within(retained).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveAttribute('readonly');
+
+      // Local restore returns the saved prompt without any request.
+      fireEvent.click(screen.getByRole('button', { name: 'Restore saved prompt' }));
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(savedPrompt);
+      expect(within(retained).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveValue(DIRTY_LEGACY_PROMPT);
+      expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method !== 'GET'))
+        .toHaveLength(0);
+    },
+  );
+
+  it('links a manual-resolution 422 to the Prompt tab and offers only the server-backed recovery', async () => {
+    const fetchMock = mockWorkbenchApi({
+      upgrade: () => apiResponse(422, MANUAL_RESOLUTION_REJECTION),
+      source: () => apiResponse(200, syntheticLegacyPromptSource('data_analyst', 0)),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await selectRole('Data Analyst');
+    const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+
+    const issues = await screen.findByRole('region', { name: 'Server rejected this request' });
+    expect(issues).toHaveTextContent('prompt_text — legacy_prompt_manual_resolution_required');
+    expect(issues).toHaveTextContent(MANUAL_RESOLUTION_REJECTION.errors[0].message);
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(within(issues).getByRole('button', { name: 'Go to Prompt tab' }));
+    expect(screen.getByRole('tab', { name: 'Prompt' })).toHaveAttribute('aria-selected', 'true');
+    // Nothing was saved, retried, rewritten, or upgraded.
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(savedPrompt);
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toBeEnabled();
+    expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
+
+    // Make the local prompt differ from the saved prompt before recovering, so the two
+    // quarantined alternatives carry distinguishable bytes. Restoring a retained
+    // alternative is the only prompt change that keeps the server verdict on screen.
+    const dirtyAttempt = screen.getByRole('textbox', { name: 'Prompt text' });
+    fireEvent.change(dirtyAttempt, { target: { value: DIRTY_LEGACY_PROMPT } });
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    expect(promptPanel()).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore saved prompt' }));
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(2));
+    expect(promptPanel()).toBeVisible();
+    fireEvent.click(within(screen.getByRole('group', { name: 'Retained alternative 1' }))
+      .getByRole('button', { name: 'Restore retained values' }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(DIRTY_LEGACY_PROMPT);
+
+    const recover = screen.getByRole('button', { name: 'Restore published Graph Version 1 prompt' });
+    fireEvent.click(recover);
+    await waitFor(() => expect(sourceCalls(fetchMock)).toHaveLength(1));
+    const [sourceUrl, sourceInit] = sourceCalls(fetchMock)[0] as [string, RequestInit];
+    expect(sourceUrl).toMatch(/\/draft\/data_analyst\/legacy-prompt-source$/);
+    expect(sourceInit.method).toBe('POST');
+    expect(String(sourceInit.body)).toBe('{"lock_version":0}');
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(PUBLISHED_V1_PROMPT_SOURCE.data_analyst));
+    // Recovery never writes: the lock is unchanged and no PUT or second POST fired.
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(upgradeCalls(fetchMock)).toHaveLength(2);
+
+    // Three alternatives: the refused dirty attempt, then the edited saved form and the
+    // edited local form the recovery quarantined. The last two are deliberately
+    // distinct, so the assertion cannot pass on the wrong order or a duplicated form.
+    const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+    expect(within(recovery).getAllByRole('group', { name: /^Retained alternative \d+$/ })).toHaveLength(3);
+    expect(within(recovery).getAllByRole('group', { name: /^Retained values \d+$/ })).toHaveLength(3);
+    expect(savedPrompt).not.toBe(DIRTY_LEGACY_PROMPT);
+    expect(within(recovery).getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
+      .map((box) => (box as HTMLTextAreaElement).value))
+      .toEqual([DIRTY_LEGACY_PROMPT, savedPrompt, DIRTY_LEGACY_PROMPT]);
+  });
+
+  it.each([
+    'legacy_prompt_source_unsupported',
+    'legacy_prompt_source_not_required',
+    'legacy_prompt_source_unavailable',
+  ])('surfaces the %s recovery rejection without writing anything', async (code) => {
+    const rejection = {
+      code: 'invalid_draft',
+      errors: [{ field: 'prompt_text', code, message: `Recovery refused: ${code}.` }],
+    };
+    const fetchMock = mockWorkbenchApi({
+      upgrade: () => apiResponse(422, MANUAL_RESOLUTION_REJECTION),
+      source: () => apiResponse(422, rejection),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await selectRole('Build Reviewer');
+    const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await screen.findByRole('region', { name: 'Server rejected this request' });
+    fireEvent.click(promptPanel().querySelector('button:last-of-type')!);
+
+    await waitFor(() => expect(sourceCalls(fetchMock)).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Server rejected this request' }))
+      .toHaveTextContent(`Recovery refused: ${code}.`));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(savedPrompt);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
+  });
+
+  it('links an already_current 422 to the Assembly tab and changes no local byte', async () => {
+    const fetchMock = mockWorkbenchApi({ upgrade: () => apiResponse(422, ALREADY_CURRENT_REJECTION) });
+    render(<AgentDefinitionWorkbench />);
+    await selectRole('Architect');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect local edit' } });
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+
+    const issues = await screen.findByRole('region', { name: 'Server rejected this request' });
+    expect(issues).toHaveTextContent('protected_assembly.version — already_current');
+    expect(issues).toHaveTextContent('Protected assembly is already current.');
+    fireEvent.click(within(issues).getByRole('button', { name: 'Go to Assembly tab' }));
+    expect(screen.getByRole('tab', { name: 'Assembly' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(screen.getByRole('tabpanel', { name: 'Assembly' }))
+      .getByRole('button', { name: 'Upgrade protected assembly' })).toBeEnabled();
+
+    // No reload, save, retry, or second state check.
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET'))
+      .toHaveLength(1);
+    expect(promptPanel()).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect local edit');
+    expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+  });
+
+  it('one aggregate gate blocks every second operation, across roles, until the first settles', async () => {
+    let releaseUpgrade!: (response: object) => void;
+    const held = new Promise<object>((resolve) => { releaseUpgrade = resolve; });
+    const fetchMock = mockWorkbenchApi({
+      upgrade: () => held,
+      put: (agentKey, body) => apiResponse(200, saveSuccess(
+        agentKey,
+        body.candidate as EditableModelDraft,
+        2,
+      )),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await selectRole('Data Analyst');
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+
+    // Same role: the prompt control is disabled but safe model fields are not.
+    expect(within(promptPanel()).getByRole('textbox', { name: 'Prompt text' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    const maxTokens = screen.getByRole('spinbutton', { name: 'Maximum tokens' });
+    expect(maxTokens).toBeEnabled();
+    fireEvent.change(maxTokens, { target: { value: '4096' } });
+    expect(maxTokens).toHaveValue(4096);
+
+    // A second Upgrade, and a Save on another role, issue no request at all.
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+
+    releaseUpgrade(apiResponse(200, syntheticUpgradeSuccess('data_analyst', 1)));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+
+    // The safe edit made while pending survived the upgrade.
+    fireEvent.click(within(navigation).getByRole('button', { name: /Data Analyst/ }));
+    expect(promptPanel()).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(4096);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    const body = JSON.parse(String((putCalls(fetchMock)[0][1] as RequestInit).body)) as DraftSaveRequest;
+    expect(body.lock_version).toBe(1);
+    expect(body.candidate.prompt_text).toBe(V2_AUTHORED_PROMPT.data_analyst);
+    expect(body.candidate.model.max_tokens).toBe(4096);
+  });
+
+  it('a pending Save blocks Upgrade and SourceRecovery on every role', async () => {
+    let releasePut!: (response: object) => void;
+    const held = new Promise<object>((resolve) => { releasePut = resolve; });
+    const fetchMock = mockWorkbenchApi({ put: () => held });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await selectRole('Architect');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(putCalls(fetchMock)).toHaveLength(1);
+
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(0);
+    fireEvent.click(within(navigation).getByRole('button', { name: /Data Analyst/ }));
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(0);
+
+    releasePut(apiResponse(200, saveSuccess('architect', {
+      prompt_text: 'Architect A2',
+      model: structuredClone(modelNode('architect').draft.model),
+    }, 1)));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+    expect(upgradeCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('edits custom blocks locally and sends them only on an explicit Save', async () => {
+    const fetchMock = mockWorkbenchApi({
+      upgrade: (agentKey) => apiResponse(200, syntheticUpgradeSuccess(agentKey, 1)),
+      put: (agentKey, body) => apiResponse(200, {
+        ...syntheticUpgradeSuccess(agentKey, 2),
+        definition: syntheticV2DraftDefinition(agentKey, {
+          prompt_text: (body.candidate as { prompt_text: string }).prompt_text,
+          assembly_rules: (body.candidate as { assembly_rules: AssemblyRulesV2 }).assembly_rules,
+        }),
+      }),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await selectRole('Build Reviewer');
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
+
+    const panel = assemblyPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Add custom block After deck-brief re-review' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Add custom block After deck-brief re-review' }));
+    const deckGroup = within(assemblyPanel())
+      .getByRole('group', { name: 'Custom blocks: After deck-brief re-review' });
+    const blocks = within(deckGroup).getAllByRole('group', { name: /^Custom block \d at/ });
+    expect(blocks).toHaveLength(2);
+    fireEvent.change(within(blocks[0]).getByRole('textbox', { name: 'Block text' }), {
+      target: { value: 'first deck note' },
+    });
+    fireEvent.change(within(blocks[1]).getByRole('textbox', { name: 'Block text' }), {
+      target: { value: 'second deck note' },
+    });
+    fireEvent.change(within(blocks[1]).getByRole('combobox', { name: 'Condition' }), {
+      target: { value: 'payload_has_deck_brief' },
+    });
+    expect(within(navigation).getByRole('button', { name: /Build Reviewer/ })).toHaveTextContent('Unsaved');
+    // Editing, reordering, and deleting never write.
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Move up' }));
+    const reordered = within(within(assemblyPanel())
+      .getByRole('group', { name: 'Custom blocks: After deck-brief re-review' }))
+      .getAllByRole('group', { name: /^Custom block \d at/ });
+    expect(within(reordered[0]).getByRole('textbox', { name: 'Block text' })).toHaveValue('second deck note');
+    expect(within(reordered[1]).getByRole('textbox', { name: 'Block text' })).toHaveValue('first deck note');
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    const body = JSON.parse(String((putCalls(fetchMock)[0][1] as RequestInit).body)) as DraftSaveRequest;
+    const sent = body.candidate.assembly_rules;
+    expect(sent?.format_version).toBe(2);
+    expect(sent?.custom_blocks.map((block) => [block.anchor, block.condition, block.text])).toEqual([
+      ['after_deck_brief', 'payload_has_deck_brief', 'second deck note'],
+      ['after_deck_brief', 'always', 'first deck note'],
+    ]);
+    for (const block of sent?.custom_blocks ?? []) {
+      expect(block.block_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(block.kind).toBe('custom_text');
+    }
+    expect(new Set((sent?.custom_blocks ?? []).map((block) => block.block_id)).size).toBe(2);
+
+    fireEvent.click(within(assemblyPanel())
+      .getAllByRole('button', { name: 'Delete' })[0]);
+    expect(within(within(assemblyPanel())
+      .getByRole('group', { name: 'Custom blocks: After deck-brief re-review' }))
+      .getAllByRole('group', { name: /^Custom block \d at/ })).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('renders the authoritative block-id and cross-anchor 422 issues in exact server order', async () => {
+    const errors = [
+      {
+        field: 'candidate.assembly_rules.custom_blocks.0.block_id',
+        code: 'strict_type',
+        message: 'Custom block ID must be a UUID string.',
+      },
+      {
+        field: 'candidate.assembly_rules',
+        code: 'invalid_protected_placement',
+        message: 'Assembly rules must satisfy the persisted assembly contract.',
+      },
+    ];
+    const fetchMock = mockWorkbenchApi({
+      upgrade: (agentKey) => apiResponse(200, syntheticUpgradeSuccess(agentKey, 1)),
+      put: () => apiResponse(422, { code: 'invalid_draft', errors }),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await selectRole('Architect');
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Add custom block After authored prompt' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    const issues = await screen.findByRole('region', { name: 'Server rejected this request' });
+    expect([...issues.querySelectorAll('li')].map((item) => item.querySelector('p')?.textContent)).toEqual([
+      'candidate.assembly_rules.custom_blocks.0.block_id — strict_type',
+      'candidate.assembly_rules — invalid_protected_placement',
+    ]);
+    expect(issues).toHaveTextContent('Custom block ID must be a UUID string.');
+    expect(issues).toHaveTextContent('Assembly rules must satisfy the persisted assembly contract.');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('adopts a v2 conflict winner, quarantines legacy bytes, and never puts them back', async () => {
+    const fetchMock = mockWorkbenchApi({
+      put: (agentKey, body, call) => (call === 0
+        ? apiResponse(409, (() => {
+          const conflict = saveConflict(body as unknown as DraftSaveRequest);
+          conflict.server.definitions.data_analyst = syntheticV2DraftDefinition('data_analyst');
+          return conflict;
+        })())
+        : apiResponse(200, {
+          ...syntheticUpgradeSuccess(agentKey, 2),
+          definition: syntheticV2DraftDefinition(agentKey),
+        })),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await selectRole('Data Analyst');
+    const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: DIRTY_LEGACY_PROMPT } });
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.55' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    const conflictRegion = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(within(conflictRegion).getByRole('group', { name: 'Server values' }))
+      .toHaveTextContent(V2_AUTHORED_PROMPT.data_analyst);
+    expect(promptPanel()).toBeVisible();
+    // The v1 composite is gone from every savable form and lives only as bytes.
+    expect(screen.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+    const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+    expect(within(recovery).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+      .toHaveValue(DIRTY_LEGACY_PROMPT);
+
+    fireEvent.click(within(conflictRegion).getByRole('button', { name: 'Keep local' }));
+    expect(screen.queryByRole('region', { name: 'Draft changed on the server' })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.55);
+
+    // Restoring the retained alternative re-sanitizes the prompt against v2.
+    fireEvent.click(within(screen.getByRole('region', { name: 'Values retained for recovery' }))
+      .getByRole('button', { name: 'Restore retained values' }));
+    expect(promptPanel()).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Prompt text' }))
+      .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+    const body = JSON.parse(String((putCalls(fetchMock)[1][1] as RequestInit).body)) as DraftSaveRequest;
+    expect(body.lock_version).toBe(1);
+    expect(body.candidate.prompt_text).toBe(V2_AUTHORED_PROMPT.data_analyst);
+    expect(body.candidate.prompt_text).not.toBe(DIRTY_LEGACY_PROMPT);
+    expect(body.candidate.prompt_text).not.toBe(savedPrompt);
+    expect(body.candidate.assembly_rules).toEqual({ format_version: 2, custom_blocks: [] });
+    expect(within(navigation).getByRole('button', { name: /Data Analyst/ })).toBeVisible();
+  });
+
+  it('reconciles an upgrade 409 to v2 across every role without surfacing already_current', async () => {
+    const fetchMock = mockWorkbenchApi({
+      upgrade: () => apiResponse(409, syntheticNullCandidateConflict(0, 1, [...AFFECTED_ROLE_KEYS])),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await selectRole('Data Analyst');
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+
+    const conflictRegion = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(conflictRegion).toHaveTextContent('Expected lock 0');
+    expect(conflictRegion).toHaveTextContent('Current lock 1');
+    // No candidate was submitted, so no Submitted values group exists.
+    expect(within(conflictRegion).queryByRole('group', { name: 'Submitted values' })).not.toBeInTheDocument();
+    expect(within(conflictRegion).getByRole('group', { name: 'Server values' }))
+      .toHaveTextContent(V2_AUTHORED_PROMPT.data_analyst);
+    expect(screen.queryByText('Protected assembly is already current.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
+
+    // Both affected roles reconciled to v2; the unaffected role stayed on v1.
+    expect(within(assemblyPanel()).queryByRole('button', { name: 'Upgrade protected assembly' }))
+      .not.toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Build Reviewer/ }));
+    expect(within(assemblyPanel()).getByRole('button', { name: 'Add custom block After deck-brief re-review' }))
+      .toBeEnabled();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    expect(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' })).toBeEnabled();
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('keeps an unaffected role losslessly editable while another role upgrades', async () => {
+    let releaseUpgrade!: (response: object) => void;
+    const held = new Promise<object>((resolve) => { releaseUpgrade = resolve; });
+    const fetchMock = mockWorkbenchApi({ upgrade: () => held });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await selectRole('Data Analyst');
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /Fixer/ }));
+    const prompt = promptPanel().querySelector('textarea')!;
+    expect(prompt).toBeEnabled();
+    fireEvent.change(prompt, { target: { value: 'Fixer lossless edit' } });
+    expect(prompt).toHaveValue('Fixer lossless edit');
+    expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
+
+    releaseUpgrade(apiResponse(200, syntheticUpgradeSuccess('data_analyst', 1)));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Fixer lossless edit');
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('persists role, tab, and Admin-tab state across an upgrade without another GET', async () => {
+    const fetchMock = mockWorkbenchApi({
+      upgrade: (agentKey) => apiResponse(200, syntheticUpgradeSuccess(agentKey, 1)),
+    });
+    render(<AdminPage />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent Definitions' }));
+    const navigation = await loadedNodeNavigation();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Data Analyst/ }));
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
+    fireEvent.click(within(assemblyPanel())
+      .getByRole('button', { name: 'Add custom block After authored prompt' }));
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Usage' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent Definitions' }));
+
+    expect(within(screen.getByRole('navigation', { name: 'Graph nodes' }))
+      .getByRole('button', { name: /Data Analyst/ })).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByRole('tab', { name: 'Assembly' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(screen.getByRole('tabpanel', { name: 'Assembly' }))
+      .getAllByRole('group', { name: /^Custom block \d at/ })).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET'))
+      .toHaveLength(1);
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+  });
+});
+
+/**
+ * Drives `useDraftEditor` through controls that are never disabled, so the hook's own
+ * shared request-ID gate is the only thing that can stop a second request. A test that
+ * goes through `DefinitionEditor` cannot prove this: the button's `disabled` attribute
+ * masks the hook, and the DOM is not the state invariant.
+ */
+function GateHarness() {
+  const editor = useDraftEditor(syntheticAgentDefinitionWorkbench);
+  const operations: Array<[string, () => Promise<void>]> = [
+    ['save architect', () => editor.save('architect')],
+    ['save builder', () => editor.save('builder')],
+    ['upgrade architect', () => editor.upgradeProtectedAssembly('architect')],
+    ['upgrade builder', () => editor.upgradeProtectedAssembly('builder')],
+    ['recover data analyst', () => editor.restorePublishedV1Prompt('data_analyst')],
+  ];
+  // Pairs fired inside one handler never see a re-render, so the hook's shared
+  // in-flight ref is the only guard the second call can meet.
+  const sameTickPairs: Array<[string, () => void]> = [
+    ['double upgrade architect', () => {
+      void editor.upgradeProtectedAssembly('architect');
+      void editor.upgradeProtectedAssembly('architect');
+    }],
+    ['save then upgrade architect', () => {
+      void editor.save('architect');
+      void editor.upgradeProtectedAssembly('architect');
+    }],
+    ['upgrade then recover', () => {
+      void editor.upgradeProtectedAssembly('architect');
+      void editor.restorePublishedV1Prompt('data_analyst');
+    }],
+    ['recover then save builder', () => {
+      void editor.restorePublishedV1Prompt('data_analyst');
+      void editor.save('builder');
+    }],
+  ];
+  return (
+    <>
+      {operations.map(([name, run]) => (
+        <button key={name} type="button" onClick={() => { void run(); }}>{`harness ${name}`}</button>
+      ))}
+      {sameTickPairs.map(([name, run]) => (
+        <button key={name} type="button" onClick={run}>{`harness ${name}`}</button>
+      ))}
+    </>
+  );
+}
+
+describe('prompt-change backstop reaches the retained-forms controls', () => {
+  it.each(AFFECTED_ROLES)(
+    '%s: restoring an alternative mid-Upgrade restores safe fields but not the prompt',
+    async (displayName, agentKey) => {
+      let releaseUpgrade!: (response: object) => void;
+      const held = new Promise<object>((resolve) => { releaseUpgrade = resolve; });
+      const fetchMock = mockWorkbenchApi({ upgrade: () => held });
+      render(<AgentDefinitionWorkbench />);
+      await selectRole(displayName);
+      const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
+
+      // Four clicks reach the cell: dirty Upgrade (refused, retains) → Restore saved
+      // prompt → Upgrade (now in flight) → Restore retained values.
+      fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: DIRTY_LEGACY_PROMPT } });
+      fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.66' } });
+      fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+      expect(upgradeCalls(fetchMock)).toHaveLength(0);
+      expect(promptPanel()).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: 'Restore saved prompt' }));
+      fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+      expect(upgradeCalls(fetchMock)).toHaveLength(1);
+
+      // The prompt control is disabled, but the retained-forms controls are not, which
+      // is why the reducer and not the DOM has to hold the invariant.
+      expect(within(promptPanel()).getByRole('textbox', { name: 'Prompt text' })).toBeDisabled();
+      const alternative = screen.getByRole('group', { name: 'Retained alternative 1' });
+      const restore = within(alternative).getByRole('button', { name: 'Restore retained values' });
+      expect(restore).toBeEnabled();
+      expect(within(alternative).getByRole('button', { name: 'Discard retained values' })).toBeEnabled();
+
+      fireEvent.click(restore);
+
+      // The savable prompt is still authoritative; the safe field was restored.
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(savedPrompt);
+      fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+      expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.66);
+      // The refused prompt is quarantined a second time rather than dropped.
+      const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+      expect(within(recovery).getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
+        .map((box) => (box as HTMLTextAreaElement).value))
+        .toEqual([DIRTY_LEGACY_PROMPT, DIRTY_LEGACY_PROMPT]);
+      expect(upgradeCalls(fetchMock)).toHaveLength(1);
+      expect(putCalls(fetchMock)).toHaveLength(0);
+
+      // On success the server-authored v2 prompt wins and every byte is kept.
+      releaseUpgrade(apiResponse(200, syntheticUpgradeSuccess(agentKey, 1)));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+      expect(promptPanel()).toBeVisible();
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+      expect(within(screen.getByRole('region', { name: 'Values retained for recovery' }))
+        .getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
+        .map((box) => (box as HTMLTextAreaElement).value))
+        .toEqual([DIRTY_LEGACY_PROMPT, DIRTY_LEGACY_PROMPT, savedPrompt]);
+    },
+  );
+});
+
+describe('useDraftEditor shared request gate', () => {
+  function heldFetch() {
+    const release: Array<(response: object) => void> = [];
+    const fetchMock = vi.fn().mockImplementation(() => new Promise<object>((resolve) => {
+      release.push(resolve);
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    return { fetchMock, release };
+  }
+
+  function requestCount(fetchMock: ReturnType<typeof vi.fn>) {
+    return fetchMock.mock.calls.length;
+  }
+
+  it.each([
+    ['save architect', 'upgrade architect'],
+    ['upgrade architect', 'save architect'],
+    ['recover data analyst', 'save architect'],
+    ['upgrade architect', 'upgrade architect'],
+    ['save architect', 'save builder'],
+    ['upgrade architect', 'upgrade builder'],
+    ['upgrade architect', 'recover data analyst'],
+    ['recover data analyst', 'upgrade builder'],
+  ])('%s then %s issues only the first request', (first, second) => {
+    const { fetchMock } = heldFetch();
+    render(<GateHarness />);
+
+    fireEvent.click(screen.getByRole('button', { name: `harness ${first}` }));
+    expect(requestCount(fetchMock)).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: `harness ${second}` }));
+    expect(requestCount(fetchMock)).toBe(1);
+    // A third attempt on a further role is refused by the same one gate.
+    fireEvent.click(screen.getByRole('button', { name: 'harness save builder' }));
+    expect(requestCount(fetchMock)).toBe(1);
+  });
+
+  it.each([
+    'double upgrade architect',
+    'save then upgrade architect',
+    'upgrade then recover',
+    'recover then save builder',
+  ])('%s inside one tick issues only the first request', (name) => {
+    const { fetchMock } = heldFetch();
+    render(<GateHarness />);
+
+    fireEvent.click(screen.getByRole('button', { name: `harness ${name}` }));
+
+    expect(requestCount(fetchMock)).toBe(1);
+  });
+
+  it('releases the shared gate only after the pending operation settles', async () => {
+    const { fetchMock, release } = heldFetch();
+    render(<GateHarness />);
+    fireEvent.click(screen.getByRole('button', { name: 'harness upgrade architect' }));
+    expect(requestCount(fetchMock)).toBe(1);
+
+    release[0](apiResponse(200, syntheticUpgradeSuccess('architect', 1)));
+    await waitFor(() => expect(requestCount(fetchMock)).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'harness save builder' }));
+    await waitFor(() => expect(requestCount(fetchMock)).toBe(2));
+    expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/draft\/builder$/);
   });
 });
