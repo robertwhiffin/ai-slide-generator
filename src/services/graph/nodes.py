@@ -117,6 +117,39 @@ def _deck_mutation_context(
     )
 
 
+def _assembly_context(
+    design_system_active: Any,
+    root_session_id: Any,
+    actor_session_id: Any,
+) -> AgentAssemblyContext:
+    """Build the FOURTH argument every ``get_agent_runtime().run(...)`` call passes.
+
+    The one place in this module that constructs an ``AgentAssemblyContext``, and
+    that is deliberate.  ``AgentAssemblyContext``'s two session-ID fields carry
+    ``""`` defaults — they must, because every caller outside the graph
+    constructs it with one argument — so a call site that simply forgot them
+    would trace blank and nothing would raise.  Routing all ten through here
+    makes the omission a *structural* fact an AST assertion can see
+    (``TestNoCallSiteMayTraceBlank``) rather than a silent hole.
+
+    Tolerant of an absent key by design.  The trace is evidence ABOUT a
+    mutation, never a precondition for one: a payload assembled by an older
+    checkpoint should degrade to an unattributed invocation, not kill a user's
+    turn in a reviewer's exception handler that would placehold their slide.
+    Production cannot reach that branch — ``invoke_graph`` writes both keys on
+    every invocation, before any node runs — which is why the end-to-end tests
+    assert the real owner and contributor IDs rather than the fallback.
+
+    **IDs never select the release.**  ``run``'s second argument does; these two
+    are inert for resolution and are read by nothing but the identity sink.
+    """
+    return AgentAssemblyContext(
+        bool(design_system_active),
+        root_session_id or "",
+        actor_session_id or "",
+    )
+
+
 def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
     if isinstance(exc, PersistedRuntimeError):
         raise exc
@@ -481,6 +514,8 @@ def rereview_committed_slides(
     spec: DeckSpec,
     brand: Dict[str, Any],
     graph_release_id: int,
+    root_session_id: str = "",
+    actor_session_id: str = "",
 ) -> Dict[str, Any]:
     """Score every committed slide against the **new** spec, serially, here.
 
@@ -505,6 +540,13 @@ def rereview_committed_slides(
     ``build_reviewer_node``; the failing positions then travel on
     ``target_positions`` and the shipped ``builder -> build_reviewer -> land``
     path rebuilds exactly those.
+
+    ``root_session_id`` and ``actor_session_id`` are taken as arguments, exactly
+    like ``graph_release_id``, because this pass runs inside ``architect_node``
+    but is not a node: it has no state of its own, so its provenance has to
+    travel with the release it reviews under.  They default to ``""`` only so the
+    suites that predate the trace keep calling it with four arguments; the
+    architect always passes all six.
 
     The cost, stated rather than hidden: this is **serial**, so §4.6's "cheap,
     parallel" becomes "cheap, serial" — one review call per committed slide,
@@ -620,7 +662,9 @@ def rereview_committed_slides(
                 "build_reviewer",
                 graph_release_id,
                 review_payload,
-                AgentAssemblyContext(design_system_active),
+                _assembly_context(
+                    design_system_active, root_session_id, actor_session_id
+                ),
             ).output
             findings = _stamp_findings(
                 _skill_findings(out),
@@ -1284,6 +1328,14 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
         "session_id": state["session_id"],
         "graph_release_id": state["graph_release_id"],
         "turn_id": state["turn_id"],
+        # The collaboration trace, DECLARED here because a Send-reached node sees
+        # only its payload: the builder and the re-fanned reviewer cannot read
+        # state at all, so an omission here is an unattributed mutation rather
+        # than an error.  Copied, never re-resolved — invoke_graph resolved the
+        # owner once for the whole turn, and a branch that looked it up again
+        # could disagree with its siblings.
+        "root_session_id": state.get("root_session_id") or "",
+        "actor_session_id": state.get("actor_session_id") or "",
         "initiated_by": state.get("initiated_by"),
         "position": position,
         "slide_spec": slide_spec.model_dump(),
@@ -1428,7 +1480,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "architect",
         state["graph_release_id"],
         payload,
-        AgentAssemblyContext(brand["design_system_active"]),
+        _assembly_context(
+            brand["design_system_active"],
+            state.get("root_session_id"),
+            state.get("actor_session_id"),
+        ),
     ).output
     intent = out.intent
     message = out.message
@@ -1595,6 +1651,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
             spec,
             brand,
             state["graph_release_id"],
+            state.get("root_session_id") or "",
+            state.get("actor_session_id") or "",
         )
         if not verdicts["committed"]:
             # Nothing committed to score (an unbuilt deck, or the row read
@@ -1813,7 +1871,11 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         "data_analyst",
         state["graph_release_id"],
         payload,
-        AgentAssemblyContext(bool(state.get("design_system_active"))),
+        _assembly_context(
+            state.get("design_system_active"),
+            state.get("root_session_id"),
+            state.get("actor_session_id"),
+        ),
     ).output
 
     if out.outcome == "success":
@@ -2027,7 +2089,11 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             "builder",
             payload["graph_release_id"],
             skill_payload,
-            AgentAssemblyContext(design_system_active),
+            _assembly_context(
+                design_system_active,
+                payload.get("root_session_id"),
+                payload.get("actor_session_id"),
+            ),
         ).output
 
         def _regenerate() -> str:
@@ -2039,7 +2105,11 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 "builder",
                 payload["graph_release_id"],
                 retry_payload,
-                AgentAssemblyContext(design_system_active),
+                _assembly_context(
+                    design_system_active,
+                    payload.get("root_session_id"),
+                    payload.get("actor_session_id"),
+                ),
             ).output.html
 
         def _on_retry() -> None:
@@ -2149,7 +2219,11 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "build_reviewer",
             payload["graph_release_id"],
             review_payload,
-            AgentAssemblyContext(bool(payload.get("design_system_active"))),
+            _assembly_context(
+                payload.get("design_system_active"),
+                payload.get("root_session_id"),
+                payload.get("actor_session_id"),
+            ),
         ).output
 
         findings = _stamp_findings(
@@ -2389,7 +2463,11 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             "fixer",
             state["graph_release_id"],
             fix_payload,
-            AgentAssemblyContext(design_system_active),
+            _assembly_context(
+                design_system_active,
+                state.get("root_session_id"),
+                state.get("actor_session_id"),
+            ),
         ).output
 
         def _regenerate() -> str:
@@ -2401,7 +2479,11 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 "fixer",
                 state["graph_release_id"],
                 retry_payload,
-                AgentAssemblyContext(design_system_active),
+                _assembly_context(
+                    design_system_active,
+                    state.get("root_session_id"),
+                    state.get("actor_session_id"),
+                ),
             ).output.html
 
         def _on_retry() -> None:
@@ -2532,7 +2614,11 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                     "fix_reviewer",
                     state["graph_release_id"],
                     review_payload,
-                    AgentAssemblyContext(bool(payload.get("design_system_active"))),
+                    _assembly_context(
+                        payload.get("design_system_active"),
+                        state.get("root_session_id"),
+                        state.get("actor_session_id"),
+                    ),
                 ).output
                 re_findings = _stamp_findings(
                     _skill_findings(out),
@@ -2900,7 +2986,11 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 "deck_reviewer",
                 state["graph_release_id"],
                 review_payload,
-                AgentAssemblyContext(bool(state.get("design_system_active"))),
+                _assembly_context(
+                    state.get("design_system_active"),
+                    state.get("root_session_id"),
+                    state.get("actor_session_id"),
+                ),
             ).output
             findings = _stamp_findings(
                 _skill_findings(out), subject_hash=digest, slide_index=-1

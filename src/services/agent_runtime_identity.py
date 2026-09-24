@@ -16,6 +16,23 @@ class AgentInvocationIdentity:
     agent_key: str
     agent_definition_revision_id: int
     content_hash: str
+    # Collaboration provenance (#262 Task 4).  ``root_session_id`` is the
+    # deck-OWNING session and ``actor_session_id`` the session the turn runs as;
+    # on a contributor's turn they differ, and ``graph_release_id`` above is then
+    # the ACTOR's pinned release, never the root's.  **IDs never select the
+    # release** — ``AgentRuntime.run``'s second argument does — so these two are
+    # inert for resolution and exist only to make a mutation attributable.
+    #
+    # Neither is Optional: a conversation with no persisted pin never reaches a
+    # node at all (``invoke_graph`` raises ``ConversationPinMissingError`` first),
+    # so there is no live path that would need a null identity (Ruling C-3).
+    # They carry a default only because every caller outside the graph — the
+    # runtime's own suites and the agentic gates — constructs
+    # ``AgentAssemblyContext`` with one argument; the thing that stops a
+    # *production* call site tracing blank is structural, and is asserted by
+    # ``TestNoCallSiteMayTraceBlank`` in ``tests/unit/test_graph_nodes.py``.
+    root_session_id: str = ""
+    actor_session_id: str = ""
 
 
 class AgentInvocationIdentitySink(Protocol):
