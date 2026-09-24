@@ -205,6 +205,22 @@ def load_collaboration_root(session_factory: sessionmaker, session_id: str) -> s
 
     Returns *session_id* itself for a root session, so an owner working on their
     own deck traces root == actor.
+
+    **Fail-closed, exactly as ``authorized_collaboration_root`` is.**  The join
+    requires ``root.parent_session_id IS NULL``, so a hand-forced depth-2 row —
+    reachable only through raw SQL or a pre-guard legacy database — resolves to
+    NOTHING and raises, rather than naming the intermediate contributor as the deck
+    owner.  Without that predicate the three root resolvers disagree three ways on
+    such a row (``_resolve_root_session`` walks to the real root,
+    ``authorized_collaboration_root`` returns ``None``, and this one would return
+    the intermediate), and recording a non-root session as the owner is the one
+    thing AC4 exists to prevent.  C-16 justifies the one-hop join *shape*; it does
+    not license dropping the guard that makes the hop safe.
+
+    An absent conversation and a hand-forced depth-2 row are indistinguishable
+    here, and deliberately share one outcome: neither has a legal root, so neither
+    may run a turn.  The refusal lands before any node or writer, exactly as the
+    null-pin refusal does (Ruling C-3).
     """
     with session_factory() as db:
         requested = aliased(UserSession)
@@ -216,7 +232,10 @@ def load_collaboration_root(session_factory: sessionmaker, session_id: str) -> s
                 root,
                 root.id == func.coalesce(requested.parent_session_id, requested.id),
             )
-            .where(requested.session_id == session_id)
+            .where(
+                requested.session_id == session_id,
+                root.parent_session_id.is_(None),
+            )
         )
         if owner_session_id is None:
             raise ConversationSessionNotFoundError(session_id)

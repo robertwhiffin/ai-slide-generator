@@ -61,9 +61,40 @@ class RecordingAgentInvocationIdentitySink:
             raise
 
 
+#: The EXACT identity fields a production invocation may log.  The contract is the
+#: #260 PRD amendment, recorded verbatim at
+#: ``docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md:21``: the sink
+#: contains "**only** graph version, release ID, role, revision ID, content hash,
+#: outcome, and error class; **it never logs payload, prompt, output, session/user
+#: ID**, tools, or slide HTML".  Five fields come off the identity; ``outcome`` and
+#: ``error_class`` are the sink's own, making seven emitted in total.
+#:
+#: This is an ALLOW-LIST and must stay one.  #262 widened ``AgentInvocationIdentity``
+#: with ``root_session_id``/``actor_session_id`` so a shared-deck mutation is
+#: attributable — the plan requires them on the IDENTITY, never in the LOG, and
+#: "session/user ID" is the category it names as prohibited.  Spreading
+#: ``identity.__dict__`` emitted both, and the guard meant to catch that asserted
+#: ``not hasattr(record, "session_id")`` — an exact NAME, so two differently-named
+#: session IDs walked past it with the suite green (Ruling C-32, which is C-24's
+#: failure class one level up: a guard checking a name rather than a property).
+#: An allow-list cannot be walked past by naming: a new identity field is omitted
+#: from the log by default and has to be added here deliberately.
+_LOGGED_IDENTITY_FIELDS = (
+    "graph_version",
+    "graph_release_id",
+    "agent_key",
+    "agent_definition_revision_id",
+    "content_hash",
+)
+
+
 class LoggingAgentInvocationIdentitySink:
     def __init__(self, *, logger: logging.Logger) -> None:
         self._logger = logger
+
+    def _permitted(self, identity: AgentInvocationIdentity) -> dict[str, object]:
+        """Project exactly the permitted identity fields — never the whole dataclass."""
+        return {field: getattr(identity, field) for field in _LOGGED_IDENTITY_FIELDS}
 
     def invoke(
         self,
@@ -73,10 +104,13 @@ class LoggingAgentInvocationIdentitySink:
         try:
             result = callback()
         except Exception as exc:
+            # Both branches project through _permitted.  A guard on only one of
+            # them would leave the other free to leak, and the error branch is the
+            # one that runs when something has already gone wrong.
             self._logger.info(
                 "persisted_agent_invocation",
                 extra={
-                    **identity.__dict__,
+                    **self._permitted(identity),
                     "outcome": "error",
                     "error_class": type(exc).__name__,
                 },
@@ -85,7 +119,7 @@ class LoggingAgentInvocationIdentitySink:
         self._logger.info(
             "persisted_agent_invocation",
             extra={
-                **identity.__dict__,
+                **self._permitted(identity),
                 "outcome": "success",
                 "error_class": None,
             },
