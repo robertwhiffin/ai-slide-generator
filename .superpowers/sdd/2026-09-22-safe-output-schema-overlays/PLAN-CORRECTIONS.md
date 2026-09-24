@@ -819,3 +819,54 @@ absorbed.
    configured `[tool.ruff.lint]` gate passes with **zero new findings** against the same files at
    base), recorded rather than claimed clean — the Task-2 re-review's F7 flagged exactly this
    over-claim.
+
+## Correction 40 — controller rulings on Task 3's three disclosed decisions
+
+**(a) The four files beyond the Files block are ALLOWED, and one of them was mine to authorize.**
+Task 3 flagged this as the widest scope decision it made without asking, and invited disagreement.
+It was right to flag it and the decision stands. `src/services/agent_schema_registry.py` holds the
+`:556` gate that the controller's brief named as one of Task 3's **three explicit items**, so the
+brief authorized it even though the plan's Files block does not list it — the same defect class as
+#262's C-30, where a boundary was written from the plan's text rather than from the code that text
+describes. The three test files (`test_agent_resolution_prompt.py` 7,
+`test_deck_level_spec_change.py` 2, `test_graph_configuration_bootstrap.py` 1) plus
+`test_conversation_pin_acceptance_postgres.py` 1 were **predicted by name and count in the c11
+radius the controller supplied**, so they were foreseen rather than discovered, they are single
+adapter doubles, and the cause-baseline rule makes an inherited RED the current task's to repair.
+None touches production behaviour. The Files block is amended to include all four.
+
+**(b) The partial TDD inversion is accepted on the same terms as #265 Task 5.** The registry half had
+nine REDs measured before implementation; the runtime and sink tests were written after the code and
+are proved by the mutation table instead. That is this epic's established substitute and it is
+weaker evidence than a genuine RED, because sabotage shows a test *can* fail while TDD shows it
+asserts the *requirement*. Precedent from #265 Task 5: accepted, with the residual routed to the
+reviewer as an explicit objective — hunt for tests that pass for the wrong reason. Applied here too.
+
+**(c) Concern 4 is recorded for a later task, not this one.** `agent_runtime.py:87-96` remains a
+third copy of the seven v1 digests. Correction 13 warned about a third registry *instance*, not a
+third *table*, so this is outside Task 3's warrant, and converging it means touching
+`CodeOwnedAgentDefinitionSource`'s own fail-closed check. `_SchemaContractRegistry` did lose its
+now-unreachable `resolve`, and the `AgentRuntime.__init__` check is strengthened to v1+v2 material.
+
+## Correction 41 — EPIC-WIDE: two tickets are independently widening the application log surface
+
+Task 3 disclosed that `LoggingAgentInvocationIdentitySink` now emits one model-derived field on its
+**success** record, and that the adjacent test named `…does_not_log_prompt_payload_or_model_output`
+is consequently **broader than its guarantee**. It added an in-test disclosure rather than renaming.
+
+Independently, and on the same sink, #262's slice 4B disclosed that widening
+`AgentInvocationIdentity` puts **both session IDs** into the same `persisted_agent_invocation` log
+line, because the sink logs `**identity.__dict__`.
+
+**Neither ticket is at fault and both disclosed it.** Both changes are mandated by their own plans.
+But the convergence is the finding: **one logging sink is accumulating disclosure from two tickets
+that cannot see each other's diffs**, and neither ticket's privacy contract covers application logs
+— #262's is scoped to the API response, and #264's is scoped to persisted content.
+
+Binding: both whole-branch reviews must rule on the **combined** log record rather than on their own
+ticket's increment, and a test whose name promises more than it guarantees must be renamed to its
+guarantee or widened to its name. Whichever ticket integrates second inherits the combined surface,
+so it must re-read this correction rather than assume its own increment is the whole picture.
+
+Cost if wrong: a privacy posture that holds for every individual diff and fails for their sum, with
+no single review positioned to see it.
