@@ -614,3 +614,62 @@ Do not leave it implicit.
 **required**, so `schema_overlay: {}` now validates where it previously raised `missing`. Undisclosed
 and untested. Impact is small today because all seven v1 overlays are empty, but Tasks 4 and 5
 introduce the first non-empty overlays, so it must be disclosed and pinned before then.
+
+## Correction 31 — EPIC-WIDE: a zero at a narrow scope licenses no statement about any wider scope
+
+This is the generalisable lesson behind correction 27, named by the implementer that made the
+original error, and it is the single most reusable sentence produced by this ticket.
+
+The mode-blindness claim was not built on a bad measurement. Scoped to the row's own named
+selectors, RED really was 0. The defect was **generalising that zero into a statement about the hash
+gate as a whole** — and the controller then ratified it after verifying a different proposition
+entirely (that `list` and `tuple` share a normaliser branch, which is true and irrelevant).
+
+**Binding rule, two parts.** Mechanically: every clause-to-mutation table in this epic **declares its
+measurement scope**, and where a row's own scope is narrower than the suite, it reports **both**
+numbers. Task 2's corrected table does this — "named" for the row's own selectors, "focused" for the
+full suite — and the two columns differ on the row that caused the problem: M2 is RED 1 named and
+**RED 6** focused.
+
+By judgement: a zero measured at a narrow scope supports **no** claim at a wider one. If a mutation
+appears free, the only honest statements are "free within this scope" or "widen the scope and
+measure again". Never "the gate cannot detect this".
+
+Cost if wrong: a fail-closed guard is recorded as free to remove, which is exactly what happened
+here and was caught only because an independent reviewer re-measured at a wider scope.
+
+## Correction 32 — extends C-27: a `cp` backup taken before a change silently reverts it
+
+C-27 required mutation harnesses to assert their anchor count. On its first outing that rule fired
+**twice**, both times on the same agent, and both were reported rather than absorbed. The second is a
+new trap worth recording in its own right.
+
+The harness took its `cp` backups **before** the c29 non-string-key guard was written, so every
+`restore_all()` silently reverted that guard and **inflated every focused number by exactly 1**.
+Nothing about the runs looked wrong; the discrepancy surfaced only when a later mutation's anchor
+failed to exist, because the anchor lived in the code the stale restore kept removing. The agent
+re-baselined, re-ran all 19 rows and discarded the first run's focused column.
+
+The first instance was simpler: a probe it failed to restore, so both arms of a comparison measured
+json mode and returned the same hash — caught when the next mutation found 0 anchors.
+
+**Binding addition to C-27: a mutation harness re-takes its backups after any commit, and asserts
+that a restore reproduces the committed tree** — the triple check against HEAD is sufficient. A
+stale backup set is indistinguishable from a passing suite, and it biases every subsequent number in
+the same direction, which is worse than a single wrong measurement because the bias looks like
+consistency.
+
+## Correction 33 — the dump mode guards BOTH halves of the fail-closed behaviour
+
+Extends correction 27 beyond what the reviewer established. `mode='json'` does not only stringify
+`Decimal` so the finiteness check cannot fire — it also **coerces an integer object key to `"1"`
+before the normaliser can see it**, so the new c29 non-string-key guard cannot fire either.
+
+So the canonical dump mode protects **both** halves of the removed helper's original fail-closed
+behaviour: the value half through the non-finite check, and the key half through c29. Measured, with
+`mode='python'` shipped: a non-finite Decimal raises `ValueError: canonical numeric values must be
+finite`; under the swap it is silently hashed to `140de6a9…`, and `Decimal('0.700000')` stops hashing
+equal to `0.7`.
+
+Any later task that touches the canonical dump mode is touching two independent fail-closed
+guarantees, not one.
