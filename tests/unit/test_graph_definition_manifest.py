@@ -813,7 +813,9 @@ def test_packaged_v1_overlay_payload_is_byte_identical_under_the_chosen_mode() -
             "field_overrides": {},
             "additional_optional_fields": (),
         }
-        # The exact persisted bytes for the JSON column.
+        # The exact value the one landed mapper hands to the JSON column.  This
+        # re-serialises the mapper's dict, so it pins that value canonically; it
+        # is not a capture of the bytes SQLAlchemy itself emits.
         persisted = definition_content_values(definition)["schema_overlay"]
         assert json.dumps(persisted, sort_keys=True, separators=(",", ":")) == (
             '{"additional_optional_fields":[],"field_overrides":{}}'
@@ -1109,3 +1111,102 @@ def test_hashing_still_fails_closed_on_a_non_json_guidance_value() -> None:
     )
     with pytest.raises(TypeError):
         definition_content_hash(candidate)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 fix round 1 — corrections 27 through 30.
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_payload_mode_is_load_bearing_for_the_finiteness_guard() -> None:
+    """Correction 27: the canonical dump mode is NOT free to change.
+
+    `mode='json'` serialises a `Decimal` to a *string*, which
+    `_normalize_canonical_value` passes through un-normalised.  Two things break:
+    `Decimal('0.700000')` stops hashing equal to the packaged float `0.7`, and —
+    worse — `Decimal('NaN')` becomes the string `'NaN'`, so the finiteness check
+    never fires and a non-finite numeric is **silently hashed**.
+
+    The seven packaged v1 hash literals cannot catch this, because all seven are
+    byte-identical under both modes.  This test is what pins the mode, so the
+    swap cannot be re-derived as free.  `Decimal` is the shape these values take
+    crossing the SQLAlchemy boundary, which is the case `canonical_payload`'s own
+    docstring exists for.
+    """
+    definition = load_graph_v1_manifest().definitions[0]
+
+    decimal_valued = definition.model_copy(
+        update={
+            "model": definition.model.model_copy(
+                update={"temperature": Decimal("0.700000")}
+            )
+        }
+    )
+    temperature = decimal_valued.canonical_payload()["model"]["temperature"]
+    assert temperature == 0.7
+    assert isinstance(temperature, float), "a stringified Decimal would break normalisation"
+    assert definition_content_hash(decimal_valued) == definition_content_hash(definition)
+
+    for non_finite in (Decimal("NaN"), Decimal("Infinity")):
+        broken = definition.model_copy(
+            update={
+                "model": definition.model.model_copy(update={"temperature": non_finite})
+            }
+        )
+        with pytest.raises(ValueError, match="canonical numeric values must be finite"):
+            definition_content_hash(broken)
+
+
+def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
+    """Correction 29: the key half of the removed helper's fail-closed behaviour.
+
+    Without this check `{1: "a"}` and `{"1": "a"}` hash identically, the persist
+    path silently coerces `1` to `"1"`, and mixed keys fail only incidentally
+    through `json.dumps(sort_keys=True)` raising a comparison `TypeError` with no
+    domain meaning.  Two distinct semantic inputs must not share one content
+    hash in a content-addressed identity system.
+    """
+    original = _definition_by_key(load_graph_v1_manifest(), "architect")
+
+    def built(example: object) -> DefinitionContent:
+        raw = original.model_dump(mode="python")
+        raw["schema_overlay"] = {
+            "field_overrides": {"message": {"examples": [example]}},
+            "additional_optional_fields": (),
+        }
+        return DefinitionContent.model_validate(raw)
+
+    for rejected in ({1: "a"}, {1: "a", "b": "c"}, {"nested": {2: "b"}}):
+        with pytest.raises(TypeError, match="canonical object keys must be strings"):
+            definition_content_hash(built(rejected))
+
+    # The string-keyed sibling is unaffected, so no existing hash moves.
+    assert definition_content_hash(built({"1": "a"})) == (
+        "3b0f99866da532e835babeb7e646943ead92cb42d103d4bedd773baeb7b82ef0"
+    )
+
+
+def test_converged_overlay_defaults_two_fields_the_removed_carrier_required() -> None:
+    """Correction 30: a disclosed relaxation, pinned rather than left latent.
+
+    The removed manifest-local overlay declared `field_overrides` and
+    `additional_optional_fields` with no defaults, so `schema_overlay: {}` raised
+    two `missing` errors.  The converged carrier defaults both, so the same input
+    now validates to an empty overlay.  Harmless while all seven v1 overlays are
+    empty; Tasks 4 and 5 introduce the first non-empty ones, so it is recorded
+    here instead of being discovered there.
+    """
+    original = _definition_by_key(load_graph_v1_manifest(), "architect")
+    raw = original.model_dump(mode="python")
+
+    relaxed = DefinitionContent.model_validate({**raw, "schema_overlay": {}})
+    assert relaxed.schema_overlay.field_overrides == {}
+    assert relaxed.schema_overlay.additional_optional_fields == ()
+    # The relaxation cannot move a v1 hash: the default is the packaged value.
+    assert definition_content_hash(relaxed) == definition_content_hash(original)
+
+    # It is a defaults-only relaxation — unknown keys are still refused.
+    with pytest.raises(ValidationError):
+        DefinitionContent.model_validate(
+            {**raw, "schema_overlay": {"unexpected_key": True}}
+        )

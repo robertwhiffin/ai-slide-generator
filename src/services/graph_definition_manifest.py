@@ -316,6 +316,17 @@ class GraphV1Manifest(_FrozenModel):
 
 def _normalize_canonical_value(value: object) -> object:
     if isinstance(value, dict):
+        for key in value:
+            if not isinstance(key, str):
+                # The removed module-local freeze helper carried two raises: one for
+                # non-JSON values and one for non-string object keys.  The value half
+                # is covered by the TypeError at the end of this function; this is the
+                # key half.  Without it {1: "a"} and {"1": "a"} produce the SAME
+                # content hash while the persist path silently coerces 1 to "1", and
+                # mixed keys fail only incidentally through json.dumps(sort_keys=True).
+                raise TypeError(
+                    f"canonical object keys must be strings, received {key!r}"
+                )
         return {key: _normalize_canonical_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_normalize_canonical_value(item) for item in value]
