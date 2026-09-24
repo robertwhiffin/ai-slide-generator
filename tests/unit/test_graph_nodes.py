@@ -15,23 +15,43 @@ gains an elapsed-time gate.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import json
 import queue
 import time
+import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
 
 from src.api.services.slide_repository import is_placeholder_record
+from src.database.models.graph_configuration import GraphRelease
+from src.database.models.session import SharedDeckMutationEvent, UserSession
 from src.domain.finding import VERDICT_KEY, DeckReviewOutput, make_finding_id
-from src.domain.skill_io import AnalystOutput, ArchitectOutput
+from src.domain.skill_io import (
+    AnalystOutput,
+    ArchitectOutput,
+    BuilderOutput,
+    FixerOutput,
+)
+from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+from src.services.agent_runtime_identity import (
+    AgentInvocationIdentity,
+    RecordingAgentInvocationIdentitySink,
+)
 from src.services.deck_review_store import compute_deck_digest, get_deck_review
+from src.services.graph_definition_manifest import load_graph_v1_manifest
+from src.services.persisted_graph_release import ResolvedDefinition
+from src.services.graph import builder as graph_builder
 from src.services.graph import nodes
+from src.services.graph import routers as graph_routers
 from src.services.graph.event_emitter import set_event_emitter
 from src.services.graph.nodes import (
     architect_node,
+    build_branch_payload,
     build_reviewer_node,
     builder_node,
     data_analyst_node,
@@ -40,6 +60,7 @@ from src.services.graph.nodes import (
     fixer_node,
     foreman_node,
     placeholder_node,
+    rereview_committed_slides,
 )
 from src.services.graph.state import (
     GraphState,
@@ -56,6 +77,7 @@ from src.services.shared_deck_attribution import (
 from src.utils.slide_hash import compute_slide_hash
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
     DEFAULT_STYLE,
+    TEMPLATE_LAYOUT,
     TEMPLATE_STYLE_BLOCK,
     TEMPLATE_TOKEN_CSS,
     architect_build,
@@ -79,6 +101,11 @@ def _branch_payload(env, position=0, html=None, scripts="", spec=None, **extra):
         "session_id": env.session_id,
         "graph_release_id": 1,
         "turn_id": TURN,
+        # An owner working on their own deck: root and actor are the same session.
+        # A contributor's turn is the case where they differ — see
+        # TestRuntimeRootActorTrace.
+        "root_session_id": env.session_id,
+        "actor_session_id": env.session_id,
         "initiated_by": USER,
         "position": position,
         "slide_spec": slide_spec.model_dump(),
@@ -2462,3 +2489,862 @@ class TestEmissionIsOptional:
         assert "emitter" not in declared
         assert "event_emitter" not in declared
         assert not any("emitter" in key for key in declared)
+
+
+# ===========================================================================
+# #262 Task 4 slice 4B — the runtime root/actor trace
+#
+# The mandated semantic, and the one a reader should hold on to: **IDs never
+# select the release; the actor's state pin does.**  ``AgentRuntime.run``'s
+# SECOND argument selects the definition; the root and actor session IDs ride
+# the FOURTH (``AgentAssemblyContext``) and are inert for resolution.  That is
+# also why the trace could be threaded without touching ``run``'s arity, which
+# #265's ``test_every_production_runtime_call_passes_all_four_pinned_arguments``
+# pins at four positional arguments and zero keywords.
+# ===========================================================================
+
+OWNER_GRAPH_VERSION = 1
+ACTOR_GRAPH_VERSION = 2
+UNSAFE_HTML = "<div class='slide'><img src='https://evil.example/x.png'></div>"
+CLEAN_HTML = "<div class='slide'>clean</div>"
+
+
+class _ChainLoader:
+    """Resolve any (release, role) pair, echoing back the release it was ASKED for.
+
+    The production loader reads the row for exactly the release the node passed.
+    Echoing it is what makes "the identity carries the release the node was
+    given" an assertion about threading rather than about this double: a node
+    that passed the wrong release produces the wrong identity here too.
+    """
+
+    def __init__(self, versions: dict) -> None:
+        self.versions = versions
+        self.calls: list = []
+
+    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+        self.calls.append((graph_release_id, agent_key))
+        content = next(
+            item
+            for item in load_graph_v1_manifest().definitions
+            if item.agent_key == agent_key
+        )
+        return ResolvedDefinition(
+            graph_version=self.versions[graph_release_id],
+            graph_release_id=graph_release_id,
+            agent_key=agent_key,
+            agent_definition_revision_id=1000 + graph_release_id,
+            content_hash="a" * 64,
+            content=content,
+        )
+
+
+class _QueuedAdapter:
+    """Return queued per-role outputs and record every prompt it was handed.
+
+    A role with several queued outputs pops one per call (the unsafe-output
+    retry needs a rejected first attempt and a clean second); the last one
+    repeats, so a role called more often than it was scripted still answers.
+    """
+
+    def __init__(self, outputs: dict) -> None:
+        self.outputs = {key: list(value) for key, value in outputs.items()}
+        self.prompts: list = []
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        self.prompts.append((agent_key, prompt))
+        queued = self.outputs.get(agent_key)
+        if not queued:
+            raise AssertionError(
+                f"no queued output for {agent_key!r}; this test did not expect "
+                "that role to be invoked"
+            )
+        return queued.pop(0) if len(queued) > 1 else queued[0]
+
+
+def _collaboration(env):
+    """Owner pinned to the superseded R1; a contributor session pinned to R2.
+
+    R1 is closed off with ``effective_to`` rather than left open, so exactly one
+    release is active — two open releases would make every public session
+    projection raise ``MultipleResultsFound`` and the scenario would be testing
+    the fixture rather than the trace.
+    """
+    db = env.factory()
+    try:
+        owner = (
+            db.query(UserSession)
+            .filter(UserSession.session_id == env.session_id)
+            .one()
+        )
+        r1 = db.get(GraphRelease, owner.graph_release_id)
+        published = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)
+        r1.effective_to = published
+        r2 = GraphRelease(
+            version_number=ACTOR_GRAPH_VERSION,
+            release_note="contributor release",
+            published_by="test",
+            published_at=published,
+            effective_from=published,
+            effective_to=None,
+        )
+        db.add(r2)
+        db.flush()
+        contributor = UserSession(
+            session_id=f"contrib-{uuid.uuid4().hex[:10]}",
+            created_by="contributor@example.com",
+            parent_session_id=owner.id,
+            graph_release_id=r2.id,
+        )
+        db.add(contributor)
+        db.commit()
+        return SimpleNamespace(
+            owner_session_id=owner.session_id,
+            owner_pk=owner.id,
+            contributor_session_id=contributor.session_id,
+            contributor_pk=contributor.id,
+            r1_id=r1.id,
+            r2_id=r2.id,
+        )
+    finally:
+        db.close()
+
+
+def _trace_runtime(monkeypatch, collab, outputs):
+    """The REAL ``AgentRuntime`` with a recording identity sink, wired into nodes."""
+    loader = _ChainLoader({collab.r1_id: OWNER_GRAPH_VERSION, collab.r2_id: ACTOR_GRAPH_VERSION})
+    adapter = _QueuedAdapter(outputs)
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=loader,
+        model_adapter=adapter,
+        identity_sink=sink,
+    )
+    monkeypatch.setattr(nodes, "get_agent_runtime", lambda: runtime)
+    return SimpleNamespace(loader=loader, adapter=adapter, sink=sink, runtime=runtime)
+
+
+def _actor_state(env, collab, **overrides):
+    """The state ``invoke_graph`` hands a contributor's turn on the owner's deck."""
+    state = env.state(
+        session_id=collab.contributor_session_id,
+        graph_release_id=collab.r2_id,
+        turn_id=TURN,
+        root_session_id=collab.owner_session_id,
+        actor_session_id=collab.contributor_session_id,
+    )
+    state.update(overrides)
+    return state
+
+
+def _assert_traced(calls, collab, *, agent_keys):
+    """Every identity call carries root=owner, actor=contributor, release=R2, version 2."""
+    assert collab.owner_session_id != collab.contributor_session_id, (
+        "the scenario collapsed root and actor onto one session, so every "
+        "assertion below would hold for the wrong reason"
+    )
+    assert [call.agent_key for call in calls] == agent_keys
+    for call in calls:
+        assert call.root_session_id == collab.owner_session_id
+        assert call.actor_session_id == collab.contributor_session_id
+        assert call.graph_release_id == collab.r2_id
+        assert call.graph_version == ACTOR_GRAPH_VERSION
+
+
+# ---------------------------------------------------------------------------
+# The widened identity and the channel that carries it
+# ---------------------------------------------------------------------------
+
+
+class TestTheTraceChannel:
+    def test_the_identity_carries_a_non_nullable_root_and_actor(self):
+        """C-3: no nullable runtime identity — a null pin excludes the turn instead."""
+        annotations = {
+            field.name: field.type
+            for field in dataclasses.fields(AgentInvocationIdentity)
+        }
+        assert annotations["root_session_id"] == "str"
+        assert annotations["actor_session_id"] == "str"
+
+    def test_the_assembly_context_is_the_channel(self):
+        """The fourth argument, because ``run``'s arity is pinned at four (#265)."""
+        names = [field.name for field in dataclasses.fields(AgentAssemblyContext)]
+        assert names[0] == "design_system_active"
+        assert "root_session_id" in names
+        assert "actor_session_id" in names
+
+    def test_the_runtime_copies_the_context_ids_onto_the_identity(self):
+        loader = _ChainLoader({41: 7})
+        adapter = _QueuedAdapter({"architect": [ArchitectOutput(intent="discuss", message="hi")]})
+        sink = RecordingAgentInvocationIdentitySink()
+        runtime = AgentRuntime(
+            persisted_release_loader=loader,
+            model_adapter=adapter,
+            identity_sink=sink,
+        )
+
+        runtime.run(
+            "architect",
+            41,
+            {},
+            AgentAssemblyContext(False, "owner-session", "contributor-session"),
+        )
+
+        assert len(sink.calls) == 1
+        assert sink.calls[0].root_session_id == "owner-session"
+        assert sink.calls[0].actor_session_id == "contributor-session"
+
+    def test_the_ids_never_select_the_release(self):
+        """Only ``run``'s second argument resolves a definition."""
+        loader = _ChainLoader({41: 7, 99: 9})
+        adapter = _QueuedAdapter({"architect": [ArchitectOutput(intent="discuss", message="hi")]})
+        sink = RecordingAgentInvocationIdentitySink()
+        runtime = AgentRuntime(
+            persisted_release_loader=loader,
+            model_adapter=adapter,
+            identity_sink=sink,
+        )
+
+        runtime.run(
+            "architect",
+            41,
+            {},
+            AgentAssemblyContext(False, "99", "99"),
+        )
+
+        assert loader.calls == [(41, "architect")]
+        assert sink.calls[0].graph_release_id == 41
+        assert sink.calls[0].graph_version == 7
+
+    def test_the_ids_never_reach_the_model(self):
+        """The trace channel is out of band: it is not payload, so it is not prompt."""
+        loader = _ChainLoader({41: 7})
+        adapter = _QueuedAdapter({"architect": [ArchitectOutput(intent="discuss", message="hi")]})
+        runtime = AgentRuntime(
+            persisted_release_loader=loader,
+            model_adapter=adapter,
+            identity_sink=RecordingAgentInvocationIdentitySink(),
+        )
+
+        runtime.run(
+            "architect",
+            41,
+            {"request": "a deck"},
+            AgentAssemblyContext(False, "owner-abc123", "contributor-def456"),
+        )
+
+        agent_key, prompt = adapter.prompts[0]
+        assert agent_key == "architect"
+        assert "owner-abc123" not in prompt
+        assert "contributor-def456" not in prompt
+
+
+class TestGraphStateDeclaresTheTrace:
+    def test_root_and_actor_are_declared_single_writer_keys(self):
+        """An undeclared key is DROPPED silently, so a fanned branch would trace blank."""
+        hints = get_type_hints(GraphState, include_extras=True)
+        for key in ("root_session_id", "actor_session_id"):
+            assert key in hints, f"{key!r} is missing from GraphState"
+            assert not hasattr(hints[key], "__metadata__"), (
+                f"{key!r} is resolved once by invoke_graph and must carry no reducer"
+            )
+
+
+# ---------------------------------------------------------------------------
+# invoke_graph: resolve the owner once, pin the release to the ACTOR
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompiled:
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, state, config):
+        self.calls.append({"state": dict(state), "config": dict(config)})
+        return {"ok": True}
+
+
+class TestInvokeGraphResolvesTheTrace:
+    @pytest.fixture
+    def fake_graph(self, monkeypatch):
+        fake = _FakeCompiled()
+        monkeypatch.setattr(graph_builder, "_compiled_graph", fake)
+        monkeypatch.setattr(graph_builder, "get_session_local", lambda: object())
+        yield fake
+        set_event_emitter(None)
+
+    def test_the_owner_is_resolved_once_and_hostile_ids_are_overwritten(
+        self, fake_graph
+    ):
+        """A caller-supplied root/actor is attacker-controlled input, not provenance."""
+        root_calls = []
+
+        graph_builder.invoke_graph(
+            "contributor-session",
+            {
+                "root_session_id": "attacker-root",
+                "actor_session_id": "attacker-actor",
+            },
+            pin_loader=lambda factory, session_id: 41,
+            root_loader=lambda factory, session_id: root_calls.append(session_id)
+            or "owner-session",
+        )
+
+        assert root_calls == ["contributor-session"]
+        state = fake_graph.calls[0]["state"]
+        assert state["root_session_id"] == "owner-session"
+        assert state["actor_session_id"] == "contributor-session"
+
+    def test_the_release_is_the_actors_pin_and_the_root_never_selects_it(
+        self, fake_graph
+    ):
+        """IDs never select the release; the ACTOR's state pin does."""
+        pin_calls = []
+
+        def pin_loader(factory, session_id):
+            pin_calls.append(session_id)
+            return 77
+
+        graph_builder.invoke_graph(
+            "contributor-session",
+            {},
+            pin_loader=pin_loader,
+            root_loader=lambda factory, session_id: "owner-session",
+        )
+
+        assert pin_calls == ["contributor-session"]
+        assert fake_graph.calls[0]["state"]["graph_release_id"] == 77
+
+    def test_a_null_pinned_legacy_root_runs_no_node_and_resolves_no_owner(
+        self, fake_graph
+    ):
+        """C-3: the pin failure precedes every node and every writer."""
+        from src.services.conversation_pins import ConversationPinMissingError
+
+        root_calls = []
+
+        def pin_loader(factory, session_id):
+            raise ConversationPinMissingError(session_id)
+
+        with pytest.raises(ConversationPinMissingError):
+            graph_builder.invoke_graph(
+                "legacy-session",
+                {},
+                pin_loader=pin_loader,
+                root_loader=lambda factory, session_id: root_calls.append(session_id)
+                or "owner",
+            )
+
+        assert fake_graph.calls == [], "a node ran for a conversation with no pin"
+        assert root_calls == [], "the owner was resolved before the pin was checked"
+
+    def test_the_default_loader_resolves_a_contributor_to_its_owner(self, graph_env):
+        """One hop: a contributor on a contributor is refused at creation (C-16)."""
+        collab = _collaboration(graph_env)
+
+        assert (
+            graph_builder.load_collaboration_root(
+                graph_env.factory, collab.contributor_session_id
+            )
+            == collab.owner_session_id
+        )
+        assert (
+            graph_builder.load_collaboration_root(
+                graph_env.factory, collab.owner_session_id
+            )
+            == collab.owner_session_id
+        )
+
+    def test_the_default_loader_refuses_an_unknown_conversation(self, graph_env):
+        from src.services.conversation_pins import ConversationSessionNotFoundError
+
+        with pytest.raises(ConversationSessionNotFoundError):
+            graph_builder.load_collaboration_root(graph_env.factory, "no-such-session")
+
+
+# ---------------------------------------------------------------------------
+# The chain: a contributor's R2 turn on the owner's R1 deck
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeRootActorTrace:
+    def test_the_architect_records_root_actor_and_the_actors_release(
+        self, graph_env, monkeypatch
+    ):
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {"architect": [architect_build(make_spec((0,)))]},
+        )
+
+        architect_node(_actor_state(graph_env, collab))
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["architect"])
+
+    def test_the_data_analyst_records_root_actor_and_the_actors_release(
+        self, graph_env, monkeypatch
+    ):
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "data_analyst": [
+                    AnalystOutput(
+                        outcome="success",
+                        synthesis="ok",
+                        figures=[],
+                        gaps=[],
+                        sources=["catalog.schema.table"],
+                    )
+                ]
+            },
+        )
+
+        data_analyst_node(
+            _actor_state(graph_env, collab, architect_message="how many?")
+        )
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["data_analyst"])
+
+    def test_the_fanned_branch_payload_declares_the_root_and_the_actor(
+        self, graph_env
+    ):
+        """A ``Send``-reached node sees only its payload, so the IDs are copied in."""
+        collab = _collaboration(graph_env)
+        spec = make_spec((0,))
+        state = _actor_state(
+            graph_env,
+            collab,
+            deck_spec=spec,
+            template_layout_html=TEMPLATE_LAYOUT,
+            deterministic_css=TEMPLATE_TOKEN_CSS,
+            resolved_style=DEFAULT_STYLE,
+        )
+
+        payload = build_branch_payload(state, 0)
+
+        assert payload["root_session_id"] == collab.owner_session_id
+        assert payload["actor_session_id"] == collab.contributor_session_id
+        assert payload["graph_release_id"] == collab.r2_id
+
+    def test_the_builder_and_its_unsafe_output_retry_record_one_identity(
+        self, graph_env, monkeypatch
+    ):
+        """The retry is a second model call; a lost trace there is a lost mutation."""
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "builder": [
+                    BuilderOutput(position=0, html=UNSAFE_HTML, scripts=""),
+                    BuilderOutput(position=0, html=CLEAN_HTML, scripts=""),
+                ]
+            },
+        )
+        payload = _branch_payload(
+            graph_env,
+            0,
+            root_session_id=collab.owner_session_id,
+            actor_session_id=collab.contributor_session_id,
+            graph_release_id=collab.r2_id,
+            session_id=collab.contributor_session_id,
+        )
+
+        updates = builder_node(payload)
+
+        assert updates["slides"]["vals"][0]["html"] == CLEAN_HTML
+        _assert_traced(trace.sink.calls, collab, agent_keys=["builder", "builder"])
+        record = updates["slides"]["vals"][0]
+        assert record["root_session_id"] == collab.owner_session_id
+        assert record["actor_session_id"] == collab.contributor_session_id
+
+    def test_the_refanned_build_review_records_root_actor_and_the_actors_release(
+        self, graph_env, monkeypatch
+    ):
+        """THE re-review identity test — bullet 2's named sabotage target."""
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {"build_reviewer": [review_out(0)]},
+        )
+        record = _branch_payload(
+            graph_env,
+            0,
+            html=CLEAN_HTML,
+            root_session_id=collab.owner_session_id,
+            actor_session_id=collab.contributor_session_id,
+            graph_release_id=collab.r2_id,
+            session_id=collab.contributor_session_id,
+        )
+        state = _actor_state(
+            graph_env, collab, slides=scoped(TURN, {0: record})
+        )
+
+        sends = graph_routers.build_reviewer_refan_router(state)
+        assert len(sends) == 1
+        build_reviewer_node(sends[0].arg)
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
+
+    def test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record(
+        self, graph_env
+    ):
+        """The record is turn state; the re-fan re-declares provenance from state."""
+        collab = _collaboration(graph_env)
+        record = _branch_payload(
+            graph_env,
+            0,
+            html=CLEAN_HTML,
+            root_session_id="attacker-root",
+            actor_session_id="attacker-actor",
+            graph_release_id=999,
+        )
+        state = _actor_state(graph_env, collab, slides=scoped(TURN, {0: record}))
+
+        sends = graph_routers.build_reviewer_refan_router(state)
+
+        assert len(sends) == 1
+        assert sends[0].arg["root_session_id"] == collab.owner_session_id
+        assert sends[0].arg["actor_session_id"] == collab.contributor_session_id
+        assert sends[0].arg["graph_release_id"] == collab.r2_id
+
+    def test_the_fixer_and_its_unsafe_output_retry_record_one_identity(
+        self, graph_env, monkeypatch
+    ):
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "fixer": [
+                    FixerOutput(
+                        position=0,
+                        html=UNSAFE_HTML,
+                        scripts="",
+                        changed=True,
+                        change_summary="unsafe",
+                    ),
+                    FixerOutput(
+                        position=0,
+                        html=CLEAN_HTML,
+                        scripts="",
+                        changed=True,
+                        change_summary="clean",
+                    ),
+                ]
+            },
+        )
+        state = _actor_state(
+            graph_env,
+            collab,
+            deck_spec=make_spec((0,)),
+            fix_map=scoped(TURN, {0: _fix_entry(0)}),
+            design_system_active=False,
+        )
+
+        updates = fixer_node(state)
+
+        assert updates["fixed"]["vals"][0]["html"] == CLEAN_HTML
+        _assert_traced(trace.sink.calls, collab, agent_keys=["fixer", "fixer"])
+
+    def test_the_fix_reviewer_records_root_actor_and_the_actors_release(
+        self, graph_env, monkeypatch
+    ):
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(monkeypatch, collab, {"fix_reviewer": [review_out(0)]})
+        entry = _fix_entry(0)
+        entry["in_flight"] = True
+        state = _actor_state(
+            graph_env,
+            collab,
+            fix_target=0,
+            fix_map=scoped(TURN, {0: entry}),
+            fixed=scoped(TURN, {0: {"html": CLEAN_HTML, "scripts": "", "changed": True}}),
+        )
+
+        fix_reviewer_node(state)
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["fix_reviewer"])
+
+    def test_the_deck_reviewer_records_root_actor_and_the_actors_release(
+        self, graph_env, monkeypatch
+    ):
+        collab = _collaboration(graph_env)
+        graph_env.seed_slides([CLEAN_HTML])
+        trace = _trace_runtime(
+            monkeypatch, collab, {"deck_reviewer": [DeckReviewOutput(findings=[])]}
+        )
+
+        deck_reviewer_node(
+            _actor_state(graph_env, collab, deck_spec=make_spec((0,)))
+        )
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["deck_reviewer"])
+
+    def test_the_committed_slide_rereview_records_root_actor_and_the_release(
+        self, graph_env, monkeypatch
+    ):
+        """§4.6's re-review pass takes the two IDs explicitly, like its release."""
+        collab = _collaboration(graph_env)
+        graph_env.seed_slides([CLEAN_HTML])
+        trace = _trace_runtime(
+            monkeypatch, collab, {"build_reviewer": [review_out(0)]}
+        )
+
+        rereview_committed_slides(
+            collab.contributor_session_id,
+            make_spec((0,)),
+            {
+                "resolved_style": DEFAULT_STYLE,
+                "deterministic_css": TEMPLATE_TOKEN_CSS,
+                "design_system_active": False,
+            },
+            collab.r2_id,
+            collab.owner_session_id,
+            collab.contributor_session_id,
+        )
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
+
+    def test_the_architect_hands_the_re_review_pass_its_root_and_actor(
+        self, graph_env, monkeypatch
+    ):
+        """§4.6's re-review runs INSIDE architect_node, so the hand-off is a seam
+        of its own: the pass takes the two IDs as arguments, and only the
+        architect can supply them from state."""
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        collab = _collaboration(graph_env)
+        persisted = make_spec((0,))
+        write_deck_level_columns(
+            collab.contributor_session_id,
+            deck_spec=persisted.to_json(),
+            modified_by="owner@example.com",
+        )
+        graph_env.seed_slides([CLEAN_HTML])
+        retargeted = persisted.model_copy(
+            update={"audience": "the CFO, not engineers"}
+        )
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "architect": [
+                    ArchitectOutput(
+                        intent="build",
+                        message="Retargeting the deck at the CFO.",
+                        deck_spec=retargeted,
+                    )
+                ],
+                "build_reviewer": [review_out(0)],
+            },
+        )
+
+        architect_node(_actor_state(graph_env, collab))
+
+        _assert_traced(
+            trace.sink.calls, collab, agent_keys=["architect", "build_reviewer"]
+        )
+
+    def test_the_persisted_mutation_event_agrees_with_the_runtime_trace(
+        self, graph_env, monkeypatch
+    ):
+        """AC4: the trace and the evidence row name the same root, actor and release."""
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch, collab, {"build_reviewer": [review_out(0)]}
+        )
+        record = _branch_payload(
+            graph_env,
+            0,
+            html=CLEAN_HTML,
+            root_session_id=collab.owner_session_id,
+            actor_session_id=collab.contributor_session_id,
+            graph_release_id=collab.r2_id,
+            session_id=collab.contributor_session_id,
+            initiated_by="contributor@example.com",
+        )
+
+        build_reviewer_node(record)
+
+        _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
+        db = graph_env.factory()
+        try:
+            events = db.query(SharedDeckMutationEvent).all()
+            assert len(events) == 1
+            event = events[0]
+            assert event.root_session_id == collab.owner_pk
+            assert event.actor_session_id == collab.contributor_pk
+            assert event.graph_release_id == collab.r2_id
+            assert event.graph_version == ACTOR_GRAPH_VERSION
+        finally:
+            db.close()
+
+    def test_the_whole_turn_records_one_immutable_root_actor_and_release(
+        self, graph_env, monkeypatch
+    ):
+        """Every handoff in bullet 1, end to end, on one contributor turn."""
+        collab = _collaboration(graph_env)
+        spec = make_spec((0,))
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "architect": [architect_build(spec)],
+                "builder": [
+                    BuilderOutput(position=0, html=UNSAFE_HTML, scripts=""),
+                    BuilderOutput(position=0, html=CLEAN_HTML, scripts=""),
+                ],
+                "build_reviewer": [review_out(0, [finding("overflow")])],
+                "fixer": [
+                    FixerOutput(
+                        position=0,
+                        html="<div class='slide'>fixed</div>",
+                        scripts="",
+                        changed=True,
+                        change_summary="fixed",
+                    )
+                ],
+                "fix_reviewer": [review_out(0)],
+                "deck_reviewer": [DeckReviewOutput(findings=[])],
+            },
+        )
+
+        # architect -> spec on state
+        state = _actor_state(graph_env, collab)
+        updates = architect_node(state)
+        state = {**state, **updates}
+        state["deck_spec"] = spec
+
+        # foreman_router's Send -> builder (unsafe output, then the retry)
+        payload = build_branch_payload(state, 0)
+        built = builder_node(payload)
+        state["slides"] = built["slides"]
+
+        # the re-fan -> build_reviewer, which opens a fix
+        sends = graph_routers.build_reviewer_refan_router(state)
+        reviewed = build_reviewer_node(sends[0].arg)
+        state["fix_map"] = reviewed["fix_map"]
+
+        # fixer -> fix_reviewer
+        fixed = fixer_node(state)
+        state["fix_map"] = turn_scoped_merge(state["fix_map"], fixed["fix_map"])
+        state["fixed"] = fixed["fixed"]
+        state["fix_target"] = fixed["fix_target"]
+        fix_reviewer_node(state)
+
+        # deck review, then §4.6's re-review of the committed row
+        deck_reviewer_node(state)
+        rereview_committed_slides(
+            collab.contributor_session_id,
+            spec,
+            {
+                "resolved_style": DEFAULT_STYLE,
+                "deterministic_css": TEMPLATE_TOKEN_CSS,
+                "design_system_active": False,
+            },
+            collab.r2_id,
+            collab.owner_session_id,
+            collab.contributor_session_id,
+        )
+
+        _assert_traced(
+            trace.sink.calls,
+            collab,
+            agent_keys=[
+                "architect",
+                "builder",
+                "builder",
+                "build_reviewer",
+                "fixer",
+                "fix_reviewer",
+                "deck_reviewer",
+                "build_reviewer",
+            ],
+        )
+
+    def test_no_narrow_payload_prompt_carries_a_session_id(
+        self, graph_env, monkeypatch
+    ):
+        """The reviewer/fixer payloads are narrow by design and stay narrow."""
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch, collab, {"build_reviewer": [review_out(0)]}
+        )
+        record = _branch_payload(
+            graph_env,
+            0,
+            html=CLEAN_HTML,
+            root_session_id=collab.owner_session_id,
+            actor_session_id=collab.contributor_session_id,
+            graph_release_id=collab.r2_id,
+            session_id=collab.contributor_session_id,
+        )
+
+        build_reviewer_node(record)
+
+        agent_key, prompt = trace.adapter.prompts[0]
+        assert agent_key == "build_reviewer"
+        assert collab.owner_session_id not in prompt
+        assert collab.contributor_session_id not in prompt
+
+
+# ---------------------------------------------------------------------------
+# The structural guard: no call site may trace blank
+# ---------------------------------------------------------------------------
+
+
+def _runtime_run_calls():
+    """Every production ``get_agent_runtime().run(...)`` call in ``nodes``."""
+    tree = ast.parse(inspect.getsource(nodes))
+    return [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "run"
+        and isinstance(call.func.value, ast.Call)
+        and isinstance(call.func.value.func, ast.Name)
+        and call.func.value.func.id == "get_agent_runtime"
+    ]
+
+
+class TestNoCallSiteMayTraceBlank:
+    """``AgentAssemblyContext``'s new fields default to ``""`` — they must, because
+    every out-of-slice caller constructs it with one argument — so the thing that
+    keeps a production call site from tracing blank is structural, not a default.
+    """
+
+    def test_all_ten_call_sites_build_their_context_through_the_one_helper(self):
+        calls = _runtime_run_calls()
+        assert len(calls) == 10
+        fourth = [call.args[3] for call in calls]
+        assert all(isinstance(arg, ast.Call) for arg in fourth)
+        assert all(
+            isinstance(arg.func, ast.Name) and arg.func.id == "_assembly_context"
+            for arg in fourth
+        ), [ast.unparse(arg) for arg in fourth]
+        assert all(len(arg.args) == 3 and arg.keywords == [] for arg in fourth)
+
+    def test_every_call_site_sources_both_ids_from_its_state_or_payload(self):
+        calls = _runtime_run_calls()
+        assert len(calls) == 10
+        for call in calls:
+            context = call.args[3]
+            assert "root_session_id" in ast.unparse(context.args[1]), ast.unparse(context)
+            assert "actor_session_id" in ast.unparse(context.args[2]), ast.unparse(context)
+
+    def test_the_assembly_context_is_constructed_in_exactly_one_place(self):
+        tree = ast.parse(inspect.getsource(nodes))
+        constructions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AgentAssemblyContext"
+        ]
+        assert len(constructions) == 1, [ast.unparse(n) for n in constructions]

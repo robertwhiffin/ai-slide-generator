@@ -188,7 +188,20 @@ def build_reviewer_refan_router(state: dict) -> Union[str, List[Send]]:
     sends = [
         Send(
             "build_reviewer",
-            {**dict(record), "graph_release_id": state["graph_release_id"]},
+            {
+                **dict(record),
+                # Provenance is RE-DECLARED from state, never inherited from the
+                # record.  The record is turn state: it round-trips the
+                # checkpointer and a resumed or hand-forced one can carry any
+                # release, root or actor at all, and the reviewer it reaches is
+                # the writer of the row — so the one authority is the state
+                # invoke_graph resolved this turn.  Measured: a record carrying
+                # a hostile root/actor/release is corrected here (see
+                # ``test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record``).
+                "graph_release_id": state["graph_release_id"],
+                "root_session_id": state.get("root_session_id") or "",
+                "actor_session_id": state.get("actor_session_id") or "",
+            },
         )
         for position, record in sorted(slides.items())
         if record is not None and position not in reviewed
