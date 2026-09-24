@@ -518,3 +518,315 @@ Note on measurement conditions: C-22 honoured — no migration, alteration or dr
 - Per C-22: no migration, alteration or drop of `ai_slide_generator`, and it was not read as evidence.
 - **Final state:** `git status --porcelain` empty, `git diff HEAD` empty, `git diff --cached` empty,
   HEAD still `2ca0825fcc9b47648d349421c1145526efe471e0`.
+
+---
+---
+
+# Fix round 1 — scoped re-review
+
+**Scope:** the four items I raised, plus new breakage in the fix diff only. The original task was
+not re-reviewed.
+
+**Range verified myself:** `c5594a33be7d57d223a8c492ab214cc49c7d13df..53126c8697977eb998819d65cf5eb06f2a85df18`
+— four frontend files, 299 insertions / 46 deletions. `53126c869`'s parent really is `c5594a33b`;
+all of `c5594a33b`, `53126c869` and round 1's `2ca0825fc` are ancestors of HEAD
+`a99e7131a81987cd43c4e17c77a699c821141b88`. `c5594a33b` touches only two `.superpowers/` docs and
+`a99e7131a` only eight, so **the fix commit is the sole frontend change since round 1** — confirmed by
+`git diff --name-only 2ca0825fc..HEAD -- frontend/ .github/` returning exactly the four files.
+
+**Baselines reproduced:** `npm run test:unit` **169 passed / 12 files** (was 166), `npm run typecheck`
+clean, the new spec **6 passed** (was 5), adjacent set **50 passed**. All figures as reported.
+
+**Per C-27, every mutation below asserted its anchor count and refused to patch on anything but the
+expected number.** All twelve anchor assertions held at 1; no anchor ambiguity encountered.
+
+## BOTTOM LINE
+
+All four items **ADDRESSED**. Three of my corrections were adopted, one was sharpened beyond what I
+asked, and **the fix introduces no behavioural breakage.** It does introduce three test-hygiene
+Minors, all new and all measured — none blocking. The `role="status"` asymmetry is **CONFIRMED** as a
+correct reading of C-26.
+
+---
+
+## ITEM 1 — Important-1, the accessibility-tree privacy guard: **ADDRESSED**
+
+I re-ran my own round-1 sabotage against the fixed guard, which is the cleanest verdict available.
+
+**Sabotage A3 — my exact round-1 leak shape** (`aria-label` on the non-failure root `<div>`), but with
+a **fabricated UUID distinct from the test's `LEAKED_UUID` needle**, so the guard had to catch by
+pattern rather than by literal:
+
+```
+--- UNIT ---
+   × MixedReleaseWarning > lets no server-added field reach the DOM or the accessibility tree
+     → expected '<div data-testid="mixed-release-warni…' not to match /[0-9a-f]{8}-[0-9a-f]{4}-…/i
+      Tests  1 failed | 22 passed (23)
+
+--- E2E ---
+  ✘  1 … warns about two releases on one deck and discloses opaque provenance rows
+  ✘  6 … both AC5 surfaces stay independently addressable with the Share dialog open
+  2 failed / 4 passed
+```
+**1 Vitest + 2 Playwright RED** — the same leak measured GREEN across all 25 tests in round 1. The
+`outerHTML` switch is the tooth, and it catches by pattern.
+
+**The added accessibility-tree oracle is not decoration — it has INDEPENDENT teeth.** I probed the one
+case `outerHTML` structurally cannot see: an `aria-labelledby` on the region root pointing at text
+that lives **outside** the region, so the region's own markup never contains the UUID while its
+computed accessible name *is* the UUID.
+
+```
+   × MixedReleaseWarning > lets no server-added field reach the DOM or the accessibility tree
+     → expect(element).not.toBeInTheDocument()
+```
+That is `queryByLabelText(UUID_PATTERN)` firing, not the `outerHTML` assertion. This is genuinely
+better than what I asked for: I asked for `outerHTML`; the author added a real a11y-tree oracle that
+covers a leak class `outerHTML` misses.
+
+**Residual → New-Minor-A.** The guard was upgraded on the *non-failure* branch only. The `loadFailed`
+branch has its own separate root `<div>`, and the unit test for it
+(`keeps the unavailable state generic`, `MixedReleaseWarning.test.tsx:165-167`) still reads
+`region.innerHTML` and carries no UUID-pattern assertion at all. Measured: leaking a distinct UUID
+into that branch's root attribute is **GREEN on all 23 unit tests** and RED only in e2e T4 (which
+*was* upgraded to `outerHTML`).
+
+```
+--- UNIT (loadFailed branch root leak) ---
+      Tests  23 passed (23)          ← unit blind
+--- E2E ---
+  ✘  4 … a denied history request becomes one generic unavailable state that discloses nothing
+  1 failed / 5 passed                 ← e2e catches it
+```
+Coverage overall is intact, so this is not a reopening of Important-1. But it is the same
+branch-asymmetry that made round 1's hole possible, in the faster feedback loop. Fix: change
+`:167` to `outerHTML` and add the `UUID_PATTERN` / `queryByLabelText` pair to that test.
+
+## ITEM 2 — Important-2, the second surface: **ADDRESSED**
+
+- **Placed in the Share Deck dialog body**, `AppLayout.tsx:1490-1504`, rendered as the **first child**
+  of the dialog body ahead of `DeckContributorsManager` — so it is the first thing in the dialog's
+  reading order.
+- **`DeckContributorsManager.tsx` untouched — 0 lines in the fix range.** My file-ownership
+  correction is confirmed by construction: the whole second surface cost `AppLayout.tsx` +
+  `MixedReleaseWarning.tsx`, both in the author's Files block, exactly as I measured in round 1.
+- **Wholly distinct wording, not suffixes:** conversation `Change provenance` / `Contributor releases`;
+  collaboration `Who changed this deck` / `Release history by contributor`.
+- **Coexistence is asserted, not hidden.** T6 pins the ambiguity it creates —
+  `mixed-release-warning-text` at 2, `getByText(WARNING_TEXT)` at 2, `mixed-release-disclosure` at 2,
+  rows at 6 with both expanded — while every accessible *name* still resolves to exactly 1 under
+  Playwright's default substring matching.
+- **The obstacle I identified and the author had not named is now asserted directly**, via
+  `click({ trial: true, timeout: 2000 })` on the conversation copy failing behind the overlay, with
+  its expanded state proven to survive (reads unaffected). Dialog interactions go through a
+  container-scoped locator.
+- It also hit the `Shared deck` / `Share` collision I mentioned only in passing and used
+  `exact: true`, with a comment explaining why.
+- Good incidental design: `surface` is a **required** prop (`MixedReleaseWarning.tsx:137`), so a third
+  placement cannot silently inherit a default vocabulary — typecheck forces the choice.
+
+**C-26's named risk — does the shared row/testid vocabulary make an existing conversation-surface
+assertion ambiguous while the dialog is open? Verified: NO, but only by circumstance.** I audited
+every unscoped shared-testid locator in the spec:
+
+- In T1–T5 each sits in a test that never opens the dialog, so each resolves to 1.
+- In T6 every unscoped shared-testid locator is a deliberate **count** assertion (2, 2, 6), never a
+  matcher that would violate strict mode.
+
+**New-Minor-B.** The *inner* testids are not surface-scoped — both surfaces render
+`mixed-release-warning-text`, `mixed-release-disclosure`, `mixed-release-provenance`,
+`mixed-release-row` and `mixed-release-unavailable`; only the two **root** testids
+(`mixed-release-warning` / `shared-deck-provenance`) disambiguate. T2, T3 and T5 use
+`page.getByTestId('mixed-release-warning-text')` unscoped with `toBeVisible()` / `toHaveCount(0)`,
+which are safe *only* because the dialog is shut there. I proved the hazard is real by swapping T6's
+deliberate count for the same non-count matcher those tests use:
+
+```
+Error: strict mode violation: getByTestId('mixed-release-warning-text') resolved to 2 elements
+```
+The author documented the shared **row vocabulary** decision in a comment, but not that the inner
+testids are shared across surfaces. Fix: surface-prefix the inner testids, or state the coupling at
+the component so a future dialog-open test scopes by container.
+
+## ITEM 3 — Minor-1, fixture-sourced cardinality: **ADDRESSED**
+
+Both self-referential counts are now literal `3`, and the "cannot silently shrink" comment has moved
+onto the literal `toBe(2)` that actually earns it. Verified the literal is now the tooth by re-running
+the M30-equivalent (fixture 3→1):
+
+```
+   × keeps every row name distinct under substring matching
+     → expected [ Array(1) ] to have a length of 3 but got 1     ← the literal firing
+   × gives AC5 second surface wholly distinct wording, not a suffix
+     → expected [ <li …(2)>…(2)</li> ] to have a length of 3 but got 1
+      Tests  4 failed | 19 passed (23)
+```
+Four tests RED, up from three, and the failure is now the literal rather than the incidental
+`toBe(2)`. The e2e equivalent at spec `:180` was given the same treatment. The new nesting test
+applies the lesson up front with a literal `toHaveLength(4)`.
+
+## ITEM 4 — Minor-2, dead exports, and C-24 at `SURFACE_ACCESSIBLE_NAMES`: **ADDRESSED**
+
+Five constants and two functions un-exported (`MIXED_RELEASE_WARNING_TEXT`, `LEGACY_RELEASE_LABEL`,
+`DISCLOSURE_LABEL`, `PROVENANCE_LIST_LABEL`, `HISTORY_UNAVAILABLE_TEXT`, `releaseLabel`,
+`groupRowLabel`). Three exports remain — `MixedReleaseWarning`, `MixedReleaseWarningProps` and
+`SURFACE_ACCESSIBLE_NAMES` — and typecheck stays clean, so the first two have real consumers.
+
+**C-24 HOLDS at `SURFACE_ACCESSIBLE_NAMES`. Verified, not accepted.** The question is whether a guard
+reading a set *from the implementation* can still catch a wording defect. All four names are pinned by
+**local literals** in the test file: the two disclosure labels via `toContain(DISCLOSURE_LABEL)` /
+`toContain(COLLABORATION_DISCLOSURE_LABEL)`, and — the part worth checking, since the coordinator only
+mentioned the disclosure labels — **both list labels too**, via the literal
+`getByRole('list', { name: PROVENANCE_LIST_LABEL })` and
+`getByRole('list', { name: COLLABORATION_LIST_LABEL })` assertions, whose constants are local literals
+at `:29` and `:33`. Nothing in the file takes an expected wording from the component.
+
+Measured with a nesting rename (`collaboration.listLabel` → `'Contributor releases by date'`, which
+contains `'Contributor releases'`) — **two independent teeth**:
+
+```
+   × gives AC5 second surface wholly distinct wording, not a suffix
+     → Unable to find an accessible element with the role "list" and name "Release history by contributor"
+   × no surface's accessible name nests inside another's
+     → expected 'contributor releases by date' not to contain 'contributor releases'
+      Tests  2 failed | 21 passed (23)
+```
+
+**New-Minor-C — the one residual, and it is exactly the creep the coordinator suspected.** The
+structural guard's *subject* comes from the implementation, so it has a vacuity mode: if
+`SURFACE_ACCESSIBLE_NAMES` ever stops deriving from `SURFACE_VOCABULARY`, the guard silently stops
+covering the real vocabulary. Measured by decoupling the export to a hardcoded copy of the current
+four names **while leaving the nesting rename in place**:
+
+```
+   × gives AC5 second surface wholly distinct wording, not a suffix      ← only the literal catches it
+      Tests  1 failed | 22 passed (23)
+```
+The nesting guard went **green on a set that no longer reflected the real vocabulary, while the real
+vocabulary did nest.** Defence in depth held — the literal test still caught the underlying defect —
+so C-24 is not breached and this is a Minor. The robust fix removes the export entirely: render both
+surfaces in the test and read the accessible names off the DOM, which makes the guard cover what is
+actually rendered and retires Minor-2's last export.
+
+---
+
+## RULING — the `role="status"` asymmetry against my own C-26: **CONFIRMED**
+
+N5 reproduces as claimed: adding `announce: true` to the collaboration surface REDs both runners —
+1 Vitest (`announces on the conversation surface only` → `expect(element).not.toBeInTheDocument()`)
+and 1 Playwright (T6 line 430, `getByRole('status')` expected 1).
+
+**The implementation honours C-26 and does not narrow AC5 further.** The reasoning:
+
+1. **AC5 requires the warning as *content*, and both surfaces deliver it.** `role="status"` is an
+   *announcement mechanism*, not the warning. The identical mandated sentence is rendered on both
+   surfaces and pinned at count 2 in T6. Nothing about AC5's "warn" is withheld from the second
+   surface.
+2. **The asymmetry is correct on independent a11y grounds, not just convenience.** A live region
+   exists to announce content that *changes after render*. The conversation warning genuinely can
+   arrive late — round 1 established the history load lands off the critical path
+   (`void collaborationLoad.then(...)`), so `role="status"` is right there. The dialog copy is static
+   at mount, deliberately opened by the user, and already present in context when it renders. Two
+   simultaneous identical live regions announcing one sentence twice is a real defect, not a cosmetic
+   one, and the code comment correctly leads with that reason and treats the
+   `getByRole('status')`-stays-1 benefit as secondary.
+3. **It matches the design doc's split precisely.** `2026-09-21-agent-definition-workbench-design.md:254-261`
+   gives *grouping* to collaboration/history views and *warning* to the conversation surface; §17.2:662
+   says "**the** shared-deck version warning", singular. Both surfaces carrying the grouped evidence
+   and one announcing is that split implemented literally — which is the reading C-26 set out.
+
+**Context worth recording, not a defect in this fix:** how much the second surface helps an
+assistive-technology user is bounded by its host, not by `announce: false`. The Share Deck dialog is a
+plain `<div className="fixed inset-0 …">` with an `<h2>` and no `role="dialog"`, no `aria-modal` and no
+focus trap (`AppLayout.tsx:1476-1483`) — pre-existing, outside this fix's diff, and a whole-branch
+a11y item. The new surface is at least placed first in the dialog's reading order, which is the right
+call given that container.
+
+---
+
+## SPOT-CHECKS OF THE RE-AIMED FIRST-ROUND MUTATIONS
+
+Given three consecutive rounds opening with a wrong aim, I re-measured two of the twelve myself —
+deliberately the two whose anchors the refactor **moved**, since that is where a re-aim fails.
+
+**M6 re-aimed** (`role="status"` is no longer a literal attribute but a conditional spread, and two
+such spreads now exist — warning `<p>` and unavailable `<p>`; I targeted the warning one, anchor count
+asserted at 1):
+```
+   × warns when one deck carries changes from two persisted Graph Versions
+     → Unable to find an accessible element with the role "status"
+   × announces on the conversation surface only, so one sentence is not announced twice
+     → Unable to find an accessible element with the role "status"
+      Tests  2 failed | 21 passed (23)
+```
+
+**M32 re-aimed** (the mandated disclosure wording moved from a module constant into
+`SURFACE_VOCABULARY`):
+```
+⎯⎯ Failed Tests 7 ⎯⎯   (shows no warning…, calls a null graph release Legacy…,
+   discloses provenance…, labels each row from its OWN returned release…,
+   keeps every row name distinct…, and two more)
+```
+Both land on live anchors and RED. Combined with N1/N1b, N5, the M30-equivalent and the two C-24
+mutations I ran, that is **eight** independently measured REDs plus **two** deliberate GREENs in this
+round, all with asserted anchor counts. I did not hit a single anchor ambiguity, and I have no reason
+to doubt the remaining ten re-aims.
+
+On **C-27 itself**: the rule is right and the counterfactual is the real lesson —
+`replace(..., 1)` on a merely *non-unique* anchor mutates the first match silently and yields a RED
+that proves something else. An absent anchor is the benign failure; the ambiguous one is the dangerous
+one. I applied C-27 throughout and it cost nothing.
+
+---
+
+## NEW BREAKAGE IN THE FIX DIFF
+
+**None behavioural.** Unit 169/169, typecheck clean, new spec 6/6, adjacent set 50/50.
+
+Blast radius of the second instance is structurally near-zero, which is worth stating because it is
+not obvious: the collaboration surface renders only inside `showShareDialog && sessionId`, and
+`MixedReleaseWarning` returns `null` when `history.groups.length === 0`. `setup-mocks.ts` defaults
+collaboration-history to **200 with empty groups**, so in every other spec the dialog gets nothing at
+all. Only `mixed-release-collaboration.spec.ts` references the mixed-release testids, and the only
+other spec that opens the Share dialog is `share-link.spec.ts`, which is quarantined in
+`DELIBERATE_EXCLUSIONS` and was already failing at a precondition in round 1. `test_e2e_matrix_covers_specs.py`
+passes (4 passed) — no spec file was added, so the matrix guard is unaffected.
+
+Three new Minors, all test-hygiene, all measured above: **New-Minor-A** (loadFailed branch root
+unguarded at unit level), **New-Minor-B** (inner testids not surface-scoped; strict-mode violation
+proven), **New-Minor-C** (structural nesting guard has a vacuity mode).
+
+## PYTHON BASELINE — reasoning confirmed, not re-run
+
+The claim holds and I verified it rather than accepting it. Everything changed since round 1's
+reviewed commit is four frontend files plus eight `.superpowers/` docs; filtering that range for
+`*.py`, `.github/`, `pyproject`, `conftest`, `requirements`, `*.yml`, `*.yaml` returns **nothing**, and
+`.github/workflows/test.yml` is byte-identical to round 1 (`git diff --stat 2ca0825fc..HEAD --
+.github/workflows/test.yml` empty). There is no Python-visible change, so the 6 / 5325 / 110 residual
+I measured in round 1 stands unchanged. Re-running 5325 tests would have been waste.
+
+## DEFERRED — open by instruction, not re-examined
+
+- **Minor-3** (cross-endpoint existence probing caught only at unit level).
+- **Minor-4** (`has_legacy_evidence` narrowed and typed but never read).
+- **Minor-5** (the `aria-controls` assertion is self-consistency, not requirement).
+- Carried to the whole-branch review: the three pre-existing `slide-surface-fidelity` CI failures, the
+  18-spec `setup-mocks.ts` blast radius (the author reused my figure without re-measuring, which is
+  correct — nothing in this diff touches `setup-mocks.ts`), and the Share dialog's missing
+  `role="dialog"` / `aria-modal` / focus trap.
+
+## HYGIENE
+
+Twelve mutations applied and restored from `cp` backups (`.review2-backups/`), never
+`git checkout <commit> -- <paths>`; every one asserted its anchor count per C-27. All four files
+re-verified by md5 against their pre-mutation hashes after each restore. Drift enumerated with
+`git diff --name-only HEAD`. No commits, no push, no PR, no merge, no subagents. All scratch kept
+in-tree this round. Port 3000 confirmed at zero listeners before every Playwright invocation, all
+`--project=chromium --workers=1`, one at a time. No installs; no migration, alteration or drop of
+`ai_slide_generator`. HEAD `a99e7131a81987cd43c4e17c77a699c821141b88`.
+
+**Final state, stated precisely:** all four reviewed source files are restored bit-for-bit (md5
+verified against their pre-mutation hashes), `git diff --cached` is empty, and the ONLY entry in
+`git status --porcelain` is ` M` on this review file itself — which is the required deliverable, and
+which now shows as *modified* rather than *untracked* because `a99e7131a` force-tracked it. There is
+no source drift.
