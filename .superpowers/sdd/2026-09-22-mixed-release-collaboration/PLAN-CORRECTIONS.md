@@ -877,3 +877,29 @@ flips the moment anyone calls the `setup_logging()` that already exists in the r
 Cost of the original error: both whole-branch reviews would have weighed a policy question that had
 already been decided in writing, and the naming-based guard would have survived to miss the next
 field too.
+
+### C-33 — EPIC-WIDE, and it patches a hole in my own C-32: back up the MUTABLE SET, not the current drift
+
+C-32 (in #264's ledger) told agents to re-take `cp` backups after any commit. Slice 4B followed it and
+was bitten anyway, because the rule named *when* to re-take without naming *what to enumerate*.
+
+Its harness enumerated the backup set from `git diff --name-only HEAD` — which, **immediately after a
+commit, lists nothing**. So the re-take produced an **empty** backup set, `state.py` was mutated by M5
+and never restored, and every later mutation ran on a poisoned tree.
+
+**The detection signature is worth as much as the rule:** it surfaced because M23 through M26, touching
+**three unrelated files**, all REDed the **same four** `TestARealTurn` tests. A phantom common RED set
+across unrelated mutations means your tree is dirty, not that you found a common cause.
+
+**Binding, and it supersedes C-32's enumeration step:** back up the **mutable set** — the files the run
+intends to touch — rather than whatever currently differs from HEAD. And make `restore()`
+**self-enforcing**: assert the tree came back (porcelain against the snapshot contract) and **abort the
+run** rather than continue. Slice 4B's harness now does both, re-ran all 31 mutations from scratch, and
+reported 31 anchor counts as expected, 30 RED, 1 deliberate blank, 0 restore aborts.
+
+This is the third distinct trap in this family — C-27 (assert the anchor count), C-32 (re-take after a
+commit), and now the enumeration source. Each was found by a different agent, and each was found
+because someone disbelieved a number rather than banking it.
+
+Cost of my original error: an agent obeying C-32 exactly could produce an empty backup set and never
+know.
