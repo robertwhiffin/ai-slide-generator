@@ -10,6 +10,7 @@ import { GraphVersionStatus } from './GraphVersionStatus';
 import {
   MixedReleaseWarning,
   type MixedReleaseWarningProps,
+  SURFACE_ACCESSIBLE_NAMES,
 } from './MixedReleaseWarning';
 
 /**
@@ -27,6 +28,11 @@ const WARNING_TEXT = 'This shared deck has changes from multiple Graph Versions.
 const DISCLOSURE_LABEL = 'Change provenance';
 const PROVENANCE_LIST_LABEL = 'Contributor releases';
 const HISTORY_UNAVAILABLE_TEXT = 'Collaboration history unavailable';
+/** AC5's second surface — the Share Deck dialog. Wholly distinct wording. */
+const COLLABORATION_DISCLOSURE_LABEL = 'Who changed this deck';
+const COLLABORATION_LIST_LABEL = 'Release history by contributor';
+
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 const NEWEST = '2026-09-20T10:15:00Z';
 const MIDDLE = '2026-09-19T09:05:00Z';
@@ -79,6 +85,7 @@ const MIXED_HISTORY: CollaborationHistory = {
 function renderWarning(props: Partial<MixedReleaseWarningProps> = {}) {
   return render(
     <MixedReleaseWarning
+      surface="conversation"
       history={history()}
       loadFailed={false}
       isSessionPersisted
@@ -87,9 +94,9 @@ function renderWarning(props: Partial<MixedReleaseWarningProps> = {}) {
   );
 }
 
-async function expand() {
+async function expand(label: string = DISCLOSURE_LABEL) {
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: DISCLOSURE_LABEL }));
+    fireEvent.click(screen.getByRole('button', { name: label }));
   });
 }
 
@@ -146,7 +153,7 @@ describe('MixedReleaseWarning', () => {
           onStartLatest={async () => {}}
           isStartingLatest={false}
         />
-        <MixedReleaseWarning history={null} loadFailed isSessionPersisted />
+        <MixedReleaseWarning surface="conversation" history={null} loadFailed isSessionPersisted />
       </>,
     );
 
@@ -206,7 +213,12 @@ describe('MixedReleaseWarning', () => {
           onStartLatest={async () => {}}
           isStartingLatest={false}
         />
-        <MixedReleaseWarning history={MIXED_HISTORY} loadFailed={false} isSessionPersisted />
+        <MixedReleaseWarning
+          surface="conversation"
+          history={MIXED_HISTORY}
+          loadFailed={false}
+          isSessionPersisted
+        />
       </>,
     );
     await expand();
@@ -231,11 +243,13 @@ describe('MixedReleaseWarning', () => {
       .getAllByTestId('mixed-release-row')
       .map((row) => row.getAttribute('aria-label') ?? '');
 
-    // Cardinality joined to the fixture, so a narrowed fixture cannot silently
-    // shrink this check to a vacuous pass.
-    expect(names).toHaveLength(MIXED_HISTORY.groups.length);
-    expect(new Set(names).size).toBe(MIXED_HISTORY.groups.length);
-    // Two rows share ONE actor label, which is why the label alone is not a key.
+    // LITERAL cardinality. Comparing against `MIXED_HISTORY.groups.length`
+    // could not fail — both sides shrink together when the fixture is narrowed,
+    // which is exactly the silent-shrink this assertion exists to catch.
+    expect(names).toHaveLength(3);
+    expect(new Set(names).size).toBe(3);
+    // Two of those three rows share ONE actor label, which is why the label
+    // alone is not a key. This literal 2 is the tooth that caught M30.
     expect(new Set(MIXED_HISTORY.groups.map((g) => g.actor_label)).size).toBe(2);
 
     // Playwright matches accessible names by case-insensitive SUBSTRING, so a
@@ -272,18 +286,84 @@ describe('MixedReleaseWarning', () => {
     const region = screen.getByTestId('mixed-release-warning');
     for (const needle of [LEAKED_UUID, LEAKED_PRINCIPAL, 'Alice quarterly review']) {
       expect(region.textContent).not.toContain(needle);
-      // innerHTML, not textContent, so an aria-label or title leak is caught too.
-      expect(region.innerHTML).not.toContain(needle);
+      // outerHTML, NOT innerHTML. innerHTML excludes the region's OWN
+      // attributes, so a leak into an `aria-label` on the root element was
+      // invisible to this guard and measured green — the review proved it by
+      // doing exactly that and getting a computed accessible name equal to a raw
+      // session UUID with nothing RED. outerHTML covers the root's attributes
+      // and every descendant's.
+      expect(region.outerHTML).not.toContain(needle);
     }
-    expect(region.innerHTML).not.toMatch(
-      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
-    );
-    expect(region.innerHTML).not.toContain('@');
+    expect(region.outerHTML).not.toMatch(UUID_PATTERN);
+    expect(region.outerHTML).not.toContain('@');
+
+    // An accessibility-TREE oracle, not a markup one: queryByLabelText computes
+    // over aria-label/aria-labelledby/<label>, so this fires for a leak that
+    // never appears as visible text at all.
+    expect(screen.queryByLabelText(UUID_PATTERN)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/@/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(UUID_PATTERN)).not.toBeInTheDocument();
+  });
+
+  it('gives AC5 second surface wholly distinct wording, not a suffix', async () => {
+    renderWarning({ surface: 'collaboration', history: MIXED_HISTORY });
+
+    // The collaboration surface has its own root id, so every locator that must
+    // survive coexistence has a container to scope to.
+    expect(screen.getByTestId('shared-deck-provenance')).toBeInTheDocument();
+    expect(screen.queryByTestId('mixed-release-warning')).not.toBeInTheDocument();
+    // Same mandated warning sentence on both surfaces — AC5 says both warn.
+    expect(screen.getByTestId('mixed-release-warning-text')).toHaveTextContent(WARNING_TEXT);
+
+    expect(
+      screen.getByRole('button', { name: COLLABORATION_DISCLOSURE_LABEL }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: DISCLOSURE_LABEL })).not.toBeInTheDocument();
+
+    await expand(COLLABORATION_DISCLOSURE_LABEL);
+    expect(screen.getByRole('list', { name: COLLABORATION_LIST_LABEL })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: PROVENANCE_LIST_LABEL })).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('mixed-release-row')).toHaveLength(3);
+  });
+
+  it('announces on the conversation surface only, so one sentence is not announced twice', () => {
+    const { unmount } = renderWarning({ surface: 'conversation', history: MIXED_HISTORY });
+    expect(screen.getByRole('status')).toHaveTextContent(WARNING_TEXT);
+    unmount();
+
+    renderWarning({ surface: 'collaboration', history: MIXED_HISTORY });
+    // Same sentence, deliberately NOT a second live region: the dialog copy is
+    // static content the user just opened, and two identical live regions would
+    // announce it twice.
+    expect(screen.getByTestId('mixed-release-warning-text')).toHaveTextContent(WARNING_TEXT);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it("no surface's accessible name nests inside another's", () => {
+    // Read from the component so the guard covers the REAL set rather than a
+    // hand-maintained copy. The literal 4 is what stops a shrunk record passing
+    // vacuously; the wording itself is pinned by literals in the tests above.
+    expect(SURFACE_ACCESSIBLE_NAMES).toHaveLength(4);
+    expect(new Set(SURFACE_ACCESSIBLE_NAMES).size).toBe(4);
+    expect(SURFACE_ACCESSIBLE_NAMES).toContain(DISCLOSURE_LABEL);
+    expect(SURFACE_ACCESSIBLE_NAMES).toContain(COLLABORATION_DISCLOSURE_LABEL);
+
+    // Playwright's DEFAULT name matching is case-insensitive substring. Both
+    // placements are mounted together whenever the Share dialog is open, so a
+    // name nesting inside another makes an existing locator resolve to two
+    // elements — the strict-mode failure this epic has paid for twice.
+    for (const outer of SURFACE_ACCESSIBLE_NAMES) {
+      for (const inner of SURFACE_ACCESSIBLE_NAMES) {
+        if (outer === inner) continue;
+        expect(outer.toLowerCase()).not.toContain(inner.toLowerCase());
+      }
+    }
   });
 
   it('renders nothing for a session that is not persisted', () => {
     const { container } = render(
       <MixedReleaseWarning
+        surface="conversation"
         history={MIXED_HISTORY}
         loadFailed={false}
         isSessionPersisted={false}

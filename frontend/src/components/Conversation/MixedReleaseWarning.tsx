@@ -2,7 +2,10 @@ import { useId, useState } from 'react';
 import type { CollaborationHistory, CollaborationReleaseGroup } from '@/services/api';
 
 /**
- * The mixed-release collaboration warning and its change-provenance disclosure.
+ * The mixed-release collaboration warning and its change-provenance disclosure,
+ * rendered on BOTH surfaces issue #262 AC5 names: the conversation surface
+ * (beside the #261 pinned-version badge) and the collaboration surface (the
+ * Share Deck dialog body).
  *
  * DISPLAY VOCABULARY IS OWNED HERE (ruling F6). The collaboration-history API
  * deliberately emits no "Legacy", no "no graph release" and no "active" string —
@@ -20,23 +23,25 @@ import type { CollaborationHistory, CollaborationReleaseGroup } from '@/services
  * NO IDENTITY RECOVERY. The four group fields are the whole input. There is no
  * connected-user lookup, no root inference and no attempt to resolve
  * `actor_label` to a person; `Contributor N` is a response-local label that the
- * server reassigns per response.
+ * server reassigns per response. Nothing is spread from the payload into the
+ * DOM, so a server that later grew an identifying field could not leak through
+ * an attribute either — `lets no server-added field reach the DOM or the
+ * accessibility tree` asserts that over `outerHTML`, which includes the root's
+ * own attributes, and over the computed accessible name.
+ *
+ * WHY THE TWO SURFACES USE DIFFERENT WORDING. The Share Deck dialog is an
+ * overlay that leaves the conversation copy mounted behind it, so both
+ * placements are in the DOM at once. Playwright matches accessible names by
+ * case-insensitive SUBSTRING, so a suffixed name would make the conversation
+ * copy's locator ambiguous. Wholly DISTINCT wording escapes that outright, and
+ * `both surfaces stay independently addressable with the dialog open` measures
+ * it rather than assuming it. Every name in SURFACE_VOCABULARY is checked
+ * pairwise-non-nesting by `no surface's accessible name nests inside another's`.
  */
 
-export const MIXED_RELEASE_WARNING_TEXT =
+const MIXED_RELEASE_WARNING_TEXT =
   'This shared deck has changes from multiple Graph Versions.';
-export const LEGACY_RELEASE_LABEL = 'Legacy (no graph release)';
-export const DISCLOSURE_LABEL = 'Change provenance';
-/**
- * The provenance list's own accessible name.
- *
- * Deliberately NOT a superstring or substring of {@link DISCLOSURE_LABEL} or of
- * any row label: Playwright matches accessible names by case-insensitive
- * SUBSTRING while Testing Library's `name` is exact, so a nested name passes
- * Vitest and fails Playwright with `strict mode violation`. This epic has paid
- * for that twice.
- */
-export const PROVENANCE_LIST_LABEL = 'Contributor releases';
+const LEGACY_RELEASE_LABEL = 'Legacy (no graph release)';
 /**
  * The single generic unavailable state. Every 404 from the history endpoint —
  * unknown id, unauthorized caller, guessed contributor id, missing or deleted
@@ -44,10 +49,45 @@ export const PROVENANCE_LIST_LABEL = 'Contributor releases';
  * all. It names no contributor, no version and no session, because any of those
  * would turn an indistinguishable 404 into a disclosure.
  */
-export const HISTORY_UNAVAILABLE_TEXT = 'Collaboration history unavailable';
+const HISTORY_UNAVAILABLE_TEXT = 'Collaboration history unavailable';
+
+type CollaborationSurface = 'conversation' | 'collaboration';
+
+type SurfaceVocabulary = {
+  /** Root test id, and the container every coexistence-safe locator scopes to. */
+  testId: string;
+  disclosureLabel: string;
+  listLabel: string;
+  /**
+   * Whether this surface's warning is a live region.
+   *
+   * Only the conversation surface announces. Its warning can ARRIVE while the
+   * user is reading, so `role="status"` is correct there. The dialog's copy is
+   * static content the user just opened deliberately, and two simultaneous
+   * identical live regions would announce the same sentence twice — a real
+   * defect, not a cosmetic one. It also keeps `getByRole('status')`
+   * unambiguous while both placements are mounted.
+   */
+  announce: boolean;
+};
+
+const SURFACE_VOCABULARY: Record<CollaborationSurface, SurfaceVocabulary> = {
+  conversation: {
+    testId: 'mixed-release-warning',
+    disclosureLabel: 'Change provenance',
+    listLabel: 'Contributor releases',
+    announce: true,
+  },
+  collaboration: {
+    testId: 'shared-deck-provenance',
+    disclosureLabel: 'Who changed this deck',
+    listLabel: 'Release history by contributor',
+    announce: false,
+  },
+};
 
 /** "Graph Version 3", or the legacy wording when there is no persisted release. */
-export function releaseLabel(graphVersion: number | null): string {
+function releaseLabel(graphVersion: number | null): string {
   return graphVersion === null ? LEGACY_RELEASE_LABEL : `Graph Version ${graphVersion}`;
 }
 
@@ -63,7 +103,7 @@ export function releaseLabel(graphVersion: number | null): string {
  * a substring of another by being a suffix of it, and a distinct group cannot
  * produce a suffix-equal name.
  */
-export function groupRowLabel(group: CollaborationReleaseGroup): string {
+function groupRowLabel(group: CollaborationReleaseGroup): string {
   const changes = `${group.mutation_count} change${group.mutation_count === 1 ? '' : 's'}`;
   return `${group.actor_label}, ${releaseLabel(group.graph_version)}, ${changes}`;
 }
@@ -93,15 +133,19 @@ export type MixedReleaseWarningProps = {
    * deck that exists server-side, and a fresh local session has none.
    */
   isSessionPersisted: boolean;
+  /** Which of AC5's two surfaces this instance is. Drives wording and test ids. */
+  surface: CollaborationSurface;
 };
 
 export function MixedReleaseWarning({
   history,
   loadFailed,
   isSessionPersisted,
+  surface,
 }: MixedReleaseWarningProps) {
   const listId = useId();
   const [isOpen, setIsOpen] = useState(false);
+  const vocabulary = SURFACE_VOCABULARY[surface];
 
   if (!isSessionPersisted) {
     return null;
@@ -110,10 +154,13 @@ export function MixedReleaseWarning({
   if (loadFailed) {
     return (
       <div
-        data-testid="mixed-release-warning"
+        data-testid={vocabulary.testId}
         className="border-b border-border bg-card px-3 py-1.5 text-xs text-muted-foreground"
       >
-        <p role="status" data-testid="mixed-release-unavailable">
+        <p
+          {...(vocabulary.announce ? { role: 'status' } : {})}
+          data-testid="mixed-release-unavailable"
+        >
           {HISTORY_UNAVAILABLE_TEXT}
         </p>
       </div>
@@ -126,11 +173,15 @@ export function MixedReleaseWarning({
 
   return (
     <div
-      data-testid="mixed-release-warning"
+      data-testid={vocabulary.testId}
       className="flex flex-col gap-1 border-b border-border bg-card px-3 py-1.5 text-xs text-muted-foreground"
     >
       {history.mixed_release_warning && (
-        <p role="status" data-testid="mixed-release-warning-text" className="text-foreground">
+        <p
+          {...(vocabulary.announce ? { role: 'status' } : {})}
+          data-testid="mixed-release-warning-text"
+          className="text-foreground"
+        >
           {MIXED_RELEASE_WARNING_TEXT}
         </p>
       )}
@@ -142,12 +193,12 @@ export function MixedReleaseWarning({
         onClick={() => setIsOpen((open) => !open)}
         className="self-start underline decoration-dotted underline-offset-2 hover:text-foreground"
       >
-        {DISCLOSURE_LABEL}
+        {vocabulary.disclosureLabel}
       </button>
       {isOpen && (
         <ul
           id={listId}
-          aria-label={PROVENANCE_LIST_LABEL}
+          aria-label={vocabulary.listLabel}
           data-testid="mixed-release-provenance"
           className="flex flex-col gap-0.5"
         >
@@ -169,3 +220,15 @@ export function MixedReleaseWarning({
     </div>
   );
 }
+
+/**
+ * Every accessible name this component can render, for the pairwise-nesting
+ * guard in its test. Exported ONLY for that guard, which needs the real set
+ * rather than a hand-maintained copy: the guard asserts a structural property
+ * (no name nests inside another) rather than any specific wording, so reading
+ * it from the source is correct here. Per C-24, every test that pins a MANDATED
+ * WORDING still carries its literal.
+ */
+export const SURFACE_ACCESSIBLE_NAMES: string[] = Object.values(SURFACE_VOCABULARY).flatMap(
+  (entry) => [entry.disclosureLabel, entry.listLabel],
+);
