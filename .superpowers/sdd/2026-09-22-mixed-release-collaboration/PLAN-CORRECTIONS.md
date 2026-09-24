@@ -738,3 +738,28 @@ property and is fixed by scoping the locator, not by renaming.
 Cost if wrong: a second placement that duplicates an accessible name and makes an existing
 conversation-surface assertion ambiguous — which is why the fix must assert the disambiguation
 rather than assume it.
+
+### C-27 — EPIC-WIDE: a mutation harness must assert its anchor count
+
+Found by #262 Task 5's fix round, and it generalises to every mutation this epic still runs.
+
+Its N1 mutation anchor used six-space indentation, copied from a `loadFailed` branch, while the
+main return's root `<div>` sits at four. The harness reported **`anchor count 0`** and refused to
+patch, so the mis-aim surfaced immediately.
+
+The insight is what would have happened otherwise: **had the anchor been merely non-unique rather
+than absent, a `replace(..., 1)` would have silently mutated the wrong element and produced a RED
+that proves something else entirely.** A mis-aimed mutation that still REDs is worse than one that
+REDs nothing, because nothing about the result looks wrong — you get a green-to-red transition and
+a plausible story, and the clause you meant to pin stays unguarded.
+
+**Binding rule: any mutation harness in this epic asserts the number of anchor matches before
+patching, and fails on any count other than the one expected.** Zero means the aim is wrong; more
+than one means the patch location is ambiguous. Both must stop the run rather than proceed.
+
+This is the third consecutive round on that task where the implementer's first aim was wrong, and
+the anchor-count assertion is what caught it every time — which is also why "I hit a zero and
+re-aimed" has been such a reliable quality signal in this epic: the agents that report zeros are
+the ones whose harnesses can detect them.
+
+Cost if wrong: a clause recorded as guarded by a mutation that actually exercised a different line.
