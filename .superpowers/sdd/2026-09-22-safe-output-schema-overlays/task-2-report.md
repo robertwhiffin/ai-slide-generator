@@ -338,3 +338,243 @@ Verified by `git diff --quiet f94757d3 HEAD -- <file>`:
    clause is guarded, but by one node; a reviewer wanting a wider net on
    "no client-selected identities" could add a case where the stored digest belongs to the
    hardcoded role.
+
+---
+
+# Task 2 — fix round 1 of 5. Corrections 27 through 30.
+
+**Status: DONE.** Fix-round base `e5cfb11dfd6e90e24e5f2def4fe39c35b06f8e90` (triple check
+clean). No shipped-behaviour finding was raised against round 1; three of the four items are
+report and ledger corrections, and one restored a guard.
+
+Commits in this round:
+
+- **`1fe251549a649c97ef50c41c2fd000fd176b175f`** — `fix: restore the non-string-key guard and
+  pin two disclosed behaviours (#264)`. Two files: `src/services/graph_definition_manifest.py`
+  (+11), `tests/unit/test_graph_definition_manifest.py` (+103).
+- the commit carrying this appendix and its ledger entry.
+
+I lost the session to an infrastructure error (ENOTFOUND) partway through the closing gates.
+`1fe251549` had already landed. The controller salvaged and independently re-verified it; I
+re-verified the base, re-confirmed all three new tests are present in the committed tree, and
+finished the gates I died during. **One correction to the re-dispatch brief: item 3 / F6 is
+already tested**, not "undisclosed and untested" — `test_converged_overlay_defaults_two_fields_the_removed_carrier_required`
+landed in `1fe251549`. What remained for F6 was the prose disclosure, which is below.
+
+## ITEM 1 — my mode-blindness conclusion was FALSE. Re-measured myself.
+
+I did not take this on report. I reproduced it against the pristine tree and then probed the
+mechanism directly.
+
+**Measurement.** With the anchor count asserted at exactly 1, swapping `canonical_payload`'s
+`mode="python"` for `mode="json"`:
+
+- at the row's own named selector — `1 passed`, **RED 0**. My round-1 number.
+- at full focused-suite scope — **RED 6**, named:
+
+```
+test_hash_normalizes_manifest_floats_and_database_decimals
+test_hash_rejects_non_finite_numeric_values[temperature-Decimal('NaN')]
+test_hash_rejects_non_finite_numeric_values[top_p-Decimal('Infinity')]
+test_hashing_still_fails_closed_on_a_non_json_guidance_value          (mine, round 1)
+test_canonical_payload_mode_is_load_bearing_for_the_finiteness_guard  (mine, this round)
+test_hashing_rejects_non_string_object_keys_inside_guidance           (mine, this round)
+```
+
+**Mechanism, probed directly rather than reasoned about.** On the shipped `mode='python'` path
+a non-finite `Decimal` raises `ValueError: canonical numeric values must be finite`. Under the
+mutation it is **silently hashed** to `140de6a94eff…`, and `Decimal('0.700000')` stops hashing
+equal to the packaged float `0.7`. So the mode is load-bearing for two independent guarantees —
+Decimal normalisation, which is what `canonical_payload`'s own docstring exists for, and a
+fail-closed finiteness guard. `Decimal` is exactly the shape these values take crossing the
+SQLAlchemy boundary.
+
+**One thing I found that goes beyond correction 27.** The mode also protects the *key* half:
+node 6 above REDs because `mode='json'` coerces an `int` key to `"1"` before the normaliser can
+see it, so the new key check cannot fire either. The mode guards **both** halves of the removed
+helper's fail-closed behaviour, not just the numeric one.
+
+**The corrected conclusion.** My round-1 number was right under an undeclared per-named-test
+scope; the defect was generalising it. "Changes no hash at all" and "the hash gate cannot detect
+the swap" are both **false and withdrawn**. What survives is the mode *choice*: `mode='json'` is
+provably the persisting form, because `schema_overlay` is `json_document=True`
+(`graph_configuration_content.py:44`) and `definition_content_values` dumps `mode="json"` at
+`:79`. Both mode assertions have teeth, each proved by a distinct mutation. The requirement to
+decide explicitly was right; my reasoning in support of it was wrong, and it was wrong in the
+dangerous direction — it would have told a later task that removing a fail-closed guard was free.
+
+Pinned by `test_canonical_payload_mode_is_load_bearing_for_the_finiteness_guard`, which asserts
+the payload keeps a real `float` (not a stringified Decimal), that the Decimal and float forms
+hash equal, and that both non-finite Decimals raise. Mutation M2 REDs it.
+
+## ITEM 2 — the M7 row named the wrong node. Re-measured myself.
+
+Hardcoding the bridge's role to `"architect"`:
+
+- `test_stored_identity_resolution_fails_closed` — **6 passed, 0 failed.** My round-1 row
+  claimed this was the RED node. It is not, and the reason is instructive: `_resolve` keys the
+  bundle lookup on the `agent_key` **argument**, so `("not_a_role", 1)` still misses the
+  registry and still fails closed regardless of what role the identity carries.
+- real radius, both scopes — **RED 13**: twelve parametrisations of
+  `test_stored_identity_resolves_the_exact_role_and_version_bundle` (the six non-architect roles
+  × two versions) plus `test_registry_resolves_identities_bridged_from_the_stored_content_identity`.
+
+**Residual, corrected.** My round-1 concern 5 said the clause was "guarded, but by one node".
+That was wrong — it is guarded by thirteen. The real residual is narrower and different: **no
+test distinguishes the role *direction***, because `_resolve` keys on the argument and nothing
+in the suite passes an identity whose role differs from it. I am not adding one, because the
+structural protection is stronger than a test would be: `ContentIdentity` carries no role at
+all, so the bridge **cannot** take one from a stored pair. A test could only assert something
+the type system already makes unconstructible.
+
+## ITEM 3 (c29) — the fail-closed guarantee had moved only half. Guard restored.
+
+Verified myself before fixing: `{1: "a"}` and `{"1": "a"}` inside `examples` both hashed to
+`3b0f99866da532e835babeb7e646943ead92cb42d103d4bedd773baeb7b82ef0`, the persist path silently
+coerced `1` to `"1"` (`{'examples': [{'1': 'a'}]}`), and mixed keys failed only incidentally
+with `TypeError: '<' not supported between instances of 'str' and 'int'` — a `json.dumps`
+sort-comparison leak, not a domain check.
+
+**Decision: restore the key check, with tests.** I took this over the accepted-coercion ruling
+for three reasons. The removed helper carried the raise, so dropping it silently is the exact
+"half-moved guarantee" defect. The incidental mixed-key failure is a Pydantic/stdlib
+implementation leak, which is what Task 1's design explicitly exists to avoid. And two distinct
+semantic inputs sharing one content hash is an identity collision in a system whose entire point
+is content-addressed identity — low reachability is a reason to rank it Important, not a reason
+to accept it.
+
+**Placement.** In `_normalize_canonical_value`, the same hashing boundary the value half now
+lives at, and inside my own authorized file — no Task-3 file touched. Every write path reaches
+it before mutating a row: I confirmed `_write_locked_content` computes
+`definition_content_hash(content)` at `graph_configuration_draft.py:637`, **before** the
+`definition_content_values(content)` mapper call at `:638`. Int keys and mixed keys now raise
+`TypeError: canonical object keys must be strings, received 1`; the string-keyed sibling still
+hashes to `3b0f9986…` unchanged, so no existing hash moved.
+
+## ITEM 3 / F6 (c30) — the disclosed relaxation, in prose
+
+`agent_schema_types.py:336-337` — the converged carrier declares
+`field_overrides: Mapping[str, CanonicalFieldGuidance] = Field(default_factory=dict)` and
+`additional_optional_fields: tuple[str, ...] = ()`. The removed manifest-local overlay declared
+both **without defaults**. So `schema_overlay: {}` previously raised two `missing` errors and
+now validates to an empty overlay.
+
+This is a real, undisclosed narrowing of validation that I should have stated in round 1 and did
+not. It is harmless today only because all seven packaged v1 overlays are empty; Tasks 4 and 5
+introduce the first non-empty ones. It is a **defaults-only** relaxation — unknown keys are
+still refused, which the test asserts — and the defaults equal the packaged values, so it cannot
+move a v1 hash. Pinned by
+`test_converged_overlay_defaults_two_fields_the_removed_carrier_required`; mutation M18 REDs it
+(RED 46 at focused scope, because much of the suite constructs overlays relying on the default).
+
+## ITEM 4 / F4 — the table's measurement scope, declared
+
+**Declared scope for every row below: two numbers per row.** "named" is the row's own named test
+selectors, which is the only scope round 1 reported and reported without declaring. "focused" is
+the whole focused suite — `tests/unit/test_graph_definition_manifest.py` plus
+`tests/unit/test_agent_schema_registry.py`, 144 tests. Neither number is the full-suite radius.
+
+Round 1's numbers were all scope-consistent and all understatements — M1, M5, M12 and M2's zero
+— which left no clause unguarded, but an undeclared narrow scope is precisely what let a reader
+generalise M2's zero into a false general claim. That is the failure this declaration exists to
+prevent.
+
+Per **C-27**, the harness now asserts its anchor count and **hard-fails** on anything but
+exactly one occurrence. All 19 rows below asserted at exactly 1.
+
+| # | Clause | Test that claims it | Mutation | named | focused |
+| --- | --- | --- | --- | ---: | ---: |
+| M1 | byte-identical v1 payloads; the explicit mode decision | `…_payload_is_byte_identical_under_the_chosen_mode` | `additional_optional_fields: tuple[str, ...] = ()` → `list[str] = []` | 1 | 4 |
+| **M2** | **the canonical dump mode is load-bearing** (CORRECTED) | `…_mode_is_load_bearing_for_the_finiteness_guard` | `canonical_payload` `mode="python"` → `mode="json"` | **1** | **6** |
+| M2b | byte-identical v1 hashes | `…_content_hashes_are_the_seven_frozen_literals` | overlay serializer emits an extra `_probe` key | 1 | 18 |
+| M3 | typed guidance round-trip: absent vs explicit null | `…_round_trips_through_the_storage_carrier` | drop the `mutation_is_supplied("description")` guard | 1 | 7 |
+| M4 | v2 hash change; server-owned v2 identity | `…_only_the_schema_identity` ×7 + `…_keeps_the_manifest_identity_carrier_type` | `identity_for(key, 2)` → `identity_for(key, 1)` | 8 | 10 |
+| M5 | all v1/v2 identities resolve | `…_resolves_the_exact_role_and_version_bundle` | `version=stored.version` → `version=1` | 7 | 10 |
+| M6 | fail-closed on mismatched role/version/digest | `…_resolution_fails_closed` + registry bridge | `_resolve`: drop `or bundle.identity != identity` | 5 | 6 |
+| **M7** | **role comes from the owning record** (CORRECTED) | `…_resolves_the_exact_role_and_version_bundle` ×12 + registry bridge | `agent_key=agent_key` → `agent_key="architect"` | **13** | **13** |
+| M8 | one `SchemaOverlay`; no competing class | `…_not_a_second_definition` + `…_storage_carriers_overlay_grammar` | re-introduce a shadowing local `SchemaOverlay` | 2 | 20 |
+| M9 | do not regenerate Graph V1 | `…_does_not_regenerate_graph_v1` | upgrade mutates the shared record in place | 1 | 12 |
+| M10 | retain `ContentIdentity` as storage/wire carrier | `…_keeps_the_manifest_identity_carrier_type` | BaseModel branch returns the registry dataclass | 1 | 8 |
+| M11 | freeze-helper convergence, no third copy (c12) | `…_not_a_second_definition` | re-add `_freeze_json_containers` to the manifest | 1 | 1 |
+| M12 | the recursive #260 freeze reaches the typed grammar | `…_frozen_inside_the_carrier` + the repaired `…_dump_as_json_containers` | `freeze_json_containers` returns a plain `dict` | 2 | 3 |
+| M13 | hashing fails closed on a non-JSON **value** | `…_fails_closed_on_a_non_json_guidance_value` | `return repr(value)` instead of `raise TypeError` | 1 | 1 |
+| M14 | a v2 typed overlay round-trips through the one mapper | `…_round_trips_through_the_persistence_mapper` | mapper `mode="json"` → `mode="python"` | 1 | 1 |
+| M15 | a schema upgrade must not touch #265's assembly | `…_only_the_schema_identity` ×7 | upgrade also writes `protected_assembly` | 7 | 8 |
+| M16 | an assembly upgrade must not touch the schema contract | `…_leaves_the_schema_contract_untouched` | `upgrade_definition_to_v2` also writes `schema_contract` | 1 | 1 |
+| **M17** | **hashing fails closed on a non-string KEY** (c29, new) | `…_rejects_non_string_object_keys_inside_guidance` | neutralise the key loop | **1** | **1** |
+| **M18** | **the disclosed defaults relaxation** (c30, new) | `…_defaults_two_fields_the_removed_carrier_required` | remove `field_overrides`' default | **1** | **46** |
+
+**19 rows. Blank count 0 at both declared scopes** — no row REDs nothing at either scope.
+
+## Two mis-aimed probes of my own, this round
+
+Reported because the habit matters more than the tidiness of the result.
+
+1. **A probe where I forgot to restore, so both halves measured the same thing.** Comparing the
+   shipped mode against the mutated mode, I left the previous call's mutation in place, so my
+   "shipped `mode=python`" arm was actually running json mode. Both arms returned the identical
+   hash `140de6a9…` and I nearly recorded "not fail-closed" for the shipped path. **The C-27
+   anchor assertion caught it**: the second mutation attempt found 0 occurrences of the
+   `mode="python"` anchor and hard-failed instead of measuring. That is precisely the failure
+   mode C-27 was adopted for, on the first run after adopting it. Re-probed against a tree
+   verified byte-identical to base with `diff -q`, and got the correct result.
+
+2. **My first full table run had a stale baseline, inflating every focused number by 1.** The
+   driver's `cp` backups were taken *before* the ITEM 3 key check, so `restore_all()` silently
+   reverted it and left `test_hashing_rejects_non_string_object_keys_inside_guidance` failing in
+   every focused run. I caught it because M17's anchor then failed to exist at all — the same
+   assertion firing a second time. Re-baselined the backups from the committed state and re-ran
+   all 19 rows. **The numbers in the table above are from the re-run**; the first run's focused
+   column was uniformly one too high and is discarded.
+
+## Gates
+
+| Gate | Result | Prior | Reconciliation |
+| --- | --- | --- | --- |
+| Focused (manifest + registry tests) | **144 passed, 0 failed, 0 skipped** | 141 | 141 + 3 new |
+| Task 7 unit matrix (17 files, verbatim) | **847 passed, 0 failed, 0 skipped** | 844 | 844 + 3 new |
+| Full `tests/unit` | **14 failed, 5541 passed, 110 skipped, 136 warnings** | 14 / 5538 / 110 / 136 | 5538 + 3 new |
+| PostgreSQL, 6 baseline files, separate invocations | **2 · 7 · 7 · 1 · 2 · 15 = 34 passed, 0 skipped** | 34, zero skips | identical |
+| PostgreSQL `test_conversation_pin_acceptance_postgres.py` | 1 passed, 0 skipped | 1 passed | identical |
+| `ruff check` / `ruff format --check` on changed files | clean | — | — |
+
+Full-suite causes re-verified by traceback: 9 × `ConversationGraphReleaseIntegrityError` at
+`conversation_pins.py:83`, 3 × `AttributeError: '_FakeSession'…execute` at `:79`, 2 ×
+`test_deploy_autoscaling.py` assertions. Same six files, split **1/2/2/3/1/5**, **zero new
+failure causes**. PostgreSQL was re-run in full this round specifically because the ITEM 3 change
+sits on `_normalize_canonical_value`, which every persistence write crosses.
+
+`.venv` absent before and after every gate. No `pip`, `uv`, `uv run`. **No frontend command
+run** — that lane is held elsewhere and correction 24's four owed commands remain deferred.
+
+## Scope discipline held
+
+`git diff --name-only 2cf82b34e HEAD -- src tests` is exactly
+`src/services/graph_definition_manifest.py` and `tests/unit/test_graph_definition_manifest.py`.
+`agent_runtime.py`, `agent_schema_registry.py` and `agent_schema_types.py` remain **UNCHANGED**
+across the whole task. `SchemaContractIdentity` is still defined twice; the `isinstance` gate at
+`agent_schema_registry.py:556` is still byte-unchanged, one line from the `BaseModel` branch
+mutations M4/M10 deliberately exercised and restored. No database created, dropped, migrated or
+altered by hand. All mutations restored from `cp` backups; drift enumerated from
+`git diff --name-only HEAD` after each. Driver kept outside the repository at
+`/tmp/t2r2/mutate2.py`.
+
+## Concerns after this round
+
+1. **I generalised an undeclared-scope measurement into a general claim, and it was a claim that
+   would have made a fail-closed guard look free to remove.** That is the most serious thing in
+   either round, and it was mine. The mechanical fix is the declared two-scope table; the
+   judgement fix is that a zero measured at a narrow scope licenses no statement about any wider
+   scope. My M7 error has the same root: I asserted *which node* RED without checking.
+2. **The role-direction residual stands, deliberately untested** (ITEM 2 above). Structural, not
+   testable, because `ContentIdentity` carries no role.
+3. **The three round-1 forward items ruled correctly deferred are unchanged**, and the
+   `extra="allow"` window is narrower than I stated — unreachable from any client path today
+   because the PUT DTO refuses `schema_overlay` and `agent_runtime.py:547` hard-rejects
+   non-empty. I was conservative about my own exposure; noting that the correction was in the
+   safe direction, not that it was harmless.
+4. **`test_hashing_rejects_non_string_object_keys_inside_guidance` asserts a hash literal
+   (`3b0f9986…`) for the string-keyed sibling.** That is deliberate — it proves the new check
+   moved no existing hash — but it is a second place that hash now lives, and a future
+   legitimate change to guidance serialisation will need to update it.
+5. **Frontend baseline still outstanding** under correction 24.
