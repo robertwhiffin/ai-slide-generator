@@ -2855,6 +2855,47 @@ class TestInvokeGraphResolvesTheTrace:
             == collab.owner_session_id
         )
 
+    def test_the_default_loader_is_fail_closed_on_a_hand_forced_depth_2_row(
+        self, graph_env
+    ):
+        """A non-root session must never be recorded as the deck owner.
+
+        Depth 2 is unreachable through the application — ``get_or_create_contributor_session``
+        refuses a contributor on a contributor (C-16) — but it is reachable through
+        raw SQL or a pre-guard legacy database, and that is exactly when a
+        provenance resolver must refuse rather than guess.  Without
+        ``root.parent_session_id IS NULL`` this returns the INTERMEDIATE
+        contributor as the root, disagreeing with both other resolvers and
+        attributing the deck to a session that does not own it.
+        """
+        from src.services.conversation_pins import ConversationSessionNotFoundError
+
+        collab = _collaboration(graph_env)
+        db = graph_env.factory()
+        try:
+            middle = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == collab.contributor_session_id)
+                .one()
+            )
+            grandchild = UserSession(
+                session_id=f"depth2-{uuid.uuid4().hex[:8]}",
+                created_by="forced@example.com",
+                parent_session_id=middle.id,
+                graph_release_id=collab.r2_id,
+            )
+            db.add(grandchild)
+            db.commit()
+            forced_session_id = grandchild.session_id
+            middle_session_id = middle.session_id
+        finally:
+            db.close()
+
+        with pytest.raises(ConversationSessionNotFoundError):
+            graph_builder.load_collaboration_root(graph_env.factory, forced_session_id)
+        # The failure mode being excluded, stated: NOT the intermediate session.
+        assert middle_session_id != collab.owner_session_id
+
     def test_the_default_loader_refuses_an_unknown_conversation(self, graph_env):
         from src.services.conversation_pins import ConversationSessionNotFoundError
 
@@ -2993,12 +3034,18 @@ class TestRuntimeRootActorTrace:
     def test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record(
         self, graph_env
     ):
-        """The record is turn state; the re-fan re-declares provenance from state."""
+        """The record is turn state; the re-fan re-declares provenance from state.
+
+        Every hostile value here is DISTINCT from the value state carries — an
+        earlier version left ``session_id`` at the helper's default, which is the
+        owner's session, so that assertion could not have failed.
+        """
         collab = _collaboration(graph_env)
         record = _branch_payload(
             graph_env,
             0,
             html=CLEAN_HTML,
+            session_id="attacker-session",
             root_session_id="attacker-root",
             actor_session_id="attacker-actor",
             graph_release_id=999,
@@ -3011,6 +3058,9 @@ class TestRuntimeRootActorTrace:
         assert sends[0].arg["root_session_id"] == collab.owner_session_id
         assert sends[0].arg["actor_session_id"] == collab.contributor_session_id
         assert sends[0].arg["graph_release_id"] == collab.r2_id
+        # session_id is the key the mutation event's actor is built from, so it is
+        # part of the same hardening, not an adjacent detail.
+        assert sends[0].arg["session_id"] == collab.contributor_session_id
 
     def test_the_fixer_and_its_unsafe_output_retry_record_one_identity(
         self, graph_env, monkeypatch
@@ -3153,7 +3203,14 @@ class TestRuntimeRootActorTrace:
     def test_the_persisted_mutation_event_agrees_with_the_runtime_trace(
         self, graph_env, monkeypatch
     ):
-        """AC4: the trace and the evidence row name the same root, actor and release."""
+        """AC4: the trace and the evidence row name the same root, actor and release.
+
+        Driven through the RE-FAN from a hostile record, not from a hand-built
+        payload, because the event's actor is derived from ``session_id`` while the
+        trace's actor is ``actor_session_id``: the two only agree if the re-fan
+        hardens both.  Asserting them from a payload that already carries the right
+        session_id would prove the agreement on an input that cannot disagree.
+        """
         collab = _collaboration(graph_env)
         trace = _trace_runtime(
             monkeypatch, collab, {"build_reviewer": [review_out(0)]}
@@ -3162,14 +3219,17 @@ class TestRuntimeRootActorTrace:
             graph_env,
             0,
             html=CLEAN_HTML,
-            root_session_id=collab.owner_session_id,
-            actor_session_id=collab.contributor_session_id,
-            graph_release_id=collab.r2_id,
-            session_id=collab.contributor_session_id,
+            session_id="attacker-session",
+            root_session_id="attacker-root",
+            actor_session_id="attacker-actor",
+            graph_release_id=999,
             initiated_by="contributor@example.com",
         )
+        state = _actor_state(graph_env, collab, slides=scoped(TURN, {0: record}))
 
-        build_reviewer_node(record)
+        sends = graph_routers.build_reviewer_refan_router(state)
+        assert len(sends) == 1
+        build_reviewer_node(sends[0].arg)
 
         _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
         db = graph_env.factory()

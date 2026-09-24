@@ -551,6 +551,40 @@ class TestARealTurn:
         assert len(env.skills.calls_for("deck_reviewer")) == 1
         assert get_event_emitter() is None
 
+    def test_a_real_turn_carries_the_root_and_actor_through_the_runtime(
+        self, graph_env_threadsafe
+    ):
+        """#262 slice 4B: GraphState's two trace keys proved by RUNNING the graph.
+
+        The static checks — a ``get_type_hints`` assertion and an AST sweep — cannot
+        see the failure that matters here.  LangGraph DROPS a key ``GraphState`` does
+        not declare, and every consumer reads the trace with ``.get(...) or ""``, so
+        an undeclared key leaves all five state-reading nodes and every fanned
+        branch tracing BLANK with nothing raising and both static guards green.
+
+        Two runtime observations close that: the keys survive a real three-slide turn
+        into final state, and the ``Send`` payload each builder actually received
+        carries them — which is only possible if ``build_branch_payload`` could read
+        them off state mid-run.
+        """
+        env = graph_env_threadsafe
+        _wire_three_slide_turn(env)
+
+        final = _run(
+            env,
+            {
+                "root_session_id": "owner-of-the-deck",
+                "actor_session_id": "the-contributor",
+            },
+        )
+
+        assert final["root_session_id"] == "owner-of-the-deck"
+        assert final["actor_session_id"] == "the-contributor"
+        fanned = [call["payload"] for call in env.skills.calls_for("builder")]
+        assert len(fanned) == 3, "no builder fanned out — the check would be vacuous"
+        assert {p["root_session_id"] for p in fanned} == {"owner-of-the-deck"}
+        assert {p["actor_session_id"] for p in fanned} == {"the-contributor"}
+
     def test_one_reviewer_per_slide_each_with_its_own_position(
         self, graph_env_threadsafe
     ):

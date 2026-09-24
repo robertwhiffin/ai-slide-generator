@@ -292,3 +292,209 @@ Not touched: `src/services/collaboration_history.py` and everything else slice 4
   `test_deck_level_spec_change`, `test_prompt_assembler`): **506 passed, 0 failed**.
 - Graph integration: **151 passed / 2 failed**, both inherited and reproduced at base.
 - Mutations: **27 run, 27 anchor counts as expected, 26 RED, 1 mis-aim re-aimed, 0 blanks.**
+
+---
+
+# Fix round 1 — 1 Critical + 3 Important, all closed
+
+**Status: DONE.** Base moved to `b358f0670d4fd07860abf7a38e88e6a3f470ec75` (adds C-32); triple
+check clean before any edit, and my slice commit `6d9d154de` confirmed an ancestor.
+
+## F1 — CRITICAL (C-32): the written log prohibition was breached; closed by allow-list
+
+The contract at `docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md:21` permits
+**seven** fields and names "session/user ID" as prohibited. `**identity.__dict__` emitted my two
+new fields, and the guard could not see it because it forbade the exact *name* `session_id`.
+Accepted without reservation: the breach was mine, the plan text is unambiguous, and nothing in
+bullet 2 required the sink to emit them — only the identity to carry them.
+
+**Fix, both sides:**
+
+1. `agent_runtime_identity.py` gains `_LOGGED_IDENTITY_FIELDS` (five identity fields) and
+   `LoggingAgentInvocationIdentitySink._permitted()`, which projects exactly those. **Both**
+   branches of `invoke` — success and error — project through it; a guard on one branch only
+   would have left the branch that runs after something already went wrong free to leak.
+2. The name-forbidding guard at `test_persisted_agent_runtime.py:839` is replaced by an
+   **exact-emitted-set** assertion. `emitted_fields(record)` is `vars(record)` minus the stdlib
+   `LogRecord` attributes, and `PERMITTED_LOG_FIELDS` is seven **literals** — not an import of
+   `_LOGGED_IDENTITY_FIELDS`, per C-24, so the test cannot agree with the implementation by
+   construction. Applied to the error branch, the success branch, and a new test
+   (`test_the_identity_carries_the_session_ids_that_the_log_must_not`) that pins the separation
+   itself: the sink *receives* an identity carrying both session IDs and *writes* a record
+   carrying neither.
+
+`message`/`asctime`/`taskName` are excluded from the emitted set because they are added at
+**format** time, and `logging` raises `KeyError: "Attempt to overwrite 'message' in LogRecord"`
+for an `extra` key colliding with an existing attribute — so no sink field can ever hide behind
+one of those three names. The exclusion is provable, not a convenience.
+
+**The exact emitted log field set after the fix**, measured by running the sink:
+
+```
+agent_definition_revision_id, agent_key, content_hash, error_class,
+graph_release_id, graph_version, outcome
+```
+
+Seven fields, matching the contract one-for-one. `root_session_id` and `actor_session_id` are
+**absent** from the record, and the literal ID values do not appear anywhere in `vars(record)`.
+
+**Sabotage-verified twice**, which is what distinguishes this from the guard it replaces:
+
+- **M23** — restore `**identity.__dict__`: **3 RED** (both branch guards + the separation test).
+  The old name-based guard passed this mutation; the new one does not.
+- **M24** — add `"actor_session_id"` to the allow-list: **3 RED**. The allow-list is the control
+  point, and a *differently named* field is caught, which is the whole point of C-32.
+
+## F2 — IMPORTANT: `session_id` hardened in the re-fan; AC4 now established, not asserted
+
+The finding is correct and was a real hole: the mutation event's actor is built from
+`payload["session_id"]`, which the re-fan did not harden, so under the threat model my own
+docstring invoked the trace and the evidence row could name **different actors**.
+
+`routers.py` now re-declares `session_id` alongside release/root/actor. It falls back to the
+record's own value (`state.get("session_id") or record.get("session_id")`) rather than to `None`:
+state always carries `session_id` in production — `invoke_graph` writes it before any node runs
+and it *is* the `thread_id` — so the fallback is unreachable there, and written this way the line
+can only ever **harden** a value, never replace a usable one with a blank and break a row write
+inside a router. Four pre-existing `TestBuildReviewerRefan` tests build states with no
+`session_id`; the fallback keeps them green without touching a file I was not granted.
+
+`test_the_persisted_mutation_event_agrees_with_the_runtime_trace` was **re-aimed to drive through
+the re-fan from a hostile record** rather than from a hand-built payload. It previously asserted
+agreement on an input that could not disagree — the reviewer's `session_id` was already correct.
+It now starts from `session_id="attacker-session"`, `root="attacker-root"`,
+`actor="attacker-actor"`, `release=999` and asserts the event row's root/actor/release/version.
+
+The reviewer's own **`_branch_payload` default was the non-discrimination the coordinator flagged
+in R2**: its `session_id` default is the owner's session, so a hostile-record assertion on that
+key could not fail. Every hostile value in both tests is now distinct from the value state carries.
+
+## F3 — IMPORTANT: the root resolver is fail-closed, matching 4A
+
+`load_collaboration_root` now requires `root.parent_session_id IS NULL`. On a hand-forced depth-2
+row it resolves to nothing and raises, instead of naming the intermediate contributor as the deck
+owner. C-16 justifies the one-hop join *shape*; it does not license dropping the guard that makes
+the hop safe, and the three-way resolver disagreement the coordinator described was real.
+
+An absent conversation and a hand-forced depth-2 row are indistinguishable from this query and now
+share one outcome — neither has a legal root, so neither may run a turn — and the refusal lands
+before any node or writer, exactly as the null-pin refusal does (C-3).
+
+New test: `test_the_default_loader_is_fail_closed_on_a_hand_forced_depth_2_row` inserts the row via
+raw ORM and asserts `ConversationSessionNotFoundError`. **M26** (drop the predicate) REDs exactly it.
+
+## F4 — IMPORTANT: `GraphState`'s declaration is now guarded at runtime
+
+Added `TestARealTurn::test_a_real_turn_carries_the_root_and_actor_through_the_runtime` in
+`tests/unit/test_graph_builder.py` — the single assertion granted in that file. It runs a real
+three-slide turn through the **compiled graph** and makes two runtime observations: both keys
+survive into final state, and **the `Send` payload each of the three builders actually received**
+carries them, which is only possible if `build_branch_payload` could read them off state mid-run.
+
+That closes the M5 gap the coordinator identified: M5's two REDs were previously both static (a
+`get_type_hints` assertion and an AST sweep, neither of which runs a graph). **M5 now REDs 3,
+including the runtime test.** Nothing else was added to that file.
+
+## F5 — the commit message claim, corrected and measured
+
+The slice commit said "no prompt, no model". That was wrong, and the corrected message on the fix
+commit states the measured behaviour. **Measured** with a driver outside the repo
+(`/tmp/4b_prompt_probe.py`) which runs the full contributor-on-owner chain and greps each prompt
+the adapter received for the two literal session IDs:
+
+| role (call) | owner/root ID in prompt | contributor/actor ID in prompt |
+|---|---|---|
+| architect | no | **yes** — pre-existing |
+| data_analyst | no | **yes** — pre-existing |
+| **builder (1st)** | **YES — new with 4B** | **yes** |
+| **builder (retry)** | **YES — new with 4B** | **yes** |
+| build_reviewer (re-fan) | no | no |
+| fixer | no | no |
+| fix_reviewer | no | no |
+| deck_reviewer | no | **yes** — pre-existing |
+| build_reviewer (§4.6 re-review) | no | no |
+
+**Precisely what reaches the model, and what is new:**
+
+- **New with slice 4B:** the **deck owner's (root) session ID** reaches the **`builder` role's
+  prompt only** — on both the initial call and the unsafe-output retry. Cause chain:
+  bullet 1 mandates the `Send` payload declare it; the builder's `Send` payload **is** its model
+  payload (`skill_payload = dict(payload)`, `nodes.py`); `PromptAssembler` JSON-dumps the payload
+  between the protected delimiters (`prompt_assembler.py:689`). `actor_session_id` is also added
+  there, but as a **second copy of a value already present** as `session_id`.
+- **Pre-existing and untouched:** the actor's own session ID already reached the `architect`,
+  `data_analyst` and `deck_reviewer` prompts through their payloads' `session_id` key. Verified as
+  pre-existing, not inferred: `grep -c '"session_id": session_id'` on `nodes.py` is **10 at the
+  pre-slice base `f5ec0bfd5` and 10 at HEAD** — unchanged.
+- **Clean, and asserted:** `build_reviewer` (both the re-fan path and the §4.6 re-review), `fixer`
+  and `fix_reviewer` receive narrow payloads carrying neither ID. Guarded by
+  `test_no_narrow_payload_prompt_carries_a_session_id`; **M20** (add the IDs to `review_payload`)
+  REDs it.
+
+**The decision this leaves to the user**, stated plainly: a *third party's* identifier — the deck
+owner, who is not the acting user — now reaches the LLM on one role's prompt. The plan's log
+prohibition does not cover prompts, so this is not a breach; it is a new surface created by
+bullet 1's payload mandate. Behaviour left unchanged, as instructed. If it is unwanted, the fix is
+cheap and local: strip the two keys from `skill_payload` in `builder_node` while leaving them in
+the `Send` payload the re-fan and the trace read, which costs one line and no clause.
+
+## Method notes
+
+- **A restore hole bit me, and it is worth recording.** After committing the slice, I re-took `cp`
+  backups from `git diff --name-only HEAD` — which no longer lists committed files. `state.py` was
+  therefore mutated by M5 and **never restored**, poisoning every later mutation in that run with a
+  common phantom RED set. Caught by noticing that M23–M26, touching three unrelated files, all
+  REDed the same four `TestARealTurn` tests. The harness now backs up the **mutable set** rather
+  than the current drift, and `restore()` **asserts the tree came back** — it compares
+  `git status --porcelain` against the snapshot contract and aborts the whole run rather than
+  continuing on a poisoned tree. The full set was then re-run from scratch; every number in the
+  fix-round table comes from that clean run, with zero restore aborts. This is C-32's sibling rule
+  in action, and the assertion is what makes it self-enforcing.
+- **M9e's anchor went to 0** after F2 added a line to the block it patches, and the harness
+  refused rather than patching (C-27). Re-captured against the current file: it now REDs **4**, all
+  four re-fan/trace tests, still **zero pre-existing tests**.
+- Driver kept outside the repo throughout (`/tmp/4b_mutate.py`, `/tmp/4b_prompt_probe.py`).
+
+## Fix-round mutation table
+
+| # | Clause | Test | Mutation | Measured |
+|---|---|---|---|---|
+| M23 | The log sink projects an allow-list, never `identity.__dict__` (C-32) | the two branch guards + the separation test | restore `dict(identity.__dict__)` | **RED ×3** |
+| M24 | The allow-list is the control point, whatever a new field is called | same three | add `"actor_session_id"` to `_LOGGED_IDENTITY_FIELDS` | **RED ×3** |
+| M25 | **M17 re-aimed**: the re-fan hardens `session_id`, so trace and evidence name ONE actor | `test_the_persisted_mutation_event_agrees_with_the_runtime_trace`, `test_the_refan_overwrites_a_hostile_...` | delete the `session_id` re-declaration | **RED ×2** |
+| M26 | The root resolver is fail-closed on a hand-forced depth-2 row | `test_the_default_loader_is_fail_closed_on_a_hand_forced_depth_2_row` | delete `root.parent_session_id.is_(None)` | **RED ×1** |
+| M5 | `GraphState` declares both keys — now including at **runtime** | + `TestARealTurn::test_a_real_turn_carries_the_root_and_actor_through_the_runtime` | delete both declarations | **RED ×3** (was 2, both static) |
+| M9e | Bullet 2 sabotage, re-aimed after F2 changed the block | the three re-fan/trace tests + the AC4 event test | filter the spread **and** delete the re-declarations | **RED ×4**, zero pre-existing |
+| M17 | *(kept, and its C-29 defect recorded)* | `test_the_persisted_mutation_event_agrees_with_the_runtime_trace` | `_deck_mutation_context(payload["root_session_id"], …)` | **RED ×4** — but the unmutated value is `payload["session_id"]`, a **pre-existing Task-3 path**, so this row proves only "the event's actor is not the root". M25 is the discriminating replacement. |
+
+**31 mutations in the final run: 31 anchor counts as expected (30 × 1, M17 × 2), 30 RED, 1 blank
+(M9d, the C-29 exemplar, retained deliberately), 0 restore aborts.**
+
+## Fix-round test summary
+
+- `tests/unit`: **6 failed / 5640 passed / 110 skipped** — the same six inherited causes, unchanged.
+  (+3 on the slice figure: the fail-closed depth-2 test, the identity-vs-log separation test, and
+  the runtime trace test.)
+- Focus suites (`test_graph_nodes`, `test_graph_routers`, `test_graph_builder`,
+  `test_persisted_agent_runtime`): **311 passed, 0 failed**.
+- Graph integration: **151 passed / 2 failed** — the same two inherited failures, unchanged.
+- #265's guard: green, still `len(calls) == 10` and 4 args / 0 keywords, still not edited by me.
+
+## Remaining concerns
+
+1. **The owner's session ID on the builder prompt** (F5) — surfaced for the user's decision, not
+   changed. One-line local fix available if unwanted.
+2. **`test_graph_routers.py`'s `TestBuildReviewerRefan._branch_state` builds states with no
+   `session_id`**, which is why F2 needs its record fallback. If that file is ever granted, adding
+   `session_id` there would let the re-fan read `state["session_id"]` strictly. Flagged rather than
+   widened, as instructed.
+3. **M10–M15 each take one free RED from the structural AST guard**, so those counts overstate
+   behavioural coverage by one per row. Noted as reporting imprecision; the coordinator confirmed
+   the reviewer closed it behaviourally.
+4. **Two DB round-trips per turn** (`pin_loader` then `root_loader`, each opening its own session).
+   Correct as written, since the pin must be checked before anything else happens (C-3), but they
+   could share one session if the ordering guarantee is preserved. Not changed in a fix round.
+5. `test_graph_builder.py`'s `fake_graph` stub still cannot model a second query (slice concern 5),
+   now with the extra detail that it is what makes my `invoke_graph` tests inject `root_loader`.
+6. The 594 figure from the original dispatch is retracted by the coordinator; my slice report's
+   "594 passed" line refers to a nine-module selection and is superseded by the figures above.
