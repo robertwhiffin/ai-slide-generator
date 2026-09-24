@@ -723,6 +723,7 @@ jobs:
           - incremental-slide-delivery
           - history-ui
           - inline-svg-records-export
+          - mixed-release-collaboration
           - presentation-mode
           - profile-ui
           - profiles-integration
