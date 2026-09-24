@@ -644,6 +644,14 @@ export async function upgradeDraftProtectedAssembly(
 /**
  * Reads the retained published Graph Version 1 prompt source. This route never
  * writes, so its success carries no definition and no draft mutation.
+ *
+ * CLIENT-ONLY CONTRACT, not enforced by the backend: the reducer additionally treats a
+ * 200 as invalid unless its `agent_key` and `lock_version` match the operation the
+ * client started, on the reasoning that a route which never writes cannot have moved
+ * the lock. The backend schema does not require that correspondence, so a future
+ * backend change (for example returning the latest lock rather than the requested one)
+ * would surface here as "the server response was invalid" rather than as a parse error.
+ * See `sourceRecoverySucceeded` in `draftEditorState.ts`.
  */
 export async function readDraftLegacyPromptSource(
   agentKey: AgentKey,

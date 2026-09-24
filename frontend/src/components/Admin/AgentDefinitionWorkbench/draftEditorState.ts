@@ -611,6 +611,51 @@ function withLocalRules(
   };
 }
 
+/**
+ * True while this entry's own protected-assembly Upgrade is in flight for an affected
+ * v1 role. Every action that could move the savable local prompt must consult this,
+ * not just `edit`: the brief's backstop covers *any* prompt-change action during that
+ * request, and restoring a retained alternative is one of them.
+ */
+function promptChangeIsQuarantined(state: DraftEditorState, agentKey: AgentKey): boolean {
+  const pending = state.pendingSave;
+  return pending !== null
+    && pending.operation === 'upgrade'
+    && pending.agentKey === agentKey
+    && isLegacyCompositeRole(agentKey)
+    && definitionFormatVersion(state.byAgent[agentKey].saved) === 1;
+}
+
+/**
+ * Applies a proposed form while refusing its prompt: the savable local prompt stays at
+ * the authoritative v1 value and the proposed bytes are appended as manual-only. Safe
+ * non-prompt values in the proposal are kept, so a caller may still restore them.
+ */
+function quarantinePromptChange(
+  state: DraftEditorState,
+  agentKey: AgentKey,
+  proposal: EditableModelDraftForm,
+  proposedPrompt: string,
+): DraftEditorState {
+  const entry = state.byAgent[agentKey];
+  const authoritative: EditableModelDraftForm = {
+    ...proposal,
+    prompt_text: entry.saved.prompt_text,
+  };
+  return replaceEntry(state, agentKey, appendRetained(
+    { ...entry, local: authoritative },
+    agentKey,
+    {
+      source: 'pending_prompt_quarantine',
+      reason: RETAINED_REASONS.pending_prompt_quarantine,
+      form: authoritative,
+      manualOnlyPrompt: proposedPrompt,
+      fromVersion: definitionFormatVersion(entry.saved),
+      definition: entry.saved,
+    },
+  ));
+}
+
 export function draftEditorReducer(
   state: DraftEditorState,
   action: DraftEditorAction,
@@ -618,32 +663,8 @@ export function draftEditorReducer(
   switch (action.type) {
     case 'edit': {
       const entry = state.byAgent[action.agentKey];
-      const pending = state.pendingSave;
-      const quarantine = action.field === 'prompt_text'
-        && pending !== null
-        && pending.operation === 'upgrade'
-        && pending.agentKey === action.agentKey
-        && isLegacyCompositeRole(action.agentKey)
-        && definitionFormatVersion(entry.saved) === 1;
-      if (quarantine) {
-        // Backstop: keep the savable local prompt at the authoritative v1 value and
-        // retain the proposed prompt as manual-only bytes.
-        const authoritative: EditableModelDraftForm = {
-          ...entry.local,
-          prompt_text: entry.saved.prompt_text,
-        };
-        return replaceEntry(state, action.agentKey, appendRetained(
-          { ...entry, local: authoritative },
-          action.agentKey,
-          {
-            source: 'pending_prompt_quarantine',
-            reason: RETAINED_REASONS.pending_prompt_quarantine,
-            form: authoritative,
-            manualOnlyPrompt: String(action.value),
-            fromVersion: definitionFormatVersion(entry.saved),
-            definition: entry.saved,
-          },
-        ));
+      if (action.field === 'prompt_text' && promptChangeIsQuarantined(state, action.agentKey)) {
+        return quarantinePromptChange(state, action.agentKey, entry.local, String(action.value));
       }
       return replaceEntry(state, action.agentKey, {
         ...entry,
@@ -766,8 +787,9 @@ export function draftEditorReducer(
     case 'sourceRecoverySucceeded': {
       const pending = matchingPending(state, 'sourceRecovery', action.requestId);
       if (pending === null) return state;
-      // This route never writes, so the lock must not have moved and the record
-      // must describe the role that asked for it.
+      // This route never writes, so the lock must not have moved and the record must
+      // describe the role that asked for it. This is a client-only assumption; see the
+      // note on `readDraftLegacyPromptSource` in `agentDefinitions.ts`.
       if (action.result.agent_key !== pending.agentKey
         || action.result.lock_version !== pending.expectedLockVersion
         || action.result.draft.lock_version !== pending.expectedLockVersion) {
@@ -849,13 +871,35 @@ export function draftEditorReducer(
       const entry = state.byAgent[action.agentKey];
       const record = entry.retainedForms.find((item) => item.id === action.retainedId);
       if (record === undefined) return state;
+      // Re-apply the version invariant against whatever is authoritative now, so a
+      // record sanitized against an older format version can never reintroduce its
+      // prompt or rules beside the current saved definition.
+      const restored = sanitizeForm(record.form, record.sanitizedFormatVersion, entry.saved);
+      // Restoring is itself a prompt-change action, so it meets the same backstop as
+      // `edit`: the safe fields are restored, the prompt is not.
+      if (restored.prompt_text !== entry.saved.prompt_text
+        && promptChangeIsQuarantined(state, action.agentKey)) {
+        const quarantined = quarantinePromptChange(
+          state,
+          action.agentKey,
+          restored,
+          restored.prompt_text,
+        );
+        const quarantinedEntry = quarantined.byAgent[action.agentKey];
+        return replaceEntry(quarantined, action.agentKey, {
+          ...quarantinedEntry,
+          fieldErrors: {},
+        });
+      }
       return replaceEntry(state, action.agentKey, {
         ...entry,
-        local: sanitizeForm(record.form, record.sanitizedFormatVersion, entry.saved),
+        local: restored,
         fieldErrors: {},
       });
     }
     case 'discardRetained': {
+      // No pending guard is needed: discarding never writes to `local`, so it cannot
+      // move the savable prompt. It only drops bytes the admin explicitly discarded.
       const entry = state.byAgent[action.agentKey];
       if (!entry.retainedForms.some((item) => item.id === action.retainedId)) return state;
       return replaceEntry(state, action.agentKey, {

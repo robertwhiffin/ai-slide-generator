@@ -229,11 +229,16 @@ export function DefinitionEditor({
               <li
                 key={retained.id}
                 role="group"
-                aria-label={`Retained values ${index + 1}`}
+                // Distinct from the inner values group's name. A nested pair whose names
+                // are prefix-related resolves to two elements in any name-substring
+                // query, which is the same collision class as the stage-label heading.
+                aria-label={`Retained alternative ${index + 1}`}
                 data-retained-id={retained.id}
               >
                 <p className="text-xs">{retained.reason}</p>
-                <div className="mt-1"><DraftValues label="Retained values" values={retained.form} /></div>
+                <div className="mt-1">
+                  <DraftValues label={`Retained values ${index + 1}`} values={retained.form} />
+                </div>
                 <label
                   htmlFor={`${agentKey}-${retained.id}-manual`}
                   className="mt-2 block text-xs font-medium"
