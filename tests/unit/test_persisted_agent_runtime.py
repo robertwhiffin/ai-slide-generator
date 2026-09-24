@@ -1733,3 +1733,100 @@ def test_a_canonical_cross_field_validator_still_rejects_the_output() -> None:
     assert len(adapter.calls) == 1
     assert sink.error_classes == ["AgentOutputValidationError"]
     assert sink.successes == []
+
+
+def test_a_role_mismatch_between_release_and_content_is_invalid_persisted_definition() -> None:
+    """Closes the generic (ValidationError, ValueError, TypeError) fallback's blank.
+
+    Every other ``except`` clause in ``_run_resolved`` is pinned by a test, but the
+    final catch-all was reached by nothing: the two suites asserting this code both
+    arrive through the ``PromptAssemblyRejected`` clause instead, measured.  This is
+    the ``ValueError`` the runtime raises itself when a release and its content
+    disagree about the role.
+    """
+    builder_content = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == "builder"
+    )
+    definition = ResolvedDefinition(
+        graph_version=1,
+        graph_release_id=41,
+        agent_key="architect",
+        agent_definition_revision_id=23,
+        content_hash="a" * 64,
+        content=builder_content,
+    )
+    adapter = _Adapter(_output_values("architect"))
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=_Loader(definition),
+        model_adapter=adapter,
+        identity_sink=sink,
+    )
+
+    with pytest.raises(PersistedConfigurationUnavailableError) as raised:
+        runtime.run("architect", 41, {}, AgentAssemblyContext(False))
+
+    assert raised.value.code == "invalid_persisted_definition"
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert "role does not match its content" in str(raised.value.__cause__)
+    assert adapter.calls == []
+    assert sink.calls == []
+    assert sink.successes == []
+
+
+def test_no_canonical_schema_carries_a_dump_mode_divergent_field_type() -> None:
+    """Guards the precondition that makes the adapter-conversion dump mode free.
+
+    ``_supplied_output_keys`` dumps ``mode="python"``.  Swapping it for ``mode="json"``
+    REDs nothing at either measured scope — not because the choice cannot matter, but
+    because no canonical schema currently holds a field type the two modes serialise
+    differently.  That is a *precondition*, not a guarantee, so it is asserted here:
+    adding a ``Decimal``, ``datetime``, ``UUID``, ``Enum``, ``bytes``, ``set`` or
+    tuple-typed field to any of the seven output schemas REDs this test, and whoever
+    does it has to re-examine the mode rather than discover the difference in
+    production.  #260's canonical-hash mode is a separate decision (correction 33).
+    """
+    import datetime
+    import decimal
+    import enum
+    import uuid
+    from typing import get_args, get_origin
+
+    divergent_scalars = (
+        decimal.Decimal,
+        datetime.datetime,
+        datetime.date,
+        datetime.time,
+        datetime.timedelta,
+        uuid.UUID,
+        bytes,
+    )
+    divergent_containers = (set, frozenset, tuple)
+    walked: set[type[BaseModel]] = set()
+    findings: list[str] = []
+
+    def walk(annotation: object, path: str) -> None:
+        for argument in get_args(annotation) or ():
+            walk(argument, path)
+        if get_origin(annotation) in divergent_containers:
+            findings.append(f"{path}: {annotation!r} (container)")
+        if not isinstance(annotation, type):
+            return
+        if issubclass(annotation, BaseModel):
+            if annotation in walked:
+                return
+            walked.add(annotation)
+            for name, info in annotation.model_fields.items():
+                walk(info.annotation, f"{path}.{name}")
+            return
+        if issubclass(annotation, enum.Enum):
+            findings.append(f"{path}: {annotation.__name__} (Enum)")
+        elif issubclass(annotation, divergent_scalars):
+            findings.append(f"{path}: {annotation.__name__} (scalar)")
+
+    for role in GRAPH_V1_AGENT_KEYS:
+        walk(OUTPUT_SCHEMAS[role], role)
+
+    assert findings == []
+    # Aim check: the walker really does reach the nested models, not just the roots.
+    assert len(walked) >= 13
