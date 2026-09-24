@@ -170,9 +170,15 @@ export function AssemblyEditor({
   onDeleteBlock,
   onMoveBlock,
 }: AssemblyEditorProps) {
-  // Anchor legality is read from the server view, never invented by the client.
-  // An anchor group is placed after the last protected row that declares it, so a
-  // custom sibling can never land after the payload or terminal stages.
+  // Every anchor but one is read from the server view: a group is placed after the last
+  // protected row that declares it, so a custom sibling can never land after the payload
+  // or terminal stages. The one exception is the universal anchor hardcoded below, which
+  // is legal for every role and declared by no protected row, so no row can supply it.
+  // The server contract that makes hardcoding it safe — exactly one anchor legal for
+  // every role, declared by no stage, and ranked first — is asserted by
+  // `test_client_hardcoded_universal_anchor_is_exactly_the_server_legality`, which reads
+  // this very declaration. The declaration order is also the rank order the reducer
+  // inserts by, and `CUSTOM_ANCHORS` is joined to the server rank map separately.
   const anchorPlacement = new Map<CustomAnchor, number>();
   protectedStageView.forEach((row, index) => {
     for (const anchor of row.legal_adjacent_custom_anchors) anchorPlacement.set(anchor, index);

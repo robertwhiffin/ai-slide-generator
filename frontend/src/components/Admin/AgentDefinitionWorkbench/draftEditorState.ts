@@ -1,6 +1,7 @@
 import {
   AGENT_KEYS,
   AgentDefinitionApiError,
+  CUSTOM_ANCHORS,
   InvalidDraftSaveResponseError,
   type AgentDefinitionWorkbenchResponse,
   type AgentKey,
@@ -684,12 +685,24 @@ export function draftEditorReducer(
           condition: 'always',
           text: '',
         };
-        const lastAtAnchor = blocks.reduce(
-          (found, candidate, index) => (candidate.anchor === action.anchor ? index : found),
+        // The server requires `custom_blocks` in non-decreasing anchor rank and refuses
+        // anything else with `invalid_anchor_order`. Appending when the chosen anchor had
+        // no sibling yet made the array's order depend on click order, so adding at a
+        // later anchor first built a draft every save rejected — at an anchor the panel
+        // itself offered. Inserting after the last block whose rank is at most the new
+        // block's keeps the array ordered whatever order the admin clicks in, and leaves
+        // same-anchor order theirs: rank equality keeps the new block last in its group.
+        // `CUSTOM_ANCHORS` is declared in the server's own rank order and is joined to it
+        // by `test_client_condition_and_anchor_vocabularies_match_the_server`, so this
+        // introduces no second rank table for that order to drift against.
+        const rankOf = (anchor: CustomAnchor) => CUSTOM_ANCHORS.indexOf(anchor);
+        const insertAfter = blocks.reduce(
+          (found, candidate, index) => (
+            rankOf(candidate.anchor) <= rankOf(action.anchor) ? index : found
+          ),
           -1,
         );
-        if (lastAtAnchor === -1) return [...blocks, block];
-        return [...blocks.slice(0, lastAtAnchor + 1), block, ...blocks.slice(lastAtAnchor + 1)];
+        return [...blocks.slice(0, insertAfter + 1), block, ...blocks.slice(insertAfter + 1)];
       }));
     }
     case 'assemblyBlockTextChanged': {

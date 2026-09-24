@@ -23,6 +23,7 @@ import {
   syntheticV2DraftDefinition,
   v2ProtectedStageView,
 } from '../fixtures/mocks';
+import { ALLOWED_ACTION_NAMES, forbidsActionName } from '../fixtures/forbiddenActionNames';
 
 const WORKBENCH_ENDPOINT = '**/api/admin/agent-definitions/workbench';
 const SAVE_ENDPOINT = '**/api/admin/agent-definitions/draft/*';
@@ -458,17 +459,6 @@ test('small viewports deliberately overflow the fixed three-pane canvas', async 
 
 const UPGRADE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/protected-assembly-upgrade';
 const SOURCE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/legacy-prompt-source';
-
-/**
- * Accessible names no control in this panel may ever carry (#260's guard).
- *
- * `publish` is word-bounded on purpose. An unbounded `/publish/` also matched the
- * legitimate `Restore published Graph Version 1 prompt` control, so the sweep passed
- * only while that control happened to be off screen — one state change away from a
- * false alarm, or from someone loosening the pattern and losing a real miss.
- */
-const FORBIDDEN_ACTION_NAME =
-  /\brun\b|approve|reject|review\s*&\s*publish|\bpublish(es|ing)?\b|\bhistory\b|rollback/i;
 
 /**
  * The affected-role matrix, fixed by this file rather than read from the shared
@@ -1447,18 +1437,22 @@ test('a legacy source response whose role or lock disagrees is contained without
   expect(saves).toHaveLength(0);
 });
 
-test('the forbidden-action pattern fires on every banned name and spares the legitimate restore control', () => {
+test('the forbidden-action rule fires on every banned name and spares the legitimate restore controls', () => {
   // Asserted separately from the sweep so the sweep cannot pass merely because a
   // matching control happened to be absent from the state it walked.
   for (const forbidden of [
     'Run isolated test', 'Approve draft', 'Reject draft', 'Review & publish',
     'Publish draft', 'Publishes the release', 'Publishing', 'Release history', 'Rollback release',
+    // All four were missed while the stem was word-bounded, which is the wrong trade for
+    // one legitimate name and wrong toward #264's and #266's own publish-adjacent work.
+    'Republish release', 'Unpublish draft', 'Publisher settings', 'Published versions',
   ]) {
-    expect(forbidden).toMatch(FORBIDDEN_ACTION_NAME);
+    expect(forbidsActionName(forbidden)).toBe(true);
   }
-  expect('Restore published Graph Version 1 prompt').not.toMatch(FORBIDDEN_ACTION_NAME);
-  expect('Restore saved prompt').not.toMatch(FORBIDDEN_ACTION_NAME);
-  expect('Restore retained values').not.toMatch(FORBIDDEN_ACTION_NAME);
+  for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
+  expect(ALLOWED_ACTION_NAMES).toHaveLength(3);
+  // An exempt name is removed from the string, not read as a licence for the rest of it.
+  expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
 });
 
 test('no control in the panel ever offers execution, review, publication, history, or rollback', async ({ page }) => {
@@ -1493,7 +1487,7 @@ test('no control in the panel ever offers execution, review, publication, histor
         `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
       )));
     expect(names.length).toBeGreaterThan(0);
-    for (const name of names) expect(name).not.toMatch(FORBIDDEN_ACTION_NAME);
+    for (const name of names) expect(forbidsActionName(name)).toBe(false);
     return names;
   };
 
