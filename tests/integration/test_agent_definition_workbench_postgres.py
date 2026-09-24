@@ -1307,6 +1307,31 @@ def _node(body: dict, agent_key: str) -> dict:
     return next(node for node in body["nodes"] if node["agent_key"] == agent_key)
 
 
+def test_affected_role_constant_matches_the_canonical_transition_list(real_route_stack) -> None:
+    """Joins this suite's own hand-typed affected-role tuple to the server's list.
+
+    ``AFFECTED_ROLES`` is one of five hand-typed copies of the set across two
+    languages. The other four are joined in ``test_prompt_assembler.py``; this closes
+    the copy that decides which roles the real-route sequences below actually run for,
+    so a narrowed tuple REDs instead of silently shrinking this suite.
+    """
+    factory, _client = real_route_stack
+    canonical = tuple(
+        record.agent_key
+        for record in PromptAssembler()
+        .resolve_bundle(V2_PROTECTED_ASSEMBLY_IDENTITY)
+        .transitions
+    )
+    assert AFFECTED_ROLES == canonical
+    assert len(AFFECTED_ROLES) == len(set(AFFECTED_ROLES))
+    # And each named role really is persisted as a legacy composite to begin with.
+    for agent_key in AFFECTED_ROLES:
+        content, _hash = _stored_draft(factory, agent_key)
+        assert content.protected_assembly.version == 1
+        assert content.prompt_text == INDEPENDENT_TRANSITION_LITERALS[agent_key][0]
+    assert set(INDEPENDENT_TRANSITION_LITERALS) == set(canonical)
+
+
 def test_real_routes_serve_real_protected_text_for_every_model_role(real_route_stack) -> None:
     """Catches placeholder, reconstructed, empty, or duplicated protected rows.
 

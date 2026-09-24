@@ -459,8 +459,25 @@ test('small viewports deliberately overflow the fixed three-pane canvas', async 
 const UPGRADE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/protected-assembly-upgrade';
 const SOURCE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/legacy-prompt-source';
 
-/** Accessible names no control in this panel may ever carry (#260's guard). */
-const FORBIDDEN_ACTION_NAME = /\brun\b|approve|reject|review\s*&\s*publish|publish|history|rollback/i;
+/**
+ * Accessible names no control in this panel may ever carry (#260's guard).
+ *
+ * `publish` is word-bounded on purpose. An unbounded `/publish/` also matched the
+ * legitimate `Restore published Graph Version 1 prompt` control, so the sweep passed
+ * only while that control happened to be off screen — one state change away from a
+ * false alarm, or from someone loosening the pattern and losing a real miss.
+ */
+const FORBIDDEN_ACTION_NAME =
+  /\brun\b|approve|reject|review\s*&\s*publish|\bpublish(es|ing)?\b|\bhistory\b|rollback/i;
+
+/**
+ * The affected-role matrix, fixed by this file rather than read from the shared
+ * fixture. Narrowing `LEGACY_COMPOSITE_ROLES` in `mocks.ts` used to shrink every loop
+ * below and still report all-green; now the cardinality is owned here and the
+ * agreement test asserts the fixture, the production constant and the server's
+ * canonical transition list all still say the same thing.
+ */
+const AFFECTED_ROLES = ['data_analyst', 'build_reviewer'] as const;
 
 interface CapturedPost {
   agentKey: AgentKey;
@@ -823,7 +840,7 @@ test('an upgrade 409 carries client_candidate null, reconciles the crossed snaps
   await expect.poll(workbenchRequestCount).toBe(1);
 });
 
-for (const agentKey of LEGACY_COMPOSITE_ROLES) {
+for (const agentKey of AFFECTED_ROLES) {
   test(`${DISPLAY_NAMES[agentKey]}: a locally edited legacy prompt refuses the Upgrade with zero POST and a local restore`, async ({ page }) => {
     await installExactIdentityMock(page);
     await installWorkbenchMock(page);
@@ -859,7 +876,7 @@ for (const agentKey of LEGACY_COMPOSITE_ROLES) {
   });
 }
 
-for (const agentKey of LEGACY_COMPOSITE_ROLES) {
+for (const agentKey of AFFECTED_ROLES) {
   test(`${DISPLAY_NAMES[agentKey]}: the server's manual-resolution 422 is shown against Prompt with no automatic rewrite, save or retry`, async ({ page }) => {
     const edited = oneCodePointEdit(agentKey);
     await installExactIdentityMock(page);
@@ -899,7 +916,7 @@ for (const agentKey of LEGACY_COMPOSITE_ROLES) {
   });
 }
 
-for (const agentKey of LEGACY_COMPOSITE_ROLES) {
+for (const agentKey of AFFECTED_ROLES) {
   test(`${DISPLAY_NAMES[agentKey]}: the whole route-backed 422 to authored-only v2 sequence loses no bytes and never writes on its own`, async ({ page }) => {
     const edited = oneCodePointEdit(agentKey);
     const published = PUBLISHED_V1_PROMPT_SOURCE[agentKey];
@@ -1121,7 +1138,7 @@ test('one aggregate gate holds Save, Upgrade and source recovery across roles un
     .toBeEnabled();
 });
 
-for (const agentKey of LEGACY_COMPOSITE_ROLES) {
+for (const agentKey of AFFECTED_ROLES) {
   for (const operation of ['save', 'upgrade'] as const) {
     test(`${DISPLAY_NAMES[agentKey]}: a selected ${operation} 409 crossing to Graph Version 2 appends, restores by ID, and never resubmits v1 bytes`, async ({ page }) => {
       await installExactIdentityMock(page);
@@ -1230,7 +1247,7 @@ for (const agentKey of LEGACY_COMPOSITE_ROLES) {
   }
 }
 
-for (const agentKey of LEGACY_COMPOSITE_ROLES) {
+for (const agentKey of AFFECTED_ROLES) {
   for (const operation of ['save', 'upgrade'] as const) {
     test(`${DISPLAY_NAMES[agentKey]}: an unselected affected entry in an ${operation} 409 is quarantined and restorable by ID`, async ({ page }) => {
       await installExactIdentityMock(page);
@@ -1430,28 +1447,66 @@ test('a legacy source response whose role or lock disagrees is contained without
   expect(saves).toHaveLength(0);
 });
 
+test('the forbidden-action pattern fires on every banned name and spares the legitimate restore control', () => {
+  // Asserted separately from the sweep so the sweep cannot pass merely because a
+  // matching control happened to be absent from the state it walked.
+  for (const forbidden of [
+    'Run isolated test', 'Approve draft', 'Reject draft', 'Review & publish',
+    'Publish draft', 'Publishes the release', 'Publishing', 'Release history', 'Rollback release',
+  ]) {
+    expect(forbidden).toMatch(FORBIDDEN_ACTION_NAME);
+  }
+  expect('Restore published Graph Version 1 prompt').not.toMatch(FORBIDDEN_ACTION_NAME);
+  expect('Restore saved prompt').not.toMatch(FORBIDDEN_ACTION_NAME);
+  expect('Restore retained values').not.toMatch(FORBIDDEN_ACTION_NAME);
+});
+
 test('no control in the panel ever offers execution, review, publication, history, or rollback', async ({ page }) => {
+  const edited = oneCodePointEdit('data_analyst');
   await installExactIdentityMock(page);
   await installWorkbenchMock(page, 200, workbenchWith({
     build_reviewer: syntheticV2DraftDefinition('build_reviewer'),
+    data_analyst: v1DraftWithPrompt('data_analyst', edited),
   }));
+  await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    422,
+    MANUAL_RESOLUTION_REJECTION,
+  ));
   await openWorkbench(page);
   const panel = page.getByRole('tabpanel', { name: 'Agent Definitions' });
   await expect(panel.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
   await expect(panel).toContainText('Isolated testing is not available in this release.');
 
+  // Put the legitimate `Restore published Graph Version 1 prompt` control on screen,
+  // so the sweep below is exercised in the state that used to be one away from a
+  // false alarm rather than only in the states where it is absent.
+  await openAssemblyTab(page, 'Data Analyst');
+  await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }))
+    .toBeVisible();
+
+  const sweep = async () => {
+    const names = await panel.locator('button, a')
+      .evaluateAll((controls) => controls.map((control) => (
+        `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
+      )));
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(name).not.toMatch(FORBIDDEN_ACTION_NAME);
+    return names;
+  };
+
+  // v1 with the recovery control live, v1 plain, and v2 with custom-block controls.
+  const withRecovery = await sweep();
+  expect(withRecovery.some((name) => name.includes('Restore published Graph Version 1 prompt')))
+    .toBe(true);
   for (const displayName of ['Architect', 'Build Reviewer']) {
     await page.getByRole('navigation', { name: 'Graph nodes' })
       .getByRole('button', { name: displayName }).click();
     for (const tab of ['Prompt', 'Model', 'Output Schema', 'Assembly']) {
       await page.getByRole('tab', { name: tab }).click();
-      const names = await panel.locator('button, a')
-        .evaluateAll((controls) => controls.map((control) => (
-          `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
-        )));
-      for (const name of names) {
-        expect(name).not.toMatch(FORBIDDEN_ACTION_NAME);
-      }
+      await sweep();
     }
   }
 });
@@ -1494,3 +1549,136 @@ test('a safe-field edit hides the published-source recovery until the rejection 
   await expect(restore).toBeVisible();
   expect(saves).toHaveLength(0);
 });
+
+test('the affected-role browser matrix cannot silently narrow', () => {
+  // Task 6's first round keyed every affected-role loop off the shared fixture copy
+  // of LEGACY_COMPOSITE_ROLES. Narrowing that copy removed seven tests from this file
+  // and still reported all-green, which is worse than a missing test because it looks
+  // like coverage. The loops now run off AFFECTED_ROLES above, and this asserts the
+  // fixture still agrees; the server's canonical transition list is joined to both by
+  // `test_every_affected_role_copy_matches_the_canonical_transition_list`.
+  expect([...AFFECTED_ROLES]).toEqual([...LEGACY_COMPOSITE_ROLES]);
+  expect(AFFECTED_ROLES).toHaveLength(2);
+  expect(new Set(AFFECTED_ROLES).size).toBe(AFFECTED_ROLES.length);
+  for (const agentKey of AFFECTED_ROLES) {
+    // Each role must really be a legacy composite in the fixture world, or the
+    // matrix would be running its sequences against a role with no published source.
+    expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).toBeTruthy();
+    expect(V2_AUTHORED_PROMPT[agentKey]).toBeTruthy();
+    expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).not.toEqual(V2_AUTHORED_PROMPT[agentKey]);
+  }
+});
+
+for (const agentKey of AFFECTED_ROLES) {
+  for (const operation of ['save', 'upgrade'] as const) {
+    test(`${DISPLAY_NAMES[agentKey]}: Keep local after a ${operation} 409 crossing to Graph Version 2 retains every alternative and resubmits no v1 bytes`, async ({ page }) => {
+      await installExactIdentityMock(page);
+      const workbenchRequestCount = await installWorkbenchMock(page);
+      const saves = await installSaveMock(page, (route, save, call) => (
+        operation === 'save' && call === 0
+          ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
+          : fulfillJson(route, 200, saveSuccessFor(save))));
+      const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => fulfillJson(
+        route,
+        409,
+        syntheticNullCandidateConflict(0, 1, [agentKey]),
+      ));
+      await openWorkbench(page);
+      const navigation = page.getByRole('navigation', { name: 'Graph nodes' });
+      await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
+      const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+      const saved = syntheticDraftDefinitions[agentKey].prompt_text;
+
+      // A pre-existing retained v1 alternative with its own safe sentinels.
+      await prompt.fill(DIRTY_LEGACY_PROMPT);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-keep-A');
+      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.33');
+      await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('3333');
+      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.33');
+      await page.getByRole('tab', { name: 'Assembly' }).click();
+      await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+      expect(upgrades).toHaveLength(0);
+      await expect(retainedAlternative(page, 1)).toBeVisible();
+
+      // Distinct current-local sentinels, and a dirty prompt only where the reducer
+      // permits the operation to start at all.
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-keep-B');
+      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.44');
+      await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('4444');
+      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.44');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      if (operation === 'upgrade') {
+        await page.getByRole('button', { name: 'Restore saved prompt' }).click();
+        await expect(prompt).toHaveValue(saved);
+        await page.getByRole('tab', { name: 'Assembly' }).click();
+        await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
+        await expect.poll(() => upgrades.length).toBe(1);
+      } else {
+        await page.getByRole('button', { name: 'Save Draft' }).click();
+        await expect.poll(() => saves.length).toBe(1);
+      }
+
+      const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
+      await expect(conflict).toBeVisible();
+      await expect(retainedAlternative(page, 2)).toBeVisible();
+      const idsBeforeKeep = await retainedRegion(page)
+        .getByRole('group', { name: /^Retained alternative / })
+        .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-retained-id') ?? ''));
+      expect(idsBeforeKeep).toHaveLength(2);
+
+      // Keep local closes the conflict WITHOUT discarding anything that was displaced.
+      await conflict.getByRole('button', { name: 'Keep local' }).click();
+      await expect(page.getByRole('region', { name: 'Draft changed on the server' })).toHaveCount(0);
+      const idsAfterKeep = await retainedRegion(page)
+        .getByRole('group', { name: /^Retained alternative / })
+        .evaluateAll((groups) => groups.map((group) => group.getAttribute('data-retained-id') ?? ''));
+      expect(idsAfterKeep).toEqual(idsBeforeKeep);
+      await expect(retainedAlternative(page, 1).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+        .toHaveValue(DIRTY_LEGACY_PROMPT);
+      for (let index = 1; index <= 2; index += 1) {
+        const alternative = retainedAlternative(page, index);
+        await expect(alternative.getByRole('textbox', { name: 'Manual-only prompt bytes' }))
+          .toHaveAttribute('aria-readonly', 'true');
+        // Every sanitized savable form is already on the server's Graph Version 2.
+        await expect(alternative.getByRole('group', { name: `Retained values ${index}` }))
+          .toContainText(V2_AUTHORED_PROMPT[agentKey]);
+        await expect(alternative.getByRole('group', { name: `Retained values ${index}` }))
+          .toContainText('Custom blocks');
+      }
+
+      // Keeping local keeps the safe fields, never the displaced v1 prompt or rules.
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-B');
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('4444');
+      await page.getByRole('tab', { name: 'Assembly' }).click();
+      await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
+
+      // Each retained ID still restores its own safe tuple independently after Keep local.
+      await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
+      await page.getByRole('tab', { name: 'Model' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-A');
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('3333');
+      await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
+      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-B');
+      await page.getByRole('tab', { name: 'Prompt' }).click();
+      await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+
+      // The immediate PUT after Keep local carries none of the v1 or manual-only bytes.
+      const before = saves.length;
+      await page.getByRole('button', { name: 'Save Draft' }).click();
+      await expect.poll(() => saves.length).toBe(before + 1);
+      const body = JSON.stringify(saves[before].body);
+      expect(body).toContain(V2_AUTHORED_PROMPT[agentKey]);
+      expect(body).not.toContain(saved);
+      expect(body).not.toContain('Edited');
+      expect(body).not.toContain('nonce');
+      expect(saves[before].body.candidate.assembly_rules)
+        .toEqual({ format_version: 2, custom_blocks: [] });
+      await expect.poll(workbenchRequestCount).toBe(1);
+    });
+  }
+}
