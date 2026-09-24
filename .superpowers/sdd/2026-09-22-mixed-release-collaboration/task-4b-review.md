@@ -697,3 +697,314 @@ conclusion.
 5. **The 594-test "affected-suite focus" figure in the dispatch.** I could not reproduce it from any
    module set I tried; I measured 233 (3 modules), 507 (the author's 8), and 624 (11). No conclusion
    depends on it.
+
+---
+---
+
+# Fix round 1 — scoped re-review
+
+**Scope:** the fix diff only, `6d9d154de4c6830125d45c3e0d361a453d60f936..fb88cca3a382baade5d4c7d15d1737447312a1f2`.
+HEAD `07b0856ceb58af07de89939e2fcdd37e55153584` (docs-only C-33 on top). The slice itself is not
+re-reviewed. Triple check clean before and after; nine-file mutable set backed up per **C-33** and
+`restore()` made self-enforcing (asserts porcelain, `diff --name-only HEAD`, and every backup blob
+against `HEAD:<path>`, and aborts the run rather than continuing). **0 restore aborts.**
+
+## VERDICT SUMMARY
+
+| item | verdict |
+|---|---|
+| **C1** — session IDs in the identity log line | **ADDRESSED** |
+| **I1** — trace-and-evidence agreement (`session_id` in the re-fan) | **ADDRESSED** |
+| **I2** — third root resolver, fail-open | **ADDRESSED** |
+| **I3** — `GraphState` declaration guarded statically only | **ADDRESSED** |
+| my C-29 item (M17 re-aim) and Minor M-b (R2 non-discrimination) | **ADDRESSED** |
+| new breakage in the fix diff | **NONE FOUND** |
+
+**GO for #262 Task 6.**
+
+---
+
+## 1. C1 — ADDRESSED
+
+The sink projects `_LOGGED_IDENTITY_FIELDS` (`src/services/agent_runtime_identity.py:64-89`)
+through `_permitted()` on **both** branches (`:108`, `:123`). I re-ran my own probe rather than
+reading the report, on the success **and** error branch, at key level and value level:
+
+```
+--- SUCCESS BRANCH ---
+  emitted non-intrinsic fields (sorted): ['agent_definition_revision_id', 'agent_key',
+      'content_hash', 'error_class', 'graph_release_id', 'graph_version', 'outcome']
+  count: 7
+  hasattr session_id         -> False
+  hasattr root_session_id    -> False
+  hasattr actor_session_id   -> False
+  VALUE sweep: 'sess-owner-830471'   in repr(vars(record)) -> False
+  VALUE sweep: 'sess-contrib-830472' in repr(vars(record)) -> False
+  VALUE sweep: in r.getMessage() -> False
+  outcome/error_class: success / None
+--- ERROR BRANCH ---
+  emitted non-intrinsic fields (sorted): ['agent_definition_revision_id', 'agent_key',
+      'content_hash', 'error_class', 'graph_release_id', 'graph_version', 'outcome']
+  count: 7
+  hasattr session_id         -> False
+  hasattr root_session_id    -> False
+  hasattr actor_session_id   -> False
+  VALUE sweep: 'sess-owner-830471'   in repr(vars(record)) -> False
+  VALUE sweep: 'sess-contrib-830472' in repr(vars(record)) -> False
+  VALUE sweep: in r.getMessage() -> False
+  outcome/error_class: error / RuntimeError
+```
+
+**Exactly seven fields on both branches**, one-for-one with the PRD allow-list (graph version,
+release ID, role, revision ID, content hash, outcome, error class), and neither session ID is
+present by key **or** by value. The error branch — which is where I said I would look for a
+half-fix, because it has its own `extra=` dict — is fixed and separately asserted
+(`tests/unit/test_persisted_agent_runtime.py:855-861` exercises it through a raising callback).
+
+**The guard is now the right shape.** It asserts the **exact emitted set** from seven literals
+(`PERMITTED_LOG_FIELDS`, `:799-823`), not an import (C-24), with the standard-attribute baseline
+derived from a live `LogRecord` at runtime so it cannot drift from the stdlib. The replaced
+denylist is strictly subsumed: an exact set forbids *every* unlisted name, so `prompt`, `payload`,
+`output`, `session_id`, `user_id` and `response` are all still excluded. Two incidental
+strengthenings I checked and credit: `AgentAssemblyContext(False)` → `AgentAssemblyContext(False, "owner-session-9f", "contributor-session-3b")`
+at `:907`, which is what makes the value sweep there non-vacuous, and the value sweeps themselves.
+
+**M24 spot-checked** (see §5): adding `"actor_session_id"` to the allow-list REDs 3 with
+`Extra items in the left set: 'actor_session_id'` — so a **differently named** session field is now
+caught, which is precisely what my finding showed the old name-based guard could not do. The failure
+mode that produced C1 cannot recur silently.
+
+## 2. I1 — ADDRESSED. The fallback cannot blank a value on any reachable path.
+
+`src/services/graph/routers.py:213` now hardens `session_id`. The coordinator asked me to prove the
+fallback cannot null a field. I ran the full presence/absence matrix through the real router:
+
+```
+case                                       key present  value
+state='good-state'  record='attacker'      True         'good-state'     <- HARDENED
+state='good-state'  record ABSENT          True         'good-state'     <- HARDENED
+state ABSENT        record='attacker'      True         'attacker-session'  <- unchanged from pre-fix
+state=''            record='attacker'      True         'attacker-session'  <- unchanged from pre-fix
+state ABSENT        record ABSENT          True         None
+state=''            record=''              True         ''
+```
+
+`state.get(...) or record.get(...)` is structurally incapable of the failure feared: when state's
+value is usable it wins, and when it is not, the result is **exactly the pre-fix value**. There is
+no input for which the line replaces a usable value with a blank. Confirmed.
+
+One delta worth stating rather than hiding: in the both-absent row the key is now **present with
+`None`** where pre-fix it was **absent**, and `build_reviewer_node` reads it as
+`session_id = payload["session_id"]` (`src/services/graph/nodes.py:2195`) — so a `KeyError` becomes
+a `None`. That row is **doubly unreachable**: `invoke_graph` always writes `session_id` into state,
+and `build_branch_payload` always writes it into the record from `state["session_id"]` (a `[...]`
+read that would raise first). And even if reached, the outcome is still a loud failure, not silent
+misattribution — `record_shared_deck_mutation` raises
+`ValueError("mutation actor session does not exist")` at
+`src/services/shared_deck_attribution.py:96` for a null actor. So the change is neutral-to-safe, not
+a new hole.
+
+**M25 spot-checked** (§5): deleting the hardening line REDs 2 — the hostile-record test on
+`assert sends[0].arg["session_id"] == collab.contributor_session_id` →
+`assert 'attacker-session' == 'contrib-b16ef128a4'`, and the AC4 trace-agreement test on
+`assert len(events) == 1` → `assert 0 == 1` (the hostile `session_id` reaches attribution, which
+refuses and placeholds — loudly). Exactly the discrimination M17 could not supply.
+
+## 3. I2 — ADDRESSED. Two of three resolvers now agree; the third divergence is documented.
+
+`src/services/graph/builder.py:235-238` adds `root.parent_session_id.is_(None)`. I built a real
+hand-forced depth-2 row (owner pk 1 → contributor pk 2 → grandchild pk 3) and ran all three
+resolvers against it:
+
+```
+=== hand-forced depth-2 row ===
+  owner : graph-4f522c65fe pk 1 parent None
+  middle: contrib-98cb202186 pk 2 parent 1
+  gchild: depth2-06fe1e3c   pk 3 parent 2
+  R1 _resolve_root_session         -> graph-4f522c65fe (real root)
+  R2 authorized_collaboration_root -> None
+  R2 on the legitimate contributor -> None        <- see caveat
+  R3 load_collaboration_root       -> RAISED ConversationSessionNotFoundError depth2-06fe1e3c
+  R3 on the legitimate contributor -> graph-4f522c65fe (expected graph-4f522c65fe)
+```
+
+**R3 no longer names the intermediate contributor as the deck owner** — it refuses — and it still
+resolves every reachable row correctly (depth-1 measured above; depth-0 covered by the pre-existing
+`test_the_default_loader_resolves_a_contributor_to_its_owner`, green). The three-way disagreement I
+found is now a two-way one between `load_collaboration_root`/`authorized_collaboration_root`
+(refuse) and `_resolve_root_session` (walks to the real root) — and that remaining divergence is
+**exactly** the pre-existing defect C-16 already recorded as carried to the whole-branch review. It
+is now also documented in code, at `src/services/graph/builder.py:208-223`, naming all three
+resolvers and their three behaviours explicitly. As the person who found the three-way split: **two
+of three, with the third documented and already owned by the whole-branch review, is enough.**
+
+*Caveat, stated because my own sanity check caught it:* my R2 measurement is not discriminating in
+the `graph_env` fixture — its owner session has no `SessionSlideDeck` row, so
+`authorized_collaboration_root` returns `None` for the **legitimate** contributor too. R2's depth
+behaviour therefore rests on its SQL (`require root.parent_session_id IS NULL`, plan bullet 4),
+C-16's explicit statement of it, and 4A's own reviewed tests — not on my measurement. Recorded in
+§7.
+
+**M26 spot-checked** (§5): removing the predicate REDs **exactly one** test, the new one, with
+`Failed: DID NOT RAISE ConversationSessionNotFoundError`. Zero collateral.
+
+## 4. I3 — ADDRESSED, and the new RED is the exact failure I said was invisible.
+
+`tests/unit/test_graph_builder.py:554-586` adds
+`test_a_real_turn_carries_the_root_and_actor_through_the_runtime`: a real compiled-graph
+three-slide turn asserting both keys survive into final state **and** that all three builders'
+`Send` payloads carried them, with an explicit anti-vacuity guard
+(`assert len(fanned) == 3, "no builder fanned out — the check would be vacuous"`).
+
+**M5 goes from 2 static REDs to 3**, verified (§5), and the third RED is:
+
+```
+>       assert final["root_session_id"] == "owner-of-the-deck"
+E       KeyError: 'root_session_id'
+tests/unit/test_graph_builder.py:581: KeyError
+```
+
+That is LangGraph dropping an undeclared key from final state — precisely the behavioural failure
+that the `get_type_hints` assertion and the AST sweep could not see and that the tolerant
+`.get(...) or ""` reads would have swallowed in production. The clause is now guarded
+behaviourally, not only structurally. Fully closed.
+
+## 5. MUTATION SPOT-CHECKS — five re-run figures independently confirmed
+
+Two were asked for; I took five, because a poisoned-tree run inflates a common set and these are the
+figures most worth an independent number. All five hit anchor count 1 as expected; **0 restore
+aborts**; no phantom common RED set across the three unrelated files touched (`state.py`,
+`agent_runtime_identity.py`, `routers.py`, `builder.py`), which is the C-33 detection signature.
+
+| mutation | file | reported | **measured** | REDs |
+|---|---|---|---|---|
+| **M5** | `graph/state.py` | 3 (was 2) | **3** ✔ | AST sweep, type-hints test, **new real-turn test** |
+| **M24** | `agent_runtime_identity.py` | 3 | **3** ✔ | all three log tests, both branches |
+| **M25** | `graph/routers.py` | 2 | **2** ✔ | hostile-record + AC4 trace-agreement |
+| **M26** | `graph/builder.py` | 1 (the new test) | **1** ✔ | exactly the new depth-2 test |
+| **M9e** | `graph/routers.py` | 4 (was 3) | **4** ✔ | the three re-fan/trace tests + AC4, **zero pre-existing** |
+
+M9e's move from 3 to 4 is explained and correct: the fourth is the AC4 test, which the fix re-aimed
+to drive through the re-fan, so it is now sensitive to re-fan sabotage. The C-27 refusal the
+coordinator reports (M9e's anchor going to 0 after the `session_id` line landed in that block) is
+the harness behaving correctly; my own round-1 anchors still matched because they span the
+root/actor pair, which stayed adjacent.
+
+M24's RED text, on both the success-branch and error-branch tests:
+
+```
+>       assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+E       AssertionError: assert {'actor_sessi...ease_id', ...} == {'agent_defin...version', ...}
+E         Extra items in the left set:
+E         'actor_session_id'
+```
+
+## 6. NEW BREAKAGE IN THE FIX DIFF — none found
+
+- **Full `tests/unit`: 6 failed / 5640 passed / 110 skipped** (279s). Same six inherited causes,
+  identical to both earlier measurements: `test_deploy_autoscaling` ×2,
+  `test_style_exclusivity_chokepoint` ×3, `test_style_exclusivity_persistence_boundary` ×1.
+  **5637 → 5640 is exactly +3**, matching the three tests the fix adds — so no test was removed or
+  silently skipped to make the fix pass.
+- **Graph integration: 2 failed / 151 passed.** The same two I already confirmed pre-existing
+  (`test_a_position_left_uncommitted…`, `test_persisted_corruption_escapes_later_node_recovery[deck_reviewer-…]`).
+  No new integration failure.
+- **`#265`'s guard is byte-unchanged at HEAD**: the function extracted and hashed at base, slice and
+  HEAD is `f47cdceb5b296e95` in all three. `TestAgentRuntimeSeam` + `TestNoCallSiteMayTraceBlank`:
+  **6 passed**.
+- Focus: trio + `test_persisted_agent_runtime` = **311 passed, 0 failed**; the three new tests
+  individually **3 passed**.
+- Diff read for regressions: the replaced denylist is strictly subsumed by the exact-set assertion;
+  `.where(a, b)` is correct ANDed SQLAlchemy 2 usage and leaves depth-0/1 resolution intact
+  (measured); the new `session_id` entry sits after the `**dict(record)` spread so it overrides, as
+  intended; the AC4 test's four hostile values (`attacker-session`, `attacker-root`,
+  `attacker-actor`, `999`) are each **distinct** from what state carries, so none of its assertions
+  can pass for the wrong reason — M25 proves the `session_id` one can fail. The
+  `agent_runtime_identity.py` citation of "Ruling C-32" is correct for *this* ledger (C-32 here is
+  the log-breach ruling; C-33's body disambiguates its own reference to #264's C-32).
+
+### Footnotes, non-blocking, no action needed
+1. `_STANDARD_LOG_RECORD_ATTRS` unions `taskName`, which is intrinsic on Python 3.12+ but not on
+   this 3.11 runtime — so a sink field literally named `taskName` would be invisible to
+   `emitted_fields` here. Implausible for an identity field, and `message`/`asctime` are protected
+   by `makeRecord`'s own `KeyError`. Recorded only for completeness.
+2. I could not reproduce the reported "focus suites 440 passed" from any module set (measured 233,
+   311, 507, 624 for various sets) — the same unreproducible-figure class as last round's 594. No
+   conclusion depends on it.
+
+## 7. CANNOT VERIFY (this round)
+
+1. **`authorized_collaboration_root`'s depth-2 behaviour, by measurement.** My probe returned `None`
+   for the legitimate contributor too, because the `graph_env` fixture's owner has no deck row, so
+   the `None` I got for depth 2 is not attributable to the depth predicate. I relied on its SQL,
+   C-16's explicit statement, and 4A's reviewed tests. This does not affect the I2 verdict, which
+   turns on `load_collaboration_root`'s own behaviour — measured directly.
+2. **The #260 PRD amendment's own text**, unchanged from round 1: I verified the fix against the
+   #261 plan's verbatim restatement at
+   `docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md:21`, which is the standing
+   in-repo authority. The PRD itself is not in the repo.
+3. **Whether the log line can be emitted in the deployed Apps logging configuration.** Now moot for
+   C1 — the fields are gone regardless of level — but the underlying question is still unexamined.
+
+## 8. THE MODEL-PROMPT MEASUREMENT — independently verified, scope is exactly as stated
+
+Behaviour is unchanged by the fix; the question is whether the measurement the user's decision rests
+on is right. I measured it directly rather than by grep: one contributor turn with a recording
+adapter, capturing the **prompt actually handed to the model** at all ten invocations, and testing
+each for the owner's and the actor's session-ID literals.
+
+```
+ # role             OWNER id  ACTOR id
+ 0 architect        False     True
+ 1 data_analyst     False     True
+ 2 builder          True      True      <- initial call
+ 3 builder          True      True      <- unsafe-output retry
+ 4 build_reviewer   False     False     <- re-fan
+ 5 fixer            False     False
+ 6 fixer            False     False     <- retry
+ 7 fix_reviewer     False     False
+ 8 deck_reviewer    False     True
+ 9 build_reviewer   False     False     <- re-review
+
+  roles whose prompt carries the OWNER's id: ['builder']
+  roles whose prompt carries the ACTOR's id: ['architect', 'builder', 'data_analyst', 'deck_reviewer']
+```
+
+**The claim holds exactly, on all three points.**
+
+- **New with 4B: the deck owner's session ID reaches the `builder` role's prompt only** — both the
+  initial call and the unsafe-output retry. Nothing else. Scope is **not** wider than "builder only".
+- **Pre-existing and unchanged:** the actor's own session ID already reached `architect`,
+  `data_analyst` and `deck_reviewer`. I confirmed this independently of the grep: the three payload
+  dict literals carrying `"session_id": session_id` are `nodes.py:1461` (architect), `:1864`
+  (data_analyst) and `:2973` (deck_reviewer), and `grep -c '"session_id": session_id'` on `nodes.py`
+  returns **10 at `f5ec0bfd5`, 10 at `6d9d154de`, 10 at `fb88cca3a` and 10 at `07b0856ce`** — the
+  count claim is true. I note the instrument is weaker than the claim it supports: 7 of those 10
+  matches are `extra={"session_id": session_id}` **log** dicts, not model payloads, and
+  `build_branch_payload` spells it `state["session_id"]` so the grep never saw the builder at all.
+  The measurement above is what actually establishes the claim.
+- **Clean and asserted:** `build_reviewer` (re-fan **and** re-review), `fixer` (initial **and**
+  retry) and `fix_reviewer` carry neither identifier. Guarded by M20.
+- `actor_session_id` on the builder payload is indeed a **second copy** of a value already present
+  as `session_id`, so it adds no new identifier to that prompt.
+
+**So the user's decision is correctly framed and correctly scoped:** one role's prompt (`builder`,
+two calls per slide) now carries one new third-party identifier — the deck owner's session ID —
+on a role whose prompt already carried the acting user's own. The acting user's ID was, and remains,
+on three other roles. Nothing about the fix round changed this, and nothing I measured widens it.
+
+## 9. GO / NO-GO
+
+**GO for #262 Task 6.**
+
+All four findings are addressed, each with a mutation that REDs and that I re-ran myself. My C-29
+audit item (M17's non-discriminating RED) is closed by M25, and the Minor I raised about R2's
+non-discriminating hostile-record test is closed by giving that record a distinct `session_id`. No
+new breakage: the full unit suite, the graph integration suites and #265's guard are all exactly
+where they were, with +3 tests and no removals. The one open decision — the deck owner's session ID
+on the `builder` prompt — is a product call for the user, correctly scoped and correctly measured,
+and it does not block Task 6.
+
+Two items to carry to the **whole-branch review**, neither new and neither blocking: the
+`_resolve_root_session` depth divergence (C-16's, now documented in three places) and the two
+inherited Task-3-era integration failures.
