@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import dataclasses
+import pathlib
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.api.routes import _authz
+from src.api.routes.agent_definitions import router as agent_definition_router
 from src.api.schemas.agent_definitions import (
     DraftDefinitionResponse,
     DraftFieldErrorResponse,
@@ -17,14 +23,17 @@ from src.api.schemas.agent_definitions import (
     DraftSaveSuccessResponse,
     DraftValidationErrorResponse,
 )
-from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE
+from src.core.database import get_db
+from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE, UNTRUSTED_DATA_NOTICE
 from src.core.skills.build_reviewer import (
     BUILD_REVIEWER_AUTHORED_PREFIX,
     BUILD_REVIEWER_CRITERIA_STAGE,
     BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
     BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+    DECK_BRIEF_REVIEW,
 )
 from src.core.skills.data_analyst import ANALYST_AUTHORED_INSTRUCTIONS
+from src.core.user_context import set_current_user
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     GraphDraft,
@@ -32,6 +41,7 @@ from src.database.models.graph_configuration import (
     GraphRelease,
     GraphReleaseAgent,
 )
+from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_configuration import (
     DraftContentRejected,
     DraftLegacyPromptSource,
@@ -52,6 +62,7 @@ from src.services.graph_definition_manifest import (
 )
 from src.services.prompt_assembler import (
     ROLE_UNTRUSTED_DATA_NOTICE,
+    V1_PROTECTED_ASSEMBLY_IDENTITY,
     V2_PROTECTED_ASSEMBLY_IDENTITY,
     PromptAssembler,
 )
@@ -1082,3 +1093,422 @@ def test_two_sessions_serialize_two_upgrades_and_reject_the_waiter(
             }
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Task 6: the real route stack over real PostgreSQL.
+#
+# Everything above drives the locked facade directly. This section drives the
+# shipped FastAPI routes, so the serializers, the strict envelopes, the real
+# protected bundle text and the real persisted rows all participate at once.
+#
+# It is also the only place the Python and TypeScript literals meet. The client's
+# 422 fixtures in ``frontend/tests/fixtures/mocks.ts`` are hand-typed literals
+# that claim to be byte-identical to the server's; nothing in the frontend lane
+# can check that claim, so a Python-side edit would otherwise leave both suites
+# green. Here the expected side is the wire body a real route really produced.
+# ---------------------------------------------------------------------------
+
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_CLIENT_MOCKS = _REPO_ROOT / "frontend" / "tests" / "fixtures" / "mocks.ts"
+_TS_STRING = re.compile(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"")
+
+#: Real protected display bytes, named from the modules that own them rather than
+#: from ``PromptAssembler``, so a wrong wiring in the assembler cannot make both
+#: sides of the comparison agree.
+_V1_PAYLOAD_DISPLAY = "json.dumps(payload, indent=2, default=str)"
+_V2_PAYLOAD_DISPLAY = (
+    'json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)'
+)
+_OPEN_DELIMITER = "<untrusted-data>"
+_CLOSE_DELIMITER = "</untrusted-data>"
+_TERMINAL_BINDING = "langchain.with_structured_output"
+
+
+def _client_rejection_triple(name: str) -> dict[str, str]:
+    """The hand-typed (field, code, message) of one client 422 fixture."""
+    source = _CLIENT_MOCKS.read_text(encoding="utf-8")
+    start = source.index(f"export const {name}")
+    block = source[start : source.index("\n};", start)]
+    errors = block[block.index("errors: [") :]
+
+    def literals(fragment: str) -> list[str]:
+        values = []
+        for match in _TS_STRING.finditer(fragment):
+            raw = match.group(1) if match.group(1) is not None else match.group(2)
+            values.append(raw.replace("\\n", "\n").replace("\\'", "'").replace('\\"', '"'))
+        return values
+
+    field = literals(errors[errors.index("field:") : errors.index("code:")])
+    code = literals(errors[errors.index("code:") : errors.index("message:")])
+    message = "".join(literals(errors[errors.index("message:") :]))
+    assert len(field) == 1 and len(code) == 1 and message, (
+        f"client fixture {name} did not parse; the join would be vacuous"
+    )
+    return {"field": field[0], "code": code[0], "message": message}
+
+
+def _expected_v1_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    if agent_key == "build_reviewer":
+        rows.append(
+            {
+                "stage_id": "build_reviewer_deck_brief",
+                "label": "Deck-brief re-review",
+                "condition": "payload_has_deck_brief",
+                "display_text": DECK_BRIEF_REVIEW,
+                "legal_adjacent_custom_anchors": [],
+            }
+        )
+    rows.extend(
+        [
+            {
+                "stage_id": "slide_frame_constraints",
+                "label": "Slide frame constraints",
+                "condition": "design_system_inactive",
+                "display_text": _SLIDE_FRAME_CONSTRAINTS,
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "design_system_precedence",
+                "label": "Design system precedence",
+                "condition": "design_system_active",
+                "display_text": DESIGN_SYSTEM_PRECEDENCE,
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "runtime_payload",
+                "label": "Graph Version 1 runtime payload",
+                "condition": "always",
+                "display_text": _V1_PAYLOAD_DISPLAY,
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "structured_output_binding",
+                "label": "Structured-output binding",
+                "condition": "always",
+                "display_text": _TERMINAL_BINDING,
+                "legal_adjacent_custom_anchors": [],
+            },
+        ]
+    )
+    for row in rows:
+        row.update({"locked": True, "bundle_version": 1, "bundle_digest": digest})
+    return rows
+
+
+def _expected_v2_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    if agent_key == "build_reviewer":
+        rows.extend(
+            [
+                {
+                    "stage_id": "build_reviewer_criteria",
+                    "label": "Build Reviewer criteria",
+                    "condition": "always",
+                    "display_text": BUILD_REVIEWER_CRITERIA_STAGE,
+                    "legal_adjacent_custom_anchors": [],
+                },
+                {
+                    "stage_id": "build_reviewer_deck_brief",
+                    "label": "Deck-brief re-review",
+                    "condition": "payload_has_deck_brief",
+                    "display_text": DECK_BRIEF_REVIEW,
+                    "legal_adjacent_custom_anchors": ["after_deck_brief"],
+                },
+            ]
+        )
+    rows.extend(
+        [
+            {
+                "stage_id": "slide_frame_constraints",
+                "label": "Slide frame constraints",
+                "condition": "design_system_inactive",
+                "display_text": _SLIDE_FRAME_CONSTRAINTS,
+                "legal_adjacent_custom_anchors": ["after_environment_constraints"],
+            },
+            {
+                "stage_id": "design_system_precedence",
+                "label": "Design system precedence",
+                "condition": "design_system_active",
+                "display_text": DESIGN_SYSTEM_PRECEDENCE,
+                "legal_adjacent_custom_anchors": ["after_environment_constraints"],
+            },
+            {
+                "stage_id": "untrusted_data_notice",
+                "label": "Role-specific untrusted-data notice",
+                "condition": "always",
+                "display_text": ROLE_UNTRUSTED_DATA_NOTICE[agent_key],
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "untrusted_data_open",
+                "label": "Untrusted-data opening delimiter",
+                "condition": "always",
+                "display_text": _OPEN_DELIMITER,
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "runtime_payload",
+                "label": "Canonical runtime payload",
+                "condition": "always",
+                "display_text": _V2_PAYLOAD_DISPLAY,
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "untrusted_data_close",
+                "label": "Untrusted-data closing delimiter",
+                "condition": "always",
+                "display_text": _CLOSE_DELIMITER,
+                "legal_adjacent_custom_anchors": [],
+            },
+            {
+                "stage_id": "structured_output_binding",
+                "label": "Structured-output binding",
+                "condition": "always",
+                "display_text": _TERMINAL_BINDING,
+                "legal_adjacent_custom_anchors": [],
+            },
+        ]
+    )
+    for row in rows:
+        row.update({"locked": True, "bundle_version": 2, "bundle_digest": digest})
+    return rows
+
+
+@pytest.fixture
+def real_route_stack(postgres_engine, monkeypatch):
+    """The shipped router over real PostgreSQL, authorized as a trusted admin."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+
+    app = FastAPI()
+    app.include_router(agent_definition_router)
+
+    def _override_db():
+        with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_db
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    set_current_user("task6-admin@example.com")
+    monkeypatch.setattr(_authz, "_admin_acl_probe", lambda _user: True)
+    _authz.reset_admin_cache()
+    try:
+        with TestClient(app) as client:
+            yield factory, client
+    finally:
+        set_current_user(None)
+        _authz.reset_admin_cache()
+
+
+def _node(body: dict, agent_key: str) -> dict:
+    return next(node for node in body["nodes"] if node["agent_key"] == agent_key)
+
+
+def test_real_routes_serve_real_protected_text_for_every_model_role(real_route_stack) -> None:
+    """Catches placeholder, reconstructed, empty, or duplicated protected rows.
+
+    Task 5's browser fixtures carry synthetic ``display_text`` on purpose, so this
+    is the first and only place the real bundle bytes reach a real HTTP response.
+    """
+    _factory, client = real_route_stack
+
+    response = client.get("/api/admin/agent-definitions/workbench")
+    assert response.status_code == 200
+    body = response.json()
+    v1_digest = PromptAssembler().protected_stage_view(
+        agent_key="architect", identity=V1_PROTECTED_ASSEMBLY_IDENTITY
+    )[0].bundle_digest
+
+    for agent_key in GRAPH_V1_AGENT_KEYS:
+        node = _node(body, agent_key)
+        expected = _expected_v1_rows(agent_key, v1_digest)
+        for source in ("published", "draft"):
+            rows = node[source]["protected_stage_view"]
+            # M-3's silent-empty-view case is impossible on the server side.
+            assert rows, f"{agent_key}.{source} served an empty protected_stage_view"
+            assert rows == expected
+            stage_ids = [row["stage_id"] for row in rows]
+            assert len(stage_ids) == len(set(stage_ids))
+            assert stage_ids[-1] == "structured_output_binding"
+
+    # The deterministic node still carries no definition and therefore no view.
+    foreman = _node(body, "foreman")
+    assert foreman["published"] is None and foreman["draft"] is None
+
+
+@pytest.mark.parametrize("agent_key", AFFECTED_ROLES)
+def test_real_route_sequence_from_persisted_v1_edit_to_authored_only_v2(
+    real_route_stack, agent_key
+) -> None:
+    """Drives 422 -> read-only source -> ordinary Save -> Upgrade over real routes.
+
+    Catches a lossy or automatic transition, a source route that writes, a
+    published mutation, a re-baselined 422 literal, or protected text the client
+    fixtures no longer describe.
+    """
+    factory, client = real_route_stack
+    upgrade_url = f"/api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade"
+    source_url = f"/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source"
+    save_url = f"/api/admin/agent-definitions/draft/{agent_key}"
+
+    transition = PromptAssembler().legacy_v1_prompt_source(agent_key=agent_key)
+    independent_source, independent_target = INDEPENDENT_TRANSITION_LITERALS[agent_key]
+    published_content, published_hash, published_id = _published_revision(factory, agent_key)
+    artifacts_before = _immutable_graph_artifacts(factory)
+    assert published_content.prompt_text == independent_source
+
+    # A persisted one-code-point edit of the published Graph Version 1 composite.
+    edited_prompt = independent_source[:-1] + "é"
+    assert edited_prompt != independent_source
+    assert len(edited_prompt) == len(independent_source)
+
+    saved = client.put(
+        save_url,
+        json={
+            "lock_version": 0,
+            "candidate": {
+                "prompt_text": edited_prompt,
+                "model": {
+                    "endpoint_name": published_content.model.endpoint_name,
+                    "temperature": float(published_content.model.temperature),
+                    "max_tokens": published_content.model.max_tokens,
+                    "top_p": float(published_content.model.top_p),
+                },
+            },
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["draft"]["lock_version"] == 1
+    assert saved.json()["definition"]["prompt_text"] == edited_prompt
+
+    # 1. The edited legacy composite is refused with the exact manual-resolution issue.
+    rejected = client.post(upgrade_url, json={"lock_version": 1})
+    assert rejected.status_code == 422
+    assert rejected.json() == {
+        "code": "invalid_draft",
+        "errors": [_client_rejection_triple("MANUAL_RESOLUTION_REJECTION")],
+    }
+    after_rejection, hash_after_rejection = _stored_draft(factory, agent_key)
+    assert after_rejection.prompt_text == edited_prompt
+    assert after_rejection.protected_assembly == transition.source_protected_assembly
+    assert _draft_meta(factory)[0] == 1
+
+    # 2. The source route returns the exact published prompt and writes nothing.
+    recovered = client.post(source_url, json={"lock_version": 1})
+    assert recovered.status_code == 200
+    source_body = recovered.json()
+    assert source_body["agent_key"] == agent_key
+    assert source_body["lock_version"] == 1
+    assert source_body["draft"]["lock_version"] == 1
+    assert source_body["source"] == {
+        "prompt_text": independent_source,
+        "revision_id": published_id,
+        "content_hash": published_hash,
+    }
+    assert _stored_draft(factory, agent_key) == (after_rejection, hash_after_rejection)
+    assert _draft_meta(factory)[0] == 1
+    assert _immutable_graph_artifacts(factory) == artifacts_before
+
+    # 3. An explicit ordinary Save reinstates the exact published composite.
+    restored = client.put(
+        save_url,
+        json={
+            "lock_version": 1,
+            "candidate": {
+                "prompt_text": source_body["source"]["prompt_text"],
+                "model": {
+                    "endpoint_name": published_content.model.endpoint_name,
+                    "temperature": float(published_content.model.temperature),
+                    "max_tokens": published_content.model.max_tokens,
+                    "top_p": float(published_content.model.top_p),
+                },
+            },
+        },
+    )
+    assert restored.status_code == 200
+    assert restored.json()["draft"]["lock_version"] == 2
+    assert restored.json()["definition"]["prompt_text"] == independent_source
+    assert restored.json()["definition"]["assembly_rules"]["format_version"] == 1
+
+    # 4. Only now does an explicit Upgrade produce the authored-only v2 definition.
+    upgraded = client.post(upgrade_url, json={"lock_version": 2})
+    assert upgraded.status_code == 200
+    definition = upgraded.json()["definition"]
+    assert upgraded.json()["draft"]["lock_version"] == 3
+    assert definition["prompt_text"] == independent_target
+    assert definition["prompt_text"] == transition.target_authored_prompt
+    assert definition["assembly_rules"] == {"format_version": 2, "custom_blocks": []}
+    assert definition["protected_assembly"] == {
+        "version": V2_PROTECTED_ASSEMBLY_IDENTITY.version,
+        "digest": V2_PROTECTED_ASSEMBLY_IDENTITY.digest,
+    }
+    assert definition["protected_stage_view"] == _expected_v2_rows(
+        agent_key, V2_PROTECTED_ASSEMBLY_IDENTITY.digest
+    )
+    stage_ids = [row["stage_id"] for row in definition["protected_stage_view"]]
+    assert len(stage_ids) == len(set(stage_ids))
+    displaced = (
+        UNTRUSTED_DATA_NOTICE if agent_key == "data_analyst" else BUILD_REVIEWER_CRITERIA_STAGE
+    )
+    assert displaced not in definition["prompt_text"]
+
+    # 5. A second Upgrade is the exact already-current rejection and writes nothing.
+    already = client.post(upgrade_url, json={"lock_version": 3})
+    assert already.status_code == 422
+    assert already.json() == {
+        "code": "invalid_draft",
+        "errors": [_client_rejection_triple("ALREADY_CURRENT_REJECTION")],
+    }
+    assert _draft_meta(factory)[0] == 3
+
+    # 6. Nothing published moved at any point in the sequence.
+    assert _published_revision(factory, agent_key) == (
+        published_content,
+        published_hash,
+        published_id,
+    )
+    assert _immutable_graph_artifacts(factory) == artifacts_before
+
+
+def test_real_upgrade_route_rejects_a_stale_lock_with_a_null_candidate_conflict(
+    real_route_stack,
+) -> None:
+    """The upgrade conflict envelope carries exactly ``client_candidate: null``."""
+    factory, client = real_route_stack
+    published_content = _published_revision(factory, "architect")[0]
+
+    bumped = client.put(
+        "/api/admin/agent-definitions/draft/architect",
+        json={
+            "lock_version": 0,
+            "candidate": {
+                "prompt_text": published_content.prompt_text + " edited",
+                "model": {
+                    "endpoint_name": published_content.model.endpoint_name,
+                    "temperature": float(published_content.model.temperature),
+                    "max_tokens": published_content.model.max_tokens,
+                    "top_p": float(published_content.model.top_p),
+                },
+            },
+        },
+    )
+    assert bumped.status_code == 200
+
+    stale = client.post(
+        "/api/admin/agent-definitions/draft/data_analyst/protected-assembly-upgrade",
+        json={"lock_version": 0},
+    )
+    assert stale.status_code == 409
+    body = stale.json()
+    assert body["code"] == "stale_draft"
+    assert body["expected_lock_version"] == 0
+    assert body["current_lock_version"] == 1
+    assert body["client_candidate"] is None
+    assert set(body["server"]["definitions"]) == set(GRAPH_V1_AGENT_KEYS)
+    assert body["current_lock_version"] == body["server"]["draft"]["lock_version"]
+    # A refused upgrade writes nothing of its own.
+    assert _draft_meta(factory)[0] == 1
+    assert _stored_draft(factory, "data_analyst")[0].protected_assembly.version == 1

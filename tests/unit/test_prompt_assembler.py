@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import pathlib
+import re
 
 import pytest
 
@@ -23,6 +25,7 @@ from src.core.skills.data_analyst import (
 from src.core.skills.data_analyst import (
     INSTRUCTIONS as ANALYST_V1_PROMPT,
 )
+from src.services import prompt_assembler
 from src.services.agent_runtime import (
     TEST_COMPATIBILITY_GRAPH_RELEASE_ID,
     AgentAssemblyContext,
@@ -750,3 +753,440 @@ def test_other_v1_role_upgrades_without_changing_authored_prompt() -> None:
     upgraded = PromptAssembler().upgrade_definition_to_v2(definition=original)
     assert upgraded.prompt_text == original.prompt_text
     assert upgraded.assembly_rules == AssemblyRulesV2(format_version=2, custom_blocks=())
+
+
+# ---------------------------------------------------------------------------
+# Task 6: independent attestation of the v2 identity material, and the only
+# place the Python and TypeScript literals meet.
+#
+# The import-time guard at ``prompt_assembler.py`` detects drift but cannot
+# attest correctness: re-baselining ``_V2_DIGEST`` beside a changed literal is a
+# one-line operation and silences it. The pins below raise that cost, because a
+# re-baseline now has to be made in two committed files, and because the
+# structural material is hand-typed here rather than read back out of the module
+# that produces it.
+#
+# The cross-language tests read the frontend sources as text on purpose. The
+# frontend's fixtures are hand-typed literals that claim to mirror this module;
+# nothing in the frontend lane can check that claim, so Python-side drift would
+# otherwise leave both suites green.
+# ---------------------------------------------------------------------------
+
+
+#: Committed separately from ``src/services/prompt_assembler.py``'s own literal.
+INDEPENDENT_V2_DIGEST = "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+
+#: Hand-typed from the reviewed v2 contract, in the exact bundle order:
+#: (stage_id, label, condition, contributes_to_prompt, roles, legal anchors).
+INDEPENDENT_V2_STAGE_PLAN: tuple[
+    tuple[str, str, str, bool, tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        "build_reviewer_criteria",
+        "Build Reviewer criteria",
+        "always",
+        True,
+        ("build_reviewer",),
+        (),
+    ),
+    (
+        "build_reviewer_deck_brief",
+        "Deck-brief re-review",
+        "payload_has_deck_brief",
+        True,
+        ("build_reviewer",),
+        ("after_deck_brief",),
+    ),
+    (
+        "slide_frame_constraints",
+        "Slide frame constraints",
+        "design_system_inactive",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        ("after_environment_constraints",),
+    ),
+    (
+        "design_system_precedence",
+        "Design system precedence",
+        "design_system_active",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        ("after_environment_constraints",),
+    ),
+    (
+        "untrusted_data_notice",
+        "Role-specific untrusted-data notice",
+        "always",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "untrusted_data_open",
+        "Untrusted-data opening delimiter",
+        "always",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "runtime_payload",
+        "Canonical runtime payload",
+        "always",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "untrusted_data_close",
+        "Untrusted-data closing delimiter",
+        "always",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "structured_output_binding",
+        "Structured-output binding",
+        "always",
+        False,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+)
+
+#: Hand-typed from the reviewed v1 contract, same tuple shape.
+INDEPENDENT_V1_STAGE_PLAN: tuple[
+    tuple[str, str, str, bool, tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        "build_reviewer_deck_brief",
+        "Deck-brief re-review",
+        "payload_has_deck_brief",
+        True,
+        ("build_reviewer",),
+        (),
+    ),
+    (
+        "slide_frame_constraints",
+        "Slide frame constraints",
+        "design_system_inactive",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "design_system_precedence",
+        "Design system precedence",
+        "design_system_active",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "runtime_payload",
+        "Graph Version 1 runtime payload",
+        "always",
+        True,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+    (
+        "structured_output_binding",
+        "Structured-output binding",
+        "always",
+        False,
+        GRAPH_V1_AGENT_KEYS,
+        (),
+    ),
+)
+
+#: Hand-typed serialization and delimiter contract values.
+INDEPENDENT_PAYLOAD_DISPLAY = (
+    'json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)'
+)
+INDEPENDENT_V1_PAYLOAD_DISPLAY = "json.dumps(payload, indent=2, default=str)"
+INDEPENDENT_OPEN_DELIMITER = "<untrusted-data>"
+INDEPENDENT_CLOSE_DELIMITER = "</untrusted-data>"
+INDEPENDENT_TERMINAL_BINDING = "langchain.with_structured_output"
+INDEPENDENT_ANCHOR_RANK = {
+    "after_authored_prompt": 0,
+    "after_deck_brief": 1,
+    "after_environment_constraints": 2,
+}
+#: The one anchor that is legal for every role and declared by no protected stage.
+UNIVERSAL_CUSTOM_ANCHOR = "after_authored_prompt"
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_CLIENT_MOCKS = _REPO_ROOT / "frontend" / "tests" / "fixtures" / "mocks.ts"
+_CLIENT_API = _REPO_ROOT / "frontend" / "src" / "api" / "agentDefinitions.ts"
+_CLIENT_ASSEMBLY_EDITOR = (
+    _REPO_ROOT
+    / "frontend"
+    / "src"
+    / "components"
+    / "Admin"
+    / "AgentDefinitionWorkbench"
+    / "AssemblyEditor.tsx"
+)
+
+_TS_STRING = re.compile(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"")
+_TS_STAGE_ROW = re.compile(
+    r"stage_id:\s*\"([^\"]+)\",\s*"
+    r"label:\s*\"([^\"]+)\",\s*"
+    r"condition:\s*\"([^\"]+)\",\s*"
+    r"display_text:\s*(?P<display>.+?),\s*"
+    r"legal_adjacent_custom_anchors:\s*\[(?P<anchors>[^\]]*)\]",
+    re.DOTALL,
+)
+
+
+def _stage_plan(stages) -> tuple[tuple[str, str, str, bool, tuple[str, ...], tuple[str, ...]], ...]:
+    return tuple(
+        (
+            stage.stage_id,
+            stage.label,
+            stage.condition,
+            stage.contributes_to_prompt,
+            tuple(stage.roles),
+            tuple(stage.legal_adjacent_custom_anchors),
+        )
+        for stage in stages
+    )
+
+
+def _read_client(path: pathlib.Path) -> str:
+    assert path.is_file(), f"client source missing: {path}"
+    return path.read_text(encoding="utf-8")
+
+
+def _ts_strings(fragment: str) -> list[str]:
+    """Every quoted TypeScript string literal in ``fragment``, in source order."""
+    values: list[str] = []
+    for match in _TS_STRING.finditer(fragment):
+        raw = match.group(1) if match.group(1) is not None else match.group(2)
+        values.append(
+            raw.replace("\\n", "\n").replace("\\t", "\t").replace("\\'", "'").replace('\\"', '"')
+        )
+    return values
+
+
+def _ts_block(source: str, declaration: str) -> str:
+    """The text of one top-level ``export const`` / ``function`` block."""
+    start = source.index(declaration)
+    end = source.index("\n}", start)
+    return source[start:end]
+
+
+def _ts_array_block(source: str, declaration: str) -> str:
+    """The bracketed body of one top-level ``export const NAME = [...] as const;``."""
+    start = source.index(declaration)
+    opening = source.index("[", start)
+    closing = source.index("]", opening)
+    return source[opening : closing + 1]
+
+
+def _ts_joined_string(fragment: str) -> str:
+    """One TypeScript value written as quoted literals joined by ``+``."""
+    return "".join(_ts_strings(fragment))
+
+
+def _client_stage_rows(function_name: str) -> list[tuple[str, str, str, tuple[str, ...]]]:
+    """(stage_id, label, condition, anchors) for one fixture builder, in file order."""
+    block = _ts_block(_read_client(_CLIENT_MOCKS), f"function {function_name}(")
+    rows: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for match in _TS_STAGE_ROW.finditer(block):
+        anchors = tuple(_ts_strings(match.group("anchors")))
+        rows.append((match.group(1), match.group(2), match.group(3), anchors))
+    assert rows, f"no protected-stage rows parsed out of {function_name}"
+    return rows
+
+
+def _client_rejection(name: str) -> tuple[str, str, str]:
+    """The exact (field, code, message) triple of one hand-typed 422 fixture."""
+    block = _ts_block(_read_client(_CLIENT_MOCKS), f"export const {name}")
+    errors = block[block.index("errors: [") :]
+    field = _ts_strings(errors[errors.index("field:") : errors.index("code:")])
+    code = _ts_strings(errors[errors.index("code:") : errors.index("message:")])
+    message = _ts_joined_string(errors[errors.index("message:") :])
+    assert len(field) == 1 and len(code) == 1
+    return field[0], code[0], message
+
+
+def test_v2_identity_digest_is_pinned_in_a_second_committed_file() -> None:
+    """Catches a one-line ``_V2_DIGEST`` re-baseline that silences the import guard."""
+    assert V2_PROTECTED_ASSEMBLY_IDENTITY.version == 2
+    assert V2_PROTECTED_ASSEMBLY_IDENTITY.digest == INDEPENDENT_V2_DIGEST
+    # The import guard recomputes from live material; agreeing with the pin above
+    # means the material, the module literal, and this file all still coincide.
+    assert protected_assembly_v2_digest() == INDEPENDENT_V2_DIGEST
+
+
+def test_protected_stage_plans_match_hand_typed_contract_literals() -> None:
+    """Catches a stage id, label, condition, role set, or anchor wrong at baseline."""
+    assert _stage_plan(prompt_assembler._v2_stages()) == INDEPENDENT_V2_STAGE_PLAN
+    assert _stage_plan(prompt_assembler._v1_stages()) == INDEPENDENT_V1_STAGE_PLAN
+
+
+def test_serialization_delimiter_and_anchor_contract_values_are_pinned() -> None:
+    """Catches a silently re-baselined payload, delimiter, binding, or anchor rank."""
+    assert prompt_assembler._PAYLOAD_DISPLAY == INDEPENDENT_PAYLOAD_DISPLAY
+    assert prompt_assembler._OPEN_DELIMITER == INDEPENDENT_OPEN_DELIMITER
+    assert prompt_assembler._CLOSE_DELIMITER == INDEPENDENT_CLOSE_DELIMITER
+    assert prompt_assembler._TERMINAL_BINDING == INDEPENDENT_TERMINAL_BINDING
+    assert dict(prompt_assembler._ANCHOR_RANK) == INDEPENDENT_ANCHOR_RANK
+    v1_payload = next(
+        stage for stage in prompt_assembler._v1_stages() if stage.stage_id == "runtime_payload"
+    )
+    assert v1_payload.display_text == INDEPENDENT_V1_PAYLOAD_DISPLAY
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected"),
+    [
+        (
+            "MANUAL_RESOLUTION_REJECTION",
+            (
+                "prompt_text",
+                "legacy_prompt_manual_resolution_required",
+                prompt_assembler._MANUAL_RESOLUTION_MESSAGE,
+            ),
+        ),
+        (
+            "ALREADY_CURRENT_REJECTION",
+            (
+                "protected_assembly.version",
+                "already_current",
+                "Protected assembly is already current.",
+            ),
+        ),
+    ],
+)
+def test_client_422_fixtures_are_byte_identical_to_the_server_literals(
+    fixture: str, expected: tuple[str, str, str]
+) -> None:
+    """Joins the hand-typed client 422 fixtures to independently committed literals.
+
+    ``MANUAL_RESOLUTION_REJECTION``'s message is compared against the module's own
+    constant. ``already_current``'s message has no named constant — it is written
+    inline in ``upgrade_definition_to_v2`` — so its expected value here is a
+    hand-typed attestation, and the join to what the module actually raises is made
+    by ``test_server_emits_exactly_the_client_fixture_422_triples`` below.
+    """
+    assert _client_rejection(fixture) == expected
+
+
+def test_server_emits_exactly_the_client_fixture_422_triples() -> None:
+    """Both fixture triples are what the assembler actually raises, not just text."""
+    edited = _definition("data_analyst").model_copy(update={"prompt_text": "edited composite"})
+    with pytest.raises(PromptAssemblyRejected) as manual:
+        PromptAssembler().upgrade_definition_to_v2(definition=edited)
+    assert [(issue.field, issue.code, issue.message) for issue in manual.value.issues] == [
+        _client_rejection("MANUAL_RESOLUTION_REJECTION")
+    ]
+
+    already = PromptAssembler().upgrade_definition_to_v2(definition=_definition("architect"))
+    with pytest.raises(PromptAssemblyRejected) as current:
+        PromptAssembler().upgrade_definition_to_v2(definition=already)
+    assert [(issue.field, issue.code, issue.message) for issue in current.value.issues] == [
+        _client_rejection("ALREADY_CURRENT_REJECTION")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fixture", "stages"),
+    [
+        ("v1ProtectedStageView", prompt_assembler._v1_stages),
+        ("v2ProtectedStageView", prompt_assembler._v2_stages),
+    ],
+)
+def test_client_protected_stage_fixtures_mirror_the_server_bundle_structure(
+    fixture: str, stages
+) -> None:
+    """Catches client fixtures whose stage identities drifted from this module.
+
+    ``display_text`` is deliberately excluded: Task 5's synthetic values are what
+    prove the client renders server bytes rather than reconstructing them. Every
+    other half of the row is the server's contract and is joined here.
+    """
+    server = stages()
+    build_reviewer_only = {
+        stage.stage_id for stage in server if tuple(stage.roles) == ("build_reviewer",)
+    }
+
+    def server_rows(agent_key: str) -> list[tuple[str, str, str, tuple[str, ...]]]:
+        return [
+            (
+                stage.stage_id,
+                stage.label,
+                stage.condition,
+                tuple(stage.legal_adjacent_custom_anchors),
+            )
+            for stage in server
+            if agent_key in stage.roles
+        ]
+
+    client_rows = _client_stage_rows(fixture)
+    # The fixture pushes Build Reviewer's own rows first, exactly as the bundle
+    # orders them, so its file order is Build Reviewer's row order.
+    assert client_rows == server_rows("build_reviewer")
+    # Dropping the Build-Reviewer-only rows must leave every other role's order.
+    shared = [row for row in client_rows if row[0] not in build_reviewer_only]
+    for agent_key in GRAPH_V1_AGENT_KEYS:
+        if agent_key == "build_reviewer":
+            continue
+        assert shared == server_rows(agent_key)
+
+
+def test_client_condition_and_anchor_vocabularies_match_the_server() -> None:
+    """Catches a client vocabulary that gained or lost a value relative to Python."""
+    api = _read_client(_CLIENT_API)
+    conditions = _ts_strings(_ts_array_block(api, "export const ASSEMBLY_CONDITIONS"))
+    anchors = _ts_strings(_ts_array_block(api, "export const CUSTOM_ANCHORS"))
+    server_conditions = sorted(
+        {stage.condition for stage in prompt_assembler._v2_stages()}
+        | {stage.condition for stage in prompt_assembler._v1_stages()}
+    )
+    assert sorted(conditions) == server_conditions
+    assert anchors == sorted(
+        INDEPENDENT_ANCHOR_RANK, key=lambda anchor: INDEPENDENT_ANCHOR_RANK[anchor]
+    )
+
+
+def test_client_hardcoded_universal_anchor_is_exactly_the_server_legality() -> None:
+    """Joins M-1's duplicated source of truth to the server contract that backs it.
+
+    ``AssemblyEditor`` hard-codes ``after_authored_prompt`` as always legal while
+    reading every other anchor out of the server view. That is correct only while
+    the server keeps exactly one anchor legal for every role and declared by no
+    protected stage. This asserts that, so a server-side change REDs here instead
+    of silently making the client wrong.
+    """
+    declared = {
+        anchor
+        for stage in prompt_assembler._v2_stages()
+        for anchor in stage.legal_adjacent_custom_anchors
+    }
+    legal_everywhere = set.intersection(
+        *(set(anchors) for anchors in prompt_assembler._LEGAL_ANCHORS.values())
+    )
+    undeclared_universal = legal_everywhere - declared
+    assert undeclared_universal == {UNIVERSAL_CUSTOM_ANCHOR}
+    assert prompt_assembler._ANCHOR_RANK[UNIVERSAL_CUSTOM_ANCHOR] == 0
+
+    editor = _read_client(_CLIENT_ASSEMBLY_EDITOR)
+    hardcoded = _ts_strings(
+        editor[
+            editor.index("const legalAnchors") : editor.index("const editable = rules !== null")
+        ]
+    )
+    assert hardcoded == [UNIVERSAL_CUSTOM_ANCHOR]
+
+    # And the server really does accept that anchor for every role today.
+    for agent_key in GRAPH_V1_AGENT_KEYS:
+        PromptAssembler().validate(
+            definition=_v2(
+                agent_key,
+                [_custom("11111111-1111-4111-8111-111111111111", "text", anchor=hardcoded[0])],
+            )
+        )
