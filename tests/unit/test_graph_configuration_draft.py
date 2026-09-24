@@ -27,6 +27,8 @@ from src.database.models.graph_configuration import (
     GraphReleaseAgent,
 )
 from src.services import graph_configuration_draft as draft_module
+from src.services.agent_schema_registry import AgentSchemaRegistry
+from src.services.agent_schema_types import SchemaOverlay
 from src.services.graph_configuration import (
     DraftContentRejected,
     DraftLegacyPromptSource,
@@ -165,6 +167,7 @@ def test_exact_five_field_save_preserves_every_server_owned_value_and_artifact(
         "max_tokens": after.model.max_tokens,
         "top_p": float(after.model.top_p),
         "assembly_rules": None,
+        "schema_overlay": None,
     }
     assert after.model.endpoint_name == " custom-endpoint-name "
     assert after.agent_key == before.agent_key
@@ -398,8 +401,12 @@ def test_trusted_full_content_writer_carries_schema_overlay_through_shared_hash_
     session_factory,
 ) -> None:
     before, old_hash = _stored_content(session_factory)
-    changed_overlay = before.schema_overlay.model_copy(
-        update={"additional_optional_fields": ("task_263_added",)}
+    # Canonical-field guidance, not an optional selection: guidance is editable under
+    # either schema contract, whereas an optional name is ineligible until the v2
+    # upgrade.  #263 used an invented name here because nothing validated the
+    # overlay yet; #264 closed the catalog, so the premise had to become a legal edit.
+    changed_overlay = SchemaOverlay.model_validate(
+        {"field_overrides": {"intent": {"description": "Task 263 intent guidance."}}}
     )
     proposed = before.model_copy(update={"schema_overlay": changed_overlay})
 
@@ -1813,8 +1820,11 @@ def test_valid_v2_trusted_content_save_uses_one_mapper_hash_and_audit(
     proposed = after_upgrade.model_copy(
         update={
             "assembly_rules": _v2_rules(block),
-            "schema_overlay": after_upgrade.schema_overlay.model_copy(
-                update={"additional_optional_fields": ("task_265_added",)}
+            # Guidance, not an optional selection: this content's schema_contract is
+            # still v1 (only protected_assembly was upgraded), so an optional name
+            # would be ineligible.  See the sibling hash-seam test.
+            "schema_overlay": SchemaOverlay.model_validate(
+                {"field_overrides": {"intent": {"description": "Task 265 guidance."}}}
             ),
         }
     )
@@ -1978,3 +1988,751 @@ def test_trusted_content_local_valid_stale_request_is_coherent_409(
     assert _stored_content(session_factory) == (current, current_hash)
     assert _draft_audit(session_factory) == before_audit
     assert _database_snapshot(session_factory) == before_db
+
+
+# ===========================================================================
+# #264 Task 4 — schema-overlay validation in the locked writer, and the one
+# server-owned v2 schema-contract upgrade.
+#
+# Every expected field/code/message below is written as a LITERAL rather than
+# imported from the module under test: a test that imports the constant it
+# asserts cannot guard that constant's value.
+# ===========================================================================
+
+#: The registry's v1 bundle declares no optional field, so selecting the v2
+#: catalog name before the upgrade is ineligible.  This is the whole mechanism
+#: behind "v1 until upgrade".
+OVERLAY_INELIGIBLE_TUPLE = (
+    (
+        "candidate.schema_overlay.additional_optional_fields.0",
+        "overlay_optional_field_ineligible",
+        "Optional field is not available for this agent.",
+    ),
+)
+OVERLAY_UNKNOWN_FIELD_TUPLE = (
+    (
+        "candidate.schema_overlay.field_overrides.no_such_field",
+        "overlay_unknown_canonical_field",
+        "Canonical field is not available for this agent.",
+    ),
+)
+OVERLAY_BLANK_DESCRIPTION_TUPLE = (
+    (
+        "candidate.schema_overlay.field_overrides.intent.description",
+        "overlay_description_blank",
+        "Description must not be blank.",
+    ),
+)
+#: The one unlocated overlay issue.  It is server state, not candidate content,
+#: so it is reported on the protected identity's own unprefixed field.
+OVERLAY_CONTRACT_UNAVAILABLE_TUPLE = (
+    (
+        "schema_contract",
+        "overlay_schema_contract_unavailable",
+        "Schema contract bundle is unavailable.",
+    ),
+)
+SCHEMA_ALREADY_CURRENT_TUPLE = (
+    (
+        "schema_contract",
+        "already_current",
+        "Schema contract is already current.",
+    ),
+)
+#: #263's landed immutable-identity rejection, which Task 4 consumes rather than
+#: re-implements.  Note the field is unprefixed and the code is `immutable_field`
+#: — NOT an `overlay_*` code and NOT under the `candidate.` prefix.
+SCHEMA_CONTRACT_IMMUTABLE_TUPLE = (
+    (
+        "schema_contract",
+        "immutable_field",
+        "Schema contract identity is immutable in a draft save.",
+    ),
+)
+
+DIAGNOSTIC_NOTES = "diagnostic_notes"
+
+
+def _overlay(**payload: object) -> SchemaOverlay:
+    return SchemaOverlay.model_validate(payload)
+
+
+def _select_notes() -> SchemaOverlay:
+    return _overlay(additional_optional_fields=[DIAGNOSTIC_NOTES])
+
+
+def _upgrade_schema(
+    factory: sessionmaker,
+    agent_key: str = "architect",
+    *,
+    lock_version: int,
+    actor: str = "test:schema-upgrade",
+):
+    with factory() as session:
+        return GraphConfiguration().upgrade_draft_schema_contract(
+            session,
+            agent_key=agent_key,
+            expected_lock_version=lock_version,
+            actor=actor,
+        )
+
+
+def _v2_schema_identity(agent_key: str = "architect") -> ContentIdentity:
+    identity = AgentSchemaRegistry().identity_for(agent_key, 2)
+    return ContentIdentity(version=identity.version, digest=identity.digest)
+
+
+# ---------------------------------------------------------------------------
+# Which validator tuple the overlay validator is registered in (correction 16)
+# ---------------------------------------------------------------------------
+
+
+def test_overlay_validation_is_registered_in_the_pre_stale_tuple_only() -> None:
+    """Catches the overlay validator moving to the post-stale phase.
+
+    Registering it post-stale would make an invalid-plus-stale request return 409
+    instead of the mandated ordered 422, and would make every overlay issue
+    invisible because the stale check short-circuits first.
+    """
+    local = GraphConfiguration.local_candidate_validators
+    assert local == (
+        draft_module._assembly_candidate_validator,
+        draft_module._schema_overlay_candidate_validator,
+    )
+    assert GraphConfiguration.post_stale_validators == ()
+    # Order within the pre-stale tuple is part of the contract: #265's assembly
+    # validator keeps first position, so its issues precede overlay issues.
+    assert local.index(draft_module._assembly_candidate_validator) == 0
+    assert local.index(draft_module._schema_overlay_candidate_validator) == 1
+
+
+def test_invalid_overlay_and_stale_lock_is_an_ordered_422_with_no_write(
+    session_factory, monkeypatch
+) -> None:
+    """The measured 422-before-409 evidence for the real overlay validator.
+
+    This is the correction-16 defect made observable: with the validator in the
+    pre-stale tuple an invalid-plus-stale request rejects; moving it post-stale
+    returns a conflict and drops the issues entirely.
+    """
+    current, _ = _stored_content(session_factory)
+    # Advance the shared lock so the request below is BOTH invalid and stale.
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, prompt_text="advance the lock"),
+            actor="test:advance",
+        )
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+    # Spy installed AFTER the setup save, so the log covers only the request
+    # under test.  Installing it earlier records the setup's own write.
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(
+                seeded, prompt_text="invalid and stale", schema_overlay=_select_notes()
+            ),
+            actor="test:invalid-stale-overlay",
+        )
+
+    assert _issue_tuples(caught) == OVERLAY_INELIGIBLE_TUPLE
+    assert write_log == []
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_valid_overlay_with_stale_lock_is_a_coherent_409(session_factory) -> None:
+    """A valid candidate that is merely stale still conflicts rather than rejecting."""
+    current, _ = _stored_content(session_factory)
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, prompt_text="advance the lock"),
+            actor="test:advance",
+        )
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+
+    with session_factory() as session:
+        result = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(
+                seeded,
+                prompt_text="valid but stale",
+                schema_overlay=_overlay(
+                    field_overrides={"intent": {"description": "Valid guidance."}}
+                ),
+            ),
+            actor="test:valid-stale-overlay",
+        )
+
+    assert isinstance(result, DraftSaveConflict)
+    assert result.expected_lock_version == 0
+    assert result.current_lock_version == 1
+    assert set(result.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+    assert len(result.server.definitions) == 7
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+# ---------------------------------------------------------------------------
+# Invalid overlay is a total no-write, on both save paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("overlay_payload", "expected"),
+    [
+        ({"additional_optional_fields": [DIAGNOSTIC_NOTES]}, OVERLAY_INELIGIBLE_TUPLE),
+        (
+            {"field_overrides": {"no_such_field": {"description": "x"}}},
+            OVERLAY_UNKNOWN_FIELD_TUPLE,
+        ),
+        (
+            {"field_overrides": {"intent": {"description": "   "}}},
+            OVERLAY_BLANK_DESCRIPTION_TUPLE,
+        ),
+        ({"field_overrides": {"intent": {"examples": []}}}, (
+            (
+                "candidate.schema_overlay.field_overrides.intent.examples",
+                "overlay_examples_empty",
+                "Examples must contain at least one item.",
+            ),
+        )),
+    ],
+)
+def test_invalid_client_overlay_rejects_with_no_state_change(
+    session_factory, monkeypatch, overlay_payload, expected
+) -> None:
+    """Catches an overlay issue reaching the writer or losing its wire field."""
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(
+                current,
+                prompt_text="rejected overlay",
+                schema_overlay=_overlay(**overlay_payload),
+            ),
+            actor="test:invalid-overlay",
+        )
+
+    assert _issue_tuples(caught) == expected
+    assert write_log == []
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_invalid_trusted_overlay_rejects_with_no_state_change(
+    session_factory, monkeypatch
+) -> None:
+    """The same guarantee on the trusted full-content path."""
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            content=current.model_copy(update={"schema_overlay": _select_notes()}),
+            actor="test:trusted-invalid-overlay",
+        )
+
+    assert _issue_tuples(caught) == OVERLAY_INELIGIBLE_TUPLE
+    assert write_log == []
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_a_stored_contract_that_does_not_resolve_is_reported_on_the_identity_field(
+    session_factory,
+) -> None:
+    """Catches the unlocated overlay issue being silently dropped or mis-prefixed."""
+    current, _ = _stored_content(session_factory)
+    unresolvable = current.model_copy(
+        update={"schema_contract": ContentIdentity(version=1, digest="0" * 64)}
+    )
+    _overwrite_draft_row(session_factory, "architect", unresolvable)
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(seeded, prompt_text="unresolvable contract"),
+            actor="test:unresolvable",
+        )
+
+    assert _issue_tuples(caught) == OVERLAY_CONTRACT_UNAVAILABLE_TUPLE
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+# ---------------------------------------------------------------------------
+# Ordinary identity rejection — consumed, not re-implemented (correction 18)
+# ---------------------------------------------------------------------------
+
+
+def test_trusted_save_rejects_a_schema_contract_change_with_the_landed_code(
+    session_factory,
+) -> None:
+    """Catches Task 4 adding a second code for the one immutable-identity condition."""
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            content=current.model_copy(update={"schema_contract": _v2_schema_identity()}),
+            actor="test:identity-change",
+        )
+
+    assert _issue_tuples(caught) == SCHEMA_CONTRACT_IMMUTABLE_TUPLE
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_the_client_candidate_cannot_name_the_protected_identity_at_all() -> None:
+    """The client path's identity rejection is STRUCTURAL, not a validator.
+
+    ``_immutable_content_issues`` has exactly one call site, inside the trusted
+    ``save_draft_content``.  ``save_editable_model_draft`` never calls it, because
+    it rebuilds the payload from stored content — so the identity is unreachable
+    rather than rejected.  A client that names ``schema_contract`` is refused by
+    the editable candidate's own field set, one layer earlier.  Task 4
+    deliberately does NOT add a second `immutable_field` guard here.
+    """
+    field_names = {field.name for field in dataclasses.fields(EditableModelDraft)}
+    assert "schema_contract" not in field_names
+    assert "definition_version" not in field_names
+    assert "protected_assembly" not in field_names
+    # The overlay IS editable; the identity that versions it is not.
+    assert "schema_overlay" in field_names
+    with pytest.raises(TypeError):
+        EditableModelDraft(
+            prompt_text="x",
+            endpoint_name="e",
+            temperature=0.1,
+            max_tokens=10,
+            top_p=0.5,
+            schema_contract=ContentIdentity(version=2, digest="a" * 64),
+        )
+
+
+def test_a_client_overlay_never_reaches_the_protected_identity(session_factory) -> None:
+    """A client overlay edit leaves every server-owned identity byte-identical."""
+    before, _ = _stored_content(session_factory)
+
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(
+                before,
+                schema_overlay=_overlay(
+                    field_overrides={"intent": {"description": "Client guidance."}}
+                ),
+            ),
+            actor="test:client-overlay",
+        )
+
+    after, _ = _stored_content(session_factory)
+    assert after.schema_contract == before.schema_contract
+    assert after.protected_assembly == before.protected_assembly
+    assert after.definition_version == before.definition_version
+    assert after.schema_overlay != before.schema_overlay
+
+
+def test_content_identity_cannot_carry_a_role_so_the_pydantic_carrier_gate_is_safe() -> None:
+    """Guards the reachable half of the registry's identity-carrier gate.
+
+    Task 4 is the first live caller to route a *Pydantic* identity carrier through
+    ``_replacement_schema_contract_identity``.  Its BaseModel branch revalidates
+    only ``version``/``digest``, so a carrier that also held ``agent_key`` would
+    silently retain its own role (defaulted) or raise a generic ``ValidationError``
+    (required) — the two failure modes the dataclass branch names and refuses.
+    ``ContentIdentity`` is safe because it carries no role.  Widening it to the
+    full identity triple must fail here rather than in the registry.
+    """
+    assert set(ContentIdentity.model_fields) == {"version", "digest"}
+
+
+# ---------------------------------------------------------------------------
+# The server-owned v2 schema-contract upgrade
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("agent_key", list(GRAPH_V1_AGENT_KEYS))
+def test_schema_upgrade_installs_the_server_owned_v2_identity_for_every_role(
+    session_factory, monkeypatch, agent_key
+) -> None:
+    """Catches a client-supplied identity, a lost overlay, or a second write."""
+    before_db = _database_snapshot(session_factory)
+    before, before_hash = _stored_content(session_factory, agent_key)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    result = _upgrade_schema(session_factory, agent_key, lock_version=0)
+
+    after, after_hash = _stored_content(session_factory, agent_key)
+    assert isinstance(result, DraftSaveResult)
+    assert result.changed is True
+    assert write_log == ["write"]
+    assert after.schema_contract == _v2_schema_identity(agent_key)
+    assert after.schema_contract.version == 2
+    assert after.schema_contract != before.schema_contract
+    # Everything else is preserved byte-for-byte.
+    assert after.prompt_text == before.prompt_text
+    assert after.model == before.model
+    assert after.assembly_rules == before.assembly_rules
+    assert after.protected_assembly == before.protected_assembly
+    assert after.definition_version == before.definition_version
+    assert after.schema_overlay == before.schema_overlay
+    assert after_hash == definition_content_hash(after)
+    assert after_hash != before_hash
+    assert result.definition.candidate_hash == after_hash
+    assert result.draft.lock_version == 1
+    # Retained v1 history and release (plan: "retained v1 history/release").
+    after_db = _database_snapshot(session_factory)
+    assert after_db["revisions"] == before_db["revisions"]
+    assert after_db["releases"] == before_db["releases"]
+    assert after_db["mappings"] == before_db["mappings"]
+
+
+def test_the_optional_catalog_becomes_selectable_only_after_the_schema_upgrade(
+    session_factory,
+) -> None:
+    """The one behaviour the whole upgrade exists to enable."""
+    before, _ = _stored_content(session_factory)
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(before, schema_overlay=_select_notes()),
+            actor="test:before-upgrade",
+        )
+    assert _issue_tuples(caught) == OVERLAY_INELIGIBLE_TUPLE
+
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+
+    upgraded, _ = _stored_content(session_factory)
+    with session_factory() as session:
+        result = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=1,
+            candidate=_editable(upgraded, schema_overlay=_select_notes()),
+            actor="test:after-upgrade",
+        )
+
+    persisted, persisted_hash = _stored_content(session_factory)
+    assert isinstance(result, DraftSaveResult)
+    assert result.changed is True
+    assert persisted.schema_overlay.additional_optional_fields == (DIAGNOSTIC_NOTES,)
+    assert persisted.schema_contract == _v2_schema_identity()
+    assert persisted_hash == definition_content_hash(persisted)
+    assert _draft_audit(session_factory)[:2] == (2, "test:after-upgrade")
+
+
+def test_a_repeated_schema_upgrade_reports_already_current_and_writes_nothing(
+    session_factory, monkeypatch
+) -> None:
+    """Catches a second upgrade advancing the lock or rewriting the identity."""
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+    upgraded, upgraded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _upgrade_schema(session_factory, lock_version=1, actor="test:already-current")
+
+    assert _issue_tuples(caught) == SCHEMA_ALREADY_CURRENT_TUPLE
+    assert write_log == []
+    assert _stored_content(session_factory) == (upgraded, upgraded_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_a_stale_schema_upgrade_is_a_coherent_409_that_writes_nothing(
+    session_factory, monkeypatch
+) -> None:
+    """A valid stale upgrade conflicts; it never reaches the transition."""
+    current, _ = _stored_content(session_factory)
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, prompt_text="advance the lock"),
+            actor="test:advance",
+        )
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    result = _upgrade_schema(session_factory, lock_version=0, actor="test:stale-upgrade")
+
+    assert isinstance(result, DraftSaveConflict)
+    assert result.expected_lock_version == 0
+    assert result.current_lock_version == 1
+    assert result.client_candidate is None
+    assert set(result.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+    assert len(result.server.definitions) == 7
+    assert result.server.definitions["architect"].content.schema_contract.version == 1
+    assert write_log == []
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_an_invalid_plus_stale_schema_upgrade_is_an_ordered_422(
+    session_factory, monkeypatch
+) -> None:
+    """Catches the stale comparison outranking existing-content validation."""
+    log: list[str] = []
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "local_candidate_validators",
+        (
+            _recording_validator(
+                log,
+                "local-1",
+                ("candidate.first", "first_code", "First recorded issue."),
+                ("candidate.second", "second_code", "Second recorded issue."),
+            ),
+            _recording_validator(
+                log, "local-2", ("candidate.third", "third_code", "Third recorded issue.")
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "post_stale_validators",
+        (_recording_validator(log, "post-1"),),
+    )
+    _install_write_spy(monkeypatch, log)
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _upgrade_schema(session_factory, lock_version=7, actor="test:invalid-stale")
+
+    assert _issue_tuples(caught) == (
+        ("candidate.first", "first_code", "First recorded issue."),
+        ("candidate.second", "second_code", "Second recorded issue."),
+        ("candidate.third", "third_code", "Third recorded issue."),
+    )
+    assert log == ["local-1", "local-2"]
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_the_two_upgrades_deliberately_differ_in_precedence(
+    session_factory, monkeypatch
+) -> None:
+    """The correction-17 guard: the siblings must NOT be harmonised.
+
+    For one identical request shape — locally invalid AND stale — the landed
+    protected-assembly upgrade returns #265's shipped 409 while the new
+    schema-contract upgrade returns the mandated ordered 422.  Moving the stale
+    check in either method REDs this test.  Harmonising them would ship a #265
+    regression under a #264 commit.
+    """
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "local_candidate_validators",
+        (
+            _recording_validator(
+                [], "local-1", ("candidate.x", "x_code", "Recorded issue.")
+            ),
+        ),
+    )
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    current, current_hash = _stored_content(session_factory, "data_analyst")
+    before_db = _database_snapshot(session_factory)
+
+    # Sibling: stale BEFORE validation -> 409, issues never computed.
+    assembly_outcome = _upgrade(
+        session_factory, "data_analyst", lock_version=7, actor="test:assembly-precedence"
+    )
+    assert isinstance(assembly_outcome, DraftSaveConflict)
+    assert assembly_outcome.current_lock_version == 0
+
+    # New method: validation BEFORE stale -> ordered 422.
+    with pytest.raises(DraftContentRejected) as caught:
+        _upgrade_schema(
+            session_factory,
+            "data_analyst",
+            lock_version=7,
+            actor="test:schema-precedence",
+        )
+    assert _issue_tuples(caught) == (
+        ("candidate.x", "x_code", "Recorded issue."),
+    )
+
+    assert write_log == []
+    assert _stored_content(session_factory, "data_analyst") == (current, current_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_the_schema_upgrade_validates_before_reporting_already_current(
+    session_factory, monkeypatch
+) -> None:
+    """Mirrors the assembler's inner ordering: validation outranks already_current."""
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+    upgraded, upgraded_hash = _stored_content(session_factory)
+    # Seed an overlay that is invalid even under v2, on already-current content.
+    _overwrite_draft_row(
+        session_factory,
+        "architect",
+        upgraded.model_copy(
+            update={
+                "schema_overlay": _overlay(
+                    field_overrides={"no_such_field": {"description": "x"}}
+                )
+            }
+        ),
+    )
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _upgrade_schema(session_factory, lock_version=1, actor="test:invalid-current")
+
+    assert _issue_tuples(caught) == OVERLAY_UNKNOWN_FIELD_TUPLE
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_a_same_content_overlay_save_advances_the_lock_once_and_reports_unchanged(
+    session_factory, monkeypatch
+) -> None:
+    """The landed same-content contract, exercised through a v2 overlay."""
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+    upgraded, _ = _stored_content(session_factory)
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=1,
+            candidate=_editable(upgraded, schema_overlay=_select_notes()),
+            actor="test:select-notes",
+        )
+    selected, selected_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    with session_factory() as session:
+        result = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=2,
+            candidate=_editable(selected, schema_overlay=_select_notes()),
+            actor="test:same-overlay",
+        )
+
+    after, after_hash = _stored_content(session_factory)
+    assert isinstance(result, DraftSaveResult)
+    assert result.changed is False
+    assert write_log == ["write"]
+    assert after == selected
+    assert after_hash == selected_hash
+    assert _draft_audit(session_factory)[:2] == (3, "test:same-overlay")
+    assert _database_snapshot(session_factory)["revisions"] == before_db["revisions"]
+    assert _database_snapshot(session_factory)["releases"] == before_db["releases"]
+
+
+def test_an_absent_client_overlay_retains_the_stored_overlay(session_factory) -> None:
+    """Absent never means "clear it": a five-field save keeps the stored overlay."""
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+    upgraded, _ = _stored_content(session_factory)
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=1,
+            candidate=_editable(upgraded, schema_overlay=_select_notes()),
+            actor="test:select-notes",
+        )
+    selected, _ = _stored_content(session_factory)
+    assert selected.schema_overlay.additional_optional_fields == (DIAGNOSTIC_NOTES,)
+
+    with session_factory() as session:
+        GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=2,
+            candidate=_editable(selected, prompt_text="prompt only edit"),
+            actor="test:prompt-only",
+        )
+
+    after, _ = _stored_content(session_factory)
+    assert after.schema_overlay == selected.schema_overlay
+    assert after.prompt_text == "prompt only edit"
+
+
+def test_an_empty_overlay_document_validates_with_both_fields_defaulted() -> None:
+    """Pins correction 30: the converged carrier defaults two formerly-required fields.
+
+    Disclosed and untested before Task 4, which introduces the first non-empty
+    overlays.  Pinned here so a later change to either default is loud.
+    """
+    empty = SchemaOverlay.model_validate({})
+    assert dict(empty.field_overrides) == {}
+    assert empty.additional_optional_fields == ()
+    assert SchemaOverlay.model_fields["field_overrides"].is_required() is False
+    assert SchemaOverlay.model_fields["additional_optional_fields"].is_required() is False
+
+
+def test_only_diagnostic_notes_is_ever_eligible_and_speaker_notes_never_is() -> None:
+    """Pins the closed catalog with literals, for every role."""
+    registry = AgentSchemaRegistry()
+    assert len(GRAPH_V1_AGENT_KEYS) == 7
+    for agent_key in GRAPH_V1_AGENT_KEYS:
+        v2 = registry.identity_for(agent_key, 2)
+        assert registry.validate_overlay(
+            agent_key, v2, _overlay(additional_optional_fields=["diagnostic_notes"])
+        ) == ()
+        refused = registry.validate_overlay(
+            agent_key, v2, _overlay(additional_optional_fields=["speaker_notes"])
+        )
+        assert tuple(
+            (issue.code, issue.path) for issue in refused
+        ) == (("overlay_optional_field_ineligible", ("additional_optional_fields", 0)),)

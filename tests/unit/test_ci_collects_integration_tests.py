@@ -320,3 +320,20 @@ def test_collaboration_history_api_is_collected_by_integration_graph():
         "projection ordering and SET NULL survival assertions must execute "
         "against PostgreSQL."
     )
+
+
+def test_agent_schema_overlay_is_collected_by_integration_graph():
+    """#264's schema-overlay writer coverage belongs in the graph CI job.
+
+    Its assertions are about real row-level locks, distinct backend PIDs and an
+    observably waiting session, none of which SQLite can express — so it must run
+    in the graph job's PostgreSQL environment rather than the unit job.
+    """
+    target = "tests/integration/test_agent_schema_overlay_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its schema-overlay validation, v2 contract "
+        "upgrade and two-session serialization assertions must execute against "
+        "PostgreSQL."
+    )
