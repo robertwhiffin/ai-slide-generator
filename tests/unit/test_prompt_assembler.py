@@ -979,9 +979,16 @@ def _ts_block(source: str, declaration: str) -> str:
 
 
 def _ts_array_block(source: str, declaration: str) -> str:
-    """The bracketed body of one top-level ``export const NAME = [...] as const;``."""
+    """The bracketed body of one top-level ``const NAME[: type] = [...]`` declaration.
+
+    Anchored on the ``=`` first: a declaration such as
+    ``const X: readonly AgentKey[] = ['a', 'b']`` carries a ``[`` inside its type
+    annotation, and taking the first bracket after the name would read that empty
+    pair instead of the value.
+    """
     start = source.index(declaration)
-    opening = source.index("[", start)
+    assignment = source.index("=", start)
+    opening = source.index("[", assignment)
     closing = source.index("]", opening)
     return source[opening : closing + 1]
 
@@ -1009,7 +1016,11 @@ def _client_rejection(name: str) -> tuple[str, str, str]:
     field = _ts_strings(errors[errors.index("field:") : errors.index("code:")])
     code = _ts_strings(errors[errors.index("code:") : errors.index("message:")])
     message = _ts_joined_string(errors[errors.index("message:") :])
-    assert len(field) == 1 and len(code) == 1
+    # A silent parse failure would make this join vacuous, so an empty field, code or
+    # message is a hard error here rather than a comparison that happens to fail.
+    assert len(field) == 1 and len(code) == 1 and field[0] and code[0] and message, (
+        f"client fixture {name} did not parse; the cross-language join would be vacuous"
+    )
     return field[0], code[0], message
 
 
@@ -1190,3 +1201,156 @@ def test_client_hardcoded_universal_anchor_is_exactly_the_server_legality() -> N
                 [_custom("11111111-1111-4111-8111-111111111111", "text", anchor=hardcoded[0])],
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 6 fix round 1 — I-R1: the affected-role set.
+#
+# ``{data_analyst, build_reviewer}`` is hand-typed in five places across two
+# languages. The canonical source is this module's transition list, and before this
+# round nothing pinned it at all. Worse, the browser matrix keyed its loops off a
+# test-fixture copy that shares its name with the production constant, so narrowing
+# the fixture silently reduced the matrix and still reported all-green.
+#
+# The set is joined here because this is the module that owns it.
+# ---------------------------------------------------------------------------
+
+
+#: Hand-typed, in the canonical transition order.
+INDEPENDENT_AFFECTED_ROLES = ("data_analyst", "build_reviewer")
+
+_CLIENT_DRAFT_EDITOR_STATE = (
+    _REPO_ROOT
+    / "frontend"
+    / "src"
+    / "components"
+    / "Admin"
+    / "AgentDefinitionWorkbench"
+    / "draftEditorState.ts"
+)
+_CLIENT_WORKBENCH_SPEC = (
+    _REPO_ROOT / "frontend" / "tests" / "e2e" / "agent-definition-workbench.spec.ts"
+)
+_PG_ROUTE_SUITE = (
+    _REPO_ROOT / "tests" / "integration" / "test_agent_definition_workbench_postgres.py"
+)
+
+
+def _canonical_affected_roles() -> tuple[str, ...]:
+    """The roles the v2 bundle actually declares a legacy transition for."""
+    bundle = PromptAssembler().resolve_bundle(V2_PROTECTED_ASSEMBLY_IDENTITY)
+    return tuple(record.agent_key for record in bundle.transitions)
+
+
+def test_canonical_affected_role_list_is_pinned_and_actually_enforced() -> None:
+    """Catches a transition added, dropped or reordered, and policy/list divergence.
+
+    The declared list and the enforced policy are checked against each other, so a
+    role can neither be declared without being enforced nor enforced without being
+    declared.
+    """
+    declared = _canonical_affected_roles()
+    assert declared == INDEPENDENT_AFFECTED_ROLES
+    assert len(declared) == len(set(declared))
+
+    enforced: list[str] = []
+    for agent_key in GRAPH_V1_AGENT_KEYS:
+        original = _definition(agent_key)
+        edited = original.model_copy(update={"prompt_text": original.prompt_text + " edited"})
+        try:
+            upgraded = PromptAssembler().upgrade_definition_to_v2(definition=edited)
+        except PromptAssemblyRejected as rejected:
+            assert [issue.code for issue in rejected.issues] == [
+                "legacy_prompt_manual_resolution_required"
+            ]
+            enforced.append(agent_key)
+        else:
+            # An unaffected role keeps its authored prompt exactly, edits and all.
+            assert upgraded.prompt_text == edited.prompt_text
+    assert tuple(enforced) == INDEPENDENT_AFFECTED_ROLES
+
+    # Every declared transition names a distinct target prompt, and the public lookup
+    # returns that very record rather than rebuilding an equal-looking one.
+    assembler = PromptAssembler()
+    for record in assembler.resolve_bundle(V2_PROTECTED_ASSEMBLY_IDENTITY).transitions:
+        assert record.source_composite_prompt != record.target_authored_prompt
+        assert assembler.legacy_v1_prompt_source(agent_key=record.agent_key) is record
+
+
+def _ts_role_list(path: pathlib.Path, declaration: str) -> tuple[str, ...]:
+    return tuple(_ts_strings(_ts_array_block(_read_client(path), declaration)))
+
+
+def test_every_affected_role_copy_matches_the_canonical_transition_list() -> None:
+    """Joins all five hand-typed copies of the affected-role set to this module.
+
+    The fixture copy and the production constant share the name
+    ``LEGACY_COMPOSITE_ROLES``, so the browser matrix could key off either. Both are
+    joined, and so is the browser spec's own loop driver, which is what stops a
+    narrowed fixture from silently shrinking that matrix.
+    """
+    canonical = _canonical_affected_roles()
+    assert canonical == INDEPENDENT_AFFECTED_ROLES
+
+    # 1. This module's enforcement set, read out of its own source.
+    assembler = _read_client(_REPO_ROOT / "src" / "services" / "prompt_assembler.py")
+    enforcement = assembler[assembler.index("if definition.agent_key in {") :]
+    assert tuple(_ts_strings(enforcement[: enforcement.index("}")])) == canonical
+    # 2. The transition record's own type annotation.
+    annotation = assembler[assembler.index('agent_key: Literal["data_analyst"') :]
+    assert tuple(_ts_strings(annotation[: annotation.index("]")])) == canonical
+
+    # 3. The draft facade's legacy-source role tuple.
+    facade = _read_client(_REPO_ROOT / "src" / "services" / "graph_configuration_draft.py")
+    # Its own type annotation repeats the same two strings, so read past the "= (".
+    legacy_source = facade[facade.index("_LEGACY_SOURCE_ROLES") :]
+    legacy_source = legacy_source[legacy_source.index("= (") :]
+    assert tuple(_ts_strings(legacy_source[: legacy_source.index(")")])) == canonical
+
+    # 4. The client production constant and 5. the shared test fixture's copy.
+    assert _ts_role_list(
+        _CLIENT_DRAFT_EDITOR_STATE, "export const LEGACY_COMPOSITE_ROLES"
+    ) == canonical
+    assert _ts_role_list(_CLIENT_MOCKS, "export const LEGACY_COMPOSITE_ROLES") == canonical
+
+    # 6. The browser matrix's own loop driver, and the PostgreSQL suite's constant.
+    assert _ts_role_list(_CLIENT_WORKBENCH_SPEC, "const AFFECTED_ROLES") == canonical
+    pg_suite = _read_client(_PG_ROUTE_SUITE)
+    pg_roles = pg_suite[pg_suite.index("AFFECTED_ROLES = (") :]
+    assert tuple(_ts_strings(pg_roles[: pg_roles.index(")")])) == canonical
+
+
+def test_both_deck_brief_evaluators_agree_for_every_payload_truthiness() -> None:
+    """Pins the invariant the two separate deck-brief evaluators must satisfy.
+
+    ``_applies`` decides the condition for v1 blocks and for v2 custom blocks, while
+    ``_assemble_v2`` inlines its own ``bool(payload.get("deck_brief"))`` for the
+    protected v2 stage. Nothing made the two agree, so a change to either alone was
+    invisible. This asserts they reach the same verdict on the same payload, which is
+    also the contract any future unification of the two call sites has to preserve.
+    """
+    block = _custom(
+        "22222222-2222-4222-8222-222222222222",
+        "deck-brief sibling",
+        anchor="after_deck_brief",
+        condition="payload_has_deck_brief",
+    )
+    definition = _v2("build_reviewer", [block])
+    for deck_brief in (None, "", {}, [], 0, "a real brief", {"argument": "Revenue compounds"}):
+        value = PromptAssembler().assemble(
+            definition=definition,
+            payload={"deck_brief": deck_brief},
+            context=AgentAssemblyContext(False),
+        )
+        stage_ids = [stage.stage_id for stage in value.stages]
+        protected_rendered = stage_ids.count("build_reviewer_deck_brief")
+        custom_rendered = stage_ids.count(f"custom:{block.block_id}")
+        assert protected_rendered == custom_rendered == int(bool(deck_brief)), (
+            f"deck-brief evaluators disagreed for {deck_brief!r}: "
+            f"protected={protected_rendered} custom={custom_rendered}"
+        )
+        # The custom sibling must land immediately after the protected stage it anchors to.
+        if protected_rendered:
+            assert stage_ids.index(f"custom:{block.block_id}") == (
+                stage_ids.index("build_reviewer_deck_brief") + 1
+            )
