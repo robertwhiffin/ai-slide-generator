@@ -384,6 +384,22 @@ def test_required_cases_pass_unchanged_through_current_runtime_adapter_seam(
     with session_factory() as session:
         cases = session.scalars(select(AgentTestCase).order_by(AgentTestCase.id)).all()
 
+    # #264 Task 3: the runtime validates the provider result through the registry,
+    # so the double must answer with a valid instance of the composed schema.
+    valid_output_values: dict[str, dict[str, object]] = {
+        "architect": {"intent": "discuss", "message": "an answer"},
+        "data_analyst": {
+            "outcome": "success",
+            "synthesis": "a finding",
+            "sources": ["warehouse.sales"],
+        },
+        "builder": {"position": 3, "html": "<section></section>"},
+        "build_reviewer": {"slide_index": 2, "verdict": "clean"},
+        "fixer": {"position": 3, "html": "<section></section>", "changed": False},
+        "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
+        "deck_reviewer": {},
+    }
+
     class RecordingAdapter:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
@@ -392,7 +408,7 @@ def test_required_cases_pass_unchanged_through_current_runtime_adapter_seam(
             self.calls.append(
                 {"configuration": asdict(configuration), "schema": schema, "prompt": prompt}
             )
-            return schema.model_construct()
+            return schema.model_validate(valid_output_values[agent_key])
 
     adapter = RecordingAdapter()
     runtime = AgentRuntime.compatibility(
