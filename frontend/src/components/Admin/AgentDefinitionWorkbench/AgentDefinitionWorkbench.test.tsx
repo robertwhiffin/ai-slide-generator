@@ -12,6 +12,10 @@ import {
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
 } from '../../../../tests/fixtures/mocks';
+import {
+  ALLOWED_ACTION_NAMES,
+  forbidsActionName,
+} from '../../../../tests/fixtures/forbiddenActionNames';
 import type {
   AgentKey,
   AssemblyRulesV2,
@@ -22,6 +26,7 @@ import type {
 } from '../../../api/agentDefinitions';
 import { AdminPage } from '../AdminPage';
 import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
+import { LEGACY_COMPOSITE_ROLES } from './draftEditorState';
 import { useDraftEditor } from './useDraftEditor';
 
 vi.mock('../UsageDashboard', () => ({ UsageDashboard: () => <div>Usage panel fixture</div> }));
@@ -42,16 +47,40 @@ const NODE_ORDER = [
   'Deck Reviewer',
 ];
 
-const FORBIDDEN_ACTION_NAME = /\brun\b|approve|reject|review\s*&\s*publish|publish|history|rollback/i;
+/**
+ * The affected-role matrix for this file, owned here rather than hand-typed at each
+ * `it.each`. Two matrices carried their own copy of the pair and a third hand-typed the
+ * display-name-to-key mapping, so narrowing any of them dropped the Build Reviewer half
+ * with an all-green report. The agreement test below makes narrowing this RED, and the
+ * server's canonical transition list is joined to `LEGACY_COMPOSITE_ROLES` by
+ * `test_every_affected_role_copy_matches_the_canonical_transition_list`.
+ */
+const AFFECTED_ROLES = [
+  ['Data Analyst', 'data_analyst'],
+  ['Build Reviewer', 'build_reviewer'],
+] as const;
+const AFFECTED_ROLE_KEYS = AFFECTED_ROLES.map(([, agentKey]) => agentKey);
 
 function interactiveControls() {
   return [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link')];
 }
 
 function expectNoForbiddenActionNames() {
-  for (const control of interactiveControls()) {
-    expect(control).not.toHaveAccessibleName(FORBIDDEN_ACTION_NAME);
-  }
+  // `name` as a predicate hands the sweep each control's *computed* accessible name, so
+  // aria-labelledby, `title` and `alt` resolve exactly as a screen reader resolves them,
+  // and the shared rule decides. Collecting the offenders reports the names rather than
+  // DOM nodes, which is what a failure needs to be actionable.
+  const offenders: string[] = [];
+  const collect = (accessibleName: string) => {
+    if (!forbidsActionName(accessibleName)) return false;
+    offenders.push(accessibleName);
+    return true;
+  };
+  screen.queryAllByRole('button', { name: collect });
+  screen.queryAllByRole('link', { name: collect });
+  expect(offenders).toEqual([]);
+  // Not vacuous: the sweep must have had at least one control to walk.
+  expect(interactiveControls().length).toBeGreaterThan(0);
 }
 
 function mockFetchResponse(status: number, body: unknown) {
@@ -189,6 +218,57 @@ async function loadedNodeNavigation() {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('the forbidden-action guard', () => {
+  it('fires on every banned name, including the four a word-bounded publish stem spared', () => {
+    for (const forbidden of [
+      'Run isolated test', 'Approve draft', 'Reject draft', 'Review & publish',
+      'Publish draft', 'Publishes the release', 'Publishing', 'Release history',
+      'Rollback release',
+      // Regression guard: all four of these were missed while the stem was word-bounded.
+      'Republish release', 'Unpublish draft', 'Publisher settings', 'Published versions',
+    ]) {
+      expect(forbidsActionName(forbidden)).toBe(true);
+    }
+  });
+
+  it('spares the panel\'s legitimate restore controls without spared names shielding a stem', () => {
+    for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
+    expect(ALLOWED_ACTION_NAMES).toHaveLength(3);
+    // An exempt name is removed, not treated as a licence for the rest of the string.
+    expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
+    expect(forbidsActionName('Restore retained values, then approve')).toBe(true);
+  });
+
+  it('spares every other name the panel actually renders', () => {
+    for (const name of [
+      'Save Draft', 'Keep local', 'Reload server', 'Upgrade protected assembly',
+      'Add custom block After authored prompt', 'Add custom block After deck brief',
+      'Add custom block After environment constraints', 'Go to Assembly tab',
+      'Go to Prompt tab', 'Delete custom block 1 at After authored prompt',
+      'Move custom block 1 up', 'Move custom block 1 down', 'Discard retained values',
+      ...NODE_ORDER,
+    ]) {
+      expect(forbidsActionName(name)).toBe(false);
+    }
+  });
+});
+
+describe('the affected-role Vitest matrix', () => {
+  it('cannot silently narrow', () => {
+    expect([...AFFECTED_ROLE_KEYS]).toEqual([...LEGACY_COMPOSITE_ROLES]);
+    expect(AFFECTED_ROLES).toHaveLength(2);
+    expect(new Set(AFFECTED_ROLE_KEYS).size).toBe(AFFECTED_ROLE_KEYS.length);
+    for (const [displayName, agentKey] of AFFECTED_ROLES) {
+      // The display name each matrix clicks must be the one the panel renders for that
+      // key, or a narrowed or mistyped pair would select the wrong role and still pass.
+      expect(NODE_ORDER).toContain(displayName);
+      expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).toBeTruthy();
+      expect(V2_AUTHORED_PROMPT[agentKey]).toBeTruthy();
+      expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).not.toEqual(V2_AUTHORED_PROMPT[agentKey]);
+    }
+  });
 });
 
 describe('AgentDefinitionWorkbench', () => {
@@ -851,7 +931,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     });
   });
 
-  it.each(['Data Analyst', 'Build Reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     '%s with a dirty prompt sends no POST and retains the exact bytes for manual reapplication',
     async (displayName) => {
       const fetchMock = mockWorkbenchApi({});
@@ -1250,7 +1330,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
 
   it('reconciles an upgrade 409 to v2 across every role without surfacing already_current', async () => {
     const fetchMock = mockWorkbenchApi({
-      upgrade: () => apiResponse(409, syntheticNullCandidateConflict(0, 1, ['data_analyst', 'build_reviewer'])),
+      upgrade: () => apiResponse(409, syntheticNullCandidateConflict(0, 1, [...AFFECTED_ROLE_KEYS])),
     });
     render(<AgentDefinitionWorkbench />);
     const navigation = await selectRole('Data Analyst');
@@ -1374,12 +1454,11 @@ function GateHarness() {
 }
 
 describe('prompt-change backstop reaches the retained-forms controls', () => {
-  it.each(['Data Analyst', 'Build Reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     '%s: restoring an alternative mid-Upgrade restores safe fields but not the prompt',
-    async (displayName) => {
+    async (displayName, agentKey) => {
       let releaseUpgrade!: (response: object) => void;
       const held = new Promise<object>((resolve) => { releaseUpgrade = resolve; });
-      const agentKey: AgentKey = displayName === 'Data Analyst' ? 'data_analyst' : 'build_reviewer';
       const fetchMock = mockWorkbenchApi({ upgrade: () => held });
       render(<AgentDefinitionWorkbench />);
       await selectRole(displayName);

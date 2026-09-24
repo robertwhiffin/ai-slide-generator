@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentDefinitionApiError,
+  CUSTOM_ANCHORS,
   InvalidDraftSaveResponseError,
   parseDraftSaveConflictResponse,
   parseDraftSaveSuccessResponse,
@@ -38,6 +39,7 @@ import {
   draftSaveErrorMessage,
   draftStatus,
   formFromDefinition,
+  LEGACY_COMPOSITE_ROLES,
   retainedFormId,
   RETAINED_REASONS,
   validateDraftForm,
@@ -67,9 +69,36 @@ const AGENT_KEYS: AgentKey[] = [
   'deck_reviewer',
 ];
 
+/**
+ * The affected-role matrix for this file, owned here rather than hand-typed at each
+ * `it.each`. Six matrices used to carry their own copy of the pair, so narrowing them
+ * dropped six brief-mandated Build Reviewer behaviours and still reported all-green in
+ * both lanes — the silent-shrink failure the browser lane closed at
+ * `agent-definition-workbench.spec.ts` and this lane did not. The agreement test below
+ * makes narrowing this constant RED instead, and the server's canonical transition list
+ * is joined to `LEGACY_COMPOSITE_ROLES` by
+ * `test_every_affected_role_copy_matches_the_canonical_transition_list`.
+ */
+const AFFECTED_ROLES = ['data_analyst', 'build_reviewer'] as const;
+
 function workbench(): AgentDefinitionWorkbenchResponse {
   return structuredClone(syntheticAgentDefinitionWorkbench);
 }
+
+describe('the affected-role Vitest matrix', () => {
+  it('cannot silently narrow', () => {
+    expect([...AFFECTED_ROLES]).toEqual([...LEGACY_COMPOSITE_ROLES]);
+    expect(AFFECTED_ROLES).toHaveLength(2);
+    expect(new Set(AFFECTED_ROLES).size).toBe(AFFECTED_ROLES.length);
+    for (const agentKey of AFFECTED_ROLES) {
+      // Each role must really be a legacy composite in the fixture world, or the
+      // matrices below would run their sequences against a role with no v1 source.
+      expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).toBeTruthy();
+      expect(V2_AUTHORED_PROMPT[agentKey]).toBeTruthy();
+      expect(PUBLISHED_V1_PROMPT_SOURCE[agentKey]).not.toEqual(V2_AUTHORED_PROMPT[agentKey]);
+    }
+  });
+});
 
 function definition(agentKey: AgentKey, prompt?: string, hash?: string): DraftDefinition {
   const node = workbench().nodes.find((candidate) => candidate.agent_key === agentKey);
@@ -592,6 +621,7 @@ describe('draft editor state', () => {
 const BLOCK_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const BLOCK_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const BLOCK_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const BLOCK_D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
 function block(id: string, anchor: CustomTextBlock['anchor'], text: string): CustomTextBlock {
   return { kind: 'custom_text', block_id: id, anchor, condition: 'always', text };
@@ -976,6 +1006,58 @@ describe('local assembly editing', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('inserts by anchor rank, so no click order can build a server-rejected array', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    // Every `Add custom block …` button renders at once for an upgraded role, so a
+    // descending sequence is two or three ordinary clicks at valid anchors. Appending
+    // when no sibling exists built ["after_environment_constraints",
+    // "after_authored_prompt"], which the server refuses as `invalid_anchor_order`
+    // (`_ANCHOR_RANK`, `prompt_assembler.py`) while the UI still groups the blocks by
+    // anchor — so the admin saw the right order and got a 422 that named the wrong one.
+    let state = v2State('build_reviewer');
+    state = draftEditorReducer(state, {
+      type: 'assemblyBlockAdded', agentKey: 'build_reviewer', blockId: BLOCK_A, anchor: 'after_environment_constraints',
+    });
+    state = draftEditorReducer(state, {
+      type: 'assemblyBlockAdded', agentKey: 'build_reviewer', blockId: BLOCK_B, anchor: 'after_authored_prompt',
+    });
+    state = draftEditorReducer(state, {
+      type: 'assemblyBlockAdded', agentKey: 'build_reviewer', blockId: BLOCK_C, anchor: 'after_deck_brief',
+    });
+
+    const blocks = v2Rules(state.byAgent.build_reviewer.local).custom_blocks;
+    expect(blocks.map((block) => block.block_id)).toEqual([BLOCK_B, BLOCK_C, BLOCK_A]);
+    const anchors = blocks.map((block) => block.anchor);
+    // Non-decreasing in the rank order the server enforces, which the client holds as
+    // `CUSTOM_ANCHORS` and `test_client_condition_and_anchor_vocabularies_match_the_server`
+    // pins to that server rank map.
+    const ranks = anchors.map((anchor) => CUSTOM_ANCHORS.indexOf(anchor));
+    expect(ranks).toEqual([...ranks].sort((left, right) => left - right));
+    expect(anchors).toEqual([
+      'after_authored_prompt', 'after_deck_brief', 'after_environment_constraints',
+    ]);
+
+    // A later sibling still lands after the last block at its own anchor, so ordinary
+    // ascending authoring is unchanged and same-anchor order stays the admin's.
+    state = draftEditorReducer(state, {
+      type: 'assemblyBlockAdded', agentKey: 'build_reviewer', blockId: BLOCK_D, anchor: 'after_authored_prompt',
+    });
+    expect(v2Rules(state.byAgent.build_reviewer.local).custom_blocks.map((block) => block.block_id))
+      .toEqual([BLOCK_B, BLOCK_D, BLOCK_C, BLOCK_A]);
+
+    // `validateDraftForm` passes `assembly_rules` through verbatim, so what the reducer
+    // built is exactly what the save body carries.
+    const validation = validateDraftForm(state.byAgent.build_reviewer.local);
+    expect(validation.ok).toBe(true);
+    if (validation.ok) {
+      expect(validation.candidate.assembly_rules).toEqual(
+        v2Rules(state.byAgent.build_reviewer.local),
+      );
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('ignores every assembly action while the role is still on v1', () => {
     const state = createDraftEditorState(workbench());
     const actions = [
@@ -1047,7 +1129,7 @@ describe('discriminated draft operations', () => {
     expect(settled.byAgent.data_analyst.requestError).toBe('Upgrade failed.');
   });
 
-  it.each(['data_analyst', 'build_reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     'refuses to start %s Upgrade while its prompt differs from the saved prompt',
     (agentKey) => {
       let state = createDraftEditorState(workbench());
@@ -1066,7 +1148,7 @@ describe('discriminated draft operations', () => {
     },
   );
 
-  it.each(['data_analyst', 'build_reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     'retains the exact dirty %s prompt as manual-only bytes and leaves the form untouched',
     (agentKey) => {
       let state = createDraftEditorState(workbench());
@@ -1316,8 +1398,8 @@ describe('cross-version authoritative adoption', () => {
   });
 
   it.each([
-    ['data_analyst' as const, 'build_reviewer' as const],
-    ['build_reviewer' as const, 'data_analyst' as const],
+    [AFFECTED_ROLES[0], AFFECTED_ROLES[1]],
+    [AFFECTED_ROLES[1], AFFECTED_ROLES[0]],
   ])('an Upgrade 409 for %s quarantines the dirty v1 prompt of unselected %s', (started, other) => {
     let state = createDraftEditorState(workbench());
     state = draftEditorReducer(state, {
@@ -1349,7 +1431,7 @@ describe('cross-version authoritative adoption', () => {
     }
   });
 
-  it.each(['data_analyst', 'build_reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     'quarantines %s legacy bytes even while another role is selected',
     (agentKey) => {
       let state = createDraftEditorState(workbench());
@@ -1511,7 +1593,7 @@ describe('cross-version authoritative adoption', () => {
   it('merges every one of the seven definitions from a null-candidate conflict', () => {
     let state = createDraftEditorState(workbench());
     state = draftEditorReducer(state, { type: 'upgradeStarted', pending: upgradePending('build_reviewer') });
-    const body = syntheticNullCandidateConflict(0, 1, ['data_analyst', 'build_reviewer']);
+    const body = syntheticNullCandidateConflict(0, 1, [...AFFECTED_ROLES]);
     state = draftEditorReducer(state, { type: 'upgradeConflicted', requestId: 1, conflict: body });
 
     for (const agentKey of AGENT_KEYS) {
@@ -1553,7 +1635,7 @@ function pendingUpgradeWithDirtyRestoreAttempt(agentKey: 'data_analyst' | 'build
 }
 
 describe('prompt-change backstop during a pending Upgrade', () => {
-  it.each(['data_analyst', 'build_reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     'a restored alternative cannot dirty the %s prompt while its Upgrade is in flight',
     (agentKey) => {
       const { state, savedPrompt, retainedId } = pendingUpgradeWithDirtyRestoreAttempt(agentKey);
@@ -1589,7 +1671,7 @@ describe('prompt-change backstop during a pending Upgrade', () => {
     },
   );
 
-  it.each(['data_analyst', 'build_reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     'discarding an alternative mid-flight moves no %s prompt byte',
     (agentKey) => {
       const { state, savedPrompt, retainedId } = pendingUpgradeWithDirtyRestoreAttempt(agentKey);
@@ -1604,7 +1686,7 @@ describe('prompt-change backstop during a pending Upgrade', () => {
     },
   );
 
-  it.each(['data_analyst', 'build_reviewer'] as const)(
+  it.each(AFFECTED_ROLES)(
     'an Upgrade 409 adopts v2 for %s after the prompt was made dirty mid-flight',
     (agentKey) => {
       const { state, savedPrompt, retainedId } = pendingUpgradeWithDirtyRestoreAttempt(agentKey);

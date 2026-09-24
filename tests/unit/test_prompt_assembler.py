@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
 import pathlib
 import re
@@ -1203,6 +1204,57 @@ def test_client_hardcoded_universal_anchor_is_exactly_the_server_legality() -> N
         )
 
 
+def test_server_accepts_every_anchor_order_the_client_reducer_can_build() -> None:
+    """The server half of the #265 F-1 fix: rank-ordered custom blocks always validate.
+
+    ``assemblyBlockAdded`` inserts a new block after the last block whose anchor rank is
+    at most the new block's, taking that rank order from ``CUSTOM_ANCHORS``. Whatever
+    order an administrator clicks the per-anchor ``Add custom block ...`` buttons in, the
+    array reaching this validator is therefore their click sequence stably sorted by rank.
+    Before the fix the reducer appended when the chosen anchor had no sibling yet, so a
+    descending pair of clicks at two legal anchors built the rejected array pinned at the
+    bottom of this test. Asserting both halves here means neither side can move alone.
+    """
+    client_order = _ts_strings(
+        _ts_array_block(_read_client(_CLIENT_API), "export const CUSTOM_ANCHORS")
+    )
+    assert client_order == sorted(
+        INDEPENDENT_ANCHOR_RANK, key=lambda anchor: INDEPENDENT_ANCHOR_RANK[anchor]
+    )
+    block_ids = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    )
+
+    def _sibling(position: int, anchor: str) -> CustomTextBlock:
+        return _custom(
+            block_ids[position],
+            f"custom sibling {position}",
+            anchor=anchor,
+            condition="payload_has_deck_brief" if anchor == "after_deck_brief" else "always",
+        )
+
+    # Build Reviewer is the only role for which all three anchors are legal, so only its
+    # click sequences can exercise every rank.
+    for clicks in itertools.permutations(client_order):
+        reducer_order = sorted(clicks, key=client_order.index)
+        blocks = [_sibling(position, anchor) for position, anchor in enumerate(reducer_order)]
+        PromptAssembler().validate(definition=_v2("build_reviewer", blocks))
+
+    # Not vacuous: the array the pre-fix reducer built from one of those very click
+    # sequences is still refused, and refused on the anchor order.
+    appended = [
+        _sibling(0, "after_environment_constraints"),
+        _sibling(1, "after_authored_prompt"),
+    ]
+    with pytest.raises(PromptAssemblyRejected) as rejected:
+        PromptAssembler().validate(definition=_v2("build_reviewer", appended))
+    assert [(issue.field, issue.code) for issue in rejected.value.issues] == [
+        ("candidate.assembly_rules.custom_blocks.1.anchor", "invalid_anchor_order"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Task 6 fix round 1 — I-R1: the affected-role set.
 #
@@ -1282,12 +1334,17 @@ def _ts_role_list(path: pathlib.Path, declaration: str) -> tuple[str, ...]:
 
 
 def test_every_affected_role_copy_matches_the_canonical_transition_list() -> None:
-    """Joins all five hand-typed copies of the affected-role set to this module.
+    """Joins all seven hand-typed copies of the affected-role set to this module.
 
-    The fixture copy and the production constant share the name
-    ``LEGACY_COMPOSITE_ROLES``, so the browser matrix could key off either. Both are
-    joined, and so is the browser spec's own loop driver, which is what stops a
-    narrowed fixture from silently shrinking that matrix.
+    The seven are numbered in the body below. The fixture copy and the production
+    constant share the name ``LEGACY_COMPOSITE_ROLES``, so the browser matrix could key
+    off either. Both are joined, and so is the browser spec's own loop driver, which is
+    what stops a narrowed fixture from silently shrinking that matrix.
+
+    The two Vitest specs hold local matrix constants of their own, which this module does
+    not read. They are joined in their own lane instead: each asserts equality against the
+    imported production ``LEGACY_COMPOSITE_ROLES``, which is copy 4 here, so narrowing one
+    REDs there rather than silently dropping half of a matrix.
     """
     canonical = _canonical_affected_roles()
     assert canonical == INDEPENDENT_AFFECTED_ROLES
@@ -1313,8 +1370,9 @@ def test_every_affected_role_copy_matches_the_canonical_transition_list() -> Non
     ) == canonical
     assert _ts_role_list(_CLIENT_MOCKS, "export const LEGACY_COMPOSITE_ROLES") == canonical
 
-    # 6. The browser matrix's own loop driver, and the PostgreSQL suite's constant.
+    # 6. The browser matrix's own loop driver.
     assert _ts_role_list(_CLIENT_WORKBENCH_SPEC, "const AFFECTED_ROLES") == canonical
+    # 7. The PostgreSQL suite's constant.
     pg_suite = _read_client(_PG_ROUTE_SUITE)
     pg_roles = pg_suite[pg_suite.index("AFFECTED_ROLES = (") :]
     assert tuple(_ts_strings(pg_roles[: pg_roles.index(")")])) == canonical
