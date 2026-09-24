@@ -673,3 +673,149 @@ equal to `0.7`.
 
 Any later task that touches the canonical dump mode is touching two independent fail-closed
 guarantees, not one.
+
+# ============================================================================
+# Task 3 — runtime composition, canonical projection, diagnostics and traces.
+# 2026-09-24. Base `1fb5141cc`; commits `cca068af3`, `87676a04f`.
+# ============================================================================
+
+## Correction 34 — Task 3's real file set: four replacements beyond the plan's Files block
+
+The plan's Task-3 Files block names `src/services/agent_runtime.py`,
+`src/services/agent_runtime_identity.py`, `tests/unit/test_agent_runtime.py`,
+`tests/unit/test_persisted_agent_runtime.py` and "extend `tests/unit/test_agent_schema_registry.py`".
+Task 3 changed **ten** files. Recorded here per the plan's own "Record replacements in corrections"
+step.
+
+| File | Why | Authority |
+| --- | --- | --- |
+| `src/services/agent_schema_registry.py` | the `:556` identity-carrier gate | named explicitly in the Task-3 brief's three items, so authorized there rather than by the Files block |
+| `tests/unit/test_agent_resolution_prompt.py` | 7 RED — `PromptCaptureAdapter` returned `schema.model_construct()` | c11's amended radius names this file and this exact count |
+| `tests/unit/test_deck_level_spec_change.py` | 2 RED — two `Capture` doubles, same cause | c11's amended radius, 2 |
+| `tests/unit/test_graph_configuration_bootstrap.py` | 1 RED — `RecordingAdapter`, same cause | c11's amended radius, 1 |
+| `tests/integration/test_conversation_pin_acceptance_postgres.py` | 1 RED — `assert isinstance(output, schema)` cannot hold once the bound schema is a strict *subclass* of the output's class | c23's matrix addition, plus the cause-baseline rule |
+
+**The convergence itself needed no file outside the Files block**, which is why the brief's
+ask-gate ("ask before starting if the *convergence* would require touching a file outside your
+Files block") did not fire: nothing outside `agent_runtime.py` imported the duplicate class, proved
+by repo-wide grep before any edit. The four test replacements are the cause-baseline rule applied
+("anything outside the inherited fourteen is yours"), each a single adapter double that the
+composition change necessarily invalidated, each mechanical, and **none changes production
+behaviour**.
+
+Ruling for Tasks 4-7: a runtime *contract* change in this epic has a five-suite test-double
+radius, not a two-suite one. The doubles that break are the ones returning
+`schema.model_construct()` — an empty shell that cannot survive `validate_output` — plus any
+`isinstance(output, schema)` guard, which must become `issubclass(schema, type(output))` now that
+the bound schema is a composed subclass. Cost if wrong: a later task reads 3 extra failures as a
+new defect and re-derives this.
+
+## Correction 35 — c9's vacuity is CONFIRMED by measurement, and the success channel is new behaviour
+
+Verified by running HEAD's sink rather than reading it:
+`RecordingAgentInvocationIdentitySink`'s public state at base was exactly `['calls',
+'error_classes']`, **no success-named channel of any kind**, `calls.append` provably preceded
+`callback()`, and after a *failed* invoke `len(calls) == 1`. So "invalid output emits no success
+fields" had nothing to assert — and if a reader took `calls` for the success channel, `calls == []`
+on failure is *false*, so the only way such a test could pass was by asserting nothing.
+
+Task 3 added `AgentInvocationSuccess(identity, additional_fields)` plus a `successes` list appended
+**only after** the callback returns, and `additional_fields` on the logging sink's **success**
+record only. The three channels are now documented as distinct outcomes in the class docstring.
+Non-vacuity is measured: moving the append before the callback REDs 6/12, deleting it REDs 19/27,
+and adding the field to the *error* record REDs 2/2.
+
+Amended figures confirmed in passing: **three** `invoke` definitions, not four sites. The
+`-> ValidatedAgentOutput` retyping was taken anyway — a design choice, as the amendment says — because
+returning only `canonical_output` would discard the projection before either sink could observe it.
+
+## Correction 36 — the canonical projection is a behaviour change with a 63-test radius, and M21 re-confirms c11's 30
+
+`result.output` is no longer the object the adapter returned; it is
+`validated.canonical_output`, a freshly validated instance of the **original canonical class**. So
+`result.output is output` is no longer true anywhere, and `adapter.calls[...]["schema"] is
+OUTPUT_SCHEMAS[role]` is no longer true either — the adapter is bound to a strict
+(`extra="forbid"`) subclass named `…SchemaV{n}Overlay`.
+
+Measured radius of the change, before repair: `test_agent_runtime.py` **18**,
+`test_agent_resolution_prompt.py` **7**, `test_deck_level_spec_change.py` **2**,
+`test_graph_configuration_bootstrap.py` **1** (the four c11 files, **28** against c11's 30),
+plus `test_persisted_agent_runtime.py` **34** and the acceptance suite **1** — **63 total**.
+Three of the four c11 files match byte-for-byte; `test_agent_runtime.py` differs (18 vs 20) because
+c11's sabotage breaks the *literal* while this change alters the whole composition path — different
+mutations sharing a neighbourhood.
+
+**Independently, c11's own figure still reproduces exactly.** Mutation row M21 sabotaged the
+compatibility loader's hardcoded v1 overlay literal, now at `agent_runtime.py:467-468`, and REDs
+**30 across the same four files** on the Task-3 tree. c11's amended magnitude is confirmed a third
+time.
+
+## Correction 37 — at the adapter-conversion boundary `exclude_unset` is load-bearing and the dump mode is NOT (both scopes declared)
+
+`_supplied_output_keys` converts one provider result to raw top-level keys with
+`model_dump(mode="python", exclude_unset=True)`. The two halves behave oppositely and the
+difference matters, so both are recorded:
+
+- **`exclude_unset=True` is load-bearing.** The registry distinguishes an absent optional from an
+  explicitly supplied `null` by raw key presence, so a field sitting at its declared `None` default
+  must not arrive as an explicit null. Dropping the flag REDs the `{}`-vs-null row.
+- **The dump mode is free at both measured scopes: RED 0 of 264 in the focused suite and RED 0 of
+  887 in the whole Task 7 unit matrix.** Per correction 31 that licenses no wider claim, and **no
+  claim that the gate cannot detect it** is made here.
+
+The *mechanism* was probed rather than the zero generalised. Walking every field annotation of all
+**13 models** reachable from the seven canonical output schemas found **zero** mode-divergent field
+types — no `Decimal`, `datetime`, `date`, `time`, `timedelta`, `UUID`, `bytes`, `Enum`, `set`,
+`frozenset` or tuple-typed leaf anywhere. The modes are therefore equivalent *for these schemas*,
+which is a **precondition, not a guarantee**, and it is now asserted by
+`test_no_canonical_schema_carries_a_dump_mode_divergent_field_type` (with an internal aim check,
+`len(walked) >= 13`, so a walker that stopped at the roots fails rather than reporting a
+comfortable zero).
+
+**This is emphatically NOT correction 33's decision.** `canonical_payload`'s `mode="python"` guards
+three fail-closed guarantees and was not touched by Task 3. The adapter-conversion mode is a
+different call at a different boundary: python-to-python re-validation, not a persistence
+boundary. Ruling: adding a mode-divergent field type to any of the seven output schemas REDs the
+new precondition test, and whoever does it must re-examine this mode rather than discover the
+difference in production.
+
+## Correction 38 — `_run_resolved`'s generic `(ValidationError, ValueError, TypeError)` fallback was pinned by NOTHING, found by a mis-aimed mutation
+
+A mutation intended for the `SchemaOverlayValidationError` fallback anchored uniquely on the
+*generic* catch-all one line below it — the failure mode the anchor-count rule does **not** catch,
+a unique anchor on the wrong line — and returned RED 0. Suspecting the instrument first, the cause
+was probed directly: both suites that assert `invalid_persisted_definition` through the runtime
+reach it via the **`PromptAssemblyRejected`** clause instead, confirmed by inspecting `__cause__`
+on a live run. So the zero was real and the aim was wrong; the re-aim (M18b) REDs 1/1.
+
+The mis-aim paid for itself: the generic fallback was reached by no test at either scope, in
+pre-existing code that Task 3 only added a clause above.
+`test_a_role_mismatch_between_release_and_content_is_invalid_persisted_definition` now pins it, so
+the same mutation at matrix scope reads RED 1/887 rather than 0.
+
+Ruling for Tasks 4-7: **report mis-aimed mutations, and probe the zero's cause rather than
+re-aiming blind.** Two of this epic's findings now come from mis-aims investigated instead of
+absorbed.
+
+## Correction 39 — forward items Task 3 deliberately did not action
+
+1. **`agent_runtime.py:87-96` is still a third copy of the seven v1 digests**
+   (`_SCHEMA_CONTRACT_DIGESTS`), alongside `agent_schema_registry._V1_DIGESTS` and this file's
+   table. Correction 13 warned about a third *registry instance*, not a third *table*; converging
+   it means touching `CodeOwnedAgentDefinitionSource`'s own fail-closed check, outside Task 3's
+   three items. `_SchemaContractRegistry` was reduced to that check plus `identity_for` and its
+   now-unreachable `resolve` was removed, so no unreachable second contract check reads as a live
+   guard.
+2. **`LoggingAgentInvocationIdentitySink` now emits one model-derived field.** Plan-mandated, and
+   allowlisted by construction (only `composed.declared_optional_names`, capped 8 × 280), but the
+   adjacent test is named `test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output` —
+   a name now **broader** than its guarantee. An in-test disclosure was added rather than a rename;
+   a reviewer may prefer the rename, or may want the notes dropped from logs entirely.
+3. **`VALID_OUTPUT_VALUES` fixture data now exists in four test modules.** Duplication was chosen
+   over a new shared helper to avoid widening the file set further.
+4. **`AgentInvocationSuccess` is not re-exported from `agent_runtime`** — re-exporting an otherwise
+   unused name trips `F401` and nothing imports it that way today.
+5. `ruff format --check` reports 6 of Task 3's files would reformat. Not a repo gate (the
+   configured `[tool.ruff.lint]` gate passes with **zero new findings** against the same files at
+   base), recorded rather than claimed clean — the Task-2 re-review's F7 flagged exactly this
+   over-claim.
