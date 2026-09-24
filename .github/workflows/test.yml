@@ -461,6 +461,7 @@ jobs:
             tests/integration/test_persisted_graph_runtime_failures_postgres.py \
             tests/integration/test_conversation_pin_acceptance_postgres.py \
             tests/integration/test_agent_definition_workbench_postgres.py \
+            tests/integration/test_agent_schema_overlay_postgres.py \
             tests/integration/test_spec_dirty_marker_routes.py \
             tests/integration/test_sweeper_describe_only.py \
             tests/integration/test_architect_reply_is_persisted.py \
