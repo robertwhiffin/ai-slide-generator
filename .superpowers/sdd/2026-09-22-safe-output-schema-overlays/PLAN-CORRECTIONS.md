@@ -516,3 +516,101 @@ Ruling: **not** a source defect and not grounds to rewrite history now; Task 7 m
 `INTEGRATION_BASE..HEAD` review package's "#264 work" accounting, or relocate it under the correct
 path in the reviewed test-corrections commit. Cost if ignored: the whole-branch reviewer counts an
 obsolete-path artefact as #264 deliverable and fails the package on the plan's own constraint.
+
+## Correction 27 — WITHDRAWN RULING: the hash gate is NOT blind to serialisation mode
+
+**This strikes an accepted controller ruling. Any task that read the ledger before this entry has
+read a false claim. Read this instead.**
+
+The ledger recorded, as an accepted ruling, that the two serialisation modes are hash-equivalent so
+that "swapping `canonical_payload`'s mode changes no hash at all" and "the hash gate is blind to the
+mode; only the direct payload assertion catches it". **Both statements are false**, and Task 2's
+independent reviewer measured it.
+
+What is true: for the seven packaged v1 definitions the modes *are* hash-equivalent — the reviewer
+computed it and found zero differing roles. What does not follow, and what nobody measured before
+recording it, is the general claim.
+
+`model_dump(mode="json")` serialises a `Decimal` to a **string**, which `_normalize_canonical_value`
+passes through un-normalised. `Decimal` is exactly the shape these values take crossing the
+SQLAlchemy boundary — the case `canonical_payload`'s own docstring exists for. Swapping the mode,
+with the anchor count asserted at 1, REDs **four** tests in the focused suite, not zero:
+
+    FAILED test_hash_normalizes_manifest_floats_and_database_decimals
+    FAILED test_hash_rejects_non_finite_numeric_values[temperature-Decimal('NaN')]
+    FAILED test_hash_rejects_non_finite_numeric_values[top_p-Decimal('Infinity')]
+    FAILED test_hashing_still_fails_closed_on_a_non_json_guidance_value
+    4 failed, 137 passed
+
+Two of those are **fail-closed guards**. In json mode `Decimal("NaN")` and `Decimal("Infinity")`
+become strings, so the finiteness check never fires and a non-finite numeric would be **silently
+hashed**. The mode is therefore load-bearing for a fail-closed guarantee — the precise opposite of
+the withdrawn claim. The fourth failure is the author's own new fail-closed test.
+
+**Why the original measurement showed zero, and why that was defensible while the conclusion was
+not.** Scoped to the row's own named hash test, RED really is 0 — the reviewer reproduced `2
+passed`. The number is correct under an undeclared per-named-test scope. The defect is the
+**conclusion generalised from it**.
+
+**The controller's confirmation checked the wrong thing.** It read `_normalize_canonical_value` and
+verified that `list` and `tuple` route through one branch. That is true, and it establishes nothing
+about whether any *other* mode difference reaches the hash. Reading one branch of a normaliser
+cannot establish blindness to a whole serialisation mode; only measurement can, and nobody measured
+before it was recorded as accepted.
+
+**Downstream hazard this entry exists to stop.** A Task 3 through 7 agent trusting "the hash gate is
+blind to the mode" could swap the mode believing the change free, silently breaking Decimal
+normalisation and the non-finite guard **while all seven v1 hashes stay green**. That is a false
+green on a fail-closed path.
+
+**What survives.** The mode *choice* is correct and independently verified: `mode='json'` is
+provably the persisting form, because `schema_overlay` is `json_document=True`
+(`graph_configuration_content.py:44`) and `definition_content_values` does
+`value.model_dump(mode="json")` at `:79`. Both of Task 2's mode assertions have teeth, each proved
+by a distinct mutation. The requirement to declare the mode explicitly was right; the reasoning
+recorded in support of it was wrong.
+
+Cost of the original error: a later task could have treated a fail-closed guard as free to remove.
+
+## Correction 28 — mutation row M7 is factually wrong; forward item (d) and concern 5 are struck
+
+Task 2's clause-to-mutation row M7 claims "RED 1 (the `not_a_role` case now resolves)", and the
+ledger propagated that into forward item (d) and concern 5 as "M7's radius is one node".
+
+Measured by the reviewer: that test stays **6/6 green** — hardcoding the bridge's role still misses
+the bundle key, so it still fails closed — and the real radius is **RED 13**.
+
+So the task reported a weakness that does not exist, and the controller recorded it as a forward
+item for Tasks 3-7. **Strike forward item (d) and concern 5.** A row that misidentifies its own RED
+node undermines the deliverable it belongs to, which is why the reviewer graded it Important rather
+than Minor.
+
+One residual is worth keeping: no test distinguishes the role **direction**, because `_resolve` keys
+on the `agent_key` argument and nothing passes an identity whose role differs from it. But the
+structural protection is stronger than any test would be — `ContentIdentity` carries no role, so the
+bridge literally cannot take one from a stored pair.
+
+## Correction 29 — the fail-closed guarantee moved only half
+
+Task 2 reported that the removed local helper's fail-closed behaviour moved to the hashing boundary.
+The **value** half did, at two independent homes: `definition_content_hash` raises `TypeError` and
+`definition_content_values` raises `PydanticSerializationError`. The reviewer traced all four write
+paths — `revision_from_definition`, `draft_from_definition`, `_write_locked_content` (hash first at
+`graph_configuration_draft.py:637`) and `agent_runtime.py:471` — and confirmed **nothing reachable
+can persist a non-JSON overlay value**.
+
+But the removed helper carried **two** raises, and the non-string-key raise has **no replacement**.
+`{1:"a"}` and `{"1":"a"}` inside `examples` now produce the **same content hash** (`3b0f9986…`), the
+persist path silently coerces `1` to `"1"`, and mixed keys fail only accidentally through
+`json.dumps(sort_keys=True)`. No test exercises it. Reachability is low, because both the wire and
+JSONB force string keys, which is why it is Important rather than Critical.
+
+Either restore a key check with a test, or record an explicit ruling that the coercion is accepted.
+Do not leave it implicit.
+
+## Correction 30 — the converged carrier relaxed two required fields, undisclosed
+
+`agent_schema_types.py:336-337`: the converged carrier **defaults** two fields that the removed one
+**required**, so `schema_overlay: {}` now validates where it previously raised `missing`. Undisclosed
+and untested. Impact is small today because all seven v1 overlays are empty, but Tasks 4 and 5
+introduce the first non-empty overlays, so it must be disclosed and pinned before then.
