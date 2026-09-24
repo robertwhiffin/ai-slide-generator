@@ -95,7 +95,10 @@ class _OrderedAdapter:
             assert agent_key == expected_role, (
                 f"adapter order mismatch: expected {expected_role!r}, got {agent_key!r}"
             )
-            assert isinstance(output, schema), (
+            # #264 Task 3: the runtime binds the provider to the registry's
+            # COMPOSED schema, a strict subclass of the role's canonical class, so
+            # the guard checks the bound schema belongs to this output's role.
+            assert issubclass(schema, type(output)), (
                 f"{agent_key!r} output is {type(output).__name__}, not {schema.__name__}"
             )
             self.entries.popleft()

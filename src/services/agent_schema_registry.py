@@ -8,7 +8,7 @@ import inspect
 import json
 import textwrap
 from collections.abc import Mapping
-from dataclasses import is_dataclass, replace
+from dataclasses import fields, is_dataclass, replace
 from types import MappingProxyType
 from typing import Annotated, Any, Protocol, TypeVar, cast
 
@@ -309,6 +309,17 @@ class SchemaContractMaterialChangedError(RuntimeError):
     """Frozen identity material changed without a corresponding literal update."""
 
 
+class SchemaContractIdentityCarrierError(TypeError):
+    """A schema-contract identity carrier is not one this registry recognises.
+
+    The gate that raises this used to end in a silent ``else`` which replaced any
+    unrecognised carrier with the server-owned identity, and a *second* class
+    carrying ``SchemaContractIdentity``'s own field triple fell through to the
+    structural dataclass branch without a word — the two reprs are byte-identical,
+    so the divergence was invisible in a traceback.  Both are now loud.
+    """
+
+
 class SchemaOverlayValidationError(ValueError):
     def __init__(self, issues: tuple[SchemaValidationIssue, ...]):
         self.issues = issues
@@ -535,6 +546,56 @@ class AgentSchemaRegistry:
         )
 
 
+_CANONICAL_IDENTITY_FIELD_NAMES = frozenset(("agent_key", "version", "digest"))
+_STRUCTURAL_IDENTITY_FIELD_NAMES = frozenset(("version", "digest"))
+
+
+def _carrier_name(carrier: object) -> str:
+    carrier_type = type(carrier)
+    return f"{carrier_type.__module__}.{carrier_type.__qualname__}"
+
+
+def _replacement_schema_contract_identity(
+    existing: object,
+    identity: SchemaContractIdentity,
+) -> object:
+    """Return the server-owned identity in the carrier's own retained type.
+
+    Every branch here is a carrier this registry understands.  An unrecognised
+    carrier raises rather than being silently replaced, and a class that merely
+    *looks* like :class:`SchemaContractIdentity` is named and refused rather than
+    being handled structurally, so a re-duplication of that class cannot pass as
+    an anonymous dataclass again.
+    """
+    if isinstance(existing, SchemaContractIdentity):
+        return identity
+    if isinstance(existing, BaseModel):
+        return type(existing).model_validate(
+            {"version": identity.version, "digest": identity.digest}
+        )
+    if is_dataclass(existing) and not isinstance(existing, type):
+        names = frozenset(field.name for field in fields(existing))
+        if names == _CANONICAL_IDENTITY_FIELD_NAMES:
+            raise SchemaContractIdentityCarrierError(
+                f"{_carrier_name(existing)} duplicates SchemaContractIdentity's fields but "
+                "is not that class; converge on "
+                "src.services.agent_schema_types.SchemaContractIdentity instead of "
+                "shadowing it."
+            )
+        if not _STRUCTURAL_IDENTITY_FIELD_NAMES <= names:
+            raise SchemaContractIdentityCarrierError(
+                f"{_carrier_name(existing)} cannot carry a schema contract identity: "
+                f"expected fields {sorted(_STRUCTURAL_IDENTITY_FIELD_NAMES)}, "
+                f"found {sorted(names)}."
+            )
+        return replace(existing, version=identity.version, digest=identity.digest)
+    raise SchemaContractIdentityCarrierError(
+        f"{_carrier_name(existing)} is not a recognised schema contract identity carrier; "
+        "expected src.services.agent_schema_types.SchemaContractIdentity, a Pydantic "
+        "carrier, or a dataclass carrying 'version' and 'digest'."
+    )
+
+
 class _UpgradeableContent(Protocol):
     agent_key: str
     schema_contract: object
@@ -552,21 +613,9 @@ def upgrade_content_to_v2(content: ContentT) -> ContentT:
     """
     registry = AgentSchemaRegistry()
     identity = registry.identity_for(content.agent_key, 2)
-    existing_identity = content.schema_contract
-    if isinstance(existing_identity, SchemaContractIdentity):
-        replacement_identity: object = identity
-    elif isinstance(existing_identity, BaseModel):
-        replacement_identity = type(existing_identity).model_validate(
-            {"version": identity.version, "digest": identity.digest}
-        )
-    elif is_dataclass(existing_identity):
-        replacement_identity = replace(
-            existing_identity,
-            version=identity.version,
-            digest=identity.digest,
-        )
-    else:
-        replacement_identity = identity
+    replacement_identity = _replacement_schema_contract_identity(
+        content.schema_contract, identity
+    )
 
     existing_overlay = content.schema_overlay
     if isinstance(existing_overlay, SchemaOverlay):

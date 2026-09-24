@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, astuple, dataclass, fields, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -1001,3 +1001,144 @@ def test_upgraded_content_round_trips_through_the_persistence_mapper() -> None:
             "digest": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
         }
         assert definition_content_hash(restored) == definition_content_hash(upgraded)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (#264): one SchemaContractIdentity, and a carrier gate that is loud.
+#
+# Correction C-12's remaining half.  ``agent_runtime`` used to define a second
+# frozen ``SchemaContractIdentity`` with the identical field triple, so the two
+# registries produced identities that compared unequal while their reprs were
+# byte-identical, and the carrier gate in ``upgrade_content_to_v2`` let such an
+# identity fall through to the structural ``is_dataclass`` branch *silently*.
+# Exact values are literals rather than imports (epic correction C-24).
+# ---------------------------------------------------------------------------
+
+
+def test_schema_contract_identity_is_defined_exactly_once_in_the_repository() -> None:
+    """The public home is the only definition; other modules import it."""
+    import pathlib
+    import re
+
+    import src.services.agent_runtime as runtime_module
+    import src.services.agent_schema_types as types_module
+    import src.services.graph_definition_manifest as manifest_module
+
+    assert runtime_module.SchemaContractIdentity is types_module.SchemaContractIdentity
+    assert manifest_module.SchemaContractIdentity is types_module.SchemaContractIdentity
+
+    source_root = pathlib.Path(types_module.__file__).resolve().parent.parent
+    definition = re.compile(r"^class SchemaContractIdentity[(:]", re.MULTILINE)
+    definitions = sorted(
+        str(path.relative_to(source_root))
+        for path in source_root.rglob("*.py")
+        if definition.search(path.read_text(encoding="utf-8"))
+    )
+    assert definitions == ["services/agent_schema_types.py"]
+
+
+def test_runtime_and_registry_agree_on_identity_class_equality_and_isinstance() -> None:
+    """The two registries must produce equal, mutually-isinstance identities."""
+    from src.services.agent_runtime import _SchemaContractRegistry
+
+    runtime_registry = _SchemaContractRegistry()
+    registry = AgentSchemaRegistry()
+
+    for role in EXPECTED_ROLES:
+        runtime_identity = runtime_registry.identity_for(role)
+        public_identity = registry.identity_for(role, 1)
+        assert type(runtime_identity) is type(public_identity)
+        assert isinstance(runtime_identity, SchemaContractIdentity)
+        assert runtime_identity == public_identity
+        assert runtime_identity.digest == EXPECTED_V1_DIGESTS[role]
+
+
+def test_upgrade_rejects_a_shadow_identity_carrier_loudly_instead_of_replacing_it() -> None:
+    """A second class with the identity's own field triple must not pass silently."""
+    from src.services.agent_schema_registry import SchemaContractIdentityCarrierError
+
+    @dataclass(frozen=True)
+    class ShadowSchemaContractIdentity:
+        agent_key: str
+        version: int
+        digest: str
+
+    class Content(BaseModel):
+        model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+        agent_key: str
+        schema_contract: Any
+        schema_overlay: SchemaOverlay
+
+    shadow = ShadowSchemaContractIdentity(
+        agent_key="architect",
+        version=1,
+        digest="a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    )
+    # The defect this guards: the shadow is structurally indistinguishable, so
+    # neither a field comparison nor a repr body can tell it from the real class.
+    real = SchemaContractIdentity(
+        agent_key="architect",
+        version=1,
+        digest="a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    )
+    assert [item.name for item in fields(shadow)] == [item.name for item in fields(real)]
+    assert astuple(shadow) == astuple(real)
+    assert shadow != real
+    assert not isinstance(shadow, SchemaContractIdentity)
+
+    content = Content(
+        agent_key="architect", schema_contract=shadow, schema_overlay=SchemaOverlay()
+    )
+    with pytest.raises(SchemaContractIdentityCarrierError) as raised:
+        upgrade_content_to_v2(content)
+
+    assert "ShadowSchemaContractIdentity" in str(raised.value)
+    assert "agent_schema_types.SchemaContractIdentity" in str(raised.value)
+    assert isinstance(raised.value, TypeError)
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [None, "1:abc", 2, ("architect", 2, "abc"), {"version": 2, "digest": "abc"}],
+)
+def test_upgrade_rejects_an_unrecognised_identity_carrier_instead_of_substituting(
+    carrier: Any,
+) -> None:
+    """The removed ``else`` branch silently discarded any unknown carrier."""
+    from src.services.agent_schema_registry import SchemaContractIdentityCarrierError
+
+    class Content(BaseModel):
+        model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+        agent_key: str
+        schema_contract: Any
+        schema_overlay: SchemaOverlay
+
+    content = Content(
+        agent_key="architect", schema_contract=carrier, schema_overlay=SchemaOverlay()
+    )
+    with pytest.raises(SchemaContractIdentityCarrierError):
+        upgrade_content_to_v2(content)
+
+
+def test_upgrade_rejects_a_dataclass_carrier_that_cannot_hold_the_identity_values() -> None:
+    """A structural dataclass carrier without the values fails loudly, not silently."""
+    from src.services.agent_schema_registry import SchemaContractIdentityCarrierError
+
+    @dataclass(frozen=True)
+    class WrongFields:
+        contract_version: int
+        contract_digest: str
+
+    class Content(BaseModel):
+        model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+        agent_key: str
+        schema_contract: Any
+        schema_overlay: SchemaOverlay
+
+    content = Content(
+        agent_key="architect",
+        schema_contract=WrongFields(contract_version=1, contract_digest="abc"),
+        schema_overlay=SchemaOverlay(),
+    )
+    with pytest.raises(SchemaContractIdentityCarrierError):
+        upgrade_content_to_v2(content)

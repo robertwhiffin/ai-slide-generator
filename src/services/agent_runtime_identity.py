@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from pydantic import BaseModel
+from src.services.agent_schema_types import JsonValue, ValidatedAgentOutput
 
 
 @dataclass(frozen=True)
@@ -35,30 +36,60 @@ class AgentInvocationIdentity:
     actor_session_id: str = ""
 
 
+@dataclass(frozen=True)
+class AgentInvocationSuccess:
+    """One *observed success*, distinct from the attempt recorded in ``calls``.
+
+    ``calls`` is appended before the callback runs, so it records attempts and
+    cannot distinguish an outcome.  Without this channel a test asserting that an
+    invalid output "emits no success fields" passes vacuously, because no success
+    field exists to be absent.  ``additional_fields`` is the registry's own frozen
+    projection of the explicitly supplied, allowlisted optional values.
+    """
+
+    identity: AgentInvocationIdentity
+    additional_fields: Mapping[str, JsonValue]
+
+
 class AgentInvocationIdentitySink(Protocol):
     def invoke(
         self,
         identity: AgentInvocationIdentity,
-        callback: Callable[[], BaseModel],
-    ) -> BaseModel: ...
+        callback: Callable[[], ValidatedAgentOutput],
+    ) -> ValidatedAgentOutput: ...
 
 
 class RecordingAgentInvocationIdentitySink:
+    """Test/compatibility sink recording attempts, successes and error classes.
+
+    The three lists are deliberately separate outcome channels: ``calls`` is an
+    attempt log appended *before* the callback, ``successes`` is appended only
+    *after* the callback returns, and ``error_classes`` only when it raises.
+    """
+
     def __init__(self) -> None:
         self.calls: list[AgentInvocationIdentity] = []
+        self.successes: list[AgentInvocationSuccess] = []
         self.error_classes: list[str] = []
 
     def invoke(
         self,
         identity: AgentInvocationIdentity,
-        callback: Callable[[], BaseModel],
-    ) -> BaseModel:
+        callback: Callable[[], ValidatedAgentOutput],
+    ) -> ValidatedAgentOutput:
         self.calls.append(identity)
         try:
-            return callback()
+            result = callback()
         except Exception as exc:
             self.error_classes.append(type(exc).__name__)
             raise
+        self.successes.append(
+            AgentInvocationSuccess(
+                identity=identity,
+                additional_fields=result.additional_fields,
+            )
+        )
+        return result
 
 
 #: The EXACT identity fields a production invocation may log.  The contract is the
@@ -89,6 +120,13 @@ _LOGGED_IDENTITY_FIELDS = (
 
 
 class LoggingAgentInvocationIdentitySink:
+    """Production sink logging identity, outcome, error class and optional values.
+
+    Only the registry's allowlisted optional projection is logged, and only on the
+    success path: the error record carries no success field at all, so prompt,
+    payload and canonical model output never reach a log record.
+    """
+
     def __init__(self, *, logger: logging.Logger) -> None:
         self._logger = logger
 
@@ -99,8 +137,8 @@ class LoggingAgentInvocationIdentitySink:
     def invoke(
         self,
         identity: AgentInvocationIdentity,
-        callback: Callable[[], BaseModel],
-    ) -> BaseModel:
+        callback: Callable[[], ValidatedAgentOutput],
+    ) -> ValidatedAgentOutput:
         try:
             result = callback()
         except Exception as exc:
@@ -122,6 +160,7 @@ class LoggingAgentInvocationIdentitySink:
                 **self._permitted(identity),
                 "outcome": "success",
                 "error_class": None,
+                "additional_fields": result.additional_fields,
             },
         )
         return result
