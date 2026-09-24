@@ -8,7 +8,12 @@ import type {
   AgentNode,
 } from '../../../api/agentDefinitions';
 import { DefinitionEditor } from './DefinitionEditor';
-import { draftStatus, validateDraftForm } from './draftEditorState';
+import {
+  definitionFormatVersion,
+  draftStatus,
+  isLegacyCompositeRole,
+  validateDraftForm,
+} from './draftEditorState';
 import { useDraftEditor } from './useDraftEditor';
 
 function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchResponse }) {
@@ -89,19 +94,38 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
             {workbench.nodes.filter((node) => node.execution_kind === 'model').map((node) => {
               if (node.execution_kind !== 'model') return null;
               const entry = editor.state.byAgent[node.agent_key];
+              const pending = editor.state.pendingSave;
+              // Every Save, Upgrade, and SourceRecovery button reads the same
+              // aggregate pending slot; there is no second gate.
+              const operationsDisabled = pending !== null;
+              const promptDisabled = pending !== null
+                && pending.operation === 'upgrade'
+                && pending.agentKey === node.agent_key
+                && isLegacyCompositeRole(node.agent_key)
+                && definitionFormatVersion(entry.saved) === 1;
               return (
                 <div key={node.agent_key} hidden={selectedNode.agent_key !== node.agent_key}>
                   <DefinitionEditor
                     agentKey={node.agent_key}
                     node={node}
                     entry={entry}
-                    saveDisabled={editor.state.pendingSave !== null || !validateDraftForm(entry.local).ok}
+                    saveDisabled={operationsDisabled || !validateDraftForm(entry.local).ok}
+                    operationsDisabled={operationsDisabled}
+                    promptDisabled={promptDisabled}
                     onEdit={editor.edit}
                     onSave={editor.save}
+                    onUpgradeProtectedAssembly={editor.upgradeProtectedAssembly}
+                    onRestorePublishedV1Prompt={editor.restorePublishedV1Prompt}
+                    onAddAssemblyBlock={editor.addAssemblyBlock}
+                    onEditAssemblyBlockText={editor.editAssemblyBlockText}
+                    onEditAssemblyBlockCondition={editor.editAssemblyBlockCondition}
+                    onDeleteAssemblyBlock={editor.deleteAssemblyBlock}
+                    onMoveAssemblyBlock={editor.moveAssemblyBlock}
                     onReloadServer={editor.reloadServer}
                     onKeepLocal={editor.keepLocal}
-                    onRestoreRecovery={editor.restoreRecovery}
-                    onDismissRecovery={editor.dismissRecovery}
+                    onRestoreSavedPrompt={editor.restoreSavedPrompt}
+                    onRestoreRetained={editor.restoreRetained}
+                    onDiscardRetained={editor.discardRetained}
                   />
                 </div>
               );

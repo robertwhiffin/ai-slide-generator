@@ -5,12 +5,17 @@
 import type {
   AgentDefinitionWorkbenchResponse,
   AgentKey,
-  AssemblyRules,
+  AssemblyRulesV1,
+  AssemblyRulesV2,
+  ContentIdentity,
   DraftDefinition,
   DraftSaveConflictResponse,
   DraftSaveRequest,
   DraftSaveSuccessResponse,
+  DraftValidationErrorResponse,
+  LegacyPromptSourceResponse,
   ModelAgentNode,
+  ProtectedStageView,
 } from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
@@ -906,7 +911,155 @@ const mockAssemblyRules = {
       terminal: true,
     },
   ],
-} satisfies AssemblyRules;
+} satisfies AssemblyRulesV1;
+
+export const V1_PROTECTED_IDENTITY = { version: 1, digest: "b".repeat(64) } satisfies ContentIdentity;
+export const V2_PROTECTED_IDENTITY = { version: 2, digest: "e".repeat(64) } satisfies ContentIdentity;
+
+export const EMPTY_V2_ASSEMBLY_RULES = {
+  format_version: 2,
+  custom_blocks: [],
+} satisfies AssemblyRulesV2;
+
+/**
+ * The exact protected-stage rows the Task 4 route derives for each bundle. Stage
+ * identities, labels, conditions, and legal anchors mirror the server contract;
+ * every `display_text` is a synthetic fixture value, which is what proves the
+ * client renders server bytes instead of reconstructing protected text.
+ */
+function v1ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
+  const locked = { locked: true, bundle_version: 1, bundle_digest: V1_PROTECTED_IDENTITY.digest } as const;
+  const rows: ProtectedStageView[] = [];
+  if (agentKey === "build_reviewer") {
+    rows.push({
+      stage_id: "build_reviewer_deck_brief",
+      label: "Deck-brief re-review",
+      condition: "payload_has_deck_brief",
+      display_text: "Synthetic v1 deck-brief re-review text.",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    });
+  }
+  rows.push(
+    {
+      stage_id: "slide_frame_constraints",
+      label: "Slide frame constraints",
+      condition: "design_system_inactive",
+      display_text: "Synthetic v1 slide frame constraints text.",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "design_system_precedence",
+      label: "Design system precedence",
+      condition: "design_system_active",
+      display_text: "Synthetic v1 design system precedence text.",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "runtime_payload",
+      label: "Graph Version 1 runtime payload",
+      condition: "always",
+      display_text: "json.dumps(payload, indent=2, default=str)",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "structured_output_binding",
+      label: "Structured-output binding",
+      condition: "always",
+      display_text: "langchain.with_structured_output",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+  );
+  return rows;
+}
+
+export function v2ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
+  const locked = { locked: true, bundle_version: 2, bundle_digest: V2_PROTECTED_IDENTITY.digest } as const;
+  const rows: ProtectedStageView[] = [];
+  if (agentKey === "build_reviewer") {
+    rows.push(
+      {
+        stage_id: "build_reviewer_criteria",
+        label: "Build Reviewer criteria",
+        condition: "always",
+        display_text: "Synthetic v2 Build Reviewer criteria text.",
+        legal_adjacent_custom_anchors: [],
+        ...locked,
+      },
+      {
+        stage_id: "build_reviewer_deck_brief",
+        label: "Deck-brief re-review",
+        condition: "payload_has_deck_brief",
+        display_text: "Synthetic v2 deck-brief re-review text.",
+        legal_adjacent_custom_anchors: ["after_deck_brief"],
+        ...locked,
+      },
+    );
+  }
+  rows.push(
+    {
+      stage_id: "slide_frame_constraints",
+      label: "Slide frame constraints",
+      condition: "design_system_inactive",
+      display_text: "Synthetic v2 slide frame constraints text.",
+      legal_adjacent_custom_anchors: ["after_environment_constraints"],
+      ...locked,
+    },
+    {
+      stage_id: "design_system_precedence",
+      label: "Design system precedence",
+      condition: "design_system_active",
+      display_text: "Synthetic v2 design system precedence text.",
+      legal_adjacent_custom_anchors: ["after_environment_constraints"],
+      ...locked,
+    },
+    {
+      stage_id: "untrusted_data_notice",
+      label: "Role-specific untrusted-data notice",
+      condition: "always",
+      display_text: `Synthetic v2 untrusted-data notice for ${agentKey}.`,
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "untrusted_data_open",
+      label: "Untrusted-data opening delimiter",
+      condition: "always",
+      display_text: "<<<UNTRUSTED_DATA>>>",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "runtime_payload",
+      label: "Canonical runtime payload",
+      condition: "always",
+      display_text: "json.dumps(payload, indent=2, default=str, sort_keys=True)",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "untrusted_data_close",
+      label: "Untrusted-data closing delimiter",
+      condition: "always",
+      display_text: "<<<END_UNTRUSTED_DATA>>>",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "structured_output_binding",
+      label: "Structured-output binding",
+      condition: "always",
+      display_text: "langchain.with_structured_output",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+  );
+  return rows;
+}
 
 const workbenchAgentNames = [
   ["architect", "Architect"],
@@ -933,8 +1086,9 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
       additional_optional_fields: agentKey === "architect" ? ["speaker_notes"] : [],
     },
     assembly_rules: mockAssemblyRules,
-    protected_assembly: { version: 1, digest: "b".repeat(64) },
+    protected_assembly: structuredClone(V1_PROTECTED_IDENTITY),
     schema_contract: { version: 1, digest: "c".repeat(64) },
+    protected_stage_view: v1ProtectedStageView(agentKey),
   };
 
   return {
@@ -1066,3 +1220,138 @@ export function syntheticDraftSaveConflict(
     },
   };
 }
+
+// ============================================
+// #265 protected-assembly upgrade and legacy-source fixtures
+// ============================================
+
+/** The two roles whose Graph Version 1 prompt is a protected legacy composite. */
+export const LEGACY_COMPOSITE_ROLES = ['data_analyst', 'build_reviewer'] as const;
+
+/** Exact server-authored v2 targets. The client may never derive these. */
+export const V2_AUTHORED_PROMPT: Record<AgentKey, string> = {
+  architect: 'Synthetic Architect authored-only v2 prompt.',
+  data_analyst: 'Synthetic Data Analyst authored-only v2 prompt.',
+  builder: 'Synthetic Builder authored-only v2 prompt.',
+  build_reviewer: 'Synthetic Build Reviewer authored-only v2 prompt.',
+  fixer: 'Synthetic Fixer authored-only v2 prompt.',
+  fix_reviewer: 'Synthetic Fix Reviewer authored-only v2 prompt.',
+  deck_reviewer: 'Synthetic Deck Reviewer authored-only v2 prompt.',
+};
+
+/**
+ * An edited legacy prompt with a combining mark, a non-breaking space, a trailing
+ * space, and a trailing newline, so byte-exact retention is observable.
+ */
+export const DIRTY_LEGACY_PROMPT = 'Edited énonce legacy composite \n';
+
+/** The exact published Graph Version 1 prompt the source route returns. */
+export const PUBLISHED_V1_PROMPT_SOURCE: Record<'data_analyst' | 'build_reviewer', string> = {
+  data_analyst: 'Synthetic published Data Analyst Graph Version 1 composite prompt.',
+  build_reviewer: 'Synthetic published Build Reviewer Graph Version 1 composite prompt.',
+};
+
+/** A definition already migrated to the v2 protected bundle and v2 rules. */
+export function syntheticV2DraftDefinition(
+  agentKey: AgentKey,
+  overrides: Partial<DraftDefinition> = {},
+): DraftDefinition {
+  return {
+    ...structuredClone(syntheticDraftDefinitions[agentKey]),
+    prompt_text: V2_AUTHORED_PROMPT[agentKey],
+    assembly_rules: structuredClone(EMPTY_V2_ASSEMBLY_RULES),
+    protected_assembly: structuredClone(V2_PROTECTED_IDENTITY),
+    protected_stage_view: v2ProtectedStageView(agentKey),
+    candidate_hash: 'f'.repeat(64),
+    ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/** The 200 body the protected-assembly-upgrade route returns. */
+export function syntheticUpgradeSuccess(
+  agentKey: AgentKey,
+  lockVersion: number,
+  definitionOverrides: Partial<DraftDefinition> = {},
+): DraftSaveSuccessResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@example.com',
+      updated_at: `2026-09-22T13:00:0${lockVersion}Z`,
+    },
+    definition: syntheticV2DraftDefinition(agentKey, definitionOverrides),
+    changed: true,
+  };
+}
+
+/**
+ * A 409 for an operation that submitted no candidate. `client_candidate` is exactly
+ * `null`; `v2Roles` names the roles the winning writer already moved to v2.
+ */
+export function syntheticNullCandidateConflict(
+  expectedLockVersion: number,
+  currentLockVersion: number,
+  v2Roles: readonly AgentKey[] = [],
+): DraftSaveConflictResponse {
+  const definitions = structuredClone(syntheticDraftDefinitions);
+  for (const agentKey of v2Roles) definitions[agentKey] = syntheticV2DraftDefinition(agentKey);
+  return {
+    code: 'stale_draft',
+    expected_lock_version: expectedLockVersion,
+    current_lock_version: currentLockVersion,
+    client_candidate: null,
+    server: {
+      draft: {
+        ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+        lock_version: currentLockVersion,
+      },
+      definitions,
+    },
+  };
+}
+
+/** The 200 body the legacy-prompt-source route returns; this route never writes. */
+export function syntheticLegacyPromptSource(
+  agentKey: 'data_analyst' | 'build_reviewer',
+  lockVersion = 0,
+): LegacyPromptSourceResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+    },
+    agent_key: agentKey,
+    lock_version: lockVersion,
+    source: {
+      prompt_text: PUBLISHED_V1_PROMPT_SOURCE[agentKey],
+      revision_id: 12,
+      content_hash: 'a'.repeat(64),
+    },
+  };
+}
+
+/** The exact ordered 422 the upgrade route returns for an edited legacy prompt. */
+export const MANUAL_RESOLUTION_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'prompt_text',
+      code: 'legacy_prompt_manual_resolution_required',
+      message: 'Legacy protected prompt content was edited. Restore the exact Graph Version 1 '
+        + 'prompt before upgrading, then reapply authored edits.',
+    },
+  ],
+};
+
+/** The exact ordered 422 the upgrade route returns for an already-current draft. */
+export const ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'protected_assembly.version',
+      code: 'already_current',
+      message: 'Protected assembly is already current.',
+    },
+  ],
+};

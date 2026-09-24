@@ -1,10 +1,19 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
-import type { AgentKey, ModelAgentNode } from '../../../api/agentDefinitions';
+import type {
+  AgentKey,
+  AssemblyCondition,
+  CustomAnchor,
+  DraftFieldError,
+  ModelAgentNode,
+} from '../../../api/agentDefinitions';
+import { AssemblyEditor } from './AssemblyEditor';
 import {
+  definitionFormatVersion,
   draftStatus,
   editableFormsEqual,
   formFromCandidate,
   formFromDefinition,
+  isLegacyCompositeRole,
   type DraftEditorEntry,
   type EditableDraftField,
   type EditableModelDraftForm,
@@ -20,17 +29,42 @@ const TAB_LABELS: Record<DefinitionTab, string> = {
   assembly: 'Assembly',
 };
 
+/** The exact upgrade-only code that requires manual prompt resolution. */
+export const MANUAL_RESOLUTION_CODE = 'legacy_prompt_manual_resolution_required';
+
+/** Every server issue is surfaced in its exact order; this only chooses the tab link. */
+function issueTab(field: string): DefinitionTab {
+  if (field === 'prompt_text' || field === 'candidate.prompt_text') return 'prompt';
+  return 'assembly';
+}
+
 interface DefinitionEditorProps {
   agentKey: AgentKey;
   node: ModelAgentNode;
   entry: DraftEditorEntry;
   saveDisabled: boolean;
+  /** True while any Save, Upgrade, or SourceRecovery request is in flight. */
+  operationsDisabled: boolean;
+  /** True only while this affected v1 role's own Upgrade request is in flight. */
+  promptDisabled: boolean;
   onEdit(agentKey: AgentKey, field: EditableDraftField, value: string): void;
   onSave(agentKey: AgentKey): Promise<void>;
+  onUpgradeProtectedAssembly(agentKey: AgentKey): Promise<void>;
+  onRestorePublishedV1Prompt(agentKey: AgentKey): Promise<void>;
+  onAddAssemblyBlock(agentKey: AgentKey, anchor: CustomAnchor): void;
+  onEditAssemblyBlockText(agentKey: AgentKey, blockId: string, text: string): void;
+  onEditAssemblyBlockCondition(
+    agentKey: AgentKey,
+    blockId: string,
+    condition: AssemblyCondition,
+  ): void;
+  onDeleteAssemblyBlock(agentKey: AgentKey, blockId: string): void;
+  onMoveAssemblyBlock(agentKey: AgentKey, blockId: string, direction: 'up' | 'down'): void;
   onReloadServer(agentKey: AgentKey): void;
   onKeepLocal(agentKey: AgentKey): void;
-  onRestoreRecovery(agentKey: AgentKey): void;
-  onDismissRecovery(agentKey: AgentKey): void;
+  onRestoreSavedPrompt(agentKey: AgentKey): void;
+  onRestoreRetained(agentKey: AgentKey, retainedId: string): void;
+  onDiscardRetained(agentKey: AgentKey, retainedId: string): void;
 }
 
 function FieldError({ id, message }: { id: string; message?: string }) {
@@ -49,6 +83,11 @@ function DraftValues({ label, values }: { label: string; values: EditableModelDr
         <dt>Temperature</dt><dd>{values.temperature}</dd>
         <dt>Maximum tokens</dt><dd>{values.max_tokens}</dd>
         <dt>Top-p</dt><dd>{values.top_p}</dd>
+        {values.assembly_rules !== null && (
+          <>
+            <dt>Custom blocks</dt><dd>{values.assembly_rules.custom_blocks.length}</dd>
+          </>
+        )}
       </dl>
     </div>
   );
@@ -59,12 +98,22 @@ export function DefinitionEditor({
   node,
   entry,
   saveDisabled,
+  operationsDisabled,
+  promptDisabled,
   onEdit,
   onSave,
+  onUpgradeProtectedAssembly,
+  onRestorePublishedV1Prompt,
+  onAddAssemblyBlock,
+  onEditAssemblyBlockText,
+  onEditAssemblyBlockCondition,
+  onDeleteAssemblyBlock,
+  onMoveAssemblyBlock,
   onReloadServer,
   onKeepLocal,
-  onRestoreRecovery,
-  onDismissRecovery,
+  onRestoreSavedPrompt,
+  onRestoreRetained,
+  onDiscardRetained,
 }: DefinitionEditorProps) {
   const [activeTab, setActiveTab] = useState<DefinitionTab>('prompt');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -91,11 +140,39 @@ export function DefinitionEditor({
   const conflictServer = entry.conflict
     ? formFromDefinition(entry.conflict.server.definitions[agentKey])
     : null;
-  const conflictSubmitted = entry.conflict
+  const conflictSubmitted = entry.conflict && entry.conflict.client_candidate !== null
     ? formFromCandidate(entry.conflict.client_candidate)
     : null;
   const currentDiffersFromSubmitted = conflictSubmitted !== null
     && !editableFormsEqual(entry.local, conflictSubmitted);
+
+  const savedFormatVersion = definitionFormatVersion(entry.saved);
+  const legacyRole = isLegacyCompositeRole(agentKey) && savedFormatVersion === 1;
+  const promptDirty = entry.local.prompt_text !== entry.saved.prompt_text;
+  const manualResolutionRequired = entry.responseIssues.some(
+    (issue) => issue.code === MANUAL_RESOLUTION_CODE,
+  );
+
+  const issueList = (issues: DraftFieldError[]) => (
+    <section
+      role="region"
+      aria-labelledby={`${agentKey}-issues-heading`}
+      className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+    >
+      <h4 id={`${agentKey}-issues-heading`} className="font-semibold">Server rejected this request</h4>
+      <ol className="mt-2 space-y-2">
+        {issues.map((issue) => (
+          <li key={`${issue.field}:${issue.code}`}>
+            <p className="font-mono text-xs">{`${issue.field} — ${issue.code}`}</p>
+            <p>{issue.message}</p>
+            <button type="button" onClick={() => selectTab(issueTab(issue.field), true)}>
+              {`Go to ${TAB_LABELS[issueTab(issue.field)]} tab`}
+            </button>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
 
   return (
     <>
@@ -118,6 +195,7 @@ export function DefinitionEditor({
           {entry.requestError}
         </div>
       )}
+      {entry.responseIssues.length > 0 && issueList(entry.responseIssues)}
       {entry.conflict && (
         <section
           role="region"
@@ -139,18 +217,52 @@ export function DefinitionEditor({
           </div>
         </section>
       )}
-      {entry.recoveryForm && (
+      {entry.retainedForms.length > 0 && (
         <section
           role="region"
           aria-labelledby={`${agentKey}-recovery-heading`}
           className="mb-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900"
         >
           <h4 id={`${agentKey}-recovery-heading`} className="font-semibold">Values retained for recovery</h4>
-          <div className="mt-2"><DraftValues label="Retained values" values={entry.recoveryForm} /></div>
-          <div className="mt-2 flex gap-2">
-            <button type="button" onClick={() => onRestoreRecovery(agentKey)}>Restore retained values</button>
-            <button type="button" onClick={() => onDismissRecovery(agentKey)}>Dismiss</button>
-          </div>
+          <ol className="mt-2 space-y-3">
+            {entry.retainedForms.map((retained, index) => (
+              <li
+                key={retained.id}
+                role="group"
+                // Distinct from the inner values group's name. A nested pair whose names
+                // are prefix-related resolves to two elements in any name-substring
+                // query, which is the same collision class as the stage-label heading.
+                aria-label={`Retained alternative ${index + 1}`}
+                data-retained-id={retained.id}
+              >
+                <p className="text-xs">{retained.reason}</p>
+                <div className="mt-1">
+                  <DraftValues label={`Retained values ${index + 1}`} values={retained.form} />
+                </div>
+                <label
+                  htmlFor={`${agentKey}-${retained.id}-manual`}
+                  className="mt-2 block text-xs font-medium"
+                >
+                  Manual-only prompt bytes
+                </label>
+                <textarea
+                  id={`${agentKey}-${retained.id}-manual`}
+                  readOnly
+                  aria-readonly="true"
+                  value={retained.manualOnlyPrompt}
+                  className="mt-1 min-h-16 w-full rounded border border-blue-300 p-2 font-mono text-xs"
+                />
+                <div className="mt-2 flex gap-2">
+                  <button type="button" onClick={() => onRestoreRetained(agentKey, retained.id)}>
+                    Restore retained values
+                  </button>
+                  <button type="button" onClick={() => onDiscardRetained(agentKey, retained.id)}>
+                    Discard retained values
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ol>
         </section>
       )}
 
@@ -199,10 +311,26 @@ export function DefinitionEditor({
           id={`${agentKey}-prompt`}
           aria-describedby={entry.fieldErrors.prompt_text ? `${agentKey}-prompt-error` : undefined}
           value={entry.local.prompt_text}
+          disabled={promptDisabled}
           onChange={(event) => onEdit(agentKey, 'prompt_text', event.currentTarget.value)}
           className="min-h-56 w-full rounded-md border border-gray-300 p-3 font-mono text-sm"
         />
         <FieldError id={`${agentKey}-prompt-error`} message={entry.fieldErrors.prompt_text} />
+        {legacyRole && promptDirty && (
+          <button type="button" onClick={() => onRestoreSavedPrompt(agentKey)} className="mt-2">
+            Restore saved prompt
+          </button>
+        )}
+        {legacyRole && manualResolutionRequired && (
+          <button
+            type="button"
+            disabled={operationsDisabled}
+            onClick={() => { void onRestorePublishedV1Prompt(agentKey); }}
+            className="mt-2 block"
+          >
+            Restore published Graph Version 1 prompt
+          </button>
+        )}
       </div>
 
       <div
@@ -285,14 +413,30 @@ export function DefinitionEditor({
         role="tabpanel"
         aria-labelledby={`${agentKey}-assembly-tab`}
         hidden={activeTab !== 'assembly'}
-        className="min-h-72 rounded-md border border-gray-200 bg-gray-50 p-4"
+        className="min-h-72 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4"
       >
-        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-gray-800">
-          {JSON.stringify({
-            assembly_rules: entry.saved.assembly_rules,
-            protected_assembly: entry.saved.protected_assembly,
-          }, null, 2)}
-        </pre>
+        {savedFormatVersion === 1 && (
+          <button
+            type="button"
+            disabled={operationsDisabled}
+            onClick={() => { void onUpgradeProtectedAssembly(agentKey); }}
+            className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-gray-300"
+          >
+            Upgrade protected assembly
+          </button>
+        )}
+        <AssemblyEditor
+          agentKey={agentKey}
+          protectedStageView={entry.saved.protected_stage_view}
+          rules={entry.local.assembly_rules}
+          protectedAssembly={entry.saved.protected_assembly}
+          disabled={operationsDisabled}
+          onAddBlock={(anchor) => onAddAssemblyBlock(agentKey, anchor)}
+          onChangeText={(blockId, text) => onEditAssemblyBlockText(agentKey, blockId, text)}
+          onChangeCondition={(blockId, condition) => onEditAssemblyBlockCondition(agentKey, blockId, condition)}
+          onDeleteBlock={(blockId) => onDeleteAssemblyBlock(agentKey, blockId)}
+          onMoveBlock={(blockId, direction) => onMoveAssemblyBlock(agentKey, blockId, direction)}
+        />
       </div>
     </>
   );

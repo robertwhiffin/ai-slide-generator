@@ -40,9 +40,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.databricks_client import DatabricksClientError
 from src.core.defaults import DEFAULT_CONFIG
-from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE, UNTRUSTED_DATA_NOTICE
 from src.core.skills import load_skill
-from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW, build_instructions
 from src.domain.skill_io import OUTPUT_SCHEMAS
 from src.services.agent_runtime_identity import (
     AgentInvocationIdentity,
@@ -50,13 +48,12 @@ from src.services.agent_runtime_identity import (
     LoggingAgentInvocationIdentitySink,
     RecordingAgentInvocationIdentitySink,
 )
-from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_definition_manifest import (
     AssemblyRules,
     DefinitionContent,
-    assembly_rules_for,
     definition_content_hash,
+    load_graph_v1_manifest,
 )
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
@@ -65,6 +62,12 @@ from src.services.persisted_graph_release import (
     PinnedInvocationEndpointError,
     ResolvedDefinition,
     ResolvedDefinitionLoader,
+)
+from src.services.prompt_assembler import (
+    PromptAssembler,
+    PromptAssemblyRejected,
+    ProtectedAssemblyBundleUnavailable,
+    ResolvedPromptStage,
 )
 
 MODEL_DRIVEN_AGENT_KEYS = (
@@ -77,7 +80,6 @@ MODEL_DRIVEN_AGENT_KEYS = (
     "deck_reviewer",
 )
 _MODEL_DRIVEN_AGENT_KEY_SET = frozenset(MODEL_DRIVEN_AGENT_KEYS)
-
 _PROTECTED_PROMPT_VERSION = 1
 _PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -100,10 +102,6 @@ class AgentRuntimeError(RuntimeError):
 
 class UnknownAgentKeyError(AgentRuntimeError):
     """The requested key is not one of the seven model-driven roles."""
-
-
-class ProtectedPromptBundleUnavailableError(AgentRuntimeError):
-    """A definition names protected prompt material this deployment cannot resolve."""
 
 
 class IncompatibleSchemaContractError(AgentRuntimeError):
@@ -153,6 +151,7 @@ class AgentDefinition:
     protected_prompt: ProtectedPromptIdentity
     schema_contract: SchemaContractIdentity
     legacy_tool_grants: tuple[str, ...]
+    assembly_rules: AssemblyRules
 
 
 @dataclass(frozen=True)
@@ -163,6 +162,7 @@ class AgentInvocationDiagnostics:
     model_configuration: AgentModelConfiguration
     protected_prompt: ProtectedPromptIdentity
     schema_contract: SchemaContractIdentity
+    assembly_stages: tuple[ResolvedPromptStage, ...]
     latency_ms: float
 
 
@@ -187,14 +187,6 @@ class AgentModelAdapter(Protocol):
     ) -> BaseModel: ...
 
 
-@dataclass(frozen=True)
-class _ProtectedPromptBundle:
-    identity: ProtectedPromptIdentity
-    slide_frame_constraints: str
-    design_system_precedence: str
-    build_reviewer_deck_brief: str
-
-
 def _canonical_digest(material: Any) -> str:
     serialized = json.dumps(
         material,
@@ -203,23 +195,6 @@ def _canonical_digest(material: Any) -> str:
         ensure_ascii=False,
     )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _protected_prompt_material() -> dict[str, Any]:
-    """Return every code-owned input covered by protected prompt identity v1."""
-    return {
-        "build_reviewer_criteria": build_instructions(),
-        "build_reviewer_deck_brief": DECK_BRIEF_REVIEW,
-        "design_system_precedence": DESIGN_SYSTEM_PRECEDENCE,
-        "payload_serialization": {
-            "default": "str",
-            "format": "json",
-            "indent": 2,
-        },
-        "slide_frame_constraints": _SLIDE_FRAME_CONSTRAINTS,
-        "structured_output_binding": "langchain.with_structured_output",
-        "untrusted_data_notice": UNTRUSTED_DATA_NOTICE,
-    }
 
 
 def _schema_contract_material(agent_key: str, schema: type[BaseModel]) -> dict[str, Any]:
@@ -298,33 +273,6 @@ def _schema_validator_material(schema: type[BaseModel]) -> list[dict[str, str]]:
     return [validators[key] for key in sorted(validators)]
 
 
-class _ProtectedPromptBundleRegistry:
-    def __init__(self) -> None:
-        actual_digest = _canonical_digest(_protected_prompt_material())
-        if actual_digest != _PROTECTED_PROMPT_DIGEST:
-            raise RuntimeContractIdentityError(
-                "Protected prompt material changed without an identity update: "
-                f"expected {_PROTECTED_PROMPT_DIGEST}, calculated {actual_digest}"
-            )
-        self._current = _ProtectedPromptBundle(
-            identity=ProtectedPromptIdentity(
-                version=_PROTECTED_PROMPT_VERSION,
-                digest=_PROTECTED_PROMPT_DIGEST,
-            ),
-            slide_frame_constraints=_SLIDE_FRAME_CONSTRAINTS,
-            design_system_precedence=DESIGN_SYSTEM_PRECEDENCE,
-            build_reviewer_deck_brief=DECK_BRIEF_REVIEW,
-        )
-
-    def resolve(self, identity: ProtectedPromptIdentity) -> _ProtectedPromptBundle:
-        if identity != self._current.identity:
-            raise ProtectedPromptBundleUnavailableError(
-                "Protected prompt bundle is unavailable: "
-                f"version={identity.version}, digest={identity.digest}"
-            )
-        return self._current
-
-
 class _SchemaContractRegistry:
     def __init__(self) -> None:
         self._contracts: dict[str, tuple[SchemaContractIdentity, type[BaseModel]]] = {}
@@ -391,6 +339,11 @@ class CodeOwnedAgentDefinitionSource:
             )
 
         llm = cast(dict[str, Any], DEFAULT_CONFIG["llm"])
+        persisted_v1 = next(
+            definition
+            for definition in load_graph_v1_manifest().definitions
+            if definition.agent_key == agent_key
+        )
         return AgentDefinition(
             agent_key=agent_key,
             definition_version=skill.version,
@@ -404,6 +357,7 @@ class CodeOwnedAgentDefinitionSource:
             protected_prompt=self._protected_prompt,
             schema_contract=self._schemas.identity_for(agent_key),
             legacy_tool_grants=tuple(skill.tool_grants),
+            assembly_rules=persisted_v1.assembly_rules,
         )
 
 
@@ -501,7 +455,7 @@ class CompatibilityResolvedDefinitionLoader:
                     "field_overrides": {},
                     "additional_optional_fields": [],
                 },
-                "assembly_rules": assembly_rules_for(definition.agent_key),
+                "assembly_rules": definition.assembly_rules,
                 "protected_assembly": definition.protected_prompt.__dict__,
                 "schema_contract": {
                     "version": definition.schema_contract.version,
@@ -532,7 +486,7 @@ class AgentRuntime:
         self._persisted_release_loader = persisted_release_loader
         self._model_adapter = model_adapter
         self._identity_sink = identity_sink
-        self._protected_prompts = _ProtectedPromptBundleRegistry()
+        self._prompt_assembler = PromptAssembler()
         self._schema_contracts = _SchemaContractRegistry()
 
     @classmethod
@@ -591,11 +545,10 @@ class AgentRuntime:
                 raise IncompatibleSchemaContractError(
                     "Graph Version 1 requires an empty schema overlay"
                 )
-            protected_prompt = self._protected_prompts.resolve(
-                ProtectedPromptIdentity(
-                    version=content.protected_assembly.version,
-                    digest=content.protected_assembly.digest,
-                )
+            self._prompt_assembler.resolve_bundle(content.protected_assembly)
+            protected_prompt = ProtectedPromptIdentity(
+                version=content.protected_assembly.version,
+                digest=content.protected_assembly.digest,
             )
             schema_identity = SchemaContractIdentity(
                 agent_key=definition.agent_key,
@@ -603,10 +556,18 @@ class AgentRuntime:
                 digest=content.schema_contract.digest,
             )
             schema = self._schema_contracts.resolve(definition.agent_key, schema_identity)
-            prompt = self._assemble_v1_prompt(content, protected_prompt, payload, assembly_context)
-        except ProtectedPromptBundleUnavailableError as exc:
+            assembled = self._prompt_assembler.assemble(
+                definition=content,
+                payload=payload,
+                context=assembly_context,
+            )
+        except ProtectedAssemblyBundleUnavailable as exc:
             raise PersistedConfigurationUnavailableError(
                 code="protected_bundle_unavailable"
+            ) from exc
+        except PromptAssemblyRejected as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="invalid_persisted_definition"
             ) from exc
         except IncompatibleSchemaContractError as exc:
             raise PersistedConfigurationUnavailableError(
@@ -623,6 +584,7 @@ class AgentRuntime:
             max_tokens=int(content.model.max_tokens),
             top_p=float(content.model.top_p),
         )
+        prompt = assembled.prompt
         identity = AgentInvocationIdentity(
             graph_version=definition.graph_version,
             graph_release_id=definition.graph_release_id,
@@ -657,45 +619,12 @@ class AgentRuntime:
                 definition_version=definition.agent_definition_revision_id,
                 assembled_prompt=prompt,
                 model_configuration=configuration,
-                protected_prompt=protected_prompt.identity,
+                protected_prompt=protected_prompt,
                 schema_contract=schema_identity,
+                assembly_stages=assembled.stages,
                 latency_ms=latency_ms,
             ),
         )
-
-    @staticmethod
-    def _assemble_v1_prompt(
-        content: DefinitionContent,
-        protected_prompt: _ProtectedPromptBundle,
-        payload: dict[str, Any],
-        context: AgentAssemblyContext,
-    ) -> str:
-        expected = AssemblyRules.model_validate(assembly_rules_for(content.agent_key))
-        if content.assembly_rules != expected:
-            raise ValueError("persisted assembly rules do not match Graph Version 1")
-        parts: list[str] = []
-        for index, block in enumerate(content.assembly_rules.blocks):
-            if block.kind == "authored_prompt":
-                parts.append(content.prompt_text)
-            elif block.kind == "protected":
-                enabled = {
-                    "payload_has_deck_brief": bool(payload.get("deck_brief")),
-                    "design_system_active": context.design_system_active,
-                    "design_system_inactive": not context.design_system_active,
-                }[block.condition]
-                if enabled:
-                    parts.append(getattr(protected_prompt, block.name))
-            elif block.kind == "payload_json":
-                parts.append(json.dumps(payload, indent=2, default=str))
-            elif block.kind == "structured_output_binding":
-                if index != len(content.assembly_rules.blocks) - 1 or not block.terminal:
-                    raise ValueError("structured output binding must be terminal")
-            else:  # pragma: no cover - DefinitionContent's discriminated union
-                raise ValueError("unknown persisted assembly block")
-        terminal = content.assembly_rules.blocks[-1]
-        if terminal.kind != "structured_output_binding" or not terminal.terminal:
-            raise ValueError("structured output binding must be terminal")
-        return content.assembly_rules.separator.join(parts)
 
 
 @lru_cache(maxsize=1)

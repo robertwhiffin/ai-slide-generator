@@ -221,8 +221,26 @@ def test_snapshots_keep_one_content_record_and_responses_flatten_it_in_wire_orde
         "schema_contract",
     ]
     assert set(semantic_fields) == set(type(content).model_fields) - {"agent_key"}
-    assert list(published_body) == ["revision_id", "content_hash", *semantic_fields]
-    assert list(draft_body) == ["base_revision_id", "candidate_hash", *semantic_fields]
+    # #265 appends one server-derived, read-only protected view after the flattened
+    # content record.  It is not part of the persisted content seam.
+    assert list(published_body) == [
+        "revision_id",
+        "content_hash",
+        *semantic_fields,
+        "protected_stage_view",
+    ]
+    assert list(draft_body) == [
+        "base_revision_id",
+        "candidate_hash",
+        *semantic_fields,
+        "protected_stage_view",
+    ]
+    assert "protected_stage_view" not in DEFINITION_CONTENT_COLUMN_NAMES
+    assert "protected_stage_view" not in type(content).model_fields
+    assert published_body["protected_stage_view"] == draft_body["protected_stage_view"]
+    assert all(
+        row["locked"] is True for row in published_body["protected_stage_view"]
+    )
     assert {name: published_body[name] for name in semantic_fields} == (
         content.model_dump(mode="json", exclude={"agent_key"})
     )

@@ -32,6 +32,7 @@ from src.services.agent_runtime import (
     _schema_contract_material,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+from src.services.graph_definition_manifest import AssemblyRulesV1
 from src.services.persisted_graph_release import PersistedConfigurationUnavailableError
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
@@ -205,6 +206,10 @@ def test_code_owned_contract_identities_are_stable_literals():
     assert {
         key: definition.schema_contract.digest for key, definition in definitions.items()
     } == EXPECTED_SCHEMA_DIGESTS
+    assert all(
+        isinstance(definition.assembly_rules, AssemblyRulesV1)
+        for definition in definitions.values()
+    )
 
 
 def test_schema_contract_identity_changes_when_validator_behavior_changes():
@@ -316,6 +321,7 @@ def test_incompatible_schema_contract_fails_before_model_invocation():
 
 def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     output = _output_for("data_analyst")
+    structured_bindings: list[type[BaseModel]] = []
 
     class StructuredModel:
         def invoke(self, prompt: str) -> BaseModel:
@@ -327,6 +333,7 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
             raise AssertionError(f"legacy tool grants must stay inert: {tools}")
 
         def with_structured_output(self, schema):
+            structured_bindings.append(schema)
             assert schema is OUTPUT_SCHEMAS["data_analyst"]
             return StructuredModel()
 
@@ -354,6 +361,7 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     )
 
     assert actual is output
+    assert structured_bindings == [OUTPUT_SCHEMAS["data_analyst"]]
     assert constructed == [
         {
             "endpoint": "databricks-claude-opus-4-6",
@@ -373,3 +381,134 @@ def test_agent_runtime_is_the_only_prompt_and_model_invocation_owner():
     assert not hasattr(skills, "_with_conditional_instructions")
     assert not hasattr(agent_resolution, "assemble_skill_prompt")
     assert not hasattr(agent_resolution, "get_structured_model")
+
+
+def test_runtime_and_nodes_have_no_prompt_serialization_or_binding_bypass():
+    import inspect
+
+    import src.services.agent_runtime as agent_runtime
+    import src.services.graph.nodes as nodes
+
+    runtime_source = inspect.getsource(agent_runtime)
+    node_source = inspect.getsource(nodes)
+    assert "json.dumps(payload" not in runtime_source
+    assert "json.dumps(payload" not in node_source
+    assert runtime_source.count("with_structured_output(") == 1
+    assert "with_structured_output(" not in node_source
+
+
+# ---------------------------------------------------------------------------
+# Task 6: the deck-brief condition's negative case on the runtime path, and the
+# scope guarantee Task 6's manual ``rg`` check asserts, made executable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("payload", "expects_deck_brief"),
+    [
+        ({"position": 2}, False),
+        ({"position": 2, "deck_brief": None}, False),
+        ({"position": 2, "deck_brief": ""}, False),
+        ({"position": 2, "deck_brief": {}}, False),
+        ({"position": 2, "deck_brief": {"argument": "Revenue compounds"}}, True),
+    ],
+)
+def test_runtime_deck_brief_stage_tracks_payload_truthiness(payload, expects_deck_brief):
+    """Catches an unconditional or key-presence-only deck-brief stage in the runtime.
+
+    The positive case alone cannot see a condition forced true, so every falsey
+    payload shape is asserted to omit the stage.
+    """
+    model = RecordingModelAdapter(_output_for("build_reviewer"))
+    runtime = AgentRuntime.compatibility(model_adapter=model)
+
+    runtime.run("build_reviewer", 1, payload, AgentAssemblyContext(design_system_active=False))
+
+    prompt = model.calls[0].prompt
+    assert (DECK_BRIEF_REVIEW in prompt) is expects_deck_brief
+    assert prompt.count(DECK_BRIEF_REVIEW) == int(expects_deck_brief)
+    if not expects_deck_brief:
+        assert prompt == _expected_prompt("build_reviewer", payload, design_system_active=False)
+
+
+@pytest.mark.parametrize("agent_key", ["architect", "data_analyst", "builder", "fixer"])
+def test_non_build_reviewer_roles_never_render_the_deck_brief_stage(agent_key):
+    """Catches a deck-brief stage that leaks onto a role whose rules never declare it."""
+    model = RecordingModelAdapter(_output_for(agent_key))
+    runtime = AgentRuntime.compatibility(model_adapter=model)
+
+    runtime.run(
+        agent_key,
+        1,
+        {"position": 2, "deck_brief": {"argument": "Revenue compounds"}},
+        AgentAssemblyContext(design_system_active=False),
+    )
+
+    assert DECK_BRIEF_REVIEW not in model.calls[0].prompt
+
+
+def test_prompt_assembler_is_the_only_payload_serializer_and_adapter_the_only_binder():
+    """The executable form of Task 6's scope check over the three owning modules.
+
+    Call sites are counted from the parsed AST rather than by substring, because
+    the assembler also carries the serialization signature as *displayed* protected
+    text: a textual count conflates the two and would go quiet if a real call site
+    were added while a display literal was removed.
+    """
+    import ast
+    import inspect
+
+    import src.services.agent_runtime as agent_runtime
+    import src.services.graph.nodes as nodes
+    import src.services.prompt_assembler as prompt_assembler
+
+    sources = {
+        "agent_runtime": inspect.getsource(agent_runtime),
+        "nodes": inspect.getsource(nodes),
+        "prompt_assembler": inspect.getsource(prompt_assembler),
+    }
+
+    def payload_serializations(source: str) -> int:
+        found = 0
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "dumps":
+                continue
+            owner = node.func.value
+            if not isinstance(owner, ast.Name) or owner.id != "json":
+                continue
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Name) and first.id == "payload":
+                found += 1
+        return found
+
+    def structured_bindings(source: str) -> int:
+        return sum(
+            1
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "with_structured_output"
+        )
+
+    assert {name: payload_serializations(source) for name, source in sources.items()} == {
+        "agent_runtime": 0,
+        "nodes": 0,
+        # Exactly one owned serialization per rules format version, and no more.
+        "prompt_assembler": 2,
+    }
+    assert {name: structured_bindings(source) for name, source in sources.items()} == {
+        "agent_runtime": 1,
+        "nodes": 0,
+        "prompt_assembler": 0,
+    }
+
+    # The same guarantee Task 6's ``rg`` check states, in its textual form: neither
+    # the runtime nor the graph nodes mention either owned operation at all.
+    for name in ("agent_runtime", "nodes"):
+        assert "json.dumps(payload" not in sources[name]
+    assert "with_structured_output(" not in sources["nodes"]
+    assert "with_structured_output(" not in sources["prompt_assembler"]
+    # The assembler still declares the binding as data, which is not a call site.
+    assert 'langchain.with_structured_output"' in sources["prompt_assembler"]

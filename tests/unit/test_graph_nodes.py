@@ -26,7 +26,7 @@ import pytest
 
 from src.api.services.slide_repository import is_placeholder_record
 from src.domain.finding import VERDICT_KEY, DeckReviewOutput, make_finding_id
-from src.domain.skill_io import ArchitectOutput, AnalystOutput
+from src.domain.skill_io import AnalystOutput, ArchitectOutput
 from src.services.deck_review_store import compute_deck_digest, get_deck_review
 from src.services.graph import nodes
 from src.services.graph.event_emitter import set_event_emitter
@@ -95,6 +95,22 @@ def _branch_payload(env, position=0, html=None, scripts="", spec=None, **extra):
 
 
 class TestAgentRuntimeSeam:
+    def test_every_production_runtime_call_passes_all_four_pinned_arguments(self):
+        tree = ast.parse(inspect.getsource(nodes))
+        calls = [
+            call
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "run"
+            and isinstance(call.func.value, ast.Call)
+            and isinstance(call.func.value.func, ast.Name)
+            and call.func.value.func.id == "get_agent_runtime"
+        ]
+
+        assert len(calls) == 10
+        assert all(len(call.args) == 4 and call.keywords == [] for call in calls)
+
     def test_model_driven_node_invokes_agent_runtime(self, graph_env, monkeypatch):
         output = architect_build(make_spec((0,)))
         graph_env.skills.set("architect", output)
