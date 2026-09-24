@@ -870,3 +870,69 @@ so it must re-read this correction rather than assume its own increment is the w
 
 Cost if wrong: a privacy posture that holds for every individual diff and fails for their sum, with
 no single review positioned to see it.
+
+## Correction 42 — BLOCKING FIX to correction 36's ruling: the 63 REDs are FOUR causes, not one
+
+Correction 36 attributes Task 3's 63-RED radius to a single cause and rules on that basis. **The
+attribution is wrong**, measured by Task 3's independent reviewer and classified by traceback:
+
+- **57** — adapter doubles returning an empty `model_construct()` shell → `AgentOutputValidationError`
+- **4** — the bound schema is now `…SchemaV1Overlay` rather than canonical (`:276`, `:428`, `deck_reviewer`)
+- **1** — `result.output is output` no longer holds (`test_agent_runtime.py:121`, `deck_reviewer`)
+- **1** — the acceptance suite's `isinstance` guard
+
+Every per-file figure matches (18/7/2/1/34 + 1 = 63); it is the **aggregation** that hid two causes.
+
+**The load-bearing detail Task 4 needs:** the five non-shell failures are all and only
+`deck_reviewer`, because its canonical schema has **no required field**, so an empty shell *survives*
+validation and the **next** assertion fires instead. A Task 4 agent following correction 36 as written
+would see five `deck_reviewer` REDs shaped exactly like a new defect and have no ruling that covers
+them.
+
+**Correction 36's ruling is amended to add:** a runtime contract change also REDs any
+`result.output is output` assertion and any `adapter.calls[...]["schema"] is OUTPUT_SCHEMAS[role]`
+assertion, and those surface precisely on roles whose canonical schema has no required field —
+`deck_reviewer` today — because the empty shell survives validation there.
+
+This was fixed before Task 4 was dispatched, because correction 36 is the artefact Task 4 will read
+when its own composition change lights up the same neighbourhood.
+
+## Correction 43 — supersedes 41 and #262's C-32: BOTH tickets hit the SAME root cause on the same sink
+
+Corrections 41 and #262's C-32 treated two log findings as separate increments on a shared surface.
+They are the **same defect**, and the reviewers found it independently from opposite directions.
+
+**The root cause is a denylist of literal field names where a positive assertion on the permitted set
+is required.** The guard at `tests/unit/test_persisted_agent_runtime.py` iterates six forbidden
+*spellings* and asserts `not hasattr(record, name)`. So:
+
+- **#262's slice 4B** slipped `root_session_id` and `actor_session_id` past the needle `session_id`
+  — verified, 75 passed with a written prohibition broken.
+- **#264's Task 3** can slip `validated_output` past the needle `output` — verified by mutation RM1,
+  which put **the entire canonical model output** into the log record while
+  `…does_not_log_prompt_payload_or_model_output` **passed**, at 0 RED of 264 and 0 of 887. The
+  complementary RM1b proves the mechanism: the same leak spelled `output` REDs 1.
+
+Two tickets, two unrelated fields, one guard, and neither ticket's own tests could see the other's
+breach. **A denylist cannot be closed by adding names**, which is why both fixes are the same fix.
+
+**Binding: replace the six-name `hasattr` denylist with ONE positive assertion** that the record's
+non-intrinsic keys equal exactly `{identity fields, outcome, error_class, additional_fields}`. That
+makes RM1 RED, makes #262's session-ID breach RED, and is the only form that survives two tickets
+editing this sink blind to each other. Whichever ticket integrates second owns the combined
+assertion.
+
+**And the content finding, which neither controller had measured.** On the unmutated tree, up to
+**2240 characters of free-form model-authored prose** reach the log per successful invocation, and the
+registry's own shipped example for `architect` is *"Assumed the request refers to the existing Q2
+deck…"* — paraphrasing the user's request is the field's **purpose**. So `diagnostic_notes` **is**
+model output, which makes the test name `…does_not_log_prompt_payload_or_model_output` **false, not
+merely broad**, and an in-test disclosure cannot repair a false name attached to an assertion that
+does not assert it. Rename it to its guarantee.
+
+The combined line will therefore carry **both session IDs and up to 2240 characters of user-derived
+prose** under a name promising neither. The second integrator must also decide whether the notes
+belong in the log as values at all, or only as a count or key list.
+
+Cost of the original framing: two reviews each fixing their own increment, leaving the guard shape
+that admitted both.
