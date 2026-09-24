@@ -1193,6 +1193,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         is the strict-mode collision this epic has already paid
                         for twice. */}
                     <MixedReleaseWarning
+                      surface="conversation"
                       history={collaborationHistory}
                       loadFailed={collaborationHistoryFailed}
                       isSessionPersisted={isSessionPersisted}
@@ -1489,6 +1490,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
               </button>
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-4">
+              {/* AC5's second surface. Its wording is wholly DISTINCT from the
+                  conversation copy's, not suffixed: this overlay leaves the
+                  conversation copy mounted behind it, and Playwright matches
+                  accessible names by case-insensitive substring, so a suffix
+                  would make the conversation locator ambiguous. The dialog copy
+                  is also the only one that is CLICKABLE while the overlay is up
+                  — the conversation copy fails a pointer-events check behind it,
+                  which is why interactions here scope to a container. */}
+              <MixedReleaseWarning
+                surface="collaboration"
+                history={collaborationHistory}
+                loadFailed={collaborationHistoryFailed}
+                isSessionPersisted={isSessionPersisted}
+              />
               <DeckContributorsManager
                 sessionId={sessionId}
                 onSharingChange={() => setSessionsRefreshKey((k) => k + 1)}

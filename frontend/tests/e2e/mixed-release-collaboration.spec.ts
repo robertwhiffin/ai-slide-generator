@@ -41,6 +41,12 @@ const MIXED_HISTORY = {
   ],
 };
 
+const CONVERSATION_DISCLOSURE = 'Change provenance';
+const CONVERSATION_LIST = 'Contributor releases';
+const COLLABORATION_DISCLOSURE = 'Who changed this deck';
+const COLLABORATION_LIST = 'Release history by contributor';
+const WARNING_TEXT = 'This shared deck has changes from multiple Graph Versions.';
+
 const MIXED_ROW_NAMES = [
   'Contributor 1, Graph Version 2, 3 changes',
   'Contributor 2, Graph Version 1, 2 changes',
@@ -144,7 +150,7 @@ function recordNonGetTo(page: Page, sessionId: string): string[] {
 }
 
 async function openProvenance(page: Page) {
-  const disclosure = page.getByRole('button', { name: 'Change provenance' });
+  const disclosure = page.getByRole('button', { name: CONVERSATION_DISCLOSURE });
   await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
   await disclosure.click();
   await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
@@ -171,7 +177,9 @@ test.describe('mixed-release collaboration', () => {
 
     const list = page.getByRole('list', { name: 'Contributor releases' });
     await expect(list).toHaveCount(1);
-    await expect(page.getByTestId('mixed-release-row')).toHaveCount(MIXED_HISTORY.groups.length);
+    // LITERAL 3, not MIXED_HISTORY.groups.length: a fixture-sourced count
+    // shrinks with the fixture and so cannot fail.
+    await expect(page.getByTestId('mixed-release-row')).toHaveCount(3);
 
     // Each FULL row name is individually addressable under substring matching.
     for (const name of MIXED_ROW_NAMES) {
@@ -181,8 +189,13 @@ test.describe('mixed-release collaboration', () => {
     await expect(page.getByRole('listitem', { name: 'Contributor 1' })).toHaveCount(2);
     await expect(page.getByRole('listitem', { name: 'Contributor 2' })).toHaveCount(1);
 
-    // No identity of any kind reaches the rendered surface.
-    const rendered = (await page.getByTestId('mixed-release-warning').textContent()) ?? '';
+    // No identity of any kind reaches the rendered surface. outerHTML, NOT
+    // textContent: textContent excludes every attribute, including an
+    // `aria-label` on the region root, which is where a leak would be
+    // invisible to a text-only guard while still reaching the accessibility
+    // tree as the region's computed name.
+    const region = page.getByTestId('mixed-release-warning');
+    const rendered = await region.evaluate((el) => el.outerHTML);
     expect(rendered).not.toMatch(UUID_PATTERN);
     expect(rendered).not.toContain('@');
     expect(rendered).not.toContain(SESSION_A);
@@ -287,12 +300,15 @@ test.describe('mixed-release collaboration', () => {
     await expect(unavailable).toHaveAttribute('role', 'status');
 
     // No contributor, no version, no id — and no way to tell a real-but-denied
-    // session from a fabricated one.
-    const rendered = (await page.getByTestId('mixed-release-warning').textContent()) ?? '';
+    // session from a fabricated one. outerHTML, so the root's own attributes
+    // are covered too.
+    const rendered = await page
+      .getByTestId('mixed-release-warning')
+      .evaluate((el) => el.outerHTML);
     expect(rendered).not.toContain(GUESSED_CONTRIBUTOR);
     expect(rendered).not.toMatch(UUID_PATTERN);
     expect(rendered).not.toMatch(/Contributor|Graph Version|Legacy/);
-    await expect(page.getByRole('button', { name: 'Change provenance' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: CONVERSATION_DISCLOSURE })).toHaveCount(0);
 
     // The pinned-version badge is NOT erased by the failure.
     await expect(page.getByTestId('graph-version-status')).toContainText(
@@ -370,5 +386,84 @@ test.describe('mixed-release collaboration', () => {
       (entry) => !entry.endsWith(`/api/sessions/${SESSION_A}/duplicate`),
     );
     expect(unexpected).toEqual([]);
+  });
+
+  test('both AC5 surfaces stay independently addressable with the Share dialog open', async ({ page }) => {
+    await setupMocks(page);
+    await mockSessionDetail(page, SESSION_A, 1, 2, true);
+    await mockCollaborationHistory(page, SESSION_A, MIXED_HISTORY);
+    await allowEditing(page);
+
+    await page.goto(`/sessions/${SESSION_A}/edit`);
+
+    const conversation = page.getByTestId('mixed-release-warning');
+    const collaboration = page.getByTestId('shared-deck-provenance');
+    await expect(conversation).toBeVisible();
+    await expect(collaboration).toHaveCount(0);
+
+    // Expand the conversation copy BEFORE the overlay goes up. Afterwards it is
+    // behind the dialog and fails a pointer-events check — asserted below.
+    await conversation.getByRole('button', { name: CONVERSATION_DISCLOSURE }).click();
+
+    // 'Share' with exact:true. The deck-title button is named 'Shared deck' in
+    // this fixture, so Playwright's default substring matching resolves both and
+    // the click would be a strict-mode violation.
+    await page.getByRole('button', { name: 'Share', exact: true }).click();
+    await expect(collaboration).toBeVisible();
+    await expect(conversation).toBeVisible();
+
+    // Coexistence is real and asserted rather than assumed: the same mandated
+    // sentence is on screen twice, so any unscoped locator for it is ambiguous.
+    await expect(page.getByTestId('mixed-release-warning-text')).toHaveCount(2);
+    await expect(page.getByText(WARNING_TEXT)).toHaveCount(2);
+    await expect(page.getByTestId('mixed-release-disclosure')).toHaveCount(2);
+
+    // And yet every accessible NAME still resolves to exactly one element under
+    // Playwright's DEFAULT substring matching — because the two surfaces use
+    // wholly distinct wording rather than a suffix.
+    await expect(page.getByRole('button', { name: CONVERSATION_DISCLOSURE })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: COLLABORATION_DISCLOSURE })).toHaveCount(1);
+    await expect(page.getByRole('list', { name: CONVERSATION_LIST })).toHaveCount(1);
+
+    // One live region, though the sentence appears twice: only the conversation
+    // surface announces, so the same warning is not read out twice.
+    await expect(page.getByRole('status')).toHaveCount(1);
+
+    // THE REAL OBSTACLE: the conversation copy is visible but sits behind the
+    // overlay, so it cannot receive pointer events. A trial click runs the full
+    // actionability check without acting, and must fail.
+    let blockedByOverlay = false;
+    try {
+      await conversation
+        .getByRole('button', { name: CONVERSATION_DISCLOSURE })
+        .click({ trial: true, timeout: 2000 });
+    } catch {
+      blockedByOverlay = true;
+    }
+    expect(blockedByOverlay).toBe(true);
+    // Its expanded state survives regardless — reads are unaffected.
+    await expect(
+      conversation.getByRole('button', { name: CONVERSATION_DISCLOSURE }),
+    ).toHaveAttribute('aria-expanded', 'true');
+
+    // The dialog copy is on top, so a CONTAINER-SCOPED interaction works. This
+    // is the fix for the overlay, not renaming.
+    await collaboration.getByRole('button', { name: COLLABORATION_DISCLOSURE }).click();
+    await expect(collaboration.getByRole('list', { name: COLLABORATION_LIST })).toHaveCount(1);
+    await expect(collaboration.getByTestId('mixed-release-row')).toHaveCount(3);
+    for (const name of MIXED_ROW_NAMES) {
+      await expect(collaboration.getByRole('listitem', { name })).toHaveCount(1);
+      await expect(conversation.getByRole('listitem', { name })).toHaveCount(1);
+    }
+    // Row names are shared vocabulary, so unscoped they are ambiguous BY
+    // DESIGN once both surfaces are expanded. Recorded so nobody "fixes" it by
+    // renaming rows per surface.
+    await expect(page.getByTestId('mixed-release-row')).toHaveCount(6);
+
+    // No identity leaks on the second surface either.
+    const dialogHtml = await collaboration.evaluate((el) => el.outerHTML);
+    expect(dialogHtml).not.toMatch(UUID_PATTERN);
+    expect(dialogHtml).not.toContain('@');
+    expect(dialogHtml).not.toContain(SESSION_A);
   });
 });
