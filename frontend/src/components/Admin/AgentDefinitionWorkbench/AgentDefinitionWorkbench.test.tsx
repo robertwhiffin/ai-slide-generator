@@ -871,7 +871,11 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
       expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(DIRTY_LEGACY_PROMPT);
 
       const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
-      const retained = within(recovery).getByRole('group', { name: 'Retained values 1' });
+      const retained = within(recovery).getByRole('group', { name: 'Retained alternative 1' });
+      // The entry container and its values group must not be prefix-related, or any
+      // name-substring query resolves to both.
+      expect(within(recovery).getAllByRole('group', { name: /Retained alternative/ })).toHaveLength(1);
+      expect(within(recovery).getAllByRole('group', { name: /Retained values/ })).toHaveLength(1);
       expect(within(retained).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
         .toHaveValue(DIRTY_LEGACY_PROMPT);
       expect(within(retained).getByRole('textbox', { name: 'Manual-only prompt bytes' }))
@@ -910,6 +914,22 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toBeEnabled();
     expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
 
+    // Make the local prompt differ from the saved prompt before recovering, so the two
+    // quarantined alternatives carry distinguishable bytes. Restoring a retained
+    // alternative is the only prompt change that keeps the server verdict on screen.
+    const dirtyAttempt = screen.getByRole('textbox', { name: 'Prompt text' });
+    fireEvent.change(dirtyAttempt, { target: { value: DIRTY_LEGACY_PROMPT } });
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    expect(promptPanel()).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore saved prompt' }));
+    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+    await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(2));
+    expect(promptPanel()).toBeVisible();
+    fireEvent.click(within(screen.getByRole('group', { name: 'Retained alternative 1' }))
+      .getByRole('button', { name: 'Restore retained values' }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(DIRTY_LEGACY_PROMPT);
+
     const recover = screen.getByRole('button', { name: 'Restore published Graph Version 1 prompt' });
     fireEvent.click(recover);
     await waitFor(() => expect(sourceCalls(fetchMock)).toHaveLength(1));
@@ -923,12 +943,18 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     // Recovery never writes: the lock is unchanged and no PUT or second POST fired.
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
     expect(putCalls(fetchMock)).toHaveLength(0);
-    expect(upgradeCalls(fetchMock)).toHaveLength(1);
+    expect(upgradeCalls(fetchMock)).toHaveLength(2);
 
+    // Three alternatives: the refused dirty attempt, then the edited saved form and the
+    // edited local form the recovery quarantined. The last two are deliberately
+    // distinct, so the assertion cannot pass on the wrong order or a duplicated form.
     const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
-    expect(within(recovery).getAllByRole('group', { name: /^Retained values \d+$/ })).toHaveLength(2);
+    expect(within(recovery).getAllByRole('group', { name: /^Retained alternative \d+$/ })).toHaveLength(3);
+    expect(within(recovery).getAllByRole('group', { name: /^Retained values \d+$/ })).toHaveLength(3);
+    expect(savedPrompt).not.toBe(DIRTY_LEGACY_PROMPT);
     expect(within(recovery).getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
-      .map((box) => (box as HTMLTextAreaElement).value)).toEqual([savedPrompt, savedPrompt]);
+      .map((box) => (box as HTMLTextAreaElement).value))
+      .toEqual([DIRTY_LEGACY_PROMPT, savedPrompt, DIRTY_LEGACY_PROMPT]);
   });
 
   it.each([
@@ -1346,6 +1372,65 @@ function GateHarness() {
     </>
   );
 }
+
+describe('prompt-change backstop reaches the retained-forms controls', () => {
+  it.each(['Data Analyst', 'Build Reviewer'] as const)(
+    '%s: restoring an alternative mid-Upgrade restores safe fields but not the prompt',
+    async (displayName) => {
+      let releaseUpgrade!: (response: object) => void;
+      const held = new Promise<object>((resolve) => { releaseUpgrade = resolve; });
+      const agentKey: AgentKey = displayName === 'Data Analyst' ? 'data_analyst' : 'build_reviewer';
+      const fetchMock = mockWorkbenchApi({ upgrade: () => held });
+      render(<AgentDefinitionWorkbench />);
+      await selectRole(displayName);
+      const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
+
+      // Four clicks reach the cell: dirty Upgrade (refused, retains) → Restore saved
+      // prompt → Upgrade (now in flight) → Restore retained values.
+      fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: DIRTY_LEGACY_PROMPT } });
+      fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.66' } });
+      fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+      expect(upgradeCalls(fetchMock)).toHaveLength(0);
+      expect(promptPanel()).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: 'Restore saved prompt' }));
+      fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
+      expect(upgradeCalls(fetchMock)).toHaveLength(1);
+
+      // The prompt control is disabled, but the retained-forms controls are not, which
+      // is why the reducer and not the DOM has to hold the invariant.
+      expect(within(promptPanel()).getByRole('textbox', { name: 'Prompt text' })).toBeDisabled();
+      const alternative = screen.getByRole('group', { name: 'Retained alternative 1' });
+      const restore = within(alternative).getByRole('button', { name: 'Restore retained values' });
+      expect(restore).toBeEnabled();
+      expect(within(alternative).getByRole('button', { name: 'Discard retained values' })).toBeEnabled();
+
+      fireEvent.click(restore);
+
+      // The savable prompt is still authoritative; the safe field was restored.
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(savedPrompt);
+      fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+      expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.66);
+      // The refused prompt is quarantined a second time rather than dropped.
+      const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
+      expect(within(recovery).getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
+        .map((box) => (box as HTMLTextAreaElement).value))
+        .toEqual([DIRTY_LEGACY_PROMPT, DIRTY_LEGACY_PROMPT]);
+      expect(upgradeCalls(fetchMock)).toHaveLength(1);
+      expect(putCalls(fetchMock)).toHaveLength(0);
+
+      // On success the server-authored v2 prompt wins and every byte is kept.
+      releaseUpgrade(apiResponse(200, syntheticUpgradeSuccess(agentKey, 1)));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+      expect(promptPanel()).toBeVisible();
+      expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
+      expect(within(screen.getByRole('region', { name: 'Values retained for recovery' }))
+        .getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
+        .map((box) => (box as HTMLTextAreaElement).value))
+        .toEqual([DIRTY_LEGACY_PROMPT, DIRTY_LEGACY_PROMPT, savedPrompt]);
+    },
+  );
+});
 
 describe('useDraftEditor shared request gate', () => {
   function heldFetch() {

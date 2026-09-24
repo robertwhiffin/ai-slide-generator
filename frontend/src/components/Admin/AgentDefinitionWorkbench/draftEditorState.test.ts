@@ -39,6 +39,7 @@ import {
   draftStatus,
   formFromDefinition,
   retainedFormId,
+  RETAINED_REASONS,
   validateDraftForm,
   type DraftEditorState,
   type EditableModelDraftForm,
@@ -245,6 +246,40 @@ describe('draft save transport', () => {
     for (const path of blockPaths) {
       expect(parseDraftSaveSuccessResponse(setAtPath(valid, path, null, true)), `missing ${path}`).toBeNull();
       expect(parseDraftSaveSuccessResponse(setAtPath(valid, path, null)), `mistyped ${path}`).toBeNull();
+    }
+  });
+
+  it('rejects an unknown extra key at every level of the 200 envelope', () => {
+    const valid = success('architect', 'Architect A2', 1);
+    expect(parseDraftSaveSuccessResponse(valid)).not.toBeNull();
+
+    // `hasExactKeys` checks cardinality as well as membership, so no level may carry
+    // a field the contract does not name. The definition level is the one this ticket
+    // widened, which is why it is pinned here alongside its siblings.
+    const levels = [
+      'extra',
+      'draft.extra',
+      'definition.extra',
+      'definition.model.extra',
+      'definition.schema_overlay.extra',
+      'definition.assembly_rules.extra',
+      'definition.protected_assembly.extra',
+      'definition.schema_contract.extra',
+      'definition.protected_stage_view.0.extra',
+    ];
+    for (const path of levels) {
+      expect(parseDraftSaveSuccessResponse(setAtPath(valid, path, true)), `extra ${path}`).toBeNull();
+    }
+
+    // The same exactness holds for the definitions carried by a conflict envelope.
+    const conflicted = conflict(0, 1);
+    expect(parseDraftSaveConflictResponse(conflicted)).not.toBeNull();
+    for (const path of [
+      'server.definitions.architect.extra',
+      'server.definitions.deck_reviewer.extra',
+      'server.definitions.architect.protected_stage_view.0.extra',
+    ]) {
+      expect(parseDraftSaveConflictResponse(setAtPath(conflicted, path, true)), `extra ${path}`).toBeNull();
     }
   });
 
@@ -1227,10 +1262,11 @@ describe('cross-version authoritative adoption', () => {
     ['data_analyst' as AgentKey, 'upgradeConflicted' as const],
     ['build_reviewer' as AgentKey, 'upgradeConflicted' as const],
   ])('quarantines the displaced %s v1 form on %s for a selected entry', (agentKey, type) => {
-    // A dirty affected prompt can never have its own Upgrade pending, because both
-    // the hook and the reducer refuse to start one. That cell is proved unreachable
-    // by `refuses to start ... Upgrade while its prompt differs`, and the reachable
-    // dirty-plus-upgrade-409 cell is the unselected entry covered below.
+    // An entry cannot *start* its own Upgrade dirty, so this matrix covers the dirty
+    // local prompt under `saveConflicted`. The dirty-prompt-under-Upgrade cell is
+    // reachable after the request is in flight and has its own two tests below:
+    // `a restored alternative cannot dirty the prompt while its Upgrade is in flight`
+    // and `an Upgrade 409 adopts v2 after the prompt was made dirty mid-flight`.
     const dirtyCases = type === 'saveConflicted' ? [false, true] : [false];
     for (const dirty of dirtyCases) {
       let state = createDraftEditorState(workbench());
@@ -1485,5 +1521,176 @@ describe('cross-version authoritative adoption', () => {
     expect(state.byAgent.data_analyst.retainedForms).toHaveLength(1);
     expect(state.byAgent.build_reviewer.retainedForms).toHaveLength(1);
     expect(state.byAgent.architect.retainedForms).toEqual([]);
+  });
+});
+
+// ============================================================
+// #265 fix round 1 — a dirty prompt is reachable *after* an Upgrade starts
+// ============================================================
+
+/**
+ * The exact four-step sequence a UI reaches: the dirty attempt is refused and retained,
+ * the prompt is restored so the Upgrade may start, and then the retained alternative is
+ * restored while the request is still in flight. Only `restoreRetained` can do this, so
+ * it needs the same backstop as `edit`.
+ */
+function pendingUpgradeWithDirtyRestoreAttempt(agentKey: 'data_analyst' | 'build_reviewer') {
+  let state = createDraftEditorState(workbench());
+  const savedPrompt = state.byAgent[agentKey].saved.prompt_text;
+  state = draftEditorReducer(state, { type: 'edit', agentKey, field: 'top_p', value: 0.66 });
+  state = draftEditorReducer(state, {
+    type: 'edit', agentKey, field: 'prompt_text', value: DIRTY_LEGACY_PROMPT,
+  });
+  // Step 1: the dirty Upgrade attempt is refused and the bytes are retained.
+  state = draftEditorReducer(state, { type: 'dirtyLegacyPromptRetained', agentKey });
+  // Step 2: local restore makes the prompt clean again.
+  state = draftEditorReducer(state, { type: 'restoreSavedPrompt', agentKey });
+  expect(state.byAgent[agentKey].local.prompt_text).toBe(savedPrompt);
+  // Step 3: the Upgrade may now start, and does.
+  state = draftEditorReducer(state, { type: 'upgradeStarted', pending: upgradePending(agentKey) });
+  expect(state.pendingSave).toEqual(upgradePending(agentKey));
+  return { state, savedPrompt, retainedId: retainedFormId(agentKey, 1) };
+}
+
+describe('prompt-change backstop during a pending Upgrade', () => {
+  it.each(['data_analyst', 'build_reviewer'] as const)(
+    'a restored alternative cannot dirty the %s prompt while its Upgrade is in flight',
+    (agentKey) => {
+      const { state, savedPrompt, retainedId } = pendingUpgradeWithDirtyRestoreAttempt(agentKey);
+
+      // Step 4: restore the retained alternative mid-flight.
+      const next = draftEditorReducer(state, { type: 'restoreRetained', agentKey, retainedId });
+
+      // The savable prompt stays at the authoritative v1 value, exactly as the
+      // backstop requires for *any* prompt-change action during the request.
+      expect(next.byAgent[agentKey].local.prompt_text).toBe(savedPrompt);
+      expect(next.byAgent[agentKey].local.prompt_text).not.toBe(DIRTY_LEGACY_PROMPT);
+      // The alternative's safe fields are still restored...
+      expect(next.byAgent[agentKey].local.top_p).toBe(0.66);
+      // ...and the refused prompt is appended as manual-only bytes, not dropped.
+      expect(next.byAgent[agentKey].retainedForms.map((item) => item.id)).toEqual([
+        retainedFormId(agentKey, 1), retainedFormId(agentKey, 2),
+      ]);
+      expect(next.byAgent[agentKey].retainedForms[1].source).toBe('pending_prompt_quarantine');
+      expect(next.byAgent[agentKey].retainedForms[1].manualOnlyPrompt).toBe(DIRTY_LEGACY_PROMPT);
+      expect(next.byAgent[agentKey].retainedForms[1].form.prompt_text).toBe(savedPrompt);
+      expect(next.byAgent[agentKey].retainedForms[1].form.top_p).toBe(0.66);
+      // The pending operation is untouched: restoring issues nothing.
+      expect(next.pendingSave).toEqual(state.pendingSave);
+
+      // The same restore with nothing pending is a plain restore, so the guard is
+      // scoped to the in-flight window and does not disable ordinary recovery.
+      const settled = draftEditorReducer(state, {
+        type: 'upgradeFailed', requestId: 1, message: 'Upgrade failed.',
+      });
+      const restored = draftEditorReducer(settled, { type: 'restoreRetained', agentKey, retainedId });
+      expect(restored.byAgent[agentKey].local.prompt_text).toBe(DIRTY_LEGACY_PROMPT);
+      expect(restored.byAgent[agentKey].retainedForms).toHaveLength(1);
+    },
+  );
+
+  it.each(['data_analyst', 'build_reviewer'] as const)(
+    'discarding an alternative mid-flight moves no %s prompt byte',
+    (agentKey) => {
+      const { state, savedPrompt, retainedId } = pendingUpgradeWithDirtyRestoreAttempt(agentKey);
+
+      const next = draftEditorReducer(state, { type: 'discardRetained', agentKey, retainedId });
+
+      // Discard never writes to `local`, which is why it needs no pending guard.
+      expect(next.byAgent[agentKey].local).toEqual(state.byAgent[agentKey].local);
+      expect(next.byAgent[agentKey].local.prompt_text).toBe(savedPrompt);
+      expect(next.byAgent[agentKey].retainedForms).toEqual([]);
+      expect(next.pendingSave).toEqual(state.pendingSave);
+    },
+  );
+
+  it.each(['data_analyst', 'build_reviewer'] as const)(
+    'an Upgrade 409 adopts v2 for %s after the prompt was made dirty mid-flight',
+    (agentKey) => {
+      const { state, savedPrompt, retainedId } = pendingUpgradeWithDirtyRestoreAttempt(agentKey);
+      const dirtied = draftEditorReducer(state, { type: 'restoreRetained', agentKey, retainedId });
+
+      const next = draftEditorReducer(dirtied, {
+        type: 'upgradeConflicted',
+        requestId: 1,
+        conflict: syntheticNullCandidateConflict(0, 1, [agentKey]),
+      });
+
+      const entry = next.byAgent[agentKey];
+      expect(entry.saved.assembly_rules.format_version).toBe(2);
+      expect(entry.local.prompt_text).toBe(V2_AUTHORED_PROMPT[agentKey]);
+      expect(entry.local.assembly_rules).toEqual({ format_version: 2, custom_blocks: [] });
+      expect(entry.local.top_p).toBe(0.66);
+
+      // Three alternatives: the refused dirty attempt, the mid-flight quarantine, and
+      // the displaced local form. Every one is sanitized to v2; every byte is kept.
+      expect(entry.retainedForms.map((item) => item.id)).toEqual([
+        retainedFormId(agentKey, 1), retainedFormId(agentKey, 2), retainedFormId(agentKey, 3),
+      ]);
+      expect(entry.retainedForms.map((item) => item.manualOnlyPrompt))
+        .toEqual([DIRTY_LEGACY_PROMPT, DIRTY_LEGACY_PROMPT, savedPrompt]);
+      for (const retained of entry.retainedForms) {
+        expect(retained.sanitizedFormatVersion).toBe(2);
+        expect(retained.form.prompt_text).toBe(V2_AUTHORED_PROMPT[agentKey]);
+        expect(retained.form.assembly_rules).toEqual({ format_version: 2, custom_blocks: [] });
+      }
+
+      // The immediate PUT carries the authored-only v2 prompt and no retained byte.
+      const validation = validateDraftForm(entry.local);
+      expect(validation.ok).toBe(true);
+      if (validation.ok) {
+        expect(validation.candidate.prompt_text).toBe(V2_AUTHORED_PROMPT[agentKey]);
+        expect(validation.candidate.prompt_text).not.toBe(DIRTY_LEGACY_PROMPT);
+        expect(validation.candidate.prompt_text).not.toBe(savedPrompt);
+      }
+    },
+  );
+
+  it('re-sanitizes a retained record whose format version is stale on restore', () => {
+    // Built directly against the reducer's declared contract. `adoptAuthoritativeDefinition`
+    // sanitizes eagerly, so no legal action sequence leaves a stale record behind — this
+    // pins the mandated restore-time re-application as defence in depth.
+    const base = createDraftEditorState(workbench());
+    const v2Saved = v2Definition('data_analyst');
+    const staleRecord = {
+      id: retainedFormId('data_analyst', 1),
+      source: 'version_adoption' as const,
+      reason: RETAINED_REASONS.version_adoption,
+      form: {
+        ...formFromDefinition(base.byAgent.data_analyst.saved),
+        top_p: 0.44,
+      },
+      manualOnlyPrompt: DIRTY_LEGACY_PROMPT,
+      // Deliberately stale: the form was sanitized against v1 while `saved` is v2.
+      sanitizedFormatVersion: 1 as const,
+    };
+    const stale: DraftEditorState = {
+      ...base,
+      byAgent: {
+        ...base.byAgent,
+        data_analyst: {
+          ...base.byAgent.data_analyst,
+          saved: v2Saved,
+          local: formFromDefinition(v2Saved),
+          retainedForms: [staleRecord],
+          nextRetainedOrdinal: 2,
+        },
+      },
+    };
+    const legacyPrompt = staleRecord.form.prompt_text;
+    expect(legacyPrompt).not.toBe(V2_AUTHORED_PROMPT.data_analyst);
+
+    const next = draftEditorReducer(stale, {
+      type: 'restoreRetained', agentKey: 'data_analyst', retainedId: staleRecord.id,
+    });
+
+    // The stale v1 prompt and absent rules are replaced by the authoritative v2 values...
+    expect(next.byAgent.data_analyst.local.prompt_text).toBe(V2_AUTHORED_PROMPT.data_analyst);
+    expect(next.byAgent.data_analyst.local.prompt_text).not.toBe(legacyPrompt);
+    expect(next.byAgent.data_analyst.local.assembly_rules)
+      .toEqual({ format_version: 2, custom_blocks: [] });
+    // ...while the record's safe field is still restored and its bytes are untouched.
+    expect(next.byAgent.data_analyst.local.top_p).toBe(0.44);
+    expect(next.byAgent.data_analyst.retainedForms[0].manualOnlyPrompt).toBe(DIRTY_LEGACY_PROMPT);
   });
 });
