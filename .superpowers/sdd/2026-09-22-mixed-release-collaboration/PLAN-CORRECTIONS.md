@@ -830,3 +830,50 @@ cannot exist.
 
 Cost if wrong: a reviewer holds the slice to a literal count that no implementation can produce, and
 the loop burns rounds on an unsatisfiable clause.
+
+### C-32 — CORRECTS #264's correction 41: this is a BREACHED WRITTEN CONTRACT, not an uncovered surface
+
+**Controller error, and it matters because the wrong framing would have sent both whole-branch
+reviews looking for a policy decision instead of a violation.**
+
+Correction 41 in #264's ledger states that "neither ticket's privacy contract covers application
+logs". That is false. `docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md:21` covers
+it explicitly, by closed allow-list, and names the prohibited category verbatim:
+
+> Production identity handling is a structured application-log sink containing **only** graph
+> version, release ID, role, revision ID, content hash, outcome, and error class; **it never logs
+> payload, prompt, output, session/user ID**, tools, or slide HTML, and writes no Lakebase/UC trace
+> row.
+
+Seven permitted fields, and "session/user ID" named as prohibited. The controller verified every
+link in the chain:
+
+- `AgentInvocationIdentity` now has **seven** fields, two of which are `root_session_id` and
+  `actor_session_id`.
+- `LoggingAgentInvocationIdentitySink` logs `**identity.__dict__`, so both reach the record.
+- The guard at `tests/unit/test_persisted_agent_runtime.py:839` is
+  `for forbidden in ("prompt", "payload", "output", "session_id", "user_id", "response"): assert not
+  hasattr(record, forbidden)` — an **exact attribute-name** check. `hasattr(record, "session_id")` is
+  False while both new fields are present, so the needle misses.
+- **The suite passes: 75 passed.** A documented prohibition was breached and nothing went red.
+
+That is correction C-24's failure class one level up: a guard that checks a **name** rather than a
+**property**. C-24 concerned a test importing the constant it asserts; this is a test forbidding a
+literal field name rather than pinning the permitted set.
+
+**Ruling: this is Critical and the fix is not optional.** Replace `**identity.__dict__` with an
+explicit `_LOGGED_FIELDS` allow-list, and replace the name-forbidding guard with one that asserts
+the **exact emitted field set** — which closes the naming weakness permanently rather than adding
+one more needle. The plan's bullet 2 requires the fields on the *identity*; it does not require the
+*sink* to emit them, so nothing in the plan is sacrificed by the fix.
+
+If the identifiers are instead to be accepted in the log, the #261 plan text and that guard must be
+amended **explicitly and by the user**, since the prohibition traces to a PRD amendment. Silent
+acceptance is the one outcome to refuse.
+
+Latency note, not mitigation: this is latent only because the root logger sits at WARNING, which
+flips the moment anyone calls the `setup_logging()` that already exists in the repo.
+
+Cost of the original error: both whole-branch reviews would have weighed a policy question that had
+already been decided in writing, and the naming-based guard would have survived to miss the next
+field too.
