@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 import requests
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoesNotExist
 from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
 
@@ -80,14 +81,49 @@ class ModelEndpointCatalog(Protocol):
 _URL_PREFIX = re.compile(r"^\s*(?:https?://|//|[a-z][a-z0-9+.-]*://)", re.IGNORECASE)
 
 
+#: The SDK interpolates the name unescaped into
+#: ``/api/2.0/serving-endpoints/{name}``.  Any separator, query, fragment,
+#: percent-escape or ASCII control character would change which workspace path
+#: the service principal requests, and so would a bare dot segment.
+_PATH_METACHARACTERS = re.compile(r"[/\\?#%\x00-\x1f\x7f]")
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
 def validate_endpoint_name_policy(name: str) -> None:
-    """Reject URL-shaped input without normalizing a valid endpoint name."""
-    if _URL_PREFIX.match(name):
+    """Reject URL- or path-shaped input without normalizing a valid endpoint name."""
+    if (
+        _URL_PREFIX.match(name)
+        or _PATH_METACHARACTERS.search(name)
+        or name in _DOT_SEGMENTS
+    ):
         raise EndpointValidationFailure(
             "endpoint_url_not_allowed",
             "Endpoint must be a Databricks endpoint name, not a URL.",
             False,
         )
+
+
+#: The remote check runs while the save holds the exclusive draft lock, so its
+#: client must not inherit the SDK's 300 s default retry window.  With a 5 s
+#: window and a 3 s per-request timeout, measured transport exhaustion ends
+#: well inside the ruled 15 s bound (see ``bounded_catalog_workspace_client``).
+CATALOG_RETRY_TIMEOUT_SECONDS = 5
+CATALOG_HTTP_TIMEOUT_SECONDS = 3
+
+
+def bounded_catalog_workspace_client(system_client: WorkspaceClient) -> WorkspaceClient:
+    """Derive a short-retry catalog client from the system client's own config.
+
+    No credential source is introduced: the copy keeps the system client's host
+    and resolved header factory.  ``Config.copy`` is shallow and shares its
+    attribute mapping with the source, so the copy gets its own mapping before
+    the timeouts change; the system client's configuration is never modified.
+    """
+    config = system_client.config.copy()
+    config._inner = dict(config._inner)
+    config.retry_timeout_seconds = CATALOG_RETRY_TIMEOUT_SECONDS
+    config.http_timeout_seconds = CATALOG_HTTP_TIMEOUT_SECONDS
+    return WorkspaceClient(config=config)
 
 
 class DatabricksModelEndpointCatalog:
@@ -145,6 +181,8 @@ class DatabricksModelEndpointCatalog:
         return SystemModelDiscovery(endpoints=tuple(discovered))
 
     def validate_custom_endpoint_remote(self, name: str) -> None:
+        # Defensive: never let a path-shaped name reach the interpolated request.
+        validate_endpoint_name_policy(name)
         try:
             detail = self._workspace_client.serving_endpoints.get(name)
         except ResourceDoesNotExist as error:

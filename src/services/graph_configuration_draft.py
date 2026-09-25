@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from datetime import timezone
 from types import MappingProxyType
-from typing import Callable, Generic, Literal, Mapping, TypeVar
+from typing import Callable, Generic, Literal, Mapping, Protocol, TypeVar
 
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -36,6 +36,11 @@ from src.services.graph_definition_manifest import (
     DefinitionContent,
     definition_content_hash,
     schema_contract_identity,
+)
+from src.services.model_endpoint_catalog import (
+    EndpointValidationFailure,
+    ModelEndpointCatalog,
+    validate_endpoint_name_policy,
 )
 from src.services.prompt_assembler import PromptAssembler, PromptAssemblyRejected
 
@@ -214,6 +219,51 @@ def _schema_overlay_candidate_validator(
     )
 
 
+_ENDPOINT_FIELD = "candidate.model.endpoint_name"
+
+
+def _endpoint_issue(failure: EndpointValidationFailure) -> DraftValidationIssue:
+    """Copy the catalog-owned code and message; never echo endpoint text."""
+    return DraftValidationIssue(_ENDPOINT_FIELD, failure.code, failure.message)
+
+
+def _endpoint_name_policy_validator(
+    content: DefinitionContent,
+) -> tuple[DraftValidationIssue, ...]:
+    """Pure local endpoint-name policy; it performs no SDK or network work."""
+    try:
+        validate_endpoint_name_policy(content.model.endpoint_name)
+    except EndpointValidationFailure as failure:
+        return (_endpoint_issue(failure),)
+    return ()
+
+
+class RemoteEndpointDraftValidator(Protocol):
+    """Remote exact-endpoint check over one complete reconstructed candidate.
+
+    It raises ``EndpointValidationFailure`` to reject and returns ``None`` to
+    accept.  The draft writer calls it only for a current locked candidate.
+    """
+
+    def validate(self, content: DefinitionContent) -> None: ...
+
+
+class CatalogRemoteEndpointDraftValidator:
+    """Delegate the exact, unchanged candidate endpoint to the model catalog.
+
+    The catalog is obtained from the factory on each call, so constructing the
+    validator performs no client or network work.
+    """
+
+    def __init__(self, catalog_factory: Callable[[], ModelEndpointCatalog]) -> None:
+        self._catalog_factory = catalog_factory
+
+    def validate(self, content: DefinitionContent) -> None:
+        self._catalog_factory().validate_custom_endpoint_remote(
+            content.model.endpoint_name
+        )
+
+
 _EXPECTED_AGENT_KEYS = frozenset(GRAPH_V1_AGENT_KEYS)
 _IMMUTABLE_DRAFT_FIELDS = (
     "definition_version",
@@ -255,6 +305,20 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
     #: immediately before the one mapper/hash/flush/audit/lock write.
     post_stale_validators: tuple[DraftCandidateValidator, ...] = ()
 
+    def __init__(
+        self,
+        *,
+        remote_endpoint_validator: RemoteEndpointDraftValidator | None = None,
+    ) -> None:
+        """``None`` skips the remote endpoint phase (trusted/test composition only).
+
+        Production draft saves are composed with
+        ``build_remote_endpoint_draft_validator()``; the admin PUT wiring is #266
+        Task 3.  Upgrades never consult this validator.
+        """
+        super().__init__()
+        self._remote_endpoint_validator = remote_endpoint_validator
+
     def _run_candidate_validators(
         self,
         validators: tuple[DraftCandidateValidator, ...],
@@ -266,6 +330,24 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             issues.extend(validator(content))
         if issues:
             raise DraftContentRejected(*issues)
+
+    def _save_local_validators(self) -> tuple[DraftCandidateValidator, ...]:
+        """The two saves' local phase: the class tuple, then the endpoint policy.
+
+        The endpoint policy is composed here rather than into
+        ``local_candidate_validators`` so that neither upgrade runs it: an
+        upgrade never edits the endpoint and must do no endpoint work.
+        """
+        return self.local_candidate_validators + (_endpoint_name_policy_validator,)
+
+    def _validate_remote_endpoint(self, content: DefinitionContent) -> None:
+        """The saves' remote phase: once, for a current locked candidate only."""
+        if self._remote_endpoint_validator is None:
+            return
+        try:
+            self._remote_endpoint_validator.validate(content)
+        except EndpointValidationFailure as failure:
+            raise DraftContentRejected(_endpoint_issue(failure)) from failure
 
     def save_editable_model_draft(
         self,
@@ -312,7 +394,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 ):
                     raise
                 raise DraftContentRejected(_EDITABLE_RULES_INVALID) from exc
-            self._run_candidate_validators(self.local_candidate_validators, content)
+            self._run_candidate_validators(self._save_local_validators(), content)
             if expected_lock_version != locked.snapshot.draft.lock_version:
                 return DraftSaveConflict(
                     expected_lock_version=expected_lock_version,
@@ -321,6 +403,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
             self._run_candidate_validators(self.post_stale_validators, content)
+            self._validate_remote_endpoint(content)
             return self._write_locked_content(
                 session,
                 locked=locked,
@@ -370,7 +453,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             )
             if issues:
                 raise DraftContentRejected(*issues)
-            self._run_candidate_validators(self.local_candidate_validators, validated)
+            self._run_candidate_validators(self._save_local_validators(), validated)
             if expected_lock_version != locked.snapshot.draft.lock_version:
                 return DraftSaveConflict(
                     expected_lock_version=expected_lock_version,
@@ -379,6 +462,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
             self._run_candidate_validators(self.post_stale_validators, validated)
+            self._validate_remote_endpoint(validated)
             return self._write_locked_content(
                 session,
                 locked=locked,

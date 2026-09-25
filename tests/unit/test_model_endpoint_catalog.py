@@ -6,12 +6,14 @@ from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoe
 from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
 
 from src.services.model_endpoint_catalog import (
+    CATALOG_RETRY_TIMEOUT_SECONDS,
     DatabricksModelEndpointCatalog,
     EndpointValidationFailure,
     FakeModelEndpointCatalog,
     ModelEndpointCatalogFailure,
     SystemModelDiscovery,
     SystemModelEndpoint,
+    bounded_catalog_workspace_client,
     validate_endpoint_name_policy,
 )
 
@@ -260,3 +262,143 @@ def test_validate_custom_endpoint_remote_maps_transport_exhaustion_to_endpoint_u
         "Endpoint validation is temporarily unavailable. Retry the save."
     )
     assert failure.value.__cause__ is error
+
+
+# Correction 4: the SDK interpolates the name unescaped into
+# ``/api/2.0/serving-endpoints/{name}``, so path metacharacters and dot segments
+# would address another workspace API under the service principal.
+_PATH_SHAPED_NAMES = [
+    pytest.param("../../2.0/secrets/scopes/list", id="dot-segment-traversal"),
+    pytest.param("a/b", id="slash"),
+    pytest.param("a\\b", id="backslash"),
+    pytest.param("x?y=1", id="query"),
+    pytest.param("x#frag", id="fragment"),
+    pytest.param("a%2Fb", id="percent-escape"),
+    pytest.param("a\x00b", id="nul"),
+    pytest.param("a\nb", id="newline"),
+    pytest.param("a\tb", id="tab"),
+    pytest.param("a\x7fb", id="delete"),
+    pytest.param(".", id="dot"),
+    pytest.param("..", id="dot-dot"),
+]
+
+
+@pytest.mark.parametrize("name", _PATH_SHAPED_NAMES)
+def test_validate_endpoint_name_policy_rejects_request_path_metacharacters(name):
+    with pytest.raises(EndpointValidationFailure) as failure:
+        validate_endpoint_name_policy(name)
+
+    assert failure.value.code == "endpoint_url_not_allowed"
+    assert failure.value.message == (
+        "Endpoint must be a Databricks endpoint name, not a URL."
+    )
+    assert failure.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "databricks-claude-opus-4-6",
+        "exact endpoint name",
+        "model.v1",
+        "...",
+        " ..",
+        "endpoint_with-mixed.chars",
+        "modèle-é",
+    ],
+)
+def test_validate_endpoint_name_policy_accepts_other_endpoint_names_verbatim(name):
+    original = str(name)
+
+    assert validate_endpoint_name_policy(name) is None
+    assert name == original
+
+
+@pytest.mark.parametrize("name", _PATH_SHAPED_NAMES)
+def test_validate_custom_endpoint_remote_refuses_a_path_shaped_name_before_any_get(name):
+    serving_endpoints = RecordingServingEndpoints(detail=detailed_endpoint(name))
+
+    with pytest.raises(EndpointValidationFailure) as failure:
+        catalog_for(serving_endpoints).validate_custom_endpoint_remote(name)
+
+    assert failure.value.code == "endpoint_url_not_allowed"
+    assert serving_endpoints.get_calls == []
+
+
+# Controller ruling on correction 8: the remote check runs under the exclusive
+# draft lock, so its client must bound the SDK's retry window (default 300 s)
+# while reusing the system client's own credentials.
+class _SteppingClock:
+    """SDK ``Clock`` that advances only when the retry wrapper sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.slept: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _offline_system_client(monkeypatch, clock=None):
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.config import Config
+
+    # Host-metadata discovery is the only network step in PAT config resolution.
+    monkeypatch.setattr(Config, "_resolve_host_metadata", lambda self: None)
+    return WorkspaceClient(
+        config=Config(host="https://unit.invalid", token="dapi-unit", clock=clock)
+    )
+
+
+def test_bounded_endpoint_catalog_client_reuses_system_credentials_and_leaves_it_unchanged(
+    monkeypatch,
+):
+    system_client = _offline_system_client(monkeypatch)
+    system_inner = dict(system_client.config._inner)
+
+    bounded = bounded_catalog_workspace_client(system_client)
+
+    assert bounded is not system_client
+    assert bounded.config.retry_timeout_seconds == CATALOG_RETRY_TIMEOUT_SECONDS
+    assert 0 < CATALOG_RETRY_TIMEOUT_SECONDS <= 15
+    assert bounded.config.host == system_client.config.host
+    # Same credential source: the copy shares the resolved header factory.
+    assert bounded.config._header_factory is system_client.config._header_factory
+    assert bounded.config.authenticate() == system_client.config.authenticate()
+    # The system client's own configuration is never changed.
+    assert system_client.config._inner == system_inner
+    assert system_client.config.retry_timeout_seconds is None
+
+
+def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_unavailable(
+    monkeypatch,
+):
+    clock = _SteppingClock()
+    system_client = _offline_system_client(monkeypatch, clock=clock)
+    requested: list[tuple[str, str]] = []
+
+    def _refused(self, method, url, **kwargs):
+        requested.append((method, url))
+        raise requests.exceptions.ConnectionError("connection refused")
+
+    monkeypatch.setattr(requests.Session, "request", _refused)
+    catalog = DatabricksModelEndpointCatalog(bounded_catalog_workspace_client(system_client))
+    started = clock.now
+
+    with pytest.raises(EndpointValidationFailure) as failure:
+        catalog.validate_custom_endpoint_remote("exact endpoint name")
+
+    assert failure.value.code == "endpoint_unavailable"
+    assert failure.value.retryable is True
+    assert isinstance(failure.value.__cause__, TimeoutError)
+    assert requested and set(requested) == {
+        ("GET", "https://unit.invalid/api/2.0/serving-endpoints/exact endpoint name")
+    }
+    # The SDK stops retrying once the bounded window elapses; one final sleep
+    # (at most min(10, attempt) + 1 s) may overshoot it.
+    elapsed = clock.now - started
+    assert CATALOG_RETRY_TIMEOUT_SECONDS <= elapsed <= 15

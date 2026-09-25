@@ -1537,3 +1537,136 @@ def test_real_upgrade_route_rejects_a_stale_lock_with_a_null_candidate_conflict(
     # A refused upgrade writes nothing of its own.
     assert _draft_meta(factory)[0] == 1
     assert _stored_draft(factory, "data_analyst")[0].protected_assembly.version == 1
+
+
+# ---------------------------------------------------------------------------
+# #266 Task 2: the remote endpoint phase under real PostgreSQL row locks.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validation(
+    postgres_engine, monkeypatch
+) -> None:
+    """Catches the remote endpoint check running for a stale concurrent loser.
+
+    The winner blocks inside a deterministic remote validator while it holds the
+    draft locks; a second, locally valid save against the same lock version
+    waits on a real PostgreSQL lock, then sees the winner's commit and returns
+    the coherent 409 without ever invoking remote validation or writing.
+    """
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    bootstrap_content, _ = _stored_draft(factory, "architect")
+    artifacts_before = _immutable_graph_artifacts(factory)
+
+    winner_validating = threading.Event()
+    release_winner = threading.Event()
+    loser_started = threading.Event()
+    guard = threading.Lock()
+    pids: dict[str, int] = {}
+    outcomes: dict[str, object] = {}
+    remote_calls: list[tuple[str, str]] = []
+    writes: list[str] = []
+
+    class BlockingRemoteEndpointValidator:
+        def validate(self, content: DefinitionContent) -> None:
+            with guard:
+                remote_calls.append(
+                    (threading.current_thread().name, content.model.endpoint_name)
+                )
+            if threading.current_thread().name == "endpoint-winner":
+                winner_validating.set()
+                assert release_winner.wait(timeout=20), "test never released the winner"
+
+    original_write = GraphConfiguration._write_locked_content
+
+    def _recording_write(session, *, locked, content, actor):
+        with guard:
+            writes.append(actor)
+        return original_write(session, locked=locked, content=content, actor=actor)
+
+    monkeypatch.setattr(
+        GraphConfiguration, "_write_locked_content", staticmethod(_recording_write)
+    )
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            with guard:
+                pids[threading.current_thread().name] = pid
+            if threading.current_thread().name == "endpoint-loser":
+                loser_started.set()
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    service = ObservedGraphConfiguration(
+        remote_endpoint_validator=BlockingRemoteEndpointValidator()
+    )
+    loser_candidate = EditableModelDraft(
+        prompt_text="stale loser edit",
+        endpoint_name="loser endpoint name",
+        temperature=float(bootstrap_content.model.temperature),
+        max_tokens=bootstrap_content.model.max_tokens,
+        top_p=float(bootstrap_content.model.top_p),
+    )
+
+    def _save(thread_name: str, candidate: EditableModelDraft) -> None:
+        threading.current_thread().name = thread_name
+        with factory() as session:
+            outcomes[thread_name] = service.save_editable_model_draft(
+                session,
+                agent_key="architect",
+                expected_lock_version=0,
+                candidate=candidate,
+                actor=thread_name,
+            )
+
+    winner_candidate = EditableModelDraft(
+        prompt_text="winner edit",
+        endpoint_name="winner endpoint name",
+        temperature=float(bootstrap_content.model.temperature),
+        max_tokens=bootstrap_content.model.max_tokens,
+        top_p=float(bootstrap_content.model.top_p),
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winner = pool.submit(_save, "endpoint-winner", winner_candidate)
+            assert winner_validating.wait(timeout=10), "winner never reached remote validation"
+            loser = pool.submit(_save, "endpoint-loser", loser_candidate)
+            assert loser_started.wait(timeout=10), "loser never attempted the parent lock"
+            with guard:
+                loser_pid = pids.get("endpoint-loser")
+                winner_pid = pids.get("endpoint-winner")
+            assert loser_pid is not None and winner_pid is not None
+            assert winner_pid != loser_pid
+            assert _observe_lock_waiter(postgres_engine, loser_pid) is True
+            with guard:
+                assert remote_calls == [("endpoint-winner", "winner endpoint name")]
+            release_winner.set()
+            winner.result(timeout=20)
+            loser.result(timeout=20)
+    finally:
+        release_winner.set()
+
+    won = outcomes["endpoint-winner"]
+    lost = outcomes["endpoint-loser"]
+    assert isinstance(won, DraftSaveResult)
+    assert won.draft.lock_version == 1
+    assert won.draft.updated_by == "endpoint-winner"
+    persisted, persisted_hash = _stored_draft(factory, "architect")
+    assert persisted.prompt_text == "winner edit"
+    assert persisted.model.endpoint_name == "winner endpoint name"
+    assert persisted_hash == definition_content_hash(persisted)
+    assert _draft_meta(factory)[:2] == (1, "endpoint-winner")
+
+    assert isinstance(lost, DraftSaveConflict)
+    assert lost.expected_lock_version == 0
+    assert lost.current_lock_version == 1
+    assert lost.client_candidate is loser_candidate
+    assert set(lost.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+    assert len(lost.server.definitions) == 7
+    assert lost.server.definitions["architect"].content.prompt_text == "winner edit"
+
+    # The stale loser never reached the remote phase and never wrote.
+    assert remote_calls == [("endpoint-winner", "winner endpoint name")]
+    assert writes == ["endpoint-winner"]
+    assert _immutable_graph_artifacts(factory) == artifacts_before
