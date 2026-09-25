@@ -4062,3 +4062,30 @@ def test_endpoint_validation_dependency_is_resolved_only_by_the_draft_put(
 
     assert response.status_code == 200
     assert resolved == ["validator"]
+
+
+@pytest.mark.parametrize(
+    ("dto_name", "valid"),
+    [
+        (
+            "SystemModelEndpointResponse",
+            {"name": _SEED_ENDPOINT, "display_name": None, "description": None, "docs": None},
+        ),
+        ("SystemModelDiscoveryResponse", {"items": []}),
+        (
+            "ModelEndpointCatalogErrorResponse",
+            {"code": "catalog_unavailable", "message": "m", "retryable": True},
+        ),
+    ],
+)
+def test_model_endpoints_dtos_are_strict_siblings_that_forbid_extra_keys(dto_name, valid):
+    """Catches a discovery DTO that accepts task/provider/ID keys or extends a #263 DTO."""
+    from pydantic import ValidationError
+
+    from src.api.schemas import agent_definitions as schemas
+
+    dto = getattr(schemas, dto_name)
+    dto.model_validate(valid)
+    with pytest.raises(ValidationError):
+        dto.model_validate({**valid, "task": "llm/v1/chat"})
+    assert dto.__mro__[1] is schemas.BaseModel
