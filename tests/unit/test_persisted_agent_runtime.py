@@ -902,19 +902,19 @@ PERMITTED_LOG_FIELDS = {
 EXPECTED_LOG_MESSAGE = "persisted_agent_invocation"
 
 #: The SUCCESS record's exact field set: the seven above plus #264's
-#: ``additional_fields`` — the registry's allowlisted optional projection — and
-#: nothing else.  This is the COMBINED surface of #262 and #264 on one sink
-#: (PLAN-CORRECTIONS 43: the second integrator owns one positive assertion, not a
-#: denylist of spellings).  The ERROR record is exactly ``PERMITTED_LOG_FIELDS``.
+#: ``additional_field_names`` — the sorted NAMES of the optional fields the model
+#: explicitly supplied — and nothing else.  This is the COMBINED surface of #262
+#: and #264 on one sink (PLAN-CORRECTIONS 43: the second integrator owns one
+#: positive assertion, not a denylist of spellings).  The ERROR record is exactly
+#: ``PERMITTED_LOG_FIELDS``.
 #:
-#: It pins CURRENT behaviour and is not a privacy ruling.  Two product decisions
-#: are open and held by the user: whether session IDs may ever reach the log (they
-#: do not today — the sink projects the five identity fields), and whether
-#: ``additional_fields`` should carry ``diagnostic_notes`` as VALUES at all.  Today
-#: it does: up to eight model-authored strings of up to 280 characters each — model
-#: output, often paraphrasing the user's request — reach the success record.  Any
-#: change to either decision must change this constant deliberately.
-SUCCESS_LOG_FIELDS = PERMITTED_LOG_FIELDS | {"additional_fields"}
+#: The user decided (#264 whole-branch review, I4): the application log carries
+#: KEY NAMES ONLY for optional fields, never their values.  ``diagnostic_notes``
+#: is model output that often paraphrases the user's request, so its values stay
+#: in diagnostics and in the recording sink's ``successes`` and never reach a log
+#: record.  Session IDs likewise never reach the log.  Any change to either rule
+#: must change this constant deliberately.
+SUCCESS_LOG_FIELDS = PERMITTED_LOG_FIELDS | {"additional_field_names"}
 
 #: Every attribute the stdlib puts on a LogRecord, so the difference is exactly
 #: what the sink's ``extra=`` contributed.  ``message``/``asctime``/``taskName`` are
@@ -1040,8 +1040,8 @@ def test_runtime_logging_sink_success_record_is_identity_outcome_and_optional_pr
     rendered = str(vars(record))
     for secret in ("private", "payload", "owner-session-9f", "contributor-session-3b"):
         assert secret not in rendered
-    # With no optional selected by this v1 overlay the projection is exactly empty.
-    assert dict(record.additional_fields) == {}
+    # With no optional selected by this v1 overlay no optional name is logged.
+    assert record.additional_field_names == []
 
 
 def test_compatibility_loader_constructs_exact_synthetic_persisted_definitions():
@@ -1154,6 +1154,9 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
     assert "default" not in model_endpoint_attempts
     if isinstance(sink, RecordingAgentInvocationIdentitySink):
         assert sink.error_classes == ["PinnedInvocationEndpointError"]
+        # #264 m13: one attempt and NO success on the provider-error branch.
+        assert len(sink.calls) == 1
+        assert sink.successes == []
     else:
         records = [
             record for record in caplog.records if record.msg == "persisted_agent_invocation"
@@ -1457,12 +1460,42 @@ def test_exact_optional_values_reach_diagnostics_and_both_sink_traces(
     assert len(records) == 1
     assert records[0].outcome == "success"
     assert records[0].error_class is None
-    # Current behaviour, pinned rather than endorsed: the notes reach the log as
-    # VALUES (see SUCCESS_LOG_FIELDS for the open decision).
-    assert dict(records[0].additional_fields) == expected
+    # The user's rule (see SUCCESS_LOG_FIELDS): the log carries the supplied
+    # optional NAMES only.  Explicit null and [] are supplied, so they are named;
+    # absence is not.  No value ever reaches the record.
+    assert records[0].additional_field_names == sorted(expected)
+    rendered = str(vars(records[0]))
+    for value in supplied.get("diagnostic_notes") or ():
+        assert value.strip() not in rendered
     assert emitted_fields(records[0]) == SUCCESS_LOG_FIELDS
     assert records[0].msg == EXPECTED_LOG_MESSAGE
     assert records[0].args in (None, ())
+
+
+def test_the_success_log_record_is_json_serializable_with_optional_values_supplied(caplog) -> None:
+    """#264 I4(b): the record carries a plain JSON-safe copy, never the frozen mapping.
+
+    ``src/utils/logging_config.JSONFormatter`` calls ``json.dumps`` with no
+    ``default``, so a ``MappingProxyType`` or a keys view on the record would raise
+    ``TypeError`` and drop every success record.  Every field the sink emits must
+    survive ``json.dumps`` as-is, and the names field must be a plain ``list``.
+    """
+    logger = logging.getLogger("test.persisted.runtime.json_safe")
+    values = _output_values("architect", diagnostic_notes=["one note", "two"])
+    runtime, _, _ = _v2_runtime(
+        "architect", values, sink=LoggingAgentInvocationIdentitySink(logger=logger)
+    )
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = runtime.run("architect", 88, {"x": 1}, AgentAssemblyContext(False))
+
+    # The values themselves are still delivered where they belong.
+    assert dict(result.diagnostics.additional_fields) == {"diagnostic_notes": ("one note", "two")}
+    records = [record for record in caplog.records if record.msg == EXPECTED_LOG_MESSAGE]
+    assert len(records) == 1
+    record = records[0]
+    assert type(record.additional_field_names) is list
+    emitted = {name: getattr(record, name) for name in emitted_fields(record)}
+    assert json.loads(json.dumps(emitted))["additional_field_names"] == ["diagnostic_notes"]
 
 
 def test_diagnostics_optional_projection_is_immutable_and_deeply_frozen() -> None:
@@ -1568,6 +1601,11 @@ def test_invalid_output_records_one_error_and_no_success_fields_in_the_recording
             {"intent": "discuss", "message": "ok", "diagnostic_notes": ["  "]},
             ["output_invalid_optional_field"],
         ),
+        # #264 m13: the undeclared-key branch reaches the same logging ``except``.
+        (
+            {"intent": "discuss", "message": "ok", "undeclared": "undeclared-secret"},
+            ["output_undeclared_top_level_field"],
+        ),
     ],
 )
 def test_invalid_output_logs_one_error_outcome_and_no_success_field(
@@ -1596,6 +1634,7 @@ def test_invalid_output_logs_one_error_outcome_and_no_success_field(
     assert records[0].msg == EXPECTED_LOG_MESSAGE
     assert records[0].args in (None, ())
     assert "never log" not in str(vars(records[0]))
+    assert "undeclared-secret" not in str(vars(records[0]))
 
 
 def test_an_unselected_optional_output_field_is_rejected_as_undeclared() -> None:
