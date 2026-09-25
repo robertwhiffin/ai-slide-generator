@@ -9,6 +9,7 @@ constructs a real workspace client or reaches Databricks.
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections.abc import Iterator
 from typing import Any, get_args
 
@@ -247,15 +248,9 @@ def test_model_endpoint_probe_permission_denial_is_forbidden(phase):
 
 def _ambiguous_errors() -> list[tuple[str, str, BaseException]]:
     request = httpx.Request("POST", "https://leak.example/serving-endpoints")
-    response = httpx.Response(400, request=request)
     return [
         ("invoke", "openai-connection", openai.APIConnectionError(message=SECRET, request=request)),
         ("invoke", "openai-timeout", openai.APITimeoutError(request=request)),
-        (
-            "invoke",
-            "openai-400",
-            openai.BadRequestError(SECRET, response=response, body=None),
-        ),
         ("invoke", "sdk-internal", InternalError(SECRET)),
         ("invoke", "sdk-unauthenticated", Unauthenticated(SECRET)),
         ("invoke", "requests", requests.exceptions.ConnectionError(SECRET)),
@@ -560,3 +555,130 @@ def test_model_endpoint_probe_fake_needs_no_sdk_and_replays_outcomes():
     assert caught.value is failure
     assert fake.probe(CONFIGURATION) is None
     assert fake.calls == [CONFIGURATION, CONFIGURATION, CONFIGURATION]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: the REAL ``ChatDatabricks`` over a mock HTTP transport.
+#
+# The provider reaches the endpoint through the openai client, so a real
+# rejection arrives as an openai exception, never as the SDK's
+# ``PermissionDenied`` or a binding ``NotImplementedError``.  These tests drive
+# the production model factory end to end.  The fake workspace client hands the
+# chat model an ``openai.OpenAI`` whose only transport is ``httpx.MockTransport``
+# with a literal dummy key and an ``.invalid`` host, so no request can reach a
+# network and no ambient credential (environment, profile, SDK auth) is read.
+# ---------------------------------------------------------------------------
+
+MOCK_HOST = "probe.invalid"
+PROVIDER_SECRET = "PROVIDER_SECRET_detail https://leak.example/token"
+
+#: (mock outcome, expected code) per the fix-round-1 controller ruling.
+REAL_PROVIDER_CASES = [
+    (400, "unsupported_structured_output"),
+    (401, "endpoint_probe_forbidden"),
+    (403, "endpoint_probe_forbidden"),
+    (404, "unsupported_structured_output"),
+    (422, "unsupported_structured_output"),
+    (429, "structured_output_probe_failed"),
+    (500, "structured_output_probe_failed"),
+    ("connection", "structured_output_probe_failed"),
+]
+
+
+class MockTransportWorkspace:
+    """A workspace-client stand-in exposing only the one method the chat model uses."""
+
+    def __init__(self, outcome: int | str) -> None:
+        self.outcome = outcome
+        self.requests: list[httpx.Request] = []
+        self.client_kwargs: list[dict[str, Any]] = []
+        self.serving_endpoints = self
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.outcome == "connection":
+            raise httpx.ConnectError(PROVIDER_SECRET, request=request)
+        if self.outcome == 200:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "probe",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "mock",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "_StructuredOutputProbeResponse",
+                                            "arguments": '{"result": "ok"}',
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            int(self.outcome), json={"error": {"message": PROVIDER_SECRET}}
+        )
+
+    def get_open_ai_client(self, **kwargs: Any) -> openai.OpenAI:
+        self.client_kwargs.append(kwargs)
+        return openai.OpenAI(
+            base_url=f"https://{MOCK_HOST}/serving-endpoints",
+            api_key="unit-test-dummy-key",
+            http_client=httpx.Client(transport=httpx.MockTransport(self._handle)),
+            **kwargs,
+        )
+
+
+def real_provider_probe(workspace: MockTransportWorkspace) -> DatabricksStructuredOutputProbe:
+    """The production model factory (real ``ChatDatabricks``) over the mock workspace."""
+    return DatabricksStructuredOutputProbe(client_factory=lambda: workspace)
+
+
+def _assert_only_the_mock_was_reached(workspace: MockTransportWorkspace) -> None:
+    assert workspace.client_kwargs == [
+        {"timeout": PROBE_TIMEOUT_SECONDS, "max_retries": PROBE_MAX_RETRIES}
+    ]
+    assert len(workspace.requests) == 1  # one attempt: max_retries=0 reached openai
+    request = workspace.requests[0]
+    assert request.url.host == MOCK_HOST
+    assert request.headers["authorization"] == "Bearer unit-test-dummy-key"
+
+
+def test_model_endpoint_probe_real_provider_success_over_mock_transport():
+    """Catches the real provider path failing to bind or parse the ``ok`` schema."""
+    workspace = MockTransportWorkspace(200)
+
+    assert real_provider_probe(workspace).probe(CONFIGURATION) is None
+
+    _assert_only_the_mock_was_reached(workspace)
+    sent = json.loads(workspace.requests[0].content)
+    assert sent["model"] == "exact saved endpoint"
+    assert [message["content"] for message in sent["messages"]] == [_PROBE_PROMPT]
+
+
+@pytest.mark.parametrize(("outcome", "code"), REAL_PROVIDER_CASES, ids=str)
+def test_model_endpoint_probe_real_provider_errors_are_classified(outcome, code):
+    """Catches every real rejection collapsing to the retryable 503 (review I1)."""
+    workspace = MockTransportWorkspace(outcome)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    _assert_failure(caught, code)
+    assert PROVIDER_SECRET not in caught.value.message
+    assert MOCK_HOST not in caught.value.message
+    assert "exact saved endpoint" not in caught.value.message
+    _assert_only_the_mock_was_reached(workspace)

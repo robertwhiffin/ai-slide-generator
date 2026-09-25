@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+import openai
 from databricks.sdk.errors import PermissionDenied
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
@@ -99,6 +100,24 @@ PROBE_TIMEOUT_SECONDS = 30.0
 PROBE_MAX_RETRIES = 0
 
 
+#: The runtime's Databricks chat model talks to the endpoint through the openai
+#: client, so these are the types a real provider rejection arrives as (measured over
+#: ``databricks-langchain`` 0.9.0; fix round 1).  An authorization rejection is
+#: forbidden; a request rejection (400, 404, 422) means the endpoint refused the
+#: structured request, so it is unsupported and not worth retrying.  Rate
+#: limits, 5xx, connection errors and timeouts stay the ambiguous retryable
+#: failure.
+_OPENAI_FORBIDDEN: tuple[type[BaseException], ...] = (
+    openai.PermissionDeniedError,
+    openai.AuthenticationError,
+)
+_OPENAI_UNSUPPORTED: tuple[type[BaseException], ...] = (
+    openai.BadRequestError,
+    openai.NotFoundError,
+    openai.UnprocessableEntityError,
+)
+
+
 class StructuredOutputProbeAdapter(Protocol):
     """Probe one saved model configuration; raise ``StructuredOutputProbeFailure``."""
 
@@ -112,10 +131,13 @@ class DatabricksStructuredOutputProbe:
     constructs the same client the runtime does; construction does no work.
     Classification reads exception types only, never exception text:
 
-    * ``NotImplementedError`` from the binding step is ``unsupported``;
-    * ``PermissionDenied`` from binding or invocation is ``forbidden``;
-    * every other failure, and any result other than the exact ``ok`` schema
-      instance, is the ambiguous retryable ``failed``.
+    * ``NotImplementedError`` from the binding step, and an openai request
+      rejection (400/404/422) from invocation, are ``unsupported``;
+    * the SDK's ``PermissionDenied`` from binding or invocation, and an openai
+      401/403 from invocation, are ``forbidden``;
+    * every other failure (rate limit, 5xx, connection, timeout, anything
+      else), and any result other than the exact ``ok`` schema instance, is
+      the ambiguous retryable ``failed``.
     """
 
     def __init__(
@@ -153,6 +175,10 @@ class DatabricksStructuredOutputProbe:
             output = bound.invoke(_PROBE_PROMPT)
         except PermissionDenied as error:
             raise _failure(_FORBIDDEN, error) from error
+        except _OPENAI_FORBIDDEN as error:
+            raise _failure(_FORBIDDEN, error) from error
+        except _OPENAI_UNSUPPORTED as error:
+            raise _failure(_UNSUPPORTED, error) from error
         except Exception as error:  # noqa: BLE001 - ambiguous by contract
             raise _failure(_FAILED, error) from error
         if not isinstance(output, _StructuredOutputProbeResponse) or output.result != "ok":
