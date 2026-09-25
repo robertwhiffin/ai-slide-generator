@@ -117,6 +117,40 @@ describe('Output Schema Editor — v1 contract', () => {
     renderEditor({ v2: false, disabled: true });
     expect(screen.getByRole('button', { name: 'Schema Upgrade' })).toBeDisabled();
   });
+
+  it.each([...AGENT_KEYS])(
+    '%s under v1 shows every canonical field as protected labels only, with no guidance input',
+    (agentKey) => {
+      // #264 I1: a v1 contract has no overlay grammar and the server rejects any v1
+      // overlay, so nothing in the editor is editable; only Schema Upgrade is offered.
+      renderEditor({ agentKey, v2: false });
+      const expected = CANONICAL_FIELD_DESCRIPTORS[agentKey];
+      const groups = screen.getAllByRole('group', { name: /^Canonical field: / });
+      expect(groups.map((group) => group.getAttribute('aria-label')))
+        .toEqual(expected.map((field) => `Canonical field: ${field.name}`));
+      for (const field of expected) {
+        const group = screen.getByRole('group', { name: `Canonical field: ${field.name}` });
+        expect(within(group).getByRole('group', { name: `Protected properties of ${field.name}` }))
+          .toBeInTheDocument();
+        for (const role of ['textbox', 'checkbox', 'spinbutton', 'combobox', 'radio'] as const) {
+          expect(within(group).queryAllByRole(role), `${field.name} ${role}`).toEqual([]);
+        }
+      }
+      for (const role of ['checkbox', 'spinbutton', 'combobox', 'radio'] as const) {
+        expect(screen.queryAllByRole(role), role).toEqual([]);
+      }
+      // The only textboxes left belong to the loose-override block, which shows a
+      // stored name that is neither canonical nor selectable (the architect fixture's
+      // impossible `title` override, deferred as m9); none is a canonical guidance input.
+      for (const textbox of screen.queryAllByRole('textbox')) {
+        expect(textbox.closest('[aria-label^="Field override: "]')).not.toBeNull();
+      }
+      expect(screen.getByRole('button', { name: 'Schema Upgrade' })).toBeEnabled();
+      expect(screen.getByRole('region', { name: 'Canonical output fields' })).toHaveTextContent(
+        'Schema Upgrade enables description and examples guidance.',
+      );
+    },
+  );
 });
 
 // ── v2 contract (picker shown) ────────────────────────────────────────────────
@@ -160,16 +194,27 @@ describe('Output Schema Editor — v2 contract', () => {
     expect(within(row).getByText(/^null$/)).toBeInTheDocument();
   });
 
-  it('shows a description textarea for the optional field', () => {
+  it('offers no description or examples input for the optional field (#264 I2)', () => {
+    // The server rejects any field_overrides entry for an optional name, and the
+    // descriptor's description and example are code-owned, so the row has no textbox.
     renderEditor({ v2: true });
     const row = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
-    expect(within(row).getByRole('textbox', { name: 'Description override' })).toBeInTheDocument();
+    expect(within(row).queryAllByRole('textbox')).toEqual([]);
+    expect(within(row).queryByRole('textbox', { name: 'Description override' })).toBeNull();
+    expect(within(row).queryByRole('textbox', { name: 'Examples override (JSON array)' })).toBeNull();
+    // The only control in the row is the selection checkbox.
+    expect(within(row).getAllByRole('checkbox').map((node) => node.getAttribute('aria-label')))
+      .toEqual(['Select diagnostic_notes']);
   });
 
-  it('shows an examples textarea for the optional field', () => {
+  it('shows the optional descriptor description and example as read-only code-owned text', () => {
     renderEditor({ v2: true });
     const row = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
-    expect(within(row).getByRole('textbox', { name: 'Examples override (JSON array)' })).toBeInTheDocument();
+    const guidance = within(row).getByRole('group', { name: 'Code-owned guidance of diagnostic_notes' });
+    expect(guidance).toHaveTextContent(DIAGNOSTIC_NOTES_DESCRIPTOR.description);
+    expect(DIAGNOSTIC_NOTES_DESCRIPTOR.examples).toHaveLength(1);
+    expect(guidance).toHaveTextContent(`Example: ${String(DIAGNOSTIC_NOTES_DESCRIPTOR.examples[0])}`);
+    expect(within(guidance).queryAllByRole('textbox')).toEqual([]);
   });
 
   it('shows a toggle to select the optional field', () => {
@@ -210,30 +255,12 @@ describe('Output Schema Editor — v2 contract', () => {
     expect(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' })).not.toBeChecked();
   });
 
-  it('calls onEditFieldDescription when the description textarea changes', () => {
-    const handler = vi.fn();
-    renderEditor({ v2: true, onEditFieldDescription: handler });
-    const row = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
-    const input = within(row).getByRole('textbox', { name: 'Description override' });
-    fireEvent.change(input, { target: { value: 'New description' } });
-    expect(handler).toHaveBeenCalledWith('diagnostic_notes', 'New description');
-  });
-
-  it('calls onEditFieldExamples when the examples textarea changes', () => {
-    const handler = vi.fn();
-    renderEditor({ v2: true, onEditFieldExamples: handler });
-    const row = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
-    const input = within(row).getByRole('textbox', { name: 'Examples override (JSON array)' });
-    fireEvent.change(input, { target: { value: '["example"]' } });
-    expect(handler).toHaveBeenCalledWith('diagnostic_notes', '["example"]');
-  });
-
-  it('disables the toggle and description/examples inputs when disabled=true', () => {
+  it('disables the toggle and every canonical guidance input when disabled=true', () => {
     renderEditor({ v2: true, disabled: true });
     expect(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' })).toBeDisabled();
-    const row = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
-    expect(within(row).getByRole('textbox', { name: 'Description override' })).toBeDisabled();
-    expect(within(row).getByRole('textbox', { name: 'Examples override (JSON array)' })).toBeDisabled();
+    const textboxes = screen.getAllByRole('textbox');
+    expect(textboxes.length).toBeGreaterThan(0);
+    for (const textbox of textboxes) expect(textbox).toBeDisabled();
   });
 });
 
@@ -279,7 +306,7 @@ describe('seven descriptors', () => {
 
 describe('Output Schema Editor — protected canonical fields', () => {
   it.each([...AGENT_KEYS])('%s lists every canonical field with read-only name, type, required, default and enum', (agentKey) => {
-    renderEditor({ agentKey });
+    renderEditor({ agentKey, v2: true });
     const expected = CANONICAL_FIELD_DESCRIPTORS[agentKey];
     const groups = screen.getAllByRole('group', { name: /^Canonical field: / });
     expect(groups.map((group) => group.getAttribute('aria-label')))
@@ -314,17 +341,18 @@ describe('Output Schema Editor — protected canonical fields', () => {
   });
 
   it('labels the canonical section as protected and the guidance as the only editable content', () => {
-    renderEditor();
+    renderEditor({ v2: true });
     const section = screen.getByRole('region', { name: 'Canonical output fields' });
     expect(section).toHaveTextContent(
       'Name, type, required, default and enum are code-owned and cannot be changed here.',
     );
+    expect(section).toHaveTextContent('Only description and examples guidance is editable.');
   });
 
   it('edits guidance for a canonical field that has no saved override', () => {
     const onDescription = vi.fn();
     const onExamples = vi.fn();
-    renderEditor({ onEditFieldDescription: onDescription, onEditFieldExamples: onExamples });
+    renderEditor({ v2: true, onEditFieldDescription: onDescription, onEditFieldExamples: onExamples });
     const group = screen.getByRole('group', { name: 'Canonical field: intent' });
     const description = within(group).getByRole('textbox', { name: 'Description guidance for intent' });
     const examples = within(group).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' });
@@ -338,7 +366,7 @@ describe('Output Schema Editor — protected canonical fields', () => {
 
   it('shows saved canonical guidance in its canonical row', () => {
     const def: DraftDefinition = {
-      ...structuredClone(syntheticDraftDefinitions.architect),
+      ...v2SchemaDefinition('architect'),
       schema_overlay: {
         field_overrides: { intent: { description: 'Saved intent guidance', examples: ['build'] } },
         additional_optional_fields: [],
@@ -365,7 +393,7 @@ describe('Output Schema Editor — protected canonical fields', () => {
   });
 
   it('shows a malformed examples value as a visible error on that field', () => {
-    const entry = v1Entry();
+    const entry = v2Entry();
     const withBadExamples = {
       ...entry,
       local: {

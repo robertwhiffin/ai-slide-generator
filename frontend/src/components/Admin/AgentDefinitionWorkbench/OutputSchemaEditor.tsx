@@ -1,7 +1,10 @@
 /**
  * Output Schema Editor — displays the server-owned canonical-field and optional-field
- * descriptor metadata as read-only protected labels, and exposes only description/examples
- * guidance editing plus the `diagnostic_notes` optional-field picker (v2 contracts only).
+ * descriptor metadata as read-only protected labels. Under a v2 schema contract it exposes
+ * canonical-field description/examples guidance and the `diagnostic_notes` picker; under v1
+ * it exposes nothing editable, because a v1 contract carries no overlay grammar and the
+ * server rejects every v1 overlay (#264 I1) — only the Schema Upgrade action is offered.
+ * The optional descriptor's own description and example are code-owned text (#264 I2).
  */
 import type {
   AgentKey,
@@ -56,6 +59,8 @@ function ExamplesError({ id, message }: { id: string; message: string | null }) 
 interface CanonicalFieldRowProps {
   agentKey: AgentKey;
   field: CanonicalFieldDescriptor;
+  /** False under a v1 schema contract: the row is protected labels only. */
+  guidanceEditable: boolean;
   guidanceDescription: string;
   guidanceExamples: string;
   disabled: boolean;
@@ -65,12 +70,14 @@ interface CanonicalFieldRowProps {
 
 /**
  * One code-owned canonical output field. Name, type, required, default and enum are
- * server-derived text in a description list — never inputs. The two guidance textareas
- * carry field-specific accessible names so no name is a substring of another's.
+ * server-derived text in a description list — never inputs. Under v2 the two guidance
+ * textareas carry field-specific accessible names so no name is a substring of another's;
+ * under v1 they are not rendered at all.
  */
 function CanonicalFieldRow({
   agentKey,
   field,
+  guidanceEditable,
   guidanceDescription,
   guidanceExamples,
   disabled,
@@ -106,40 +113,42 @@ function CanonicalFieldRow({
           ))}
         </dl>
       </div>
-      <div className="space-y-2">
-        <div>
-          <label htmlFor={descId} className="block text-xs font-medium text-gray-700">
-            Description guidance
-          </label>
-          <textarea
-            id={descId}
-            aria-label={`Description guidance for ${field.name}`}
-            value={guidanceDescription}
-            disabled={disabled}
-            onChange={(event) => onDescriptionChange(event.currentTarget.value)}
-            rows={2}
-            className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm font-normal disabled:bg-gray-50"
-          />
+      {guidanceEditable && (
+        <div className="space-y-2">
+          <div>
+            <label htmlFor={descId} className="block text-xs font-medium text-gray-700">
+              Description guidance
+            </label>
+            <textarea
+              id={descId}
+              aria-label={`Description guidance for ${field.name}`}
+              value={guidanceDescription}
+              disabled={disabled}
+              onChange={(event) => onDescriptionChange(event.currentTarget.value)}
+              rows={2}
+              className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm font-normal disabled:bg-gray-50"
+            />
+          </div>
+          <div>
+            <label htmlFor={examplesId} className="block text-xs font-medium text-gray-700">
+              Examples guidance (JSON array)
+            </label>
+            <textarea
+              id={examplesId}
+              aria-label={`Examples guidance for ${field.name} (JSON array)`}
+              aria-invalid={examplesError !== null}
+              aria-describedby={examplesError !== null ? examplesErrorId : undefined}
+              value={guidanceExamples}
+              disabled={disabled}
+              onChange={(event) => onExamplesChange(event.currentTarget.value)}
+              rows={2}
+              placeholder='["example value"]'
+              className="mt-1 w-full rounded-md border border-gray-300 p-2 font-mono text-xs disabled:bg-gray-50"
+            />
+            <ExamplesError id={examplesErrorId} message={examplesError} />
+          </div>
         </div>
-        <div>
-          <label htmlFor={examplesId} className="block text-xs font-medium text-gray-700">
-            Examples guidance (JSON array)
-          </label>
-          <textarea
-            id={examplesId}
-            aria-label={`Examples guidance for ${field.name} (JSON array)`}
-            aria-invalid={examplesError !== null}
-            aria-describedby={examplesError !== null ? examplesErrorId : undefined}
-            value={guidanceExamples}
-            disabled={disabled}
-            onChange={(event) => onExamplesChange(event.currentTarget.value)}
-            rows={2}
-            placeholder='["example value"]'
-            className="mt-1 w-full rounded-md border border-gray-300 p-2 font-mono text-xs disabled:bg-gray-50"
-          />
-          <ExamplesError id={examplesErrorId} message={examplesError} />
-        </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -147,29 +156,22 @@ function CanonicalFieldRow({
 interface OptionalFieldRowProps {
   descriptor: FieldDescriptor;
   isSelected: boolean;
-  guidanceDescription: string;
-  guidanceExamples: string;
   disabled: boolean;
   onToggle(): void;
-  onDescriptionChange(value: string): void;
-  onExamplesChange(value: string): void;
 }
 
+/**
+ * One selectable optional field. Only the selection is editable: the descriptor's name,
+ * schema, description and example are all code-owned, and the server rejects any
+ * `field_overrides` entry for an optional name (#264 I2), so they render as text.
+ */
 function OptionalFieldRow({
   descriptor,
   isSelected,
-  guidanceDescription,
-  guidanceExamples,
   disabled,
   onToggle,
-  onDescriptionChange,
-  onExamplesChange,
 }: OptionalFieldRowProps) {
   const checkboxId = `optional-field-${descriptor.name}`;
-  const descId = `optional-field-desc-${descriptor.name}`;
-  const examplesId = `optional-field-examples-${descriptor.name}`;
-  const examplesErrorId = `${examplesId}-error`;
-  const examplesError = overlayExamplesError(guidanceExamples);
 
   return (
     <div
@@ -200,43 +202,18 @@ function OptionalFieldRow({
         <ProtectedLabel name="max_items" value={String(descriptor.schema.max_items)} />
       </div>
 
-      {/* Server-owned descriptor text */}
-      <div className="ml-6 text-xs text-gray-600">{descriptor.description}</div>
-
-      {/* Editable guidance overrides */}
-      <div className="ml-6 space-y-2">
-        <div>
-          <label htmlFor={descId} className="block text-xs font-medium text-gray-700">
-            Description override
-          </label>
-          <textarea
-            id={descId}
-            aria-label="Description override"
-            value={guidanceDescription}
-            disabled={disabled}
-            onChange={(event) => onDescriptionChange(event.currentTarget.value)}
-            rows={2}
-            className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm font-normal disabled:bg-gray-50"
-          />
-        </div>
-        <div>
-          <label htmlFor={examplesId} className="block text-xs font-medium text-gray-700">
-            Examples override (JSON array)
-          </label>
-          <textarea
-            id={examplesId}
-            aria-label="Examples override (JSON array)"
-            aria-invalid={examplesError !== null}
-            aria-describedby={examplesError !== null ? examplesErrorId : undefined}
-            value={guidanceExamples}
-            disabled={disabled}
-            onChange={(event) => onExamplesChange(event.currentTarget.value)}
-            rows={2}
-            placeholder='["example value"]'
-            className="mt-1 w-full rounded-md border border-gray-300 p-2 font-mono text-xs disabled:bg-gray-50"
-          />
-          <ExamplesError id={examplesErrorId} message={examplesError} />
-        </div>
+      {/* Code-owned descriptor text — read-only, never inputs */}
+      <div
+        role="group"
+        aria-label={`Code-owned guidance of ${descriptor.name}`}
+        className="ml-6 space-y-1 text-xs text-gray-600"
+      >
+        <p>{descriptor.description}</p>
+        {descriptor.examples.map((example, index) => (
+          <p key={index} className="font-mono">
+            Example: {typeof example === 'string' ? example : JSON.stringify(example)}
+          </p>
+        ))}
       </div>
     </div>
   );
@@ -276,7 +253,7 @@ export function OutputSchemaEditor({
         )}
       </div>
 
-      {/* Code-owned canonical fields: protected labels plus editable guidance */}
+      {/* Code-owned canonical fields: protected labels, plus editable guidance under v2 only */}
       {canonicalFields.length > 0 && (
         <section
           role="region"
@@ -288,7 +265,9 @@ export function OutputSchemaEditor({
           </h4>
           <p className="text-xs text-gray-500">
             Name, type, required, default and enum are code-owned and cannot be changed here.
-            Only description and examples guidance is editable.
+            {isV2Schema
+              ? ' Only description and examples guidance is editable.'
+              : ' Schema Upgrade enables description and examples guidance.'}
           </p>
           {canonicalFields.map((field) => {
             const guidance = overlay.field_overrides[field.name];
@@ -297,6 +276,7 @@ export function OutputSchemaEditor({
                 key={field.name}
                 agentKey={agentKey}
                 field={field}
+                guidanceEditable={isV2Schema}
                 guidanceDescription={guidance?.description ?? ''}
                 guidanceExamples={guidance?.examples ?? ''}
                 disabled={disabled}
@@ -312,22 +292,15 @@ export function OutputSchemaEditor({
       {isV2Schema && selectableFields.length > 0 && (
         <div className="space-y-3">
           <h4 className="text-sm font-semibold text-gray-800">Optional output fields</h4>
-          {selectableFields.map((descriptor) => {
-            const guidance = overlay.field_overrides[descriptor.name];
-            return (
-              <OptionalFieldRow
-                key={descriptor.name}
-                descriptor={descriptor}
-                isSelected={overlay.additional_optional_fields.includes(descriptor.name)}
-                guidanceDescription={guidance?.description ?? ''}
-                guidanceExamples={guidance?.examples ?? ''}
-                disabled={disabled}
-                onToggle={() => onToggleOptionalField(descriptor.name)}
-                onDescriptionChange={(value) => onEditFieldDescription(descriptor.name, value)}
-                onExamplesChange={(value) => onEditFieldExamples(descriptor.name, value)}
-              />
-            );
-          })}
+          {selectableFields.map((descriptor) => (
+            <OptionalFieldRow
+              key={descriptor.name}
+              descriptor={descriptor}
+              isSelected={overlay.additional_optional_fields.includes(descriptor.name)}
+              disabled={disabled}
+              onToggle={() => onToggleOptionalField(descriptor.name)}
+            />
+          ))}
         </div>
       )}
 
@@ -389,10 +362,10 @@ export function OutputSchemaEditor({
           </div>
         ))}
 
-      {/* v1: no selectable optional fields, show a note */}
+      {/* v1: nothing is editable, show a note */}
       {!isV2Schema && (
         <p className="text-xs text-gray-500">
-          Schema Upgrade enables optional output fields for this role.
+          Schema Upgrade enables canonical-field guidance and optional output fields for this role.
         </p>
       )}
     </div>

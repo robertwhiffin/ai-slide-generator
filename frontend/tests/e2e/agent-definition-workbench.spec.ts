@@ -1593,6 +1593,14 @@ test('output schema tab: v1 shows Schema Upgrade button and no picker; no protec
     await expect(panel.getByRole('textbox', { name: label })).toHaveCount(0);
     await expect(panel.getByRole('spinbutton', { name: label })).toHaveCount(0);
   }
+
+  // #264 I1: under v1 the canonical fields are protected labels only. Accessible names
+  // match by substring here, so these two queries cover every canonical field's input.
+  const intent = panel.getByRole('group', { name: 'Canonical field: intent' });
+  await expect(intent.getByRole('group', { name: 'Protected properties of intent' })).toBeVisible();
+  await expect(intent.getByRole('textbox')).toHaveCount(0);
+  await expect(panel.getByRole('textbox', { name: 'Description guidance for ' })).toHaveCount(0);
+  await expect(panel.getByRole('textbox', { name: 'Examples guidance for ' })).toHaveCount(0);
 });
 
 test('output schema tab: v2 shows diagnostic_notes picker with protected labels, no type/default inputs', async ({ page }) => {
@@ -1619,9 +1627,12 @@ test('output schema tab: v2 shows diagnostic_notes picker with protected labels,
     await expect(panel.getByRole('spinbutton', { name: new RegExp(label, 'i') })).toHaveCount(0);
   }
 
-  // Description and examples inputs present
-  await expect(row.getByRole('textbox', { name: 'Description override' })).toBeVisible();
-  await expect(row.getByRole('textbox', { name: 'Examples override (JSON array)' })).toBeVisible();
+  // #264 I2: the descriptor's description and example are code-owned text, never
+  // inputs; the server rejects any field_overrides entry for an optional name.
+  await expect(row.getByRole('textbox')).toHaveCount(0);
+  const codeOwned = row.getByRole('group', { name: 'Code-owned guidance of diagnostic_notes' });
+  await expect(codeOwned).toContainText(DIAGNOSTIC_NOTES_DESCRIPTOR.description);
+  await expect(codeOwned).toContainText(`Example: ${String(DIAGNOSTIC_NOTES_DESCRIPTOR.examples[0])}`);
 });
 
 test('v2 selection: selecting diagnostic_notes sends it in the save candidate', async ({ page }) => {
@@ -1800,7 +1811,8 @@ test('direct malformed-API 422 on schema overlay is stable and not a 500', async
 });
 
 test('canonical fields: protected labels, guidance edit, blocked malformed examples, save and reload', async ({ page }) => {
-  const body = cloneWorkbench();
+  // Canonical guidance is editable only under a v2 schema contract (#264 I1).
+  const body = workbenchWithSchemaV2();
   await installExactIdentityMock(page);
   await installWorkbenchMock(page, 200, body);
   const saves = await installSaveMock(page, (route, save) => {

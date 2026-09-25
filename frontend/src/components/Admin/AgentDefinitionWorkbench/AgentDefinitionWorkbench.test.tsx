@@ -175,10 +175,11 @@ function conflictWithServerEdits(
 
 function mockWorkbenchWithPuts(
   put: (agentKey: AgentKey, request: DraftSaveRequest, call: number) => Promise<object> | object,
+  workbench: object = syntheticAgentDefinitionWorkbench,
 ) {
   let putCall = 0;
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-    if (init?.method === 'GET') return apiResponse(200, syntheticAgentDefinitionWorkbench);
+    if (init?.method === 'GET') return apiResponse(200, workbench);
     const agentKey = url.split('/').at(-1) as AgentKey;
     const request = JSON.parse(String(init?.body)) as DraftSaveRequest;
     const result = await put(agentKey, request, putCall++);
@@ -1661,11 +1662,9 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
     const picker = screen.getByRole('checkbox', { name: 'Select diagnostic_notes' });
     fireEvent.click(picker);
     expect(requests()).toBe(1);
+    // The optional descriptor's text is code-owned: its row offers no textbox (#264 I2).
     const optional = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
-    fireEvent.change(within(optional).getByRole('textbox', { name: 'Description override' }), {
-      target: { value: 'Optional guidance' },
-    });
-    expect(requests()).toBe(1);
+    expect(within(optional).queryAllByRole('textbox')).toEqual([]);
     const intent = screen.getByRole('group', { name: 'Canonical field: intent' });
     fireEvent.change(within(intent).getByRole('textbox', { name: 'Description guidance for intent' }), {
       target: { value: 'Intent guidance' },
@@ -1693,8 +1692,9 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
   });
 
   it('malformed examples block Save with a visible field error and send nothing; fixed guidance is sent', async () => {
+    // Canonical guidance is editable only under a v2 schema contract (#264 I1).
     const fetchMock = mockWorkbenchWithPuts((agentKey, request) =>
-      apiResponse(200, saveSuccess(agentKey, request.candidate, 1)));
+      apiResponse(200, saveSuccess(agentKey, request.candidate, 1)), workbenchWithArchitectSchemaV2());
     render(<AgentDefinitionWorkbench />);
     await loadedNodeNavigation();
     fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
