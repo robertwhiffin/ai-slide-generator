@@ -35,8 +35,11 @@ import type { CollaborationHistory, CollaborationReleaseGroup } from '@/services
  * case-insensitive SUBSTRING, so a suffixed name would make the conversation
  * copy's locator ambiguous. Wholly DISTINCT wording escapes that outright, and
  * `both surfaces stay independently addressable with the dialog open` measures
- * it rather than assuming it. Every name in SURFACE_VOCABULARY is checked
- * pairwise-non-nesting by `no surface's accessible name nests inside another's`.
+ * it rather than assuming it. Every RENDERED name is checked pairwise-non-nesting
+ * by `no surface's accessible name nests inside another's`, which reads those
+ * names back off the DOM rather than off an export of this table — an export
+ * made that guard agree with this file by construction, so it could stay green
+ * over a vocabulary it no longer described.
  */
 
 const MIXED_RELEASE_WARNING_TEXT =
@@ -220,15 +223,3 @@ export function MixedReleaseWarning({
     </div>
   );
 }
-
-/**
- * Every accessible name this component can render, for the pairwise-nesting
- * guard in its test. Exported ONLY for that guard, which needs the real set
- * rather than a hand-maintained copy: the guard asserts a structural property
- * (no name nests inside another) rather than any specific wording, so reading
- * it from the source is correct here. Per C-24, every test that pins a MANDATED
- * WORDING still carries its literal.
- */
-export const SURFACE_ACCESSIBLE_NAMES: string[] = Object.values(SURFACE_VOCABULARY).flatMap(
-  (entry) => [entry.disclosureLabel, entry.listLabel],
-);

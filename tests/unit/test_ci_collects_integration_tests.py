@@ -267,6 +267,33 @@ def test_shared_deck_mutation_lifecycle_is_collected_by_integration_graph():
     )
 
 
+def test_mixed_release_collaboration_acceptance_is_collected_by_integration_graph():
+    """#262's cross-writer acceptance and both final contract audits need PostgreSQL.
+
+    Four of its claims cannot be cashed anywhere else. The ``ON DELETE SET NULL``
+    retention needs real cascades — the SQLite fixtures report
+    ``PRAGMA foreign_keys = 0``, so a delete there leaves a dangling FK rather
+    than a nulled one and the retention assertion would pass vacuously. The
+    append-only trigger and the ``collaboration_identity`` immutability trigger
+    are PL/pgSQL. The forced creation lock orderings need two genuinely
+    concurrent transactions plus ``pg_stat_activity`` to observe a waiter, which
+    a single shared SQLite connection cannot produce. And the one grouped
+    statement is counted against the real dialect's aggregation.
+
+    The two executable contract audits ride in the same module deliberately:
+    they are the plan's final ``rg`` sweeps, and a sweep whose result lives in a
+    report is re-run by hand or not at all.
+    """
+    target = "tests/integration/test_mixed_release_collaboration_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its cross-writer acceptance, cascade "
+        "retention, trigger, lock-ordering and contract-audit assertions must "
+        "execute against PostgreSQL."
+    )
+
+
 def test_collaboration_history_api_is_collected_by_integration_graph():
     """The authorization-scoped collaboration history API requires PostgreSQL.
 

@@ -16,7 +16,7 @@ from src.database.models.graph_configuration import (
     GraphRelease,
     GraphReleaseAgent,
 )
-from src.database.models.session import UserSession
+from src.database.models.session import SharedDeckMutationEvent, UserSession
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     AgentRuntime,
@@ -502,6 +502,48 @@ def test_persisted_corruption_escapes_later_node_recovery(
             0,
             "<div class='slide'>persisted</div>",
         )
+        # MIRROR THE STATE'S RELEASE INTO THE CONTENT DATABASE AND PIN THE
+        # SESSION TO IT.
+        #
+        # `deck_reviewer_node`'s post-commit deck-level write now records
+        # collaboration evidence, and `record_shared_deck_mutation` validates the
+        # state's release BOTH against the content database and against the
+        # session's own persisted pin. This fixture deliberately splits the two:
+        # the runtime catalog is the PostgreSQL `postgres_engine`, while
+        # `graph_turn_env`'s deck and session live in its own SQLite database. So
+        # the release id the state carries did not exist on the content side and
+        # the session was pinned to a different release; attribution refused with
+        # `mutation actor pin does not match its persisted pin`, the node swallowed
+        # that into a user-visible notice, and the "no message" assertion below
+        # failed for a reason with nothing to do with persisted corruption.
+        #
+        # Production never has that split — one database holds catalog and
+        # content — and `invoke_graph` always puts the session's own persisted
+        # pin into state. So the fixture was what diverged, and this restores the
+        # invariant the writer is entitled to assume rather than relaxing it.
+        mirrored_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        with graph_turn_env.factory() as content_db:
+            content_db.add(
+                GraphRelease(
+                    id=release_id,
+                    version_number=3,
+                    previous_release_id=None,
+                    release_note="content-side mirror of the corrupted release",
+                    published_by="task-6-test@example.com",
+                    published_at=mirrored_at,
+                    effective_from=mirrored_at,
+                    # Closed, so the content database still has exactly one
+                    # active release and no lookup there can drift to this one.
+                    effective_to=mirrored_at + timedelta(seconds=1),
+                )
+            )
+            owner = content_db.scalar(
+                select(UserSession).where(
+                    UserSession.session_id == graph_turn_env.session_id
+                )
+            )
+            owner.graph_release_id = release_id
+            content_db.commit()
         state = {
             "session_id": graph_turn_env.session_id,
             "graph_release_id": release_id,
@@ -519,3 +561,18 @@ def test_persisted_corruption_escapes_later_node_recovery(
     assert adapter.calls == []
     assert graph_turn_env.messages() == messages_before
     assert release_id != active_v2_id
+
+    if node_name == "deck_reviewer":
+        # The post-commit deck-level write DID run and DID record its evidence
+        # against the state's exact release. Without this the assertion above
+        # would also be satisfied by a write that never happened, and by the
+        # attribution refusal this fixture used to provoke — whose only symptom
+        # was the notice, so suppressing the notice would have hidden it.
+        with graph_turn_env.factory() as content_db:
+            recorded = [
+                (event.operation, event.graph_release_id, event.graph_version)
+                for event in content_db.scalars(
+                    select(SharedDeckMutationEvent).order_by(SharedDeckMutationEvent.id)
+                )
+            ]
+        assert recorded == [("write_deck_level", release_id, 3)]
