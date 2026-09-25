@@ -137,3 +137,72 @@ Notes on the table:
 ## Triple check
 
 `git status --porcelain`, `git diff HEAD` and `git diff --cached` were all empty after the sabotage runs and gates (before this report was added).
+
+## Fix round 1
+
+- **Base (pinned):** `1b08498f4c4dee5a1fb75ff1ffe072c665e2d9f7`, the controller ledger commit.
+- **Fix commit:** `03002d6693e847acea2fb919b80d4d3057eba451` `test: join the client and server endpoint name policies (#266)`. This commit is test and fixture changes only; no production line changed.
+
+### I-1: TS/Python endpoint-policy join
+
+I made a **new small module**, `tests/unit/test_endpoint_name_policy_client_join.py`, with 25 tests. Adding it to the 1,300-line `test_prompt_assembler.py` would have widened that file's text-read surface for an unrelated concern.
+
+- **Shared case table.** The TS reject/accept arrays moved into a strict-JSON block, `ENDPOINT_NAME_POLICY_CASES: Record<'rejected' | 'accepted', string[]>`, appended at the end of `frontend/tests/fixtures/mocks.ts`.
+  - The Vitest policy table now uses `it.each(ENDPOINT_NAME_POLICY_CASES.rejected / .accepted)`.
+  - The Python module parses the block the same way `_client_json_fixture` does (`export const NAME:`, then `= {`, then `\n};`).
+  - Every case is decided three ways: by `validate_endpoint_name_policy`, by the client's pinned rules evaluated in Python, and by the table's verdict. All three must agree.
+  - The table asserts that the rejected and accepted lists are non-empty and disjoint.
+- **Pins.** Each is a text read of `draftEditorState.ts`:
+  - `const ENDPOINT_URL_PREFIX = /…/i;`. The line must match `^const ENDPOINT_URL_PREFIX = /(.*)/([a-z]*);$` exactly once. Its source with `\/` replaced by `/` must equal `_URL_PREFIX.pattern`, and the flag must be `i`.
+  - `const ENDPOINT_PATH_METACHARACTERS = /[/\\?#%]/;`. Its class plus `\x00-\x1f\x7f` must equal `_PATH_METACHARACTERS.pattern`, with no flags.
+  - The control rule: the exact line `if (code <= 0x1f || code === 0x7f) return true;`, exactly once.
+  - The `endpointNamePolicyError` condition block, including `name === '.'` and `name === '..'`, exactly once, plus `_DOT_SEGMENTS == {".", ".."}`.
+  - The `validateDraftForm` call `endpointNamePolicyError(form.endpoint_name)`, exactly once.
+  - The message: `export const ENDPOINT_URL_NOT_ALLOWED_MESSAGE = '<single-quoted>';` must equal the server failure's `message`, with `retryable` False.
+- **Newly text-read lines** (C19-style hazards):
+  - In `draftEditorState.ts`: the two regex `const` lines, the control line, the six-line condition block, the call site, and the message `const`.
+  - In `mocks.ts`: the `ENDPOINT_NAME_POLICY_CASES` block, which must stay strict JSON.
+  - Rules that follow from these reads:
+    - No trailing comment on the two regex lines. The `;$` anchor refuses one, as F1/F2 below show.
+    - The message stays single-quoted and on one line.
+    - The condition block is not to be reflowed.
+    - No new constant whose name has `ENDPOINT_NAME_POLICY_CASES` as a prefix may be placed above that block.
+
+### Minor 2: all-GETs backstop
+
+`allGets()` counts every GET to any URL. `expect(allGets(fetchMock)).toHaveLength(1)` was added beside the narrowed workbench and catalog counts at the three sites (now `:863`, `:1151`, `:1469`).
+
+### Sabotage
+
+- **Drivers:** `/tmp/t266-4/sab2.py` and `sab2b.py`. Outputs are in `fr1-sab.out` and `fr1-sab-b.out`.
+- **Per row:** anchor count 1; the `T266_4_Fn` marker counted with `grep -c` (1 after mutating, 0 after restoring); restore with `git checkout 03002d6693e847acea2fb919b80d4d3057eba451 -- <file>` and a 0-line diff; then GREEN.
+- **Scopes:**
+  - J = `pytest -q -p no:randomly tests/unit/test_endpoint_name_policy_client_join.py` (25)
+  - C = J plus `tests/unit/test_model_endpoint_catalog.py` (86)
+  - V = the Vitest workbench file (149)
+
+| # | Mutation | Scope | RED | GREEN |
+| --- | --- | --- | --- | --- |
+| F1 | Loosen TS: drop `%` from `ENDPOINT_PATH_METACHARACTERS`. The marker is a trailing comment. | J, V | J 23/25: the trailing comment also breaks the `;$` line anchor, so every case test fails, along with the class pin. V 1: `rejects … "a%2Fb"` | J 25, V 149 |
+| F1b | The same mutation, with the marker on its own line | J | **2**: `…metacharacter_literal_plus_control_rule_is_the_server_class`, `…rejected…[a%2Fb]` | 25 |
+| F2 | Tighten TS: add a space to the class. The marker is a trailing comment. | J, V | J 23/25 (anchor cause, as in F1). V 4: `accepts "Team Shared Endpoint (EU)"`, `accepts " leading and trailing "`, and the manual-save and 422-correction flows | J 25, V 149 |
+| F2b | The same mutation, with the marker on its own line | J | **3**: the class pin, `…accepted…[Team Shared Endpoint (EU)]`, `…accepted…[ leading and trailing ]` | 25 |
+| F3 | Loosen Python: drop `%` from `_PATH_METACHARACTERS` | C | 4: the class pin, `…rejected…[a%2Fb]`, and 2 × `test_model_endpoint_catalog` `[percent-escape]` | 86 |
+| F4 | Loosen the TS control rule: `code < 0x1f` | J | 1: the class-and-control-rule pin. The table has `unit\u001fsep`, but the Python emulation evaluates the pinned rule rather than the mutated text, so only the pin catches this | 25 |
+| F5 | Loosen the TS dot rule: drop `\|\| name === '..'` | J | 1: the dot-segment, condition and message pin | 25 |
+| F6 | Drift the TS message | J | 1: the same pin | 25 |
+| F7 | Loosen Python: `_DOT_SEGMENTS = {"."}` | C | 4: the dot pin, `…rejected…[..]`, and 2 × catalog `[dot-dot]` | 86 |
+| F8 | Minor 2: a third-URL GET at the start of `upgradeProtectedAssembly` | V | 14. These are the two restored backstops at `:1151` and `:1469` plus 12 shared-gate tests, whose `requestCount` also counts every fetch | 149 |
+
+### Gates (at `03002d669`)
+
+- **Python:** `PYTHONPATH=<wt>:<wt>/packages/databricks-tellr /Users/robert.whiffin/.pyenv/shims/python -m pytest -q -p no:randomly tests/unit/test_endpoint_name_policy_client_join.py tests/unit/test_prompt_assembler.py tests/unit/test_agent_definition_workbench_routes.py tests/unit/test_model_endpoint_catalog.py` gave **356 passed** (25 + 79 + 191 + 61), with 10 warnings from the pre-existing causes. `test ! -e .venv` passed. `ruff check` on the new module is clean.
+- **Vitest:** `(cd frontend && npx vitest run src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx)` gave **149 passed**.
+- **Typecheck:** `npm run typecheck` exit 0.
+- **ESLint:** `npx eslint src/api/agentDefinitions.ts src/components/Admin/AgentDefinitionWorkbench tests/fixtures/mocks.ts tests/e2e/agent-definition-workbench.spec.ts` exit 0.
+- **Playwright** was not run, because the spec is untouched.
+
+### Residual
+
+- **The emulation reads the pinned rule, not the literal TS code.** `_client_rejects` evaluates the control and dot rules as Python code, not by reading their TS text. Those two clauses are guarded by the text pins (F4, F5) rather than case-by-case, while the two regexes are compiled from the TS source and so are guarded both ways.
+- **The review's other Minors stay deferred, as instructed:** M-1 (retry copy for non-retryable errors), M-3 and M-4.
