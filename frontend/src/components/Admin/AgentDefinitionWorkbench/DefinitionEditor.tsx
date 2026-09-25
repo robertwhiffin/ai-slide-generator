@@ -17,7 +17,9 @@ import {
   formFromCandidate,
   formFromDefinition,
   isLegacyCompositeRole,
+  probeEndpointUnsaved,
   type DraftEditorEntry,
+  type DraftProbeResult,
   type EditableDraftField,
   type EditableModelDraftForm,
 } from './draftEditorState';
@@ -77,12 +79,16 @@ interface DefinitionEditorProps {
   node: ModelAgentNode;
   entry: DraftEditorEntry;
   saveDisabled: boolean;
-  /** True while any Save, Upgrade, SourceRecovery, or SchemaUpgrade request is in flight. */
+  /** True while any Save, Upgrade, SourceRecovery, SchemaUpgrade, or Probe request is in flight. */
   operationsDisabled: boolean;
+  /** True only while this role's own structured-output probe is in flight. */
+  probePending: boolean;
   /** True only while this affected v1 role's own Upgrade request is in flight. */
   promptDisabled: boolean;
   onEdit(agentKey: AgentKey, field: EditableDraftField, value: string): void;
   onSave(agentKey: AgentKey): Promise<void>;
+  /** Explicitly probes this role's saved candidate; it never saves or edits anything. */
+  onProbeStructuredOutput(agentKey: AgentKey): Promise<void>;
   onUpgradeProtectedAssembly(agentKey: AgentKey): Promise<void>;
   onUpgradeSchemaContract(agentKey: AgentKey): Promise<void>;
   onToggleSchemaOverlayOptionalField(agentKey: AgentKey, fieldName: string): void;
@@ -115,6 +121,51 @@ function FieldError({ id, message }: { id: string; message?: string }) {
   ) : null;
 }
 
+export const PROBE_UNSAVED_ENDPOINT_HINT = 'Save the endpoint before testing structured output.';
+
+/**
+ * The exact sanitized probe outcome and the identity the server reported. It claims
+ * nothing beyond that one test: no status, lock, or form value depends on it.
+ */
+function ProbeResultView({
+  result,
+  retryDisabled,
+  onRetry,
+}: {
+  result: DraftProbeResult;
+  retryDisabled: boolean;
+  onRetry(): void;
+}) {
+  const succeeded = result.outcome === 'succeeded';
+  return (
+    <section
+      role="region"
+      aria-label="Structured output test result"
+      aria-live="polite"
+      className={`rounded-md border p-2 text-xs ${
+        succeeded ? 'border-green-200 bg-green-50 text-green-900' : 'border-red-200 bg-red-50 text-red-800'
+      }`}
+    >
+      {succeeded ? (
+        <>
+          <p>Structured output test succeeded for the saved candidate.</p>
+          <p>This result does not change the draft or its status.</p>
+        </>
+      ) : (
+        <p role="alert">{result.message}</p>
+      )}
+      <p className="mt-1 break-all font-mono">
+        {`Endpoint ${result.endpoint_name} · Candidate hash ${result.candidate_hash} · Draft lock ${result.lock_version}`}
+      </p>
+      {result.outcome === 'failed' && result.retryable && (
+        <button type="button" disabled={retryDisabled} onClick={onRetry} className="mt-2">
+          Retry structured output test
+        </button>
+      )}
+    </section>
+  );
+}
+
 function DraftValues({ label, values }: { label: string; values: EditableModelDraftForm }) {
   return (
     <div role="group" aria-label={label} className="rounded border border-current/20 bg-white/60 p-2">
@@ -141,9 +192,11 @@ export function DefinitionEditor({
   entry,
   saveDisabled,
   operationsDisabled,
+  probePending,
   promptDisabled,
   onEdit,
   onSave,
+  onProbeStructuredOutput,
   onUpgradeProtectedAssembly,
   onUpgradeSchemaContract,
   onToggleSchemaOverlayOptionalField,
@@ -207,6 +260,9 @@ export function DefinitionEditor({
   const endpointMessage = entry.fieldErrors.endpoint_name
     ?? endpointNamePolicyError(entry.local.endpoint_name)
     ?? undefined;
+  const endpointUnsaved = probeEndpointUnsaved(entry);
+  const probeDisabled = operationsDisabled || endpointUnsaved;
+  const probe = () => { void onProbeStructuredOutput(agentKey); };
   const visibleModels = modelCatalog.items.filter((item) => matchesModelSearch(item, modelSearch));
   let modelCatalogStatus = '';
   if (modelCatalog.status === 'loading') modelCatalogStatus = 'Loading discovered models…';
@@ -474,6 +530,21 @@ export function DefinitionEditor({
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
           <FieldError id={`${agentKey}-endpoint-error`} message={endpointMessage} />
+        </div>
+        <div className="space-y-2">
+          <button
+            type="button"
+            disabled={probeDisabled}
+            onClick={probe}
+            className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 disabled:cursor-not-allowed disabled:text-gray-400"
+          >
+            Test structured output
+          </button>
+          {endpointUnsaved && <p className="text-xs text-gray-600">{PROBE_UNSAVED_ENDPOINT_HINT}</p>}
+          {probePending && <p className="text-xs text-gray-600">Testing the saved candidate…</p>}
+          {entry.probeResult !== null && (
+            <ProbeResultView result={entry.probeResult} retryDisabled={probeDisabled} onRetry={probe} />
+          )}
         </div>
         <div>
           <label htmlFor={`${agentKey}-temperature`} className="block text-sm font-medium text-gray-700">Temperature</label>

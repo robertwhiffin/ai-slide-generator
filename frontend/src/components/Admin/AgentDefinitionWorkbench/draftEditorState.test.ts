@@ -7,7 +7,9 @@ import {
   parseDraftSaveSuccessResponse,
   parseDraftValidationErrorResponse,
   parseLegacyPromptSourceResponse,
+  probeDraftStructuredOutput,
   readDraftLegacyPromptSource,
+  StructuredOutputProbeApiError,
   saveDraftDefinition,
   upgradeDraftProtectedAssembly,
   upgradeDraftSchemaContract,
@@ -30,10 +32,15 @@ import {
   MANUAL_RESOLUTION_REJECTION,
   PUBLISHED_V1_PROMPT_SOURCE,
   SCHEMA_ALREADY_CURRENT_REJECTION,
+  SEED_CANDIDATE_HASH,
+  SEED_MODEL_ENDPOINT_NAME,
+  STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticLegacyPromptSource,
   syntheticNullCandidateConflict,
+  syntheticProbeFailure,
+  syntheticProbeSuccess,
   syntheticSchemaUpgradeSuccess,
   syntheticSchemaV2DraftDefinition,
   syntheticUpgradeSuccess,
@@ -2156,5 +2163,427 @@ describe('strict schema overlay parsing', () => {
         JSON.stringify(candidate),
       ).toBeNull();
     }
+  });
+});
+
+// ============================================================
+// #266 Task 6 — saved-candidate structured-output probe
+// ============================================================
+
+const PROBE_CODES = [
+  'unsupported_structured_output',
+  'endpoint_probe_forbidden',
+  'structured_output_probe_failed',
+] as const;
+
+function probePending(agentKey: AgentKey = 'architect', requestId = 1, expectedLockVersion = 0): PendingDraftSave {
+  return { operation: 'probe', requestId, agentKey, expectedLockVersion, submittedCandidate: null };
+}
+
+describe('structured-output probe transport', () => {
+  it('sends exactly the lock body in one POST to the saved-candidate probe route and parses the exact 200', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(200, syntheticProbeSuccess()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(probeDraftStructuredOutput('architect', { lock_version: 0 }))
+      .resolves.toEqual(syntheticProbeSuccess());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/draft\/architect\/model-endpoint-probe$/);
+    expect(url).not.toContain('?');
+    expect(init).toEqual({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"lock_version":0}',
+    });
+  });
+
+  it.each(PROBE_CODES)('parses the exact typed %s failure at its own status', async (code) => {
+    const { status, message, retryable } = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+    const body = syntheticProbeFailure(code, { lock_version: 3 });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(status, body)));
+
+    const error = await probeDraftStructuredOutput('builder', { lock_version: 3 }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(StructuredOutputProbeApiError);
+    const typed = error as StructuredOutputProbeApiError;
+    expect(typed.status).toBe(status);
+    expect(typed.failure).toEqual({
+      code,
+      message,
+      retryable,
+      endpoint_name: SEED_MODEL_ENDPOINT_NAME,
+      candidate_hash: SEED_CANDIDATE_HASH,
+      lock_version: 3,
+    });
+  });
+
+  it('keeps the 409 null-candidate conflict and the 422 draft rejection as the existing draft envelopes', async () => {
+    const nullConflict = syntheticNullCandidateConflict(0, 1);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(409, nullConflict, 'Conflict')));
+    const conflicted = await probeDraftStructuredOutput('architect', { lock_version: 0 }).catch((error: unknown) => error);
+    expect(conflicted).toBeInstanceOf(AgentDefinitionApiError);
+    expect((conflicted as AgentDefinitionApiError).status).toBe(409);
+    expect((conflicted as AgentDefinitionApiError).payload).toEqual(nullConflict);
+
+    // A probe 409 that echoes a candidate is not this route's contract.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(409, conflict(0, 1), 'Conflict')));
+    await expect(probeDraftStructuredOutput('architect', { lock_version: 0 }))
+      .rejects.toBeInstanceOf(InvalidDraftSaveResponseError);
+
+    const policy = {
+      code: 'invalid_draft',
+      errors: [{
+        field: 'candidate.model.endpoint_name',
+        code: 'endpoint_url_not_allowed',
+        message: 'Endpoint must be a Databricks endpoint name, not a URL.',
+      }],
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(422, policy, 'Unprocessable Entity')));
+    const rejected = await probeDraftStructuredOutput('architect', { lock_version: 0 }).catch((error: unknown) => error);
+    expect(rejected).toBeInstanceOf(AgentDefinitionApiError);
+    expect(rejected).not.toBeInstanceOf(StructuredOutputProbeApiError);
+    expect((rejected as AgentDefinitionApiError).status).toBe(422);
+    expect((rejected as AgentDefinitionApiError).payload).toEqual(policy);
+  });
+
+  it.each([
+    ['an extra key', { ...syntheticProbeSuccess(), approved: true }],
+    ['a missing identity key', setAtPath(syntheticProbeSuccess(), 'candidate_hash', undefined, true)],
+    ['a failure code', { ...syntheticProbeSuccess(), code: 'structured_output_probe_failed' }],
+    ['a non-hex hash', { ...syntheticProbeSuccess(), candidate_hash: 'z'.repeat(64) }],
+    ['a short hash', { ...syntheticProbeSuccess(), candidate_hash: 'a'.repeat(63) }],
+    ['a fractional lock', { ...syntheticProbeSuccess(), lock_version: 1.5 }],
+    ['a negative lock', { ...syntheticProbeSuccess(), lock_version: -1 }],
+    ['an empty endpoint', { ...syntheticProbeSuccess(), endpoint_name: '' }],
+    ['a numeric endpoint', { ...syntheticProbeSuccess(), endpoint_name: 7 }],
+    ['an array', [syntheticProbeSuccess()]],
+    ['null', null],
+    ['a string', 'ok'],
+  ])('rejects a 200 with %s as an invalid response', async (_name, body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(200, body)));
+    await expect(probeDraftStructuredOutput('architect', { lock_version: 0 }))
+      .rejects.toBeInstanceOf(InvalidDraftSaveResponseError);
+  });
+
+  it.each([
+    ['the unsupported code with retryable true', { ...syntheticProbeFailure('unsupported_structured_output'), retryable: true }],
+    ['the forbidden code at 422', syntheticProbeFailure('endpoint_probe_forbidden')],
+    ['the ambiguous code at 422', syntheticProbeFailure('structured_output_probe_failed')],
+    ['an extra key', { ...syntheticProbeFailure('unsupported_structured_output'), detail: 'x' }],
+    ['a missing message', setAtPath(syntheticProbeFailure('unsupported_structured_output'), 'message', undefined, true)],
+    ['a non-string message', { ...syntheticProbeFailure('unsupported_structured_output'), message: 5 }],
+    ['a malformed hash', { ...syntheticProbeFailure('unsupported_structured_output'), candidate_hash: 'A'.repeat(64) }],
+    ['an empty errors list', { code: 'invalid_draft', errors: [] }],
+    ['null', null],
+  ])('rejects a 422 carrying %s as an invalid response', async (_name, body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(422, body, 'Unprocessable Entity')));
+    await expect(probeDraftStructuredOutput('architect', { lock_version: 0 }))
+      .rejects.toBeInstanceOf(InvalidDraftSaveResponseError);
+  });
+
+  it.each([
+    [403, { ...syntheticProbeFailure('endpoint_probe_forbidden'), retryable: true }],
+    [403, syntheticProbeFailure('structured_output_probe_failed')],
+    [403, { detail: 'Admin access required' }],
+    [503, { ...syntheticProbeFailure('structured_output_probe_failed'), retryable: false }],
+    [503, syntheticProbeFailure('endpoint_probe_forbidden')],
+    [503, null],
+    [500, syntheticProbeFailure('structured_output_probe_failed')],
+  ])('a %i that is not the exact typed envelope is a plain request error, never a typed retry', async (status, body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(status, body, 'Error')));
+    const error = await probeDraftStructuredOutput('architect', { lock_version: 0 }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentDefinitionApiError);
+    expect(error).not.toBeInstanceOf(StructuredOutputProbeApiError);
+    expect((error as AgentDefinitionApiError).status).toBe(status);
+  });
+
+  it('propagates a network failure unchanged', async () => {
+    const failure = new TypeError('network failed');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(failure));
+    await expect(probeDraftStructuredOutput('architect', { lock_version: 0 })).rejects.toBe(failure);
+  });
+});
+
+describe('structured-output probe in the one draft gate', () => {
+  it('joins the one pending slot: a pending probe refuses every other start, and every other pending start refuses a probe', () => {
+    const base = createDraftEditorState(workbench());
+    const probing = draftEditorReducer(base, { type: 'probeStarted', pending: probePending('architect', 1) });
+    expect(probing.pendingSave).toEqual(probePending('architect', 1));
+
+    for (const action of [
+      { type: 'saveStarted', pending: { operation: 'save', requestId: 2, agentKey: 'builder', expectedLockVersion: 0, submittedCandidate: request().candidate } },
+      { type: 'upgradeStarted', pending: upgradePending('data_analyst', 2) },
+      { type: 'sourceRecoveryStarted', pending: sourcePending('data_analyst', 2) },
+      { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('fixer', 2) },
+      { type: 'probeStarted', pending: probePending('builder', 2) },
+      { type: 'probeStarted', pending: probePending('architect', 2) },
+    ] as const) {
+      expect(draftEditorReducer(probing, action)).toBe(probing);
+    }
+
+    for (const first of [
+      { type: 'saveStarted', pending: { operation: 'save', requestId: 1, agentKey: 'builder', expectedLockVersion: 0, submittedCandidate: request().candidate } },
+      { type: 'upgradeStarted', pending: upgradePending('data_analyst', 1) },
+      { type: 'sourceRecoveryStarted', pending: sourcePending('data_analyst', 1) },
+      { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('fixer', 1) },
+    ] as const) {
+      const pending = draftEditorReducer(base, first);
+      expect(pending.pendingSave).not.toBeNull();
+      expect(draftEditorReducer(pending, { type: 'probeStarted', pending: probePending('architect', 2) })).toBe(pending);
+    }
+  });
+
+  it('refuses to start a probe while the role\'s local endpoint differs from its saved endpoint', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'endpoint_name', value: 'databricks-claude-opus-4-7' });
+    expect(draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') })).toBe(state);
+
+    // Another role's unsaved endpoint does not block this role, and an unsaved
+    // non-endpoint field does not either: the probe tests the saved candidate.
+    let other = createDraftEditorState(workbench());
+    other = draftEditorReducer(other, { type: 'edit', agentKey: 'builder', field: 'endpoint_name', value: 'elsewhere' });
+    other = draftEditorReducer(other, { type: 'edit', agentKey: 'architect', field: 'temperature', value: 0.1 });
+    expect(draftEditorReducer(other, { type: 'probeStarted', pending: probePending('architect') }).pendingSave)
+      .toEqual(probePending('architect'));
+  });
+
+  it('a success records the exact identity and changes no lock, saved entry, form value or status', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    const before = state;
+
+    const next = draftEditorReducer(state, { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess() });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft).toBe(before.draft);
+    expect(next.byAgent.architect.saved).toBe(before.byAgent.architect.saved);
+    expect(next.byAgent.architect.local).toBe(before.byAgent.architect.local);
+    expect(next.byAgent.architect.conflict).toBeNull();
+    expect(next.byAgent.architect.retainedForms).toBe(before.byAgent.architect.retainedForms);
+    expect(draftStatus(next.byAgent.architect)).toBe(draftStatus(before.byAgent.architect));
+    expect(next.byAgent.architect.probeResult).toEqual({
+      outcome: 'succeeded',
+      endpoint_name: SEED_MODEL_ENDPOINT_NAME,
+      candidate_hash: SEED_CANDIDATE_HASH,
+      lock_version: 0,
+    });
+    for (const agentKey of AGENT_KEYS) {
+      if (agentKey !== 'architect') expect(next.byAgent[agentKey]).toBe(before.byAgent[agentKey]);
+    }
+  });
+
+  it.each(PROBE_CODES)('a typed %s failure records the sanitized message and its exact retryability', (code) => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('builder', 4) });
+    const before = state;
+
+    const next = draftEditorReducer(state, { type: 'probeUnsuccessful', requestId: 4, failure: syntheticProbeFailure(code) });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft).toBe(before.draft);
+    expect(next.byAgent.builder.saved).toBe(before.byAgent.builder.saved);
+    expect(next.byAgent.builder.local).toBe(before.byAgent.builder.local);
+    expect(next.byAgent.builder.requestError).toBeNull();
+    expect(next.byAgent.builder.probeResult).toEqual({
+      outcome: 'failed',
+      code,
+      message: STRUCTURED_OUTPUT_PROBE_FAILURES[code].message,
+      retryable: STRUCTURED_OUTPUT_PROBE_FAILURES[code].retryable,
+      endpoint_name: SEED_MODEL_ENDPOINT_NAME,
+      candidate_hash: SEED_CANDIDATE_HASH,
+      lock_version: 0,
+    });
+  });
+
+  it('only the pending probe\'s own request ID may complete it, and a probe ID never completes another operation', () => {
+    let probing = createDraftEditorState(workbench());
+    probing = draftEditorReducer(probing, { type: 'probeStarted', pending: probePending('architect', 7) });
+    for (const action of [
+      { type: 'probeSucceeded', requestId: 6, result: syntheticProbeSuccess() },
+      { type: 'probeUnsuccessful', requestId: 8, failure: syntheticProbeFailure('structured_output_probe_failed') },
+      { type: 'probeFailed', requestId: 6, message: 'late' },
+      { type: 'probeConflicted', requestId: 6, conflict: syntheticNullCandidateConflict(0, 1) },
+      { type: 'saveSucceeded', requestId: 7, result: success('architect', 'A2', 1) },
+      { type: 'upgradeFailed', requestId: 7, message: 'x' },
+      { type: 'schemaUpgradeSucceeded', requestId: 7, result: syntheticSchemaUpgradeSuccess('architect', 1) },
+      { type: 'saveConflicted', requestId: 7, conflict: conflict(0, 1) },
+    ] as const) {
+      expect(draftEditorReducer(probing, action)).toBe(probing);
+    }
+
+    let saving = createDraftEditorState(workbench());
+    saving = draftEditorReducer(saving, {
+      type: 'saveStarted',
+      pending: { operation: 'save', requestId: 1, agentKey: 'architect', expectedLockVersion: 0, submittedCandidate: request().candidate },
+    });
+    expect(draftEditorReducer(saving, { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess() })).toBe(saving);
+    expect(draftEditorReducer(saving, { type: 'probeFailed', requestId: 1, message: 'x' })).toBe(saving);
+  });
+
+  it('a late probe response after a newer save has started never clobbers state (monotonic IDs)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect', 1) });
+    state = draftEditorReducer(state, { type: 'probeFailed', requestId: 1, message: 'Unable to test structured output.' });
+    state = draftEditorReducer(state, {
+      type: 'saveStarted',
+      pending: { operation: 'save', requestId: 2, agentKey: 'architect', expectedLockVersion: 0, submittedCandidate: request().candidate },
+    });
+    for (const late of [
+      { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess() },
+      { type: 'probeUnsuccessful', requestId: 1, failure: syntheticProbeFailure('unsupported_structured_output') },
+    ] as const) {
+      const next = draftEditorReducer(state, late);
+      expect(next).toBe(state);
+      expect(next.pendingSave?.requestId).toBe(2);
+      expect(next.byAgent.architect.probeResult).toBeNull();
+    }
+  });
+
+  it.each([
+    ['another lock', { lock_version: 1 }],
+    ['another endpoint', { endpoint_name: 'databricks-claude-opus-4-7' }],
+    ['another candidate hash', { candidate_hash: 'b'.repeat(64) }],
+  ])('a success reporting %s than the saved candidate is contained as an invalid response', (_name, identity) => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    const before = state;
+
+    for (const action of [
+      { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess(identity) },
+      { type: 'probeUnsuccessful', requestId: 1, failure: syntheticProbeFailure('unsupported_structured_output', identity) },
+    ] as const) {
+      const next = draftEditorReducer(state, action);
+      expect(next.pendingSave).toBeNull();
+      expect(next.draft).toBe(before.draft);
+      expect(next.byAgent.architect.saved).toBe(before.byAgent.architect.saved);
+      expect(next.byAgent.architect.local).toBe(before.byAgent.architect.local);
+      expect(next.byAgent.architect.probeResult).toBeNull();
+      expect(next.byAgent.architect.requestError).toBe(
+        'Unable to test structured output because the server response was invalid.',
+      );
+    }
+  });
+
+  it('keeps every edit made while the probe was pending (A2 to A3)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'prompt_text', value: 'Architect A2' });
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'prompt_text', value: 'Architect A3' });
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'top_p', value: 0.42 });
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'builder', field: 'prompt_text', value: 'Builder B3' });
+
+    const next = draftEditorReducer(state, { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess() });
+
+    expect(next.byAgent.architect.local.prompt_text).toBe('Architect A3');
+    expect(next.byAgent.architect.local.top_p).toBe(0.42);
+    expect(next.byAgent.builder.local.prompt_text).toBe('Builder B3');
+    expect(draftStatus(next.byAgent.architect)).toBe('Unsaved');
+    expect(next.byAgent.architect.probeResult?.outcome).toBe('succeeded');
+  });
+
+  it('clears an old probe result when the local endpoint changes, and drops a result for an endpoint no longer local', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    state = draftEditorReducer(state, { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess() });
+    expect(state.byAgent.architect.probeResult).not.toBeNull();
+
+    // A non-endpoint edit keeps it: the result still describes the saved candidate.
+    const temperature = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'temperature', value: 0.2 });
+    expect(temperature.byAgent.architect.probeResult).toEqual(state.byAgent.architect.probeResult);
+    const cleared = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'endpoint_name', value: 'endpoint-b' });
+    expect(cleared.byAgent.architect.probeResult).toBeNull();
+    const back = draftEditorReducer(cleared, { type: 'edit', agentKey: 'architect', field: 'endpoint_name', value: SEED_MODEL_ENDPOINT_NAME });
+    expect(back.byAgent.architect.probeResult).toBeNull();
+
+    // An endpoint edited while the probe is in flight: its answer is for the saved
+    // endpoint, which is no longer the one on screen, so it is not shown.
+    let inFlight = createDraftEditorState(workbench());
+    inFlight = draftEditorReducer(inFlight, { type: 'probeStarted', pending: probePending('architect', 2) });
+    inFlight = draftEditorReducer(inFlight, { type: 'edit', agentKey: 'architect', field: 'endpoint_name', value: 'endpoint-b' });
+    const settled = draftEditorReducer(inFlight, { type: 'probeSucceeded', requestId: 2, result: syntheticProbeSuccess() });
+    expect(settled.pendingSave).toBeNull();
+    expect(settled.byAgent.architect.probeResult).toBeNull();
+    expect(settled.byAgent.architect.local.endpoint_name).toBe('endpoint-b');
+  });
+
+  it('a later save that changes the saved candidate clears the probe result it no longer describes', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    state = draftEditorReducer(state, { type: 'probeSucceeded', requestId: 1, result: syntheticProbeSuccess() });
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'prompt_text', value: 'A2' });
+    const submitted = validateDraftForm(state.byAgent.architect.local);
+    if (!submitted.ok) throw new Error('expected a valid form');
+    state = draftEditorReducer(state, {
+      type: 'saveStarted',
+      pending: { operation: 'save', requestId: 2, agentKey: 'architect', expectedLockVersion: 0, submittedCandidate: submitted.candidate },
+    });
+    const saved = draftEditorReducer(state, { type: 'saveSucceeded', requestId: 2, result: success('architect', 'A2', 1) });
+    expect(saved.byAgent.architect.saved.candidate_hash).not.toBe(SEED_CANDIDATE_HASH);
+    expect(saved.byAgent.architect.probeResult).toBeNull();
+  });
+
+  it('a probe 409 is the coherent seven-role recovery: every definition merges and the lock advances', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'builder', field: 'prompt_text', value: 'Builder dirty' });
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    const server = syntheticNullCandidateConflict(0, 2);
+    for (const agentKey of AGENT_KEYS) {
+      server.server.definitions[agentKey] = {
+        ...server.server.definitions[agentKey],
+        prompt_text: `${agentKey} server`,
+        candidate_hash: `${AGENT_KEYS.indexOf(agentKey) + 1}`.repeat(64),
+      };
+    }
+
+    const next = draftEditorReducer(state, { type: 'probeConflicted', requestId: 1, conflict: server });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft.lock_version).toBe(2);
+    for (const agentKey of AGENT_KEYS) {
+      expect(next.byAgent[agentKey].saved).toEqual(server.server.definitions[agentKey]);
+      expect(next.byAgent[agentKey].probeResult).toBeNull();
+    }
+    expect(next.byAgent.architect.conflict).toEqual(server);
+    expect(next.byAgent.builder.local.prompt_text).toBe('Builder dirty');
+    expect(next.byAgent.fixer.local.prompt_text).toBe('fixer server');
+  });
+
+  it('an incoherent probe 409 is contained without adopting anything', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect', 1, 3) });
+    const stale = syntheticNullCandidateConflict(3, 2);
+    const next = draftEditorReducer(state, { type: 'probeConflicted', requestId: 1, conflict: stale });
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft).toBe(state.draft);
+    expect(next.byAgent.architect.saved).toBe(state.byAgent.architect.saved);
+    expect(next.byAgent.architect.conflict).toBeNull();
+  });
+
+  it('a probe policy 422 binds to the endpoint field and a transport failure is contained to the role', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'probeStarted', pending: probePending('architect') });
+    const rejected = draftEditorReducer(state, {
+      type: 'probeRejected',
+      requestId: 1,
+      error: {
+        code: 'invalid_draft',
+        errors: [{
+          field: 'candidate.model.endpoint_name',
+          code: 'endpoint_url_not_allowed',
+          message: 'Endpoint must be a Databricks endpoint name, not a URL.',
+        }],
+      },
+    });
+    expect(rejected.pendingSave).toBeNull();
+    expect(rejected.byAgent.architect.fieldErrors.endpoint_name)
+      .toBe('Endpoint must be a Databricks endpoint name, not a URL.');
+    expect(rejected.byAgent.architect.local).toBe(state.byAgent.architect.local);
+    expect(rejected.byAgent.architect.probeResult).toBeNull();
+
+    const failed = draftEditorReducer(state, { type: 'probeFailed', requestId: 1, message: 'Unable to test structured output (500).' });
+    expect(failed.pendingSave).toBeNull();
+    expect(failed.byAgent.architect.requestError).toBe('Unable to test structured output (500).');
+    expect(failed.byAgent.architect.local).toBe(state.byAgent.architect.local);
+    expect(failed.byAgent.builder).toBe(state.byAgent.builder);
   });
 });

@@ -9,7 +9,9 @@ import {
   MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE,
   PUBLISHED_V1_PROMPT_SOURCE,
   SCHEMA_ALREADY_CURRENT_REJECTION,
+  SEED_CANDIDATE_HASH,
   SEED_MODEL_ENDPOINT_NAME,
+  STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticDraftDefinitions,
@@ -17,6 +19,8 @@ import {
   syntheticModelEndpointDiscovery,
   syntheticNewerModelEndpoint,
   syntheticNullCandidateConflict,
+  syntheticProbeFailure,
+  syntheticProbeSuccess,
   syntheticSchemaV2DraftDefinition,
   syntheticSystemModelEndpoints,
   syntheticUpgradeSuccess,
@@ -125,6 +129,20 @@ function isWorkbenchUrl(url: unknown) {
   return String(url).endsWith(WORKBENCH_SUFFIX);
 }
 
+/**
+ * The #266 probe POST is routed by URL (correction 17): every harness below otherwise
+ * parses an unmatched non-GET as a PUT, which would answer a probe with a save body.
+ */
+const PROBE_SUFFIX = '/model-endpoint-probe';
+
+function isProbeUrl(url: unknown) {
+  return String(url).endsWith(PROBE_SUFFIX);
+}
+
+function probeCalls(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([url]) => isProbeUrl(url));
+}
+
 function defaultCatalogResponse() {
   return apiResponse(200, syntheticModelEndpointDiscovery());
 }
@@ -226,12 +244,19 @@ function mockWorkbenchWithPuts(
   put: (agentKey: AgentKey, request: DraftSaveRequest, call: number) => Promise<object> | object,
   workbench: object = syntheticAgentDefinitionWorkbench,
   catalog: (call: number) => Promise<object> | object = defaultCatalogResponse,
+  probe?: (agentKey: AgentKey, body: Record<string, unknown>, call: number) => Promise<object> | object,
 ) {
   let putCall = 0;
   let catalogCall = 0;
+  let probeCall = 0;
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (isCatalogUrl(url)) return catalog(catalogCall++);
     if (isWorkbenchUrl(url)) return apiResponse(200, workbench);
+    if (isProbeUrl(url)) {
+      if (!probe) throw new Error('unexpected probe POST');
+      const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
+      return probe(agentKey, JSON.parse(String(init?.body)) as Record<string, unknown>, probeCall++);
+    }
     const agentKey = url.split('/').at(-1) as AgentKey;
     const request = JSON.parse(String(init?.body)) as DraftSaveRequest;
     const result = await put(agentKey, request, putCall++);
@@ -882,12 +907,18 @@ function mockWorkbenchApi(routes: {
   put?: RouteResponder;
   upgrade?: RouteResponder;
   source?: RouteResponder;
+  probe?: RouteResponder;
 }) {
-  const counts = { put: 0, upgrade: 0, source: 0 };
+  const counts = { put: 0, upgrade: 0, source: 0, probe: 0 };
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (isCatalogUrl(url)) return defaultCatalogResponse();
     if (isWorkbenchUrl(url)) return apiResponse(200, syntheticAgentDefinitionWorkbench);
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (isProbeUrl(url)) {
+      const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
+      if (!routes.probe) throw new Error('unexpected probe POST');
+      return routes.probe(agentKey, body, counts.probe++);
+    }
     if (url.endsWith(UPGRADE_SUFFIX)) {
       const agentKey = url.slice(0, -UPGRADE_SUFFIX.length).split('/').at(-1) as AgentKey;
       if (!routes.upgrade) throw new Error('unexpected upgrade POST');
@@ -1486,6 +1517,8 @@ function GateHarness() {
     ['upgrade builder', () => editor.upgradeProtectedAssembly('builder')],
     ['recover data analyst', () => editor.restorePublishedV1Prompt('data_analyst')],
     ['schema upgrade architect', () => editor.upgradeSchemaContract('architect')],
+    ['probe architect', () => editor.probeStructuredOutput('architect')],
+    ['probe builder', () => editor.probeStructuredOutput('builder')],
   ];
   // Pairs fired inside one handler never see a re-render, so the hook's shared
   // in-flight ref is the only guard the second call can meet.
@@ -1513,6 +1546,22 @@ function GateHarness() {
     ['save architect then schema upgrade', () => {
       void editor.save('architect');
       void editor.upgradeSchemaContract('architect');
+    }],
+    ['double probe architect', () => {
+      void editor.probeStructuredOutput('architect');
+      void editor.probeStructuredOutput('architect');
+    }],
+    ['probe then save architect', () => {
+      void editor.probeStructuredOutput('architect');
+      void editor.save('architect');
+    }],
+    ['save then probe architect', () => {
+      void editor.save('architect');
+      void editor.probeStructuredOutput('architect');
+    }],
+    ['probe then schema upgrade builder', () => {
+      void editor.probeStructuredOutput('architect');
+      void editor.upgradeSchemaContract('builder');
     }],
   ];
   return (
@@ -1648,6 +1697,16 @@ describe('useDraftEditor shared request gate', () => {
     ['save architect', 'schema upgrade architect'],
     ['schema upgrade architect', 'upgrade architect'],
     ['upgrade architect', 'schema upgrade architect'],
+    ['probe architect', 'save architect'],
+    ['save architect', 'probe architect'],
+    ['probe architect', 'upgrade architect'],
+    ['upgrade architect', 'probe builder'],
+    ['probe architect', 'schema upgrade architect'],
+    ['schema upgrade architect', 'probe builder'],
+    ['recover data analyst', 'probe architect'],
+    ['probe architect', 'recover data analyst'],
+    ['probe architect', 'probe builder'],
+    ['probe architect', 'probe architect'],
   ])('%s then %s issues only the first request', (first, second) => {
     const { fetchMock } = heldFetch();
     render(<GateHarness />);
@@ -1668,6 +1727,10 @@ describe('useDraftEditor shared request gate', () => {
     'recover then save builder',
     'schema upgrade then save architect',
     'save architect then schema upgrade',
+    'double probe architect',
+    'probe then save architect',
+    'save then probe architect',
+    'probe then schema upgrade builder',
   ])('%s inside one tick issues only the first request', (name) => {
     const { fetchMock } = heldFetch();
     render(<GateHarness />);
@@ -2479,5 +2542,365 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
     expect(save).toBeEnabled();
     expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+});
+
+// ============================================================
+// #266 Task 6 — explicit structured-output probe of the saved candidate
+// ============================================================
+
+const PROBE_BUTTON = 'Test structured output';
+const PROBE_RETRY_BUTTON = 'Retry structured output test';
+const PROBE_RESULT_REGION = 'Structured output test result';
+const PROBE_SUCCEEDED_TEXT = 'Structured output test succeeded for the saved candidate.';
+const PROBE_UNSAVED_HINT = 'Save the endpoint before testing structured output.';
+const PROBE_NETWORK_MESSAGE = 'Unable to test structured output. Check your connection and try again.';
+const PROBE_IDENTITY_TEXT = (endpoint: string, hash: string, lock: number) =>
+  `Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
+
+function probeButton() {
+  return within(modelPanel()).getByRole('button', { name: PROBE_BUTTON });
+}
+
+function probeResult() {
+  return within(modelPanel()).queryByRole('region', { name: PROBE_RESULT_REGION });
+}
+
+function probeBody(fetchMock: ReturnType<typeof vi.fn>, index: number) {
+  return String((probeCalls(fetchMock)[index][1] as RequestInit).body);
+}
+
+function heldResponses() {
+  const pending: Array<(response: object) => void> = [];
+  const responder = () => new Promise<object>((resolve) => { pending.push(resolve); });
+  return { pending, responder };
+}
+
+describe('AgentDefinitionWorkbench structured-output probe', () => {
+  it('Test structured output sends one lock-only POST for the saved candidate and reports its exact identity without a write', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(200, syntheticProbeSuccess()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const statusBefore = architectStatus(navigation).textContent;
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    const [url, init] = probeCalls(fetchMock)[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/draft\/architect\/model-endpoint-probe$/);
+    expect(url).not.toContain('?');
+    expect(init.method).toBe('POST');
+    expect(probeBody(fetchMock, 0)).toBe('{"lock_version":0}');
+
+    const region = probeResult()!;
+    expect(region).toHaveTextContent(PROBE_SUCCEEDED_TEXT);
+    expect(region).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expect(within(region).queryByRole('alert')).not.toBeInTheDocument();
+    // Success approves nothing: no status, lock, form or write moves.
+    expect(region.textContent).not.toMatch(/approv|publish|release|ready|verified|passed/i);
+    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(within(region).queryByRole('button', { name: PROBE_RETRY_BUTTON })).not.toBeInTheDocument();
+    expectNoForbiddenActionNames();
+  });
+
+  it('probes the saved endpoint, never a newer discovered family member that was not selected and saved', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      (call) => (call === 0
+        ? catalogResponse()
+        : catalogResponse([syntheticNewerModelEndpoint, ...syntheticSystemModelEndpoints])),
+      () => apiResponse(200, syntheticProbeSuccess()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await within(panel).findByRole('radio', { name: syntheticNewerModelEndpoint.name });
+
+    expect(probeButton()).toBeEnabled();
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+
+    expect(probeBody(fetchMock, 0)).toBe('{"lock_version":0}');
+    expect(probeBody(fetchMock, 0)).not.toContain(syntheticNewerModelEndpoint.name);
+    expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('is disabled while the local endpoint is unsaved, and probes the newly saved candidate once it is saved', async () => {
+    const newer = 'databricks-gpt-oss-120b';
+    const fetchMock = mockWorkbenchWithPuts(
+      (agentKey, request) => apiResponse(200, saveSuccess(agentKey, request.candidate, 1)),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(200, syntheticProbeSuccess({ endpoint_name: newer, candidate_hash: 'd'.repeat(64), lock_version: 1 })),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    // An unsaved non-endpoint edit does not block it: the probe reads the saved candidate.
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.5' } });
+    expect(probeButton()).toBeEnabled();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: String(SEED_NUMERICS.temperature) } });
+
+    fireEvent.click(within(panel).getByRole('radio', { name: newer }));
+    expect(probeButton()).toBeDisabled();
+    expect(panel).toHaveTextContent(PROBE_UNSAVED_HINT);
+    fireEvent.click(probeButton());
+    fireEvent.change(customEndpoint(), { target: { value: 'Team Manual Endpoint' } });
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    await act(async () => { await Promise.resolve(); });
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(within(panel).getByRole('radio', { name: newer }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    expect(probeButton()).toBeEnabled();
+    expect(panel).not.toHaveTextContent(PROBE_UNSAVED_HINT);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    expect(probeBody(fetchMock, 0)).toBe('{"lock_version":1}');
+    expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(newer, 'd'.repeat(64), 1));
+    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('clears an old result when the local endpoint changes, even back to the saved name', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(200, syntheticProbeSuccess()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+
+    fireEvent.change(customEndpoint(), { target: { value: 'endpoint-b' } });
+    expect(probeResult()).not.toBeInTheDocument();
+    fireEvent.change(customEndpoint(), { target: { value: SEED_MODEL_ENDPOINT_NAME } });
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    expect(probeCalls(fetchMock)).toHaveLength(2);
+  });
+
+  it.each([
+    'unsupported_structured_output',
+    'endpoint_probe_forbidden',
+    'structured_output_probe_failed',
+  ] as const)('renders the sanitized %s result and offers Retry only when it is retryable', async (code) => {
+    const { status, message, retryable } = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      (_agentKey, _body, call) => (call === 0
+        ? apiResponse(status, syntheticProbeFailure(code))
+        : apiResponse(200, syntheticProbeSuccess())),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const statusBefore = architectStatus(navigation).textContent;
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    const region = probeResult()!;
+    const alert = within(region).getByRole('alert');
+    expect(alert).toHaveTextContent(message);
+    expect(region).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expect(region).not.toHaveTextContent(PROBE_SUCCEEDED_TEXT);
+    expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
+    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(probeButton()).toBeEnabled();
+    expectNoForbiddenActionNames();
+
+    const retry = within(region).queryByRole('button', { name: PROBE_RETRY_BUTTON });
+    if (!retryable) {
+      expect(retry).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+      expect(probeCalls(fetchMock)).toHaveLength(1);
+      return;
+    }
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry!);
+    await waitFor(() => expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT));
+    expect(probeCalls(fetchMock)).toHaveLength(2);
+    expect(probeBody(fetchMock, 1)).toBe('{"lock_version":0}');
+    expect(within(probeResult()!).queryByRole('alert')).not.toBeInTheDocument();
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('a pending probe holds the one gate on every role while the catalog read stays outside it', async () => {
+    const held = heldResponses();
+    const fetchMock = mockWorkbenchApi({
+      probe: held.responder,
+      put: (agentKey, body) => apiResponse(200, saveSuccess(agentKey, body.candidate as EditableModelDraft, 1)),
+      upgrade: () => apiResponse(500, null),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+    expect(probeButton()).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    expect(within(modelPanel()).getByRole('button', { name: 'Refresh models' })).toBeEnabled();
+    fireEvent.click(probeButton());
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /Data Analyst/ }));
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    const upgrade = within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' });
+    expect(upgrade).toBeDisabled();
+    fireEvent.click(upgrade);
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    await act(async () => { await Promise.resolve(); });
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(upgradeCalls(fetchMock)).toHaveLength(0);
+
+    await act(async () => { held.pending[0](apiResponse(200, syntheticProbeSuccess())); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+    expect(probeButton()).toBeEnabled();
+    // The result belongs to Architect; Data Analyst shows none.
+    expect(probeResult()).not.toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    openModelTab();
+    expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT);
+  });
+
+  it('a pending Save disables Test structured output on every role', async () => {
+    let releasePut!: (response: object) => void;
+    const heldPut = new Promise<object>((resolve) => { releasePut = resolve; });
+    const fetchMock = mockWorkbenchApi({ put: () => heldPut, probe: () => apiResponse(200, syntheticProbeSuccess()) });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(putCalls(fetchMock)).toHaveLength(1);
+
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    releasePut(apiResponse(200, saveSuccess('architect', {
+      prompt_text: 'Architect A2',
+      model: structuredClone(modelNode('architect').draft.model),
+    }, 1)));
+    await waitFor(() => expect(probeButton()).toBeEnabled());
+  });
+
+  it('a probe 409 recovers all seven roles and the next explicit probe sends the adopted lock', async () => {
+    const fetchMock = mockWorkbenchApi({
+      probe: (_agentKey, _body, call) => (call === 0
+        ? apiResponse(409, syntheticNullCandidateConflict(0, 1))
+        : apiResponse(200, syntheticProbeSuccess({ lock_version: 1 }))),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    const conflict = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(conflict).toHaveTextContent('Expected lock 0; Current lock 1');
+    expect(within(conflict).queryByRole('group', { name: 'Submitted values' })).not.toBeInTheDocument();
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT));
+    expect(probeBody(fetchMock, 1)).toBe('{"lock_version":1}');
+    expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 1));
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+  });
+
+  it.each([
+    ['a network failure', () => Promise.reject(new TypeError('network failed')), PROBE_NETWORK_MESSAGE],
+    ['an untyped 500', () => apiResponse(500, { detail: 'Traceback: secret-host.example' }), 'Unable to test structured output (500).'],
+    ['a malformed 200', () => apiResponse(200, { code: 'structured_output_probe_succeeded' }), 'Unable to test structured output because the server response was invalid.'],
+  ])('%s is a contained alert with no result, no leak, and no automatic retry', async (_name, respond, message) => {
+    const fetchMock = mockWorkbenchApi({ probe: respond });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    const alert = await screen.findByText(message);
+    expect(alert).toHaveAttribute('role', 'alert');
+    expect(document.body).not.toHaveTextContent('secret-host.example');
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(probeButton()).toBeEnabled();
+    await act(async () => { await Promise.resolve(); });
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('a hook probe with an unsaved endpoint allocates no request, and a saved one sends only the lock', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(apiResponse(200, syntheticProbeSuccess()));
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useDraftEditor(syntheticAgentDefinitionWorkbench));
+
+    act(() => result.current.edit('architect', 'endpoint_name', 'databricks-claude-opus-4-7'));
+    await act(() => result.current.probeStructuredOutput('architect'));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.state.pendingSave).toBeNull();
+
+    await act(() => result.current.probeStructuredOutput('builder'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/draft\/builder\/model-endpoint-probe$/);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe('{"lock_version":0}');
+    expect(result.current.state.byAgent.builder.probeResult).toEqual({
+      outcome: 'succeeded',
+      endpoint_name: SEED_MODEL_ENDPOINT_NAME,
+      candidate_hash: SEED_CANDIDATE_HASH,
+      lock_version: 0,
+    });
+    expect(result.current.state.draft.lock_version).toBe(0);
   });
 });
