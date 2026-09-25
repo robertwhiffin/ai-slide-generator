@@ -702,6 +702,7 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         enqueue_export_job,
         generate_job_id,
     )
+    from src.services.image_service import resolve_requesting_user
 
     import time
     start_time = time.time()
@@ -759,6 +760,9 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
             job_id,
             {
                 "session_id": request.session_id,
+                # Acting user for {{image:ID}} ownership checks (F-CR-27): the
+                # worker runs outside this request's user context.
+                "user_identity": resolve_requesting_user(),
                 "chart_images_per_slide": chart_images_per_slide,
                 "title": slide_deck.get("title", "slides"),
                 "total_slides": total_slides,
