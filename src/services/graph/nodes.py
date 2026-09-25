@@ -2050,16 +2050,16 @@ def foreman_node(state: dict) -> Dict[str, Any]:
 # ``build_branch_payload`` later stays out of the prompt by default.  Excluded
 # and still used by the node itself: ``session_id``, ``root_session_id``,
 # ``actor_session_id`` (mutation actor, trace), ``initiated_by``, ``turn_id``
-# (turn scoping) and ``graph_release_id`` (release pin) — all carried in the
-# ``slides[position]`` record.  ``position`` stays: ``BuilderOutput.position``
-# echoes it.
+# (turn scoping), ``graph_release_id`` (release pin) and ``design_contract``
+# (row IDs resolved from the session's agent config, unusable by the model) —
+# all carried in the ``slides[position]`` record.  ``position`` stays:
+# ``BuilderOutput.position`` echoes it.
 _BUILDER_MODEL_PAYLOAD_KEYS = frozenset(
     {
         "position",
         "slide_spec",
         "assumes",
         "hands_off",
-        "design_contract",
         "resolved_data",
         "section_html",
         "section_css",
