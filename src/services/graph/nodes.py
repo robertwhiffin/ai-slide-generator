@@ -2044,10 +2044,28 @@ def foreman_node(state: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-# Session identifiers a ``Send`` payload carries for attribution and tracing,
-# never for the model.  Excluded from the builder's model-facing payload.
-_MODEL_EXCLUDED_SESSION_KEYS = frozenset(
-    {"session_id", "root_session_id", "actor_session_id"}
+# The ONLY payload keys the builder's model is handed: the slide's content and
+# styling inputs (#258, user decision — nothing session-, user-, turn- or
+# release-specific reaches the model).  An allowlist, so a metadata key added to
+# ``build_branch_payload`` later stays out of the prompt by default.  Excluded
+# and still used by the node itself: ``session_id``, ``root_session_id``,
+# ``actor_session_id`` (mutation actor, trace), ``initiated_by``, ``turn_id``
+# (turn scoping) and ``graph_release_id`` (release pin) — all carried in the
+# ``slides[position]`` record.  ``position`` stays: ``BuilderOutput.position``
+# echoes it.
+_BUILDER_MODEL_PAYLOAD_KEYS = frozenset(
+    {
+        "position",
+        "slide_spec",
+        "assumes",
+        "hands_off",
+        "design_contract",
+        "resolved_data",
+        "section_html",
+        "section_css",
+        "resolved_style",
+        "design_system_active",
+    }
 )
 
 
@@ -2089,14 +2107,15 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         object_type="slide",
     )
 
-    # The model-facing payload carries no session identifier (#258, user
-    # decision).  The IDs stay in ``payload`` for everything that is not the
-    # model: the mutation actor above, the trace via ``_assembly_context``, the
-    # placeholder and the carried ``slides[position]`` record below.
+    # The model-facing payload is slide content only (#258, user decision).
+    # Every metadata value stays in ``payload`` for the node's own work: the
+    # mutation actor above, the trace via ``_assembly_context``, the release
+    # pin, turn scoping, the placeholder and the carried record below.
+    # Filtered in payload order, so the rendered prompt keeps its key order.
     skill_payload = {
         key: value
         for key, value in payload.items()
-        if key not in _MODEL_EXCLUDED_SESSION_KEYS
+        if key in _BUILDER_MODEL_PAYLOAD_KEYS
     }
 
     try:
