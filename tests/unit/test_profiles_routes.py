@@ -4,6 +4,7 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -364,8 +365,11 @@ class TestLoadProfileIntoSession:
 class TestUpdateProfile:
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
-    def test_update_profile_name(self, mock_perm, mock_get_db, client):
-        """PUT /api/profiles/{id} updates profile name."""
+    @patch("src.api.routes.profiles.require_admin")
+    def test_non_admin_can_update_profile_name(
+        self, mock_require_admin, mock_perm, mock_get_db, client
+    ):
+        """CAN_EDIT remains sufficient for ordinary profile updates."""
         profile = _make_profile(id=3, name="Old Name")
 
         mock_db = MagicMock()
@@ -378,11 +382,15 @@ class TestUpdateProfile:
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "New Name"
+        mock_require_admin.assert_not_called()
 
     @patch("src.api.routes.profiles.get_db_session")
     @patch("src.api.routes.profiles.get_permission_service", return_value=_mock_perm_service_allow_all())
-    def test_set_default_clears_others(self, mock_perm, mock_get_db, client):
-        """PUT /api/profiles/{id} with is_default=true clears other defaults."""
+    @patch("src.api.routes.profiles.require_admin")
+    def test_admin_can_set_default_and_clear_others(
+        self, mock_require_admin, mock_perm, mock_get_db, client
+    ):
+        """An admin with CAN_EDIT can promote a profile to global default."""
         profile = _make_profile(id=3, name="Profile C", is_default=False)
 
         mock_db = MagicMock()
@@ -395,11 +403,42 @@ class TestUpdateProfile:
         assert response.status_code == 200
         data = response.json()
         assert data["is_default"] is True
+        mock_require_admin.assert_called_once_with()
 
         # Verify that an update was issued to clear other defaults
         # The mock_db.query should have been called with an update to clear is_default
         update_calls = mock_db.execute.call_args_list
         assert len(update_calls) > 0, "Expected execute call to clear other defaults"
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch(
+        "src.api.routes.profiles.get_permission_service",
+        return_value=_mock_perm_service_allow_all(),
+    )
+    @patch(
+        "src.api.routes.profiles.require_admin",
+        side_effect=HTTPException(status_code=403, detail="Admin access required"),
+    )
+    def test_non_admin_cannot_set_default(
+        self, mock_require_admin, mock_perm, mock_get_db, client
+    ):
+        """CAN_EDIT alone cannot promote a profile to global default."""
+        profile = _make_profile(id=3, name="Profile C", is_default=False)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.first.return_value = profile
+        mock_get_db.return_value = mock_db
+
+        response = client.put("/api/profiles/3", json={"is_default": True})
+
+        assert response.status_code == 403
+        assert response.json() == {"detail": "Admin access required"}
+        mock_require_admin.assert_called_once_with()
+        mock_perm.return_value.require_edit_profile.assert_called_once_with(mock_db, 3)
+        mock_db.execute.assert_not_called()
+        assert profile.is_default is False
 
 
 class TestDeleteProfile:
