@@ -3001,3 +3001,88 @@ def test_every_overlay_the_writer_accepts_runs_and_every_one_the_runtime_refuses
         accepted_by_version[version] = accepted
 
     assert accepted_by_version == {1: {"empty"}, 2: _V2_LEGAL_SHAPES}
+
+
+def _raw_draft_overlay(factory: sessionmaker, agent_key: str) -> str:
+    """The stored ``schema_overlay`` column, serialized in its stored key order."""
+    import json
+
+    with factory() as session:
+        return json.dumps(
+            session.scalar(
+                select(GraphDraftAgent.schema_overlay).where(
+                    GraphDraftAgent.agent_key == agent_key
+                )
+            )
+        )
+
+
+def test_a_legacy_v1_draft_with_guidance_is_rejected_by_the_upgrade_and_kept_byte_for_byte(
+    session_factory, monkeypatch
+) -> None:
+    """#264 I3, as ruled against I1.
+
+    Since I1 the writer cannot SAVE canonical guidance under v1, and bootstrap
+    writes only empty v1 overlays, so a v1 draft carrying guidance can only be
+    pre-existing data seeded behind the writer.  The upgrade validates the
+    existing content first, and that content breaks the one v1 rule every other
+    writer and the runtime enforce, so the upgrade REJECTS it with the ordered
+    overlay issue rather than silently carrying an illegal state forward — and
+    the rejection leaves the stored overlay byte-for-byte as it was, with no
+    write at all.  Clearing it with an explicit empty-overlay save is the way out,
+    and the upgrade then succeeds (asserted last).
+    """
+    current, _ = _stored_content(session_factory)
+    legacy = current.model_copy(
+        update={
+            "schema_overlay": _overlay(
+                field_overrides={
+                    "message": {"description": "Legacy guidance.", "examples": [{"a": [1]}]},
+                    "intent": {"description": "Second legacy guidance."},
+                }
+            )
+        }
+    )
+    assert legacy.schema_contract.version == 1
+    _overwrite_draft_row(session_factory, "architect", legacy)
+    seeded, seeded_hash = _stored_content(session_factory)
+    raw_before = _raw_draft_overlay(session_factory, "architect")
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _upgrade_schema(session_factory, lock_version=0)
+
+    assert _issue_tuples(caught) == (
+        (
+            "candidate.schema_overlay.field_overrides.message",
+            "overlay_unknown_canonical_field",
+            "Canonical field is not available for this agent.",
+        ),
+        (
+            "candidate.schema_overlay.field_overrides.intent",
+            "overlay_unknown_canonical_field",
+            "Canonical field is not available for this agent.",
+        ),
+    )
+    assert write_log == []
+    assert _raw_draft_overlay(session_factory, "architect") == raw_before
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+    # The way out: an explicit empty overlay is a legal v1 save, and then the
+    # upgrade succeeds.
+    with session_factory() as session:
+        cleared = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(seeded, schema_overlay=SchemaOverlay()),
+            actor="test:clear-legacy",
+        )
+    assert isinstance(cleared, DraftSaveResult)
+    assert isinstance(_upgrade_schema(session_factory, lock_version=1), DraftSaveResult)
+    assert write_log == ["write", "write"]

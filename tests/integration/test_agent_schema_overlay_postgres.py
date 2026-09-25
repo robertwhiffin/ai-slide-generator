@@ -220,6 +220,100 @@ def test_persisted_schema_upgrade_installs_v2_and_retains_v1_history(
         assert published.schema_contract_version == 1
 
 
+def _raw_overlay_text(factory, agent_key: str) -> str:
+    """The stored ``schema_overlay`` jsonb exactly as PostgreSQL renders it."""
+    with factory() as session:
+        return session.scalar(
+            text(
+                "SELECT schema_overlay::text FROM graph_draft_agent "
+                "WHERE agent_key = :agent_key"
+            ),
+            {"agent_key": agent_key},
+        )
+
+
+def test_persisted_schema_upgrade_keeps_the_stored_overlay_byte_for_byte(
+    postgres_engine,
+) -> None:
+    """#264 I3 against a real jsonb column, for both states a v1 draft can hold.
+
+    Reachable state: a v1 draft's only legal overlay is empty (I1), and the
+    upgrade keeps that stored jsonb byte-for-byte.  Legacy state: guidance seeded
+    directly behind the writer, as pre-existing data only could be.  The upgrade
+    validates existing content first and rejects it with the ordered overlay
+    issue, so the legacy guidance is neither carried into v2 nor wiped — its
+    stored bytes, hash, lock, audit and every immutable artifact are unchanged.
+    """
+    from src.services.graph_configuration_content import definition_content_values
+
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    service = GraphConfiguration()
+    service.bootstrap_v1(factory)
+
+    # Reachable: the empty v1 overlay survives the upgrade unchanged.
+    builder_raw_before = _raw_overlay_text(factory, "builder")
+    with factory() as session:
+        upgraded = service.upgrade_draft_schema_contract(
+            session, agent_key="builder", expected_lock_version=0, actor="pg:upgrade"
+        )
+    assert isinstance(upgraded, DraftSaveResult)
+    assert _stored_draft(factory, "builder")[0].schema_contract.version == 2
+    assert _raw_overlay_text(factory, "builder") == builder_raw_before
+
+    # Legacy: seed v1 guidance behind the writer, then attempt the upgrade.
+    current, _ = _stored_draft(factory, "architect")
+    legacy = current.model_copy(
+        update={
+            "schema_overlay": _overlay(
+                field_overrides={
+                    "message": {"examples": [{"z": 1, "a": [2, None]}], "description": "L."},
+                    "intent": {"description": "Second."},
+                }
+            )
+        }
+    )
+    with factory.begin() as session:
+        row = session.scalar(
+            select(GraphDraftAgent).where(GraphDraftAgent.agent_key == "architect")
+        )
+        assert row is not None
+        for column_name, value in definition_content_values(legacy).items():
+            setattr(row, column_name, value)
+        row.candidate_hash = definition_content_hash(legacy)
+    seeded, seeded_hash = _stored_draft(factory, "architect")
+    assert seeded.schema_overlay == legacy.schema_overlay
+    raw_before = _raw_overlay_text(factory, "architect")
+    meta_before = _draft_meta(factory)
+    artifacts_before = _immutable_graph_artifacts(factory)
+
+    with factory() as session, pytest.raises(DraftContentRejected) as caught:
+        service.upgrade_draft_schema_contract(
+            session, agent_key="architect", expected_lock_version=1, actor="pg:legacy"
+        )
+
+    # jsonb does not keep object key insertion order (it stores keys shortest
+    # first), so the STORED overlay — and therefore the issue order, which follows
+    # the stored overlay — is intent, then message.
+    assert list(seeded.schema_overlay.field_overrides) == ["intent", "message"]
+    assert _issue_tuples(caught) == (
+        (
+            "candidate.schema_overlay.field_overrides.intent",
+            "overlay_unknown_canonical_field",
+            "Canonical field is not available for this agent.",
+        ),
+        (
+            "candidate.schema_overlay.field_overrides.message",
+            "overlay_unknown_canonical_field",
+            "Canonical field is not available for this agent.",
+        ),
+    )
+    assert _raw_overlay_text(factory, "architect") == raw_before
+    assert _stored_draft(factory, "architect") == (seeded, seeded_hash)
+    assert _stored_draft(factory, "architect")[0].schema_contract.version == 1
+    assert _draft_meta(factory) == meta_before
+    assert _immutable_graph_artifacts(factory) == artifacts_before
+
+
 def test_persisted_invalid_overlay_writes_nothing_at_all(postgres_engine) -> None:
     """A rejected overlay changes no candidate, hash, lock, audit, revision or release."""
     factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
