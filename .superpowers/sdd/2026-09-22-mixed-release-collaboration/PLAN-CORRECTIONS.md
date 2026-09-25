@@ -967,3 +967,89 @@ base was chosen. Two independent measurements, two different bases, same answer.
 
 C-34's binding rules are unchanged: a failure is inherited only when measured on an integration base
 itself, and every cause baseline must cover both lanes.
+
+## Correction 37 — the log allow-list is #262's to complete, not #264's; I assigned it to the wrong ticket
+
+I routed the combined log allow-list to "whichever of #262/#264 integrates second". The
+whole-branch review showed that is wrong on a structural point, and I verified it myself.
+
+`emitted_fields()` at `tests/unit/test_persisted_agent_runtime.py:835` returns
+`vars(record)` minus `_STANDARD_LOG_RECORD_ATTRS`, and that frozenset is built from
+`vars(logging.LogRecord(...))`, which **contains `msg`**. Confirmed by direct execution:
+`msg` is subtracted, and `message` is subtracted again by the explicit union. So the
+exact-set assertion is **structurally incapable** of seeing anything written into the log
+message. The only thing guarding the message is `assert "owner-session-9f" not in rendered`
+— a denylist on one literal.
+
+Positive exact-set on extras, spelling denylist on the message, in the same test. That is
+**#264's correction-43 shape exactly**, one attribute over, and #262 owns the file.
+
+The review's own process here is the part worth keeping: its first mutation, S1, *appeared*
+to catch the leak — but the RED was `assert 0 == 1`, thrown by the test's own `msg ==`
+filter rather than by the guard. It did not bank it. Its second mutation, S1b, put a marker
+into the error branch's message with the marker proven on the executed path, and measured
+**4 passed, zero RED**. The zero is the finding. Had it banked S1, this ruling would be
+inverted and the hole would have shipped.
+
+## Correction 38 — there are FOUR root resolvers across five sites, not three; and the shipped docstring says three
+
+My carried item said "three resolvers, two agree". Verified live, that is wrong:
+
+| Resolver | Site | Depth-2 behaviour |
+| --- | --- | --- |
+| `_resolve_root_session` | `permission_service.py:217` | walks to the real root |
+| `authorized_collaboration_root` | `collaboration_history.py:243` | returns `None` |
+| `load_collaboration_root` | `graph/builder.py:195` | raises (fail-closed) |
+| **`_get_deck_owner_session`** | **`session_manager.py:926`** | **returns the intermediate** |
+
+Plus a fifth, unguarded site: `conversation_pins.py:197` inlines
+`func.coalesce(UserSession.parent_session_id, UserSession.id)`.
+
+The omitted fourth is the consequential one — it has **32 call sites** and supplies
+`deck_owner` to the attribution path, i.e. AC4's persisted root. Slice 4B hardened the
+resolver that labels a log line and left the one that writes the durable row.
+
+**The consequence is nevertheless benign**, and that is measured, not assumed: the seam
+fail-closes independently on `deck.session_id != deck_owner.id`, so no mis-attributed row
+is constructible. Graded Minor, merge-acceptable — but for this reason, not the one I gave.
+
+The docstring at `src/services/graph/builder.py` states "the three root resolvers disagree
+three ways" and enumerates three. It is wrong in the shipped code, not just in my ledger.
+
+## Correction 39 — C-22 does not forbid the C-6 fixture repair; I asserted a boundary from a document instead of reading the code
+
+I carried the C-6 fixture class as unfixable because C-22 bars touching the dev database.
+C-22 governs `ai_slide_generator` specifically. The repair operates on the per-test
+**throwaway** database, and the identical 3-line seed is **already shipped in-branch** at
+`tests/integration/graph/test_insert_slide_route.py:92-94`.
+
+The review applied it to the two remaining sibling files and measured:
+`test_spec_dirty_marker_routes.py` **11 failed → 11 passed**; `test_slide_id_is_durable.py`
+**13 failed → 14 passed**. **24 of 24 failures cleared by 6 lines, zero production change.**
+
+This is the **third** time in this ticket I asserted a boundary from a document rather than
+from the code — C-18 (an invented 422 contract), C-30 (a file list that could not satisfy
+its own bullets), and now this. The pattern is specific enough to name: when I state a
+constraint, I must cite the line that imposes it, not the document I remember imposing it.
+
+## Correction 40 — C-33 extended: mutation harnesses need a run lock, not just a re-taken backup
+
+C-33 required re-taking the backup set after a commit. The review reached the same hazard by
+a **different route**: a timed-out foreground run was still holding `nodes.py` mutated when a
+second instance launched against the same tree, which hit `ANCHOR-REFUSAL: count 0`.
+
+Concurrency against a shared worktree is a second way to corrupt a mutation harness, and the
+re-taken backup does not address it. Extend C-33: a mutation driver must take an exclusive
+run lock on the worktree and refuse to start while another holds it, and must verify the tree
+is clean before mutating (`require_clean()`), not only after restoring. The review added
+exactly that and re-ran serially; both poisoned runs' figures were discarded.
+
+Credit where due: it caught this from its own refusal guard firing, disclosed all four of its
+driver errors unprompted, and discarded the affected figures rather than reconciling them.
+
+## Correction 41 — `conversation_pins.py` is not in #262's diff range at all
+
+My whole-branch brief listed it among the files "ten tasks touched in sequence". Verified:
+`git diff --name-only 795262c16..HEAD -- src/services/conversation_pins.py` returns **empty**,
+against 111 files in the range. It is the **site** of the inherited failures, not a modified
+file. A reviewer taking my list at face value would have hunted for a diff that does not exist.
