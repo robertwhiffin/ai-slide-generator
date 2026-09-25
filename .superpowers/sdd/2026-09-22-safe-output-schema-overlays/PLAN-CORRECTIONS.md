@@ -1362,3 +1362,64 @@ assertion. Both are wrong-reason passes that a count would have hidden.
 Fix wave dispatched for C1, I1, I2 and I3. The seven Minors and the un-flagged gap the reviewer
 noted — the upgrade route's own invalid-content-plus-stale leg having no *route* test, though it is
 covered at the service layer — go to #264's whole-branch review with F5 and F6.
+
+## Correction 62 — my C1 commit closed I1, I2 and I3 as well, and its message does not say so
+
+Round 2's agent reported all three Important findings **already closed**, and I verified each rather
+than accepting it:
+
+| Finding | Evidence at `0b698757d` |
+| --- | --- |
+| I1 | `test_put_schema_overlay_wire_type_error_uses_owned_message` exists; all three owned message strings appear exactly once each in the test file |
+| I2 | `"selectable_optional_fields"` is in the `server_owned` set at `tests/unit/test_agent_definition_workbench_routes.py:1393` |
+| I3 | Both descriptor tests now contain **zero** `_descriptor_material` calls; my commit changed 3 such lines |
+
+The cause is mine. The agent terminated by the 401 had written **all four** fixes into its test-file
+diff before dying — not only C1's six RED tests. I reviewed that diff, confirmed its RED failed on
+the 500 for the right reason, implemented C1's production fix, and committed the lot **describing it
+as the C1 fix plus "six RED tests"**. It was in fact the C1 fix plus four findings' worth of
+coverage.
+
+Nobody is misled about the code, which is correct and now independently mutation-verified. The defect
+is in the commit message, which understates what a later reader will find in that commit. Not amended
+— the review report and this file both cite `0b698757d`, and rewriting it to fix prose would
+invalidate those references for no gain. Recorded here instead.
+
+**The lesson is about salvage, not about commit prose.** When adopting a dead agent's diff I verified
+the part I was looking for — C1's RED — and inherited the rest unexamined. A salvaged diff must be
+attributed clause by clause against the open findings list, not just checked for the finding that
+prompted the salvage. Had one of those three fixes been *wrong* rather than right, I would have
+committed it with a message asserting the commit contained something else.
+
+Round 2's mutations, which I did not re-run because they were measured against an unchanged tree and
+each names its failing test:
+
+```
+delete the owned-message branch  -> 3 failed / 154 passed, the three parametrised message cases
+make the display field writable  -> 1 failed / 156 passed, the display-field guard
+corrupt one literal character    -> 1 failed, the descriptor test
+```
+
+It also checked all seven request models programmatically against the full `server_owned` set and
+found no overlap and nothing else missing — so the omission I2 reported was the only one, and the
+hand-maintained set is currently complete.
+
+## Correction 63 — the `dict_type` prediction is falsified, because it assumed a different fix
+
+Task 5's reviewer measured `dict_type` inert in the `strict_type` mapping and predicted it would
+become **load-bearing under C1's fix**. Measured after the fix: **RED 0/157**. Still inert.
+
+The prediction was sound but conditional — it assumed C1 would be fixed by narrowing the wire type to
+`dict[str, dict[str, object]]`, which would make `dict_type` the code a malformed inner shape
+produced. C1 was instead fixed with a catch that routes the domain `ValidationError` through the
+existing ordered-422 path, **deliberately leaving the wire types loose** so guidance properties keep
+reaching the domain validator. Under that fix `dict_type` never fires.
+
+So the entry is now confirmed dead code rather than merely unexercised. Left in place as the brief
+required. Routed to the whole-branch review with the Minors: either remove it or pin it, but it should
+not stay as an unpinned entry that a reader assumes is load-bearing.
+
+Worth keeping as a reasoning example: a prediction conditioned on an implementation choice is not
+wrong when the choice differs — it is untested. The reviewer could not have known which fix would be
+chosen, and saying "load-bearing under the C1 fix" without naming the assumed fix is what made the
+prediction look falsifiable when it was conditional.
