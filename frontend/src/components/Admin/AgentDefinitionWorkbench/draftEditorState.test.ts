@@ -1839,6 +1839,27 @@ describe('Schema Upgrade completion', () => {
     expect(state.pendingSave?.requestId).toBe(2);
   });
 
+  it('settles a Schema Upgrade failure on the matching request ID, keeping local edits (#264 m8)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'prompt_text', value: 'Architect A2' });
+    state = draftEditorReducer(state, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('architect', 2) });
+    const before = state;
+
+    const next = draftEditorReducer(state, { type: 'schemaUpgradeFailed', requestId: 2, message: 'Schema Upgrade failed.' });
+
+    expect(next).not.toBe(before);
+    expect(next.pendingSave).toBeNull();
+    expect(next.byAgent.architect.requestError).toBe('Schema Upgrade failed.');
+    // A transport failure changes nothing the server owns and discards no local edit.
+    expect(next.draft).toBe(before.draft);
+    expect(next.byAgent.architect.saved).toBe(before.byAgent.architect.saved);
+    expect(next.byAgent.architect.saved.schema_contract.version).toBe(1);
+    expect(next.byAgent.architect.local.prompt_text).toBe('Architect A2');
+    for (const agentKey of AGENT_KEYS) {
+      if (agentKey !== 'architect') expect(next.byAgent[agentKey]).toBe(before.byAgent[agentKey]);
+    }
+  });
+
   it('never lets one operation complete another operation with the same request ID', () => {
     let saving = createDraftEditorState(workbench());
     saving = draftEditorReducer(saving, {

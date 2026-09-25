@@ -2673,13 +2673,22 @@ def _actor_state(env, collab, **overrides):
     return state
 
 
-def _assert_traced(calls, collab, *, agent_keys):
-    """Every identity call carries root=owner, actor=contributor, release=R2, version 2."""
+def _assert_traced(sink, collab, *, agent_keys):
+    """Every identity call carries root=owner, actor=contributor, release=R2, version 2.
+
+    Takes the recording sink, not only its ``calls``: ``calls`` is an ATTEMPT log
+    appended before the callback, and since #264 an invocation can fail in output
+    validation and still add to it.  Requiring one success per attempt keeps these
+    trace assertions from passing on a failed invocation (#264 m11).
+    """
+    calls = sink.calls
     assert collab.owner_session_id != collab.contributor_session_id, (
         "the scenario collapsed root and actor onto one session, so every "
         "assertion below would hold for the wrong reason"
     )
     assert [call.agent_key for call in calls] == agent_keys
+    assert len(sink.successes) == len(calls)
+    assert [success.identity for success in sink.successes] == calls
     for call in calls:
         assert call.root_session_id == collab.owner_session_id
         assert call.actor_session_id == collab.contributor_session_id
@@ -2957,7 +2966,7 @@ class TestRuntimeRootActorTrace:
 
         architect_node(_actor_state(graph_env, collab))
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["architect"])
+        _assert_traced(trace.sink, collab, agent_keys=["architect"])
 
     def test_the_data_analyst_records_root_actor_and_the_actors_release(
         self, graph_env, monkeypatch
@@ -2983,7 +2992,7 @@ class TestRuntimeRootActorTrace:
             _actor_state(graph_env, collab, architect_message="how many?")
         )
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["data_analyst"])
+        _assert_traced(trace.sink, collab, agent_keys=["data_analyst"])
 
     def test_the_fanned_branch_payload_declares_the_root_and_the_actor(
         self, graph_env
@@ -3033,7 +3042,7 @@ class TestRuntimeRootActorTrace:
         updates = builder_node(payload)
 
         assert updates["slides"]["vals"][0]["html"] == CLEAN_HTML
-        _assert_traced(trace.sink.calls, collab, agent_keys=["builder", "builder"])
+        _assert_traced(trace.sink, collab, agent_keys=["builder", "builder"])
         record = updates["slides"]["vals"][0]
         assert record["root_session_id"] == collab.owner_session_id
         assert record["actor_session_id"] == collab.contributor_session_id
@@ -3065,7 +3074,7 @@ class TestRuntimeRootActorTrace:
         assert len(sends) == 1
         build_reviewer_node(sends[0].arg)
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
+        _assert_traced(trace.sink, collab, agent_keys=["build_reviewer"])
 
     def test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record(
         self, graph_env
@@ -3135,7 +3144,7 @@ class TestRuntimeRootActorTrace:
         updates = fixer_node(state)
 
         assert updates["fixed"]["vals"][0]["html"] == CLEAN_HTML
-        _assert_traced(trace.sink.calls, collab, agent_keys=["fixer", "fixer"])
+        _assert_traced(trace.sink, collab, agent_keys=["fixer", "fixer"])
 
     def test_the_fix_reviewer_records_root_actor_and_the_actors_release(
         self, graph_env, monkeypatch
@@ -3154,7 +3163,7 @@ class TestRuntimeRootActorTrace:
 
         fix_reviewer_node(state)
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["fix_reviewer"])
+        _assert_traced(trace.sink, collab, agent_keys=["fix_reviewer"])
 
     def test_the_deck_reviewer_records_root_actor_and_the_actors_release(
         self, graph_env, monkeypatch
@@ -3169,7 +3178,7 @@ class TestRuntimeRootActorTrace:
             _actor_state(graph_env, collab, deck_spec=make_spec((0,)))
         )
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["deck_reviewer"])
+        _assert_traced(trace.sink, collab, agent_keys=["deck_reviewer"])
 
     def test_the_committed_slide_rereview_records_root_actor_and_the_release(
         self, graph_env, monkeypatch
@@ -3194,7 +3203,7 @@ class TestRuntimeRootActorTrace:
             collab.contributor_session_id,
         )
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
+        _assert_traced(trace.sink, collab, agent_keys=["build_reviewer"])
 
     def test_the_architect_hands_the_re_review_pass_its_root_and_actor(
         self, graph_env, monkeypatch
@@ -3233,7 +3242,7 @@ class TestRuntimeRootActorTrace:
         architect_node(_actor_state(graph_env, collab))
 
         _assert_traced(
-            trace.sink.calls, collab, agent_keys=["architect", "build_reviewer"]
+            trace.sink, collab, agent_keys=["architect", "build_reviewer"]
         )
 
     def test_the_persisted_mutation_event_agrees_with_the_runtime_trace(
@@ -3267,7 +3276,7 @@ class TestRuntimeRootActorTrace:
         assert len(sends) == 1
         build_reviewer_node(sends[0].arg)
 
-        _assert_traced(trace.sink.calls, collab, agent_keys=["build_reviewer"])
+        _assert_traced(trace.sink, collab, agent_keys=["build_reviewer"])
         db = graph_env.factory()
         try:
             events = db.query(SharedDeckMutationEvent).all()
@@ -3349,7 +3358,7 @@ class TestRuntimeRootActorTrace:
         )
 
         _assert_traced(
-            trace.sink.calls,
+            trace.sink,
             collab,
             agent_keys=[
                 "architect",
