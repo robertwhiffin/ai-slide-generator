@@ -1304,3 +1304,61 @@ table as a comment at the branch point.
 
 Task 5's independent review is dispatched with a **different** sabotage target — issue ordering and
 the exact-seven 409 snapshot validation — so the controller's and reviewer's targets do not overlap.
+
+## Correction 60 — CONTROLLER ERROR: I moved HEAD under a running reviewer
+
+I committed correction 59 at 08:28:33 while Task 5's reviewer was mid-run on the same worktree,
+taking HEAD from `3f102c666` to `45afc8fba`. The reviewer detected it, stated plainly that it had
+made no commits itself, and verified the move benign: docs-only, `3f102c666` still an ancestor, and
+the package range still reporting 3 files / 742 / 5.
+
+**But its mid-run restores used symbolic `HEAD` against a moving target.** They were correct only
+because the one differing file was one it never touched. That is luck, not method.
+
+This is correction 40's hazard reached by a **third** route. The first was a re-taken backup that
+enumerated nothing; the second a concurrent mutation run against a shared tree; this one is the
+**controller** committing under a reviewer. Extending 40 again:
+
+- The controller does not commit to a worktree while a reviewer or implementer is running on it.
+  Ledger and corrections appends wait for the hand-back, or go to a different worktree.
+- Any agent restoring files pins an **explicit SHA** captured at start, never symbolic `HEAD`.
+
+Recorded as my error rather than as a note about the reviewer's method, because the reviewer's
+method is what caught it.
+
+## Correction 61 — Task 5 review: 1 Critical, 3 Important; NO-GO for Task 6 pending a short fix
+
+**C1 reproduced by me independently.** The domain `SchemaOverlay`
+(`src/services/agent_schema_types.py:331`) is strict — `extra="forbid"`, `frozen=True`, and
+`field_overrides` typed `Mapping[str, CanonicalFieldGuidance]`. The wire model types the same
+fields loosely as `dict[str, object]` and `list[str]`, deliberately, so guidance properties can
+reach the domain validator and be reported as `overlay_guidance_property_forbidden`.
+
+The consequence is that a **type** error passes the wire layer and raises at the domain layer.
+`_domain_schema_overlay` is called at `src/api/routes/agent_definitions.py:397`, inside the
+`EditableModelDraft(...)` construction, which sits **between** the two try blocks — the first
+catches `ValidationError` from the lock parse, the second catches `DraftContentRejected`. So the
+raise is uncaught and the route returns **HTTP 500** where the plan mandates an ordered **422**.
+
+Measured directly against the domain model:
+
+```
+{'field_overrides': {'diagnostic_notes': 'not-a-dict'}}  -> RAISES ValidationError
+{'additional_optional_fields': [123]}                    -> RAISES ValidationError
+{'field_overrides': {'x': {'bogus_key': 'v'}}}           -> no raise (by design, a domain issue)
+```
+
+The third is the important contrast: the pass-through design is correct and must be preserved. Only
+the type errors need catching.
+
+**The reviewer's five answers are worth keeping as evidence, not just verdicts.** It found the
+`dict_type` mapping addition inert (`RED 0/148`, the mapper's terminal default already returns
+`strict_type`), and read it as "a vestige of the narrower typing that would have prevented C1" —
+which is a diagnosis of the cause, not merely a finding. It also found its own assigned issue-order
+mutation caught only by **pre-existing #263/#265 tests**, with no Task 5 test contributing, and the
+exact-seven snapshot RED coming from a production `model_validator` rather than from the tests' set
+assertion. Both are wrong-reason passes that a count would have hidden.
+
+Fix wave dispatched for C1, I1, I2 and I3. The seven Minors and the un-flagged gap the reviewer
+noted — the upgrade route's own invalid-content-plus-stale leg having no *route* test, though it is
+covered at the service layer — go to #264's whole-branch review with F5 and F6.
