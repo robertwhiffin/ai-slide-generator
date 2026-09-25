@@ -34,6 +34,7 @@ from src.services.graph_definition_manifest import (
     AgentKey,
     AssemblyRulesV2,
     DefinitionContent,
+    ModelConfiguration,
     definition_content_hash,
     schema_contract_identity,
 )
@@ -89,6 +90,20 @@ class DraftLegacyPromptSource:
     agent_key: AgentKey
     lock_version: int
     source: DraftLegacyPromptSourceRecord
+
+
+@dataclass(frozen=True)
+class DraftProbeCandidate:
+    """An immutable copy of one role's saved candidate for the #266 probe.
+
+    It is copied inside a transaction that has already ended when this value
+    is returned, so no database lock outlives the read.
+    """
+
+    agent_key: AgentKey
+    lock_version: int
+    candidate_hash: str
+    model: ModelConfiguration
 
 
 ClientCandidateT = TypeVar("ClientCandidateT")
@@ -587,6 +602,45 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 )
             return self._legacy_prompt_source(locked, agent_key=agent_key)
 
+    def read_draft_probe_candidate(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+        expected_lock_version: int,
+    ) -> DraftProbeCandidate | DraftSaveConflict[None]:
+        """Copy one role's saved candidate for the structured-output probe.
+
+        Read-only.  The copy is taken under the workbench's shared parent locks
+        inside its own transaction, which ends before this returns (correction
+        13), so the caller's remote model call holds no database lock.  A stale
+        lock is the coherent null-candidate conflict.  The saved endpoint name
+        is then re-checked against the local policy after the locks are
+        released, so a URL- or path-shaped stored name never reaches a provider.
+        """
+        self._validate_lock_and_agent_key(expected_lock_version, agent_key)
+        with session.begin():
+            snapshot = self.read_workbench(session)
+            aggregate = self._draft_aggregate_snapshot(snapshot)
+            if expected_lock_version != snapshot.draft.lock_version:
+                return DraftSaveConflict(
+                    expected_lock_version=expected_lock_version,
+                    current_lock_version=snapshot.draft.lock_version,
+                    client_candidate=None,
+                    server=aggregate,
+                )
+            selected = aggregate.definitions[agent_key]
+            candidate = DraftProbeCandidate(
+                agent_key=agent_key,
+                lock_version=snapshot.draft.lock_version,
+                candidate_hash=selected.candidate_hash,
+                model=selected.content.model,
+            )
+        self._run_candidate_validators(
+            (_endpoint_name_policy_validator,), selected.content
+        )
+        return candidate
+
     @staticmethod
     def _legacy_prompt_source(
         locked: _LockedDraftWriteAggregate,
@@ -638,6 +692,25 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             issues.append(
                 DraftValidationIssue("actor", "blank", "Actor must not be blank.")
             )
+        issues.extend(
+            _GraphConfigurationDraft._lock_and_agent_key_issues(lock_version, agent_key)
+        )
+        if issues:
+            raise DraftContentRejected(*issues)
+
+    @staticmethod
+    def _validate_lock_and_agent_key(lock_version: object, agent_key: object) -> None:
+        issues = _GraphConfigurationDraft._lock_and_agent_key_issues(
+            lock_version, agent_key
+        )
+        if issues:
+            raise DraftContentRejected(*issues)
+
+    @staticmethod
+    def _lock_and_agent_key_issues(
+        lock_version: object, agent_key: object
+    ) -> list[DraftValidationIssue]:
+        issues: list[DraftValidationIssue] = []
         if isinstance(lock_version, bool) or not isinstance(lock_version, int):
             issues.append(
                 DraftValidationIssue(
@@ -662,8 +735,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     "Agent key must identify an editable model role.",
                 )
             )
-        if issues:
-            raise DraftContentRejected(*issues)
+        return issues
 
     def _validate_actor_lock_and_editable_candidate(
         self,
