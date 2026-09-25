@@ -1200,3 +1200,63 @@ than separately, since they are the same pattern appearing twice.
 
 Neither is a correctness defect. Both are recorded so the whole-branch review inherits them
 as open items with their measurements attached, not as fresh discoveries.
+
+## Correction 57 — my fix brief named the wrong upgrade authority, and the resulting assertion is inert
+
+I told the fix agent to spy on `PromptAssembler.upgrade_definition_to_v2` for F1's
+`upgrade_calls == []` assertion. That method is **not on this path**. Verified live:
+
+| Path | Line | Upgrade authority |
+| --- | --- | --- |
+| prompt definition to v2 | `graph_configuration_draft.py:412` | `_PROMPT_ASSEMBLER.upgrade_definition_to_v2(...)` |
+| schema contract to v2 | `graph_configuration_draft.py:472` | `upgrade_content_to_v2(...)` (`agent_schema_registry.py:608`) |
+
+The agent used the correct one and **disclosed the consequence rather than hiding it**: the
+`upgrade_calls == []` assertion is satisfied under both the original and the mutation, because
+neither reaches the upgrade call. It is **inert** for this mutation. F1's real RED comes from
+`isinstance(result, DraftSaveConflict)`.
+
+Recorded so no later reader treats that line as load-bearing. Keeping it is fine as
+belt-and-braces; relying on it is not. Same class as the whole-branch review's S1 — an
+assertion that looks like the guard and is not.
+
+**The two paths are not divergent implementations of one upgrade.** One upgrades the prompt
+definition, the other the schema contract: different concerns, identical control-flow shape
+(read locked, then stale, then already-current, then upgrade, then write). That shared shape is
+precisely why they must agree on the ordering, which independently confirms correction 52's
+warrant. The near-identical names, both in one file, are what produced my error, and are worth
+renaming when something else touches that file.
+
+## Correction 58 — a gate figure must carry the command that produced it
+
+"Focused 116", then "focused 118", is used as the merge gate throughout Task 4's review and fix
+report, and **neither document records the command**. Reconstructing it cost me four probes: a
+single-file run of `test_graph_configuration_draft.py` gives **110**, not 118, so the figure is
+unreproducible from the reports alone. The scope is defined only in the plan at line 136, as the
+two unit files `test_graph_configuration_draft.py` and `test_ci_collects_integration_tests.py`
+run together.
+
+Reproduced exactly at `f8c581533`: **118 passed**; pg **9 passed, zero skips**. From here, any
+report quoting a gate figure states the invocation that produced it, or the figure is not
+evidence — a bare count is unfalsifiable by the next reader.
+
+## Ruling — no scoped re-review round for Task 4's fix wave
+
+The protocol calls for one scoped re-review after a fix round. I am not dispatching one here,
+because I performed the falsification myself on all three substantive findings, which is what
+the re-review would have been for:
+
+| Finding | My mutation | Measured |
+| --- | --- | --- |
+| F1 ordering | flipped already-current ahead of stale, anchor count 1 | **RED 1/118** — `test_stale_schema_upgrade_is_a_conflict_even_when_content_is_already_current` |
+| F2 second lookup | inserted a redundant `_read_workbench_for_draft_write` | **RED 1/118** — `test_schema_upgrade_path_performs_exactly_one_row_lookup` |
+| F3 self-derivation | flipped one nibble of the `architect` literal | **RED 2/118** |
+
+All three restored with a verified SHA match and a clean triple check. The commit changes
+**one file** — `tests/unit/test_graph_configuration_draft.py`, 93 insertions and 11 deletions —
+and **zero production files**, so there is no blast radius for a reviewer to read. F4 is a
+docstring narrowing.
+
+**Cost if wrong:** an unreviewed test-only diff in one file reaches #264's whole-branch review,
+which reads the full branch anyway. Both F5 and F6 are already queued there, so that reviewer
+sees this file regardless.
