@@ -67,6 +67,9 @@ def api(client, test_db_factory):
     and chat_service's Databricks username lookup which would otherwise reach a
     non-resolving host and hang indefinitely under CI credentials.
     """
+    from src.services.graph_configuration import bootstrap_graph_configuration
+
+    bootstrap_graph_configuration(test_db_factory)
     fake = _make_fake_get_db_session(test_db_factory)
     with patch(_SPEC_SYNC_DB, fake), patch(_WRITER_DB, fake):
         with patch(_CHAT_SERVICE_USERNAME, return_value="test-user"):
