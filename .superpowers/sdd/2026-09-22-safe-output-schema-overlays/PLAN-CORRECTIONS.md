@@ -1175,3 +1175,28 @@ Task 4's reviewer ran 00:18–00:40 UTC and was **clear** of it, verified empiri
 The window is the **few minutes before** a UTC midnight, not after: `NOW = datetime.utcnow()` is
 captured at module import, so the hazard is a run that *starts* before the boundary and asserts across
 it. Corrected so nobody discounts a genuine failure by appealing to a flake that cannot apply.
+
+## Correction 56 — two Task 4 findings routed to #264's whole-branch review
+
+Neither belongs in a task-scoped fix round; both are whole-branch questions the task reviewer
+correctly declined to decide alone.
+
+**F5 — the post-upgrade re-validation is provably dead code.** Dropping it REDs **zero** tests
+at three scopes. The reviewer did not stop at that zero: it instrumented the path and observed
+the validator running **twice**, at `[(1, 'a03440e5'), (2, 'a03aefb1')]`, then identified the
+compensator — provable input-equivalence between the two calls. So the call executes and is
+genuinely redundant, which is a stronger and more useful result than an unexplained RED 0.
+The whole-branch review decides whether redundant defence on a content-upgrade path is worth
+its cost. It must not read the RED 0 as licence to delete without ruling on that.
+
+**F6 — undisclosed import-time coupling.** `_SCHEMA_REGISTRY = AgentSchemaRegistry()` at module
+scope now runs a 14-digest verification for **every importer of the writer**, including
+importers that never write a draft. The import graph currently contains this (the writer has
+exactly one importer, and `agent_runtime.py` reaches only `graph_configuration_content`), so
+there is no live blast radius — but the coupling is undeclared and the containment is
+incidental rather than enforced. Related to #265's own import-time digest guard at
+`prompt_assembler.py:377-384`; the whole-branch review should rule on both together rather
+than separately, since they are the same pattern appearing twice.
+
+Neither is a correctness defect. Both are recorded so the whole-branch review inherits them
+as open items with their measurements attached, not as fresh discoveries.
