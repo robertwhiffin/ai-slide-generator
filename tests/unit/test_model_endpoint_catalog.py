@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+import requests
 from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoesNotExist
 from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
 
@@ -215,3 +216,47 @@ def test_fake_catalog_queues_discovery_and_name_keyed_validation_outcomes():
 
     assert fake.list_calls == 1
     assert fake.validated_names == ["first", "second"]
+
+
+# Correction 3: the SDK retry wrapper exhausts transport failures into builtins
+# that are not ``DatabricksError``; both catalog methods must still stay typed.
+_TRANSPORT_EXHAUSTION = [
+    pytest.param(TimeoutError("Timed out after 0:05:00"), id="sdk-retry-timeout"),
+    pytest.param(RuntimeError("Exceeded max retry attempts (3)"), id="sdk-max-attempts"),
+    pytest.param(requests.exceptions.ConnectionError("reset"), id="requests-transport"),
+    pytest.param(OSError("socket closed"), id="os-transport"),
+]
+
+
+@pytest.mark.parametrize("error", _TRANSPORT_EXHAUSTION)
+def test_list_system_models_maps_transport_exhaustion_to_catalog_unavailable(error):
+    serving_endpoints = RecordingServingEndpoints(list_error=error)
+
+    with pytest.raises(ModelEndpointCatalogFailure) as failure:
+        catalog_for(serving_endpoints).list_system_models()
+
+    assert serving_endpoints.list_calls == 1
+    assert failure.value.code == "catalog_unavailable"
+    assert failure.value.retryable is True
+    assert str(failure.value) == (
+        "Model endpoint discovery is temporarily unavailable. Retry the request."
+    )
+    assert failure.value.__cause__ is error
+
+
+@pytest.mark.parametrize("error", _TRANSPORT_EXHAUSTION)
+def test_validate_custom_endpoint_remote_maps_transport_exhaustion_to_endpoint_unavailable(
+    error,
+):
+    serving_endpoints = RecordingServingEndpoints(get_error=error)
+
+    with pytest.raises(EndpointValidationFailure) as failure:
+        catalog_for(serving_endpoints).validate_custom_endpoint_remote("exact")
+
+    assert serving_endpoints.get_calls == ["exact"]
+    assert failure.value.code == "endpoint_unavailable"
+    assert failure.value.retryable is True
+    assert failure.value.message == (
+        "Endpoint validation is temporarily unavailable. Retry the save."
+    )
+    assert failure.value.__cause__ is error

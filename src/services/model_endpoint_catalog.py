@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+import requests
 from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoesNotExist
 from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
 
@@ -57,6 +58,19 @@ class EndpointValidationFailure(ValueError):  # noqa: N818
         self.retryable = retryable
 
 
+#: Transport exhaustion that the SDK does not wrap in ``DatabricksError``.  Its
+#: retry wrapper raises builtin ``TimeoutError`` once ``retry_timeout_seconds``
+#: elapses and builtin ``RuntimeError`` once ``max_attempts`` is exceeded; raw
+#: ``requests``/socket failures can also escape.  Each is mapped to the typed
+#: unavailable outcome without reading the exception text.
+_TRANSPORT_FAILURES: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    RuntimeError,
+    requests.exceptions.RequestException,
+    OSError,
+)
+
+
 class ModelEndpointCatalog(Protocol):
     def list_system_models(self) -> SystemModelDiscovery: ...
 
@@ -89,7 +103,7 @@ class DatabricksModelEndpointCatalog:
                 "Model endpoint discovery is not permitted with this workspace identity.",
                 False,
             ) from error
-        except DatabricksError as error:
+        except (DatabricksError, *_TRANSPORT_FAILURES) as error:
             raise ModelEndpointCatalogFailure(
                 "catalog_unavailable",
                 "Model endpoint discovery is temporarily unavailable. Retry the request.",
@@ -143,7 +157,7 @@ class DatabricksModelEndpointCatalog:
                 "Endpoint cannot be validated with this workspace identity.",
                 False,
             ) from error
-        except DatabricksError as error:
+        except (DatabricksError, *_TRANSPORT_FAILURES) as error:
             raise _validation_failure(
                 "endpoint_unavailable",
                 "Endpoint validation is temporarily unavailable. Retry the save.",
