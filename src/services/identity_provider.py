@@ -14,6 +14,8 @@ from enum import Enum
 from functools import lru_cache
 from typing import Dict, List, Optional
 
+from src.services.identity_providers.scim_filter import escape_scim_filter_string
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,9 +34,11 @@ def _resolve_cached(email: str) -> str:
     try:
         provider = get_identity_provider()
         from src.services.identity_providers.workspace_provider import WorkspaceIdentityProvider
+
         if isinstance(provider._provider, WorkspaceIdentityProvider):
+            escaped_email = escape_scim_filter_string(email)
             for u in provider._provider._client.users.list(
-                filter=f'userName eq "{email}"',
+                filter=f'userName eq "{escaped_email}"',
                 attributes="id,userName,displayName",
             ):
                 if u.display_name:
@@ -52,8 +56,9 @@ def resolve_display_names(emails: List[str]) -> Dict[str, str]:
 
 class IdentityProviderMode(Enum):
     """Identity provider source mode."""
+
     WORKSPACE = "workspace"  # Workspace SCIM API via system client (SP)
-    LOCAL = "local"          # Local Lakebase table (dev fallback)
+    LOCAL = "local"  # Local Lakebase table (dev fallback)
 
 
 # Singleton instance
@@ -96,12 +101,15 @@ class IdentityProvider:
         """Use the system client when available, else fall back to local."""
         try:
             from src.core.databricks_client import get_system_client
+
             client = get_system_client()
             if client is not None:
                 logger.info("System client available — using Workspace SCIM API for identity")
                 return IdentityProviderMode.WORKSPACE
         except Exception as e:
-            logger.warning(f"System client unavailable ({e}) — falling back to local identity table")
+            logger.warning(
+                f"System client unavailable ({e}) — falling back to local identity table"
+            )
 
         return IdentityProviderMode.LOCAL
 
@@ -109,9 +117,11 @@ class IdentityProvider:
         if self._mode == IdentityProviderMode.WORKSPACE:
             from src.core.databricks_client import get_system_client
             from src.services.identity_providers.workspace_provider import WorkspaceIdentityProvider
+
             return WorkspaceIdentityProvider(client=get_system_client())
 
         from src.services.identity_providers.local_provider import LocalIdentityProvider
+
         return LocalIdentityProvider()
 
     # ------------------------------------------------------------------
@@ -164,6 +174,7 @@ class IdentityProvider:
         """Record a user identity on login (populates local table as cache)."""
         try:
             from src.services.identity_providers.local_provider import LocalIdentityProvider
+
             local = LocalIdentityProvider()
             local.record_identity(
                 identity_id=user_id,
