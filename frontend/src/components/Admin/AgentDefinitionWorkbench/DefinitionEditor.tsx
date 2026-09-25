@@ -33,10 +33,18 @@ const TAB_LABELS: Record<DefinitionTab, string> = {
 /** The exact upgrade-only code that requires manual prompt resolution. */
 export const MANUAL_RESOLUTION_CODE = 'legacy_prompt_manual_resolution_required';
 
-/** Every server issue is surfaced in its exact order; this only chooses the tab link. */
+/**
+ * Every server issue is surfaced in its exact order; this only chooses the tab link.
+ * Schema-contract issues use the server's unprefixed `schema_contract` field (correction
+ * 18: `already_current`, `immutable_field`, `overlay_schema_contract_unavailable`), which
+ * is joined to `SCHEMA_ALREADY_CURRENT_REJECTION` by `test_prompt_assembler.py`. A nested
+ * `schema_contract.*` field, should the server ever emit one, routes to the same tab.
+ */
 function issueTab(field: string): DefinitionTab {
   if (field === 'prompt_text' || field === 'candidate.prompt_text') return 'prompt';
-  if (field.startsWith('candidate.schema_overlay') || field === 'schema_contract.version') {
+  if (field.startsWith('candidate.schema_overlay')
+    || field === 'schema_contract'
+    || field.startsWith('schema_contract.')) {
     return 'output-schema';
   }
   return 'assembly';

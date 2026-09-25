@@ -5,11 +5,13 @@ import {
   DIRTY_LEGACY_PROMPT,
   MANUAL_RESOLUTION_REJECTION,
   PUBLISHED_V1_PROMPT_SOURCE,
+  SCHEMA_ALREADY_CURRENT_REJECTION,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticDraftDefinitions,
   syntheticLegacyPromptSource,
   syntheticNullCandidateConflict,
+  syntheticSchemaV2DraftDefinition,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
 } from '../../../../tests/fixtures/mocks';
@@ -18,6 +20,7 @@ import {
   forbidsActionName,
 } from '../../../../tests/fixtures/forbiddenActionNames';
 import type {
+  AgentDefinitionWorkbenchResponse,
   AgentKey,
   AssemblyRulesV2,
   DraftSaveConflictResponse,
@@ -1623,5 +1626,133 @@ describe('useDraftEditor shared request gate', () => {
     fireEvent.click(screen.getByRole('button', { name: 'harness save builder' }));
     await waitFor(() => expect(requestCount(fetchMock)).toBe(2));
     expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/draft\/builder$/);
+  });
+});
+
+
+// ============================================================
+// #264 Task 6 fix round 1 — Output Schema tab (review I1, I2 M5, I3, I4)
+// ============================================================
+
+function workbenchWithArchitectSchemaV2(): AgentDefinitionWorkbenchResponse {
+  const body: AgentDefinitionWorkbenchResponse = structuredClone(syntheticAgentDefinitionWorkbench);
+  for (const node of body.nodes) {
+    if (node.execution_kind === 'model' && node.agent_key === 'architect') {
+      node.draft = syntheticSchemaV2DraftDefinition('architect');
+    }
+  }
+  return body;
+}
+
+describe('AgentDefinitionWorkbench Output Schema tab', () => {
+  it('toggling the picker, typing guidance and navigating send zero requests', async () => {
+    const body = workbenchWithArchitectSchemaV2();
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => (
+      init?.method === 'GET' ? apiResponse(200, body) : apiResponse(500, null)
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requests = () => fetchMock.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
+    expect(requests()).toBe(1);
+    const picker = screen.getByRole('checkbox', { name: 'Select diagnostic_notes' });
+    fireEvent.click(picker);
+    expect(requests()).toBe(1);
+    const optional = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
+    fireEvent.change(within(optional).getByRole('textbox', { name: 'Description override' }), {
+      target: { value: 'Optional guidance' },
+    });
+    expect(requests()).toBe(1);
+    const intent = screen.getByRole('group', { name: 'Canonical field: intent' });
+    fireEvent.change(within(intent).getByRole('textbox', { name: 'Description guidance for intent' }), {
+      target: { value: 'Intent guidance' },
+    });
+    expect(requests()).toBe(1);
+    fireEvent.change(within(intent).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' }), {
+      target: { value: '["build"]' },
+    });
+    expect(requests()).toBe(1);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' }));
+    expect(requests()).toBe(1);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' }));
+    expect(requests()).toBe(1);
+    fireEvent.click(screen.getByRole('tab', { name: 'Assembly' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
+    expect(requests()).toBe(1);
+
+    // The edits were local and persisted across tab and role navigation.
+    expect(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: 'Description guidance for intent' })).toHaveValue('Intent guidance');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+    expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit | undefined)?.method === 'GET')).toBe(true);
+  });
+
+  it('malformed examples block Save with a visible field error and send nothing; fixed guidance is sent', async () => {
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request) =>
+      apiResponse(200, saveSuccess(agentKey, request.candidate, 1)));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
+
+    const intent = screen.getByRole('group', { name: 'Canonical field: intent' });
+    fireEvent.change(within(intent).getByRole('textbox', { name: 'Description guidance for intent' }), {
+      target: { value: 'Prefer build for new decks.' },
+    });
+    const examples = within(intent).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' });
+    fireEvent.change(examples, { target: { value: '["build"' } });
+
+    expect(within(intent).getByRole('alert')).toHaveTextContent('Examples must be a JSON array.');
+    const saveButton = screen.getByRole('button', { name: 'Save Draft' });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.change(examples, { target: { value: '["build"]' } });
+    expect(within(intent).queryByRole('alert')).toBeNull();
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    const sent = JSON.parse(String((putCalls(fetchMock)[0][1] as RequestInit).body)) as DraftSaveRequest;
+    expect(sent.candidate.schema_overlay?.field_overrides.intent).toEqual({
+      description: 'Prefer build for new decks.',
+      examples: ['build'],
+    });
+  });
+
+  it('links a Schema Upgrade already_current 422 to the Output Schema tab', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'GET') return apiResponse(200, syntheticAgentDefinitionWorkbench);
+      if (url.endsWith('/schema-contract-upgrade')) return apiResponse(422, SCHEMA_ALREADY_CURRENT_REJECTION);
+      return apiResponse(500, null);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Schema Upgrade' }));
+
+    const issues = await screen.findByRole('region', { name: 'Server rejected this request' });
+    expect(issues).toHaveTextContent('schema_contract — already_current');
+    expect(issues).toHaveTextContent('Schema contract is already current.');
+    fireEvent.click(within(issues).getByRole('button', { name: 'Go to Output Schema tab' }));
+    expect(screen.getByRole('tab', { name: 'Output Schema' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('a hook Save with malformed examples records the field error and allocates no request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useDraftEditor(syntheticAgentDefinitionWorkbench));
+    act(() => result.current.editSchemaOverlayFieldExamples('architect', 'intent', 'not json'));
+    await act(() => result.current.save('architect'));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.state.pendingSave).toBeNull();
+    expect(result.current.state.byAgent.architect.fieldErrors).toEqual({
+      'schema_overlay.field_overrides.intent.examples': 'Examples must be a JSON array.',
+    });
   });
 });

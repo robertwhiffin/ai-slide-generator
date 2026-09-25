@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import json
 import math
+import pathlib
 import re
 import sys
 from collections.abc import Callable, Iterator
@@ -271,6 +272,7 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
             "schema_contract",
             "protected_stage_view",
             "selectable_optional_fields",
+            "canonical_fields",
         }
         assert set(draft) == {
             "base_revision_id",
@@ -284,6 +286,7 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
             "schema_contract",
             "protected_stage_view",
             "selectable_optional_fields",
+            "canonical_fields",
         }
         assert draft["base_revision_id"] == published["revision_id"]
         assert published["definition_version"] == 2
@@ -1391,6 +1394,7 @@ def test_no_request_model_accepts_a_protected_stage_view_or_display_field(
     server_owned = {
         "protected_stage_view",
         "selectable_optional_fields",
+        "canonical_fields",
         "display_text",
         "locked",
         "bundle_version",
@@ -3145,3 +3149,172 @@ def test_schema_contract_upgrade_route_exact_seven_stale_conflict_snapshot(
         assert definition == _model_node(after, agent_key)["draft"]
         # Every definition in the snapshot must carry selectable_optional_fields
         assert "selectable_optional_fields" in definition
+
+
+# ── #264 Task 6 fix round 1, I4: read-only canonical-field display data ──────────
+
+#: Hand-typed per correction C-24: the canonical output fields each role's code-owned
+#: Pydantic output schema declares, in model field order.  ``default`` is present only
+#: for a field that is not required.  Nothing here is imported from the code under test.
+def _required(name: str, type_: str, enum: list[str] | None = None) -> dict[str, object]:
+    return {"name": name, "type": type_, "required": True, "enum": enum}
+
+
+def _optional(name: str, type_: str, default: object) -> dict[str, object]:
+    return {"name": name, "type": type_, "required": False, "enum": None, "default": default}
+
+
+_VERDICTS = ["clean", "fixed", "surfaced"]
+EXPECTED_CANONICAL_FIELDS: dict[str, list[dict[str, object]]] = {
+    "architect": [
+        _required(
+            "intent",
+            "string",
+            ["discuss", "ask_data", "build", "edit", "confirm_design_contract"],
+        ),
+        _required("message", "string"),
+        _optional("deck_spec", "DeckSpec | null", None),
+        _optional("data_request", "DataRequest | null", None),
+        _optional("target_positions", "array<integer>", []),
+        _optional("proposed_design_contract", "DesignContractRef | null", None),
+    ],
+    "data_analyst": [
+        _required("outcome", "string", ["success", "missing_data", "no_tool"]),
+        _optional("synthesis", "string | null", None),
+        _optional("sources", "array<string> | null", None),
+        _optional("gap", "string | null", None),
+        _optional("tried_tools", "array<string>", []),
+        _optional("reason", "string | null", None),
+    ],
+    "builder": [
+        _required("position", "integer"),
+        _required("html", "string"),
+        _optional("scripts", "string", ""),
+    ],
+    "build_reviewer": [
+        _required("slide_index", "integer"),
+        _required("verdict", "string", _VERDICTS),
+        _optional("findings", "array<Finding>", []),
+    ],
+    "fixer": [
+        _required("position", "integer"),
+        _required("html", "string"),
+        _optional("scripts", "string", ""),
+        _required("changed", "boolean"),
+        _optional("change_summary", "string", ""),
+    ],
+    "fix_reviewer": [
+        _required("slide_index", "integer"),
+        _required("verdict", "string", _VERDICTS),
+        _optional("findings", "array<Finding>", []),
+    ],
+    "deck_reviewer": [
+        _optional("findings", "array<Finding>", []),
+    ],
+}
+
+
+def test_every_role_exposes_its_code_owned_canonical_fields_read_only(
+    session_factory, monkeypatch
+):
+    """Catches a missing, reordered, or mis-derived canonical-field display list."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        body = _workbench(client)
+
+    assert [node["agent_key"] for node in _model_nodes(body)] == list(EXPECTED_CANONICAL_FIELDS)
+    for node in _model_nodes(body):
+        expected = EXPECTED_CANONICAL_FIELDS[node["agent_key"]]
+        assert node["draft"]["canonical_fields"] == expected, node["agent_key"]
+        assert node["published"]["canonical_fields"] == expected, node["agent_key"]
+
+
+def test_canonical_fields_survive_schema_upgrade_and_change_no_stored_identity(
+    session_factory, monkeypatch
+):
+    """Catches display data that moves with the contract or leaks into hashed content."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        response = _post_schema_contract_upgrade(client, "fixer", 0)
+        after = _workbench(client)
+
+    assert response.status_code == 200
+    assert response.json()["definition"]["canonical_fields"] == EXPECTED_CANONICAL_FIELDS["fixer"]
+    for node in _model_nodes(after):
+        assert node["draft"]["canonical_fields"] == EXPECTED_CANONICAL_FIELDS[node["agent_key"]]
+    # Identical display data before and after, while the only content that changed is
+    # the upgraded role's contract: the list is derived, never stored or hashed.
+    for agent_key in EXPECTED_CANONICAL_FIELDS:
+        old = _model_node(before, agent_key)
+        new = _model_node(after, agent_key)
+        assert old["published"] == new["published"]
+        if agent_key != "fixer":
+            assert old["draft"] == new["draft"]
+
+
+def test_canonical_fields_are_in_every_seven_role_conflict_snapshot(
+    session_factory, monkeypatch
+):
+    """Catches a 409 snapshot definition that drops the display list."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        stale = _post_schema_contract_upgrade(client, "builder", 0)
+
+    assert stale.status_code == 409
+    definitions = stale.json()["server"]["definitions"]
+    for agent_key, definition in definitions.items():
+        assert definition["canonical_fields"] == EXPECTED_CANONICAL_FIELDS[agent_key]
+
+
+_CLIENT_MOCKS = (
+    pathlib.Path(__file__).resolve().parents[2] / "frontend" / "tests" / "fixtures" / "mocks.ts"
+)
+
+
+def _client_json_fixture(declaration: str) -> object:
+    """The JSON-literal body of one ``export const NAME: T = {...};`` block in mocks.ts.
+
+    Reads ``frontend/tests/fixtures/mocks.ts`` as text.  The fixture body is written as
+    strict JSON (double quotes, no trailing commas, no comments) so this can load it
+    without a TypeScript parser; a body that is not strict JSON fails loudly here.
+    """
+    source = _CLIENT_MOCKS.read_text(encoding="utf-8")
+    start = source.index(f"export const {declaration}:")
+    opening = source.index("= {", start) + 2
+    closing = source.index("\n};", opening)
+    return json.loads(source[opening : closing + 2])
+
+
+def test_client_canonical_field_fixture_is_the_server_display_data(
+    session_factory, monkeypatch
+):
+    """Joins the client's hand-typed canonical-field fixture to the live route output."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        body = _workbench(client)
+
+    fixture = _client_json_fixture("CANONICAL_FIELD_DESCRIPTORS")
+    assert list(fixture) == [node["agent_key"] for node in _model_nodes(body)]
+    for node in _model_nodes(body):
+        assert fixture[node["agent_key"]] == node["draft"]["canonical_fields"]
+
+
+def test_client_diagnostic_notes_fixture_is_the_server_descriptor_for_all_seven_roles(
+    session_factory, monkeypatch
+):
+    """Joins the client's seven per-role ``diagnostic_notes`` descriptors to the route."""
+    _force_admin(monkeypatch, is_admin=True)
+    fixture = _client_json_fixture("DIAGNOSTIC_NOTES_DESCRIPTORS")
+    with _app_for(session_factory) as client:
+        roles = [node["agent_key"] for node in _model_nodes(_workbench(client))]
+        assert list(fixture) == roles
+        for agent_key in roles:
+            response = _post_schema_contract_upgrade(
+                client, agent_key, roles.index(agent_key)
+            )
+            assert response.status_code == 200, agent_key
+            assert response.json()["definition"]["selectable_optional_fields"] == [
+                fixture[agent_key]
+            ], agent_key

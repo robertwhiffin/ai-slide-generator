@@ -1799,6 +1799,68 @@ test('direct malformed-API 422 on schema overlay is stable and not a 500', async
   await expect(issues.getByRole('button', { name: 'Go to Output Schema tab' })).toBeVisible();
 });
 
+test('canonical fields: protected labels, guidance edit, blocked malformed examples, save and reload', async ({ page }) => {
+  const body = cloneWorkbench();
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, body);
+  const saves = await installSaveMock(page, (route, save) => {
+    const success = syntheticDraftSaveSuccess(save.agentKey, save.body, 1);
+    const overlay = save.body.candidate.schema_overlay;
+    if (overlay) success.definition.schema_overlay = structuredClone(overlay);
+    return fulfillJson(route, 200, success);
+  });
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  const panel = outputSchemaPanel(page);
+  await expect(panel.getByRole('region', { name: 'Canonical output fields' })).toBeVisible();
+  const intent = panel.getByRole('group', { name: 'Canonical field: intent' });
+  const protectedProperties = intent.getByRole('group', { name: 'Protected properties of intent' });
+  await expect(protectedProperties).toContainText('string');
+  await expect(protectedProperties).toContainText('yes');
+  await expect(protectedProperties).toContainText('discuss, ask_data, build, edit, confirm_design_contract');
+  // Only the two guidance textareas are editable; no control exists for a protected property.
+  await expect(intent.getByRole('textbox')).toHaveCount(2);
+  for (const role of ['checkbox', 'spinbutton', 'combobox'] as const) {
+    await expect(intent.getByRole(role)).toHaveCount(0);
+  }
+  const deckSpec = panel.getByRole('group', { name: 'Protected properties of deck_spec' });
+  await expect(deckSpec).toContainText('DeckSpec | null');
+  await expect(deckSpec).toContainText('no');
+
+  await intent.getByRole('textbox', { name: 'Description guidance for intent' })
+    .fill('Prefer build for new decks.');
+  const examples = intent.getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' });
+  await examples.fill('["build"');
+  await expect(intent.getByRole('alert')).toHaveText('Examples must be a JSON array.');
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+  expect(saves).toHaveLength(0);
+
+  await examples.fill('["build"]');
+  await expect(intent.getByRole('alert')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0].body.candidate.schema_overlay?.field_overrides.intent).toEqual({
+    description: 'Prefer build for new decks.',
+    examples: ['build'],
+  });
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+
+  // A real page reload re-reads the server's stored overlay.
+  for (const node of body.nodes) {
+    if (node.execution_kind !== 'model' || node.agent_key !== 'architect') continue;
+    node.draft.schema_overlay = structuredClone(saves[0].body.candidate.schema_overlay!);
+  }
+  await page.reload();
+  await page.getByRole('tab', { name: 'Agent Definitions' }).click();
+  await openOutputSchemaTab(page);
+  const reloaded = outputSchemaPanel(page).getByRole('group', { name: 'Canonical field: intent' });
+  await expect(reloaded.getByRole('textbox', { name: 'Description guidance for intent' }))
+    .toHaveValue('Prefer build for new decks.');
+  await expect(reloaded.getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' }))
+    .toHaveValue('["build"]');
+});
+
 test('the affected-role browser matrix cannot silently narrow', () => {
   // Task 6's first round keyed every affected-role loop off the shared fixture copy
   // of LEGACY_COMPOSITE_ROLES. Narrowing that copy removed seven tests from this file

@@ -10,6 +10,7 @@ import {
   readDraftLegacyPromptSource,
   saveDraftDefinition,
   upgradeDraftProtectedAssembly,
+  upgradeDraftSchemaContract,
   type AgentDefinitionWorkbenchResponse,
   type AgentKey,
   type AssemblyRulesV1,
@@ -22,14 +23,19 @@ import {
 } from '../../../api/agentDefinitions';
 import {
   ALREADY_CURRENT_REJECTION,
+  CANONICAL_FIELD_DESCRIPTORS,
+  DIAGNOSTIC_NOTES_DESCRIPTORS,
   DIRTY_LEGACY_PROMPT,
   EMPTY_V2_ASSEMBLY_RULES,
   MANUAL_RESOLUTION_REJECTION,
   PUBLISHED_V1_PROMPT_SOURCE,
+  SCHEMA_ALREADY_CURRENT_REJECTION,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticLegacyPromptSource,
   syntheticNullCandidateConflict,
+  syntheticSchemaUpgradeSuccess,
+  syntheticSchemaV2DraftDefinition,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
 } from '../../../../tests/fixtures/mocks';
@@ -1774,5 +1780,360 @@ describe('prompt-change backstop during a pending Upgrade', () => {
     // ...while the record's safe field is still restored and its bytes are untouched.
     expect(next.byAgent.data_analyst.local.top_p).toBe(0.44);
     expect(next.byAgent.data_analyst.retainedForms[0].manualOnlyPrompt).toBe(DIRTY_LEGACY_PROMPT);
+  });
+});
+
+
+// ============================================================
+// #264 Task 6 fix round 1 — Schema Upgrade and overlay pins (review I2, I3, I4)
+// ============================================================
+
+function schemaUpgradePending(
+  agentKey: AgentKey = 'architect',
+  requestId = 1,
+  expectedLockVersion = 0,
+): PendingDraftSave {
+  return { operation: 'schemaUpgrade', requestId, agentKey, expectedLockVersion, submittedCandidate: null };
+}
+
+describe('Schema Upgrade completion', () => {
+  it('keeps prompt, model and overlay edits made while the Schema Upgrade was pending (A2 to A3)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'prompt_text', value: 'Architect A2' });
+    state = draftEditorReducer(state, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending() });
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'prompt_text', value: 'Architect A3' });
+    state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field: 'top_p', value: 0.42 });
+    state = draftEditorReducer(state, {
+      type: 'schemaOverlayFieldDescriptionChanged',
+      agentKey: 'architect',
+      fieldName: 'intent',
+      description: 'A3 intent guidance',
+    });
+
+    const next = draftEditorReducer(state, {
+      type: 'schemaUpgradeSucceeded',
+      requestId: 1,
+      result: syntheticSchemaUpgradeSuccess('architect', 1),
+    });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft.lock_version).toBe(1);
+    expect(next.byAgent.architect.saved.schema_contract.version).toBe(2);
+    expect(next.byAgent.architect.local.prompt_text).toBe('Architect A3');
+    expect(next.byAgent.architect.local.top_p).toBe(0.42);
+    expect(next.byAgent.architect.local.schema_overlay?.field_overrides.intent?.description)
+      .toBe('A3 intent guidance');
+    expect(draftStatus(next.byAgent.architect)).toBe('Unsaved');
+  });
+
+  it('ignores a Schema Upgrade completion whose request ID is not the pending one', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('architect', 2) });
+    const stale: DraftEditorState[] = [
+      draftEditorReducer(state, { type: 'schemaUpgradeSucceeded', requestId: 1, result: syntheticSchemaUpgradeSuccess('architect', 1) }),
+      draftEditorReducer(state, { type: 'schemaUpgradeRejected', requestId: 1, error: SCHEMA_ALREADY_CURRENT_REJECTION }),
+      draftEditorReducer(state, { type: 'schemaUpgradeConflicted', requestId: 1, conflict: syntheticNullCandidateConflict(0, 1) }),
+      draftEditorReducer(state, { type: 'schemaUpgradeFailed', requestId: 1, message: 'late failure' }),
+    ];
+    for (const next of stale) expect(next).toBe(state);
+    expect(state.pendingSave?.requestId).toBe(2);
+  });
+
+  it('never lets one operation complete another operation with the same request ID', () => {
+    let saving = createDraftEditorState(workbench());
+    saving = draftEditorReducer(saving, {
+      type: 'saveStarted',
+      pending: { operation: 'save', requestId: 1, agentKey: 'architect', expectedLockVersion: 0, submittedCandidate: request().candidate },
+    });
+    expect(draftEditorReducer(saving, {
+      type: 'schemaUpgradeSucceeded', requestId: 1, result: syntheticSchemaUpgradeSuccess('architect', 1),
+    })).toBe(saving);
+
+    let upgrading = createDraftEditorState(workbench());
+    upgrading = draftEditorReducer(upgrading, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('architect', 1) });
+    expect(draftEditorReducer(upgrading, {
+      type: 'saveSucceeded', requestId: 1, result: success('architect', 'A2', 1),
+    })).toBe(upgrading);
+    expect(draftEditorReducer(upgrading, {
+      type: 'upgradeSucceeded', requestId: 1, result: syntheticUpgradeSuccess('architect', 1),
+    })).toBe(upgrading);
+  });
+
+  it('ignores a late Schema Upgrade response after a newer request has started (monotonic IDs)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('architect', 1) });
+    state = draftEditorReducer(state, { type: 'schemaUpgradeSucceeded', requestId: 1, result: syntheticSchemaUpgradeSuccess('architect', 1) });
+    state = draftEditorReducer(state, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('builder', 2, 1) });
+    const late = draftEditorReducer(state, {
+      type: 'schemaUpgradeSucceeded', requestId: 1, result: syntheticSchemaUpgradeSuccess('builder', 2),
+    });
+    expect(late).toBe(state);
+    expect(late.byAgent.builder.saved.schema_contract.version).toBe(1);
+    expect(late.pendingSave?.requestId).toBe(2);
+  });
+
+  it('merges every one of the seven definitions from a Schema Upgrade 409 and keeps an overlay-only-dirty role', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, {
+      type: 'schemaOverlayFieldDescriptionChanged',
+      agentKey: 'builder',
+      fieldName: 'html',
+      description: 'Builder local guidance',
+    });
+    state = draftEditorReducer(state, { type: 'schemaUpgradeStarted', pending: schemaUpgradePending('architect') });
+    const body = syntheticNullCandidateConflict(0, 1);
+    body.server.definitions.architect = syntheticSchemaV2DraftDefinition('architect');
+    body.server.definitions.fixer = syntheticSchemaV2DraftDefinition('fixer');
+    body.server.definitions.builder = {
+      ...body.server.definitions.builder,
+      prompt_text: 'Builder server B1',
+      candidate_hash: '7'.repeat(64),
+    };
+    // The Schema Upgrade 409 is the null-candidate contract, and this body is valid for it.
+    expect(parseDraftSaveConflictResponse(body, 'null')).toEqual(body);
+
+    state = draftEditorReducer(state, { type: 'schemaUpgradeConflicted', requestId: 1, conflict: body });
+
+    expect(state.pendingSave).toBeNull();
+    expect(state.draft).toEqual(body.server.draft);
+    for (const agentKey of AGENT_KEYS) {
+      expect(state.byAgent[agentKey].saved).toEqual(body.server.definitions[agentKey]);
+    }
+    expect(state.byAgent.architect.conflict).toEqual(body);
+    // A clean unselected role adopts the server baseline.
+    expect(state.byAgent.fixer.local).toEqual(formFromDefinition(body.server.definitions.fixer));
+    // An unselected role whose only local edit is overlay guidance is dirty, so it keeps it.
+    expect(state.byAgent.builder.local.schema_overlay?.field_overrides.html?.description)
+      .toBe('Builder local guidance');
+    expect(draftStatus(state.byAgent.builder)).toBe('Unsaved');
+  });
+});
+
+describe('schema overlay local edits', () => {
+  it('an overlay-only edit makes the role Unsaved', () => {
+    let state = createDraftEditorState(workbench());
+    expect(draftStatus(state.byAgent.builder)).toBe('Clean');
+    state = draftEditorReducer(state, {
+      type: 'schemaOverlayFieldDescriptionChanged', agentKey: 'builder', fieldName: 'html', description: 'guidance',
+    });
+    expect(draftStatus(state.byAgent.builder)).toBe('Unsaved');
+  });
+
+  it('keeps an overlay edit made after a Save request was sent (A2 to A3)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, {
+      type: 'schemaOverlayFieldDescriptionChanged', agentKey: 'builder', fieldName: 'html', description: 'A2 guidance',
+    });
+    const validation = validateDraftForm(state.byAgent.builder.local);
+    if (!validation.ok) throw new Error('expected a valid candidate');
+    state = draftEditorReducer(state, {
+      type: 'saveStarted',
+      pending: { operation: 'save', requestId: 1, agentKey: 'builder', expectedLockVersion: 0, submittedCandidate: validation.candidate },
+    });
+    state = draftEditorReducer(state, {
+      type: 'schemaOverlayFieldDescriptionChanged', agentKey: 'builder', fieldName: 'html', description: 'A3 guidance',
+    });
+    const saved: DraftDefinition = {
+      ...definition('builder'),
+      schema_overlay: structuredClone(validation.candidate.schema_overlay) as DraftDefinition['schema_overlay'],
+      candidate_hash: '1'.repeat(64),
+    };
+
+    const next = draftEditorReducer(state, {
+      type: 'saveSucceeded', requestId: 1, result: { draft: metadata(1), definition: saved, changed: true },
+    });
+
+    expect(next.byAgent.builder.saved.schema_overlay.field_overrides).toEqual({ html: { description: 'A2 guidance' } });
+    expect(next.byAgent.builder.local.schema_overlay?.field_overrides.html?.description).toBe('A3 guidance');
+  });
+
+  it('refuses to build a candidate from malformed examples instead of silently dropping them', () => {
+    const base = formFromDefinition(definition('builder'));
+    for (const examples of ['["unterminated"', '"not an array"', '{"a": 1}', 'build']) {
+      const result = validateDraftForm({
+        ...base,
+        schema_overlay: {
+          additional_optional_fields: [],
+          field_overrides: { html: { description: 'Saved guidance', examples } },
+        },
+      });
+      expect(result.ok, examples).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toEqual({
+          'schema_overlay.field_overrides.html.examples': 'Examples must be a JSON array.',
+        });
+      }
+    }
+
+    const valid = validateDraftForm({
+      ...base,
+      schema_overlay: {
+        additional_optional_fields: [],
+        field_overrides: { html: { description: 'Saved guidance', examples: '["<section>"]' } },
+      },
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.candidate.schema_overlay?.field_overrides).toEqual({
+        html: { description: 'Saved guidance', examples: ['<section>'] },
+      });
+    }
+  });
+
+  it('clears a field\'s examples error when that field\'s examples change', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, {
+      type: 'saveInvalid',
+      agentKey: 'builder',
+      errors: {
+        prompt_text: 'Prompt text must not be blank.',
+        'schema_overlay.field_overrides.html.examples': 'Examples must be a JSON array.',
+      },
+    });
+    state = draftEditorReducer(state, {
+      type: 'schemaOverlayFieldExamplesChanged', agentKey: 'builder', fieldName: 'html', examples: '["ok"]',
+    });
+    expect(state.byAgent.builder.fieldErrors['schema_overlay.field_overrides.html.examples']).toBeUndefined();
+    expect(state.byAgent.builder.fieldErrors.prompt_text).toBe('Prompt text must not be blank.');
+  });
+});
+
+describe('schema-contract-upgrade transport', () => {
+  it('sends exactly the lock body and parses each contract status, including the null-candidate 409', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(200, syntheticSchemaUpgradeSuccess('architect', 1)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(upgradeDraftSchemaContract('architect', { lock_version: 0 }))
+      .resolves.toEqual(syntheticSchemaUpgradeSuccess('architect', 1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/draft\/architect\/schema-contract-upgrade$/);
+    expect(init).toEqual({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"lock_version":0}',
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(422, SCHEMA_ALREADY_CURRENT_REJECTION, 'Unprocessable Entity')));
+    const rejected = await upgradeDraftSchemaContract('architect', { lock_version: 0 }).catch((error: unknown) => error);
+    expect(rejected).toBeInstanceOf(AgentDefinitionApiError);
+    expect((rejected as AgentDefinitionApiError).status).toBe(422);
+    expect((rejected as AgentDefinitionApiError).payload).toEqual(SCHEMA_ALREADY_CURRENT_REJECTION);
+
+    const nullConflict = syntheticNullCandidateConflict(0, 1);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(409, nullConflict, 'Conflict')));
+    const conflicted = await upgradeDraftSchemaContract('architect', { lock_version: 0 }).catch((error: unknown) => error);
+    expect(conflicted).toBeInstanceOf(AgentDefinitionApiError);
+    expect((conflicted as AgentDefinitionApiError).status).toBe(409);
+    expect((conflicted as AgentDefinitionApiError).payload).toEqual(nullConflict);
+
+    // A Schema Upgrade 409 that echoes a candidate is not this route's contract.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(409, conflict(0, 1), 'Conflict')));
+    await expect(upgradeDraftSchemaContract('architect', { lock_version: 0 }))
+      .rejects.toBeInstanceOf(InvalidDraftSaveResponseError);
+  });
+});
+
+describe('strict schema overlay parsing', () => {
+  it('accepts each of the seven roles\' own descriptor and rejects every malformed descriptor', () => {
+    for (const agentKey of AGENT_KEYS) {
+      const body = syntheticSchemaUpgradeSuccess(agentKey, 1);
+      expect(body.definition.selectable_optional_fields).toEqual([DIAGNOSTIC_NOTES_DESCRIPTORS[agentKey]]);
+      expect(parseDraftSaveSuccessResponse(body), agentKey).toEqual(body);
+    }
+    const base = syntheticSchemaUpgradeSuccess('architect', 1);
+    const good = DIAGNOSTIC_NOTES_DESCRIPTORS.architect;
+    const rejected: unknown[] = [
+      setAtPath(good, 'name', 1),
+      setAtPath(good, 'description', null),
+      setAtPath(good, 'examples', 'x'),
+      setAtPath(good, 'extra', true),
+      setAtPath(good, 'schema', null, true),
+      setAtPath(good, 'schema.default', []),
+      setAtPath(good, 'schema.max_items', 0),
+      setAtPath(good, 'schema.type', 'array'),
+      setAtPath(good, 'schema.extra', true),
+      setAtPath(good, 'schema.items.extra', true),
+      setAtPath(good, 'schema.items.min_length', -1),
+      setAtPath(good, 'schema.items.strip_whitespace', 'yes'),
+      null,
+      'diagnostic_notes',
+    ];
+    for (const invalid of rejected) {
+      expect(
+        parseDraftSaveSuccessResponse(setAtPath(base, 'definition.selectable_optional_fields', [invalid])),
+        JSON.stringify(invalid),
+      ).toBeNull();
+    }
+  });
+
+  it('accepts every role\'s canonical fields and rejects every malformed canonical-field descriptor', () => {
+    for (const agentKey of AGENT_KEYS) {
+      const body = syntheticSchemaUpgradeSuccess(agentKey, 1);
+      expect(body.definition.canonical_fields).toEqual(CANONICAL_FIELD_DESCRIPTORS[agentKey]);
+      expect(parseDraftSaveSuccessResponse(body), agentKey).toEqual(body);
+    }
+    const base = syntheticSchemaUpgradeSuccess('architect', 1);
+    const [intent, , deckSpec] = CANONICAL_FIELD_DESCRIPTORS.architect;
+    expect(intent.required).toBe(true);
+    expect(deckSpec.required).toBe(false);
+    const rejected: unknown[] = [
+      setAtPath(intent, 'default', null),
+      setAtPath(deckSpec, 'default', null, true),
+      setAtPath(intent, 'required', 'true'),
+      setAtPath(intent, 'name', ''),
+      setAtPath(intent, 'name', 1),
+      setAtPath(intent, 'type', 1),
+      setAtPath(intent, 'type', ''),
+      setAtPath(intent, 'enum', []),
+      setAtPath(intent, 'enum', [1]),
+      setAtPath(intent, 'enum', 'build'),
+      setAtPath(intent, 'enum', null, true),
+      setAtPath(intent, 'extra', true),
+      null,
+      'intent',
+    ];
+    for (const invalid of rejected) {
+      expect(
+        parseDraftSaveSuccessResponse(setAtPath(base, 'definition.canonical_fields', [invalid])),
+        JSON.stringify(invalid),
+      ).toBeNull();
+    }
+    expect(parseDraftSaveSuccessResponse(setAtPath(base, 'definition.canonical_fields', [intent, intent])))
+      .toBeNull();
+    expect(parseDraftSaveSuccessResponse(setAtPath(base, 'definition.canonical_fields', null, true)))
+      .toBeNull();
+  });
+
+  it('accepts exactly the four candidate shapes, including schema_overlay, in a conflict echo', () => {
+    const ordinary = conflict(0, 1);
+    const model = structuredClone(definition('architect').model);
+    const overlay = { field_overrides: { intent: { description: 'd' } }, additional_optional_fields: ['diagnostic_notes'] };
+    const accepted: unknown[] = [
+      { prompt_text: 'p', model, schema_overlay: null },
+      { prompt_text: 'p', model, schema_overlay: overlay },
+      { prompt_text: 'p', model, assembly_rules: null, schema_overlay: null },
+      { prompt_text: 'p', model, assembly_rules: structuredClone(EMPTY_V2_ASSEMBLY_RULES), schema_overlay: overlay },
+    ];
+    for (const candidate of accepted) {
+      expect(
+        parseDraftSaveConflictResponse(setAtPath(ordinary, 'client_candidate', candidate)),
+        JSON.stringify(candidate),
+      ).not.toBeNull();
+    }
+    const rejected: unknown[] = [
+      { prompt_text: 'p', model, schema_overlay: {} },
+      { prompt_text: 'p', model, schema_overlay: 'overlay' },
+      { prompt_text: 'p', model, schema_overlay: { field_overrides: [], additional_optional_fields: [] } },
+      { prompt_text: 'p', model, schema_overlay: { field_overrides: {}, additional_optional_fields: [1] } },
+      { prompt_text: 'p', model, schema_overlay: { ...overlay, extra: true } },
+      { prompt_text: 'p', model, schema_overlay: null, extra: true },
+    ];
+    for (const candidate of rejected) {
+      expect(
+        parseDraftSaveConflictResponse(setAtPath(ordinary, 'client_candidate', candidate)),
+        JSON.stringify(candidate),
+      ).toBeNull();
+    }
   });
 });
