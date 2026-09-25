@@ -115,6 +115,10 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                     onEdit={editor.edit}
                     onSave={editor.save}
                     onUpgradeProtectedAssembly={editor.upgradeProtectedAssembly}
+                    onUpgradeSchemaContract={editor.upgradeSchemaContract}
+                    onToggleSchemaOverlayOptionalField={editor.toggleSchemaOverlayOptionalField}
+                    onEditSchemaOverlayFieldDescription={editor.editSchemaOverlayFieldDescription}
+                    onEditSchemaOverlayFieldExamples={editor.editSchemaOverlayFieldExamples}
                     onRestorePublishedV1Prompt={editor.restorePublishedV1Prompt}
                     onAddAssemblyBlock={editor.addAssemblyBlock}
                     onEditAssemblyBlockText={editor.editAssemblyBlockText}

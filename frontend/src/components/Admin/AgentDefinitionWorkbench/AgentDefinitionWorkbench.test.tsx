@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ALREADY_CURRENT_REJECTION,
@@ -7,6 +7,7 @@ import {
   PUBLISHED_V1_PROMPT_SOURCE,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
+  syntheticDraftDefinitions,
   syntheticLegacyPromptSource,
   syntheticNullCandidateConflict,
   syntheticUpgradeSuccess,
@@ -149,7 +150,7 @@ function saveConflict(
         syntheticAgentDefinitionWorkbench.nodes
           .filter((node) => node.execution_kind === 'model')
           .map((node) => [node.agent_key, structuredClone(node.draft)]),
-      ) as DraftSaveConflictResponse['server']['definitions'],
+      ) as unknown as DraftSaveConflictResponse['server']['definitions'],
     },
   };
 }
@@ -317,12 +318,12 @@ describe('AgentDefinitionWorkbench', () => {
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(60000);
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Output Schema' }));
-    expect(screen.getByRole('tabpanel', { name: 'Output Schema' })).toHaveTextContent(
-      'Synthetic title override',
-    );
-    expect(screen.getByRole('tabpanel', { name: 'Output Schema' })).toHaveTextContent(
-      'speaker_notes',
-    );
+    const outputSchemaPanel = screen.getByRole('tabpanel', { name: 'Output Schema' });
+    // The panel now shows the OutputSchemaEditor with field override values (not raw JSON).
+    // The architect fixture has a title field override with this description.
+    expect(outputSchemaPanel).toHaveTextContent('Synthetic title override');
+    // v1 schema contract shows the Schema Upgrade button (picker is hidden until upgrade).
+    expect(within(outputSchemaPanel).getByRole('button', { name: 'Schema Upgrade' })).toBeInTheDocument();
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Assembly' }));
     const assembly = screen.getByRole('tabpanel', { name: 'Assembly' });
@@ -1420,6 +1421,7 @@ function GateHarness() {
     ['upgrade architect', () => editor.upgradeProtectedAssembly('architect')],
     ['upgrade builder', () => editor.upgradeProtectedAssembly('builder')],
     ['recover data analyst', () => editor.restorePublishedV1Prompt('data_analyst')],
+    ['schema upgrade architect', () => editor.upgradeSchemaContract('architect')],
   ];
   // Pairs fired inside one handler never see a re-render, so the hook's shared
   // in-flight ref is the only guard the second call can meet.
@@ -1440,6 +1442,14 @@ function GateHarness() {
       void editor.restorePublishedV1Prompt('data_analyst');
       void editor.save('builder');
     }],
+    ['schema upgrade then save architect', () => {
+      void editor.upgradeSchemaContract('architect');
+      void editor.save('architect');
+    }],
+    ['save architect then schema upgrade', () => {
+      void editor.save('architect');
+      void editor.upgradeSchemaContract('architect');
+    }],
   ];
   return (
     <>
@@ -1452,6 +1462,41 @@ function GateHarness() {
     </>
   );
 }
+
+describe('schema contract upgrade via useDraftEditor', () => {
+  function mockForSchemaUpgrade(upgradeRespond: (key: string) => object) {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('schema-contract-upgrade')) {
+        const agentKey = url.split('/').at(-2) ?? 'architect';
+        return Promise.resolve(apiResponse(200, upgradeRespond(agentKey)));
+      }
+      return Promise.resolve(apiResponse(200, syntheticAgentDefinitionWorkbench));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('schema upgrade sends a lock-only POST to the schema-contract-upgrade endpoint', async () => {
+    const fetchMock = mockForSchemaUpgrade(() => ({
+      draft: { ...syntheticAgentDefinitionWorkbench.draft, lock_version: 1 },
+      definition: structuredClone(syntheticDraftDefinitions['architect']),
+      changed: true,
+    }));
+    const { result } = renderHook(() => useDraftEditor(syntheticAgentDefinitionWorkbench));
+    await act(() => result.current.upgradeSchemaContract('architect'));
+
+    const schemaCalls = (fetchMock.mock.calls as unknown[]).filter(
+      (call) => typeof (call as unknown[])[0] === 'string'
+        && String((call as unknown[])[0]).includes('schema-contract-upgrade'),
+    );
+    expect(schemaCalls).toHaveLength(1);
+    const [url, init] = schemaCalls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/draft\/architect\/schema-contract-upgrade$/);
+    const body = JSON.parse(init.body as string);
+    // Must be exactly { lock_version: 0 } with no candidate.
+    expect(body).toEqual({ lock_version: 0 });
+  });
+});
 
 describe('prompt-change backstop reaches the retained-forms controls', () => {
   it.each(AFFECTED_ROLES)(
@@ -1534,6 +1579,10 @@ describe('useDraftEditor shared request gate', () => {
     ['upgrade architect', 'upgrade builder'],
     ['upgrade architect', 'recover data analyst'],
     ['recover data analyst', 'upgrade builder'],
+    ['schema upgrade architect', 'save architect'],
+    ['save architect', 'schema upgrade architect'],
+    ['schema upgrade architect', 'upgrade architect'],
+    ['upgrade architect', 'schema upgrade architect'],
   ])('%s then %s issues only the first request', (first, second) => {
     const { fetchMock } = heldFetch();
     render(<GateHarness />);
@@ -1552,6 +1601,8 @@ describe('useDraftEditor shared request gate', () => {
     'save then upgrade architect',
     'upgrade then recover',
     'recover then save builder',
+    'schema upgrade then save architect',
+    'save architect then schema upgrade',
   ])('%s inside one tick issues only the first request', (name) => {
     const { fetchMock } = heldFetch();
     render(<GateHarness />);
