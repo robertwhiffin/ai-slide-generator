@@ -389,9 +389,14 @@ class AgentSchemaRegistry:
 
         issues: list[SchemaValidationIssue] = []
         canonical_names = bundle.canonical_model.model_fields
+        # Schema contract v1's frozen digest material carries no overlay grammar,
+        # and the runtime refuses any non-empty v1 overlay.  So under v1 no
+        # canonical field is available for guidance, exactly as v1's optional
+        # catalog is empty: writer, route and runtime then agree (#264 I1).
+        guidance_names = canonical_names if identity.version >= 2 else {}
         for field_name, guidance in overlay.field_overrides.items():
             path = ("field_overrides", field_name)
-            if field_name not in canonical_names:
+            if field_name not in guidance_names:
                 issues.append(_issue("overlay_unknown_canonical_field", *path))
                 continue
 

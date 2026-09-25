@@ -400,11 +400,13 @@ def test_editable_validation_accumulates_issues_in_declared_order(session_factor
 def test_trusted_full_content_writer_carries_schema_overlay_through_shared_hash_seam(
     session_factory,
 ) -> None:
+    # Canonical-field guidance is editable only under schema contract v2 (#264 I1:
+    # v1 has no overlay grammar and the runtime refuses any non-empty v1 overlay),
+    # so the draft is upgraded first.  #263 used an invented name here because
+    # nothing validated the overlay yet; #264 closed the catalog and then the v1
+    # guidance hole, so the premise had to become a legal v2 edit.
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
     before, old_hash = _stored_content(session_factory)
-    # Canonical-field guidance, not an optional selection: guidance is editable under
-    # either schema contract, whereas an optional name is ineligible until the v2
-    # upgrade.  #263 used an invented name here because nothing validated the
-    # overlay yet; #264 closed the catalog, so the premise had to become a legal edit.
     changed_overlay = SchemaOverlay.model_validate(
         {"field_overrides": {"intent": {"description": "Task 263 intent guidance."}}}
     )
@@ -414,7 +416,7 @@ def test_trusted_full_content_writer_carries_schema_overlay_through_shared_hash_
         result = GraphConfiguration().save_draft_content(
             session,
             agent_key="architect",
-            expected_lock_version=0,
+            expected_lock_version=1,
             content=proposed,
             actor="test:trusted",
         )
@@ -1815,14 +1817,15 @@ def test_valid_v2_trusted_content_save_uses_one_mapper_hash_and_audit(
     """Catches a second writer, hash, or audit increment on the trusted-content path."""
     before_db = _database_snapshot(session_factory)
     _upgrade(session_factory, "architect", lock_version=0)
+    # Guidance is legal only under schema contract v2 (#264 I1), so the schema
+    # contract is upgraded too; the save under test is then a v2-assembly,
+    # v2-schema trusted edit carrying both a custom block and canonical guidance.
+    assert isinstance(_upgrade_schema(session_factory, lock_version=1), DraftSaveResult)
     after_upgrade, upgrade_hash = _stored_content(session_factory)
     block = _custom_block(SECOND_BLOCK_ID, "Trusted operator guidance.")
     proposed = after_upgrade.model_copy(
         update={
             "assembly_rules": _v2_rules(block),
-            # Guidance, not an optional selection: this content's schema_contract is
-            # still v1 (only protected_assembly was upgraded), so an optional name
-            # would be ineligible.  See the sibling hash-seam test.
             "schema_overlay": SchemaOverlay.model_validate(
                 {"field_overrides": {"intent": {"description": "Task 265 guidance."}}}
             ),
@@ -1835,7 +1838,7 @@ def test_valid_v2_trusted_content_save_uses_one_mapper_hash_and_audit(
         result = GraphConfiguration().save_draft_content(
             session,
             agent_key="architect",
-            expected_lock_version=1,
+            expected_lock_version=2,
             content=proposed,
             actor="test:trusted-v2",
         )
@@ -1853,7 +1856,7 @@ def test_valid_v2_trusted_content_save_uses_one_mapper_hash_and_audit(
     assert persisted_hash == definition_content_hash(persisted)
     assert persisted_hash != upgrade_hash
     assert result.definition.candidate_hash == persisted_hash
-    assert _draft_audit(session_factory)[:2] == (2, "test:trusted-v2")
+    assert _draft_audit(session_factory)[:2] == (3, "test:trusted-v2")
     assert after_db["revisions"] == before_db["revisions"]
     assert after_db["releases"] == before_db["releases"]
     assert after_db["mappings"] == before_db["mappings"]
@@ -2166,16 +2169,12 @@ def test_invalid_overlay_and_stale_lock_is_an_ordered_422_with_no_write(
 
 
 def test_valid_overlay_with_stale_lock_is_a_coherent_409(session_factory) -> None:
-    """A valid candidate that is merely stale still conflicts rather than rejecting."""
-    current, _ = _stored_content(session_factory)
-    with session_factory() as session:
-        GraphConfiguration().save_editable_model_draft(
-            session,
-            agent_key="architect",
-            expected_lock_version=0,
-            candidate=_editable(current, prompt_text="advance the lock"),
-            actor="test:advance",
-        )
+    """A valid candidate that is merely stale still conflicts rather than rejecting.
+
+    Guidance is valid only under schema contract v2 (#264 I1), and the schema
+    upgrade is itself the write that makes ``lock_version=0`` stale.
+    """
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
     seeded, seeded_hash = _stored_content(session_factory)
     before_db = _database_snapshot(session_factory)
 
@@ -2209,18 +2208,29 @@ def test_valid_overlay_with_stale_lock_is_a_coherent_409(session_factory) -> Non
 
 
 @pytest.mark.parametrize(
-    ("overlay_payload", "expected"),
+    ("schema_version", "overlay_payload", "expected"),
     [
-        ({"additional_optional_fields": [DIAGNOSTIC_NOTES]}, OVERLAY_INELIGIBLE_TUPLE),
+        (1, {"additional_optional_fields": [DIAGNOSTIC_NOTES]}, OVERLAY_INELIGIBLE_TUPLE),
         (
+            1,
             {"field_overrides": {"no_such_field": {"description": "x"}}},
             OVERLAY_UNKNOWN_FIELD_TUPLE,
         ),
+        # #264 I1: a v1 contract has no overlay grammar, so even well-formed
+        # canonical guidance is unavailable until the schema upgrade.
+        (1, {"field_overrides": {"intent": {"description": "Legal under v2."}}}, (
+            (
+                "candidate.schema_overlay.field_overrides.intent",
+                "overlay_unknown_canonical_field",
+                "Canonical field is not available for this agent.",
+            ),
+        )),
         (
+            2,
             {"field_overrides": {"intent": {"description": "   "}}},
             OVERLAY_BLANK_DESCRIPTION_TUPLE,
         ),
-        ({"field_overrides": {"intent": {"examples": []}}}, (
+        (2, {"field_overrides": {"intent": {"examples": []}}}, (
             (
                 "candidate.schema_overlay.field_overrides.intent.examples",
                 "overlay_examples_empty",
@@ -2230,9 +2240,14 @@ def test_valid_overlay_with_stale_lock_is_a_coherent_409(session_factory) -> Non
     ],
 )
 def test_invalid_client_overlay_rejects_with_no_state_change(
-    session_factory, monkeypatch, overlay_payload, expected
+    session_factory, monkeypatch, schema_version, overlay_payload, expected
 ) -> None:
     """Catches an overlay issue reaching the writer or losing its wire field."""
+    lock_version = 0
+    if schema_version == 2:
+        # Guidance property checks are reachable only under v2 (#264 I1).
+        assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+        lock_version = 1
     write_log: list[str] = []
     _install_write_spy(monkeypatch, write_log)
     current, current_hash = _stored_content(session_factory)
@@ -2243,7 +2258,7 @@ def test_invalid_client_overlay_rejects_with_no_state_change(
         GraphConfiguration().save_editable_model_draft(
             session,
             agent_key="architect",
-            expected_lock_version=0,
+            expected_lock_version=lock_version,
             candidate=_editable(
                 current,
                 prompt_text="rejected overlay",
@@ -2366,13 +2381,15 @@ def test_the_client_candidate_cannot_name_the_protected_identity_at_all() -> Non
 
 def test_a_client_overlay_never_reaches_the_protected_identity(session_factory) -> None:
     """A client overlay edit leaves every server-owned identity byte-identical."""
+    # Guidance is a legal client edit only under schema contract v2 (#264 I1).
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
     before, _ = _stored_content(session_factory)
 
     with session_factory() as session:
-        GraphConfiguration().save_editable_model_draft(
+        result = GraphConfiguration().save_editable_model_draft(
             session,
             agent_key="architect",
-            expected_lock_version=0,
+            expected_lock_version=1,
             candidate=_editable(
                 before,
                 schema_overlay=_overlay(
@@ -2382,6 +2399,7 @@ def test_a_client_overlay_never_reaches_the_protected_identity(session_factory) 
             actor="test:client-overlay",
         )
 
+    assert isinstance(result, DraftSaveResult)
     after, _ = _stored_content(session_factory)
     assert after.schema_contract == before.schema_contract
     assert after.protected_assembly == before.protected_assembly
@@ -2818,3 +2836,168 @@ def test_only_diagnostic_notes_is_ever_eligible_and_speaker_notes_never_is() -> 
         assert tuple(
             (issue.code, issue.path) for issue in refused
         ) == (("overlay_optional_field_ineligible", ("additional_optional_fields", 0)),)
+
+
+# ---------------------------------------------------------------------------
+# #264 I1 — the writer and the runtime agree on every overlay shape, per role
+# and per schema contract version.
+# ---------------------------------------------------------------------------
+
+#: One valid canonical answer per role, so an accepted overlay can actually run.
+#: Literal rather than imported from another test module (correction 39).
+_CROSS_SEAM_OUTPUT = {
+    "architect": {"intent": "discuss", "message": "an answer"},
+    "data_analyst": {
+        "outcome": "success",
+        "synthesis": "a finding",
+        "sources": ["warehouse.sales"],
+    },
+    "builder": {"position": 3, "html": "<section></section>"},
+    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
+    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "deck_reviewer": {},
+}
+
+
+def _cross_seam_shapes(agent_key: str) -> dict[str, dict[str, object]]:
+    """Every overlay shape class the writer distinguishes, for one role."""
+    from src.domain.skill_io import OUTPUT_SCHEMAS
+
+    field = next(iter(OUTPUT_SCHEMAS[agent_key].model_fields))
+    return {
+        "empty": {},
+        "description": {"field_overrides": {field: {"description": "Guidance."}}},
+        "examples": {"field_overrides": {field: {"examples": ["an example", {"k": 1}]}}},
+        "description_and_examples": {
+            "field_overrides": {field: {"description": "Both.", "examples": ["x"]}}
+        },
+        "optional": {"additional_optional_fields": [DIAGNOSTIC_NOTES]},
+        "guidance_and_optional": {
+            "field_overrides": {field: {"description": "With notes."}},
+            "additional_optional_fields": [DIAGNOSTIC_NOTES],
+        },
+        "unknown_field": {"field_overrides": {"not_a_field": {"description": "x"}}},
+        "forbidden_property": {"field_overrides": {field: {"type": "integer"}}},
+        "blank_description": {"field_overrides": {field: {"description": "  "}}},
+        "empty_examples": {"field_overrides": {field: {"examples": []}}},
+        "ineligible_optional": {"additional_optional_fields": ["speaker_notes"]},
+        "duplicate_optional": {
+            "additional_optional_fields": [DIAGNOSTIC_NOTES, DIAGNOSTIC_NOTES]
+        },
+        "canonical_collision": {"additional_optional_fields": [field]},
+    }
+
+
+_V2_LEGAL_SHAPES = {
+    "empty",
+    "description",
+    "examples",
+    "description_and_examples",
+    "optional",
+    "guidance_and_optional",
+}
+
+
+@pytest.mark.parametrize("agent_key", GRAPH_V1_AGENT_KEYS)
+def test_every_overlay_the_writer_accepts_runs_and_every_one_the_runtime_refuses_is_rejected(
+    session_factory, agent_key
+) -> None:
+    """#264 I1's cross-seam guarantee, for all seven roles under v1 and v2.
+
+    For every overlay shape the writer's client save path either accepts (and
+    stores) the overlay, in which case the STORED content composes and runs through
+    ``AgentRuntime`` with the model adapter called exactly once; or it rejects it,
+    in which case the runtime refuses the same content before the model.  Writer
+    acceptance and runtime execution are asserted equal shape by shape, so neither
+    seam can admit what the other refuses.  The final assertions pin which shapes
+    are legal under each version: under v1 only the empty overlay is.
+    """
+    from src.domain.skill_io import OUTPUT_SCHEMAS
+    from src.services.agent_runtime import (
+        AgentAssemblyContext,
+        AgentRuntime,
+        RecordingAgentInvocationIdentitySink,
+    )
+    from src.services.persisted_graph_release import (
+        PersistedConfigurationUnavailableError,
+        ResolvedDefinition,
+    )
+
+    class _Loader:
+        definition: ResolvedDefinition
+
+        def resolve(self, graph_release_id: int, key: str) -> ResolvedDefinition:
+            return self.definition
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, *, agent_key, configuration, schema, prompt):
+            self.calls += 1
+            return schema.model_validate(_CROSS_SEAM_OUTPUT[agent_key])
+
+    def _runs(content: DefinitionContent) -> bool:
+        loader, adapter = _Loader(), _Adapter()
+        loader.definition = ResolvedDefinition(
+            graph_version=2,
+            graph_release_id=88,
+            agent_key=agent_key,
+            agent_definition_revision_id=309,
+            content_hash=definition_content_hash(content),
+            content=content,
+        )
+        runtime = AgentRuntime(
+            persisted_release_loader=loader,
+            model_adapter=adapter,
+            identity_sink=RecordingAgentInvocationIdentitySink(),
+        )
+        try:
+            result = runtime.run(agent_key, 88, {"x": 1}, AgentAssemblyContext(False))
+        except PersistedConfigurationUnavailableError:
+            assert adapter.calls == 0
+            return False
+        assert adapter.calls == 1
+        assert type(result.output) is OUTPUT_SCHEMAS[agent_key]
+        return True
+
+    accepted_by_version: dict[int, set[str]] = {}
+    lock_version = 0
+    for version in (1, 2):
+        if version == 2:
+            upgraded = _upgrade_schema(
+                session_factory, agent_key, lock_version=lock_version
+            )
+            assert isinstance(upgraded, DraftSaveResult)
+            lock_version += 1
+        accepted: set[str] = set()
+        for name, payload in _cross_seam_shapes(agent_key).items():
+            overlay = _overlay(**payload)
+            current, _ = _stored_content(session_factory, agent_key)
+            assert current.schema_contract.version == version
+            try:
+                with session_factory() as session:
+                    result = GraphConfiguration().save_editable_model_draft(
+                        session,
+                        agent_key=agent_key,
+                        expected_lock_version=lock_version,
+                        candidate=_editable(current, schema_overlay=overlay),
+                        actor="test:cross-seam",
+                    )
+            except DraftContentRejected:
+                writer_accepts = False
+                runtime_runs = _runs(current.model_copy(update={"schema_overlay": overlay}))
+            else:
+                assert isinstance(result, DraftSaveResult), name
+                lock_version += 1
+                writer_accepts = True
+                stored, _ = _stored_content(session_factory, agent_key)
+                assert stored.schema_overlay == overlay, name
+                runtime_runs = _runs(stored)
+            assert writer_accepts == runtime_runs, (version, name)
+            if writer_accepts:
+                accepted.add(name)
+        accepted_by_version[version] = accepted
+
+    assert accepted_by_version == {1: {"empty"}, 2: _V2_LEGAL_SHAPES}

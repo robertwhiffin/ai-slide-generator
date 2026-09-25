@@ -616,6 +616,61 @@ def test_v1_rejects_every_optional_selection_because_its_catalog_is_empty() -> N
     )
 
 
+@pytest.mark.parametrize("role", EXPECTED_ROLES)
+def test_v1_rejects_every_canonical_guidance_because_it_has_no_overlay_grammar(
+    role: str,
+) -> None:
+    """#264 I1: under schema contract v1 no canonical field accepts guidance.
+
+    v1's frozen digest material carries no overlay grammar and the runtime refuses
+    any non-empty v1 overlay, so the registry treats v1's guidance-editable field
+    set as empty — the same rule that makes v1's optional catalog empty.  Every
+    override is therefore ``overlay_unknown_canonical_field`` at its own field
+    path, in request insertion order, and no property check runs for it (exactly
+    as for an unknown name under v2).  The same overlay is legal under v2.
+    """
+    registry = AgentSchemaRegistry()
+    names = list(OUTPUT_SCHEMAS[role].model_fields)
+    # Insertion order deliberately differs from declaration order, and one name is
+    # not canonical at all; Deck Reviewer has a single canonical field.
+    overrides: dict[str, object] = {
+        names[-1]: {"description": "Last-field guidance.", "examples": ["x"]},
+        "not_a_field": {"description": "unknown"},
+    }
+    if len(names) > 1:
+        overrides[names[0]] = {"examples": ["only examples"]}
+    overlay = SchemaOverlay.model_validate(
+        {"field_overrides": overrides, "additional_optional_fields": ["diagnostic_notes"]}
+    )
+
+    assert registry.validate_overlay(role, registry.identity_for(role, 1), overlay) == (
+        *(
+            _issue(
+                "overlay_unknown_canonical_field",
+                "Canonical field is not available for this agent.",
+                "field_overrides",
+                name,
+            )
+            for name in overrides
+        ),
+        _issue(
+            "overlay_optional_field_ineligible",
+            "Optional field is not available for this agent.",
+            "additional_optional_fields",
+            0,
+        ),
+    )
+    # Aim check: the rejection is the contract version, not the overlay's shape.
+    legal_under_v2 = SchemaOverlay.model_validate(
+        {
+            "field_overrides": {names[-1]: {"description": "Last-field guidance."}},
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+    )
+    assert registry.validate_overlay(role, registry.identity_for(role, 2), legal_under_v2) == ()
+    assert registry.validate_overlay(role, registry.identity_for(role, 1), SchemaOverlay()) == ()
+
+
 def test_compose_applies_guidance_and_builds_a_strict_dynamic_model() -> None:
     registry = AgentSchemaRegistry()
     composed = registry.compose(

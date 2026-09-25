@@ -2834,6 +2834,10 @@ def test_put_schema_overlay_guidance_forbidden_property_is_domain_rejected(
     """Catches a route that passes a 'type' guidance property without domain rejection."""
     _force_admin(monkeypatch, is_admin=True)
     with _app_for(session_factory) as client:
+        # Guidance property checks are reachable only under schema contract v2
+        # (#264 I1: under v1 every override is an unavailable canonical field).
+        upgraded = client.post(_schema_contract_upgrade_url(), json={"lock_version": 0})
+        assert upgraded.status_code == 200
         before = _workbench(client)
         # architect has 'intent' as a canonical field; 'type' inside guidance is forbidden
         candidate = _editable_candidate(_model_node(before, "architect"))
@@ -2843,7 +2847,7 @@ def test_put_schema_overlay_guidance_forbidden_property_is_domain_rejected(
         }
         response = client.put(
             _draft_save_url(),
-            json={"lock_version": 0, "candidate": candidate},
+            json={"lock_version": 1, "candidate": candidate},
         )
         after = _workbench(client)
 
