@@ -3,7 +3,7 @@
 import json
 import logging
 from collections.abc import Mapping
-from typing import Annotated, cast
+from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -27,9 +27,14 @@ from src.api.schemas.agent_definitions import (
     EditableSchemaOverlayRequest,
     GraphWorkbenchResponse,
     LegacyPromptSourceResponse,
+    ModelEndpointCatalogErrorResponse,
+    SystemModelDiscoveryResponse,
+    SystemModelEndpointResponse,
 )
+from src.core import databricks_client
 from src.core.database import get_db
 from src.core.user_context import get_current_user
+from src.services import model_endpoint_catalog
 from src.services.agent_schema_types import SchemaOverlay
 from src.services.graph_configuration import (
     DraftContentRejected,
@@ -39,11 +44,17 @@ from src.services.graph_configuration import (
     EditableModelDraft,
     GraphConfiguration,
     GraphConfigurationIntegrityError,
+    RemoteEndpointDraftValidator,
+    build_remote_endpoint_draft_validator,
 )
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
     AssemblyRulesV2,
+)
+from src.services.model_endpoint_catalog import (
+    ModelEndpointCatalogFailure,
+    SystemModelDiscovery,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +75,67 @@ def require_draft_write_principal() -> str:
             detail="Authenticated principal required",
         )
     return actor
+
+
+def get_remote_endpoint_draft_validator() -> RemoteEndpointDraftValidator:
+    """The draft PUT's production remote endpoint validator.
+
+    Resolved after the router's admin gate.  Building it performs no client or
+    network work; the catalog client is derived only when a current locked
+    candidate is validated.
+    """
+    return build_remote_endpoint_draft_validator()
+
+
+class SystemModelEndpointLister(Protocol):
+    """The discovery half of the model endpoint catalog."""
+
+    def list_system_models(self) -> SystemModelDiscovery: ...
+
+
+_CATALOG_UNAVAILABLE_MESSAGE = (
+    "Model endpoint discovery is temporarily unavailable. Retry the request."
+)
+
+
+class _SystemModelEndpointDiscovery:
+    """Production discovery over the bounded system catalog client.
+
+    Nothing is built until ``list_system_models``.  A system-client failure is
+    the typed unavailable outcome, never a 500; its text is not read.
+    """
+
+    def list_system_models(self) -> SystemModelDiscovery:
+        try:
+            system_client = databricks_client.get_system_client()
+        except databricks_client.DatabricksClientError as error:
+            raise ModelEndpointCatalogFailure(
+                "catalog_unavailable", _CATALOG_UNAVAILABLE_MESSAGE, True
+            ) from error
+        catalog = model_endpoint_catalog.DatabricksModelEndpointCatalog(
+            model_endpoint_catalog.bounded_catalog_workspace_client(system_client)
+        )
+        return catalog.list_system_models()
+
+
+def get_model_endpoint_catalog() -> SystemModelEndpointLister:
+    """The discovery route's catalog, resolved after the router's admin gate."""
+    return _SystemModelEndpointDiscovery()
+
+
+_CATALOG_FAILURE_STATUS = {"catalog_forbidden": 403, "catalog_unavailable": 503}
+
+
+def _catalog_failure_response(failure: ModelEndpointCatalogFailure) -> JSONResponse:
+    response = ModelEndpointCatalogErrorResponse(
+        code=failure.code,
+        message=str(failure),
+        retryable=failure.retryable,
+    )
+    return JSONResponse(
+        status_code=_CATALOG_FAILURE_STATUS[failure.code],
+        content=response.model_dump(mode="json"),
+    )
 
 
 _OWNED_FIELD_MESSAGES = {
@@ -377,11 +449,47 @@ def get_agent_definition_workbench(
     return GraphWorkbenchResponse.model_validate(snapshot, from_attributes=True)
 
 
+@router.get(
+    "/model-endpoints",
+    response_model=SystemModelDiscoveryResponse,
+    responses={
+        403: {"model": ModelEndpointCatalogErrorResponse},
+        503: {"model": ModelEndpointCatalogErrorResponse},
+    },
+)
+def list_model_endpoints(
+    catalog: Annotated[SystemModelEndpointLister, Depends(get_model_endpoint_catalog)],
+) -> SystemModelDiscoveryResponse | JSONResponse:
+    """Read-only foundation-model endpoint discovery; it never writes a draft.
+
+    Only a typed catalog failure becomes a documented 403/503 envelope; any
+    other fault keeps the non-leaking 500 policy and is never empty success.
+    """
+    try:
+        discovery = catalog.list_system_models()
+    except ModelEndpointCatalogFailure as failure:
+        return _catalog_failure_response(failure)
+    return SystemModelDiscoveryResponse(
+        items=[
+            SystemModelEndpointResponse(
+                name=endpoint.name,
+                display_name=endpoint.display_name,
+                description=endpoint.description,
+                docs=endpoint.docs,
+            )
+            for endpoint in discovery.endpoints
+        ]
+    )
+
+
 @router.put("/draft/{agent_key}", response_model=DraftSaveSuccessResponse)
 async def save_agent_definition_draft(
     request: Request,
     agent_key: str,
     actor: Annotated[str, Depends(require_draft_write_principal)],
+    remote_endpoint_validator: Annotated[
+        RemoteEndpointDraftValidator, Depends(get_remote_endpoint_draft_validator)
+    ],
     db: Session = Depends(get_db),
 ) -> DraftSaveSuccessResponse | JSONResponse:
     """Save exactly the editable candidate fields through the locked draft facade."""
@@ -425,7 +533,9 @@ async def save_agent_definition_draft(
         schema_overlay=schema_overlay,
     )
     try:
-        outcome = GraphConfiguration().save_editable_model_draft(
+        outcome = GraphConfiguration(
+            remote_endpoint_validator=remote_endpoint_validator
+        ).save_editable_model_draft(
             db,
             agent_key=cast(AgentKey, agent_key),
             expected_lock_version=save_request.lock_version,

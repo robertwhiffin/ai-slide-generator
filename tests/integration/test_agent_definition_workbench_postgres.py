@@ -14,6 +14,7 @@ from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.api.routes import _authz
+from src.api.routes import agent_definitions as agent_definition_routes
 from src.api.routes.agent_definitions import router as agent_definition_router
 from src.api.schemas.agent_definitions import (
     DraftDefinitionResponse,
@@ -43,6 +44,7 @@ from src.database.models.graph_configuration import (
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_configuration import (
+    CatalogRemoteEndpointDraftValidator,
     DraftContentRejected,
     DraftLegacyPromptSource,
     DraftSaveConflict,
@@ -60,6 +62,7 @@ from src.services.graph_definition_manifest import (
     DefinitionContent,
     definition_content_hash,
 )
+from src.services.model_endpoint_catalog import FakeModelEndpointCatalog
 from src.services.prompt_assembler import (
     ROLE_UNTRUSTED_DATA_NOTICE,
     V1_PROTECTED_ASSEMBLY_IDENTITY,
@@ -1291,6 +1294,11 @@ def real_route_stack(postgres_engine, monkeypatch):
             yield session
 
     app.dependency_overrides[get_db] = _override_db
+    # The PUT's production remote endpoint validator needs a workspace client;
+    # this stack proves persistence, so every remote endpoint check accepts.
+    app.dependency_overrides[
+        agent_definition_routes.get_remote_endpoint_draft_validator
+    ] = lambda: CatalogRemoteEndpointDraftValidator(FakeModelEndpointCatalog)
     monkeypatch.setenv("ENVIRONMENT", "production")
     set_current_user("task6-admin@example.com")
     monkeypatch.setattr(_authz, "_admin_acl_probe", lambda _user: True)
