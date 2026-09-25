@@ -212,7 +212,9 @@ async def process_export_job(job_id: str, payload: dict) -> None:
         from src.core.database import get_db_session
         ds_id = resolve_active_design_system_id(session_id)
         with get_db_session() as db:
-            substitute_deck_dict_images(slide_deck, db)
+            substitute_deck_dict_images(
+                slide_deck, db, requesting_user=payload.get("user_identity")
+            )
             substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
 
         slides = slide_deck.get("slides", [])
