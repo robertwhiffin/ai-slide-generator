@@ -1423,3 +1423,68 @@ Worth keeping as a reasoning example: a prediction conditioned on an implementat
 wrong when the choice differs — it is untested. The reviewer could not have known which fix would be
 chosen, and saying "load-bearing under the C1 fix" without naming the assumed fix is what made the
 prediction look falsifiable when it was conditional.
+
+## Correction 64 — Task 6 complete at `6ffc156ca`; controller sabotage reproduced
+
+Gates, each with its invocation (correction 58):
+
+```
+(cd frontend && npm run test:unit -- draftEditorState.test.ts AgentDefinitionWorkbench.test.tsx \
+   AssemblyEditor.test.tsx OutputSchemaEditor.test.tsx)     => 191 passed (4 files)
+(cd frontend && npm run typecheck)                          => exit 0
+(cd frontend && npx eslint src/api/agentDefinitions.ts src/components/Admin/AgentDefinitionWorkbench \
+   tests/fixtures/mocks.ts tests/e2e/agent-definition-workbench.spec.ts)   => exit 0
+(cd frontend && npx playwright test tests/e2e/agent-definition-workbench.spec.ts \
+   --project=chromium --workers=1)                          => 59 passed
+```
+
+Commit is 10 files, +1529/−28, adding `OutputSchemaEditor.tsx` (255 lines) and its test (447).
+
+**Controller sabotage, the plan's assigned target, reproduced here.** `overlayFromForm`
+(`draftEditorState.ts:295`) builds each field override from an **allow-list** of `description` and
+`examples` only — that is the "no editable type/default/enum/validator" clause, enforced by
+construction rather than by rejection. Injecting `result.type = 'string'` past it:
+
+```
+RED 1/191 — OutputSchemaEditor.test.tsx > candidateFromForm schema overlay guard >
+            "includes only description and examples in field_overrides, never type or default"
+restored SHA-matched; 191 passed
+```
+
+The test is **named for the behaviour**, so it catches the leak directly rather than as a side effect
+of some other assertion. That is the distinction several earlier findings in this ticket turned on.
+
+**Verified independently, not relayed:** `frontend/tsconfig.app.json` still includes only `["src"]` and
+the commit touches **zero** tsconfig files, so the epic-wide `frontend/tests/` typecheck gap is intact
+and still routed to the whole-branch review, exactly as the brief required.
+
+### Two disclosures from the implementer worth keeping
+
+**A fixture bug it found and fixed:** `candidate_hash: 'g'.repeat(64)`. `g` is not in `[0-9a-f]`, so the
+value could never satisfy the parser's hex-digit regex. Changed to `'4'.repeat(64)` with a comment
+naming the constraint. This is the same class as correction 51's cross-language literal drift — a
+literal that looks structurally right (64 characters) and is semantically impossible. A Playwright test
+was failing on it alone.
+
+**The name-collision class did not recur.** It reports no Vitest/Playwright asymmetry, with reasoning
+rather than assertion: every new accessible name is disambiguated (`aria-label="Select
+diagnostic_notes"`, `aria-label="Schema Upgrade"`), and both `within(row)` scoping in Vitest and
+`getByRole('group', { name })` in Playwright resolve to single elements. Given that mismatch cost this
+epic twice, a reasoned negative is worth recording.
+
+### Routed to the whole-branch review, from its own concerns
+
+1. **`schemaUpgradeFailed` is untested at unit scope** — no RED test for the
+   `InvalidDraftSaveResponseError` propagation path. Its own disclosure, and the most useful item in
+   its report.
+2. **`SCHEMA_ALREADY_CURRENT_REJECTION`'s message string is synthetic** and does not match the real
+   backend; field and code are correct (`schema_contract.version` / `already_current`) and no test
+   asserts the message text. Correction 51's territory — a client-side literal that can drift from its
+   server counterpart with nothing to catch it.
+3. **`speaker_notes` retained in the `mockModelNodes` architect fixture** as a synthetic
+   `additional_optional_fields` value predating the real optional fields. Not displayed (v1 shows no
+   picker); left to avoid cascading changes across many tests that snapshot that fixture. Reasonable,
+   but a fixture asserting a field the product does not have is a future reader's trap.
+
+Task 7 (whole-slice verification) and the whole-branch review remain. **#264 must be rebased onto
+`d72ad974d` before merging** — its merge-base is `3ed8f9b6a`, so it does not contain #262.
