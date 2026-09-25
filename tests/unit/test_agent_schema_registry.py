@@ -671,6 +671,87 @@ def test_v1_rejects_every_canonical_guidance_because_it_has_no_overlay_grammar(
     assert registry.validate_overlay(role, registry.identity_for(role, 1), SchemaOverlay()) == ()
 
 
+#: One valid canonical answer per role (literal; correction 39).
+_TOOL_CALL_ARGS: dict[str, dict[str, object]] = {
+    "architect": {"intent": "discuss", "message": "an answer"},
+    "data_analyst": {"outcome": "success", "synthesis": "a finding", "sources": ["s"]},
+    "builder": {"position": 3, "html": "<section></section>"},
+    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
+    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "deck_reviewer": {},
+}
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("role", EXPECTED_ROLES)
+def test_the_model_facing_tool_keeps_the_canonical_name_and_description(
+    role: str, version: int
+) -> None:
+    """#264 I5: composing an overlay must not rename the tool the model is forced to call.
+
+    ``DatabricksModelAdapter`` calls ``ChatDatabricks.with_structured_output(schema)``,
+    which names the forced tool ``convert_to_openai_tool(schema)["function"]["name"]``,
+    binds ``[schema]`` and parses the call back with ``PydanticToolsParser`` keyed by
+    ``model_config["title"] or __name__``.  So the composed model must present the
+    canonical class name (the prompts say "Return an ArchitectOutput") and the
+    canonical docstring as the tool description.  The ONLY difference an empty
+    overlay may make to the tool is AC3's ``additionalProperties: false``.
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_core.output_parsers.openai_tools import PydanticToolsParser
+    from langchain_core.outputs import ChatGeneration
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    canonical = OUTPUT_SCHEMAS[role]
+    registry = AgentSchemaRegistry()
+    identity = registry.identity_for(role, version)
+    composed = registry.compose(role, identity, SchemaOverlay())
+
+    canonical_tool = convert_to_openai_tool(canonical)["function"]
+    composed_tool = convert_to_openai_tool(composed.model)["function"]
+    assert composed_tool["name"] == canonical.__name__
+    assert composed_tool["description"] == canonical_tool["description"]
+    assert composed_tool["description"]
+    assert composed_tool["parameters"] == {
+        **canonical_tool["parameters"],
+        "additionalProperties": False,
+    }
+    assert "additionalProperties" not in canonical_tool["parameters"]
+
+    if version == 2:
+        # Guidance and a selection change the parameters, never the tool's name.
+        field = next(iter(canonical.model_fields))
+        overlaid = registry.compose(
+            role,
+            identity,
+            SchemaOverlay.model_validate(
+                {
+                    "field_overrides": {field: {"description": "Guided."}},
+                    "additional_optional_fields": ["diagnostic_notes"],
+                }
+            ),
+        )
+        assert convert_to_openai_tool(overlaid.model)["function"]["name"] == canonical.__name__
+        composed = overlaid
+
+    # The forced tool call, under the canonical name, parses into the composed model.
+    parser = PydanticToolsParser(tools=[composed.model], first_tool_only=True)
+    parsed = parser.parse_result(
+        [
+            ChatGeneration(
+                message=AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": canonical.__name__, "args": _TOOL_CALL_ARGS[role], "id": "c1"}
+                    ],
+                )
+            )
+        ]
+    )
+    assert type(parsed) is composed.model
+
+
 def test_compose_applies_guidance_and_builds_a_strict_dynamic_model() -> None:
     registry = AgentSchemaRegistry()
     composed = registry.compose(
