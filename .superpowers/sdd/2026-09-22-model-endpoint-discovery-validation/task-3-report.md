@@ -116,3 +116,76 @@ GREEN: 31 passed. The full route file is 188, and 191 after `ae19643fe`.
 3. **Construction failures are caught narrowly, as `DatabricksClientError` only.** That is `get_system_client`'s documented wrapper. A failure raised inside `bounded_catalog_workspace_client` or the `WorkspaceClient(config=…)` constructor would still be a 500. Neither does I/O or auth, and I measured nothing that raises there.
 4. **`_SystemModelEndpointDiscovery` repeats the unavailable message literal** from `model_endpoint_catalog.py`, and the factory repeats the `endpoint_unavailable` literal. I did this so as not to refactor the Task 1/2 module. Tests pin both strings exactly, so drift would go RED.
 5. **Carried forward, not addressed:** the Retry-After and OAuth-refresh windows (C8), and the broad `RuntimeError` in `_TRANSPORT_FAILURES`, both from Task 2's review.
+
+## Fix round 1
+
+**Base:** `4667d5b16f964c5fc2e9681f50dfba78795bbefb`, pinned. It is the controller's docs ledger commit.
+
+**Fix commit:** `9a75d86fbd6f8befcaf35660f6499354b50ceb5d`, "fix: give endpoint discovery its own finite client bound (#266)".
+
+**I1: discovery reused the save path's 3 s / 5 s bound.**
+
+This was implemented as ruled:
+- `model_endpoint_catalog.py` adds `DISCOVERY_RETRY_TIMEOUT_SECONDS = 30`, `DISCOVERY_HTTP_TIMEOUT_SECONDS = 30` and `bounded_discovery_workspace_client`.
+- `bounded_catalog_workspace_client` (the save path, still 5 s / 3 s) and the new function now share one private `_derived_workspace_client`. It does `config.copy()`, re-dicts `_inner`, then sets the two timeouts. No credential source is added and the system client is never modified.
+- The discovery route now calls `bounded_discovery_workspace_client`.
+- The factory in `graph_configuration.py` is unchanged and still uses the save bound.
+
+The test gap is closed:
+- Both production-wiring route tests no longer stub the bound:
+  - `test_model_endpoints_production_dependency_lists_through_the_bounded_system_catalog`
+  - `test_endpoint_validation_production_dependency_supplies_the_remote_validator`
+- Each one now does the following:
+  - derives the client from a real offline PAT `WorkspaceClient`, stubbing only `Config._resolve_host_metadata`, as the catalog tests already do;
+  - records the workspace client passed to `DatabricksModelEndpointCatalog`;
+  - asserts its own bound through `_assert_bounded_derivation`: 30/30 for discovery and 5/3 for the save;
+  - asserts the same host and the same `_header_factory`;
+  - asserts the system client's `_inner` is unchanged and its `retry_timeout_seconds` and `http_timeout_seconds` are still `None`.
+- A new catalog test pins both bounds side by side, with separate `_inner` mappings: `test_bounded_discovery_client_has_its_own_finite_bound_and_leaves_the_system_client_unchanged`.
+- `test_graph_configuration_draft.py::test_production_remote_endpoint_validator_uses_a_bounded_system_client` still stubs the bound, which was not in the ruling's scope. The save bound's values are now pinned at route level and catalog level.
+
+**RED before the fix.** I ran the new tests with the base sources swapped in, then restored them byte-exact (md5 `4d395152…` and `24315acb…` before and after).
+- `test_model_endpoints_production_dependency_lists_through_the_bounded_system_catalog` failed with `AssertionError: assert 5 == 30`.
+- The save-wiring test passed, which is correct: the save bound was already right.
+- `test_model_endpoint_catalog.py` failed at collection with `ImportError` on `bounded_discovery_workspace_client`, because the symbol did not exist yet.
+
+**Sabotage: swap the two paths' constants.** Driver `/tmp/t266-3/sab.py`, spec `/tmp/t266-3/fr1.json`, output `/tmp/t266-3/fr1-sab.out`.
+
+| Step | Result |
+| --- | --- |
+| Mutation | In `src/services/model_endpoint_catalog.py`, the save helper passes `DISCOVERY_*` and the discovery helper passes `CATALOG_*`. One anchor spans both bodies, with the marker `T266_3_FR1_SWAP`. |
+| Anchor count | exactly 1 |
+| Marker count (`grep -c`) | 1 after the mutation, 0 after the restore |
+| Scope | the routes, catalog and draft test files (413 tests) |
+| RED | **5 failed**: both route tests (`test_endpoint_validation_production_dependency_supplies_the_remote_validator`, `test_model_endpoints_production_dependency_lists_through_the_bounded_system_catalog`), plus `test_bounded_discovery_client_has_its_own_finite_bound_and_leaves_the_system_client_unchanged`, `test_bounded_endpoint_catalog_client_reuses_system_credentials_and_leaves_it_unchanged` and `test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_unavailable` |
+| Restore | `git checkout 9a75d86fbd6f8befcaf35660f6499354b50ceb5d -- src/services/model_endpoint_catalog.py`, then a 0-line diff |
+| GREEN | 413 passed |
+
+**Worst-case wall clock for discovery.** This is arithmetic from the SDK 0.112 `retried` loop and was not measured. The loop starts a new attempt only while `clock.time() < deadline`, where the deadline is 30 s. Between attempts it sleeps `min(10, attempt) + random()`, and that sleep is counted inside the deadline. `requests`' `timeout=30` applies separately to the connect and to each read gap.
+
+| Scenario | Wall clock |
+| --- | --- |
+| Refused connections (fast failures) | about 30 s, plus at most one final fast attempt |
+| One hung read | about 30 s. The next attempt starts at about 31–32 s, after the deadline, so it never starts. |
+| Worst case: an attempt starts just before 30 s, then its connect and read both hang to their 30 s timeouts | about 30 + 30 + 30 ≈ 90 s |
+| The same, with a connect that succeeds quickly | about 60 s |
+
+The reviewer's estimate of about 30–60 s covers every case except the connect-plus-read double hang.
+
+Two things remain unbounded by configuration, as for the save path (C8):
+- a server-supplied `Retry-After` sleep;
+- a response that keeps trickling bytes, which resets the read timeout on each gap.
+
+**Gates:**
+- **Environment:** `.venv` was absent before and after.
+- **Focused.** Command: `pytest -q -p no:randomly -rf tests/unit/test_agent_definition_workbench_routes.py tests/unit/test_model_endpoint_catalog.py tests/unit/test_graph_configuration_draft.py`. Result: **413 passed**, which is 191 + 61 + 161.
+- **Full unit.** Command: `tests/unit -q -p no:randomly -rf`, started at 19:41 UTC. Result: **6 failed, 6009 passed, 110 skipped, 136 warnings**. The 6 failures are exactly the baseline nodes and causes:
+  - autoscaling ×2: `'provisioned' == 'autoscaling'` and `…provisioned to have been called once. Called 0 times.`
+  - `_FakeSession.execute` ×3, at `conversation_pins.py:79`
+  - no active Graph Release ×1, at `:83`
+- **ruff check**, HEAD against base `4667d5b16` on the 4 changed files:
+  - 3 files are clean on both sides.
+  - The routes test file shows the same pre-existing I001/F401 pair on both sides.
+  - One new E501 that I introduced was fixed before the commit.
+  - `ruff format` was not run and is not claimed.
+- **PostgreSQL:** not re-run. No PostgreSQL-exercised code path changed, because `real_route_stack` overrides the validator and the PostgreSQL suites do not call discovery.
