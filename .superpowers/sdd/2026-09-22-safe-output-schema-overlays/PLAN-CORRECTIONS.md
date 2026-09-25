@@ -936,3 +936,119 @@ belong in the log as values at all, or only as a count or key list.
 
 Cost of the original framing: two reviews each fixing their own increment, leaving the guard shape
 that admitted both.
+
+# ============================================================================
+# Task 4 — one locked v2 upgrade/save pipeline.
+# 2026-09-25. Base `80dec9e7b`; commit `418ee15c8`.
+# ============================================================================
+
+## Correction 44 — c16/c17/c18 are disjoint, and the c18 client-path gap closes by construction
+
+The Task 4 brief required the implementer to ask before resolving a three-way precedence
+question. There was none to resolve, and the reason is worth recording so a later task does not
+re-derive it: the three corrections constrain **three disjoint things** — c16 constrains *where*
+the overlay validator registers, c17 constrains the *new upgrade method's* internal precedence,
+c18 constrains the *identity rejection's* code and field. c16 and c17 agree in direction
+(validation outranks staleness); c17 only forbids touching the sibling; and c18's guard shares
+neither a field nor a code with the overlay validator (`schema_contract`/`immutable_field` versus
+`candidate.schema_overlay.*`/`overlay_*`).
+
+**The c18 client-path gap is real and was confirmed by measurement**, exactly as the brief said:
+`EditableModelDraftRequest` is `extra="forbid"` over `['prompt_text','model','assembly_rules']`,
+so `candidate.schema_contract` yields `loc=('schema_contract',) type=extra_forbidden`, never
+`immutable_field`.
+
+**Ruling: the gap must NOT be closed by adding an `immutable_field` guard to the client path.**
+c18's own cost-if-wrong is "a duplicate rejection path with a second code for one condition", and
+that is precisely what such a guard would be. The identity there is not unrejected but
+**unreachable**: `EditableModelDraft` has no such field and the payload is rebuilt from stored
+content. Task 4 therefore converted the unreachability from an accident into a guard
+(`test_the_client_candidate_cannot_name_the_protected_identity_at_all`, plus M15 which REDs 2/116
+on adding the field). Cost if wrong: two codes for one condition, and a changed #263/#265 error
+field.
+
+**Forward note for Task 5:** when it adds `schema_overlay` to `EditableModelDraftRequest`, the
+identity must stay out of both that DTO and `EditableModelDraft`. M15 is the guard.
+
+## Correction 45 — the carrier gate's BaseModel hole is UNREACHABLE-BY-DIGEST, not merely unused
+
+Task 3 left `_replacement_schema_contract_identity`'s re-arm dataclass-only; the brief routed the
+BaseModel-triple hole (`agent_schema_registry.py:571-574`) to Task 4 as "fix if you are in that
+file; route it if not". Task 4 was **not** in that file, so it is routed — but with a measurement
+that changes the risk assessment.
+
+Task 4 is the **first live caller** to route a Pydantic carrier (`ContentIdentity`) through that
+branch, which would ordinarily *raise* the risk. It does not, because widening `ContentIdentity`
+to carry the identity triple **fails closed at import time** on a pre-existing guard: measured,
+adding a defaulted `agent_key` yields
+`RuntimeError: Protected assembly v2 material changed without an identity update: expected
+fb651a0d…, calculated 4bbdb4a5…`, because `ContentIdentity` is part of the hashed
+protected-assembly material. No test in any scope even runs.
+
+So the hazard cannot be introduced silently through the one reachable carrier. Ruling: the
+general BaseModel-triple hole stays open and is **still worth closing** for a future carrier that
+is not part of hashed material, but it is **not** a live defect and no task should treat it as
+blocking. Task 4 pinned the reachable half
+(`test_content_identity_cannot_carry_a_role_so_the_pydantic_carrier_gate_is_safe`) and recorded
+that this test is belt-and-braces behind the digest guard rather than the sole guard — the kind of
+over-claim the Task-2 re-review's F7 flagged.
+
+## Correction 46 — `thaw_json_containers` is asymmetric with `freeze_json_containers`
+
+`agent_schema_types.py`: `freeze_json_containers` handles `Mapping`, `list` **and** `tuple`;
+`thaw_json_containers` handles `Mapping` and `tuple` but **not `list`**. So
+`thaw_json_containers(list(frozen_tuple))` returns the list unchanged with its children still
+frozen, silently.
+
+Found because it made a Task 4 assertion pass for the wrong reason before the comparison was
+fixed. Not a production defect today — no production caller passes a list — but any test or
+caller that normalises a frozen structure by wrapping it in `list(...)` first will get a false
+result with no error. Ruling: accepted as-is for #264; recorded so a later task adding a `list`
+branch knows the asymmetry is known rather than accidental, and so no reviewer reads a
+list-wrapped thaw as correct.
+
+## Correction 47 — EPIC-WIDE: `tests/unit/test_usage_service.py` is a latent UTC-midnight flake
+
+A full `tests/unit` run that **crosses UTC midnight** produces **four failures outside the
+inherited fourteen**, in `test_usage_service.py`: `test_event_days_use_real_logins`,
+`test_new_vs_returning_split`, `test_duplicate_worker_rows_count_as_one_visit`,
+`test_all_data_daily_spans_from_earliest_event`. Reading 18 failed / 5608 passed instead of
+14 / 5612.
+
+Cause: `tests/unit/test_usage_service.py:80` captures `NOW = datetime.utcnow()` at **module
+import** and derives `TODAY` from it; the suite takes ~5 minutes, so a run starting shortly
+before midnight asserts about a `TODAY` that has since advanced.
+
+Measured, in this order: 20/20 in isolation; 128/128 alongside the whole
+`test_graph_configuration_draft.py` suite (so it is not pollution from the task's own tests); all
+four names are day-window tests; clock read 00:04 UTC; and the identical suite re-run clear of
+the boundary returned exactly **14 failed / 5612 passed / 110 skipped**.
+
+**Binding for every remaining task and review on this epic: the cause baseline is 14 in six files
+ONLY away from the UTC-midnight boundary.** If a run shows these four, re-run rather than
+attribute them — and never absorb them into a task's own radius. Cost if wrong: an agent spends a
+round hunting a defect in its own diff, or worse, "repairs" a shared analytics suite it does not
+own. This is the second time on this epic that a wider-scope number needed its *cause* verified
+rather than its count compared (see correction 42).
+
+## Correction 48 — Task 4's shipped precedence, including the one sub-decision no correction covered
+
+`upgrade_draft_schema_contract` ships as:
+`validate(current) → stale → already_current → upgrade_content_to_v2 → validate(target) → write`.
+
+c17 mandated validate-before-stale and validate-before-`already_current`. It did **not** rule on
+`already_current` **versus** stale. Task 4 put `already_current` **after** the stale check, on
+this reasoning: it is a judgement about content a stale client has not seen, so a stale client
+receives the coherent 409 snapshot — from which it can observe the contract is already v2 — and
+can retry. That keeps both upgrade methods aligned on that sub-question while differing only on
+the validation question c17 sanctions.
+
+Recorded as a disclosed decision, not a ruling. A reviewer may prefer `already_current` before
+stale, which would make a stale repeated upgrade a 422.
+
+Also recorded: the two upgrade methods' deliberate divergence is now pinned by a single test that
+drives **one identical request shape** (locally invalid AND stale) through both and asserts 409
+from the sibling and ordered 422 from the new method —
+`test_the_two_upgrades_deliberately_differ_in_precedence`. M7 (removing the sibling's stale
+short-circuit) REDs **4/116**, including the landed `:1517` guard, so the #265-regression risk
+c17 named is now instrumented rather than merely avoided.
