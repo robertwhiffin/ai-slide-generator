@@ -948,3 +948,22 @@ slice 4A's fail-closed depth predicate and in slice 4B's re-armed resolver.
 
 Recorded so no later reader deletes it as dead: **it is deliberately a guard for an impossible state,
 and its unreachability is the reason it exists, not a reason to remove it.**
+
+### C-36 — precision on C-34: the two regressions are green at BOTH integration heads
+
+Task 6's re-delivered report names the base it measured against, which C-34 recorded only as "the
+integration base". The precision strengthens the finding rather than weakening it, and pinning it
+stops a later reader assuming the wrong SHA.
+
+- **Task 6 measured against `795262c16`** — the integration head as it stood *before* #265 merged —
+  using a `git archive` export: `test_graph_orchestration.py` **19/19**,
+  `test_persisted_graph_runtime_failures_postgres.py` **7/7**.
+- **The controller measured against `3ed8f9b6a`** — the *current* integration head, which is the merge
+  commit that integrated #265 — in the main worktree: **19 passed** and **7 passed**.
+
+So both suites are green at **both** integration heads, pre- and post-#265. The two failures were
+#262's own Task-3-era regressions under either baseline, and the conclusion does not depend on which
+base was chosen. Two independent measurements, two different bases, same answer.
+
+C-34's binding rules are unchanged: a failure is inherited only when measured on an integration base
+itself, and every cause baseline must cover both lanes.
