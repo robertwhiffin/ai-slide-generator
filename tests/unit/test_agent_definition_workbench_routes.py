@@ -4572,3 +4572,53 @@ def test_model_endpoint_probe_dtos_are_strict_siblings_that_forbid_extra_keys(dt
         dto.model_validate({**valid, "approved": True})
     assert dto.__mro__[1] is schemas.BaseModel
     assert not issubclass(dto, schemas.DraftLockRequest)
+
+
+_REAL_PROVIDER_ROUTE_EXPECTATIONS = {
+    "unsupported_structured_output": (422, False),
+    "endpoint_probe_forbidden": (403, False),
+    "structured_output_probe_failed": (503, True),
+}
+
+
+def _real_provider_cases():
+    from tests.unit.test_model_endpoint_probe import REAL_PROVIDER_CASES
+
+    return REAL_PROVIDER_CASES
+
+
+@pytest.mark.parametrize(("outcome", "code"), _real_provider_cases(), ids=str)
+def test_model_endpoint_probe_route_maps_real_provider_errors(
+    session_factory, monkeypatch, outcome, code
+):
+    """Fix round 1: the real ``ChatDatabricks`` over a mock transport, through the route.
+
+    Catches a real provider rejection surfacing as the retryable 503, and any
+    provider text, mock host or request detail reaching the response.
+    """
+    from tests.unit.test_model_endpoint_probe import (
+        MOCK_HOST,
+        PROVIDER_SECRET,
+        MockTransportWorkspace,
+        real_provider_probe,
+    )
+
+    _force_admin(monkeypatch, is_admin=True)
+    workspace = MockTransportWorkspace(outcome)
+    with _app_for(session_factory, probe=real_provider_probe(workspace)) as client:
+        body = _workbench(client)
+        response = client.post(_probe_url("architect"), json={"lock_version": 0})
+
+    status, retryable = _REAL_PROVIDER_ROUTE_EXPECTATIONS[code]
+    assert len(workspace.requests) == 1
+    assert workspace.requests[0].url.host == MOCK_HOST
+    assert response.status_code == status
+    payload = response.json()
+    assert (payload["code"], payload["retryable"]) == (code, retryable)
+    assert payload["endpoint_name"] == _model_node(body, "architect")["draft"]["model"][
+        "endpoint_name"
+    ]
+    assert PROVIDER_SECRET not in response.text
+    assert "leak.example" not in response.text
+    assert MOCK_HOST not in response.text
+    assert "unit-test-dummy-key" not in response.text
