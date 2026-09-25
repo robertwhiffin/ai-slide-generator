@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ALREADY_CURRENT_REJECTION,
   DIRTY_LEGACY_PROMPT,
+  ENDPOINT_NAME_POLICY_CASES,
   MANUAL_RESOLUTION_REJECTION,
   MODEL_ENDPOINT_DISCOVERY_FORBIDDEN,
   MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE,
@@ -131,6 +132,11 @@ function defaultCatalogResponse() {
 function workbenchGets(fetchMock = vi.mocked(fetch)) {
   return fetchMock.mock.calls.filter(([url, init]) =>
     isWorkbenchUrl(url) && (init as RequestInit | undefined)?.method === 'GET');
+}
+
+/** Every GET to any URL: the "exactly these reads and no others" backstop. */
+function allGets(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET');
 }
 
 function catalogGets(fetchMock = vi.mocked(fetch)) {
@@ -854,6 +860,7 @@ describe('AgentDefinitionWorkbench', () => {
       .getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
 });
@@ -1141,6 +1148,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(1);
     expect(promptPanel()).toBeVisible();
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect local edit');
     expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
@@ -1458,6 +1466,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
       .getAllByRole('group', { name: /^Custom block \d at/ })).toHaveLength(1);
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(1);
     expect(upgradeCalls(fetchMock)).toHaveLength(1);
   });
 });
@@ -1958,36 +1967,12 @@ describe('local endpoint-name policy in validateDraftForm', () => {
     assembly_rules: null,
   });
 
-  it.each([
-    'https://example.cloud.databricks.com/serving-endpoints/x/invocations',
-    '  http://example.invalid',
-    '//example.invalid/x',
-    'ftp://example.invalid',
-    'a/b',
-    'a\\b',
-    'x?y=1',
-    'x#frag',
-    'a%2Fb',
-    '.',
-    '..',
-    'tab\tname',
-    'nul\u0000name',
-    'unit\u001fsep',
-    'del\u007fname',
-  ])('rejects URL- or path-shaped %j with the table message and no candidate', (name) => {
+  it.each(ENDPOINT_NAME_POLICY_CASES.rejected)('rejects URL- or path-shaped %j with the table message and no candidate', (name) => {
     const result = validateDraftForm(form(name));
     expect(result).toEqual({ ok: false, errors: { endpoint_name: URL_NOT_ALLOWED } });
   });
 
-  it.each([
-    'databricks-claude-opus-4-6',
-    'Team Shared Endpoint (EU)',
-    ' leading and trailing ',
-    'a.b',
-    '...',
-    'mailto:x',
-    'ünïcode-endpoint',
-  ])('accepts %j verbatim', (name) => {
+  it.each(ENDPOINT_NAME_POLICY_CASES.accepted)('accepts %j verbatim', (name) => {
     const result = validateDraftForm(form(name));
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.candidate.model.endpoint_name).toBe(name);
