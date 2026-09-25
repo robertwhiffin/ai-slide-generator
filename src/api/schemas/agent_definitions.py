@@ -18,7 +18,7 @@ from pydantic import (
 
 from src.services.agent_schema_registry import (
     SCHEMA_CONTRACT_BUNDLES,
-    _descriptor_material,
+    optional_field_descriptor_material,
 )
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
@@ -227,7 +227,7 @@ class _DefinitionContentResponse(_AttributeResponse):
             )
             if bundle is None:
                 return ()
-            return tuple(_descriptor_material(d) for d in bundle.optional_fields)
+            return tuple(optional_field_descriptor_material(d) for d in bundle.optional_fields)
         return value
 
     @field_validator("canonical_fields", mode="before")

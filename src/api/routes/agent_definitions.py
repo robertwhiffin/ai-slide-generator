@@ -160,7 +160,7 @@ def _validation_error_code(field: str, error_type: str, error_input: object) -> 
         if shape == "candidate.assembly_rules.custom_blocks.*.condition":
             return "unknown_condition" if isinstance(error_input, str) else "strict_type"
         return "strict_type"
-    if error_type in {"uuid_type", "uuid_parsing", "list_type", "tuple_type", "dict_type"}:
+    if error_type in {"uuid_type", "uuid_parsing", "list_type", "tuple_type"}:
         return "strict_type"
     if error_type in {"greater_than", "greater_than_equal"}:
         return "positive_integer" if field == "candidate.model.max_tokens" else "out_of_range"
@@ -405,20 +405,25 @@ async def save_agent_definition_draft(
     # client as a 500 until this catch existed.  Convert it to the same ordered
     # 422 every other rejection uses; do NOT tighten the wire types, which would
     # turn a documented domain issue into a Pydantic message.
+    #
+    # The catch wraps ONLY the overlay conversion: its prefix names the overlay, so
+    # a ValidationError from any other conversion must not be reported under it.
+    assembly_rules = _domain_assembly_rules(save_request.candidate.assembly_rules)
     try:
-        candidate = EditableModelDraft(
-            prompt_text=save_request.candidate.prompt_text,
-            endpoint_name=save_request.candidate.model.endpoint_name,
-            temperature=save_request.candidate.model.temperature,
-            max_tokens=save_request.candidate.model.max_tokens,
-            top_p=save_request.candidate.model.top_p,
-            assembly_rules=_domain_assembly_rules(save_request.candidate.assembly_rules),
-            schema_overlay=_domain_schema_overlay(save_request.candidate.schema_overlay),
-        )
+        schema_overlay = _domain_schema_overlay(save_request.candidate.schema_overlay)
     except ValidationError as exc:
         return _draft_validation_response(
             _request_validation_errors(exc, prefix=("candidate", "schema_overlay"))
         )
+    candidate = EditableModelDraft(
+        prompt_text=save_request.candidate.prompt_text,
+        endpoint_name=save_request.candidate.model.endpoint_name,
+        temperature=save_request.candidate.model.temperature,
+        max_tokens=save_request.candidate.model.max_tokens,
+        top_p=save_request.candidate.model.top_p,
+        assembly_rules=assembly_rules,
+        schema_overlay=schema_overlay,
+    )
     try:
         outcome = GraphConfiguration().save_editable_model_draft(
             db,

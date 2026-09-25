@@ -752,6 +752,40 @@ def test_the_model_facing_tool_keeps_the_canonical_name_and_description(
     assert type(parsed) is composed.model
 
 
+def test_no_canonical_output_schema_keeps_undeclared_top_level_keys() -> None:
+    """#264 m6 precondition (correction 37 style): the canonical filter's premise.
+
+    ``validate_output`` builds the canonical model from canonical names only.  Today
+    that filter is an equivalent mutant (review S3): passing every raw key produces
+    the same result because no canonical model keeps extras.  That is a PRECONDITION,
+    not a guarantee, so it is asserted here for every bundle's canonical model.  If
+    a canonical schema ever sets ``extra="allow"``, this fails and whoever did it
+    must re-examine the filter rather than leak undeclared keys into graph output.
+    """
+
+    def keeps_extras(model: type[BaseModel], values: dict[str, object]) -> bool:
+        if model.model_config.get("extra") == "allow":
+            return True
+        try:
+            instance = model.model_validate({**values, "zz_undeclared": 1})
+        except ValidationError:
+            return False
+        return bool(instance.model_extra) or "zz_undeclared" in instance.model_dump()
+
+    # Aim check: the predicate does fire on a model that keeps extras.
+    class _Allowing(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        x: int = 0
+
+    assert keeps_extras(_Allowing, {})
+
+    checked = []
+    for (role, version), bundle in SCHEMA_CONTRACT_BUNDLES.items():
+        assert not keeps_extras(bundle.canonical_model, _TOOL_CALL_ARGS[role]), (role, version)
+        checked.append((role, version))
+    assert sorted(checked) == sorted((role, v) for role in EXPECTED_ROLES for v in (1, 2))
+
+
 def test_compose_applies_guidance_and_builds_a_strict_dynamic_model() -> None:
     registry = AgentSchemaRegistry()
     composed = registry.compose(
@@ -1076,6 +1110,59 @@ def test_upgrade_content_to_v2_keeps_the_manifest_identity_carrier_type() -> Non
     }
 
 
+def test_upgrade_content_to_v2_reuses_the_module_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#264 m3: the upgrade reads the module's one registry instead of rebuilding it.
+
+    Rebuilding re-ran all fourteen frozen-digest checks on every call.  The check is
+    not lost: it runs once when the module's registry is built at import (next test).
+    """
+    from src.services.graph_definition_manifest import load_graph_v1_manifest
+
+    constructions: list[None] = []
+    original_init = AgentSchemaRegistry.__init__
+
+    def _counting_init(self: AgentSchemaRegistry) -> None:
+        constructions.append(None)
+        original_init(self)
+
+    monkeypatch.setattr(AgentSchemaRegistry, "__init__", _counting_init)
+    for definition in load_graph_v1_manifest().definitions:
+        assert upgrade_content_to_v2(definition).schema_contract.version == 2
+    assert constructions == []
+
+
+def test_importing_the_registry_fails_closed_when_frozen_material_changed() -> None:
+    """#264 m3: the frozen-digest check still runs at import, before any caller.
+
+    A fresh interpreter replaces one canonical output schema with a subclass (so its
+    v1 material changes) and then imports the registry module; the import itself
+    must raise ``SchemaContractMaterialChangedError``.
+    """
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "from src.domain import skill_io\n"
+        "class Drift(skill_io.OUTPUT_SCHEMAS['architect']):\n"
+        "    pass\n"
+        "skill_io.OUTPUT_SCHEMAS['architect'] = Drift\n"
+        "import src.services.agent_schema_registry\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)},
+        timeout=120,
+    )
+    assert completed.returncode != 0
+    assert "SchemaContractMaterialChangedError" in completed.stderr
+    assert "'architect' changed: expected v1" in completed.stderr
+
+
 @pytest.mark.parametrize("agent_key", EXPECTED_ROLES)
 def test_upgrade_content_to_v2_retains_a_non_empty_overlay_byte_for_byte(agent_key: str) -> None:
     """#264 I3: the upgrade keeps the stored overlay; it never resets it.
@@ -1335,3 +1422,34 @@ def test_upgrade_rejects_a_dataclass_carrier_that_cannot_hold_the_identity_value
     )
     with pytest.raises(SchemaContractIdentityCarrierError):
         upgrade_content_to_v2(content)
+
+
+def test_no_module_imports_a_private_name_from_the_registry() -> None:
+    """#264 m16: consumers use the registry's public names only.
+
+    The admin wire used to import the private ``_descriptor_material``; it now uses
+    ``optional_field_descriptor_material``, the same function the v2 digest reads.
+    """
+    import ast
+    import pathlib
+
+    import src
+
+    root = pathlib.Path(src.__file__).parent
+    offenders: list[str] = []
+    importers = 0
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == (
+                "src.services.agent_schema_registry"
+            ):
+                importers += 1
+                offenders.extend(
+                    f"{path.relative_to(root)}:{alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith("_")
+                )
+    # Aim check: the walk really reached the registry's importers.
+    assert importers >= 3
+    assert offenders == []

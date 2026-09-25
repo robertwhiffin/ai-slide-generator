@@ -3322,3 +3322,77 @@ def test_client_diagnostic_notes_fixture_is_the_server_descriptor_for_all_seven_
             assert response.json()["definition"]["selectable_optional_fields"] == [
                 fixture[agent_key]
             ], agent_key
+
+
+def test_a_dict_type_wire_error_is_strict_type_through_the_terminal_default(
+    session_factory, monkeypatch
+):
+    """#264 m1: ``dict_type`` needs no entry in the explicit strict-type set.
+
+    The explicit set in ``_validation_error_code`` used to list ``dict_type``, but
+    the function's terminal default already returns ``strict_type``, so the entry
+    was dead (correction 63).  This pins the observable result — a non-object
+    ``field_overrides`` is ``strict_type`` with the owned message — and pins that
+    the terminal default is what now serves it.
+    """
+    assert agent_definition_routes._validation_error_code(
+        "candidate.schema_overlay.field_overrides", "dict_type", "string"
+    ) == "strict_type"
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        candidate = _editable_candidate(_model_node(before, "architect"))
+        candidate["schema_overlay"] = {"field_overrides": ["not", "an", "object"]}
+        response = client.put(
+            _draft_save_url(), json={"lock_version": 0, "candidate": candidate}
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [
+        {
+            "field": "candidate.schema_overlay.field_overrides",
+            "code": "strict_type",
+            "message": "Field overrides must be an object.",
+        }
+    ]
+    assert after == before
+
+
+def test_the_overlay_type_error_catch_wraps_only_the_overlay_conversion(
+    session_factory, monkeypatch
+):
+    """#264 m5: a ValidationError from the ASSEMBLY conversion is never reported as
+    an overlay issue.
+
+    The C1 catch renders its errors under the ``candidate.schema_overlay`` prefix,
+    so it must wrap the overlay conversion alone.  An assembly conversion failure
+    (not reachable from a valid wire body today, so it is forced here) must escape
+    that catch rather than come back as a mislabelled ``candidate.schema_overlay``
+    422; the overlay's own type errors still do (the sibling tests).
+    """
+    from pydantic import ValidationError
+
+    from src.services.graph_definition_manifest import AssemblyRulesV2
+
+    def _raising(rules):
+        AssemblyRulesV2.model_validate({"format_version": 2, "custom_blocks": "not-a-list"})
+
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        before = _workbench(client)
+        candidate = _editable_candidate(_model_node(before, "architect"))
+        candidate["assembly_rules"] = {"format_version": 2, "custom_blocks": []}
+        with pytest.raises(ValidationError):
+            _raising(None)
+        monkeypatch.setattr(agent_definition_routes, "_domain_assembly_rules", _raising)
+        response = client.put(
+            _draft_save_url(), json={"lock_version": 0, "candidate": candidate}
+        )
+        monkeypatch.undo()
+        _force_admin(monkeypatch, is_admin=True)
+        after = _workbench(client)
+
+    assert response.status_code == 500
+    assert "candidate.schema_overlay" not in response.text
+    assert after == before

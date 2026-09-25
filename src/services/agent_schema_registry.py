@@ -258,7 +258,14 @@ def _schema_contract_material(agent_key: str, schema: type[BaseModel]) -> dict[s
     }
 
 
-def _descriptor_material(descriptor: OptionalFieldDescriptor) -> dict[str, object]:
+def optional_field_descriptor_material(
+    descriptor: OptionalFieldDescriptor,
+) -> dict[str, object]:
+    """The descriptor's code-owned material: hashed into v2 and shown by the wire.
+
+    Public because the admin wire's display data is exactly this material; the v2
+    digest reads the same function, so the two cannot drift apart.
+    """
     return {
         "name": descriptor.name,
         "description": descriptor.description,
@@ -281,7 +288,9 @@ def _calculate_v2_digest(agent_key: str) -> str:
     material = {
         "canonical_v1": _schema_contract_material(agent_key, OUTPUT_SCHEMAS[agent_key]),
         "registry_grammar": _REGISTRY_GRAMMAR,
-        "optional_field_descriptors": [_descriptor_material(_V2_OPTIONAL_DESCRIPTORS[agent_key])],
+        "optional_field_descriptors": [
+            optional_field_descriptor_material(_V2_OPTIONAL_DESCRIPTORS[agent_key])
+        ],
     }
     return _canonical_digest(material)
 
@@ -559,6 +568,13 @@ class AgentSchemaRegistry:
         )
 
 
+#: The one registry this module's own functions use.  Constructing it here runs the
+#: fail-closed frozen-digest check once, at import of this module, instead of
+#: repeating all fourteen digests on every ``upgrade_content_to_v2`` call.  The
+#: draft writer's own import-time instance (``graph_configuration_draft``) and the
+#: runtime's per-construction instance are unchanged.
+_MODULE_REGISTRY = AgentSchemaRegistry()
+
 _CANONICAL_IDENTITY_FIELD_NAMES = frozenset(("agent_key", "version", "digest"))
 _STRUCTURAL_IDENTITY_FIELD_NAMES = frozenset(("version", "digest"))
 
@@ -624,8 +640,7 @@ def upgrade_content_to_v2(content: ContentT) -> ContentT:
     This intentionally targets a structural carrier. Task 2 can pass its concrete
     manifest model without making this registry import that persistence layer.
     """
-    registry = AgentSchemaRegistry()
-    identity = registry.identity_for(content.agent_key, 2)
+    identity = _MODULE_REGISTRY.identity_for(content.agent_key, 2)
     replacement_identity = _replacement_schema_contract_identity(
         content.schema_contract, identity
     )

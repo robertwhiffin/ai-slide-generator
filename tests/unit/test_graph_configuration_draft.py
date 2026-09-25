@@ -3086,3 +3086,47 @@ def test_a_legacy_v1_draft_with_guidance_is_rejected_by_the_upgrade_and_kept_byt
     assert isinstance(cleared, DraftSaveResult)
     assert isinstance(_upgrade_schema(session_factory, lock_version=1), DraftSaveResult)
     assert write_log == ["write", "write"]
+
+
+@pytest.mark.parametrize("phase", ["local_candidate_validators", "post_stale_validators"])
+def test_the_schema_upgrade_revalidates_its_target_before_writing(
+    session_factory, monkeypatch, phase
+) -> None:
+    """#264 m2: F5's post-upgrade re-validation is kept and pinned.
+
+    Today's catalogs make it redundant, which is exactly why it needs a test: the
+    writer invariant is that every write's content passed the validator tuple, so
+    the UPGRADED content must pass both phases too.  A validator that rejects only
+    the v2 target (the current v1 content passes it) must stop the upgrade with no
+    write, whichever phase it is registered in.
+    """
+    target_issue = ("schema_contract", "target_rejected", "Only the upgraded target fails.")
+    seen: list[int] = []
+
+    def _target_only(content: DefinitionContent) -> tuple[DraftValidationIssue, ...]:
+        seen.append(content.schema_contract.version)
+        if content.schema_contract.version == 2:
+            return (DraftValidationIssue(*target_issue),)
+        return ()
+
+    monkeypatch.setattr(
+        GraphConfiguration, phase, (*getattr(GraphConfiguration, phase), _target_only)
+    )
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _upgrade_schema(session_factory, lock_version=0)
+
+    assert _issue_tuples(caught) == (target_issue,)
+    assert seen[-1] == 2
+    if phase == "local_candidate_validators":
+        # It ran on the current content first, and that passed.
+        assert seen == [1, 2]
+    assert write_log == []
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
