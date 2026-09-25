@@ -115,7 +115,9 @@ def _assert_composed_schema(
     assert schema is not canonical
     assert issubclass(schema, canonical)
     assert schema.model_config["extra"] == "forbid"
-    assert schema.__name__ == f"{canonical.__name__}SchemaV{version}Overlay"
+    # The model-facing tool is named after the model: it keeps the canonical name
+    # (#264 I5), so the prompts' "Return an <CanonicalOutput>" still names it.
+    assert schema.__name__ == canonical.__name__
     expected_optional = {"diagnostic_notes"} if version == 2 else set()
     assert set(schema.model_fields) == set(canonical.model_fields) | expected_optional
 

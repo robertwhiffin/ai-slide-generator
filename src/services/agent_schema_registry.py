@@ -480,9 +480,17 @@ class AgentSchemaRegistry:
                 ),
             )
 
+        # The composed class keeps the canonical class name and docstring: the
+        # adapter's structured-output call names the forced tool after the model
+        # and describes it with the docstring, and the prompts say "Return an
+        # <CanonicalOutput>".  So composition changes only the parameters (AC3's
+        # additionalProperties: false plus any guidance and selection), never the
+        # tool the model is asked to call (#264 I5).  No digest or content hash
+        # reads the composed class; both are computed from the canonical model.
         composed_model = create_model(
-            f"{bundle.canonical_model.__name__}SchemaV{identity.version}Overlay",
+            bundle.canonical_model.__name__,
             __base__=strict_base,
+            __doc__=bundle.canonical_model.__doc__,
             **field_definitions,
         )
         return ComposedAgentSchema(
