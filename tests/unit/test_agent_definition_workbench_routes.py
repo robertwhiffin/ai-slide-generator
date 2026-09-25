@@ -3532,6 +3532,30 @@ def _one_endpoint_issue(code: str, message: str) -> dict[str, object]:
     }
 
 
+def _offline_system_client(monkeypatch: pytest.MonkeyPatch):
+    """A real PAT-configured WorkspaceClient that performs no network I/O."""
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.config import Config
+
+    # Host-metadata discovery is the only network step in PAT config resolution.
+    monkeypatch.setattr(Config, "_resolve_host_metadata", lambda self: None)
+    return WorkspaceClient(config=Config(host="https://unit.invalid", token="dapi-unit"))
+
+
+def _assert_bounded_derivation(
+    derived, system_client, system_inner, *, retry: int, http: int
+) -> None:
+    """The path's own bound, the system credentials, and an unchanged system client."""
+    assert derived is not system_client
+    assert derived.config.retry_timeout_seconds == retry
+    assert derived.config.http_timeout_seconds == http
+    assert derived.config.host == system_client.config.host
+    assert derived.config._header_factory is system_client.config._header_factory
+    assert system_client.config._inner == system_inner
+    assert system_client.config.retry_timeout_seconds is None
+    assert system_client.config.http_timeout_seconds is None
+
+
 def test_model_endpoints_populated_response_is_exact_items_only_and_deterministic(
     session_factory, monkeypatch
 ):
@@ -3670,13 +3694,13 @@ def test_non_admin_model_endpoints_is_denied_before_the_catalog_is_obtained(
 def test_model_endpoints_production_dependency_lists_through_the_bounded_system_catalog(
     session_factory, monkeypatch
 ):
-    """Catches a production discovery path that skips the bounded catalog client."""
+    """Catches discovery skipping its own 30 s/30 s bound or mutating the system client."""
     import src.core.databricks_client as databricks_client
     from src.services import model_endpoint_catalog as catalog_module
 
     _force_admin(monkeypatch, is_admin=True)
-    system_client = object()
-    bounded_client = object()
+    system_client = _offline_system_client(monkeypatch)
+    system_inner = dict(system_client.config._inner)
     catalog = FakeModelEndpointCatalog(discovery_outcomes=[_populated_discovery()])
     calls: list[tuple[str, object]] = []
 
@@ -3684,27 +3708,19 @@ def test_model_endpoints_production_dependency_lists_through_the_bounded_system_
         calls.append(("system", None))
         return system_client
 
-    def _bounded(client):
-        calls.append(("bounded", client))
-        return bounded_client
-
     def _catalog(workspace_client):
         calls.append(("catalog", workspace_client))
         return catalog
 
     monkeypatch.setattr(databricks_client, "get_system_client", _get_system_client)
-    monkeypatch.setattr(catalog_module, "bounded_catalog_workspace_client", _bounded)
     monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _catalog)
     with _app_for(session_factory) as client:
         response = client.get(_MODEL_ENDPOINTS_URL)
 
     assert response.status_code == 200
     assert response.json() == {"items": _EXPECTED_POPULATED_ITEMS}
-    assert calls == [
-        ("system", None),
-        ("bounded", system_client),
-        ("catalog", bounded_client),
-    ]
+    assert [name for name, _ in calls] == ["system", "catalog"]
+    _assert_bounded_derivation(calls[1][1], system_client, system_inner, retry=30, http=30)
     assert catalog.list_calls == 1
 
 
@@ -3941,13 +3957,13 @@ def test_endpoint_validation_accepted_save_validates_the_exact_submitted_name(
 def test_endpoint_validation_production_dependency_supplies_the_remote_validator(
     session_factory, monkeypatch
 ):
-    """Catches the PUT's production wiring passing no remote validator (fail-open)."""
+    """Catches the PUT's production wiring failing open or losing the 5 s/3 s save bound."""
     import src.core.databricks_client as databricks_client
     from src.services import model_endpoint_catalog as catalog_module
 
     _force_admin(monkeypatch, is_admin=True)
-    system_client = object()
-    bounded_client = object()
+    system_client = _offline_system_client(monkeypatch)
+    system_inner = dict(system_client.config._inner)
     catalog = FakeModelEndpointCatalog(
         validation_outcomes={
             _CUSTOM_ENDPOINT: [
@@ -3963,16 +3979,11 @@ def test_endpoint_validation_production_dependency_supplies_the_remote_validator
         calls.append(("system", None))
         return system_client
 
-    def _bounded(client):
-        calls.append(("bounded", client))
-        return bounded_client
-
     def _catalog(workspace_client):
         calls.append(("catalog", workspace_client))
         return catalog
 
     monkeypatch.setattr(databricks_client, "get_system_client", _get_system_client)
-    monkeypatch.setattr(catalog_module, "bounded_catalog_workspace_client", _bounded)
     monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _catalog)
     revisions_before = _revision_count(session_factory)
     with _app_for(session_factory, production_endpoint_validation=True) as client:
@@ -3987,11 +3998,8 @@ def test_endpoint_validation_production_dependency_supplies_the_remote_validator
     assert response.json() == _one_endpoint_issue(
         "endpoint_unknown", "Endpoint name was not found."
     )
-    assert calls == [
-        ("system", None),
-        ("bounded", system_client),
-        ("catalog", bounded_client),
-    ]
+    assert [name for name, _ in calls] == ["system", "catalog"]
+    _assert_bounded_derivation(calls[1][1], system_client, system_inner, retry=5, http=3)
     assert catalog.validated_names == [_CUSTOM_ENDPOINT]
     assert after == before
     assert _revision_count(session_factory) == revisions_before

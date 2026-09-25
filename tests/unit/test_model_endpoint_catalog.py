@@ -14,6 +14,7 @@ from src.services.model_endpoint_catalog import (
     SystemModelDiscovery,
     SystemModelEndpoint,
     bounded_catalog_workspace_client,
+    bounded_discovery_workspace_client,
     validate_endpoint_name_policy,
 )
 
@@ -411,3 +412,26 @@ def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_
     # (at most min(10, attempt) + 1 s) may overshoot it.
     elapsed = clock.now - started
     assert CATALOG_RETRY_TIMEOUT_SECONDS <= elapsed <= 15
+
+
+def test_bounded_discovery_client_has_its_own_finite_bound_and_leaves_the_system_client_unchanged(
+    monkeypatch,
+):
+    """Catches discovery sharing the save path's 5 s/3 s bound or the SDK's unbounded defaults."""
+    system_client = _offline_system_client(monkeypatch)
+    system_inner = dict(system_client.config._inner)
+
+    discovery = bounded_discovery_workspace_client(system_client)
+    save = bounded_catalog_workspace_client(system_client)
+
+    assert discovery is not system_client
+    assert discovery.config.retry_timeout_seconds == 30
+    assert discovery.config.http_timeout_seconds == 30
+    assert save.config.retry_timeout_seconds == 5
+    assert save.config.http_timeout_seconds == 3
+    assert discovery.config._inner is not save.config._inner
+    assert discovery.config.host == system_client.config.host
+    assert discovery.config._header_factory is system_client.config._header_factory
+    assert system_client.config._inner == system_inner
+    assert system_client.config.retry_timeout_seconds is None
+    assert system_client.config.http_timeout_seconds is None
