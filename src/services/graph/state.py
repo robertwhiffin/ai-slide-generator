@@ -183,6 +183,27 @@ class GraphState(TypedDict, total=False):
     # an author without re-reading a ContextVar (row-write rule under C4).
     initiated_by: str
 
+    # Collaboration provenance for this turn (#262 Task 4).  ``root_session_id``
+    # is the session that OWNS the deck and ``actor_session_id`` the session the
+    # turn runs as; they differ on a contributor's turn and are equal on the
+    # owner's own.  Both are resolved ONCE by invoke_graph, which overwrites
+    # whatever the caller seeded — a caller-supplied root or actor is
+    # attacker-controlled input, not provenance.
+    #
+    # Single-writer, NO reducer: invoke_graph is the only writer and writes once,
+    # before any node runs, so there is no fan-in and a reducer could only merge
+    # where the semantics are "replace".  NOT turn-scoped either: the deck's owner
+    # and the session the graph runs as are properties of the thread, not of the
+    # turn, and thread_id IS the actor session.
+    #
+    # Declared here because the runtime silently DROPS undeclared keys, and
+    # because build_branch_payload and the build-reviewer re-fan both read them
+    # off state to declare them in their Send payloads — a Send-reached node can
+    # see nothing else.  Neither selects a release: the actor's persisted pin,
+    # loaded by invoke_graph into graph_release_id above, does that.
+    root_session_id: str
+    actor_session_id: str
+
     # Set by architect_node when a fix turn is triggered.
     fix_target: Optional[int]
 

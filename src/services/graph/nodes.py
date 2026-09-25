@@ -84,6 +84,12 @@ from src.services.graph.event_emitter import (
 )
 from src.services.graph.state import has_pending_fix, scoped, scoped_vals
 from src.services.persisted_graph_release import PersistedRuntimeError
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    MutationActor,
+    MutationObjectType,
+    MutationOperation,
+)
 from src.services.template_sections import (
     extract_section,
     resolve_template_bytes,
@@ -93,6 +99,55 @@ from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
+
+
+def _deck_mutation_context(
+    session_id: str,
+    graph_release_id: Optional[int],
+    *,
+    operation: MutationOperation,
+    object_type: MutationObjectType,
+    object_id: Optional[str] = None,
+) -> DeckMutationContext:
+    return DeckMutationContext(
+        actor=MutationActor(session_id, graph_release_id),
+        operation=operation,
+        object_type=object_type,
+        object_id=object_id,
+    )
+
+
+def _assembly_context(
+    design_system_active: Any,
+    root_session_id: Any,
+    actor_session_id: Any,
+) -> AgentAssemblyContext:
+    """Build the FOURTH argument every ``get_agent_runtime().run(...)`` call passes.
+
+    The one place in this module that constructs an ``AgentAssemblyContext``, and
+    that is deliberate.  ``AgentAssemblyContext``'s two session-ID fields carry
+    ``""`` defaults — they must, because every caller outside the graph
+    constructs it with one argument — so a call site that simply forgot them
+    would trace blank and nothing would raise.  Routing all ten through here
+    makes the omission a *structural* fact an AST assertion can see
+    (``TestNoCallSiteMayTraceBlank``) rather than a silent hole.
+
+    Tolerant of an absent key by design.  The trace is evidence ABOUT a
+    mutation, never a precondition for one: a payload assembled by an older
+    checkpoint should degrade to an unattributed invocation, not kill a user's
+    turn in a reviewer's exception handler that would placehold their slide.
+    Production cannot reach that branch — ``invoke_graph`` writes both keys on
+    every invocation, before any node runs — which is why the end-to-end tests
+    assert the real owner and contributor IDs rather than the fallback.
+
+    **IDs never select the release.**  ``run``'s second argument does; these two
+    are inert for resolution and are read by nothing but the identity sink.
+    """
+    return AgentAssemblyContext(
+        bool(design_system_active),
+        root_session_id or "",
+        actor_session_id or "",
+    )
 
 
 def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
@@ -459,6 +514,8 @@ def rereview_committed_slides(
     spec: DeckSpec,
     brand: Dict[str, Any],
     graph_release_id: int,
+    root_session_id: str = "",
+    actor_session_id: str = "",
 ) -> Dict[str, Any]:
     """Score every committed slide against the **new** spec, serially, here.
 
@@ -483,6 +540,13 @@ def rereview_committed_slides(
     ``build_reviewer_node``; the failing positions then travel on
     ``target_positions`` and the shipped ``builder -> build_reviewer -> land``
     path rebuilds exactly those.
+
+    ``root_session_id`` and ``actor_session_id`` are taken as arguments, exactly
+    like ``graph_release_id``, because this pass runs inside ``architect_node``
+    but is not a node: it has no state of its own, so its provenance has to
+    travel with the release it reviews under.  They default to ``""`` only so the
+    suites that predate the trace keep calling it with four arguments; the
+    architect always passes all six.
 
     The cost, stated rather than hidden: this is **serial**, so §4.6's "cheap,
     parallel" becomes "cheap, serial" — one review call per committed slide,
@@ -598,7 +662,9 @@ def rereview_committed_slides(
                 "build_reviewer",
                 graph_release_id,
                 review_payload,
-                AgentAssemblyContext(design_system_active),
+                _assembly_context(
+                    design_system_active, root_session_id, actor_session_id
+                ),
             ).output
             findings = _stamp_findings(
                 _skill_findings(out),
@@ -991,6 +1057,7 @@ def _write_reviewed_row(
     verdict: str,
     slide_spec: Any,
     initiated_by: Optional[str],
+    mutation: DeckMutationContext,
 ) -> str:
     """Commit one reviewed slide row and return its content hash.
 
@@ -1026,6 +1093,7 @@ def _write_reviewed_row(
         ),
         deck_spec_slide=slide_spec if isinstance(slide_spec, dict) else None,
         modified_by=initiated_by,
+        mutation=mutation,
     )
     return content_hash
 
@@ -1083,6 +1151,7 @@ def _placehold_failed_position(
     session_id: str,
     node: str,
     reason: str,
+    mutation: DeckMutationContext,
 ) -> bool:
     """Commit a terminal placeholder for one failed branch, visibly.
 
@@ -1137,7 +1206,12 @@ def _placehold_failed_position(
     )
     writer = SlideWriter()
     try:
-        writer.commit_placeholder(session_id, position, error_message=reason)
+        writer.commit_placeholder(
+            session_id,
+            position,
+            error_message=reason,
+            mutation=mutation,
+        )
         row = writer.get_slide(session_id, position) or {}
     except Exception:
         logger.exception(
@@ -1254,6 +1328,14 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
         "session_id": state["session_id"],
         "graph_release_id": state["graph_release_id"],
         "turn_id": state["turn_id"],
+        # The collaboration trace, DECLARED here because a Send-reached node sees
+        # only its payload: the builder and the re-fanned reviewer cannot read
+        # state at all, so an omission here is an unattributed mutation rather
+        # than an error.  Copied, never re-resolved — invoke_graph resolved the
+        # owner once for the whole turn, and a branch that looked it up again
+        # could disagree with its siblings.
+        "root_session_id": state.get("root_session_id") or "",
+        "actor_session_id": state.get("actor_session_id") or "",
         "initiated_by": state.get("initiated_by"),
         "position": position,
         "slide_spec": slide_spec.model_dump(),
@@ -1398,7 +1480,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "architect",
         state["graph_release_id"],
         payload,
-        AgentAssemblyContext(brand["design_system_active"]),
+        _assembly_context(
+            brand["design_system_active"],
+            state.get("root_session_id"),
+            state.get("actor_session_id"),
+        ),
     ).output
     intent = out.intent
     message = out.message
@@ -1565,6 +1651,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
             spec,
             brand,
             state["graph_release_id"],
+            state.get("root_session_id") or "",
+            state.get("actor_session_id") or "",
         )
         if not verdicts["committed"]:
             # Nothing committed to score (an unbuilt deck, or the row read
@@ -1720,7 +1808,16 @@ def architect_node(state: dict) -> Dict[str, Any]:
     if brand["deterministic_css"]:
         deck_write["css"] = brand["deterministic_css"]
     try:
-        write_deck_level_columns(session_id, **deck_write)
+        write_deck_level_columns(
+            session_id,
+            mutation=_deck_mutation_context(
+                session_id,
+                state.get("graph_release_id"),
+                operation="write_deck_level",
+                object_type="deck",
+            ),
+            **deck_write,
+        )
     except Exception as exc:
         logger.exception("Pre-fan-out deck-level write failed")
         updates["error_state"] = {
@@ -1774,7 +1871,11 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         "data_analyst",
         state["graph_release_id"],
         payload,
-        AgentAssemblyContext(bool(state.get("design_system_active"))),
+        _assembly_context(
+            state.get("design_system_active"),
+            state.get("root_session_id"),
+            state.get("actor_session_id"),
+        ),
     ).output
 
     if out.outcome == "success":
@@ -1974,6 +2075,12 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     session_id = payload["session_id"]
     turn_id = payload["turn_id"]
     design_system_active = bool(payload.get("design_system_active"))
+    mutation = _deck_mutation_context(
+        session_id,
+        payload.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     skill_payload = dict(payload)
 
@@ -1982,7 +2089,11 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             "builder",
             payload["graph_release_id"],
             skill_payload,
-            AgentAssemblyContext(design_system_active),
+            _assembly_context(
+                design_system_active,
+                payload.get("root_session_id"),
+                payload.get("actor_session_id"),
+            ),
         ).output
 
         def _regenerate() -> str:
@@ -1994,7 +2105,11 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 "builder",
                 payload["graph_release_id"],
                 retry_payload,
-                AgentAssemblyContext(design_system_active),
+                _assembly_context(
+                    design_system_active,
+                    payload.get("root_session_id"),
+                    payload.get("actor_session_id"),
+                ),
             ).output.html
 
         def _on_retry() -> None:
@@ -2015,6 +2130,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="builder",
             reason=type(exc).__name__,
+            mutation=mutation,
         ):
             return {}
         return {"placeheld_positions": scoped(turn_id, {position})}
@@ -2081,6 +2197,12 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     html = payload["html"]
     scripts = payload.get("scripts") or ""
     initiated_by = payload.get("initiated_by")
+    mutation = _deck_mutation_context(
+        session_id,
+        payload.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     try:
         content_hash = compute_slide_hash(html)
@@ -2097,7 +2219,11 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "build_reviewer",
             payload["graph_release_id"],
             review_payload,
-            AgentAssemblyContext(bool(payload.get("design_system_active"))),
+            _assembly_context(
+                payload.get("design_system_active"),
+                payload.get("root_session_id"),
+                payload.get("actor_session_id"),
+            ),
         ).output
 
         findings = _stamp_findings(
@@ -2116,6 +2242,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
                 verdict=verdict,
                 slide_spec=payload.get("slide_spec"),
                 initiated_by=initiated_by,
+                mutation=mutation,
             )
             _emit(
                 StreamEventType.ASSISTANT,
@@ -2152,6 +2279,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="build_reviewer",
             reason=type(exc).__name__,
+            mutation=mutation,
         ):
             return {}
         # reviewed_positions too: the position is committed as a placeholder, so
@@ -2173,6 +2301,7 @@ def _land_original(
     *,
     session_id: str,
     initiated_by: Optional[str],
+    mutation: DeckMutationContext,
 ) -> List[Finding]:
     """Write the pre-fix HTML back with its findings surfaced, and return them."""
     payload = entry.get("payload") or {}
@@ -2186,6 +2315,7 @@ def _land_original(
         verdict="surfaced",
         slide_spec=payload.get("slide_spec"),
         initiated_by=initiated_by,
+        mutation=mutation,
     )
     return findings
 
@@ -2195,6 +2325,7 @@ def _reconcile_stale_fixes(
     *,
     session_id: str,
     initiated_by: Optional[str],
+    mutation: DeckMutationContext,
 ) -> List[Finding]:
     """Land the originals for fixes left ``in_flight`` by a dead process.
 
@@ -2236,6 +2367,7 @@ def _reconcile_stale_fixes(
                     entry,
                     session_id=session_id,
                     initiated_by=initiated_by,
+                    mutation=mutation,
                 )
             )
         except Exception:
@@ -2274,6 +2406,12 @@ def fixer_node(state: dict) -> Dict[str, Any]:
     session_id = state["session_id"]
     initiated_by = state.get("initiated_by")
     fix_map = scoped_vals(state, "fix_map")
+    mutation = _deck_mutation_context(
+        session_id,
+        state.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     candidates = [
         position
@@ -2288,7 +2426,10 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         }
         if stale:
             reconciled = _reconcile_stale_fixes(
-                stale, session_id=session_id, initiated_by=initiated_by
+                stale,
+                session_id=session_id,
+                initiated_by=initiated_by,
+                mutation=mutation,
             )
             return {
                 "fix_target": None,
@@ -2322,7 +2463,11 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             "fixer",
             state["graph_release_id"],
             fix_payload,
-            AgentAssemblyContext(design_system_active),
+            _assembly_context(
+                design_system_active,
+                state.get("root_session_id"),
+                state.get("actor_session_id"),
+            ),
         ).output
 
         def _regenerate() -> str:
@@ -2334,7 +2479,11 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 "fixer",
                 state["graph_release_id"],
                 retry_payload,
-                AgentAssemblyContext(design_system_active),
+                _assembly_context(
+                    design_system_active,
+                    state.get("root_session_id"),
+                    state.get("actor_session_id"),
+                ),
             ).output.html
 
         def _on_retry() -> None:
@@ -2351,7 +2500,11 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Fixer failed at position %s; landing the original", position)
         findings = _land_original(
-            position, entry, session_id=session_id, initiated_by=initiated_by
+            position,
+            entry,
+            session_id=session_id,
+            initiated_by=initiated_by,
+            mutation=mutation,
         )
         return {
             "fix_map": scoped(turn_id, {position: None}),
@@ -2417,6 +2570,12 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
     position = state.get("fix_target")
     if position is None:
         return {}
+    mutation = _deck_mutation_context(
+        session_id,
+        state.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     fix_map = scoped_vals(state, "fix_map")
     entry = fix_map.get(position) or {}
@@ -2455,7 +2614,11 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                     "fix_reviewer",
                     state["graph_release_id"],
                     review_payload,
-                    AgentAssemblyContext(bool(payload.get("design_system_active"))),
+                    _assembly_context(
+                        payload.get("design_system_active"),
+                        state.get("root_session_id"),
+                        state.get("actor_session_id"),
+                    ),
                 ).output
                 re_findings = _stamp_findings(
                     _skill_findings(out),
@@ -2505,6 +2668,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             verdict=verdict,
             slide_spec=payload.get("slide_spec"),
             initiated_by=initiated_by,
+            mutation=mutation,
         )
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
@@ -2542,6 +2706,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="fix_reviewer",
             reason=type(exc).__name__,
+            mutation=mutation,
         ):
             updates["placeheld_positions"] = scoped(turn_id, {position})
         return updates
@@ -2609,6 +2774,12 @@ def placeholder_node(state: dict) -> Dict[str, Any]:
     turn_id = state["turn_id"]
     session_id = state["session_id"]
     positions = stalled_positions(state, time.time())
+    mutation = _deck_mutation_context(
+        session_id,
+        state.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
+    )
 
     placeheld: set = set()
     for position in positions:
@@ -2617,6 +2788,7 @@ def placeholder_node(state: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="placeholder",
             reason=_STALL_REASON,
+            mutation=mutation,
         ):
             placeheld.add(position)
 
@@ -2748,6 +2920,12 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
         try:
             write_deck_level_columns(
                 session_id,
+                mutation=_deck_mutation_context(
+                    session_id,
+                    state.get("graph_release_id"),
+                    operation="write_deck_level",
+                    object_type="deck",
+                ),
                 modified_by=initiated_by,
                 # Passed here for the same reason the architect passes it, and
                 # passed EXPLICITLY rather than left to the default: these are the
@@ -2808,7 +2986,11 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 "deck_reviewer",
                 state["graph_release_id"],
                 review_payload,
-                AgentAssemblyContext(bool(state.get("design_system_active"))),
+                _assembly_context(
+                    state.get("design_system_active"),
+                    state.get("root_session_id"),
+                    state.get("actor_session_id"),
+                ),
             ).output
             findings = _stamp_findings(
                 _skill_findings(out), subject_hash=digest, slide_index=-1

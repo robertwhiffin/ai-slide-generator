@@ -73,7 +73,11 @@ def tour_db():
     """A throwaway engine with the deck schema, plus its session factory."""
     engine = _make_in_memory_engine()
     try:
-        yield _make_factory(engine)
+        factory = _make_factory(engine)
+        from src.services.graph_configuration import bootstrap_graph_configuration
+
+        bootstrap_graph_configuration(factory)
+        yield factory
     finally:
         engine.dispose()
 
@@ -247,6 +251,32 @@ class TestTheFixtureSpecReachesTheColumn:
             assert db.query(SessionSlide).count() == 3, (
                 "the deck-level write pruned the slide rows"
             )
+        finally:
+            db.close()
+
+    def test_tour_writers_record_null_provenance_without_principal(self, tour_db):
+        """Tour is legacy/monolith content, not an unattributed writer exclusion."""
+        from src.database.models.session import SharedDeckMutationEvent, UserSession
+
+        session_id = _run_the_tour(tour_db)
+
+        db = tour_db()
+        try:
+            root = db.query(UserSession).filter_by(session_id=session_id).one()
+            events = db.query(SharedDeckMutationEvent).order_by(
+                SharedDeckMutationEvent.id
+            ).all()
+            assert [event.operation for event in events] == [
+                "save_deck",
+                "save_deck_slides",
+                "write_deck_level",
+            ]
+            assert [event.object_type for event in events] == ["deck", "deck", "deck"]
+            assert [event.object_id for event in events] == [None, None, None]
+            assert all(event.root_session_id == root.id for event in events)
+            assert all(event.actor_session_id == root.id for event in events)
+            assert all(event.graph_release_id is None for event in events)
+            assert all(event.graph_version is None for event in events)
         finally:
             db.close()
 

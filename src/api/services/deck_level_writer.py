@@ -93,6 +93,10 @@ from src.api.services.session_manager import (
 )
 from src.core.database import get_db_session
 from src.database.models.session import SessionSlideDeck
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    record_shared_deck_mutation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +164,7 @@ def write_deck_level_columns(
     modified_by: Optional[str] = None,
     expected_version: Optional[int] = None,
     user_visible: bool = True,
+    mutation: Optional[DeckMutationContext] = None,
 ) -> Dict[str, Any]:
     """Write only deck-level columns on a session's slide deck.
 
@@ -339,6 +344,18 @@ def write_deck_level_columns(
                 session.last_activity = now
 
         db.flush()
+
+        if mutation is not None:
+            record_shared_deck_mutation(
+                db,
+                requesting_session=session,
+                deck_owner=deck_owner,
+                deck=deck,
+                actor=mutation.actor,
+                operation=mutation.operation,
+                object_type=mutation.object_type,
+                object_id=mutation.object_id,
+            )
 
         logger.info(
             "Wrote deck-level columns",

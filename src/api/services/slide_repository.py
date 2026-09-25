@@ -24,7 +24,11 @@ from sqlalchemy import and_
 
 from src.api.services.session_manager import SessionManager, get_session_manager
 from src.core.database import get_db_session
-from src.database.models.session import SessionSlide
+from src.database.models.session import SessionSlide, SessionSlideDeck
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    record_shared_deck_mutation,
+)
 from src.utils.slide_hash import compute_slide_hash
 
 # Sentinel prefix used by commit_placeholder so callers can distinguish
@@ -91,6 +95,7 @@ class SlideWriter:
         deck_spec_slide: Optional[Dict[str, Any]] = None,
         modified_by: Optional[str] = None,
         slide_id: Optional[str] = None,
+        mutation: Optional[DeckMutationContext] = None,
     ) -> None:
         """Commit a slide row to the database.
 
@@ -137,6 +142,16 @@ class SlideWriter:
         with get_db_session() as db:
             session = self.session_manager._get_session_or_raise(db, session_id)
             deck_owner = self.session_manager._get_deck_owner_session(db, session)
+            deck = deck_owner.slide_deck
+            if mutation is not None and deck is None:
+                deck = SessionSlideDeck(
+                    session_id=deck_owner.id,
+                    html_content="",
+                    slide_count=0,
+                    version=1,
+                )
+                db.add(deck)
+                db.flush()
 
             slide_dict: Dict[str, Any] = {"html": html, "scripts": scripts}
             if modified_by is not None:
@@ -171,6 +186,28 @@ class SlideWriter:
                 deck_spec_slide=deck_spec_slide,
                 partial=True,
             )
+            db.flush()
+            if mutation is not None:
+                row = (
+                    db.query(SessionSlide)
+                    .filter(
+                        and_(
+                            SessionSlide.session_id == deck_owner.id,
+                            SessionSlide.position == position,
+                        )
+                    )
+                    .one()
+                )
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=mutation.actor,
+                    operation=mutation.operation,
+                    object_type=mutation.object_type,
+                    object_id=mutation.object_id or row.slide_id,
+                )
 
     # ------------------------------------------------------------------
     # Read
@@ -244,6 +281,7 @@ class SlideWriter:
         self,
         session_id: str,
         position: int,
+        mutation: Optional[DeckMutationContext] = None,
     ) -> None:
         """Delete the slide row at this position.  No-op if absent.
 
@@ -266,7 +304,20 @@ class SlideWriter:
             )
 
             if row is not None:
+                object_id = row.slide_id
                 db.delete(row)
+                db.flush()
+                if mutation is not None:
+                    record_shared_deck_mutation(
+                        db,
+                        requesting_session=session,
+                        deck_owner=deck_owner,
+                        deck=deck_owner.slide_deck,
+                        actor=mutation.actor,
+                        operation=mutation.operation,
+                        object_type=mutation.object_type,
+                        object_id=mutation.object_id or object_id,
+                    )
 
     # ------------------------------------------------------------------
     # Placeholder (failed position)
@@ -277,6 +328,7 @@ class SlideWriter:
         session_id: str,
         position: int,
         error_message: str = "",
+        mutation: Optional[DeckMutationContext] = None,
     ) -> None:
         """Write a terminal placeholder for a failed position.
 
@@ -327,6 +379,7 @@ class SlideWriter:
                     "message": error_message,
                 }
             },
+            mutation=mutation,
         )
 
 

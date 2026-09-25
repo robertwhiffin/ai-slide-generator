@@ -11,7 +11,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, delete, func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import (
@@ -33,6 +34,13 @@ from src.services.conversation_pins import (
     get_conversation_graph_version,
     get_conversation_graph_versions,
     lock_active_graph_release,
+)
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    MutationActor,
+    MutationObjectType,
+    MutationOperation,
+    record_shared_deck_mutation,
 )
 
 logger = logging.getLogger(__name__)
@@ -886,11 +894,13 @@ class SessionManager:
                     "created_at": existing.created_at.isoformat(),
                 }
 
+            graph_release_id = lock_active_graph_release(db).release_id
             contributor = UserSession(
                 session_id=secrets.token_urlsafe(32),
                 created_by=created_by,
                 title=parent.title,
                 parent_session_id=parent.id,
+                graph_release_id=graph_release_id,
             )
             db.add(contributor)
             db.flush()
@@ -1217,6 +1227,23 @@ class SessionManager:
             else:
                 new_title = _default_duplicate_title(base_title)
 
+            # Determine graph capability before constructing the new actor. The
+            # duplicate owns a fresh immutable pin selected under the active-row
+            # lock; the source's older pin is never copied or rewritten.
+            marker = (
+                db.query(SessionMessage)
+                .filter(
+                    SessionMessage.session_id == deck_owner.id,
+                    SessionMessage.role == "user",
+                )
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .first()
+            )
+            carried_marker = marker is not None and _selects_agent_mode(marker.content)
+            graph_release_id = None
+            if carried_marker:
+                graph_release_id = lock_active_graph_release(db).release_id
+
             new_session = UserSession(
                 session_id=secrets.token_urlsafe(32),
                 created_by=created_by,
@@ -1228,6 +1255,7 @@ class SessionManager:
                 experiment_id=None,
                 google_slides_presentation_id=None,
                 google_slides_url=None,
+                graph_release_id=graph_release_id,
             )
             db.add(new_session)
             db.flush()
@@ -1267,16 +1295,6 @@ class SessionManager:
             # For a graph-mode duplicate that title suppression is accepted:
             # the carried row is metadata, not conversation, and the title
             # should come from the new conversation.
-            marker = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == deck_owner.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
-            carried_marker = marker is not None and _selects_agent_mode(marker.content)
             if carried_marker:
                 db.add(
                     SessionMessage(
@@ -1521,6 +1539,7 @@ class SessionManager:
         deck_dict: Optional[Dict[str, Any]] = None,
         modified_by: Optional[str] = None,
         expected_version: Optional[int] = None,
+        mutation: Optional[DeckMutationContext] = None,
     ) -> Dict[str, Any]:
         """Save or update slide deck for a session.
 
@@ -1673,6 +1692,39 @@ class SessionManager:
             session.last_activity = datetime.utcnow()
             if session.id != deck_owner.id:
                 deck_owner.last_activity = datetime.utcnow()
+
+            db.flush()
+            generic_actor = MutationActor(
+                session.session_id, session.graph_release_id
+            )
+            contexts = [mutation] if mutation is not None else []
+            if mutation is None or not mutation.suppress_nested_events:
+                contexts.append(
+                    DeckMutationContext(
+                        actor=generic_actor,
+                        operation="save_deck",
+                        object_type="deck",
+                    )
+                )
+            if deck_dict and (mutation is None or not mutation.suppress_nested_events):
+                contexts.append(
+                    DeckMutationContext(
+                        actor=generic_actor,
+                        operation="save_deck_slides",
+                        object_type="deck",
+                    )
+                )
+            for context in contexts:
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=context.actor,
+                    operation=context.operation,
+                    object_type=context.object_type,
+                    object_id=context.object_id,
+                )
 
             logger.info(
                 "Saved slide deck",
@@ -2766,6 +2818,23 @@ class SessionManager:
                 # strategy — see _prune_slide_rows_beyond).
                 _prune_slide_rows_beyond(db, deck_owner.id, len(restored_slides))
 
+                db.flush()
+                restore_mutation = DeckMutationContext(
+                    actor=MutationActor(session.session_id, session.graph_release_id),
+                    operation="restore_version",
+                    object_type="deck",
+                )
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=restore_mutation.actor,
+                    operation=restore_mutation.operation,
+                    object_type=restore_mutation.object_type,
+                    object_id=restore_mutation.object_id,
+                )
+
             logger.info(
                 "Restored to save point",
                 extra={
@@ -3044,7 +3113,7 @@ class SessionManager:
     ) -> str:
         """Create a new chat request, return request_id.
 
-        Auto-creates the session if it doesn't exist.
+        Requires the route or service boundary to have created the session.
 
         Args:
             session_id: Session to create request for
@@ -3056,26 +3125,7 @@ class SessionManager:
         request_id = secrets.token_urlsafe(24)
 
         with get_db_session() as db:
-            # Get or create session
-            session = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == session_id)
-                .first()
-            )
-
-            if not session:
-                # Auto-create session on first request
-                session = UserSession(
-                    session_id=session_id,
-                    title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-                    created_by=created_by,
-                )
-                db.add(session)
-                db.flush()
-                logger.info(
-                    "Auto-created session for chat request",
-                    extra={"session_id": session_id},
-                )
+            session = self._get_session_or_raise(db, session_id)
 
             chat_request = ChatRequest(
                 request_id=request_id,
@@ -3304,6 +3354,15 @@ class SessionManager:
             return count
 
     # Cleanup operations
+    def _delete_expired_session(self, session_id: int) -> bool:
+        """Delete one expiry candidate in its own committed transaction."""
+        with get_db_session() as db:
+            result = db.execute(
+                delete(UserSession).where(UserSession.id == session_id)
+            )
+            deleted = result.rowcount == 1
+        return deleted
+
     def cleanup_expired_sessions(self) -> int:
         """Delete sessions that have exceeded TTL.
 
@@ -3320,23 +3379,56 @@ class SessionManager:
         cutoff = datetime.utcnow() - timedelta(hours=self.session_ttl_hours)
 
         with get_db_session() as db:
-            expired = (
-                db.query(UserSession)
+            expired_session_ids = [
+                session_id
+                for (session_id,) in db.query(UserSession.id)
                 .filter(UserSession.last_activity < cutoff)
+                .order_by(UserSession.id)
                 .all()
+            ]
+
+        count = 0
+        for session_id in expired_session_ids:
+            try:
+                deleted = self._delete_expired_session(session_id)
+            except SQLAlchemyError as exc:
+                logger.error(
+                    "Failed to delete expired session",
+                    extra={
+                        "session_id": session_id,
+                        "exception_class": type(exc).__name__,
+                    },
+                )
+                continue
+            if deleted:
+                count += 1
+
+        if count > 0:
+            logger.info(
+                "Cleaned up expired sessions",
+                extra={"count": count, "cutoff": cutoff.isoformat()},
             )
 
-            count = len(expired)
-            for session in expired:
-                db.delete(session)
+        return count
 
-            if count > 0:
-                logger.info(
-                    "Cleaned up expired sessions",
-                    extra={"count": count, "cutoff": cutoff.isoformat()},
-                )
-
-            return count
+    def deck_mutation_context(
+        self,
+        session_id: str,
+        *,
+        operation: MutationOperation,
+        object_type: MutationObjectType,
+        object_id: Optional[str] = None,
+    ) -> DeckMutationContext:
+        """Snapshot an immutable session pin for a forthcoming deck write."""
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            return DeckMutationContext(
+                actor=MutationActor(session.session_id, session.graph_release_id),
+                operation=operation,
+                object_type=object_type,
+                object_id=object_id,
+                suppress_nested_events=True,
+            )
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.

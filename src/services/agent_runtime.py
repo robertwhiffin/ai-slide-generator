@@ -139,7 +139,21 @@ class AgentModelConfiguration:
 
 @dataclass(frozen=True)
 class AgentAssemblyContext:
+    """The fourth and last argument every production ``run(...)`` call passes.
+
+    ``design_system_active`` steers prompt assembly.  The two session IDs do
+    not: ``PromptAssembler`` reads only ``design_system_active`` off this object,
+    so they reach the identity sink and nothing else — never the prompt, never
+    the model.  They ride here rather than on a fifth parameter because
+    ``AgentRuntime.run``'s arity is pinned at four positional arguments and zero
+    keywords across all ten call sites by #265's
+    ``test_every_production_runtime_call_passes_all_four_pinned_arguments``.
+    """
+
     design_system_active: bool
+    # See AgentInvocationIdentity for why these default rather than being required.
+    root_session_id: str = ""
+    actor_session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -591,6 +605,11 @@ class AgentRuntime:
             agent_key=definition.agent_key,
             agent_definition_revision_id=definition.agent_definition_revision_id,
             content_hash=definition.content_hash,
+            # From the context, never from the payload: the release above came
+            # from the resolved definition, so the trace records the release the
+            # caller pinned and the root/actor pair that caller is acting for.
+            root_session_id=assembly_context.root_session_id,
+            actor_session_id=assembly_context.actor_session_id,
         )
 
         def callback() -> BaseModel:

@@ -188,7 +188,35 @@ def build_reviewer_refan_router(state: dict) -> Union[str, List[Send]]:
     sends = [
         Send(
             "build_reviewer",
-            {**dict(record), "graph_release_id": state["graph_release_id"]},
+            {
+                **dict(record),
+                # Provenance is RE-DECLARED from state, never inherited from the
+                # record.  The record is turn state: it round-trips the
+                # checkpointer and a resumed or hand-forced one can carry any
+                # release, root or actor at all, and the reviewer it reaches is
+                # the writer of the row — so the one authority is the state
+                # invoke_graph resolved this turn.  Measured: a record carrying
+                # a hostile root/actor/release is corrected here (see
+                # ``test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record``).
+                # session_id belongs in this list and its omission was a real hole.
+                # The reviewer is the WRITER of the row, and the mutation event's
+                # actor is built from THIS key (nodes._deck_mutation_context), not
+                # from actor_session_id — so hardening root/actor/release while
+                # letting a hostile record's session_id through made the trace and
+                # the evidence row name different actors under the very threat
+                # model this docstring invokes.
+                #
+                # Falls back to the record's own value rather than to None: state
+                # always carries session_id in production (invoke_graph writes it
+                # before any node runs, and it IS the thread_id), so the fallback is
+                # unreachable there, and writing it this way means this line can
+                # only ever HARDEN a value — never replace a usable one with a blank
+                # and break a row write in a router.
+                "session_id": state.get("session_id") or record.get("session_id"),
+                "graph_release_id": state["graph_release_id"],
+                "root_session_id": state.get("root_session_id") or "",
+                "actor_session_id": state.get("actor_session_id") or "",
+            },
         )
         for position, record in sorted(slides.items())
         if record is not None and position not in reviewed
