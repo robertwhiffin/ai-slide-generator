@@ -16,6 +16,7 @@ import {
   type DraftSaveSuccessResponse,
   type DraftValidationErrorResponse,
   type EditableModelDraft,
+  type EditableSchemaOverlay,
   type LegacyPromptSourceResponse,
 } from '../../../api/agentDefinitions';
 
@@ -28,6 +29,29 @@ export type EditableDraftField =
   | 'max_tokens'
   | 'top_p';
 
+/**
+ * Local editable guidance for one canonical or optional output field.
+ * Only `description` and `examples` are accepted by the domain validator;
+ * other properties are stripped in `overlayFromForm` before sending.
+ */
+export interface EditableFieldGuidanceForm {
+  description: string;
+  /** JSON-serialized array string, e.g. `'["example"]'`. Empty string = not set. */
+  examples: string;
+}
+
+/**
+ * Local schema overlay edits. `null` means no explicit edits have been made since
+ * the form was last initialized from the saved definition. `candidateFromForm`
+ * omits `schema_overlay` from the wire candidate when this is `null`, keeping the
+ * historic five-field save body byte-identical when no overlay edits are pending.
+ */
+export interface EditableSchemaOverlayForm {
+  additional_optional_fields: string[];
+  /** Keyed by field name. Only set for fields the user has explicitly edited. */
+  field_overrides: Record<string, EditableFieldGuidanceForm>;
+}
+
 /** The two roles whose Graph Version 1 prompt is a protected legacy composite. */
 export const LEGACY_COMPOSITE_ROLES: readonly AgentKey[] = ['data_analyst', 'build_reviewer'];
 
@@ -39,6 +63,12 @@ export interface EditableModelDraftForm {
   top_p: DraftNumberInput;
   /** Local v2 custom blocks, or `null` while the role is still on v1. */
   assembly_rules: AssemblyRulesV2 | null;
+  /**
+   * Local schema overlay edits, or `null`/`undefined` while no overlay changes have
+   * been made. Absent or null causes `candidateFromForm` to omit `schema_overlay` from
+   * the save body entirely, preserving the server's stored overlay unchanged.
+   */
+  schema_overlay?: EditableSchemaOverlayForm | null;
 }
 
 export type RetainedFormSource =
@@ -78,7 +108,7 @@ export interface DraftEditorEntry {
   requestError: string | null;
 }
 
-export type DraftOperationKind = 'save' | 'upgrade' | 'sourceRecovery';
+export type DraftOperationKind = 'save' | 'upgrade' | 'sourceRecovery' | 'schemaUpgrade';
 
 /**
  * The one aggregate pending slot, now discriminated by operation. Save, Upgrade,
@@ -127,6 +157,14 @@ export type DraftEditorAction =
   | { type: 'sourceRecoveryRejected'; requestId: number; error: DraftValidationErrorResponse }
   | { type: 'sourceRecoveryConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
   | { type: 'sourceRecoveryFailed'; requestId: number; message: string }
+  | { type: 'schemaUpgradeStarted'; pending: PendingDraftSave }
+  | { type: 'schemaUpgradeSucceeded'; requestId: number; result: DraftSaveSuccessResponse }
+  | { type: 'schemaUpgradeRejected'; requestId: number; error: DraftValidationErrorResponse }
+  | { type: 'schemaUpgradeConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
+  | { type: 'schemaUpgradeFailed'; requestId: number; message: string }
+  | { type: 'schemaOverlayOptionalFieldToggled'; agentKey: AgentKey; fieldName: string }
+  | { type: 'schemaOverlayFieldDescriptionChanged'; agentKey: AgentKey; fieldName: string; description: string }
+  | { type: 'schemaOverlayFieldExamplesChanged'; agentKey: AgentKey; fieldName: string; examples: string }
   | { type: 'reloadServer'; agentKey: AgentKey }
   | { type: 'keepLocal'; agentKey: AgentKey }
   | { type: 'restoreSavedPrompt'; agentKey: AgentKey }
@@ -185,9 +223,17 @@ export function formFromDefinition(definition: DraftDefinition): EditableModelDr
     max_tokens: definition.model.max_tokens,
     top_p: definition.model.top_p,
     assembly_rules: localRulesFor(definition),
+    // No local overlay edits on initialisation — candidateFromForm omits schema_overlay
+    // from the wire body when this is null, keeping the five-field save body shape.
+    schema_overlay: null,
   };
 }
 
+/**
+ * Converts a server-echoed candidate back to form state.
+ * When the candidate has `schema_overlay`, derive a form overlay from it;
+ * when absent or null, the form has no overlay edits (schema_overlay = null).
+ */
 export function formFromCandidate(candidate: EditableModelDraft): EditableModelDraftForm {
   return {
     prompt_text: candidate.prompt_text,
@@ -196,12 +242,77 @@ export function formFromCandidate(candidate: EditableModelDraft): EditableModelD
     max_tokens: candidate.model.max_tokens,
     top_p: candidate.model.top_p,
     assembly_rules: candidate.assembly_rules ?? null,
+    schema_overlay: candidate.schema_overlay != null
+      ? schemaOverlayFormFromWire(candidate.schema_overlay)
+      : null,
+  };
+}
+
+/**
+ * Derives the effective schema overlay form state from the saved definition.
+ * Used by `OutputSchemaEditor` when the local form has no overlay edits (null).
+ * Only `description` and `examples` are extracted from each field override;
+ * other properties (type, default, etc.) are ignored (protected).
+ * `examples` is serialized as a JSON array string for the textarea.
+ */
+export function schemaOverlayFormFromDefinition(definition: DraftDefinition): EditableSchemaOverlayForm {
+  return schemaOverlayFormFromWire(definition.schema_overlay);
+}
+
+function schemaOverlayFormFromWire(overlay: {
+  field_overrides: Record<string, unknown>;
+  additional_optional_fields: string[];
+}): EditableSchemaOverlayForm {
+  const fieldOverrides: Record<string, EditableFieldGuidanceForm> = {};
+  for (const [key, value] of Object.entries(overlay.field_overrides)) {
+    if (typeof value === 'object' && value !== null) {
+      const guidance = value as Record<string, unknown>;
+      const description = typeof guidance.description === 'string' ? guidance.description : '';
+      let examples = '';
+      if (guidance.examples !== undefined) {
+        try { examples = JSON.stringify(guidance.examples); } catch { /* skip */ }
+      }
+      fieldOverrides[key] = { description, examples };
+    }
+  }
+  return {
+    additional_optional_fields: [...overlay.additional_optional_fields],
+    field_overrides: fieldOverrides,
   };
 }
 
 export function candidateFromForm(form: EditableModelDraftForm): EditableModelDraft | null {
   const validation = validateDraftForm(form);
   return validation.ok ? validation.candidate : null;
+}
+
+/**
+ * Converts an editable schema overlay form to the wire format, filtering out
+ * any properties other than `description` and `examples`. This is the guard
+ * that prevents `type`, `default`, `enum`, and `validator` from ever reaching
+ * the domain validator — sending them would produce `overlay_guidance_property_forbidden`.
+ */
+export function overlayFromForm(form: EditableSchemaOverlayForm): EditableSchemaOverlay {
+  const fieldOverrides: Record<string, unknown> = {};
+  for (const [key, guidance] of Object.entries(form.field_overrides)) {
+    const result: Record<string, unknown> = {};
+    // Only description and examples are accepted by the domain validator.
+    if (guidance.description) result.description = guidance.description;
+    if (guidance.examples.trim()) {
+      try {
+        result.examples = JSON.parse(guidance.examples) as unknown;
+      } catch {
+        // Invalid JSON examples are dropped rather than sending an unparseable value.
+      }
+    }
+    if (Object.keys(result).length > 0) {
+      fieldOverrides[key] = result;
+    }
+  }
+  return {
+    field_overrides: fieldOverrides,
+    additional_optional_fields: form.additional_optional_fields,
+  };
 }
 
 function assemblyRulesEqual(
@@ -220,6 +331,25 @@ function assemblyRulesEqual(
   });
 }
 
+function schemaOverlayFormsEqual(
+  left: EditableSchemaOverlayForm | null | undefined,
+  right: EditableSchemaOverlayForm | null | undefined,
+): boolean {
+  // null and undefined are both "no overlay edits" and compare equal.
+  if (left == null || right == null) return left == null && right == null;
+  if (left.additional_optional_fields.length !== right.additional_optional_fields.length) return false;
+  if (!left.additional_optional_fields.every((f, i) => f === right.additional_optional_fields[i])) return false;
+  const leftKeys = Object.keys(left.field_overrides).sort();
+  const rightKeys = Object.keys(right.field_overrides).sort();
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key, i) => {
+    if (key !== rightKeys[i]) return false;
+    const l = left.field_overrides[key];
+    const r = right.field_overrides[key];
+    return l.description === r.description && l.examples === r.examples;
+  });
+}
+
 export function editableFormsEqual(
   left: EditableModelDraftForm,
   right: EditableModelDraftForm,
@@ -229,7 +359,8 @@ export function editableFormsEqual(
     && left.temperature === right.temperature
     && left.max_tokens === right.max_tokens
     && left.top_p === right.top_p
-    && assemblyRulesEqual(left.assembly_rules, right.assembly_rules);
+    && assemblyRulesEqual(left.assembly_rules, right.assembly_rules)
+    && schemaOverlayFormsEqual(left.schema_overlay, right.schema_overlay);
 }
 
 function cloneDefinition(definition: DraftDefinition): DraftDefinition {
@@ -410,6 +541,11 @@ export function validateDraftForm(form: EditableModelDraftForm):
       ...(form.assembly_rules === null
         ? {}
         : { assembly_rules: structuredClone(form.assembly_rules) }),
+      // Schema overlay is omitted when null/undefined (no local edits), preserving the
+      // stored server overlay unchanged and keeping the five-field body format.
+      ...(form.schema_overlay == null
+        ? {}
+        : { schema_overlay: overlayFromForm(form.schema_overlay) }),
     },
   };
 }
@@ -770,6 +906,10 @@ export function draftEditorReducer(
       if (state.pendingSave !== null) return state;
       return startOperation(state, action.pending);
     }
+    case 'schemaUpgradeStarted': {
+      if (state.pendingSave !== null) return state;
+      return startOperation(state, action.pending);
+    }
     case 'saveSucceeded':
       return succeedWrite(state, 'save', action.requestId, action.result, (entry, pending) => (
         pending.submittedCandidate === null
@@ -779,24 +919,36 @@ export function draftEditorReducer(
       // Safe non-prompt edits made while pending survive; prompt and rules come
       // only from the server-authored v2 definition.
       return succeedWrite(state, 'upgrade', action.requestId, action.result, () => true);
+    case 'schemaUpgradeSucceeded':
+      // Schema contract upgrade: the server installs the new contract and optional
+      // field catalog. Keep local non-schema edits (prompt, model) that were made
+      // while in flight; reset schema overlay to null (no local overlay edits on
+      // the newly upgraded definition).
+      return succeedWrite(state, 'schemaUpgrade', action.requestId, action.result, () => true);
     case 'saveRejected':
       return rejectOperation(state, 'save', action.requestId, action.error);
     case 'upgradeRejected':
       return rejectOperation(state, 'upgrade', action.requestId, action.error);
     case 'sourceRecoveryRejected':
       return rejectOperation(state, 'sourceRecovery', action.requestId, action.error);
+    case 'schemaUpgradeRejected':
+      return rejectOperation(state, 'schemaUpgrade', action.requestId, action.error);
     case 'saveConflicted':
       return mergeConflict(state, 'save', action.requestId, action.conflict);
     case 'upgradeConflicted':
       return mergeConflict(state, 'upgrade', action.requestId, action.conflict);
     case 'sourceRecoveryConflicted':
       return mergeConflict(state, 'sourceRecovery', action.requestId, action.conflict);
+    case 'schemaUpgradeConflicted':
+      return mergeConflict(state, 'schemaUpgrade', action.requestId, action.conflict);
     case 'saveFailed':
       return failOperation(state, 'save', action.requestId, action.message);
     case 'upgradeFailed':
       return failOperation(state, 'upgrade', action.requestId, action.message);
     case 'sourceRecoveryFailed':
       return failOperation(state, 'sourceRecovery', action.requestId, action.message);
+    case 'schemaUpgradeFailed':
+      return failOperation(state, 'schemaUpgrade', action.requestId, action.message);
     case 'sourceRecoverySucceeded': {
       const pending = matchingPending(state, 'sourceRecovery', action.requestId);
       if (pending === null) return state;
@@ -918,6 +1070,63 @@ export function draftEditorReducer(
       return replaceEntry(state, action.agentKey, {
         ...entry,
         retainedForms: entry.retainedForms.filter((item) => item.id !== action.retainedId),
+      });
+    }
+    case 'schemaOverlayOptionalFieldToggled': {
+      const entry = state.byAgent[action.agentKey];
+      // Initialise from saved definition when no local overlay edits exist yet.
+      const current: EditableSchemaOverlayForm = entry.local.schema_overlay
+        ?? schemaOverlayFormFromDefinition(entry.saved);
+      const has = current.additional_optional_fields.includes(action.fieldName);
+      const next: EditableSchemaOverlayForm = {
+        ...current,
+        additional_optional_fields: has
+          ? current.additional_optional_fields.filter((f) => f !== action.fieldName)
+          : [...current.additional_optional_fields, action.fieldName],
+      };
+      return replaceEntry(state, action.agentKey, {
+        ...entry,
+        local: { ...entry.local, schema_overlay: next },
+        responseIssues: [],
+        requestError: null,
+      });
+    }
+    case 'schemaOverlayFieldDescriptionChanged': {
+      const entry = state.byAgent[action.agentKey];
+      const current: EditableSchemaOverlayForm = entry.local.schema_overlay
+        ?? schemaOverlayFormFromDefinition(entry.saved);
+      const existing = current.field_overrides[action.fieldName] ?? { description: '', examples: '' };
+      const next: EditableSchemaOverlayForm = {
+        ...current,
+        field_overrides: {
+          ...current.field_overrides,
+          [action.fieldName]: { ...existing, description: action.description },
+        },
+      };
+      return replaceEntry(state, action.agentKey, {
+        ...entry,
+        local: { ...entry.local, schema_overlay: next },
+        responseIssues: [],
+        requestError: null,
+      });
+    }
+    case 'schemaOverlayFieldExamplesChanged': {
+      const entry = state.byAgent[action.agentKey];
+      const current: EditableSchemaOverlayForm = entry.local.schema_overlay
+        ?? schemaOverlayFormFromDefinition(entry.saved);
+      const existing = current.field_overrides[action.fieldName] ?? { description: '', examples: '' };
+      const next: EditableSchemaOverlayForm = {
+        ...current,
+        field_overrides: {
+          ...current.field_overrides,
+          [action.fieldName]: { ...existing, examples: action.examples },
+        },
+      };
+      return replaceEntry(state, action.agentKey, {
+        ...entry,
+        local: { ...entry.local, schema_overlay: next },
+        responseIssues: [],
+        requestError: null,
       });
     }
   }

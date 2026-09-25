@@ -13,6 +13,7 @@ import type {
   DraftSaveRequest,
   DraftSaveSuccessResponse,
   DraftValidationErrorResponse,
+  FieldDescriptor,
   LegacyPromptSourceResponse,
   ModelAgentNode,
   ProtectedStageView,
@@ -916,6 +917,42 @@ const mockAssemblyRules = {
 export const V1_PROTECTED_IDENTITY = { version: 1, digest: "b".repeat(64) } satisfies ContentIdentity;
 export const V2_PROTECTED_IDENTITY = { version: 2, digest: "e".repeat(64) } satisfies ContentIdentity;
 
+/** v2 schema contract identity used in schema-contract-upgrade fixtures. */
+export const V2_SCHEMA_CONTRACT_IDENTITY = { version: 2, digest: "d".repeat(64) } satisfies ContentIdentity;
+
+/**
+ * Representative `diagnostic_notes` descriptor for a v2 schema contract.
+ * Each role has distinct descriptor text; this is the architect's shape.
+ */
+export const DIAGNOSTIC_NOTES_DESCRIPTOR: FieldDescriptor = {
+  name: 'diagnostic_notes',
+  description: 'Architect diagnostic notes for AI self-assessment.',
+  examples: ['Assumed the request refers to the existing Q2 deck.'],
+  schema: {
+    type: ['array', 'null'],
+    default: null,
+    max_items: 8,
+    items: {
+      type: 'string',
+      strip_whitespace: true,
+      min_length: 1,
+      max_length: 280,
+    },
+  },
+};
+
+/** The exact ordered 422 the schema-contract-upgrade route returns for an already-current contract. */
+export const SCHEMA_ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'schema_contract.version',
+      code: 'already_current',
+      message: 'Schema contract is already at the latest version.',
+    },
+  ],
+};
+
 export const EMPTY_V2_ASSEMBLY_RULES = {
   format_version: 2,
   custom_blocks: [],
@@ -1089,6 +1126,7 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
     protected_assembly: structuredClone(V1_PROTECTED_IDENTITY),
     schema_contract: { version: 1, digest: "c".repeat(64) },
     protected_stage_view: v1ProtectedStageView(agentKey),
+    selectable_optional_fields: [],
   };
 
   return {
@@ -1113,7 +1151,7 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
 
 export const syntheticDraftDefinitions = Object.fromEntries(
   mockModelNodes.map((node) => [node.agent_key, structuredClone(node.draft)]),
-) as Record<AgentKey, DraftDefinition>;
+) as unknown as Record<AgentKey, DraftDefinition>;
 
 export const syntheticDraftSaveRequest = {
   lock_version: 0,
@@ -1264,6 +1302,42 @@ export function syntheticV2DraftDefinition(
     protected_stage_view: v2ProtectedStageView(agentKey),
     candidate_hash: 'f'.repeat(64),
     ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/**
+ * A draft definition with a v2 schema contract and one selectable optional field
+ * (diagnostic_notes). Produced by a successful schema-contract-upgrade.
+ */
+export function syntheticSchemaV2DraftDefinition(
+  agentKey: AgentKey,
+  overrides: Partial<DraftDefinition> = {},
+): DraftDefinition {
+  return {
+    ...structuredClone(syntheticDraftDefinitions[agentKey]),
+    schema_contract: structuredClone(V2_SCHEMA_CONTRACT_IDENTITY),
+    schema_overlay: { field_overrides: {}, additional_optional_fields: [] },
+    selectable_optional_fields: [structuredClone(DIAGNOSTIC_NOTES_DESCRIPTOR)],
+    candidate_hash: '4'.repeat(64),  // valid hex (only 0-9, a-f allowed)
+    ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/** The 200 body the schema-contract-upgrade route returns. */
+export function syntheticSchemaUpgradeSuccess(
+  agentKey: AgentKey,
+  lockVersion: number,
+  definitionOverrides: Partial<DraftDefinition> = {},
+): DraftSaveSuccessResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@example.com',
+      updated_at: `2026-09-22T14:00:0${lockVersion}Z`,
+    },
+    definition: syntheticSchemaV2DraftDefinition(agentKey, definitionOverrides),
+    changed: true,
   };
 }
 
