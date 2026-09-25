@@ -1548,3 +1548,39 @@ export const MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE = {
   message: 'Model endpoint discovery is temporarily unavailable. Retry the request.',
   retryable: true,
 } as const;
+
+/**
+ * The one endpoint-name policy case table (#266). The client policy table in
+ * `AgentDefinitionWorkbench.test.tsx` drives `validateDraftForm` with it, and
+ * `tests/unit/test_endpoint_name_policy_client_join.py` reads this block as text and
+ * drives the server's `validate_endpoint_name_policy` with the same cases. Keep the
+ * body strict JSON (double quotes, no trailing commas, no comments).
+ */
+export const ENDPOINT_NAME_POLICY_CASES: Record<'rejected' | 'accepted', string[]> = {
+  "rejected": [
+    "https://example.cloud.databricks.com/serving-endpoints/x/invocations",
+    "  http://example.invalid",
+    "//example.invalid/x",
+    "ftp://example.invalid",
+    "a/b",
+    "a\\b",
+    "x?y=1",
+    "x#frag",
+    "a%2Fb",
+    ".",
+    "..",
+    "tab\tname",
+    "nul\u0000name",
+    "unit\u001fsep",
+    "del\u007fname"
+  ],
+  "accepted": [
+    "databricks-claude-opus-4-6",
+    "Team Shared Endpoint (EU)",
+    " leading and trailing ",
+    "a.b",
+    "...",
+    "mailto:x",
+    "ünïcode-endpoint"
+  ]
+};
