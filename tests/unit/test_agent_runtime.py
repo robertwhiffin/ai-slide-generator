@@ -576,3 +576,257 @@ def test_agent_runtime_construction_still_fails_closed_on_contract_material_drif
         AgentRuntime.compatibility(
             model_adapter=RecordingModelAdapter(_output_for("architect"))
         )
+
+
+# ---------------------------------------------------------------------------
+# #266 Task 5: one structured-output binding helper shared by the runtime
+# adapter and the saved-candidate probe.  Recording factories only; no test
+# here constructs a real client or reaches Databricks.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingStructuredModel:
+    def __init__(self, events: list[tuple[str, Any]], output: Any) -> None:
+        self._events = events
+        self._output = output
+
+    def invoke(self, prompt: str) -> Any:
+        self._events.append(("invoke", prompt))
+        return self._output
+
+
+class _RecordingChatModel:
+    def __init__(self, events: list[tuple[str, Any]], output: Any) -> None:
+        self._events = events
+        self._output = output
+
+    def with_structured_output(self, schema):
+        self._events.append(("with_structured_output", schema))
+        return _RecordingStructuredModel(self._events, self._output)
+
+
+def _recording_factories(output: Any):
+    events: list[tuple[str, Any]] = []
+    runtime_client = object()
+
+    def model_factory(**kwargs):
+        events.append(("model_factory", kwargs))
+        return _RecordingChatModel(events, output)
+
+    def client_factory():
+        events.append(("client_factory", None))
+        return runtime_client
+
+    return events, runtime_client, model_factory, client_factory
+
+
+def _record_helper(monkeypatch) -> list[dict[str, Any]]:
+    import src.services.agent_runtime as agent_runtime
+
+    helper_calls: list[dict[str, Any]] = []
+    original = agent_runtime.bind_structured_output_model
+
+    def _recording_helper(**kwargs):
+        helper_calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(agent_runtime, "bind_structured_output_model", _recording_helper)
+    return helper_calls
+
+
+_SAVED_CONFIGURATION = AgentModelConfiguration(
+    endpoint_name="saved exact endpoint-name",
+    temperature=0.25,
+    max_tokens=321,
+    top_p=0.75,
+)
+
+
+def test_structured_output_runtime_adapter_binds_through_the_extracted_helper(monkeypatch):
+    """Catches the runtime adapter keeping a private binding beside the helper."""
+    helper_calls = _record_helper(monkeypatch)
+    output = _output_for("data_analyst")
+    events, runtime_client, model_factory, client_factory = _recording_factories(output)
+    adapter = DatabricksModelAdapter(model_factory=model_factory, client_factory=client_factory)
+
+    actual = adapter.invoke(
+        agent_key="data_analyst",
+        configuration=_SAVED_CONFIGURATION,
+        schema=OUTPUT_SCHEMAS["data_analyst"],
+        prompt="assembled prompt",
+    )
+
+    assert actual is output
+    assert len(helper_calls) == 1
+    assert helper_calls[0]["configuration"] is _SAVED_CONFIGURATION
+    assert helper_calls[0]["schema"] is OUTPUT_SCHEMAS["data_analyst"]
+    assert events == [
+        ("client_factory", None),
+        (
+            "model_factory",
+            {
+                "endpoint": "saved exact endpoint-name",
+                "temperature": 0.25,
+                "max_tokens": 321,
+                "top_p": 0.75,
+                "workspace_client": runtime_client,
+            },
+        ),
+        ("with_structured_output", OUTPUT_SCHEMAS["data_analyst"]),
+        ("invoke", "assembled prompt"),
+    ]
+
+
+def test_structured_output_runtime_and_model_endpoint_probe_share_one_helper(monkeypatch):
+    """Catches the probe binding its own structured model instead of the runtime's.
+
+    Both paths are driven with the same recording factories: each must pass the
+    exact saved endpoint as ``endpoint`` and the runtime-identity client as
+    ``workspace_client``, and bind before invoking, through the one helper.
+    """
+    from src.services.model_endpoint_probe import (
+        DatabricksStructuredOutputProbe,
+        _StructuredOutputProbeResponse,
+    )
+
+    helper_calls = _record_helper(monkeypatch)
+    runtime_output = _output_for("architect")
+    runtime_events, runtime_client, runtime_factory, runtime_client_factory = (
+        _recording_factories(runtime_output)
+    )
+    probe_events, probe_client, probe_factory, probe_client_factory = _recording_factories(
+        _StructuredOutputProbeResponse(result="ok")
+    )
+
+    DatabricksModelAdapter(
+        model_factory=runtime_factory, client_factory=runtime_client_factory
+    ).invoke(
+        agent_key="architect",
+        configuration=_SAVED_CONFIGURATION,
+        schema=OUTPUT_SCHEMAS["architect"],
+        prompt="runtime prompt",
+    )
+    DatabricksStructuredOutputProbe(
+        model_factory=probe_factory, client_factory=probe_client_factory
+    ).probe(_SAVED_CONFIGURATION)
+
+    assert [call["schema"] for call in helper_calls] == [
+        OUTPUT_SCHEMAS["architect"],
+        _StructuredOutputProbeResponse,
+    ]
+    assert [call["configuration"] for call in helper_calls] == [
+        _SAVED_CONFIGURATION,
+        _SAVED_CONFIGURATION,
+    ]
+    runtime_kwargs = runtime_events[1][1]
+    probe_kwargs = probe_events[1][1]
+    assert runtime_kwargs["workspace_client"] is runtime_client
+    assert probe_kwargs["workspace_client"] is probe_client
+    for kwargs in (runtime_kwargs, probe_kwargs):
+        assert kwargs["endpoint"] == "saved exact endpoint-name"
+        assert (kwargs["temperature"], kwargs["max_tokens"], kwargs["top_p"]) == (
+            0.25,
+            321,
+            0.75,
+        )
+    assert [name for name, _ in probe_events] == [
+        "client_factory",
+        "model_factory",
+        "with_structured_output",
+        "invoke",
+    ]
+    assert probe_events[2] == ("with_structured_output", _StructuredOutputProbeResponse)
+
+
+def test_structured_output_probe_defaults_are_the_runtime_adapters_factories():
+    """Catches a second production model factory or client source for the probe."""
+    from src.services.model_endpoint_probe import DatabricksStructuredOutputProbe
+
+    probe = DatabricksStructuredOutputProbe()
+
+    assert probe._model_factory is DatabricksModelAdapter._default_model_factory
+    assert probe._client_factory is DatabricksModelAdapter._default_client_factory
+
+
+def test_structured_output_binding_has_one_call_site_and_the_probe_has_none():
+    """Extends the one-binding guard to the probe module (correction 11).
+
+    The existing guards scan only the runtime, nodes and assembler, so a probe
+    that bound ``with_structured_output`` itself would pass them unseen.
+    """
+    import ast
+    import inspect
+
+    import src.services.agent_runtime as agent_runtime
+    import src.services.model_endpoint_probe as model_endpoint_probe
+
+    def binding_calls(source: str) -> int:
+        return sum(
+            1
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "with_structured_output"
+        )
+
+    runtime_source = inspect.getsource(agent_runtime)
+    probe_source = inspect.getsource(model_endpoint_probe)
+    helper_source = inspect.getsource(agent_runtime.bind_structured_output_model)
+    assert binding_calls(runtime_source) == 1
+    assert binding_calls(helper_source) == 1
+    assert binding_calls(probe_source) == 0
+    assert "with_structured_output" not in probe_source
+    assert "ChatDatabricks" not in probe_source
+    assert "agent_runtime.bind_structured_output_model(" in probe_source
+
+
+def test_structured_output_saved_configuration_is_the_runtime_conversion():
+    """Catches the probe and the runtime converting saved sampling values differently."""
+    from decimal import Decimal
+
+    from src.services.agent_runtime import saved_model_configuration
+    from src.services.graph_definition_manifest import ModelConfiguration
+
+    saved = ModelConfiguration(
+        endpoint_name="exact saved name",
+        temperature=Decimal("0.3"),
+        max_tokens=77,
+        top_p=Decimal("0.9"),
+    )
+
+    configuration = saved_model_configuration(saved)
+
+    assert configuration == AgentModelConfiguration(
+        endpoint_name="exact saved name", temperature=0.3, max_tokens=77, top_p=0.9
+    )
+    assert type(configuration.temperature) is float
+    assert type(configuration.top_p) is float
+    assert type(configuration.max_tokens) is int
+
+
+def test_structured_output_runtime_adapter_still_collapses_permission_denied():
+    """Catches the extraction changing the runtime's provider conversion.
+
+    Only the probe classifies ``PermissionDenied`` separately; the runtime keeps
+    mapping it, like every provider failure, to ``ModelProviderUnavailableError``.
+    """
+    from databricks.sdk.errors import PermissionDenied
+
+    from src.services.agent_runtime import ModelProviderUnavailableError
+
+    class DeniedChatModel:
+        def with_structured_output(self, schema):
+            raise PermissionDenied("denied")
+
+    adapter = DatabricksModelAdapter(
+        model_factory=lambda **_kwargs: DeniedChatModel(),
+        client_factory=lambda: object(),
+    )
+
+    with pytest.raises(ModelProviderUnavailableError):
+        adapter.invoke(
+            agent_key="architect",
+            configuration=_SAVED_CONFIGURATION,
+            schema=OUTPUT_SCHEMAS["architect"],
+            prompt="p",
+        )

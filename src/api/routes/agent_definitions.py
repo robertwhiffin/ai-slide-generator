@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -28,6 +29,8 @@ from src.api.schemas.agent_definitions import (
     GraphWorkbenchResponse,
     LegacyPromptSourceResponse,
     ModelEndpointCatalogErrorResponse,
+    StructuredOutputProbeFailureResponse,
+    StructuredOutputProbeSuccessResponse,
     SystemModelDiscoveryResponse,
     SystemModelEndpointResponse,
 )
@@ -55,6 +58,12 @@ from src.services.graph_definition_manifest import (
 from src.services.model_endpoint_catalog import (
     ModelEndpointCatalogFailure,
     SystemModelDiscovery,
+)
+from src.services.model_endpoint_probe import (
+    DatabricksStructuredOutputProbe,
+    ModelEndpointProbeService,
+    SavedEndpointProbeResult,
+    StructuredOutputProbeAdapter,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,6 +133,48 @@ def get_model_endpoint_catalog() -> SystemModelEndpointLister:
 
 
 _CATALOG_FAILURE_STATUS = {"catalog_forbidden": 403, "catalog_unavailable": 503}
+
+
+def get_structured_output_probe() -> StructuredOutputProbeAdapter:
+    """The probe route's production adapter, resolved after the router's admin gate.
+
+    Construction does no client or network work; the runtime-identity client is
+    built only when a current saved candidate is probed.
+    """
+    return DatabricksStructuredOutputProbe()
+
+
+_PROBE_FAILURE_STATUS = {
+    "unsupported_structured_output": 422,
+    "endpoint_probe_forbidden": 403,
+    "structured_output_probe_failed": 503,
+}
+
+
+def _probe_result_response(
+    result: SavedEndpointProbeResult,
+) -> StructuredOutputProbeSuccessResponse | JSONResponse:
+    identity = result.identity
+    if result.failure is None:
+        return StructuredOutputProbeSuccessResponse(
+            code="structured_output_probe_succeeded",
+            endpoint_name=identity.endpoint_name,
+            candidate_hash=identity.candidate_hash,
+            lock_version=identity.lock_version,
+        )
+    failure = result.failure
+    response = StructuredOutputProbeFailureResponse(
+        code=failure.code,
+        message=failure.message,
+        retryable=failure.retryable,
+        endpoint_name=identity.endpoint_name,
+        candidate_hash=identity.candidate_hash,
+        lock_version=identity.lock_version,
+    )
+    return JSONResponse(
+        status_code=_PROBE_FAILURE_STATUS[failure.code],
+        content=response.model_dump(mode="json"),
+    )
 
 
 def _catalog_failure_response(failure: ModelEndpointCatalogFailure) -> JSONResponse:
@@ -681,3 +732,57 @@ async def read_agent_definition_legacy_prompt_source(
         return _conflict_response(outcome, client_candidate=None)
 
     raise AssertionError(f"Unexpected legacy prompt source outcome: {type(outcome)!r}")
+
+
+@router.post(
+    "/draft/{agent_key}/model-endpoint-probe",
+    response_model=StructuredOutputProbeSuccessResponse,
+    responses={
+        403: {"model": StructuredOutputProbeFailureResponse},
+        409: {"model": DraftSaveConflictResponse},
+        422: {"model": StructuredOutputProbeFailureResponse | DraftValidationErrorResponse},
+        503: {"model": StructuredOutputProbeFailureResponse},
+    },
+)
+async def probe_agent_definition_model_endpoint(
+    request: Request,
+    agent_key: str,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    probe: Annotated[StructuredOutputProbeAdapter, Depends(get_structured_output_probe)],
+    db: Session = Depends(get_db),
+) -> StructuredOutputProbeSuccessResponse | JSONResponse:
+    """Probe the role's saved endpoint once for structured output; never writes.
+
+    The body is exactly ``{"lock_version": n}``.  The endpoint, sampling values,
+    prompt and schema are all server-owned.  The saved candidate is copied and
+    the database released before the model call, which runs off the event loop.
+    """
+    del actor  # authorization only: the probe writes and audits nothing
+    parsed = await _parse_lock_request(request, agent_key)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+
+    service = ModelEndpointProbeService(probe)
+    try:
+        outcome = await run_in_threadpool(
+            service.probe_saved_candidate,
+            db,
+            agent_key=cast(AgentKey, agent_key),
+            expected_lock_version=parsed.lock_version,
+        )
+    except DraftContentRejected as exc:
+        return _rejection_response(exc)
+    except GraphConfigurationIntegrityError as exc:
+        logger.exception("Persisted Graph Configuration is incomplete")
+        raise HTTPException(
+            status_code=500,
+            detail="Graph configuration is incomplete",
+        ) from exc
+
+    if isinstance(outcome, DraftSaveConflict):
+        return _conflict_response(outcome, client_candidate=None)
+
+    if isinstance(outcome, SavedEndpointProbeResult):
+        return _probe_result_response(outcome)
+
+    raise AssertionError(f"Unexpected probe outcome: {type(outcome)!r}")

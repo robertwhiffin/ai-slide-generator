@@ -1678,3 +1678,126 @@ def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validat
     assert remote_calls == [("endpoint-winner", "winner endpoint name")]
     assert writes == ["endpoint-winner"]
     assert _immutable_graph_artifacts(factory) == artifacts_before
+
+
+def test_model_endpoint_probe_holds_no_lock_while_the_model_call_is_in_flight(
+    postgres_engine,
+) -> None:
+    """Correction 13: the probe's snapshot read releases every lock before the call.
+
+    A deterministic probe blocks mid-call.  While it is in flight, the backend
+    that took the snapshot's FOR SHARE parent locks must hold no lock and no open
+    transaction, and a concurrent save (which needs FOR UPDATE on the same
+    parents) must commit without waiting.  The probe then reports its copied
+    pre-save identity, not the committed one.
+    """
+    from src.services.model_endpoint_probe import (
+        ModelEndpointProbeService,
+        SavedEndpointProbeIdentity,
+    )
+
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    bootstrap_content, bootstrap_hash = _stored_draft(factory, "architect")
+    artifacts_before = _immutable_graph_artifacts(factory)
+
+    probe_in_flight = threading.Event()
+    release_probe = threading.Event()
+    guard = threading.Lock()
+    pids: dict[str, int] = {}
+    probed: list[str] = []
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            with guard:
+                pids.setdefault(threading.current_thread().name, pid)
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    class BlockingProbe:
+        def probe(self, configuration) -> None:
+            with guard:
+                probed.append(configuration.endpoint_name)
+            probe_in_flight.set()
+            assert release_probe.wait(timeout=20), "test never released the probe"
+
+    service = ModelEndpointProbeService(
+        BlockingProbe(), configuration_factory=ObservedGraphConfiguration
+    )
+    outcomes: dict[str, object] = {}
+
+    def _probe() -> None:
+        threading.current_thread().name = "probe"
+        with factory() as session:
+            outcomes["probe"] = service.probe_saved_candidate(
+                session, agent_key="architect", expected_lock_version=0
+            )
+
+    def _save() -> None:
+        threading.current_thread().name = "saver"
+        with factory() as session:
+            outcomes["save"] = GraphConfiguration().save_editable_model_draft(
+                session,
+                agent_key="architect",
+                expected_lock_version=0,
+                candidate=EditableModelDraft(
+                    prompt_text=bootstrap_content.prompt_text,
+                    endpoint_name="saved while probing",
+                    temperature=float(bootstrap_content.model.temperature),
+                    max_tokens=bootstrap_content.model.max_tokens,
+                    top_p=float(bootstrap_content.model.top_p),
+                ),
+                actor="saver",
+            )
+
+    # The observer's connection is checked out before the probe starts, so the
+    # pool cannot hand it the probe's released connection and have it count its
+    # own locks.
+    observer = postgres_engine.connect()
+    observer_pid = observer.scalar(text("SELECT pg_backend_pid()"))
+    observer.commit()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            probing = pool.submit(_probe)
+            assert probe_in_flight.wait(timeout=10), "probe never reached the model call"
+            with guard:
+                probe_pid = pids["probe"]
+            assert probe_pid != observer_pid
+            held = observer.scalar(
+                text("SELECT count(*) FROM pg_locks WHERE pid = :pid"),
+                {"pid": probe_pid},
+            )
+            state = observer.scalar(
+                text("SELECT state FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": probe_pid},
+            )
+            observer.commit()
+            assert held == 0
+            assert state != "idle in transaction"
+            saving = pool.submit(_save)
+            # The save must finish while the probe is still blocked mid-call.
+            saving.result(timeout=10)
+            assert not probing.done()
+            release_probe.set()
+            probing.result(timeout=20)
+    finally:
+        release_probe.set()
+        observer.close()
+
+    saved = outcomes["save"]
+    assert isinstance(saved, DraftSaveResult)
+    assert saved.draft.lock_version == 1
+    persisted, persisted_hash = _stored_draft(factory, "architect")
+    assert persisted.model.endpoint_name == "saved while probing"
+    assert persisted_hash != bootstrap_hash
+
+    result = outcomes["probe"]
+    assert probed == [bootstrap_content.model.endpoint_name]
+    assert result.failure is None
+    assert result.identity == SavedEndpointProbeIdentity(
+        agent_key="architect",
+        endpoint_name=bootstrap_content.model.endpoint_name,
+        candidate_hash=bootstrap_hash,
+        lock_version=0,
+    )
+    assert _immutable_graph_artifacts(factory) == artifacts_before

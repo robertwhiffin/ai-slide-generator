@@ -476,3 +476,35 @@ class ModelEndpointCatalogErrorResponse(BaseModel):
     code: Literal["catalog_forbidden", "catalog_unavailable"]
     message: str
     retryable: bool
+
+
+class StructuredOutputProbeSuccessResponse(BaseModel):
+    """The saved candidate bound and answered the code-owned probe schema.
+
+    A strict sibling (correction 9): it approves nothing and carries only the
+    identity of the exact saved candidate the probe ran against.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["structured_output_probe_succeeded"]
+    endpoint_name: str
+    candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
+    lock_version: int
+
+
+class StructuredOutputProbeFailureResponse(BaseModel):
+    """One sanitized probe failure: 422 unsupported, 403 forbidden, 503 failed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "unsupported_structured_output",
+        "endpoint_probe_forbidden",
+        "structured_output_probe_failed",
+    ]
+    message: str
+    retryable: bool
+    endpoint_name: str
+    candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
+    lock_version: int

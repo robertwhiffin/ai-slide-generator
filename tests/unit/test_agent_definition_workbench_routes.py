@@ -73,6 +73,11 @@ from src.services.model_endpoint_catalog import (
     SystemModelDiscovery,
     SystemModelEndpoint,
 )
+from src.services.model_endpoint_probe import (
+    DatabricksStructuredOutputProbe,
+    FakeStructuredOutputProbe,
+    StructuredOutputProbeFailure,
+)
 from src.services.prompt_assembler import ROLE_UNTRUSTED_DATA_NOTICE
 
 EXPECTED_TOPOLOGY_ORDER = [
@@ -154,12 +159,16 @@ def _app_for(
     catalog: object | None = None,
     remote_endpoint_validator: object | None = None,
     production_endpoint_validation: bool = False,
+    probe: object | None = None,
+    production_probe: bool = False,
 ) -> TestClient:
     """Build the admin router over SQLite.
 
     The PUT's production remote endpoint validator is replaced by an accepting
     fake unless a test injects its own or asks for the production dependency;
-    a discovery catalog is injected only when a test supplies one.
+    a discovery catalog is injected only when a test supplies one.  The
+    structured-output probe is likewise a succeeding fake unless a test injects
+    its own or asks for the production dependency, so no test reaches Databricks.
     """
     app = FastAPI()
     app.include_router(router)
@@ -181,6 +190,11 @@ def _app_for(
     if catalog is not None:
         app.dependency_overrides[agent_definition_routes.get_model_endpoint_catalog] = (
             lambda: catalog
+        )
+    if not production_probe:
+        structured_output_probe = probe if probe is not None else FakeStructuredOutputProbe()
+        app.dependency_overrides[agent_definition_routes.get_structured_output_probe] = (
+            lambda: structured_output_probe
         )
     return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
@@ -617,6 +631,7 @@ def test_main_app_registers_the_dedicated_workbench_route():
             "POST"
         },
         "/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source": {"POST"},
+        "/api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe": {"POST"},
     }
     for path, methods in expected_methods.items():
         matches = [
@@ -4097,3 +4112,463 @@ def test_model_endpoints_dtos_are_strict_siblings_that_forbid_extra_keys(dto_nam
     with pytest.raises(ValidationError):
         dto.model_validate({**valid, "task": "llm/v1/chat"})
     assert dto.__mro__[1] is schemas.BaseModel
+
+
+# ---------------------------------------------------------------------------
+# #266 Task 5: POST /draft/{agent_key}/model-endpoint-probe
+# ---------------------------------------------------------------------------
+
+_PROBE_FAILURE_CASES = {
+    "unsupported_structured_output": (422, "Unsupported copy.", False),
+    "endpoint_probe_forbidden": (403, "Forbidden copy.", False),
+    "structured_output_probe_failed": (503, "Unavailable copy.", True),
+}
+_PROBE_SECRET = "PROBE_SECRET_https://leak.example/token"
+
+
+def _probe_url(agent_key: str = "architect") -> str:
+    return f"/api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe"
+
+
+def _all_table_rows(session_factory: sessionmaker) -> dict[str, list[tuple[object, ...]]]:
+    with session_factory() as session:
+        return {
+            table.name: [tuple(row) for row in session.execute(select(table))]
+            for table in Base.metadata.sorted_tables
+        }
+
+
+def _save_role_endpoint(client: TestClient, agent_key: str, endpoint_name: str) -> dict:
+    body = _workbench(client)
+    node = _model_node(body, agent_key)
+    response = client.put(
+        _draft_save_url(agent_key),
+        json={
+            "lock_version": body["draft"]["lock_version"],
+            "candidate": _editable_candidate(
+                node,
+                **{
+                    "model.endpoint_name": endpoint_name,
+                    "model.temperature": 0.125,
+                    "model.max_tokens": 777,
+                    "model.top_p": 0.875,
+                },
+            ),
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_model_endpoint_probe_route_probes_each_selected_roles_saved_candidate(
+    session_factory, monkeypatch
+):
+    """Catches the route probing another role's endpoint, a default, or a stale copy."""
+    _force_admin(monkeypatch, is_admin=True)
+    probe = FakeStructuredOutputProbe()
+    with _app_for(session_factory, probe=probe) as client:
+        _save_role_endpoint(client, "architect", "architect exact endpoint")
+        _save_role_endpoint(client, "builder", "builder exact endpoint")
+        body = _workbench(client)
+        builder = client.post(_probe_url("builder"), json={"lock_version": 2})
+        architect = client.post(_probe_url("architect"), json={"lock_version": 2})
+
+    assert [call.endpoint_name for call in probe.calls] == [
+        "builder exact endpoint",
+        "architect exact endpoint",
+    ]
+    assert [
+        (call.temperature, call.max_tokens, call.top_p) for call in probe.calls
+    ] == [(0.125, 777, 0.875), (0.125, 777, 0.875)]
+    for response, agent_key, endpoint_name in (
+        (builder, "builder", "builder exact endpoint"),
+        (architect, "architect", "architect exact endpoint"),
+    ):
+        assert response.status_code == 200
+        assert response.json() == {
+            "code": "structured_output_probe_succeeded",
+            "endpoint_name": endpoint_name,
+            "candidate_hash": _model_node(body, agent_key)["draft"]["candidate_hash"],
+            "lock_version": 2,
+        }
+        assert list(response.json()) == [
+            "code",
+            "endpoint_name",
+            "candidate_hash",
+            "lock_version",
+        ]
+
+
+@pytest.mark.parametrize("code", sorted(_PROBE_FAILURE_CASES))
+def test_model_endpoint_probe_route_maps_each_typed_failure_exactly(
+    session_factory, monkeypatch, code
+):
+    """Catches a wrong status, a lost identity, or a message not copied verbatim."""
+    _force_admin(monkeypatch, is_admin=True)
+    status, message, retryable = _PROBE_FAILURE_CASES[code]
+    probe = FakeStructuredOutputProbe([StructuredOutputProbeFailure(code, message, retryable)])
+    with _app_for(session_factory, probe=probe) as client:
+        body = _workbench(client)
+        response = client.post(_probe_url("architect"), json={"lock_version": 0})
+
+    assert len(probe.calls) == 1
+    assert response.status_code == status
+    assert response.json() == {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "endpoint_name": _model_node(body, "architect")["draft"]["model"]["endpoint_name"],
+        "candidate_hash": _model_node(body, "architect")["draft"]["candidate_hash"],
+        "lock_version": 0,
+    }
+    assert list(response.json()) == [
+        "code",
+        "message",
+        "retryable",
+        "endpoint_name",
+        "candidate_hash",
+        "lock_version",
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"endpoint_name": "client-chosen"},
+        {"endpoint": "client-chosen"},
+        {"url": "https://leak.example/serving-endpoints/x"},
+        {"host": "leak.example"},
+        {"token": "dapi-secret"},
+        {"prompt": "client prompt"},
+        {"schema": {"type": "object"}},
+        {"payload": {"x": 1}},
+        {"identity": {"session_id": "s"}},
+        {"session_id": "s"},
+        {"candidate": {"model": {"endpoint_name": "client-chosen"}}},
+    ],
+    ids=lambda extra: next(iter(extra)),
+)
+def test_model_endpoint_probe_route_rejects_every_client_field_but_the_lock(
+    session_factory, monkeypatch, extra
+):
+    """Catches the probe accepting a client endpoint, prompt, schema or identity.
+
+    The body is exactly ``{"lock_version": n}``: every other key is the strict
+    DTO's ``extra_forbidden`` 422 and the probe is never called.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    probe = FakeStructuredOutputProbe()
+    key = next(iter(extra))
+    with _app_for(session_factory, probe=probe) as client:
+        response = client.post(_probe_url(), json={"lock_version": 0, **extra})
+
+    assert probe.calls == []
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {"field": key, "code": "extra_forbidden", "message": "Extra inputs are not permitted"}
+        ],
+    }
+    assert "client-chosen" not in response.text
+    assert "leak.example" not in response.text
+    assert "dapi-secret" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b"{not json", [("$", "invalid_json")]),
+        (b"{}", [("lock_version", "strict_type")]),
+        (b'{"lock_version": "0"}', [("lock_version", "strict_type")]),
+        (b'{"lock_version": true}', [("lock_version", "strict_type")]),
+        (b'{"lock_version": -1}', [("lock_version", "out_of_range")]),
+        (b"[]", [("$", "strict_type")]),
+    ],
+)
+def test_model_endpoint_probe_route_rejects_malformed_bodies_without_probing(
+    session_factory, monkeypatch, body, expected
+):
+    """Catches a malformed body defaulting the lock or reaching the probe."""
+    _force_admin(monkeypatch, is_admin=True)
+    probe = FakeStructuredOutputProbe()
+    with _app_for(session_factory, probe=probe) as client:
+        response = client.post(
+            _probe_url(), content=body, headers={"content-type": "application/json"}
+        )
+
+    assert probe.calls == []
+    assert response.status_code == 422
+    assert [(e["field"], e["code"]) for e in response.json()["errors"]] == expected
+
+
+@pytest.mark.parametrize("agent_key", ["foreman", "unknown"])
+def test_model_endpoint_probe_route_rejects_non_editable_roles(
+    session_factory, monkeypatch, agent_key
+):
+    """Catches a deterministic or unknown role reaching the probe."""
+    _force_admin(monkeypatch, is_admin=True)
+    probe = FakeStructuredOutputProbe()
+    with _app_for(session_factory, probe=probe) as client:
+        response = client.post(_probe_url(agent_key), json={"lock_version": 0})
+
+    assert probe.calls == []
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "agent_key",
+                "code": "unknown_agent",
+                "message": "Agent key must identify an editable model role.",
+            }
+        ],
+    }
+
+
+def test_model_endpoint_probe_route_stale_lock_is_the_coherent_null_candidate_409(
+    session_factory, monkeypatch
+):
+    """Catches a stale request probing before the lock comparison."""
+    _force_admin(monkeypatch, is_admin=True)
+    probe = FakeStructuredOutputProbe()
+    with _app_for(session_factory, probe=probe) as client:
+        _save_role_endpoint(client, "architect", "moved on")
+        after = _workbench(client)
+        response = client.post(_probe_url("architect"), json={"lock_version": 0})
+
+    assert probe.calls == []
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "stale_draft"
+    assert body["client_candidate"] is None
+    assert (body["expected_lock_version"], body["current_lock_version"]) == (0, 1)
+    assert body["server"]["draft"] == after["draft"]
+    assert set(body["server"]["definitions"]) == set(EXPECTED_TOPOLOGY_ORDER) - {"foreman"}
+    assert (
+        body["server"]["definitions"]["architect"]["model"]["endpoint_name"] == "moved on"
+    )
+
+
+def test_model_endpoint_probe_route_policy_recheck_is_the_ordered_422(
+    session_factory, monkeypatch
+):
+    """Catches a URL-shaped saved name reaching the provider through the route."""
+    import src.services.graph_configuration_draft as draft_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    probe = FakeStructuredOutputProbe()
+    original = draft_module.validate_endpoint_name_policy
+    # Simulate a saved name that predates the policy: the stored seed name is
+    # checked as if it were URL-shaped, without rewriting any row.
+    monkeypatch.setattr(
+        draft_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _app_for(session_factory, probe=probe) as client:
+        response = client.post(_probe_url("architect"), json={"lock_version": 0})
+
+    assert probe.calls == []
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "candidate.model.endpoint_name",
+                "code": "endpoint_url_not_allowed",
+                "message": "Endpoint must be a Databricks endpoint name, not a URL.",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_model_endpoint_probe_route_writes_no_row_of_any_kind(
+    session_factory, monkeypatch, outcome
+):
+    """Catches a probe that saves, audits, advances the lock, or records a run/chat/deck."""
+    _force_admin(monkeypatch, is_admin=True)
+    queued = (
+        []
+        if outcome == "success"
+        else [StructuredOutputProbeFailure("structured_output_probe_failed", "m", True)]
+    )
+    probe = FakeStructuredOutputProbe(queued)
+    before = _all_table_rows(session_factory)
+    with _app_for(session_factory, probe=probe) as client:
+        response = client.post(_probe_url("architect"), json={"lock_version": 0})
+
+    assert response.status_code == (200 if outcome == "success" else 503)
+    assert _all_table_rows(session_factory) == before
+
+
+def test_model_endpoint_probe_route_calls_the_model_off_the_event_loop(
+    session_factory, monkeypatch
+):
+    """Catches a remote model call blocking the server's event loop."""
+    import asyncio
+
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+
+    class _LoopObservingProbe:
+        def probe(self, configuration) -> None:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop_running.append(False)
+            else:
+                loop_running.append(True)
+
+    with _app_for(session_factory, probe=_LoopObservingProbe()) as client:
+        response = client.post(_probe_url(), json={"lock_version": 0})
+
+    assert response.status_code == 200
+    assert loop_running == [False]
+
+
+def test_model_endpoint_probe_route_later_save_cannot_change_the_reported_identity(
+    session_factory, monkeypatch
+):
+    """Catches identity read back after the call instead of copied before it."""
+    _force_admin(monkeypatch, is_admin=True)
+    saved: list[int] = []
+
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+
+        class _SavingProbe:
+            def probe(self, configuration) -> None:
+                with session_factory() as session:
+                    outcome = GraphConfiguration().save_editable_model_draft(
+                        session,
+                        agent_key="architect",
+                        expected_lock_version=0,
+                        candidate=_domain_candidate(before, "architect", "saved mid-probe"),
+                        actor="concurrent-admin@example.com",
+                    )
+                saved.append(outcome.draft.lock_version)
+
+        client.app.dependency_overrides[
+            agent_definition_routes.get_structured_output_probe
+        ] = lambda: _SavingProbe()
+        response = client.post(_probe_url("architect"), json={"lock_version": 0})
+        after = _workbench(client)
+
+    assert saved == [1]
+    assert _model_node(after, "architect")["draft"]["model"]["endpoint_name"] == (
+        "saved mid-probe"
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "structured_output_probe_succeeded",
+        "endpoint_name": _model_node(before, "architect")["draft"]["model"]["endpoint_name"],
+        "candidate_hash": _model_node(before, "architect")["draft"]["candidate_hash"],
+        "lock_version": 0,
+    }
+
+
+def _domain_candidate(body: dict, agent_key: str, endpoint_name: str):
+    from src.services.graph_configuration import EditableModelDraft
+
+    draft = _model_node(body, agent_key)["draft"]
+    return EditableModelDraft(
+        prompt_text=draft["prompt_text"],
+        endpoint_name=endpoint_name,
+        temperature=float(draft["model"]["temperature"]),
+        max_tokens=int(draft["model"]["max_tokens"]),
+        top_p=float(draft["model"]["top_p"]),
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{not json; PROBE_SECRET_https://leak.example/token",
+        b'{"lock_version": 0, "endpoint_name": "PROBE_SECRET_https://leak.example/token"}',
+        b'{"lock_version": 0}',
+    ],
+    ids=["malformed", "extra", "valid"],
+)
+def test_auth_before_probe_body_non_admin_is_denied_without_parsing(
+    session_factory, monkeypatch, body
+):
+    """Catches authorization after body parsing, a probe call, or a body echo."""
+    _force_admin(monkeypatch, is_admin=False)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("authorization parsed the raw request body")
+
+    def _must_not_resolve_probe():
+        calls.append("probe-dependency")
+        raise AssertionError("authorization resolved the probe")
+
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    with _app_for(session_factory, raise_server_exceptions=False, production_probe=True) as client:
+        client.app.dependency_overrides[
+            agent_definition_routes.get_structured_output_probe
+        ] = _must_not_resolve_probe
+        response = client.post(
+            _probe_url("architect"),
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Admin access required"}
+    assert _PROBE_SECRET not in response.text
+    assert "leak.example" not in response.text
+
+
+def test_model_endpoint_probe_route_production_dependency_is_the_databricks_probe():
+    """Catches the production route wired to a fake, None, or a second model factory."""
+    from src.services.agent_runtime import DatabricksModelAdapter
+
+    probe = agent_definition_routes.get_structured_output_probe()
+
+    assert isinstance(probe, DatabricksStructuredOutputProbe)
+    assert probe._model_factory is DatabricksModelAdapter._default_model_factory
+    assert probe._client_factory is DatabricksModelAdapter._default_client_factory
+
+
+@pytest.mark.parametrize(
+    ("dto_name", "valid"),
+    [
+        (
+            "StructuredOutputProbeSuccessResponse",
+            {
+                "code": "structured_output_probe_succeeded",
+                "endpoint_name": _SEED_ENDPOINT,
+                "candidate_hash": "a" * 64,
+                "lock_version": 0,
+            },
+        ),
+        (
+            "StructuredOutputProbeFailureResponse",
+            {
+                "code": "structured_output_probe_failed",
+                "message": "m",
+                "retryable": True,
+                "endpoint_name": _SEED_ENDPOINT,
+                "candidate_hash": "a" * 64,
+                "lock_version": 0,
+            },
+        ),
+    ],
+)
+def test_model_endpoint_probe_dtos_are_strict_siblings_that_forbid_extra_keys(dto_name, valid):
+    """Catches a probe DTO that accepts extra keys or extends a #263 DTO (c9)."""
+    from pydantic import ValidationError
+
+    from src.api.schemas import agent_definitions as schemas
+
+    dto = getattr(schemas, dto_name)
+    dto.model_validate(valid)
+    with pytest.raises(ValidationError):
+        dto.model_validate({**valid, "approved": True})
+    assert dto.__mro__[1] is schemas.BaseModel
+    assert not issubclass(dto, schemas.DraftLockRequest)
