@@ -443,3 +443,36 @@ class LegacyPromptSourceResponse(_AttributeResponse):
     agent_key: AgentKey
     lock_version: int
     source: LegacyPromptSourceRecordResponse
+
+
+class SystemModelEndpointResponse(BaseModel):
+    """One discovered foundation-model endpoint; display metadata only.
+
+    A read-only response item: it carries no task, provider, ID, or request field,
+    and the name is the exact endpoint name the catalog returned.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    display_name: str | None
+    description: str | None
+    docs: str | None
+
+
+class SystemModelDiscoveryResponse(BaseModel):
+    """Successful model endpoint discovery; ``items`` may be empty."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SystemModelEndpointResponse]
+
+
+class ModelEndpointCatalogErrorResponse(BaseModel):
+    """The only documented discovery failures: 403 forbidden and 503 unavailable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["catalog_forbidden", "catalog_unavailable"]
+    message: str
+    retryable: bool

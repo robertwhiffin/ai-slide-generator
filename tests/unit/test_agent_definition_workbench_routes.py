@@ -55,6 +55,7 @@ from src.database.models.graph_configuration import (
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_configuration import (
+    CatalogRemoteEndpointDraftValidator,
     DraftContentRejected,
     DraftValidationIssue,
     GraphConfiguration,
@@ -65,6 +66,13 @@ from src.services.agent_schema_registry import (
 )
 from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import load_graph_v1_manifest
+from src.services.model_endpoint_catalog import (
+    EndpointValidationFailure,
+    FakeModelEndpointCatalog,
+    ModelEndpointCatalogFailure,
+    SystemModelDiscovery,
+    SystemModelEndpoint,
+)
 from src.services.prompt_assembler import ROLE_UNTRUSTED_DATA_NOTICE
 
 EXPECTED_TOPOLOGY_ORDER = [
@@ -134,11 +142,25 @@ def session_factory() -> Iterator[sessionmaker]:
         engine.dispose()
 
 
+def _accepting_remote_endpoint_validator() -> CatalogRemoteEndpointDraftValidator:
+    """Route-test default: every remote endpoint check accepts, with no SDK client."""
+    return CatalogRemoteEndpointDraftValidator(FakeModelEndpointCatalog)
+
+
 def _app_for(
     session_factory: sessionmaker,
     *,
     raise_server_exceptions: bool = True,
+    catalog: object | None = None,
+    remote_endpoint_validator: object | None = None,
+    production_endpoint_validation: bool = False,
 ) -> TestClient:
+    """Build the admin router over SQLite.
+
+    The PUT's production remote endpoint validator is replaced by an accepting
+    fake unless a test injects its own or asks for the production dependency;
+    a discovery catalog is injected only when a test supplies one.
+    """
     app = FastAPI()
     app.include_router(router)
 
@@ -147,6 +169,19 @@ def _app_for(
             yield session
 
     app.dependency_overrides[get_db] = _override_db
+    if not production_endpoint_validation:
+        validator = (
+            remote_endpoint_validator
+            if remote_endpoint_validator is not None
+            else _accepting_remote_endpoint_validator()
+        )
+        app.dependency_overrides[
+            agent_definition_routes.get_remote_endpoint_draft_validator
+        ] = lambda: validator
+    if catalog is not None:
+        app.dependency_overrides[agent_definition_routes.get_model_endpoint_catalog] = (
+            lambda: catalog
+        )
     return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
@@ -573,6 +608,7 @@ def test_main_app_registers_the_dedicated_workbench_route():
 
     expected_methods = {
         "/api/admin/agent-definitions/workbench": {"GET"},
+        "/api/admin/agent-definitions/model-endpoints": {"GET"},
         "/api/admin/agent-definitions/draft/{agent_key}": {"PUT"},
         "/api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade": {
             "POST"
@@ -3396,3 +3432,633 @@ def test_the_overlay_type_error_catch_wraps_only_the_overlay_conversion(
     assert response.status_code == 500
     assert "candidate.schema_overlay" not in response.text
     assert after == before
+
+
+# ===========================================================================
+# #266 Task 3: read-only model endpoint discovery and the PUT's production
+# remote endpoint validator
+# ===========================================================================
+
+_MODEL_ENDPOINTS_URL = "/api/admin/agent-definitions/model-endpoints"
+_SEED_ENDPOINT = "databricks-claude-opus-4-6"
+_CUSTOM_ENDPOINT = "Custom-Endpoint_266"
+_CATALOG_FORBIDDEN = ModelEndpointCatalogFailure(
+    "catalog_forbidden",
+    "Model endpoint discovery is not permitted with this workspace identity.",
+    False,
+)
+_CATALOG_UNAVAILABLE = ModelEndpointCatalogFailure(
+    "catalog_unavailable",
+    "Model endpoint discovery is temporarily unavailable. Retry the request.",
+    True,
+)
+_ENDPOINT_UNAVAILABLE_MESSAGE = (
+    "Endpoint validation is temporarily unavailable. Retry the save."
+)
+
+
+def _populated_discovery() -> SystemModelDiscovery:
+    """Already in the catalog's `(display_name or name).casefold(), name` order."""
+    return SystemModelDiscovery(
+        endpoints=(
+            SystemModelEndpoint(
+                name=_SEED_ENDPOINT,
+                display_name="Claude Opus 4.6",
+                description="Anthropic frontier model",
+                docs="https://docs.databricks.com/claude",
+            ),
+            SystemModelEndpoint(
+                name="Databricks-GTE-Large_EN",
+                display_name=None,
+                description=None,
+                docs=None,
+            ),
+            SystemModelEndpoint(
+                name="databricks-meta-llama-3-3-70b-instruct",
+                display_name="Meta Llama 3.3 70B Instruct",
+                description=None,
+                docs="https://docs.databricks.com/llama",
+            ),
+        )
+    )
+
+
+_EXPECTED_POPULATED_ITEMS = [
+    {
+        "name": _SEED_ENDPOINT,
+        "display_name": "Claude Opus 4.6",
+        "description": "Anthropic frontier model",
+        "docs": "https://docs.databricks.com/claude",
+    },
+    {
+        "name": "Databricks-GTE-Large_EN",
+        "display_name": None,
+        "description": None,
+        "docs": None,
+    },
+    {
+        "name": "databricks-meta-llama-3-3-70b-instruct",
+        "display_name": "Meta Llama 3.3 70B Instruct",
+        "description": None,
+        "docs": "https://docs.databricks.com/llama",
+    },
+]
+
+
+def _revision_count(factory: sessionmaker) -> int:
+    with factory() as session:
+        return len(session.scalars(select(AgentDefinitionRevision.id)).all())
+
+
+def _endpoint_save_body(before: dict[str, object], endpoint_name: str) -> dict[str, object]:
+    return {
+        "lock_version": before["draft"]["lock_version"],
+        "candidate": _editable_candidate(
+            _model_node(before, "architect"), **{"model.endpoint_name": endpoint_name}
+        ),
+    }
+
+
+def _one_endpoint_issue(code: str, message: str) -> dict[str, object]:
+    return {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "candidate.model.endpoint_name",
+                "code": code,
+                "message": message,
+            }
+        ],
+    }
+
+
+def test_model_endpoints_populated_response_is_exact_items_only_and_deterministic(
+    session_factory, monkeypatch
+):
+    """Catches extra envelope keys, extra item metadata, rewritten names, or reordering."""
+    _force_admin(monkeypatch, is_admin=True)
+    catalog = FakeModelEndpointCatalog(
+        discovery_outcomes=[_populated_discovery(), _populated_discovery()]
+    )
+    with _app_for(session_factory, catalog=catalog) as client:
+        first = client.get(_MODEL_ENDPOINTS_URL)
+        second = client.get(_MODEL_ENDPOINTS_URL)
+
+    assert first.status_code == 200
+    body = first.json()
+    assert set(body) == {"items"}
+    assert body == {"items": _EXPECTED_POPULATED_ITEMS}
+    for item in body["items"]:
+        assert set(item) == {"name", "display_name", "description", "docs"}
+        assert not {"task", "provider", "id", "endpoint_id"} & set(item)
+    assert body["items"][0]["name"] == _SEED_ENDPOINT
+    assert second.status_code == 200
+    assert second.content == first.content
+    assert catalog.list_calls == 2
+
+
+def test_model_endpoints_empty_catalog_is_200_empty_items(session_factory, monkeypatch):
+    """Catches an empty discovery reported as an error or with extra keys."""
+    _force_admin(monkeypatch, is_admin=True)
+    catalog = FakeModelEndpointCatalog(discovery_outcomes=[SystemModelDiscovery(())])
+    with _app_for(session_factory, catalog=catalog) as client:
+        response = client.get(_MODEL_ENDPOINTS_URL)
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    assert catalog.list_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("failure", "status"),
+    [(_CATALOG_FORBIDDEN, 403), (_CATALOG_UNAVAILABLE, 503)],
+    ids=["forbidden", "unavailable"],
+)
+def test_model_endpoints_catalog_failure_is_only_the_documented_envelope(
+    session_factory, monkeypatch, failure, status
+):
+    """Catches a typed catalog failure collapsed into empty success or another status."""
+    _force_admin(monkeypatch, is_admin=True)
+    catalog = FakeModelEndpointCatalog(discovery_outcomes=[failure])
+    with _app_for(session_factory, catalog=catalog) as client:
+        response = client.get(_MODEL_ENDPOINTS_URL)
+
+    assert response.status_code == status
+    assert response.json() == {
+        "code": failure.code,
+        "message": str(failure),
+        "retryable": failure.retryable,
+    }
+    assert "items" not in response.json()
+    assert catalog.list_calls == 1
+
+
+def test_model_endpoints_openapi_documents_only_200_403_and_503(session_factory):
+    """Catches an undocumented or mis-modelled discovery error status."""
+    app = FastAPI()
+    app.include_router(router)
+    operation = app.openapi()["paths"][_MODEL_ENDPOINTS_URL]["get"]
+    responses = operation["responses"]
+
+    assert set(responses) == {"200", "403", "503"}
+    assert responses["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/SystemModelDiscoveryResponse"
+    }
+    for status in ("403", "503"):
+        assert responses[status]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/ModelEndpointCatalogErrorResponse"
+        }
+    assert "parameters" not in operation
+    assert "requestBody" not in operation
+
+
+def test_model_endpoints_unexpected_catalog_error_is_a_nonleaking_500(
+    session_factory, monkeypatch
+):
+    """Catches a broad catch that turns an unexpected fault into a typed 503 or 200."""
+    _force_admin(monkeypatch, is_admin=True)
+    catalog = FakeModelEndpointCatalog(
+        discovery_outcomes=[ValueError("SECRET_TOKEN_266 https://secret-host.example")]
+    )
+    with _app_for(session_factory, raise_server_exceptions=False, catalog=catalog) as client:
+        response = client.get(_MODEL_ENDPOINTS_URL)
+
+    assert response.status_code == 500
+    assert "SECRET_TOKEN_266" not in response.text
+    assert "secret-host" not in response.text
+    assert "catalog_unavailable" not in response.text
+
+
+def test_non_admin_model_endpoints_is_denied_before_the_catalog_is_obtained(
+    session_factory, monkeypatch
+):
+    """Catches a discovery route that resolves or calls the catalog before authorization."""
+    import src.core.databricks_client as databricks_client
+    from src.services import model_endpoint_catalog as catalog_module
+
+    _force_admin(monkeypatch, is_admin=False)
+    injected = FakeModelEndpointCatalog(discovery_outcomes=[_populated_discovery()])
+    resolved: list[str] = []
+    production: list[str] = []
+
+    def _recording_catalog():
+        resolved.append("catalog")
+        return injected
+
+    def _must_not_build(*_args, **_kwargs):
+        production.append("built")
+        raise AssertionError("authorization reached the production catalog")
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _must_not_build)
+    monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _must_not_build)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        production_response = client.get(_MODEL_ENDPOINTS_URL)
+        client.app.dependency_overrides[
+            agent_definition_routes.get_model_endpoint_catalog
+        ] = _recording_catalog
+        injected_response = client.get(_MODEL_ENDPOINTS_URL)
+
+    for response in (production_response, injected_response):
+        assert response.status_code == 403
+        assert response.json() == {"detail": "Admin access required"}
+        assert _SEED_ENDPOINT not in response.text
+    assert resolved == []
+    assert production == []
+    assert injected.list_calls == 0
+
+
+def test_model_endpoints_production_dependency_lists_through_the_bounded_system_catalog(
+    session_factory, monkeypatch
+):
+    """Catches a production discovery path that skips the bounded catalog client."""
+    import src.core.databricks_client as databricks_client
+    from src.services import model_endpoint_catalog as catalog_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    system_client = object()
+    bounded_client = object()
+    catalog = FakeModelEndpointCatalog(discovery_outcomes=[_populated_discovery()])
+    calls: list[tuple[str, object]] = []
+
+    def _get_system_client():
+        calls.append(("system", None))
+        return system_client
+
+    def _bounded(client):
+        calls.append(("bounded", client))
+        return bounded_client
+
+    def _catalog(workspace_client):
+        calls.append(("catalog", workspace_client))
+        return catalog
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _get_system_client)
+    monkeypatch.setattr(catalog_module, "bounded_catalog_workspace_client", _bounded)
+    monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _catalog)
+    with _app_for(session_factory) as client:
+        response = client.get(_MODEL_ENDPOINTS_URL)
+
+    assert response.status_code == 200
+    assert response.json() == {"items": _EXPECTED_POPULATED_ITEMS}
+    assert calls == [
+        ("system", None),
+        ("bounded", system_client),
+        ("catalog", bounded_client),
+    ]
+    assert catalog.list_calls == 1
+
+
+def test_model_endpoints_system_client_failure_is_the_typed_503(
+    session_factory, monkeypatch
+):
+    """Catches a system-client construction failure escaping discovery as a 500."""
+    import src.core.databricks_client as databricks_client
+
+    _force_admin(monkeypatch, is_admin=True)
+
+    def _failing_system_client():
+        raise databricks_client.DatabricksClientError(
+            "Failed to initialize system Databricks client: SECRET_TOKEN_266"
+        )
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _failing_system_client)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        response = client.get(_MODEL_ENDPOINTS_URL)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "catalog_unavailable",
+        "message": "Model endpoint discovery is temporarily unavailable. Retry the request.",
+        "retryable": True,
+    }
+    assert "SECRET_TOKEN_266" not in response.text
+
+
+def test_model_endpoints_catalog_is_never_invoked_by_workbench_or_tools_routes(
+    session_factory, monkeypatch
+):
+    """Catches the workbench read or the generic tools discovery reusing this catalog."""
+    import src.core.databricks_client as databricks_client
+    from src.api.routes import tools as tools_routes
+    from src.services import model_endpoint_catalog as catalog_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    catalog = FakeModelEndpointCatalog(discovery_outcomes=[_populated_discovery()])
+    production: list[str] = []
+
+    def _must_not_build(*_args, **_kwargs):
+        production.append("built")
+        raise AssertionError("a non-discovery route reached the model endpoint catalog")
+
+    class _ServingEndpoints:
+        def list(self):
+            return []
+
+    class _UserClient:
+        serving_endpoints = _ServingEndpoints()
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _must_not_build)
+    monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _must_not_build)
+    monkeypatch.setattr(tools_routes, "get_user_client", lambda: _UserClient())
+    with _app_for(session_factory, catalog=catalog) as client:
+        client.app.include_router(tools_routes.router)
+        workbench = client.get("/api/admin/agent-definitions/workbench")
+        tools_models = client.get("/api/tools/discover/model-endpoints")
+        tools_agents = client.get("/api/tools/discover/agent-bricks")
+
+    assert workbench.status_code == 200
+    assert tools_models.status_code == 200
+    assert tools_agents.status_code == 200
+    assert catalog.list_calls == 0
+    assert catalog.validated_names == []
+    assert production == []
+
+
+def test_non_admin_endpoint_validation_put_rejects_before_body_catalog_or_writer(
+    session_factory, monkeypatch
+):
+    """Catches a PUT that parses, validates remotely, or writes before authorization."""
+    import src.core.databricks_client as databricks_client
+
+    _force_admin(monkeypatch, is_admin=False)
+    catalog = FakeModelEndpointCatalog()
+    calls: list[str] = []
+
+    def _recording_validator():
+        calls.append("validator")
+        return CatalogRemoteEndpointDraftValidator(lambda: catalog)
+
+    def _must_not_write(*_args, **_kwargs):
+        calls.append("write")
+        raise AssertionError("authorization reached the draft writer")
+
+    def _must_not_build(*_args, **_kwargs):
+        calls.append("system-client")
+        raise AssertionError("authorization reached the production catalog")
+
+    monkeypatch.setattr(GraphConfiguration, "save_editable_model_draft", _must_not_write)
+    monkeypatch.setattr(databricks_client, "get_system_client", _must_not_build)
+    secret_url = "https://SECRET-HOST-266.cloud.databricks.com/serving-endpoints/x?token=dapiSECRET"
+    bodies = [
+        b'{"lock_version": 0, "candidate": {"prompt_text": "SUPER_SECRET_PROMPT", '
+        b'"model": {"endpoint_name": "' + secret_url.encode() + b'"',
+        json.dumps(
+            {
+                "lock_version": 0,
+                "candidate": {
+                    "prompt_text": "SUPER_SECRET_PROMPT",
+                    "model": {
+                        "endpoint_name": secret_url,
+                        "temperature": 0.1,
+                        "max_tokens": 10,
+                        "top_p": 0.9,
+                    },
+                },
+            }
+        ).encode(),
+    ]
+    responses = []
+    for production in (True, False):
+        with _app_for(
+            session_factory,
+            raise_server_exceptions=False,
+            production_endpoint_validation=production,
+        ) as client:
+            if not production:
+                client.app.dependency_overrides[
+                    agent_definition_routes.get_remote_endpoint_draft_validator
+                ] = _recording_validator
+            for body in bodies:
+                responses.append(
+                    client.put(
+                        _draft_save_url(),
+                        content=body,
+                        headers={"content-type": "application/json"},
+                    )
+                )
+
+    assert calls == []
+    assert catalog.validated_names == []
+    for response in responses:
+        assert response.status_code == 403
+        assert response.json() == {"detail": "Admin access required"}
+        assert "SUPER_SECRET_PROMPT" not in response.text
+        assert "SECRET-HOST-266" not in response.text
+        assert "dapiSECRET" not in response.text
+
+
+_ENDPOINT_TABLE = [
+    (
+        "endpoint_url_not_allowed",
+        "Endpoint must be a Databricks endpoint name, not a URL.",
+        False,
+    ),
+    ("endpoint_unknown", "Endpoint name was not found.", False),
+    (
+        "endpoint_forbidden",
+        "Endpoint cannot be validated with this workspace identity.",
+        False,
+    ),
+    ("endpoint_unavailable", _ENDPOINT_UNAVAILABLE_MESSAGE, True),
+    (
+        "endpoint_name_mismatch",
+        "Endpoint validation did not return the exact requested name.",
+        False,
+    ),
+    ("endpoint_not_ready", "Endpoint is not ready for invocation.", True),
+    (
+        "endpoint_update_in_progress",
+        "Endpoint configuration update is in progress.",
+        True,
+    ),
+    ("endpoint_update_failed", "Endpoint configuration update failed.", False),
+    (
+        "endpoint_update_canceled",
+        "Endpoint configuration update was canceled.",
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "retryable"),
+    _ENDPOINT_TABLE,
+    ids=[row[0] for row in _ENDPOINT_TABLE],
+)
+def test_endpoint_validation_table_outcomes_are_one_item_invalid_draft_with_no_mutation(
+    session_factory, monkeypatch, code, message, retryable
+):
+    """Catches a remote or local endpoint rejection that leaks, reshapes, or writes."""
+    _force_admin(monkeypatch, is_admin=True)
+    if code == "endpoint_url_not_allowed":
+        endpoint_name = "https://SECRET-HOST-266.example/serving-endpoints/x"
+        catalog = FakeModelEndpointCatalog()
+    else:
+        endpoint_name = _CUSTOM_ENDPOINT
+        catalog = FakeModelEndpointCatalog(
+            validation_outcomes={
+                endpoint_name: [EndpointValidationFailure(code, message, retryable)]
+            }
+        )
+    validator = CatalogRemoteEndpointDraftValidator(lambda: catalog)
+    revisions_before = _revision_count(session_factory)
+    with _app_for(session_factory, remote_endpoint_validator=validator) as client:
+        before = _workbench(client)
+        response = client.put(_draft_save_url(), json=_endpoint_save_body(before, endpoint_name))
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json() == _one_endpoint_issue(code, message)
+    assert endpoint_name not in response.text
+    assert after == before
+    assert _revision_count(session_factory) == revisions_before
+    expected_calls = [] if code == "endpoint_url_not_allowed" else [endpoint_name]
+    assert catalog.validated_names == expected_calls
+
+
+def test_endpoint_validation_accepted_save_validates_the_exact_submitted_name(
+    session_factory, monkeypatch
+):
+    """Catches a PUT that rewrites the endpoint or bypasses the injected validator."""
+    _force_admin(monkeypatch, is_admin=True)
+    catalog = FakeModelEndpointCatalog()
+    validator = CatalogRemoteEndpointDraftValidator(lambda: catalog)
+    with _app_for(session_factory, remote_endpoint_validator=validator) as client:
+        before = _workbench(client)
+        response = client.put(
+            _draft_save_url(), json=_endpoint_save_body(before, _CUSTOM_ENDPOINT)
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 200
+    assert response.json()["definition"]["model"]["endpoint_name"] == _CUSTOM_ENDPOINT
+    assert _model_node(after, "architect")["draft"]["model"]["endpoint_name"] == (
+        _CUSTOM_ENDPOINT
+    )
+    assert catalog.validated_names == [_CUSTOM_ENDPOINT]
+
+
+def test_endpoint_validation_production_dependency_supplies_the_remote_validator(
+    session_factory, monkeypatch
+):
+    """Catches the PUT's production wiring passing no remote validator (fail-open)."""
+    import src.core.databricks_client as databricks_client
+    from src.services import model_endpoint_catalog as catalog_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    system_client = object()
+    bounded_client = object()
+    catalog = FakeModelEndpointCatalog(
+        validation_outcomes={
+            _CUSTOM_ENDPOINT: [
+                EndpointValidationFailure(
+                    "endpoint_unknown", "Endpoint name was not found.", False
+                )
+            ]
+        }
+    )
+    calls: list[tuple[str, object]] = []
+
+    def _get_system_client():
+        calls.append(("system", None))
+        return system_client
+
+    def _bounded(client):
+        calls.append(("bounded", client))
+        return bounded_client
+
+    def _catalog(workspace_client):
+        calls.append(("catalog", workspace_client))
+        return catalog
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _get_system_client)
+    monkeypatch.setattr(catalog_module, "bounded_catalog_workspace_client", _bounded)
+    monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _catalog)
+    revisions_before = _revision_count(session_factory)
+    with _app_for(session_factory, production_endpoint_validation=True) as client:
+        before = _workbench(client)
+        assert calls == []
+        response = client.put(
+            _draft_save_url(), json=_endpoint_save_body(before, _CUSTOM_ENDPOINT)
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json() == _one_endpoint_issue(
+        "endpoint_unknown", "Endpoint name was not found."
+    )
+    assert calls == [
+        ("system", None),
+        ("bounded", system_client),
+        ("catalog", bounded_client),
+    ]
+    assert catalog.validated_names == [_CUSTOM_ENDPOINT]
+    assert after == before
+    assert _revision_count(session_factory) == revisions_before
+
+
+def test_endpoint_validation_system_client_failure_is_typed_endpoint_unavailable(
+    session_factory, monkeypatch
+):
+    """Catches a system-client construction failure escaping the PUT as a 500."""
+    import src.core.databricks_client as databricks_client
+
+    _force_admin(monkeypatch, is_admin=True)
+
+    def _failing_system_client():
+        raise databricks_client.DatabricksClientError(
+            "Failed to initialize system Databricks client: SECRET_TOKEN_266"
+        )
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _failing_system_client)
+    revisions_before = _revision_count(session_factory)
+    with _app_for(
+        session_factory,
+        raise_server_exceptions=False,
+        production_endpoint_validation=True,
+    ) as client:
+        before = _workbench(client)
+        response = client.put(
+            _draft_save_url(), json=_endpoint_save_body(before, _CUSTOM_ENDPOINT)
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json() == _one_endpoint_issue(
+        "endpoint_unavailable", _ENDPOINT_UNAVAILABLE_MESSAGE
+    )
+    assert "SECRET_TOKEN_266" not in response.text
+    assert _CUSTOM_ENDPOINT not in response.text
+    assert after == before
+    assert _revision_count(session_factory) == revisions_before
+
+
+def test_endpoint_validation_dependency_is_resolved_only_by_the_draft_put(
+    session_factory, monkeypatch
+):
+    """Catches the remote validator wired into the upgrade, source, or read routes."""
+    _force_admin(monkeypatch, is_admin=True)
+    resolved: list[str] = []
+
+    def _recording_validator():
+        resolved.append("validator")
+        return _accepting_remote_endpoint_validator()
+
+    catalog = FakeModelEndpointCatalog(discovery_outcomes=[SystemModelDiscovery(())])
+    with _app_for(session_factory, catalog=catalog) as client:
+        client.app.dependency_overrides[
+            agent_definition_routes.get_remote_endpoint_draft_validator
+        ] = _recording_validator
+        before = _workbench(client)
+        client.get(_MODEL_ENDPOINTS_URL)
+        _post_upgrade(client, "architect", before["draft"]["lock_version"])
+        _post_schema_contract_upgrade(client, "architect", before["draft"]["lock_version"])
+        client.post(_source_url(), json={"lock_version": before["draft"]["lock_version"]})
+        assert resolved == []
+        current = _workbench(client)
+        response = client.put(
+            _draft_save_url(), json=_endpoint_save_body(current, _SEED_ENDPOINT)
+        )
+
+    assert response.status_code == 200
+    assert resolved == ["validator"]
