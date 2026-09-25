@@ -995,6 +995,63 @@ def test_upgrade_content_to_v2_keeps_the_manifest_identity_carrier_type() -> Non
     }
 
 
+@pytest.mark.parametrize("agent_key", EXPECTED_ROLES)
+def test_upgrade_content_to_v2_retains_a_non_empty_overlay_byte_for_byte(agent_key: str) -> None:
+    """#264 I3: the upgrade keeps the stored overlay; it never resets it.
+
+    Uses the real manifest carrier with a legacy-shaped v1 overlay (guidance on a
+    canonical field, including nested JSON examples, plus a selection).  Since I1
+    the locked writer rejects such a v1 draft before this function is reached, so
+    this pins ``upgrade_content_to_v2``'s own retention contract for every caller:
+    the overlay object, its persisted JSON bytes (key order included) and its
+    content-hash contribution all survive, and the retained guidance is legal
+    under the v2 identity the upgrade installs.
+    """
+    import json
+
+    from src.domain.skill_io import OUTPUT_SCHEMAS
+    from src.services.graph_configuration_content import definition_content_values
+    from src.services.graph_definition_manifest import (
+        load_graph_v1_manifest,
+        schema_contract_identity,
+    )
+
+    names = list(OUTPUT_SCHEMAS[agent_key].model_fields)
+    overrides: dict[str, object] = {
+        names[-1]: {
+            "examples": [{"nested": [1, "two", None]}, "flat"],
+            "description": "Retained guidance.",
+        }
+    }
+    if len(names) > 1:  # Deck Reviewer has a single canonical field.
+        overrides[names[0]] = {"description": "First-field guidance."}
+    overlay = SchemaOverlay.model_validate(
+        {"field_overrides": overrides, "additional_optional_fields": ["diagnostic_notes"]}
+    )
+    original = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
+    ).model_copy(update={"schema_overlay": overlay})
+    assert original.schema_contract.version == 1
+
+    upgraded = upgrade_content_to_v2(original)
+
+    assert upgraded.schema_contract.version == 2
+    assert upgraded.schema_overlay is original.schema_overlay
+    assert json.dumps(definition_content_values(upgraded)["schema_overlay"]) == json.dumps(
+        definition_content_values(original)["schema_overlay"]
+    )
+    assert dict(upgraded.schema_overlay.field_overrides) != {}
+    registry = AgentSchemaRegistry()
+    assert (
+        registry.validate_overlay(
+            agent_key,
+            schema_contract_identity(agent_key, upgraded.schema_contract),
+            upgraded.schema_overlay,
+        )
+        == ()
+    )
+
+
 def test_upgraded_content_round_trips_through_the_persistence_mapper() -> None:
     """A v2 schema contract survives the one landed row mapper unchanged.
 
