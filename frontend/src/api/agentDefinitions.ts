@@ -45,6 +45,67 @@ export interface SchemaOverlay {
   additional_optional_fields: string[];
 }
 
+/**
+ * Code-owned descriptor for one selectable optional output field.
+ * Every property except `name` is read-only on the client; the client sends
+ * only the field name (in `additional_optional_fields`) and optionally
+ * overrides `description`/`examples` via `field_overrides`.
+ */
+export interface FieldDescriptorItemSchema {
+  type: string;
+  strip_whitespace: boolean;
+  min_length: number;
+  max_length: number;
+}
+
+export interface FieldDescriptorSchema {
+  type: string[];
+  default: null;
+  max_items: number;
+  items: FieldDescriptorItemSchema;
+}
+
+export interface FieldDescriptor {
+  name: string;
+  description: string;
+  examples: unknown[];
+  schema: FieldDescriptorSchema;
+}
+
+/** Any JSON value, as the server serializes it. */
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+/**
+ * Code-owned, read-only display data for one canonical output field of the role's
+ * Pydantic output schema. Never a request field: the client shows it as protected
+ * labels and may only attach description/examples guidance under `field_overrides`.
+ * `default` is present exactly when `required` is false.
+ */
+export interface CanonicalFieldDescriptor {
+  name: string;
+  type: string;
+  required: boolean;
+  enum: string[] | null;
+  default?: JsonValue;
+}
+
+/**
+ * The editable schema overlay included in a save candidate.
+ * `field_overrides` keys are canonical or selectable optional field names.
+ * Only `description` and `examples` within each value reach the domain
+ * validator; any other property is rejected with `overlay_guidance_property_forbidden`.
+ */
+export interface EditableSchemaOverlay {
+  field_overrides: Record<string, unknown>;
+  additional_optional_fields: string[];
+}
+
 export type AssemblyBlock =
   | { kind: 'authored_prompt'; condition: 'always' }
   | {
@@ -108,6 +169,18 @@ interface DefinitionContent {
   protected_assembly: ContentIdentity;
   schema_contract: ContentIdentity;
   protected_stage_view: ProtectedStageView[];
+  /**
+   * Read-only server-computed list of selectable optional output fields for
+   * this schema contract version. Empty for v1; one entry (diagnostic_notes)
+   * for v2. Never a request field — the client displays and selects from it
+   * but the server always derives it from the registry.
+   */
+  selectable_optional_fields: FieldDescriptor[];
+  /**
+   * Read-only server-derived display data for every canonical output field, in model
+   * field order. Never a request field and never stored.
+   */
+  canonical_fields: CanonicalFieldDescriptor[];
 }
 
 export interface PublishedDefinition extends DefinitionContent {
@@ -180,6 +253,13 @@ export interface EditableModelDraft {
    * as `null` on a 409, so both exact shapes are accepted on the way back in.
    */
   assembly_rules?: AssemblyRulesV2 | null;
+  /**
+   * Present only when the client has explicit overlay edits (non-empty
+   * additional_optional_fields or non-empty field_overrides). Omitting the key
+   * preserves the stored overlay on the server unchanged, keeping the five-field
+   * save body byte-identical when no overlay edits have been made.
+   */
+  schema_overlay?: EditableSchemaOverlay | null;
 }
 
 export interface DraftSaveRequest {
@@ -306,16 +386,30 @@ function isWorkbenchModel(value: unknown): value is WorkbenchModel {
 }
 
 /**
- * Accepts exactly two shapes and nothing else: the #263 two-key v1 candidate, and
- * the three-key candidate the server echoes, whose `assembly_rules` is either
- * literal `null` or exact v2 rules. Extra or missing keys are still rejected.
+ * Accepts all four valid candidate shapes:
+ *   - {prompt_text, model}                               — v1, no overlay
+ *   - {prompt_text, model, assembly_rules}               — v2 assembly, no overlay
+ *   - {prompt_text, model, schema_overlay}               — v1 assembly, with overlay
+ *   - {prompt_text, model, assembly_rules, schema_overlay} — v2 assembly + overlay
+ * Extra or missing keys are still rejected. The server echoes back exactly what the
+ * client sent in a 409 client_candidate, so all sent shapes must be parseable.
  */
 function isEditableModelDraft(value: unknown): value is EditableModelDraft {
   if (!isPlainRecord(value)) return false;
   if (typeof value.prompt_text !== 'string' || !isWorkbenchModel(value.model)) return false;
-  if (hasExactKeys(value, ['prompt_text', 'model'])) return true;
-  if (!hasExactKeys(value, ['prompt_text', 'model', 'assembly_rules'])) return false;
-  return value.assembly_rules === null || isAssemblyRulesV2(value.assembly_rules);
+  const hasAssembly = 'assembly_rules' in value;
+  const hasOverlay = 'schema_overlay' in value;
+  const expectedKeys: readonly string[] = hasAssembly && hasOverlay
+    ? ['prompt_text', 'model', 'assembly_rules', 'schema_overlay']
+    : hasAssembly
+      ? ['prompt_text', 'model', 'assembly_rules']
+      : hasOverlay
+        ? ['prompt_text', 'model', 'schema_overlay']
+        : ['prompt_text', 'model'];
+  if (!hasExactKeys(value, expectedKeys)) return false;
+  if (hasAssembly && value.assembly_rules !== null && !isAssemblyRulesV2(value.assembly_rules)) return false;
+  if (hasOverlay && value.schema_overlay !== null && !isEditableSchemaOverlay(value.schema_overlay)) return false;
+  return true;
 }
 
 function isDraftMetadata(value: unknown): value is DraftMetadata {
@@ -337,6 +431,70 @@ function isSchemaOverlay(value: unknown): value is SchemaOverlay {
     && isPlainRecord(value.field_overrides)
     && Array.isArray(value.additional_optional_fields)
     && value.additional_optional_fields.every((field) => typeof field === 'string');
+}
+
+function isEditableSchemaOverlay(value: unknown): value is EditableSchemaOverlay {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['field_overrides', 'additional_optional_fields'])
+    && isPlainRecord(value.field_overrides)
+    && Array.isArray(value.additional_optional_fields)
+    && value.additional_optional_fields.every((f) => typeof f === 'string');
+}
+
+function isFieldDescriptorItemSchema(value: unknown): value is FieldDescriptorItemSchema {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['type', 'strip_whitespace', 'min_length', 'max_length'])
+    && typeof value.type === 'string'
+    && typeof value.strip_whitespace === 'boolean'
+    && isNonnegativeInteger(value.min_length)
+    && isNonnegativeInteger(value.max_length);
+}
+
+function isFieldDescriptorSchema(value: unknown): value is FieldDescriptorSchema {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['type', 'default', 'max_items', 'items'])
+    && Array.isArray(value.type)
+    && value.type.every((t) => typeof t === 'string')
+    && value.default === null
+    && isPositiveInteger(value.max_items)
+    && isFieldDescriptorItemSchema(value.items);
+}
+
+function isFieldDescriptor(value: unknown): value is FieldDescriptor {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['name', 'description', 'examples', 'schema'])
+    && typeof value.name === 'string'
+    && typeof value.description === 'string'
+    && Array.isArray(value.examples)
+    && isFieldDescriptorSchema(value.schema);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isPlainRecord(value) && Object.values(value).every(isJsonValue);
+}
+
+function isCanonicalFieldDescriptor(value: unknown): value is CanonicalFieldDescriptor {
+  if (!isPlainRecord(value) || typeof value.required !== 'boolean') return false;
+  const keys = value.required
+    ? ['name', 'type', 'required', 'enum']
+    : ['name', 'type', 'required', 'enum', 'default'];
+  return hasExactKeys(value, keys)
+    && typeof value.name === 'string' && value.name.length > 0
+    && typeof value.type === 'string' && value.type.length > 0
+    && (value.enum === null || (
+      Array.isArray(value.enum)
+      && value.enum.length > 0
+      && value.enum.every((item) => typeof item === 'string')
+    ))
+    && (value.required || isJsonValue(value.default));
+}
+
+function isCanonicalFieldList(value: unknown): value is CanonicalFieldDescriptor[] {
+  if (!Array.isArray(value) || !value.every(isCanonicalFieldDescriptor)) return false;
+  return new Set(value.map((field) => field.name)).size === value.length;
 }
 
 function isAssemblyBlock(value: unknown): value is AssemblyBlock {
@@ -441,7 +599,7 @@ function isDraftDefinition(value: unknown): value is DraftDefinition {
     && hasExactKeys(value, [
       'base_revision_id', 'candidate_hash', 'definition_version', 'prompt_text', 'model',
       'schema_overlay', 'assembly_rules', 'protected_assembly', 'schema_contract',
-      'protected_stage_view',
+      'protected_stage_view', 'selectable_optional_fields', 'canonical_fields',
     ])
     && isPositiveInteger(value.base_revision_id)
     && typeof value.candidate_hash === 'string' && /^[0-9a-f]{64}$/.test(value.candidate_hash)
@@ -453,7 +611,10 @@ function isDraftDefinition(value: unknown): value is DraftDefinition {
     && isContentIdentity(value.protected_assembly)
     && isContentIdentity(value.schema_contract)
     && Array.isArray(value.protected_stage_view)
-    && value.protected_stage_view.every(isProtectedStageView);
+    && value.protected_stage_view.every(isProtectedStageView)
+    && Array.isArray(value.selectable_optional_fields)
+    && value.selectable_optional_fields.every(isFieldDescriptor)
+    && isCanonicalFieldList(value.canonical_fields);
 }
 
 export function parseDraftSaveSuccessResponse(value: unknown): DraftSaveSuccessResponse | null {
@@ -594,7 +755,7 @@ export async function saveDraftDefinition(
 
 async function postDraftOperation(
   agentKey: AgentKey,
-  operation: 'protected-assembly-upgrade' | 'legacy-prompt-source',
+  operation: 'protected-assembly-upgrade' | 'schema-contract-upgrade' | 'legacy-prompt-source',
   request: DraftLockRequest,
 ): Promise<{ status: number; payload: unknown; statusText: string }> {
   const response = await fetch(
@@ -653,6 +814,39 @@ export async function upgradeDraftProtectedAssembly(
  * would surface here as "the server response was invalid" rather than as a parse error.
  * See `sourceRecoverySucceeded` in `draftEditorState.ts`.
  */
+
+/**
+ * Applies the server-owned schema-contract upgrade. The body is exactly
+ * `{ lock_version }`; the client supplies no prompt, no rules, and no candidate.
+ */
+export async function upgradeDraftSchemaContract(
+  agentKey: AgentKey,
+  request: DraftLockRequest,
+): Promise<DraftSaveSuccessResponse> {
+  const { status, payload, statusText } = await postDraftOperation(
+    agentKey,
+    'schema-contract-upgrade',
+    request,
+  );
+
+  if (status === 200) {
+    const parsed = parseDraftSaveSuccessResponse(payload);
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    return parsed;
+  }
+  if (status === 409) {
+    const parsed = parseDraftSaveConflictResponse(payload, 'null');
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    throw new AgentDefinitionApiError(status, parsed, statusText, true);
+  }
+  if (status === 422) {
+    const parsed = parseDraftValidationErrorResponse(payload);
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    throw new AgentDefinitionApiError(status, parsed, statusText, true);
+  }
+  throw new AgentDefinitionApiError(status, payload, statusText, true);
+}
+
 export async function readDraftLegacyPromptSource(
   agentKey: AgentKey,
   request: DraftLockRequest,

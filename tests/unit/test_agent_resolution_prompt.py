@@ -27,8 +27,30 @@ from src.services.agent_runtime import (
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 
+VALID_OUTPUT_VALUES: dict[str, dict[str, object]] = {
+    "architect": {"intent": "discuss", "message": "an answer"},
+    "data_analyst": {
+        "outcome": "success",
+        "synthesis": "a finding",
+        "sources": ["warehouse.sales"],
+    },
+    "builder": {"position": 3, "html": "<section></section>"},
+    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
+    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "deck_reviewer": {},
+}
+
 
 class PromptCaptureAdapter:
+    """Adapter double answering with a valid instance of the schema it is handed.
+
+    #264 Task 3: the runtime now binds the provider to the registry's *composed*
+    schema and validates the result through ``validate_output`` before exposing the
+    canonical projection, so an unvalidated ``model_construct()`` stand-in no longer
+    survives the boundary.
+    """
+
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
@@ -41,7 +63,7 @@ class PromptCaptureAdapter:
         prompt: str,
     ) -> BaseModel:
         self.prompts.append(prompt)
-        return schema.model_construct()
+        return schema.model_validate(VALID_OUTPUT_VALUES[agent_key])
 
 
 def _assembled_prompt(

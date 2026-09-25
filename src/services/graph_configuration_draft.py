@@ -12,6 +12,11 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from src.services.agent_schema_registry import (
+    AgentSchemaRegistry,
+    upgrade_content_to_v2,
+)
+from src.services.agent_schema_types import SchemaOverlay, SchemaValidationIssue
 from src.services.graph_configuration_content import (
     GraphConfigurationIntegrityError,
     definition_content_from_row,
@@ -30,6 +35,7 @@ from src.services.graph_definition_manifest import (
     AssemblyRulesV2,
     DefinitionContent,
     definition_content_hash,
+    schema_contract_identity,
 )
 from src.services.prompt_assembler import PromptAssembler, PromptAssemblyRejected
 
@@ -42,6 +48,10 @@ class EditableModelDraft:
     max_tokens: int
     top_p: float
     assembly_rules: AssemblyRulesV2 | None = None
+    #: Absent means "retain the stored overlay"; it never means "clear it".  The
+    #: protected ``schema_contract`` identity is deliberately NOT a member here,
+    #: so an ordinary client save cannot name it at all.
+    schema_overlay: SchemaOverlay | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,18 @@ class DraftContentRejected(ValueError):  # noqa: N818 - stable public domain nam
 
 
 _PROMPT_ASSEMBLER = PromptAssembler()
+_SCHEMA_REGISTRY = AgentSchemaRegistry()
+
+#: Wire prefix for every overlay issue that names a location inside the candidate's
+#: own editable overlay.  The protected identity keeps #263's unprefixed
+#: ``schema_contract`` field instead, so one condition never gets two spellings.
+_OVERLAY_ISSUE_ROOT = "candidate.schema_overlay"
+_SCHEMA_CONTRACT_FIELD = "schema_contract"
+_SCHEMA_ALREADY_CURRENT = DraftValidationIssue(
+    _SCHEMA_CONTRACT_FIELD,
+    "already_current",
+    "Schema contract is already current.",
+)
 
 #: One ordered tuple of validators over a complete rehydrated ``DefinitionContent``.
 #: A validator owns no persistence and returns its issues in its own declared order.
@@ -161,6 +183,37 @@ def _assembly_candidate_validator(
     return ()
 
 
+def _overlay_issue_field(issue: SchemaValidationIssue) -> str:
+    """Name one registry overlay issue in this writer's wire vocabulary.
+
+    A located issue is reported under the candidate's own overlay prefix.  The one
+    unlocated issue — the stored contract bundle failing to resolve — is server
+    state rather than candidate content, so it is reported on the protected
+    ``schema_contract`` field, matching the identity's existing spelling.
+    """
+    if not issue.path:
+        return _SCHEMA_CONTRACT_FIELD
+    return ".".join((_OVERLAY_ISSUE_ROOT, *(str(segment) for segment in issue.path)))
+
+
+def _schema_overlay_candidate_validator(
+    content: DefinitionContent,
+) -> tuple[DraftValidationIssue, ...]:
+    """Structural adapter for ``AgentSchemaRegistry.validate_overlay``.
+
+    It adds no semantics and owns no catalog: the registry decides eligibility,
+    and the role is taken from the record rather than from the stored identity, so
+    a stored version/digest pair can never select another role's contract.
+    """
+    identity = schema_contract_identity(content.agent_key, content.schema_contract)
+    return tuple(
+        DraftValidationIssue(_overlay_issue_field(issue), issue.code, issue.message)
+        for issue in _SCHEMA_REGISTRY.validate_overlay(
+            content.agent_key, identity, content.schema_overlay
+        )
+    )
+
+
 _EXPECTED_AGENT_KEYS = frozenset(GRAPH_V1_AGENT_KEYS)
 _IMMUTABLE_DRAFT_FIELDS = (
     "definition_version",
@@ -190,8 +243,13 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
     """Own complete draft reconstruction, validation, hashing, and audit writes."""
 
     #: Deterministic/local validators; they run before the stale comparison.
+    #: Schema-overlay validation belongs here and not in ``post_stale_validators``:
+    #: the stale comparison short-circuits the post-stale phase, so registering it
+    #: there would turn the mandated invalid-plus-stale ordered 422 into a 409 and
+    #: make every overlay issue invisible.
     local_candidate_validators: tuple[DraftCandidateValidator, ...] = (
         _assembly_candidate_validator,
+        _schema_overlay_candidate_validator,
     )
     #: Remote/expensive validators; they run only for a current candidate and
     #: immediately before the one mapper/hash/flush/audit/lock write.
@@ -240,6 +298,10 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             supplied_rules = candidate.assembly_rules is not None
             if supplied_rules:
                 payload["assembly_rules"] = candidate.assembly_rules.model_dump(
+                    mode="python"
+                )
+            if candidate.schema_overlay is not None:
+                payload["schema_overlay"] = candidate.schema_overlay.model_dump(
                     mode="python"
                 )
             try:
@@ -354,6 +416,60 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                 raise DraftContentRejected(
                     *_copied_assembly_issues(rejection)
                 ) from rejection
+            self._run_candidate_validators(self.local_candidate_validators, target)
+            self._run_candidate_validators(self.post_stale_validators, target)
+            return self._write_locked_content(
+                session,
+                locked=locked,
+                content=target,
+                actor=actor,
+            )
+
+    def upgrade_draft_schema_contract(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+        expected_lock_version: int,
+        actor: str,
+    ) -> DraftSaveResult | DraftSaveConflict[None]:
+        """Apply the one permitted v1 to v2 schema-contract transition.
+
+        This is a **separate** entry point from
+        :meth:`upgrade_draft_protected_assembly`, and the two deliberately differ in
+        precedence.  That sibling returns its stale conflict *before* reaching any
+        validation; this one validates the existing content *first*, so an
+        invalid-plus-stale request returns the ordered 422 the schema-overlay wire
+        contract requires while a valid stale request still returns 409.  The
+        difference is intentional: harmonising them would silently change the
+        already-shipped protected-assembly status for the same request shape.
+
+        Inner ordering mirrors ``PromptAssembler.upgrade_definition_to_v2``, which
+        validates before reporting ``already_current`` — here on field
+        ``schema_contract``.  It reuses the one locked aggregate, the one
+        mapper/hash/flush/audit/lock write, and adds no second lookup or
+        transaction.
+        """
+        self._validate_common(actor, expected_lock_version, agent_key)
+        with session.begin():
+            locked = self._read_workbench_for_draft_write(
+                session,
+                agent_key=agent_key,
+            )
+            current = locked.selected.draft.content
+            self._run_candidate_validators(self.local_candidate_validators, current)
+            if expected_lock_version != locked.snapshot.draft.lock_version:
+                return DraftSaveConflict(
+                    expected_lock_version=expected_lock_version,
+                    current_lock_version=locked.snapshot.draft.lock_version,
+                    client_candidate=None,
+                    server=self._draft_aggregate_snapshot(locked.snapshot),
+                )
+            if schema_contract_identity(
+                agent_key, current.schema_contract
+            ) == _SCHEMA_REGISTRY.identity_for(agent_key, 2):
+                raise DraftContentRejected(_SCHEMA_ALREADY_CURRENT)
+            target = upgrade_content_to_v2(current)
             self._run_candidate_validators(self.local_candidate_validators, target)
             self._run_candidate_validators(self.post_stale_validators, target)
             return self._write_locked_content(
@@ -556,6 +672,16 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                         "candidate.assembly_rules",
                         "strict_type",
                         "Assembly rules must be the current editable custom-block record.",
+                    )
+                )
+            if candidate.schema_overlay is not None and not isinstance(
+                candidate.schema_overlay, SchemaOverlay
+            ):
+                issues.append(
+                    DraftValidationIssue(
+                        _OVERLAY_ISSUE_ROOT,
+                        "strict_type",
+                        "Schema overlay must be the current editable overlay record.",
                     )
                 )
         if issues:

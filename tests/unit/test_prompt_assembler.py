@@ -1105,6 +1105,32 @@ def test_server_emits_exactly_the_client_fixture_422_triples() -> None:
     ]
 
 
+def test_client_schema_already_current_fixture_is_the_server_issue() -> None:
+    """Joins ``SCHEMA_ALREADY_CURRENT_REJECTION`` to the server's schema-upgrade issue.
+
+    Reads ``frontend/tests/fixtures/mocks.ts`` as text and compares its one
+    (field, code, message) triple to the ``_SCHEMA_ALREADY_CURRENT`` issue that
+    ``graph_configuration_draft`` raises, and to a hand-typed attestation of it.  The
+    field is the unprefixed ``schema_contract`` (correction 18), not
+    ``schema_contract.version``; the fixture once invented the latter and the client
+    routed the real issue to the wrong tab (#264 Task 6 review, I1).  What the route
+    actually emits is pinned by ``test_agent_definition_workbench_routes.py``.
+    """
+    from src.services import graph_configuration_draft
+
+    server = graph_configuration_draft._SCHEMA_ALREADY_CURRENT
+    assert _client_rejection("SCHEMA_ALREADY_CURRENT_REJECTION") == (
+        server.field,
+        server.code,
+        server.message,
+    )
+    assert (server.field, server.code, server.message) == (
+        "schema_contract",
+        "already_current",
+        "Schema contract is already current.",
+    )
+
+
 @pytest.mark.parametrize(
     ("fixture", "stages"),
     [

@@ -18,7 +18,8 @@ import json
 import logging
 import textwrap
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Callable, Protocol, cast
 
@@ -48,12 +49,23 @@ from src.services.agent_runtime_identity import (
     LoggingAgentInvocationIdentitySink,
     RecordingAgentInvocationIdentitySink,
 )
+from src.services.agent_schema_registry import (
+    AgentSchemaRegistry,
+    SchemaOverlayValidationError,
+)
+from src.services.agent_schema_types import (
+    JsonValue,
+    SchemaContractIdentity,
+    ValidatedAgentOutput,
+    freeze_json_containers,
+)
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_definition_manifest import (
     AssemblyRules,
     DefinitionContent,
     definition_content_hash,
     load_graph_v1_manifest,
+    schema_contract_identity,
 )
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
@@ -123,13 +135,6 @@ class ProtectedPromptIdentity:
 
 
 @dataclass(frozen=True)
-class SchemaContractIdentity:
-    agent_key: str
-    version: int
-    digest: str
-
-
-@dataclass(frozen=True)
 class AgentModelConfiguration:
     endpoint_name: str
     temperature: float
@@ -178,6 +183,20 @@ class AgentInvocationDiagnostics:
     schema_contract: SchemaContractIdentity
     assembly_stages: tuple[ResolvedPromptStage, ...]
     latency_ms: float
+    additional_fields: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Freeze the optional projection recursively (#260's standing rule).
+
+        The runtime copies the registry's already-frozen mapping in, so this is
+        normally a re-freeze of frozen values.  It is unconditional so that any
+        other construction site cannot hand diagnostics a mutable container.
+        """
+        object.__setattr__(
+            self,
+            "additional_fields",
+            freeze_json_containers(dict(self.additional_fields)),
+        )
 
 
 @dataclass(frozen=True)
@@ -288,6 +307,14 @@ def _schema_validator_material(schema: type[BaseModel]) -> list[dict[str, str]]:
 
 
 class _SchemaContractRegistry:
+    """Fail-closed v1 identity table for the temporary code-owned definition source.
+
+    Resolution moved to the one public ``AgentSchemaRegistry`` in #264 Task 3, so
+    this retains only the construction-time digest check and ``identity_for``; it has
+    no ``resolve`` any more, which stops an unreachable second contract check from
+    reading as a live guard.
+    """
+
     def __init__(self) -> None:
         self._contracts: dict[str, tuple[SchemaContractIdentity, type[BaseModel]]] = {}
         for agent_key in MODEL_DRIVEN_AGENT_KEYS:
@@ -310,21 +337,6 @@ class _SchemaContractRegistry:
 
     def identity_for(self, agent_key: str) -> SchemaContractIdentity:
         return self._contracts[agent_key][0]
-
-    def resolve(
-        self,
-        agent_key: str,
-        identity: SchemaContractIdentity,
-    ) -> type[BaseModel]:
-        expected_identity, schema = self._contracts[agent_key]
-        if identity != expected_identity:
-            raise IncompatibleSchemaContractError(
-                f"Schema contract is incompatible with agent {agent_key!r}: "
-                f"received agent={identity.agent_key!r}, version={identity.version}, "
-                f"digest={identity.digest}; expected agent={expected_identity.agent_key!r}, "
-                f"version={expected_identity.version}, digest={expected_identity.digest}"
-            )
-        return schema
 
 
 class CodeOwnedAgentDefinitionSource:
@@ -487,6 +499,19 @@ class CompatibilityResolvedDefinitionLoader:
         )
 
 
+def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:
+    """Convert one provider result into the raw top-level keys it actually supplied.
+
+    ``exclude_unset`` is load-bearing and not a tidiness choice: the registry tells
+    an *absent* optional key from an explicitly supplied ``null`` by raw key
+    presence, so a field left at its declared ``None`` default must not arrive as
+    an explicit null.  ``mode="python"`` keeps native leaves for the re-validation
+    that follows rather than stringifying them for a JSON boundary this value never
+    crosses.
+    """
+    return provider_output.model_dump(mode="python", exclude_unset=True)
+
+
 class AgentRuntime:
     """Resolve and execute one model-driven Agent Definition."""
 
@@ -501,7 +526,7 @@ class AgentRuntime:
         self._model_adapter = model_adapter
         self._identity_sink = identity_sink
         self._prompt_assembler = PromptAssembler()
-        self._schema_contracts = _SchemaContractRegistry()
+        self._schema_registry = AgentSchemaRegistry()
 
     @classmethod
     def compatibility(
@@ -552,24 +577,24 @@ class AgentRuntime:
             content = DefinitionContent.model_validate(definition.content.model_dump(mode="python"))
             if content.agent_key != definition.agent_key:
                 raise ValueError("resolved definition role does not match its content")
-            if (
+            schema_identity = schema_contract_identity(
+                definition.agent_key, content.schema_contract
+            )
+            if schema_identity.version == _SCHEMA_CONTRACT_VERSION and (
                 content.schema_overlay.field_overrides
                 or content.schema_overlay.additional_optional_fields
             ):
                 raise IncompatibleSchemaContractError(
-                    "Graph Version 1 requires an empty schema overlay"
+                    "Schema contract version 1 requires an empty schema overlay"
                 )
             self._prompt_assembler.resolve_bundle(content.protected_assembly)
             protected_prompt = ProtectedPromptIdentity(
                 version=content.protected_assembly.version,
                 digest=content.protected_assembly.digest,
             )
-            schema_identity = SchemaContractIdentity(
-                agent_key=definition.agent_key,
-                version=content.schema_contract.version,
-                digest=content.schema_contract.digest,
+            composed = self._schema_registry.compose(
+                definition.agent_key, schema_identity, content.schema_overlay
             )
-            schema = self._schema_contracts.resolve(definition.agent_key, schema_identity)
             assembled = self._prompt_assembler.assemble(
                 definition=content,
                 payload=payload,
@@ -586,6 +611,16 @@ class AgentRuntime:
         except IncompatibleSchemaContractError as exc:
             raise PersistedConfigurationUnavailableError(
                 code="schema_contract_unavailable"
+            ) from exc
+        except SchemaOverlayValidationError as exc:
+            if any(
+                issue.code == "overlay_schema_contract_unavailable" for issue in exc.issues
+            ):
+                raise PersistedConfigurationUnavailableError(
+                    code="schema_contract_unavailable"
+                ) from exc
+            raise PersistedConfigurationUnavailableError(
+                code="invalid_persisted_definition"
             ) from exc
         except (ValidationError, ValueError, TypeError) as exc:
             raise PersistedConfigurationUnavailableError(
@@ -612,12 +647,12 @@ class AgentRuntime:
             actor_session_id=assembly_context.actor_session_id,
         )
 
-        def callback() -> BaseModel:
+        def callback() -> ValidatedAgentOutput:
             try:
-                return self._model_adapter.invoke(
+                provider_output = self._model_adapter.invoke(
                     agent_key=definition.agent_key,
                     configuration=configuration,
-                    schema=schema,
+                    schema=composed.model,
                     prompt=prompt,
                 )
             except ModelProviderUnavailableError as exc:
@@ -626,13 +661,16 @@ class AgentRuntime:
                     graph_release_id=definition.graph_release_id,
                     agent_definition_revision_id=definition.agent_definition_revision_id,
                 ) from exc
+            return self._schema_registry.validate_output(
+                composed, _supplied_output_keys(provider_output)
+            )
 
         started = time.perf_counter()
-        output = self._identity_sink.invoke(identity, callback)
+        validated = self._identity_sink.invoke(identity, callback)
         latency_ms = (time.perf_counter() - started) * 1000
 
         return AgentInvocationResult(
-            output=output,
+            output=validated.canonical_output,
             diagnostics=AgentInvocationDiagnostics(
                 agent_key=definition.agent_key,
                 definition_version=definition.agent_definition_revision_id,
@@ -642,6 +680,7 @@ class AgentRuntime:
                 schema_contract=schema_identity,
                 assembly_stages=assembled.stages,
                 latency_ms=latency_ms,
+                additional_fields=validated.additional_fields,
             ),
         )
 
