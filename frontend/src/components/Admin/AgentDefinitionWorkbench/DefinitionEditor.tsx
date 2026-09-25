@@ -7,6 +7,7 @@ import type {
   ModelAgentNode,
 } from '../../../api/agentDefinitions';
 import { AssemblyEditor } from './AssemblyEditor';
+import { OutputSchemaEditor } from './OutputSchemaEditor';
 import {
   definitionFormatVersion,
   draftStatus,
@@ -32,9 +33,20 @@ const TAB_LABELS: Record<DefinitionTab, string> = {
 /** The exact upgrade-only code that requires manual prompt resolution. */
 export const MANUAL_RESOLUTION_CODE = 'legacy_prompt_manual_resolution_required';
 
-/** Every server issue is surfaced in its exact order; this only chooses the tab link. */
+/**
+ * Every server issue is surfaced in its exact order; this only chooses the tab link.
+ * Schema-contract issues use the server's unprefixed `schema_contract` field (correction
+ * 18: `already_current`, `immutable_field`, `overlay_schema_contract_unavailable`), which
+ * is joined to `SCHEMA_ALREADY_CURRENT_REJECTION` by `test_prompt_assembler.py`. A nested
+ * `schema_contract.*` field, should the server ever emit one, routes to the same tab.
+ */
 function issueTab(field: string): DefinitionTab {
   if (field === 'prompt_text' || field === 'candidate.prompt_text') return 'prompt';
+  if (field.startsWith('candidate.schema_overlay')
+    || field === 'schema_contract'
+    || field.startsWith('schema_contract.')) {
+    return 'output-schema';
+  }
   return 'assembly';
 }
 
@@ -43,13 +55,17 @@ interface DefinitionEditorProps {
   node: ModelAgentNode;
   entry: DraftEditorEntry;
   saveDisabled: boolean;
-  /** True while any Save, Upgrade, or SourceRecovery request is in flight. */
+  /** True while any Save, Upgrade, SourceRecovery, or SchemaUpgrade request is in flight. */
   operationsDisabled: boolean;
   /** True only while this affected v1 role's own Upgrade request is in flight. */
   promptDisabled: boolean;
   onEdit(agentKey: AgentKey, field: EditableDraftField, value: string): void;
   onSave(agentKey: AgentKey): Promise<void>;
   onUpgradeProtectedAssembly(agentKey: AgentKey): Promise<void>;
+  onUpgradeSchemaContract(agentKey: AgentKey): Promise<void>;
+  onToggleSchemaOverlayOptionalField(agentKey: AgentKey, fieldName: string): void;
+  onEditSchemaOverlayFieldDescription(agentKey: AgentKey, fieldName: string, description: string): void;
+  onEditSchemaOverlayFieldExamples(agentKey: AgentKey, fieldName: string, examples: string): void;
   onRestorePublishedV1Prompt(agentKey: AgentKey): Promise<void>;
   onAddAssemblyBlock(agentKey: AgentKey, anchor: CustomAnchor): void;
   onEditAssemblyBlockText(agentKey: AgentKey, blockId: string, text: string): void;
@@ -103,6 +119,10 @@ export function DefinitionEditor({
   onEdit,
   onSave,
   onUpgradeProtectedAssembly,
+  onUpgradeSchemaContract,
+  onToggleSchemaOverlayOptionalField,
+  onEditSchemaOverlayFieldDescription,
+  onEditSchemaOverlayFieldExamples,
   onRestorePublishedV1Prompt,
   onAddAssemblyBlock,
   onEditAssemblyBlockText,
@@ -400,12 +420,15 @@ export function DefinitionEditor({
         hidden={activeTab !== 'output-schema'}
         className="min-h-72 rounded-md border border-gray-200 bg-gray-50 p-4"
       >
-        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-gray-800">
-          {JSON.stringify({
-            schema_overlay: entry.saved.schema_overlay,
-            schema_contract: entry.saved.schema_contract,
-          }, null, 2)}
-        </pre>
+        <OutputSchemaEditor
+          agentKey={agentKey}
+          entry={entry}
+          disabled={operationsDisabled}
+          onToggleOptionalField={(fieldName) => onToggleSchemaOverlayOptionalField(agentKey, fieldName)}
+          onEditFieldDescription={(fieldName, desc) => onEditSchemaOverlayFieldDescription(agentKey, fieldName, desc)}
+          onEditFieldExamples={(fieldName, examples) => onEditSchemaOverlayFieldExamples(agentKey, fieldName, examples)}
+          onUpgradeSchemaContract={() => { void onUpgradeSchemaContract(agentKey); }}
+        />
       </div>
 
       <div

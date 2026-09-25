@@ -57,8 +57,15 @@ class ModelCall:
 
 
 class RecordingModelAdapter:
-    def __init__(self, output: BaseModel) -> None:
-        self.output = output
+    """Adapter double that answers with an instance of the schema it is handed.
+
+    This mirrors ``with_structured_output``: the provider result is an instance of
+    the *composed* schema the runtime selected, so the double cannot accidentally
+    prove that an unvalidated object is passed straight through.
+    """
+
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = values
         self.calls: list[ModelCall] = []
 
     def invoke(
@@ -70,7 +77,7 @@ class RecordingModelAdapter:
         prompt: str,
     ) -> BaseModel:
         self.calls.append(ModelCall(configuration, schema, prompt))
-        return self.output
+        return schema.model_validate(self.values)
 
 
 class StaticDefinitionSource:
@@ -81,8 +88,38 @@ class StaticDefinitionSource:
         return self.definition
 
 
-def _output_for(agent_key: str) -> BaseModel:
-    return OUTPUT_SCHEMAS[agent_key].model_construct()
+VALID_OUTPUT_VALUES: dict[str, dict[str, Any]] = {
+    "architect": {"intent": "discuss", "message": "an answer"},
+    "data_analyst": {
+        "outcome": "success",
+        "synthesis": "a finding",
+        "sources": ["warehouse.sales"],
+    },
+    "builder": {"position": 3, "html": "<section></section>"},
+    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
+    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
+    "deck_reviewer": {},
+}
+
+
+def _output_for(agent_key: str) -> dict[str, Any]:
+    return dict(VALID_OUTPUT_VALUES[agent_key])
+
+
+def _assert_composed_schema(
+    schema: type[BaseModel], agent_key: str, version: int
+) -> None:
+    """The adapter is bound to the registry's composed schema, not the canonical one."""
+    canonical = OUTPUT_SCHEMAS[agent_key]
+    assert schema is not canonical
+    assert issubclass(schema, canonical)
+    assert schema.model_config["extra"] == "forbid"
+    # The model-facing tool is named after the model: it keeps the canonical name
+    # (#264 I5), so the prompts' "Return an <CanonicalOutput>" still names it.
+    assert schema.__name__ == canonical.__name__
+    expected_optional = {"diagnostic_notes"} if version == 2 else set()
+    assert set(schema.model_fields) == set(canonical.model_fields) | expected_optional
 
 
 def _payload_for(agent_key: str) -> dict[str, Any]:
@@ -118,26 +155,28 @@ def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_
         AgentAssemblyContext(design_system_active=False),
     )
 
-    assert result.output is output
-    assert model.calls == [
-        ModelCall(
-            configuration=AgentModelConfiguration(
-                endpoint_name="databricks-claude-opus-4-6",
-                temperature=0.7,
-                max_tokens=60000,
-                top_p=0.95,
-            ),
-            schema=OUTPUT_SCHEMAS[agent_key],
-            prompt=_expected_prompt(
-                agent_key,
-                payload,
-                design_system_active=False,
-            ),
-        )
-    ]
+    # The runtime exposes the ORIGINAL canonical output class to graph logic, not
+    # the composed adapter subclass it bound the provider to.
+    assert type(result.output) is OUTPUT_SCHEMAS[agent_key]
+    assert result.output == OUTPUT_SCHEMAS[agent_key].model_validate(output)
+    assert result.diagnostics.additional_fields == {}
+    assert len(model.calls) == 1
+    call = model.calls[0]
+    assert call.configuration == AgentModelConfiguration(
+        endpoint_name="databricks-claude-opus-4-6",
+        temperature=0.7,
+        max_tokens=60000,
+        top_p=0.95,
+    )
+    assert call.prompt == _expected_prompt(
+        agent_key,
+        payload,
+        design_system_active=False,
+    )
+    _assert_composed_schema(call.schema, agent_key, 1)
     assert result.diagnostics.agent_key == agent_key
-    assert result.diagnostics.assembled_prompt == model.calls[0].prompt
-    assert result.diagnostics.model_configuration == model.calls[0].configuration
+    assert result.diagnostics.assembled_prompt == call.prompt
+    assert result.diagnostics.model_configuration == call.configuration
     assert result.diagnostics.protected_prompt.version == 1
     assert result.diagnostics.protected_prompt.digest == EXPECTED_PROTECTED_PROMPT_DIGEST
     assert result.diagnostics.schema_contract.agent_key == agent_key
@@ -512,3 +551,28 @@ def test_prompt_assembler_is_the_only_payload_serializer_and_adapter_the_only_bi
     assert "with_structured_output(" not in sources["prompt_assembler"]
     # The assembler still declares the binding as data, which is not a call site.
     assert 'langchain.with_structured_output"' in sources["prompt_assembler"]
+
+
+def test_agent_runtime_construction_still_fails_closed_on_contract_material_drift(
+    monkeypatch,
+):
+    """Correction 13: swapping the private v1-only registry keeps the check running.
+
+    ``AgentRuntime.__init__`` used to construct the module-private
+    ``_SchemaContractRegistry``, whose constructor re-derived and compared all seven
+    v1 digests.  It now constructs the one public ``AgentSchemaRegistry``, which must
+    still fail closed on material drift — and does so for v1 *and* v2 material.
+    """
+    from types import MappingProxyType
+
+    import src.services.agent_schema_registry as registry_module
+    from src.services.agent_schema_registry import SchemaContractMaterialChangedError
+
+    drifted = dict(registry_module._V1_DIGESTS)
+    drifted["architect"] = "0" * 64
+    monkeypatch.setattr(registry_module, "_V1_DIGESTS", MappingProxyType(drifted))
+
+    with pytest.raises(SchemaContractMaterialChangedError, match="architect"):
+        AgentRuntime.compatibility(
+            model_adapter=RecordingModelAdapter(_output_for("architect"))
+        )

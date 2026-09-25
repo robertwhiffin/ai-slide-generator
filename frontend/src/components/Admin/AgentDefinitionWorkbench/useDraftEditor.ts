@@ -4,6 +4,7 @@ import {
   readDraftLegacyPromptSource,
   saveDraftDefinition,
   upgradeDraftProtectedAssembly,
+  upgradeDraftSchemaContract,
   type AgentDefinitionWorkbenchResponse,
   type AgentKey,
   type AssemblyCondition,
@@ -182,12 +183,65 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     }
   };
 
+  const upgradeSchemaContract = async (agentKey: AgentKey): Promise<void> => {
+    if (operationBlocked()) return;
+
+    const requestId = nextRequestIdRef.current++;
+    const expectedLockVersion = state.draft.lock_version;
+    inFlightRequestIdRef.current = requestId;
+    dispatch({
+      type: 'schemaUpgradeStarted',
+      pending: {
+        operation: 'schemaUpgrade',
+        requestId,
+        agentKey,
+        expectedLockVersion,
+        submittedCandidate: null,
+      },
+    });
+
+    try {
+      const result = await upgradeDraftSchemaContract(agentKey, {
+        lock_version: expectedLockVersion,
+      });
+      dispatch({ type: 'schemaUpgradeSucceeded', requestId, result });
+    } catch (error) {
+      if (error instanceof AgentDefinitionApiError && error.status === 422) {
+        dispatch({
+          type: 'schemaUpgradeRejected',
+          requestId,
+          error: error.payload as DraftValidationErrorResponse,
+        });
+      } else if (error instanceof AgentDefinitionApiError && error.status === 409) {
+        dispatch({
+          type: 'schemaUpgradeConflicted',
+          requestId,
+          conflict: error.payload as DraftSaveConflictResponse,
+        });
+      } else {
+        dispatch({ type: 'schemaUpgradeFailed', requestId, message: draftSaveErrorMessage(error) });
+      }
+    } finally {
+      if (inFlightRequestIdRef.current === requestId) inFlightRequestIdRef.current = null;
+    }
+  };
+
   return {
     state,
     edit,
     save,
     upgradeProtectedAssembly,
+    upgradeSchemaContract,
     restorePublishedV1Prompt,
+    toggleSchemaOverlayOptionalField: (agentKey: AgentKey, fieldName: string) => dispatch({
+      type: 'schemaOverlayOptionalFieldToggled', agentKey, fieldName,
+    }),
+    editSchemaOverlayFieldDescription: (agentKey: AgentKey, fieldName: string, description: string) => dispatch({
+      type: 'schemaOverlayFieldDescriptionChanged', agentKey, fieldName, description,
+    }),
+    editSchemaOverlayFieldExamples: (agentKey: AgentKey, fieldName: string, examples: string) => dispatch({
+      type: 'schemaOverlayFieldExamplesChanged', agentKey, fieldName, examples,
+    }),
     /** The UUID is allocated here so the reducer stays deterministic. */
     addAssemblyBlock: (agentKey: AgentKey, anchor: CustomAnchor) => dispatch({
       type: 'assemblyBlockAdded', agentKey, blockId: crypto.randomUUID(), anchor,

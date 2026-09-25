@@ -222,21 +222,29 @@ def test_snapshots_keep_one_content_record_and_responses_flatten_it_in_wire_orde
     ]
     assert set(semantic_fields) == set(type(content).model_fields) - {"agent_key"}
     # #265 appends one server-derived, read-only protected view after the flattened
-    # content record.  It is not part of the persisted content seam.
+    # content record, and #264 appends two more read-only display lists (the selectable
+    # optional-field descriptors and the canonical-field descriptors).  None of them is
+    # part of the persisted content seam.
+    server_derived = [
+        "protected_stage_view",
+        "selectable_optional_fields",
+        "canonical_fields",
+    ]
     assert list(published_body) == [
         "revision_id",
         "content_hash",
         *semantic_fields,
-        "protected_stage_view",
+        *server_derived,
     ]
     assert list(draft_body) == [
         "base_revision_id",
         "candidate_hash",
         *semantic_fields,
-        "protected_stage_view",
+        *server_derived,
     ]
-    assert "protected_stage_view" not in DEFINITION_CONTENT_COLUMN_NAMES
-    assert "protected_stage_view" not in type(content).model_fields
+    for name in server_derived:
+        assert name not in DEFINITION_CONTENT_COLUMN_NAMES
+        assert name not in type(content).model_fields
     assert published_body["protected_stage_view"] == draft_body["protected_stage_view"]
     assert all(
         row["locked"] is True for row in published_body["protected_stage_view"]

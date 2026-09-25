@@ -1011,7 +1011,10 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
 
         def invoke(self, *, agent_key, configuration, schema, prompt):
             self.prompts.append(prompt)
-            return schema.model_construct()
+            # #264 Task 3: the runtime validates the provider result through the
+            # registry, so the double must answer with a valid instance of the
+            # composed schema it was handed rather than an empty shell.
+            return schema.model_validate({"slide_index": 0, "verdict": "clean"})
 
     skill = load_skill("build_reviewer")
     # Captured BY VALUE, before the call. Comparing skill.instructions afterwards
@@ -1062,7 +1065,10 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
 
         def invoke(self, *, agent_key, configuration, schema, prompt):
             self.prompts.append(prompt)
-            return schema.model_construct()
+            # #264 Task 3: the runtime validates the provider result through the
+            # registry, so the double must answer with a valid instance of the
+            # composed schema it was handed rather than an empty shell.
+            return schema.model_validate({"slide_index": 0, "verdict": "clean"})
 
     skill = load_skill("build_reviewer")
     payload = {

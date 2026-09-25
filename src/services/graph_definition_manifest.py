@@ -10,11 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
 from decimal import Decimal
 from functools import lru_cache
-from types import MappingProxyType
-from typing import Annotated, Literal, TypeAlias, cast
+from typing import Annotated, Literal, TypeAlias
 from uuid import UUID
 
 from pydantic import (
@@ -22,9 +20,39 @@ from pydantic import (
     ConfigDict,
     Field,
     PositiveInt,
-    field_serializer,
     model_validator,
 )
+
+from src.services.agent_schema_types import (
+    CanonicalFieldGuidance,
+    SchemaContractIdentity,
+    SchemaOverlay,
+)
+
+# ``SchemaOverlay`` and ``CanonicalFieldGuidance`` are re-exported, not redefined.
+# There is exactly one overlay grammar in the codebase and it is homed in
+# ``src.services.agent_schema_types``; this module is its storage carrier only.
+__all__ = [
+    "GRAPH_V1_AGENT_KEYS",
+    "AgentKey",
+    "AssemblyCondition",
+    "AssemblyRules",
+    "AssemblyRulesV1",
+    "AssemblyRulesV2",
+    "CanonicalFieldGuidance",
+    "ContentIdentity",
+    "CustomAnchor",
+    "CustomTextBlock",
+    "DefinitionContent",
+    "GraphV1Manifest",
+    "ModelConfiguration",
+    "SchemaContractIdentity",
+    "SchemaOverlay",
+    "assembly_rules_for",
+    "definition_content_hash",
+    "load_graph_v1_manifest",
+    "schema_contract_identity",
+]
 
 AgentKey: TypeAlias = Literal[
     "architect",
@@ -68,47 +96,6 @@ class ModelConfiguration(_FrozenModel):
     temperature: float | Decimal = Field(ge=0, le=1)
     max_tokens: PositiveInt
     top_p: float | Decimal = Field(ge=0, le=1)
-
-
-def _freeze_json_containers(value: object) -> object:
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise ValueError("schema overlay object keys must be strings")
-        return MappingProxyType(
-            {key: _freeze_json_containers(item) for key, item in value.items()}
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json_containers(item) for item in value)
-    if value is None or isinstance(value, (str, int, float, bool, Decimal)):
-        return value
-    raise ValueError(f"schema overlay values must be JSON-compatible, received {value!r}")
-
-
-def _thaw_json_containers(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _thaw_json_containers(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_json_containers(item) for item in value]
-    return value
-
-
-class SchemaOverlay(_FrozenModel):
-    field_overrides: Mapping[str, object]
-    additional_optional_fields: tuple[str, ...]
-
-    @model_validator(mode="after")
-    def freeze_field_overrides(self) -> SchemaOverlay:
-        frozen = _freeze_json_containers(self.field_overrides)
-        object.__setattr__(self, "field_overrides", frozen)
-        return self
-
-    @field_serializer("field_overrides")
-    def serialize_field_overrides(
-        self,
-        value: Mapping[str, object],
-    ) -> dict[str, object]:
-        thawed = _thaw_json_containers(value)
-        return cast(dict[str, object], thawed)
 
 
 class AuthoredPromptBlock(_FrozenModel):
@@ -188,8 +175,34 @@ AssemblyRules: TypeAlias = Annotated[
 
 
 class ContentIdentity(_FrozenModel):
+    """Retained storage/wire carrier for a protected identity.
+
+    Deliberately carries only ``version`` and ``digest``.  The role is a property
+    of the record that holds the identity, never a client-supplied part of the
+    identity itself, so ``schema_contract_identity`` derives the registry-facing
+    ``SchemaContractIdentity`` from the record's own ``agent_key``.
+    """
+
     version: PositiveInt
     digest: str = Field(pattern=_LOWERCASE_SHA256_PATTERN)
+
+
+def schema_contract_identity(
+    agent_key: str,
+    stored: ContentIdentity,
+) -> SchemaContractIdentity:
+    """Bridge a stored schema-contract identity to its registry lookup key.
+
+    The role is supplied by the server from the owning record, so a stored or
+    client-submitted ``version``/``digest`` pair can never select another role's
+    contract: a mismatched role, version or digest fails to resolve rather than
+    resolving to something else.
+    """
+    return SchemaContractIdentity(
+        agent_key=agent_key,
+        version=stored.version,
+        digest=stored.digest,
+    )
 
 
 def assembly_rules_for(agent_key: str) -> dict[str, object]:
@@ -303,6 +316,17 @@ class GraphV1Manifest(_FrozenModel):
 
 def _normalize_canonical_value(value: object) -> object:
     if isinstance(value, dict):
+        for key in value:
+            if not isinstance(key, str):
+                # The removed module-local freeze helper carried two raises: one for
+                # non-JSON values and one for non-string object keys.  The value half
+                # is covered by the TypeError at the end of this function; this is the
+                # key half.  Without it {1: "a"} and {"1": "a"} produce the SAME
+                # content hash while the persist path silently coerces 1 to "1", and
+                # mixed keys fail only incidentally through json.dumps(sort_keys=True).
+                raise TypeError(
+                    f"canonical object keys must be strings, received {key!r}"
+                )
         return {key: _normalize_canonical_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_normalize_canonical_value(item) for item in value]

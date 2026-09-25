@@ -16,6 +16,10 @@ from pydantic import (
     model_validator,
 )
 
+from src.services.agent_schema_registry import (
+    SCHEMA_CONTRACT_BUNDLES,
+    optional_field_descriptor_material,
+)
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
@@ -131,6 +135,48 @@ def _content_field(name: str):
     return Field(validation_alias=AliasChoices(name, AliasPath("content", name)))
 
 
+def _json_schema_type_label(node: dict[str, object]) -> str:
+    """A compact display label for one JSON-schema node, e.g. ``array<string> | null``."""
+    reference = node.get("$ref")
+    if isinstance(reference, str):
+        return reference.rsplit("/", 1)[-1]
+    members = node.get("anyOf")
+    if isinstance(members, list):
+        return " | ".join(_json_schema_type_label(member) for member in members)
+    declared = node.get("type")
+    if declared == "array":
+        items = node.get("items")
+        return f"array<{_json_schema_type_label(items)}>" if isinstance(items, dict) else "array"
+    if isinstance(declared, str):
+        return declared
+    return "any"
+
+
+def _canonical_field_material(model: type[BaseModel]) -> tuple[dict[str, object], ...]:
+    """Read-only display data for one code-owned canonical output model.
+
+    Derived on every read from the canonical Pydantic model the registry bundle already
+    holds; it is not part of any bundle digest, content hash, or stored record.  Each
+    entry carries ``name``, ``type``, ``required`` and ``enum``, and ``default`` only
+    when the field is optional, in model field order.
+    """
+    properties = model.model_json_schema(mode="validation")["properties"]
+    material: list[dict[str, object]] = []
+    for name, field in model.model_fields.items():
+        node = properties[name]
+        enum = node.get("enum")
+        entry: dict[str, object] = {
+            "name": name,
+            "type": _json_schema_type_label(node),
+            "required": field.is_required(),
+            "enum": list(enum) if isinstance(enum, list) else None,
+        }
+        if not field.is_required():
+            entry["default"] = node.get("default")
+        material.append(entry)
+    return tuple(material)
+
+
 class _DefinitionContentResponse(_AttributeResponse):
     """Flatten the shared snapshot content record onto the existing wire shape."""
 
@@ -144,6 +190,21 @@ class _DefinitionContentResponse(_AttributeResponse):
     protected_stage_view: tuple[ProtectedStageViewResponse, ...] = Field(
         validation_alias=AliasChoices("protected_stage_view", "content")
     )
+    #: Read-only descriptor display data for the optional fields available for
+    #: this schema contract version.  Empty for v1; one entry for v2.  Never a
+    #: request field — the client may display it and select from it, but the
+    #: server computes it from the registry; it is never accepted from the wire.
+    selectable_optional_fields: tuple[dict[str, object], ...] = Field(
+        validation_alias=AliasChoices("selectable_optional_fields", "content"),
+        default=(),
+    )
+    #: Read-only display data for the role's code-owned canonical output fields:
+    #: name, type, required, enum and (for optional fields) default.  Never a request
+    #: field and never stored; derived from the registry bundle's canonical model.
+    canonical_fields: tuple[dict[str, object], ...] = Field(
+        validation_alias=AliasChoices("canonical_fields", "content"),
+        default=(),
+    )
 
     @field_validator("protected_stage_view", mode="before")
     @classmethod
@@ -154,6 +215,32 @@ class _DefinitionContentResponse(_AttributeResponse):
                 agent_key=value.agent_key,
                 identity=value.protected_assembly,
             )
+        return value
+
+    @field_validator("selectable_optional_fields", mode="before")
+    @classmethod
+    def derive_selectable_optional_fields(cls, value: object) -> object:
+        """Read the registry's descriptor list for the stored schema contract version."""
+        if isinstance(value, DefinitionContent):
+            bundle = SCHEMA_CONTRACT_BUNDLES.get(
+                (value.agent_key, value.schema_contract.version)
+            )
+            if bundle is None:
+                return ()
+            return tuple(optional_field_descriptor_material(d) for d in bundle.optional_fields)
+        return value
+
+    @field_validator("canonical_fields", mode="before")
+    @classmethod
+    def derive_canonical_fields(cls, value: object) -> object:
+        """Read the canonical model's field display data for the stored contract."""
+        if isinstance(value, DefinitionContent):
+            bundle = SCHEMA_CONTRACT_BUNDLES.get(
+                (value.agent_key, value.schema_contract.version)
+            )
+            if bundle is None:
+                return ()
+            return _canonical_field_material(bundle.canonical_model)
         return value
 
 
@@ -269,10 +356,24 @@ class EditableAssemblyRulesRequest(_StrictDraftRequest):
     custom_blocks: list[CustomTextBlockRequest]
 
 
+class EditableSchemaOverlayRequest(_StrictDraftRequest):
+    """Editable overlay request.  Extra top-level keys are rejected via extra='forbid'.
+
+    Inner ``field_overrides`` values are ``dict[str, object]`` so that extra guidance
+    properties pass through to the domain validator, which reports them as the stable
+    ``overlay_guidance_property_forbidden`` domain issue rather than leaking Pydantic's
+    own implementation message.
+    """
+
+    field_overrides: dict[str, object] = Field(default_factory=dict)
+    additional_optional_fields: list[str] = Field(default_factory=list)
+
+
 class EditableModelDraftRequest(_StrictDraftRequest):
     prompt_text: str
     model: EditableModelDraftModelRequest
     assembly_rules: EditableAssemblyRulesRequest | None = None
+    schema_overlay: EditableSchemaOverlayRequest | None = None
 
     @field_validator("prompt_text", mode="after")
     @classmethod

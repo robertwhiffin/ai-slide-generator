@@ -7,11 +7,13 @@ import type {
 } from '../../src/api/agentDefinitions';
 import {
   ALREADY_CURRENT_REJECTION,
+  DIAGNOSTIC_NOTES_DESCRIPTOR,
   DIRTY_LEGACY_PROMPT,
   EMPTY_V2_ASSEMBLY_RULES,
   LEGACY_COMPOSITE_ROLES,
   MANUAL_RESOLUTION_REJECTION,
   PUBLISHED_V1_PROMPT_SOURCE,
+  SCHEMA_ALREADY_CURRENT_REJECTION,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticDraftDefinitions,
@@ -19,6 +21,8 @@ import {
   syntheticDraftSaveSuccess,
   syntheticLegacyPromptSource,
   syntheticNullCandidateConflict,
+  syntheticSchemaUpgradeSuccess,
+  syntheticSchemaV2DraftDefinition,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
   v2ProtectedStageView,
@@ -153,8 +157,12 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
 
   await page.getByRole('tab', { name: 'Output Schema' }).click();
+  // The OutputSchemaEditor shows field override descriptions (not raw JSON).
+  // Architect fixture has a field override for `title` with this description.
   await expect(page.getByRole('tabpanel', { name: 'Output Schema' })).toContainText('Synthetic title override');
-  await expect(page.getByRole('tabpanel', { name: 'Output Schema' })).toContainText('speaker_notes');
+  // v1 contract: Schema Upgrade button shown; picker hidden.
+  await expect(page.getByRole('tabpanel', { name: 'Output Schema' })
+    .getByRole('button', { name: 'Schema Upgrade' })).toBeVisible();
 
   await page.getByRole('tab', { name: 'Assembly' }).click();
   // Task 5 replaced the read-only assembly JSON with server-derived locked rows, so the
@@ -458,6 +466,7 @@ test('small viewports deliberately overflow the fixed three-pane canvas', async 
 // ===========================================================================
 
 const UPGRADE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/protected-assembly-upgrade';
+const SCHEMA_UPGRADE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/schema-contract-upgrade';
 const SOURCE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/legacy-prompt-source';
 
 /**
@@ -1542,6 +1551,326 @@ test('a safe-field edit hides the published-source recovery until the rejection 
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(restore).toBeVisible();
   expect(saves).toHaveLength(0);
+});
+
+// ── Output Schema tab: editor controls ───────────────────────────────────────
+
+function outputSchemaPanel(page: Page) {
+  return page.getByRole('tabpanel', { name: 'Output Schema' });
+}
+
+async function openOutputSchemaTab(page: Page, displayName = 'Architect') {
+  await page.getByRole('navigation', { name: 'Graph nodes' })
+    .getByRole('button', { name: displayName }).click();
+  await page.getByRole('tab', { name: 'Output Schema' }).click();
+}
+
+/** A workbench with architect's draft replaced by a schema-v2 definition. */
+function workbenchWithSchemaV2(agentKey: AgentKey = 'architect') {
+  const body = cloneWorkbench();
+  for (const node of body.nodes) {
+    if (node.execution_kind !== 'model' || node.agent_key !== agentKey) continue;
+    node.draft = syntheticSchemaV2DraftDefinition(agentKey);
+  }
+  return body;
+}
+
+test('output schema tab: v1 shows Schema Upgrade button and no picker; no protected type/default inputs', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  const panel = outputSchemaPanel(page);
+  // Schema Upgrade button present for v1
+  await expect(panel.getByRole('button', { name: 'Schema Upgrade' })).toBeVisible();
+
+  // No optional-field checkbox rows for v1 (selectable_optional_fields is empty)
+  await expect(panel.getByRole('checkbox')).toHaveCount(0);
+
+  // No editable input named after protected properties
+  for (const label of ['Type', 'Default', 'Max items', 'Min length', 'Max length']) {
+    await expect(panel.getByRole('textbox', { name: label })).toHaveCount(0);
+    await expect(panel.getByRole('spinbutton', { name: label })).toHaveCount(0);
+  }
+
+  // #264 I1: under v1 the canonical fields are protected labels only. Accessible names
+  // match by substring here, so these two queries cover every canonical field's input.
+  const intent = panel.getByRole('group', { name: 'Canonical field: intent' });
+  await expect(intent.getByRole('group', { name: 'Protected properties of intent' })).toBeVisible();
+  await expect(intent.getByRole('textbox')).toHaveCount(0);
+  await expect(panel.getByRole('textbox', { name: 'Description guidance for ' })).toHaveCount(0);
+  await expect(panel.getByRole('textbox', { name: 'Examples guidance for ' })).toHaveCount(0);
+});
+
+test('output schema tab: v2 shows diagnostic_notes picker with protected labels, no type/default inputs', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWithSchemaV2());
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  const panel = outputSchemaPanel(page);
+  // Schema Upgrade button absent for v2
+  await expect(panel.getByRole('button', { name: 'Schema Upgrade' })).toHaveCount(0);
+
+  // Optional field row for diagnostic_notes
+  const row = panel.getByRole('group', { name: 'Optional field: diagnostic_notes' });
+  await expect(row).toBeVisible();
+
+  // Protected label text visible
+  await expect(row).toContainText('array');
+  await expect(row).toContainText(DIAGNOSTIC_NOTES_DESCRIPTOR.description);
+
+  // No editable input for the protected schema properties
+  for (const label of ['type', 'default', 'max_items', 'strip_whitespace']) {
+    await expect(panel.getByRole('textbox', { name: new RegExp(label, 'i') })).toHaveCount(0);
+    await expect(panel.getByRole('spinbutton', { name: new RegExp(label, 'i') })).toHaveCount(0);
+  }
+
+  // #264 I2: the descriptor's description and example are code-owned text, never
+  // inputs; the server rejects any field_overrides entry for an optional name.
+  await expect(row.getByRole('textbox')).toHaveCount(0);
+  const codeOwned = row.getByRole('group', { name: 'Code-owned guidance of diagnostic_notes' });
+  await expect(codeOwned).toContainText(DIAGNOSTIC_NOTES_DESCRIPTOR.description);
+  await expect(codeOwned).toContainText(`Example: ${String(DIAGNOSTIC_NOTES_DESCRIPTOR.examples[0])}`);
+});
+
+test('v2 selection: selecting diagnostic_notes sends it in the save candidate', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWithSchemaV2());
+  const saves = await installSaveMock(page, (route, save) => fulfillJson(
+    route,
+    200,
+    syntheticDraftSaveSuccess(save.agentKey, save.body, 1),
+  ));
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  const panel = outputSchemaPanel(page);
+  // Select diagnostic_notes
+  await panel.getByRole('checkbox', { name: 'Select diagnostic_notes' }).click();
+  // Navigate away and back to verify persistence
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await page.getByRole('tab', { name: 'Output Schema' }).click();
+  await expect(panel.getByRole('checkbox', { name: 'Select diagnostic_notes' })).toBeChecked();
+
+  // Save and check the body includes schema_overlay
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  const schemaOverlay = saves[0].body.candidate.schema_overlay;
+  expect(schemaOverlay).toBeDefined();
+  expect(schemaOverlay?.additional_optional_fields).toContain('diagnostic_notes');
+});
+
+test('v2 removal: deselecting diagnostic_notes sends empty additional_optional_fields', async ({ page }) => {
+  // Start with diagnostic_notes already selected
+  const body = workbenchWithSchemaV2();
+  for (const node of body.nodes) {
+    if (node.execution_kind !== 'model' || node.agent_key !== 'architect') continue;
+    node.draft = syntheticSchemaV2DraftDefinition('architect', {
+      schema_overlay: { field_overrides: {}, additional_optional_fields: ['diagnostic_notes'] },
+    });
+  }
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, body);
+  const saves = await installSaveMock(page, (route, save) => fulfillJson(
+    route,
+    200,
+    syntheticDraftSaveSuccess(save.agentKey, save.body, 1),
+  ));
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  const panel = outputSchemaPanel(page);
+  // Should be pre-checked because saved definition has it
+  await expect(panel.getByRole('checkbox', { name: 'Select diagnostic_notes' })).toBeChecked();
+
+  // Deselect it
+  await panel.getByRole('checkbox', { name: 'Select diagnostic_notes' }).click();
+  await expect(panel.getByRole('checkbox', { name: 'Select diagnostic_notes' })).not.toBeChecked();
+
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  const schemaOverlay = saves[0].body.candidate.schema_overlay;
+  expect(schemaOverlay?.additional_optional_fields).toEqual([]);
+});
+
+test('schema upgrade sends a lock-only POST and installs the v2 descriptor', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const schemaUpgrades = await installPostMock(page, SCHEMA_UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    200,
+    syntheticSchemaUpgradeSuccess('architect', 1),
+  ));
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  await outputSchemaPanel(page).getByRole('button', { name: 'Schema Upgrade' }).click();
+  await expect.poll(() => schemaUpgrades.length).toBe(1);
+
+  // Body is exactly { lock_version: 0 } with no candidate
+  expect(schemaUpgrades[0].body).toEqual({ lock_version: 0 });
+
+  // Wait for Save Draft button to be enabled: this signals the operation settled and
+  // the new definition (with v2 schema contract) is installed in the state machine.
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+
+  // After upgrade: upgrade button gone, picker visible
+  await expect(outputSchemaPanel(page).getByRole('button', { name: 'Schema Upgrade' })).toHaveCount(0);
+  await expect(outputSchemaPanel(page)
+    .getByRole('group', { name: 'Optional field: diagnostic_notes' })).toBeVisible();
+});
+
+test('schema upgrade already_current 422 links to Output Schema tab', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  await installPostMock(page, SCHEMA_UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    422,
+    SCHEMA_ALREADY_CURRENT_REJECTION,
+  ));
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  await outputSchemaPanel(page).getByRole('button', { name: 'Schema Upgrade' }).click();
+
+  // Rejection shown in the issues list
+  const issues = page.getByRole('region', { name: 'Server rejected this request' });
+  await expect(issues).toBeVisible();
+  await expect(issues).toContainText('already_current');
+
+  // "Go to Output Schema tab" link present (issue field starts with schema_contract)
+  await expect(issues.getByRole('button', { name: 'Go to Output Schema tab' })).toBeVisible();
+});
+
+test('schema upgrade gate: Schema Upgrade is blocked while Save is in flight', async ({ page }) => {
+  let releaseSave!: () => void;
+  const holdSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  await installSaveMock(page, (route) => {
+    return holdSave.then(() => fulfillJson(route, 200, {}));
+  });
+  const schemaUpgrades = await installPostMock(page, SCHEMA_UPGRADE_ENDPOINT, (route) => fulfillJson(
+    route,
+    200,
+    syntheticSchemaUpgradeSuccess('architect', 1),
+  ));
+  await openWorkbench(page);
+
+  // Start a save (it's held)
+  await page.getByRole('textbox', { name: 'Prompt text' }).fill('Edited');
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+
+  // Navigate to Output Schema tab and try to upgrade while save is pending
+  await page.getByRole('tab', { name: 'Output Schema' }).click();
+  const upgradeButton = outputSchemaPanel(page).getByRole('button', { name: 'Schema Upgrade' });
+  await expect(upgradeButton).toBeDisabled();
+  expect(schemaUpgrades).toHaveLength(0);
+
+  // Release the save so the test cleans up
+  releaseSave();
+});
+
+test('direct malformed-API 422 on schema overlay is stable and not a 500', async ({ page }) => {
+  // Tests that a type error in schema_overlay.field_overrides reaches the API and comes
+  // back as a stable 422 (not a 500). This is the guard the brief requires for the
+  // controller's sabotage of candidate.schema_overlay.field_overrides.intent.type.
+  const body = workbenchWithSchemaV2();
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, body);
+  const saves = await installSaveMock(page, (route) => fulfillJson(
+    route,
+    422,
+    {
+      code: 'invalid_draft',
+      errors: [
+        {
+          field: 'candidate.schema_overlay.field_overrides.intent',
+          code: 'overlay_guidance_property_forbidden',
+          message: 'Only description and examples are editable.',
+        },
+      ],
+    },
+  ));
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  // User selects optional field and saves
+  await outputSchemaPanel(page).getByRole('checkbox', { name: 'Select diagnostic_notes' }).click();
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+
+  // Response is a stable 422, not a 500
+  const issues = page.getByRole('region', { name: 'Server rejected this request' });
+  await expect(issues).toBeVisible();
+  await expect(issues).toContainText('overlay_guidance_property_forbidden');
+  // The issue links to the Output Schema tab
+  await expect(issues.getByRole('button', { name: 'Go to Output Schema tab' })).toBeVisible();
+});
+
+test('canonical fields: protected labels, guidance edit, blocked malformed examples, save and reload', async ({ page }) => {
+  // Canonical guidance is editable only under a v2 schema contract (#264 I1).
+  const body = workbenchWithSchemaV2();
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, body);
+  const saves = await installSaveMock(page, (route, save) => {
+    const success = syntheticDraftSaveSuccess(save.agentKey, save.body, 1);
+    const overlay = save.body.candidate.schema_overlay;
+    if (overlay) success.definition.schema_overlay = structuredClone(overlay);
+    return fulfillJson(route, 200, success);
+  });
+  await openWorkbench(page);
+  await openOutputSchemaTab(page);
+
+  const panel = outputSchemaPanel(page);
+  await expect(panel.getByRole('region', { name: 'Canonical output fields' })).toBeVisible();
+  const intent = panel.getByRole('group', { name: 'Canonical field: intent' });
+  const protectedProperties = intent.getByRole('group', { name: 'Protected properties of intent' });
+  await expect(protectedProperties).toContainText('string');
+  await expect(protectedProperties).toContainText('yes');
+  await expect(protectedProperties).toContainText('discuss, ask_data, build, edit, confirm_design_contract');
+  // Only the two guidance textareas are editable; no control exists for a protected property.
+  await expect(intent.getByRole('textbox')).toHaveCount(2);
+  for (const role of ['checkbox', 'spinbutton', 'combobox'] as const) {
+    await expect(intent.getByRole(role)).toHaveCount(0);
+  }
+  const deckSpec = panel.getByRole('group', { name: 'Protected properties of deck_spec' });
+  await expect(deckSpec).toContainText('DeckSpec | null');
+  await expect(deckSpec).toContainText('no');
+
+  await intent.getByRole('textbox', { name: 'Description guidance for intent' })
+    .fill('Prefer build for new decks.');
+  const examples = intent.getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' });
+  await examples.fill('["build"');
+  await expect(intent.getByRole('alert')).toHaveText('Examples must be a JSON array.');
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+  expect(saves).toHaveLength(0);
+
+  await examples.fill('["build"]');
+  await expect(intent.getByRole('alert')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0].body.candidate.schema_overlay?.field_overrides.intent).toEqual({
+    description: 'Prefer build for new decks.',
+    examples: ['build'],
+  });
+  await expect(page.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+
+  // A real page reload re-reads the server's stored overlay.
+  for (const node of body.nodes) {
+    if (node.execution_kind !== 'model' || node.agent_key !== 'architect') continue;
+    node.draft.schema_overlay = structuredClone(saves[0].body.candidate.schema_overlay!);
+  }
+  await page.reload();
+  await page.getByRole('tab', { name: 'Agent Definitions' }).click();
+  await openOutputSchemaTab(page);
+  const reloaded = outputSchemaPanel(page).getByRole('group', { name: 'Canonical field: intent' });
+  await expect(reloaded.getByRole('textbox', { name: 'Description guidance for intent' }))
+    .toHaveValue('Prefer build for new decks.');
+  await expect(reloaded.getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' }))
+    .toHaveValue('["build"]');
 });
 
 test('the affected-role browser matrix cannot silently narrow', () => {

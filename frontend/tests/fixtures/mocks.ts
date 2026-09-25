@@ -7,12 +7,14 @@ import type {
   AgentKey,
   AssemblyRulesV1,
   AssemblyRulesV2,
+  CanonicalFieldDescriptor,
   ContentIdentity,
   DraftDefinition,
   DraftSaveConflictResponse,
   DraftSaveRequest,
   DraftSaveSuccessResponse,
   DraftValidationErrorResponse,
+  FieldDescriptor,
   LegacyPromptSourceResponse,
   ModelAgentNode,
   ProtectedStageView,
@@ -916,6 +918,97 @@ const mockAssemblyRules = {
 export const V1_PROTECTED_IDENTITY = { version: 1, digest: "b".repeat(64) } satisfies ContentIdentity;
 export const V2_PROTECTED_IDENTITY = { version: 2, digest: "e".repeat(64) } satisfies ContentIdentity;
 
+/** v2 schema contract identity used in schema-contract-upgrade fixtures. */
+export const V2_SCHEMA_CONTRACT_IDENTITY = { version: 2, digest: "d".repeat(64) } satisfies ContentIdentity;
+
+/**
+ * The seven roles' `diagnostic_notes` descriptors, in the seven-role order, exactly as
+ * the server's registry emits them. Written as strict JSON (double quotes, no trailing
+ * commas, no comments) because
+ * `test_client_diagnostic_notes_fixture_is_the_server_descriptor_for_all_seven_roles`
+ * (`tests/unit/test_agent_definition_workbench_routes.py`) reads this block as text and
+ * joins it to the live route output.
+ */
+export const DIAGNOSTIC_NOTES_DESCRIPTORS: Record<AgentKey, FieldDescriptor> = {
+  "architect": {"name": "diagnostic_notes", "description": "Concise assumptions or ambiguities that influenced the selected intent; never substitute for `message`, `deck_spec`, `data_request`, targets, or a design proposal.", "examples": ["Assumed the request refers to the existing Q2 deck; no target slide numbers were supplied."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "data_analyst": {"name": "diagnostic_notes", "description": "Concise retrieval limitations, source disagreement, or interpretation assumptions; never replace `outcome`, `synthesis`, `sources`, `gap`, `reason`, or `tried_tools`.", "examples": ["The two sources use different fiscal calendars; synthesis compares calendar-quarter totals."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "builder": {"name": "diagnostic_notes", "description": "Concise non-executable rendering/design trade-offs or unavailable inputs; never contain HTML, scripts, image IDs, or a substitute for canonical slide output.", "examples": ["No supplied image IDs; used a text-and-chart composition."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "build_reviewer": {"name": "diagnostic_notes", "description": "Concise review-scope/evidence notes; never hide, replace, or add a finding outside canonical `findings`.", "examples": ["Contrast was assessed against the resolved style tokens supplied in this invocation."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "fixer": {"name": "diagnostic_notes", "description": "Concise reason for a narrowly limited or declined attempted fix; never replace `changed` or `change_summary`.", "examples": ["Did not alter the chart because the reported issue concerns only title overflow."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "fix_reviewer": {"name": "diagnostic_notes", "description": "Concise evidence about whether the original issue was resolved or a review limitation; never replace the canonical verdict/findings.", "examples": ["Verified the original overflow against the corrected title container."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "deck_reviewer": {"name": "diagnostic_notes", "description": "Concise deck-level review scope/limitations; never replace deck findings or introduce slide-level findings.", "examples": ["Narrative assessment used the supplied slide sequence; no presenter notes were available."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}}
+};
+
+/** The architect's descriptor, kept as a named sample for single-role tests. */
+export const DIAGNOSTIC_NOTES_DESCRIPTOR: FieldDescriptor = DIAGNOSTIC_NOTES_DESCRIPTORS.architect;
+
+/**
+ * Each role's code-owned canonical output fields, in the seven-role order and in model
+ * field order, exactly as the server derives them for display. Strict JSON for the same
+ * reason as above: `test_client_canonical_field_fixture_is_the_server_display_data`
+ * reads this block as text and joins it to the live route output.
+ */
+export const CANONICAL_FIELD_DESCRIPTORS: Record<AgentKey, CanonicalFieldDescriptor[]> = {
+  "architect": [
+    {"name": "intent", "type": "string", "required": true, "enum": ["discuss", "ask_data", "build", "edit", "confirm_design_contract"]},
+    {"name": "message", "type": "string", "required": true, "enum": null},
+    {"name": "deck_spec", "type": "DeckSpec | null", "required": false, "enum": null, "default": null},
+    {"name": "data_request", "type": "DataRequest | null", "required": false, "enum": null, "default": null},
+    {"name": "target_positions", "type": "array<integer>", "required": false, "enum": null, "default": []},
+    {"name": "proposed_design_contract", "type": "DesignContractRef | null", "required": false, "enum": null, "default": null}
+  ],
+  "data_analyst": [
+    {"name": "outcome", "type": "string", "required": true, "enum": ["success", "missing_data", "no_tool"]},
+    {"name": "synthesis", "type": "string | null", "required": false, "enum": null, "default": null},
+    {"name": "sources", "type": "array<string> | null", "required": false, "enum": null, "default": null},
+    {"name": "gap", "type": "string | null", "required": false, "enum": null, "default": null},
+    {"name": "tried_tools", "type": "array<string>", "required": false, "enum": null, "default": []},
+    {"name": "reason", "type": "string | null", "required": false, "enum": null, "default": null}
+  ],
+  "builder": [
+    {"name": "position", "type": "integer", "required": true, "enum": null},
+    {"name": "html", "type": "string", "required": true, "enum": null},
+    {"name": "scripts", "type": "string", "required": false, "enum": null, "default": ""}
+  ],
+  "build_reviewer": [
+    {"name": "slide_index", "type": "integer", "required": true, "enum": null},
+    {"name": "verdict", "type": "string", "required": true, "enum": ["clean", "fixed", "surfaced"]},
+    {"name": "findings", "type": "array<Finding>", "required": false, "enum": null, "default": []}
+  ],
+  "fixer": [
+    {"name": "position", "type": "integer", "required": true, "enum": null},
+    {"name": "html", "type": "string", "required": true, "enum": null},
+    {"name": "scripts", "type": "string", "required": false, "enum": null, "default": ""},
+    {"name": "changed", "type": "boolean", "required": true, "enum": null},
+    {"name": "change_summary", "type": "string", "required": false, "enum": null, "default": ""}
+  ],
+  "fix_reviewer": [
+    {"name": "slide_index", "type": "integer", "required": true, "enum": null},
+    {"name": "verdict", "type": "string", "required": true, "enum": ["clean", "fixed", "surfaced"]},
+    {"name": "findings", "type": "array<Finding>", "required": false, "enum": null, "default": []}
+  ],
+  "deck_reviewer": [
+    {"name": "findings", "type": "array<Finding>", "required": false, "enum": null, "default": []}
+  ]
+};
+
+/**
+ * The exact ordered 422 the schema-contract-upgrade route returns for an already-current
+ * contract. The field is the server's unprefixed `schema_contract` (correction 18), and
+ * `test_client_schema_already_current_fixture_is_the_server_issue`
+ * (`tests/unit/test_prompt_assembler.py`) joins this triple to the server literal.
+ */
+export const SCHEMA_ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'schema_contract',
+      code: 'already_current',
+      message: 'Schema contract is already current.',
+    },
+  ],
+};
+
 export const EMPTY_V2_ASSEMBLY_RULES = {
   format_version: 2,
   custom_blocks: [],
@@ -1089,6 +1182,8 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
     protected_assembly: structuredClone(V1_PROTECTED_IDENTITY),
     schema_contract: { version: 1, digest: "c".repeat(64) },
     protected_stage_view: v1ProtectedStageView(agentKey),
+    selectable_optional_fields: [],
+    canonical_fields: structuredClone(CANONICAL_FIELD_DESCRIPTORS[agentKey]),
   };
 
   return {
@@ -1113,7 +1208,7 @@ const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) 
 
 export const syntheticDraftDefinitions = Object.fromEntries(
   mockModelNodes.map((node) => [node.agent_key, structuredClone(node.draft)]),
-) as Record<AgentKey, DraftDefinition>;
+) as unknown as Record<AgentKey, DraftDefinition>;
 
 export const syntheticDraftSaveRequest = {
   lock_version: 0,
@@ -1264,6 +1359,42 @@ export function syntheticV2DraftDefinition(
     protected_stage_view: v2ProtectedStageView(agentKey),
     candidate_hash: 'f'.repeat(64),
     ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/**
+ * A draft definition with a v2 schema contract and one selectable optional field
+ * (diagnostic_notes). Produced by a successful schema-contract-upgrade.
+ */
+export function syntheticSchemaV2DraftDefinition(
+  agentKey: AgentKey,
+  overrides: Partial<DraftDefinition> = {},
+): DraftDefinition {
+  return {
+    ...structuredClone(syntheticDraftDefinitions[agentKey]),
+    schema_contract: structuredClone(V2_SCHEMA_CONTRACT_IDENTITY),
+    schema_overlay: { field_overrides: {}, additional_optional_fields: [] },
+    selectable_optional_fields: [structuredClone(DIAGNOSTIC_NOTES_DESCRIPTORS[agentKey])],
+    candidate_hash: '4'.repeat(64),  // valid hex (only 0-9, a-f allowed)
+    ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/** The 200 body the schema-contract-upgrade route returns. */
+export function syntheticSchemaUpgradeSuccess(
+  agentKey: AgentKey,
+  lockVersion: number,
+  definitionOverrides: Partial<DraftDefinition> = {},
+): DraftSaveSuccessResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@example.com',
+      updated_at: `2026-09-22T14:00:0${lockVersion}Z`,
+    },
+    definition: syntheticSchemaV2DraftDefinition(agentKey, definitionOverrides),
+    changed: true,
   };
 }
 
