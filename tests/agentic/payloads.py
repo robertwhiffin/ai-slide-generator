@@ -22,7 +22,6 @@ from typing import Any
 #: (``src/services/graph/nodes.py``).  Guarded against drift — see the module
 #: docstring.
 ARCHITECT_PAYLOAD_KEYS: tuple[str, ...] = (
-    "session_id",
     "conversation",
     "message",
     "current_deck_spec",
@@ -39,7 +38,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
     """The architect's payload, with every production key present.
 
     Absent keys are as significant as present ones: ``architect_node`` always
-    sends all ten, so a builder that omitted ``template_sections`` would be
+    sends all nine, so a builder that omitted ``template_sections`` would be
     testing a prompt shape the architect never sees.
 
     Args:
@@ -51,7 +50,6 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
             would otherwise travel silently into the prompt as dead JSON.
     """
     payload: dict[str, Any] = {
-        "session_id": "agentic-layer3",
         "conversation": [],
         "message": message,
         "current_deck_spec": None,
@@ -181,7 +179,6 @@ def analyst_payload(request: str, *, deck_purpose: str | None = None) -> dict[st
     ``architect_message`` and the node copies it straight across.
     """
     return {
-        "session_id": "agentic-layer3",
         "data_request": request,
         "deck_purpose": deck_purpose,
     }

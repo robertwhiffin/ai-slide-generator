@@ -564,7 +564,7 @@ def test_the_placeholder_era_skill_versions_are_unchanged():
 def test_the_architect_payload_builder_matches_architect_node():
     """A layer-3 test must not exercise a prompt shape production never builds.
 
-    The architect's payload is the one with ten keys and the one every
+    The architect's payload is the one with nine keys and the one every
     architect-behaviour test (RC10's included) is built on, so it is the one worth
     pinning mechanically.  Read out of ``architect_node``'s own dict literal rather
     than from a comment, because that is what the model actually receives.

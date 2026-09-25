@@ -1424,10 +1424,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
             if stored is not None:
                 # get_deck_review returns Finding OBJECTS; the payload is
                 # serialised with json.dumps, where a pydantic model would land
-                # in the prompt as its repr.
+                # in the prompt as its repr.  The stored ``author`` is the
+                # reviewing user's identity and stays out (#258: nothing
+                # session- or user-specific reaches any role's model).
                 prior_review = {
                     "digest": stored.get("digest"),
-                    "author": stored.get("author"),
                     "findings": [
                         f.model_dump() if hasattr(f, "model_dump") else f
                         for f in (stored.get("findings") or [])
@@ -1457,8 +1458,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
         inbound_contract = prior_spec.design_contract
     brand = _resolve_brand(inbound_contract)
 
+    # The model-facing payload is content only (#258, user decision): no
+    # session, user, turn or release identifier.  This dict is built for the
+    # model alone, so it IS the architect's allowlist; ``session_id`` stays in
+    # the node for the reads above and the writes below, and the trace gets the
+    # root/actor pair through ``_assembly_context``.
     payload = {
-        "session_id": session_id,
         "conversation": _conversation(session_id),
         "message": state.get("architect_message"),
         "current_deck_spec": persisted_spec_dict,
@@ -1857,11 +1862,12 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     unreachable on the graph path.  Closing it needs a declared field on
     ``AnalystOutput``, an escalation to ws4b, not a mapping invented here.
     """
-    session_id = state["session_id"]
     request = state.get("architect_message") or ""
 
+    # Content only (#258): the analyst's model is handed no session identifier.
+    # The runtime binds no tools, so no retrieval reads it from the payload; the
+    # session is still read off ``state`` by ``_say`` below.
     payload = {
-        "session_id": session_id,
         "data_request": request,
         "deck_purpose": (
             state["deck_spec"].purpose if state.get("deck_spec") else None
@@ -3003,8 +3009,10 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     else:
         try:
             digest = compute_deck_digest(slide_htmls)
+            # Content only (#258): no session identifier reaches the model.
+            # ``session_id`` still drives the spotlight's injection-scan log,
+            # the deck-id lookup and the review write below.
             review_payload = {
-                "session_id": session_id,
                 "narrative_arc": (
                     state["deck_spec"].narrative_arc if state.get("deck_spec") else []
                 ),

@@ -37,8 +37,8 @@ verbatim single-source pass-through
     through, do not re-summarise"* is **uncheckable** without ``synthesis``.  But the
     canned tool output the assertion needs has nowhere to enter from: there is no
     tool to stub and no payload key that carries source text (``analyst_payload``
-    mirrors the node's three keys — ``session_id``, ``data_request``,
-    ``deck_purpose``).  Inventing a payload key would test a prompt shape production
+    mirrors the node's two keys — ``data_request`` and ``deck_purpose``).
+    Inventing a payload key would test a prompt shape production
     never sends, i.e. measure the fixture.
 
 **None of these three is a placeholder-prompt problem, and authoring the prompts
