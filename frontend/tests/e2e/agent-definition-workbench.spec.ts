@@ -12,8 +12,12 @@ import {
   EMPTY_V2_ASSEMBLY_RULES,
   LEGACY_COMPOSITE_ROLES,
   MANUAL_RESOLUTION_REJECTION,
+  MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE,
   PUBLISHED_V1_PROMPT_SOURCE,
   SCHEMA_ALREADY_CURRENT_REJECTION,
+  SEED_CANDIDATE_HASH,
+  SEED_MODEL_ENDPOINT_NAME,
+  STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticDraftDefinitions,
@@ -21,9 +25,13 @@ import {
   syntheticDraftSaveSuccess,
   syntheticLegacyPromptSource,
   syntheticModelEndpointDiscovery,
+  syntheticNewerModelEndpoint,
   syntheticNullCandidateConflict,
+  syntheticProbeFailure,
+  syntheticProbeSuccess,
   syntheticSchemaUpgradeSuccess,
   syntheticSchemaV2DraftDefinition,
+  syntheticSystemModelEndpoints,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
   v2ProtectedStageView,
@@ -218,7 +226,7 @@ test('explicit Save is the only write and sends the exact five-field candidate w
       },
     },
   });
-  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+  await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
   await expect(page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' }))
     .toContainText('Needs test');
   await expect(page.getByRole('heading', { name: 'Graph Version 1' })).toBeVisible();
@@ -765,7 +773,7 @@ test('custom blocks are added, edited, reordered and deleted locally, and only a
       },
     },
   });
-  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+  await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
   await expect(page.getByRole('navigation', { name: 'Graph nodes' })
     .getByRole('button', { name: 'Architect' })).toContainText('Needs test');
 });
@@ -836,7 +844,7 @@ test('an upgrade 409 carries client_candidate null, reconciles the crossed snaps
   await expect(conflict.getByRole('group', { name: 'Submitted values' })).toHaveCount(0);
   await expect(conflict).toContainText('Expected lock 0');
   await expect(conflict).toContainText('Current lock 1');
-  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+  await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
 
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' }))
@@ -990,7 +998,7 @@ for (const agentKey of AFFECTED_ROLES) {
         },
       },
     });
-    await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+    await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
 
     // 4. Only an explicit Upgrade produces the authored-only v2 definition.
     await page.getByRole('tab', { name: 'Assembly' }).click();
@@ -1411,7 +1419,7 @@ test('a repeated same-content save is accepted with changed false and still adva
   await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
   await page.getByRole('button', { name: 'Save Draft' }).click();
   await expect.poll(() => saves.length).toBe(1);
-  await expect(page.getByText('Lock version').locator('..')).toContainText('1');
+  await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
 
   await page.getByRole('button', { name: 'Save Draft' }).click();
   await expect.poll(() => saves.length).toBe(2);
@@ -2015,3 +2023,410 @@ for (const agentKey of AFFECTED_ROLES) {
     });
   }
 }
+
+// ============================================================
+// #266 Task 6 — model endpoint discovery, manual entry and the saved-candidate probe
+// ============================================================
+
+const PROBE_ENDPOINT = '**/api/admin/agent-definitions/draft/*/model-endpoint-probe';
+const PROBE_BUTTON = 'Test structured output';
+const PROBE_RETRY_BUTTON = 'Retry structured output test';
+const PROBE_RESULT_REGION = 'Structured output test result';
+const PROBE_SUCCEEDED_TEXT = 'Structured output test succeeded for the saved candidate.';
+const URL_NOT_ALLOWED = 'Endpoint must be a Databricks endpoint name, not a URL.';
+const EMPTY_DISCOVERY = 'No Databricks foundation-model endpoints are available to this identity.';
+const SEED_MODEL = { temperature: 0.7, max_tokens: 60000, top_p: 0.95 };
+
+function probeIdentityText(endpoint: string, hash: string, lock: number) {
+  return `Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
+}
+
+interface CapturedCatalogRead {
+  url: string;
+  method: string;
+  postData: string | null;
+  headers: Record<string, string>;
+}
+
+/** Registered after `installWorkbenchMock`, so it wins over the shared default. */
+async function installCatalogMock(
+  page: Page,
+  respond: (route: Route, call: number) => Promise<void> | void,
+) {
+  const reads: CapturedCatalogRead[] = [];
+  await page.route(MODEL_ENDPOINTS_ENDPOINT, async (route) => {
+    const request = route.request();
+    reads.push({
+      url: request.url(),
+      method: request.method(),
+      postData: request.postData(),
+      headers: request.headers(),
+    });
+    await respond(route, reads.length - 1);
+  });
+  return reads;
+}
+
+/** Every discovery read is a bare GET: no query, no body, no endpoint/token/host. */
+function expectBareCatalogReads(reads: CapturedCatalogRead[]) {
+  expect(reads.length).toBeGreaterThan(0);
+  for (const read of reads) {
+    expect(read.method).toBe('GET');
+    expect(new URL(read.url).search).toBe('');
+    expect(read.url).toMatch(/\/api\/admin\/agent-definitions\/model-endpoints$/);
+    expect(read.postData).toBeNull();
+    expect(read.headers).not.toHaveProperty('authorization');
+  }
+}
+
+/** The probe body is exactly the current lock, byte for byte. */
+async function installProbeMock(
+  page: Page,
+  respond: (route: Route, post: CapturedPost, call: number) => Promise<void> | void,
+) {
+  const raw: string[] = [];
+  const posts = await installPostMock(page, PROBE_ENDPOINT, async (route, post, call) => {
+    raw.push(route.request().postData() ?? '');
+    await respond(route, post, call);
+  });
+  return { posts, raw };
+}
+
+function modelTabPanel(page: Page) {
+  return page.getByRole('tabpanel', { name: 'Model' });
+}
+
+function probeResultRegion(page: Page) {
+  return page.getByRole('region', { name: PROBE_RESULT_REGION });
+}
+
+function architectNavStatus(page: Page) {
+  return page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' });
+}
+
+test('model endpoint discovery: first Model-tab read, local search, a refresh exposing a newer entry, explicit exact save, then an explicit probe of the saved candidate', async ({ page }) => {
+  await installExactIdentityMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
+  const reads = await installCatalogMock(page, (route, call) => fulfillJson(route, 200, call === 0
+    ? syntheticModelEndpointDiscovery()
+    : syntheticModelEndpointDiscovery([syntheticNewerModelEndpoint, ...syntheticSystemModelEndpoints])));
+  const saves = await installSaveMock(page, (route, save) => fulfillJson(route, 200, saveSuccessFor(save)));
+  const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess({
+    endpoint_name: syntheticNewerModelEndpoint.name,
+    candidate_hash: 'd'.repeat(64),
+    lock_version: 1,
+  })));
+  await openWorkbench(page);
+  await expect(page.getByRole('heading', { name: 'Graph Version 1' })).toBeVisible();
+  expect(reads).toHaveLength(0);
+  await page.getByRole('tab', { name: 'Assembly' }).click();
+  expect(reads).toHaveLength(0);
+
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const panel = modelTabPanel(page);
+  const group = panel.getByRole('radiogroup', { name: 'Discovered models' });
+  await expect(group.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
+  expect(reads).toHaveLength(1);
+  await expect(group.getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME, exact: true })).toBeChecked();
+
+  const search = panel.getByRole('searchbox', { name: 'Search discovered models' });
+  await search.fill('gpt oss');
+  await expect(group.getByRole('radio')).toHaveCount(1);
+  await expect(group.getByRole('radio', { name: 'databricks-gpt-oss-120b' })).toBeVisible();
+  await search.fill('');
+  await expect(group.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
+  expect(reads).toHaveLength(1);
+
+  await panel.getByRole('button', { name: 'Refresh models' }).click();
+  const newer = group.getByRole('radio', { name: syntheticNewerModelEndpoint.name, exact: true });
+  await expect(newer).toBeVisible();
+  expect(reads).toHaveLength(2);
+  // The seed stays exact: a newer family member never moves it on its own.
+  await expect(newer).not.toBeChecked();
+  await expect(group.getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME, exact: true })).toBeChecked();
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+  await expect(architectNavStatus(page)).not.toContainText('Unsaved');
+  expect(saves).toHaveLength(0);
+  expect(probes.posts).toHaveLength(0);
+
+  await newer.check();
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(syntheticNewerModelEndpoint.name);
+  await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
+  expect(saves).toHaveLength(0);
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0].body).toEqual({
+    lock_version: 0,
+    candidate: {
+      prompt_text: syntheticDraftDefinitions.architect.prompt_text,
+      model: { endpoint_name: syntheticNewerModelEndpoint.name, ...SEED_MODEL },
+    },
+  });
+  await expect(architectNavStatus(page)).toContainText('Needs test');
+
+  const probe = panel.getByRole('button', { name: PROBE_BUTTON });
+  await expect(probe).toBeEnabled();
+  await probe.click();
+  await expect(probeResultRegion(page)).toContainText(PROBE_SUCCEEDED_TEXT);
+  await expect(probeResultRegion(page))
+    .toContainText(probeIdentityText(syntheticNewerModelEndpoint.name, 'd'.repeat(64), 1));
+  expect(probes.raw).toEqual(['{"lock_version":1}']);
+  expect(probes.posts.map((post) => post.agentKey)).toEqual(['architect']);
+  expect(saves).toHaveLength(1);
+  expect(reads).toHaveLength(2);
+  expectBareCatalogReads(reads);
+  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect.poll(workbenchRequestCount).toBe(1);
+});
+
+test('model endpoint manual custom name: an exact name absent from discovery saves only the five leaves, is retained, then probes', async ({ page }) => {
+  const manual = 'Team Exact Endpoint 9';
+  await installExactIdentityMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
+  const reads = await installCatalogMock(page, (route) => fulfillJson(route, 200, syntheticModelEndpointDiscovery()));
+  const saves = await installSaveMock(page, (route, save) => fulfillJson(route, 200, saveSuccessFor(save)));
+  const rawSaves: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'PUT') rawSaves.push(request.postData() ?? '');
+  });
+  const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess({
+    endpoint_name: manual,
+    candidate_hash: 'd'.repeat(64),
+    lock_version: 1,
+  })));
+  await openWorkbench(page);
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const panel = modelTabPanel(page);
+  await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
+  await expect(panel.getByRole('radio', { name: manual })).toHaveCount(0);
+
+  await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill(manual);
+  await expect(panel.getByRole('radio', { checked: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+
+  const body = saves[0].body;
+  expect(Object.keys(body).sort()).toEqual(['candidate', 'lock_version']);
+  expect(Object.keys(body.candidate).sort()).toEqual(['model', 'prompt_text']);
+  expect(Object.keys(body.candidate.model).sort()).toEqual(['endpoint_name', 'max_tokens', 'temperature', 'top_p']);
+  expect(body).toEqual({
+    lock_version: 0,
+    candidate: {
+      prompt_text: syntheticDraftDefinitions.architect.prompt_text,
+      model: { endpoint_name: manual, ...SEED_MODEL },
+    },
+  });
+  await expect.poll(() => rawSaves.length).toBe(1);
+  for (const forbidden of [
+    '"display_name"', '"docs"', '"description"', '"items"', '"name"', '"host"', '"token"',
+    '"task"', '"provider"', '"url"', 'http', '://',
+    ...syntheticSystemModelEndpoints.flatMap((item) => [item.display_name, item.description, item.docs])
+      .filter((value): value is string => value !== null),
+  ]) {
+    expect(rawSaves[0]).not.toContain(forbidden);
+  }
+
+  // Exact retention after success: the name, the lock and the status.
+  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(manual);
+  await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
+
+  await panel.getByRole('button', { name: PROBE_BUTTON }).click();
+  await expect(probeResultRegion(page)).toContainText(probeIdentityText(manual, 'd'.repeat(64), 1));
+  expect(probes.raw).toEqual(['{"lock_version":1}']);
+  expect(saves).toHaveLength(1);
+  expectBareCatalogReads(reads);
+  await expect.poll(workbenchRequestCount).toBe(1);
+});
+
+test('model endpoint manual server-validation failure: a typed endpoint issue keeps the whole unsaved form, and the corrected name retries through the same PUT without remount', async ({ page }) => {
+  const missing = 'Team Missing Endpoint';
+  const corrected = 'Team Found Endpoint';
+  await installExactIdentityMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route, save, call) => (call === 0
+    ? fulfillJson(route, 422, {
+      code: 'invalid_draft',
+      errors: [{
+        field: 'candidate.model.endpoint_name',
+        code: 'endpoint_unknown',
+        message: 'Endpoint name was not found.',
+      }],
+    })
+    : fulfillJson(route, 200, saveSuccessFor(save))));
+  const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess({
+    endpoint_name: corrected,
+    candidate_hash: 'd'.repeat(64),
+    lock_version: 1,
+  })));
+  await openWorkbench(page);
+  await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect unsaved prompt');
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const panel = modelTabPanel(page);
+  const endpoint = page.getByRole('textbox', { name: 'Custom endpoint name' });
+  await endpoint.fill(missing);
+  await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.3');
+  await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.5');
+  // A DOM marker proves the same element survives: no remount, no reload.
+  await endpoint.evaluate((element) => { element.setAttribute('data-remount-marker', 'kept'); });
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+
+  await expect(endpoint).toHaveAccessibleDescription('Endpoint name was not found.');
+  const alerts = panel.getByRole('alert');
+  await expect(alerts).toHaveCount(1);
+  await expect(alerts).toHaveText('Endpoint name was not found.');
+  await expect(alerts).not.toContainText(missing);
+  await expect(page.getByRole('region', { name: 'Server rejected this request' })).toHaveCount(0);
+  await expect(endpoint).toHaveValue(missing);
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.3');
+  await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.5');
+  await expect(architectNavStatus(page)).toContainText('Unsaved');
+  await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
+  await page.getByRole('tab', { name: 'Prompt' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect unsaved prompt');
+  await page.getByRole('tab', { name: 'Model' }).click();
+
+  await endpoint.fill(corrected);
+  await expect(endpoint).not.toHaveAccessibleDescription('Endpoint name was not found.');
+  await page.getByRole('button', { name: 'Save Draft' }).click();
+  await expect.poll(() => saves.length).toBe(2);
+  expect(saves[1].agentKey).toBe('architect');
+  expect(saves[1].body).toEqual({
+    lock_version: 0,
+    candidate: {
+      prompt_text: 'Architect unsaved prompt',
+      model: { endpoint_name: corrected, temperature: 0.3, max_tokens: 60000, top_p: 0.5 },
+    },
+  });
+  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect(endpoint).toHaveValue(corrected);
+  await expect(endpoint).toHaveAttribute('data-remount-marker', 'kept');
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+
+  await panel.getByRole('button', { name: PROBE_BUTTON }).click();
+  await expect(probeResultRegion(page)).toContainText(probeIdentityText(corrected, 'd'.repeat(64), 1));
+  expect(probes.raw).toEqual(['{"lock_version":1}']);
+  await expect.poll(workbenchRequestCount).toBe(1);
+});
+
+for (const code of ['unsupported_structured_output', 'endpoint_probe_forbidden', 'structured_output_probe_failed'] as const) {
+  test(`model endpoint probe ${code}: the sanitized result names the saved identity and offers Retry only when retryable`, async ({ page }) => {
+    const { status, message, retryable } = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+    await installExactIdentityMock(page);
+    const workbenchRequestCount = await installWorkbenchMock(page);
+    const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+    const probes = await installProbeMock(page, (route, _post, call) => (call === 0
+      ? fulfillJson(route, status, syntheticProbeFailure(code))
+      : fulfillJson(route, 200, syntheticProbeSuccess())));
+    await openWorkbench(page);
+    await page.getByRole('tab', { name: 'Model' }).click();
+    const panel = modelTabPanel(page);
+    await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
+    const statusBefore = await architectNavStatus(page).textContent();
+
+    await panel.getByRole('button', { name: PROBE_BUTTON }).click();
+    const region = probeResultRegion(page);
+    await expect(region.getByRole('alert')).toHaveText(message);
+    await expect(region).toContainText(probeIdentityText(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    await expect(region).not.toContainText(PROBE_SUCCEEDED_TEXT);
+    expect(await architectNavStatus(page).textContent()).toBe(statusBefore);
+    await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(probes.raw).toEqual(['{"lock_version":0}']);
+
+    const retry = region.getByRole('button', { name: PROBE_RETRY_BUTTON });
+    if (!retryable) {
+      await expect(retry).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /retry/i })).toHaveCount(0);
+      await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeEnabled();
+      expect(probes.posts).toHaveLength(1);
+    } else {
+      await retry.click();
+      await expect(region).toContainText(PROBE_SUCCEEDED_TEXT);
+      await expect(region.getByRole('alert')).toHaveCount(0);
+      expect(probes.raw).toEqual(['{"lock_version":0}', '{"lock_version":0}']);
+    }
+    expect(saves).toHaveLength(0);
+    await expect.poll(workbenchRequestCount).toBe(1);
+  });
+}
+
+test('model endpoint empty discovery says so, keeps the saved seed, and still probes it', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const reads = await installCatalogMock(page, (route) => fulfillJson(route, 200, { items: [] }));
+  const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess()));
+  await openWorkbench(page);
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const panel = modelTabPanel(page);
+  await expect(panel).toContainText(EMPTY_DISCOVERY);
+  await expect(panel.getByRole('radiogroup')).toHaveCount(0);
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+
+  await panel.getByRole('button', { name: PROBE_BUTTON }).click();
+  await expect(probeResultRegion(page))
+    .toContainText(probeIdentityText(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+  expect(probes.raw).toEqual(['{"lock_version":0}']);
+  expectBareCatalogReads(reads);
+});
+
+test('model endpoint URL rejection shows the table message and sends zero PUT and zero probe', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess()));
+  await openWorkbench(page);
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const panel = modelTabPanel(page);
+  await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
+
+  for (const value of [
+    'https://example.cloud.databricks.com/serving-endpoints/x/invocations',
+    'serving-endpoints/../secrets',
+    'x?token=abc',
+  ]) {
+    const endpoint = page.getByRole('textbox', { name: 'Custom endpoint name' });
+    await endpoint.fill(value);
+    await expect(endpoint).toHaveAccessibleDescription(URL_NOT_ALLOWED);
+    await expect(panel.getByRole('alert')).toHaveText(URL_NOT_ALLOWED);
+    await expect(endpoint).toHaveValue(value);
+    await expect(page.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
+    await page.getByRole('button', { name: 'Save Draft' }).click({ force: true });
+    await panel.getByRole('button', { name: PROBE_BUTTON }).click({ force: true });
+  }
+  await page.waitForTimeout(200);
+  expect(saves).toHaveLength(0);
+  expect(probes.posts).toHaveLength(0);
+});
+
+test('model endpoint catalogue 503 is an alert that recovers through Refresh models without remount', async ({ page }) => {
+  await installExactIdentityMock(page);
+  const workbenchRequestCount = await installWorkbenchMock(page);
+  const reads = await installCatalogMock(page, (route, call) => (call === 0
+    ? fulfillJson(route, 503, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE)
+    : fulfillJson(route, 200, syntheticModelEndpointDiscovery())));
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  await openWorkbench(page);
+  await page.getByRole('tab', { name: 'Model' }).click();
+  const panel = modelTabPanel(page);
+  await expect(panel.getByRole('alert')).toContainText(MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message);
+  await expect(panel.getByRole('radiogroup')).toHaveCount(0);
+  await expect(panel).not.toContainText(EMPTY_DISCOVERY);
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+  const search = panel.getByRole('searchbox', { name: 'Search discovered models' });
+  await search.fill('opus');
+  await search.evaluate((element) => { element.setAttribute('data-remount-marker', 'kept'); });
+
+  await panel.getByRole('button', { name: 'Refresh models' }).click();
+  await expect(panel.getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME, exact: true })).toBeChecked();
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await expect(search).toHaveAttribute('data-remount-marker', 'kept');
+  await expect(search).toHaveValue('opus');
+  expect(reads).toHaveLength(2);
+  expectBareCatalogReads(reads);
+  expect(saves).toHaveLength(0);
+  await expect.poll(workbenchRequestCount).toBe(1);
+});

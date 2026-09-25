@@ -1584,3 +1584,67 @@ export const ENDPOINT_NAME_POLICY_CASES: Record<'rejected' | 'accepted', string[
     "ünïcode-endpoint"
   ]
 };
+
+// ============================================================
+// #266 saved-candidate structured-output probe
+// (POST /api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe)
+// ============================================================
+
+/** The exact seed identity every packaged role's saved candidate starts on. */
+export const SEED_CANDIDATE_HASH = 'a'.repeat(64);
+
+/**
+ * The server's code-owned probe failure table, verbatim from
+ * `src/services/model_endpoint_probe.py` and the route's status map (#266 Task 5
+ * ruling): forbidden 403 and unsupported 422 are not retryable; only the ambiguous
+ * 503 is.
+ */
+export const STRUCTURED_OUTPUT_PROBE_FAILURES = {
+  unsupported_structured_output: {
+    status: 422,
+    message: 'This endpoint does not support structured output.',
+    retryable: false,
+  },
+  endpoint_probe_forbidden: {
+    status: 403,
+    message: 'The app is not permitted to query this endpoint.',
+    retryable: false,
+  },
+  structured_output_probe_failed: {
+    status: 503,
+    message: 'The structured output probe could not complete. Retry the probe.',
+    retryable: true,
+  },
+} as const;
+
+export type StructuredOutputProbeFailureFixtureCode = keyof typeof STRUCTURED_OUTPUT_PROBE_FAILURES;
+
+export interface StructuredOutputProbeIdentityFixture {
+  endpoint_name: string;
+  candidate_hash: string;
+  lock_version: number;
+}
+
+function probeIdentity(
+  identity: Partial<StructuredOutputProbeIdentityFixture>,
+): StructuredOutputProbeIdentityFixture {
+  return {
+    endpoint_name: identity.endpoint_name ?? SEED_MODEL_ENDPOINT_NAME,
+    candidate_hash: identity.candidate_hash ?? SEED_CANDIDATE_HASH,
+    lock_version: identity.lock_version ?? 0,
+  };
+}
+
+/** The exact 200 body: the identity of the saved candidate the probe ran against. */
+export function syntheticProbeSuccess(identity: Partial<StructuredOutputProbeIdentityFixture> = {}) {
+  return { code: 'structured_output_probe_succeeded' as const, ...probeIdentity(identity) };
+}
+
+/** The exact typed failure body for one code; its status is `STRUCTURED_OUTPUT_PROBE_FAILURES[code].status`. */
+export function syntheticProbeFailure(
+  code: StructuredOutputProbeFailureFixtureCode,
+  identity: Partial<StructuredOutputProbeIdentityFixture> = {},
+) {
+  const failure = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+  return { code, message: failure.message, retryable: failure.retryable, ...probeIdentity(identity) };
+}

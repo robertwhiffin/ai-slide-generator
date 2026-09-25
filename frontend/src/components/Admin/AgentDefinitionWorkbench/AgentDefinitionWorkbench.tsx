@@ -151,9 +151,12 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
               if (node.execution_kind !== 'model') return null;
               const entry = editor.state.byAgent[node.agent_key];
               const pending = editor.state.pendingSave;
-              // Every Save, Upgrade, and SourceRecovery button reads the same
-              // aggregate pending slot; there is no second gate.
+              // Every Save, Upgrade, SourceRecovery, SchemaUpgrade and Probe button reads
+              // the same aggregate pending slot; there is no second gate.
               const operationsDisabled = pending !== null;
+              const probePending = pending !== null
+                && pending.operation === 'probe'
+                && pending.agentKey === node.agent_key;
               const promptDisabled = pending !== null
                 && pending.operation === 'upgrade'
                 && pending.agentKey === node.agent_key
@@ -167,9 +170,11 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                     entry={entry}
                     saveDisabled={operationsDisabled || !validateDraftForm(entry.local).ok}
                     operationsDisabled={operationsDisabled}
+                    probePending={probePending}
                     promptDisabled={promptDisabled}
                     onEdit={editor.edit}
                     onSave={editor.save}
+                    onProbeStructuredOutput={editor.probeStructuredOutput}
                     onUpgradeProtectedAssembly={editor.upgradeProtectedAssembly}
                     onUpgradeSchemaContract={editor.upgradeSchemaContract}
                     onToggleSchemaOverlayOptionalField={editor.toggleSchemaOverlayOptionalField}

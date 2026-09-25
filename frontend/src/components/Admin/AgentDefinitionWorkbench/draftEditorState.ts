@@ -18,6 +18,9 @@ import {
   type EditableModelDraft,
   type EditableSchemaOverlay,
   type LegacyPromptSourceResponse,
+  type StructuredOutputProbeFailureResponse,
+  type StructuredOutputProbeIdentity,
+  type StructuredOutputProbeSuccessResponse,
 } from '../../../api/agentDefinitions';
 
 export type DraftStatus = 'Clean' | 'Unsaved' | 'Needs test';
@@ -121,6 +124,21 @@ export interface RetainedDraftForm {
   sanitizedFormatVersion: 1 | 2;
 }
 
+/**
+ * The last explicit structured-output probe of this role's saved candidate (#266),
+ * carrying the exact identity the server reported. It is informational only: it never
+ * changes the lock, the saved entry, the form or the draft status.
+ */
+export type DraftProbeResult = StructuredOutputProbeIdentity & (
+  | { outcome: 'succeeded' }
+  | {
+    outcome: 'failed';
+    code: StructuredOutputProbeFailureResponse['code'];
+    message: string;
+    retryable: boolean;
+  }
+);
+
 export interface DraftEditorEntry {
   publishedHash: string;
   saved: DraftDefinition;
@@ -133,13 +151,16 @@ export interface DraftEditorEntry {
   /** Exact ordered server issues that have no inline field owner. */
   responseIssues: DraftFieldError[];
   requestError: string | null;
+  /** The last probe result for the saved candidate still on screen, or `null`. */
+  probeResult: DraftProbeResult | null;
 }
 
-export type DraftOperationKind = 'save' | 'upgrade' | 'sourceRecovery' | 'schemaUpgrade';
+export type DraftOperationKind = 'save' | 'upgrade' | 'sourceRecovery' | 'schemaUpgrade' | 'probe';
 
 /**
  * The one aggregate pending slot, now discriminated by operation. Save, Upgrade,
- * and SourceRecovery share this single gate; there is no second gate.
+ * SourceRecovery, SchemaUpgrade and the #266 structured-output Probe share this single
+ * gate; there is no second gate.
  */
 export interface PendingDraftSave {
   operation: DraftOperationKind;
@@ -189,6 +210,12 @@ export type DraftEditorAction =
   | { type: 'schemaUpgradeRejected'; requestId: number; error: DraftValidationErrorResponse }
   | { type: 'schemaUpgradeConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
   | { type: 'schemaUpgradeFailed'; requestId: number; message: string }
+  | { type: 'probeStarted'; pending: PendingDraftSave }
+  | { type: 'probeSucceeded'; requestId: number; result: StructuredOutputProbeSuccessResponse }
+  | { type: 'probeUnsuccessful'; requestId: number; failure: StructuredOutputProbeFailureResponse }
+  | { type: 'probeRejected'; requestId: number; error: DraftValidationErrorResponse }
+  | { type: 'probeConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
+  | { type: 'probeFailed'; requestId: number; message: string }
   | { type: 'schemaOverlayOptionalFieldToggled'; agentKey: AgentKey; fieldName: string }
   | { type: 'schemaOverlayFieldDescriptionChanged'; agentKey: AgentKey; fieldName: string; description: string }
   | { type: 'schemaOverlayFieldExamplesChanged'; agentKey: AgentKey; fieldName: string; examples: string }
@@ -199,6 +226,8 @@ export type DraftEditorAction =
   | { type: 'discardRetained'; agentKey: AgentKey; retainedId: string };
 
 const INVALID_RESPONSE_MESSAGE = 'Unable to save draft because the server response was invalid.';
+const PROBE_INVALID_RESPONSE_MESSAGE =
+  'Unable to test structured output because the server response was invalid.';
 
 export const RETAINED_REASONS = {
   reload_server: 'Replaced by the server draft values.',
@@ -519,6 +548,7 @@ export function createDraftEditorState(
       nextRetainedOrdinal: 1,
       responseIssues: [],
       requestError: null,
+      probeResult: null,
     };
   }
   return { draft: structuredClone(workbench.draft), byAgent, pendingSave: null };
@@ -622,6 +652,37 @@ export function draftSaveErrorMessage(error: unknown): string {
   return 'Unable to save draft. Check your connection and try again.';
 }
 
+/**
+ * The contained message for a probe that produced no typed result. It never reads the
+ * server's detail text, so an untyped error body cannot leak into the panel.
+ */
+export function probeErrorMessage(error: unknown): string {
+  if (error instanceof InvalidDraftSaveResponseError) return PROBE_INVALID_RESPONSE_MESSAGE;
+  if (error instanceof AgentDefinitionApiError) return `Unable to test structured output (${error.status}).`;
+  return 'Unable to test structured output. Check your connection and try again.';
+}
+
+/** A probe may only test the saved endpoint: it is refused while the local one differs. */
+export function probeEndpointUnsaved(entry: DraftEditorEntry): boolean {
+  return entry.local.endpoint_name !== entry.saved.model.endpoint_name;
+}
+
+/**
+ * A probe result describes one saved candidate. It survives only while the saved
+ * candidate it names is still the saved one.
+ */
+function probeResultAfterAdoption(before: DraftEditorEntry, after: DraftEditorEntry): DraftProbeResult | null {
+  return after.saved.candidate_hash === before.saved.candidate_hash
+    && after.saved.model.endpoint_name === before.saved.model.endpoint_name
+    ? before.probeResult
+    : null;
+}
+
+/** A result for an endpoint that is no longer the local one is dropped, never shown. */
+function probeResultAfterLocalChange(before: DraftEditorEntry, local: EditableModelDraftForm): DraftProbeResult | null {
+  return local.endpoint_name === before.local.endpoint_name ? before.probeResult : null;
+}
+
 function replaceEntry(
   state: DraftEditorState,
   agentKey: AgentKey,
@@ -704,7 +765,11 @@ function rejectOperation(
       ...state.byAgent,
       [pending.agentKey]: {
         ...entry,
-        fieldErrors: operation === 'save' ? fieldErrorsFromResponse(error) : entry.fieldErrors,
+        // A probe's only draft rejection is the saved-name policy re-check, which is
+        // owned by the endpoint field exactly as a save's is.
+        fieldErrors: operation === 'save' || operation === 'probe'
+          ? fieldErrorsFromResponse(error)
+          : entry.fieldErrors,
         responseIssues: nonInlineIssues(error),
       },
     },
@@ -758,6 +823,9 @@ function mergeConflict(
       fieldErrors: agentKey === pending.agentKey ? {} : entry.fieldErrors,
       conflict: agentKey === pending.agentKey ? conflict : null,
       requestError: agentKey === pending.agentKey ? null : entry.requestError,
+      probeResult: agentKey === pending.agentKey && pending.operation === 'probe'
+        ? null
+        : probeResultAfterAdoption(entry, adopted),
     };
   }
   return { draft: conflict.server.draft, byAgent, pendingSave: null };
@@ -793,8 +861,53 @@ function succeedWrite(
         conflict: null,
         responseIssues: [],
         requestError: null,
+        probeResult: probeResultAfterAdoption(entry, adopted),
       },
     },
+  };
+}
+
+/**
+ * Settles the pending probe. The route never writes, so the reported identity must be
+ * exactly the saved candidate this client holds at the lock it sent; anything else is
+ * contained as an invalid response. Nothing but the pending slot and this role's
+ * probe result may change: not the lock, the saved entry, the form, or the status.
+ */
+function settleProbe(
+  state: DraftEditorState,
+  requestId: number,
+  reported: StructuredOutputProbeIdentity,
+  result: (identity: StructuredOutputProbeIdentity) => DraftProbeResult,
+): DraftEditorState {
+  const pending = matchingPending(state, 'probe', requestId);
+  if (pending === null) return state;
+  const entry = state.byAgent[pending.agentKey];
+  const coherent = reported.lock_version === pending.expectedLockVersion
+    && state.draft.lock_version === pending.expectedLockVersion
+    && reported.endpoint_name === entry.saved.model.endpoint_name
+    && reported.candidate_hash === entry.saved.candidate_hash;
+  if (!coherent) {
+    return {
+      ...replaceEntry(state, pending.agentKey, {
+        ...entry,
+        probeResult: null,
+        requestError: PROBE_INVALID_RESPONSE_MESSAGE,
+      }),
+      pendingSave: null,
+    };
+  }
+  const identity: StructuredOutputProbeIdentity = {
+    endpoint_name: reported.endpoint_name,
+    candidate_hash: reported.candidate_hash,
+    lock_version: reported.lock_version,
+  };
+  return {
+    ...replaceEntry(state, pending.agentKey, {
+      ...entry,
+      // An endpoint edited while the probe was in flight is no longer the tested one.
+      probeResult: entry.local.endpoint_name === identity.endpoint_name ? result(identity) : null,
+    }),
+    pendingSave: null,
   };
 }
 
@@ -869,12 +982,15 @@ export function draftEditorReducer(
       if (action.field === 'prompt_text' && promptChangeIsQuarantined(state, action.agentKey)) {
         return quarantinePromptChange(state, action.agentKey, entry.local, String(action.value));
       }
+      const local = { ...entry.local, [action.field]: action.value };
       return replaceEntry(state, action.agentKey, {
         ...entry,
-        local: { ...entry.local, [action.field]: action.value },
+        local,
         fieldErrors: { ...entry.fieldErrors, [action.field]: undefined },
         responseIssues: [],
         requestError: null,
+        // Any endpoint edit clears the old result, even one that returns to the saved name.
+        probeResult: action.field === 'endpoint_name' ? null : entry.probeResult,
       });
     }
     case 'assemblyBlockAdded': {
@@ -976,6 +1092,36 @@ export function draftEditorReducer(
       if (state.pendingSave !== null) return state;
       return startOperation(state, action.pending);
     }
+    case 'probeStarted': {
+      if (state.pendingSave !== null) return state;
+      const entry = state.byAgent[action.pending.agentKey];
+      // Reducer backstop: only the saved endpoint may be probed.
+      if (probeEndpointUnsaved(entry)) return state;
+      // A probe reads and never writes, so it keeps the role's local field errors.
+      return {
+        ...replaceEntry(state, action.pending.agentKey, { ...entry, requestError: null, probeResult: null }),
+        pendingSave: action.pending,
+      };
+    }
+    case 'probeSucceeded':
+      return settleProbe(state, action.requestId, action.result, (identity) => ({
+        outcome: 'succeeded',
+        ...identity,
+      }));
+    case 'probeUnsuccessful':
+      return settleProbe(state, action.requestId, action.failure, (identity) => ({
+        outcome: 'failed',
+        code: action.failure.code,
+        message: action.failure.message,
+        retryable: action.failure.retryable,
+        ...identity,
+      }));
+    case 'probeRejected':
+      return rejectOperation(state, 'probe', action.requestId, action.error);
+    case 'probeConflicted':
+      return mergeConflict(state, 'probe', action.requestId, action.conflict);
+    case 'probeFailed':
+      return failOperation(state, 'probe', action.requestId, action.message);
     case 'saveSucceeded':
       return succeedWrite(state, 'save', action.requestId, action.result, (entry, pending) => (
         pending.submittedCandidate === null
@@ -1082,11 +1228,13 @@ export function draftEditorReducer(
         fromVersion: definitionFormatVersion(entry.saved),
         definition: entry.saved,
       });
+      const local = formFromDefinition(entry.saved);
       return replaceEntry(state, action.agentKey, {
         ...appended,
-        local: formFromDefinition(entry.saved),
+        local,
         conflict: null,
         fieldErrors: {},
+        probeResult: probeResultAfterLocalChange(entry, local),
       });
     }
     case 'keepLocal': {
@@ -1123,12 +1271,14 @@ export function draftEditorReducer(
         return replaceEntry(quarantined, action.agentKey, {
           ...quarantinedEntry,
           fieldErrors: {},
+          probeResult: probeResultAfterLocalChange(entry, restored),
         });
       }
       return replaceEntry(state, action.agentKey, {
         ...entry,
         local: restored,
         fieldErrors: {},
+        probeResult: probeResultAfterLocalChange(entry, restored),
       });
     }
     case 'discardRetained': {

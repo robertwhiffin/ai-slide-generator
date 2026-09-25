@@ -988,3 +988,146 @@ export async function getSystemModelEndpoints(): Promise<SystemModelEndpoint[]> 
   if (failure !== null) throw failure;
   throw new AgentDefinitionApiError(response.status, payload ?? null, response.statusText);
 }
+
+// ============================================================
+// #266 saved-candidate structured-output probe:
+// POST /api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe
+// ============================================================
+
+/** The exact saved candidate the server probed; it copies it before the model call. */
+export interface StructuredOutputProbeIdentity {
+  endpoint_name: string;
+  candidate_hash: string;
+  lock_version: number;
+}
+
+export interface StructuredOutputProbeSuccessResponse extends StructuredOutputProbeIdentity {
+  code: 'structured_output_probe_succeeded';
+}
+
+export type StructuredOutputProbeFailureCode =
+  | 'unsupported_structured_output'
+  | 'endpoint_probe_forbidden'
+  | 'structured_output_probe_failed';
+
+export interface StructuredOutputProbeFailureResponse extends StructuredOutputProbeIdentity {
+  code: StructuredOutputProbeFailureCode;
+  message: string;
+  retryable: boolean;
+}
+
+/**
+ * The route's exact status table (#266 Task 5 ruling): forbidden and unsupported are
+ * never retryable; only the ambiguous provider or transport failure is.
+ */
+const PROBE_FAILURE_CONTRACT = {
+  403: { code: 'endpoint_probe_forbidden', retryable: false },
+  422: { code: 'unsupported_structured_output', retryable: false },
+  503: { code: 'structured_output_probe_failed', retryable: true },
+} as const;
+
+/** A valid, typed probe failure. Its message is the server's code-owned, sanitized text. */
+export class StructuredOutputProbeApiError extends Error {
+  readonly status: 403 | 422 | 503;
+  readonly failure: StructuredOutputProbeFailureResponse;
+
+  constructor(status: 403 | 422 | 503, failure: StructuredOutputProbeFailureResponse) {
+    super(failure.message);
+    this.name = 'StructuredOutputProbeApiError';
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+function probeIdentityFrom(value: Record<string, unknown>): StructuredOutputProbeIdentity | null {
+  if (typeof value.endpoint_name !== 'string' || value.endpoint_name.length === 0) return null;
+  if (typeof value.candidate_hash !== 'string' || !/^[0-9a-f]{64}$/.test(value.candidate_hash)) return null;
+  if (!isNonnegativeInteger(value.lock_version)) return null;
+  return {
+    endpoint_name: value.endpoint_name,
+    candidate_hash: value.candidate_hash,
+    lock_version: value.lock_version,
+  };
+}
+
+export function parseStructuredOutputProbeSuccess(
+  value: unknown,
+): StructuredOutputProbeSuccessResponse | null {
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['code', 'endpoint_name', 'candidate_hash', 'lock_version'])
+    || value.code !== 'structured_output_probe_succeeded') return null;
+  const identity = probeIdentityFrom(value);
+  return identity === null ? null : { code: 'structured_output_probe_succeeded', ...identity };
+}
+
+export function parseStructuredOutputProbeFailure(
+  status: number,
+  value: unknown,
+): StructuredOutputProbeApiError | null {
+  if (status !== 403 && status !== 422 && status !== 503) return null;
+  const contract = PROBE_FAILURE_CONTRACT[status];
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, [
+      'code', 'message', 'retryable', 'endpoint_name', 'candidate_hash', 'lock_version',
+    ])
+    || value.code !== contract.code
+    || value.retryable !== contract.retryable
+    || typeof value.message !== 'string') return null;
+  const identity = probeIdentityFrom(value);
+  if (identity === null) return null;
+  return new StructuredOutputProbeApiError(status, {
+    code: contract.code,
+    message: value.message,
+    retryable: contract.retryable,
+    ...identity,
+  });
+}
+
+/**
+ * Probes the role's **saved** candidate once. The body is exactly `{ lock_version }`:
+ * the endpoint, sampling values, prompt and schema are all server-owned, and nothing
+ * here saves, approves or aliases anything.
+ *
+ * - 200: the exact success, or `InvalidDraftSaveResponseError`.
+ * - 403/503: the exact typed failure (`StructuredOutputProbeApiError`); any other body
+ *   at those statuses (an authorization or proxy error) is a plain
+ *   `AgentDefinitionApiError`, so it can never be offered as a typed retry.
+ * - 422: the typed unsupported failure, or the existing draft rejection envelope (the
+ *   saved-name policy re-check) as `AgentDefinitionApiError`; anything else is invalid.
+ * - 409: the existing null-candidate conflict as `AgentDefinitionApiError`.
+ * - Any other status is `AgentDefinitionApiError`; a transport failure propagates.
+ */
+export async function probeDraftStructuredOutput(
+  agentKey: AgentKey,
+  request: DraftLockRequest,
+): Promise<StructuredOutputProbeSuccessResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/admin/agent-definitions/draft/${agentKey}/model-endpoint-probe`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lock_version: request.lock_version }),
+    },
+  );
+  const payload: unknown = await response.json().catch(() => null);
+  const { status, statusText } = response;
+
+  if (status === 200) {
+    const parsed = parseStructuredOutputProbeSuccess(payload);
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    return parsed;
+  }
+  if (status === 409) {
+    const parsed = parseDraftSaveConflictResponse(payload, 'null');
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    throw new AgentDefinitionApiError(status, parsed, statusText);
+  }
+  const typed = parseStructuredOutputProbeFailure(status, payload);
+  if (typed !== null) throw typed;
+  if (status === 422) {
+    const parsed = parseDraftValidationErrorResponse(payload);
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    throw new AgentDefinitionApiError(status, parsed, statusText);
+  }
+  throw new AgentDefinitionApiError(status, payload, statusText);
+}
