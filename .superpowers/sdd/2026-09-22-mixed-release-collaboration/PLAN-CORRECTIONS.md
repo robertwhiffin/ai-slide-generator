@@ -1145,3 +1145,71 @@ leak was injected. The other two pass because the success branch was not mutated
 precise result, not a coincidental one.
 
 Restored to **76 passed** with a verified SHA match.
+
+## Correction 46 — the review's absolute unit figures do not reproduce, but its DELTA does exactly, and its conclusion stands
+
+The review declared `tests/unit` at **14 failed** on the integration base and **6 failed** at #262's
+HEAD. Measured here, with every command stated (correction 58):
+
+```
+pytest -q tests/unit                  # at my HEAD, 4 condition commits on top
+  => 11 failed, 5637 passed, 110 skipped
+```
+
+All 11 sit in four files. Measured on those four files at three commits, by node-ID set:
+
+| Commit | What it is | Failures |
+| --- | --- | --- |
+| `3ed8f9b6a` | the integration base | **11** |
+| `7063d13a6` | the review's own HEAD plus a docs-only commit | **11** |
+| `00bd7e409` | my HEAD, all five conditions closed | **11** |
+
+`comm -13` between the integration base's set and mine is **empty**. The sets are not merely
+nested — they are **identical**. So neither #262 nor my five condition commits introduced any of
+them, and the claim is stronger than a subset relation.
+
+`7063d13a6` differs from the review's HEAD `1cad0f177` by a single git-ignored corrections file,
++86 lines, no code and no tests — verified with `git diff --name-only`. So the 11 is measured at
+effectively the review's own tree, and its **6 is not reproducible**.
+
+**The delta reconciles exactly, which is the part that matters.** The review named eight repairs:
+`test_deck_permission_routes` ×1, `test_session_duplicate` ×2, `test_tour_ships_a_spec` ×5.
+Measured on those three files:
+
+```
+integration base 3ed8f9b6a :   8 failed, 42 passed
+#262 HEAD                  :  51 passed
+```
+
+Exactly eight, repaired exactly as claimed. So the true figures are **19 to 11**, and the review's
+were **14 to 6** — both understated by a constant 5, giving the same **−8**. Whatever five tests
+passed in its environment and fail in mine, the offset is constant across both of its
+measurements, so its zero-attributable conclusion is unaffected. **Its ruling is right; only its
+absolute numbers are.**
+
+This is precisely why baselines are recorded as causes rather than counts. Two runs can disagree
+on the count by a constant and still agree on every attribution.
+
+## Correction 47 — the residual 11 are two causes, and a hypothesis I formed about one of them was wrong
+
+**Seven** — the whole of `test_deploy_app_yaml.py` and `test_deploy_autoscaling.py`: the generated
+`app.yaml` does not contain `system.databricks_token`, which the test asserts.
+
+I first attributed these to the foreign-clone hazard, and **that attribution was wrong.** The
+hazard itself is real and reproduced — `databricks_tellr` resolves to
+`/Users/robert.whiffin/Documents/slide-generator/ai-slide-generator/packages/databricks-tellr/`,
+a different clone on branch `docs/genie-one-mcp-offline-access`, while `src` resolves locally. But
+it is **not the cause here**: the local package's own `deploy.py` also contains zero occurrences
+of `system.databricks_token`, and putting it first on `PYTHONPATH` leaves the same **7 failed**.
+A genuine pre-existing gap in deploy config, unrelated to this epic.
+
+Recording the wrong turn because the lesson is the reusable part: a known environment hazard is a
+tempting explanation for any failure that touches it, and it took one measurement to falsify. The
+hazard being real does not make it the cause.
+
+**Four** — `test_style_exclusivity_chokepoint.py` ×3 and `test_style_exclusivity_persistence_boundary.py` ×1:
+`ConversationGraphReleaseIntegrityError: no active Graph Release`, the same cause as the C-6
+fixture class and the same shape the harness seeding fixed in the integration lane. These are unit
+tests with their own fixtures, so the integration-lane seed does not reach them. Pre-existing at
+the integration base; a candidate for the same treatment, and recorded for the follow-up rather
+than widened into this round.
