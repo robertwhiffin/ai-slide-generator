@@ -210,12 +210,30 @@ def load_collaboration_root(session_factory: sessionmaker, session_id: str) -> s
     requires ``root.parent_session_id IS NULL``, so a hand-forced depth-2 row —
     reachable only through raw SQL or a pre-guard legacy database — resolves to
     NOTHING and raises, rather than naming the intermediate contributor as the deck
-    owner.  Without that predicate the three root resolvers disagree three ways on
-    such a row (``_resolve_root_session`` walks to the real root,
-    ``authorized_collaboration_root`` returns ``None``, and this one would return
-    the intermediate), and recording a non-root session as the owner is the one
-    thing AC4 exists to prevent.  C-16 justifies the one-hop join *shape*; it does
-    not license dropping the guard that makes the hop safe.
+    owner.  Without that predicate the **four** root resolvers disagree four ways
+    on such a row:
+
+    1. ``PermissionService._resolve_root_session`` — walks the full chain,
+       returns the real root.
+    2. ``authorized_collaboration_root`` (``collaboration_history.py:243``) —
+       returns ``None`` (fail-closed via ``IS NULL`` guard).
+    3. This function — raises (fail-closed via ``IS NULL`` guard).
+    4. ``SessionManager._get_deck_owner_session`` (``session_manager.py:926``)
+       — returns the **intermediate** contributor; has 32 call sites and
+       supplies ``deck_owner`` to every ``record_shared_deck_mutation`` call,
+       i.e. AC4's persisted root value.
+
+    A fifth site, ``conversation_pins.py:197``, inlines
+    ``coalesce(parent_session_id, id)`` unguarded (pre-existing, #261).
+
+    The consequence is nevertheless **benign**: the attribution seam
+    fail-closes independently on ``deck.session_id != deck_owner.id``
+    (``shared_deck_attribution.py:83-84``), so no mis-attributed evidence row
+    is constructible even from a hand-forced depth-2 row.  Recording a
+    non-root session as the owner is the one thing AC4 exists to prevent, and
+    that invariant is enforced — just by a different predicate than this
+    docstring once claimed (Ruling C-38).  C-16 justifies the one-hop join
+    *shape*; it does not license dropping the guard that makes the hop safe.
 
     An absent conversation and a hand-forced depth-2 row are indistinguishable
     here, and deliberately share one outcome: neither has a legal root, so neither
