@@ -837,6 +837,42 @@ class TestBuilderNode:
             object_type="slide",
         )
 
+    def test_the_mutation_actor_is_the_acting_contributor_not_the_deck_root(
+        self, graph_env, monkeypatch
+    ):
+        """Catches the deck mutation being attributed to the owner of the deck.
+
+        The test above pins the context's literal shape, but it runs an owner
+        working on their own deck, where root and actor are the same session — so
+        it holds equally whether the actor is read from ``session_id`` or from
+        ``root_session_id``.  This one separates them.  Attributing a
+        contributor's write to the deck root leaves the whole graph-node suite
+        green, and AC4 exists to prevent exactly that: the evidence row must name
+        who made the change, not whose deck it is.
+        """
+        owner = "owner-session-root"
+        contributor = graph_env.session_id
+        assert owner != contributor, (
+            "the scenario collapsed root and actor onto one session, so the "
+            "assertions below would hold for the wrong reason"
+        )
+
+        graph_env.skills.set(
+            "builder", lambda payload: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        seen = {}
+
+        def placehold(position, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        monkeypatch.setattr(nodes, "_placehold_failed_position", placehold)
+
+        builder_node(_branch_payload(graph_env, 0, root_session_id=owner))
+
+        assert seen["mutation"].actor.actor_session_id == contributor
+        assert seen["mutation"].actor.actor_session_id != owner
+
     def test_carries_its_whole_payload_forward_for_the_refan(self, graph_env):
         graph_env.skills.set("builder", builder_out)
         payload = _branch_payload(graph_env, 2, spec=make_spec((2,)))
