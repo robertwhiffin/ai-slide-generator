@@ -1488,3 +1488,19 @@ epic twice, a reasoned negative is worth recording.
 
 Task 7 (whole-slice verification) and the whole-branch review remain. **#264 must be rebased onto
 `d72ad974d` before merging** — its merge-base is `3ed8f9b6a`, so it does not contain #262.
+
+## Correction 65 — correction 64 was wrong about the rejection field, and Task 6's review is ❌
+
+Correction 64 said `SCHEMA_ALREADY_CURRENT_REJECTION`'s "field and code are correct". **The field is
+wrong.** The server emits `schema_contract` (`src/services/graph_configuration_draft.py:127-132`); the
+fixture (`frontend/tests/fixtures/mocks.ts:949`) and the client routing (`DefinitionEditor.tsx:39`)
+both use the invented `schema_contract.version`. So a real already-current rejection links to the
+Assembly tab, and the Playwright test is green only because the fixture agrees with the bug. The
+reviewer's P1 probe (fixture set to the server's real field and message) REDs 1/1 at `spec.ts:1733`.
+The controller relayed the implementer's claim instead of comparing it with the server literal.
+
+The review also falsified the implementer's clause table: seven of ten mandated-clause mutations RED
+0/191 at four-file Vitest scope, including the A2→A3 row reported as measured. Rulings and the fix
+scope are in `progress.md` under "Task 6 review". Issue #264 AC1/AC6 require canonical-field guidance
+and protected-property display, which the Task 5 wire does not yet carry; ruled as an additive
+read-only response field fixed in Task 6's fix round.
