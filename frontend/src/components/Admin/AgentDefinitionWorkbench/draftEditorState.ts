@@ -29,6 +29,33 @@ export type EditableDraftField =
   | 'max_tokens'
   | 'top_p';
 
+/** The local error key for one field override's examples textarea. */
+export type OverlayExamplesErrorKey = `schema_overlay.field_overrides.${string}.examples`;
+
+/** Every key a local or server field error may be attached to. */
+export type DraftFieldErrorKey = EditableDraftField | OverlayExamplesErrorKey;
+
+export const OVERLAY_EXAMPLES_ERROR = 'Examples must be a JSON array.';
+
+export function overlayExamplesErrorKey(fieldName: string): OverlayExamplesErrorKey {
+  return `schema_overlay.field_overrides.${fieldName}.examples`;
+}
+
+/**
+ * The local error for one examples textarea, or `null` when it may be sent. Blank means
+ * "no examples" and is allowed; anything else must parse as a JSON array. Malformed text
+ * is refused here rather than dropped from the candidate, so a Save can never silently
+ * replace saved examples with none (#264 Task 6 review, I3).
+ */
+export function overlayExamplesError(examples: string): string | null {
+  if (!examples.trim()) return null;
+  try {
+    return Array.isArray(JSON.parse(examples)) ? null : OVERLAY_EXAMPLES_ERROR;
+  } catch {
+    return OVERLAY_EXAMPLES_ERROR;
+  }
+}
+
 /**
  * Local editable guidance for one canonical or optional output field.
  * Only `description` and `examples` are accepted by the domain validator;
@@ -98,7 +125,7 @@ export interface DraftEditorEntry {
   publishedHash: string;
   saved: DraftDefinition;
   local: EditableModelDraftForm;
-  fieldErrors: Partial<Record<EditableDraftField, string>>;
+  fieldErrors: Partial<Record<DraftFieldErrorKey, string>>;
   conflict: DraftSaveConflictResponse | null;
   /** Ordered, append-only until an explicit discard. */
   retainedForms: RetainedDraftForm[];
@@ -142,7 +169,7 @@ export type DraftEditorAction =
   | { type: 'assemblyBlockMoved'; agentKey: AgentKey; blockId: string; direction: 'up' | 'down' }
   | { type: 'saveStarted'; pending: PendingDraftSave }
   | { type: 'saveSucceeded'; requestId: number; result: DraftSaveSuccessResponse }
-  | { type: 'saveInvalid'; agentKey: AgentKey; errors: Partial<Record<EditableDraftField, string>> }
+  | { type: 'saveInvalid'; agentKey: AgentKey; errors: Partial<Record<DraftFieldErrorKey, string>> }
   | { type: 'saveRejected'; requestId: number; error: DraftValidationErrorResponse }
   | { type: 'saveConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
   | { type: 'saveFailed'; requestId: number; message: string }
@@ -291,6 +318,10 @@ export function candidateFromForm(form: EditableModelDraftForm): EditableModelDr
  * any properties other than `description` and `examples`. This is the guard
  * that prevents `type`, `default`, `enum`, and `validator` from ever reaching
  * the domain validator — sending them would produce `overlay_guidance_property_forbidden`.
+ *
+ * Only `validateDraftForm` calls this, after `overlayExamplesError` has refused every
+ * unparseable examples value, so a parse failure here is a programming error: it throws
+ * rather than silently dropping the admin's examples from the candidate.
  */
 export function overlayFromForm(form: EditableSchemaOverlayForm): EditableSchemaOverlay {
   const fieldOverrides: Record<string, unknown> = {};
@@ -299,11 +330,7 @@ export function overlayFromForm(form: EditableSchemaOverlayForm): EditableSchema
     // Only description and examples are accepted by the domain validator.
     if (guidance.description) result.description = guidance.description;
     if (guidance.examples.trim()) {
-      try {
-        result.examples = JSON.parse(guidance.examples) as unknown;
-      } catch {
-        // Invalid JSON examples are dropped rather than sending an unparseable value.
-      }
+      result.examples = JSON.parse(guidance.examples) as unknown;
     }
     if (Object.keys(result).length > 0) {
       fieldOverrides[key] = result;
@@ -505,8 +532,8 @@ export function draftStatus(entry: DraftEditorEntry): DraftStatus {
 
 export function validateDraftForm(form: EditableModelDraftForm):
   | { ok: true; candidate: EditableModelDraft }
-  | { ok: false; errors: Partial<Record<EditableDraftField, string>> } {
-  const errors: Partial<Record<EditableDraftField, string>> = {};
+  | { ok: false; errors: Partial<Record<DraftFieldErrorKey, string>> } {
+  const errors: Partial<Record<DraftFieldErrorKey, string>> = {};
   if (!form.prompt_text.trim()) errors.prompt_text = 'Prompt text must not be blank.';
   if (!form.endpoint_name.trim()) errors.endpoint_name = 'Endpoint name must not be blank.';
   if (typeof form.temperature !== 'number'
@@ -525,6 +552,10 @@ export function validateDraftForm(form: EditableModelDraftForm):
     || form.top_p < 0
     || form.top_p > 1) {
     errors.top_p = 'Top-p must be between 0 and 1.';
+  }
+  for (const [fieldName, guidance] of Object.entries(form.schema_overlay?.field_overrides ?? {})) {
+    const examplesError = overlayExamplesError(guidance.examples);
+    if (examplesError !== null) errors[overlayExamplesErrorKey(fieldName)] = examplesError;
   }
   if (Object.keys(errors).length > 0) return { ok: false, errors };
   return {
@@ -921,9 +952,12 @@ export function draftEditorReducer(
       return succeedWrite(state, 'upgrade', action.requestId, action.result, () => true);
     case 'schemaUpgradeSucceeded':
       // Schema contract upgrade: the server installs the new contract and optional
-      // field catalog. Keep local non-schema edits (prompt, model) that were made
-      // while in flight; reset schema overlay to null (no local overlay edits on
-      // the newly upgraded definition).
+      // field catalog and changes nothing else (`upgrade_content_to_v2` keeps the
+      // stored overlay verbatim). So every local edit survives, overlay edits included:
+      // prompt, model and overlay edits made while the request was in flight (A2 to A3)
+      // are kept, and the next Save re-validates the overlay against the v2 contract.
+      // Pinned by 'keeps prompt, model and overlay edits made while the Schema Upgrade
+      // was pending (A2 to A3)' in draftEditorState.test.ts.
       return succeedWrite(state, 'schemaUpgrade', action.requestId, action.result, () => true);
     case 'saveRejected':
       return rejectOperation(state, 'save', action.requestId, action.error);
@@ -1125,6 +1159,7 @@ export function draftEditorReducer(
       return replaceEntry(state, action.agentKey, {
         ...entry,
         local: { ...entry.local, schema_overlay: next },
+        fieldErrors: { ...entry.fieldErrors, [overlayExamplesErrorKey(action.fieldName)]: undefined },
         responseIssues: [],
         requestError: null,
       });

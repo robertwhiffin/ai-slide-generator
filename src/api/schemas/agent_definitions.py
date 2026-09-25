@@ -135,6 +135,48 @@ def _content_field(name: str):
     return Field(validation_alias=AliasChoices(name, AliasPath("content", name)))
 
 
+def _json_schema_type_label(node: dict[str, object]) -> str:
+    """A compact display label for one JSON-schema node, e.g. ``array<string> | null``."""
+    reference = node.get("$ref")
+    if isinstance(reference, str):
+        return reference.rsplit("/", 1)[-1]
+    members = node.get("anyOf")
+    if isinstance(members, list):
+        return " | ".join(_json_schema_type_label(member) for member in members)
+    declared = node.get("type")
+    if declared == "array":
+        items = node.get("items")
+        return f"array<{_json_schema_type_label(items)}>" if isinstance(items, dict) else "array"
+    if isinstance(declared, str):
+        return declared
+    return "any"
+
+
+def _canonical_field_material(model: type[BaseModel]) -> tuple[dict[str, object], ...]:
+    """Read-only display data for one code-owned canonical output model.
+
+    Derived on every read from the canonical Pydantic model the registry bundle already
+    holds; it is not part of any bundle digest, content hash, or stored record.  Each
+    entry carries ``name``, ``type``, ``required`` and ``enum``, and ``default`` only
+    when the field is optional, in model field order.
+    """
+    properties = model.model_json_schema(mode="validation")["properties"]
+    material: list[dict[str, object]] = []
+    for name, field in model.model_fields.items():
+        node = properties[name]
+        enum = node.get("enum")
+        entry: dict[str, object] = {
+            "name": name,
+            "type": _json_schema_type_label(node),
+            "required": field.is_required(),
+            "enum": list(enum) if isinstance(enum, list) else None,
+        }
+        if not field.is_required():
+            entry["default"] = node.get("default")
+        material.append(entry)
+    return tuple(material)
+
+
 class _DefinitionContentResponse(_AttributeResponse):
     """Flatten the shared snapshot content record onto the existing wire shape."""
 
@@ -154,6 +196,13 @@ class _DefinitionContentResponse(_AttributeResponse):
     #: server computes it from the registry; it is never accepted from the wire.
     selectable_optional_fields: tuple[dict[str, object], ...] = Field(
         validation_alias=AliasChoices("selectable_optional_fields", "content"),
+        default=(),
+    )
+    #: Read-only display data for the role's code-owned canonical output fields:
+    #: name, type, required, enum and (for optional fields) default.  Never a request
+    #: field and never stored; derived from the registry bundle's canonical model.
+    canonical_fields: tuple[dict[str, object], ...] = Field(
+        validation_alias=AliasChoices("canonical_fields", "content"),
         default=(),
     )
 
@@ -179,6 +228,19 @@ class _DefinitionContentResponse(_AttributeResponse):
             if bundle is None:
                 return ()
             return tuple(_descriptor_material(d) for d in bundle.optional_fields)
+        return value
+
+    @field_validator("canonical_fields", mode="before")
+    @classmethod
+    def derive_canonical_fields(cls, value: object) -> object:
+        """Read the canonical model's field display data for the stored contract."""
+        if isinstance(value, DefinitionContent):
+            bundle = SCHEMA_CONTRACT_BUNDLES.get(
+                (value.agent_key, value.schema_contract.version)
+            )
+            if bundle is None:
+                return ()
+            return _canonical_field_material(bundle.canonical_model)
         return value
 
 

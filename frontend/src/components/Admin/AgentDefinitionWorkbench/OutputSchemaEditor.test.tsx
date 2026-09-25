@@ -4,15 +4,20 @@
  */
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  AgentKey,
-  DraftDefinition,
+import {
+  AGENT_KEYS,
+  parseDraftSaveSuccessResponse,
+  type AgentKey,
+  type DraftDefinition,
 } from '../../../api/agentDefinitions';
 import {
+  CANONICAL_FIELD_DESCRIPTORS,
   DIAGNOSTIC_NOTES_DESCRIPTOR,
+  DIAGNOSTIC_NOTES_DESCRIPTORS,
   V2_SCHEMA_CONTRACT_IDENTITY,
   syntheticAgentDefinitionWorkbench,
   syntheticDraftDefinitions,
+  syntheticSchemaUpgradeSuccess,
 } from '../../../../tests/fixtures/mocks';
 import {
   candidateFromForm,
@@ -27,9 +32,9 @@ import { OutputSchemaEditor } from './OutputSchemaEditor';
 
 // ── Fixture helpers ───────────────────────────────────────────────────────────
 
-function v1Entry() {
+function v1Entry(agentKey: AgentKey = 'architect') {
   const state = createDraftEditorState(structuredClone(syntheticAgentDefinitionWorkbench));
-  return state.byAgent['architect'];
+  return state.byAgent[agentKey];
 }
 
 /**
@@ -74,7 +79,7 @@ function renderEditor({
   onEditFieldExamples = noop,
   onUpgradeSchemaContract = noop,
 }: RenderProps = {}) {
-  const entry = v2 ? v2Entry(agentKey) : v1Entry();
+  const entry = v2 ? v2Entry(agentKey) : v1Entry(agentKey);
   return render(
     <OutputSchemaEditor
       agentKey={agentKey}
@@ -235,18 +240,161 @@ describe('Output Schema Editor — v2 contract', () => {
 // ── seven descriptors (one per role) ─────────────────────────────────────────
 
 describe('seven descriptors', () => {
-  it('each of the seven roles has a non-empty DIAGNOSTIC_NOTES_DESCRIPTOR with a unique description', () => {
-    // DIAGNOSTIC_NOTES_DESCRIPTOR is a representative sample; verify it has required fields.
-    expect(DIAGNOSTIC_NOTES_DESCRIPTOR).toMatchObject({
-      name: 'diagnostic_notes',
-      description: expect.any(String),
-      examples: expect.arrayContaining([expect.any(String)]),
-      schema: expect.objectContaining({
-        type: expect.arrayContaining(['array', 'null']),
-        default: null,
-      }),
-    });
-    expect(DIAGNOSTIC_NOTES_DESCRIPTOR.description.length).toBeGreaterThan(0);
+  it('parses and renders each of the seven roles\' own diagnostic_notes descriptor, in the seven-role order', () => {
+    const sevenRoleOrder = [
+      'architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer',
+    ];
+    expect([...AGENT_KEYS]).toEqual(sevenRoleOrder);
+    expect(Object.keys(DIAGNOSTIC_NOTES_DESCRIPTORS)).toEqual(sevenRoleOrder);
+
+    const rendered: string[] = [];
+    for (const agentKey of AGENT_KEYS) {
+      // Through the strict parser, exactly as a Schema Upgrade 200 reaches the editor.
+      const parsed = parseDraftSaveSuccessResponse(syntheticSchemaUpgradeSuccess(agentKey, 1));
+      expect(parsed, agentKey).not.toBeNull();
+      const definition = parsed!.definition;
+      expect(definition.selectable_optional_fields).toEqual([DIAGNOSTIC_NOTES_DESCRIPTORS[agentKey]]);
+      const { unmount } = render(
+        <OutputSchemaEditor
+          agentKey={agentKey}
+          entry={{ ...v1Entry(agentKey), saved: definition, local: formFromDefinition(definition) }}
+          disabled={false}
+          onToggleOptionalField={noop}
+          onEditFieldDescription={noop}
+          onEditFieldExamples={noop}
+          onUpgradeSchemaContract={noop}
+        />,
+      );
+      const row = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
+      expect(row).toHaveTextContent(DIAGNOSTIC_NOTES_DESCRIPTORS[agentKey].description);
+      rendered.push(DIAGNOSTIC_NOTES_DESCRIPTORS[agentKey].description);
+      unmount();
+    }
+    // Seven distinct role-specific descriptions, not one shared sample.
+    expect(new Set(rendered).size).toBe(7);
+  });
+});
+
+// ── protected canonical fields (every role) ──────────────────────────────────
+
+describe('Output Schema Editor — protected canonical fields', () => {
+  it.each([...AGENT_KEYS])('%s lists every canonical field with read-only name, type, required, default and enum', (agentKey) => {
+    renderEditor({ agentKey });
+    const expected = CANONICAL_FIELD_DESCRIPTORS[agentKey];
+    const groups = screen.getAllByRole('group', { name: /^Canonical field: / });
+    expect(groups.map((group) => group.getAttribute('aria-label')))
+      .toEqual(expected.map((field) => `Canonical field: ${field.name}`));
+
+    for (const field of expected) {
+      const group = screen.getByRole('group', { name: `Canonical field: ${field.name}` });
+      const properties = within(group).getByRole('group', { name: `Protected properties of ${field.name}` });
+      const terms = within(properties).getAllByRole('term').map((node) => node.textContent);
+      const values = within(properties).getAllByRole('definition').map((node) => node.textContent);
+      const expectedTerms = ['name', 'type', 'required'];
+      const expectedValues = [field.name, field.type, field.required ? 'yes' : 'no'];
+      if (!field.required) {
+        expectedTerms.push('default');
+        expectedValues.push(JSON.stringify(field.default));
+      }
+      if (field.enum !== null) {
+        expectedTerms.push('enum');
+        expectedValues.push(field.enum.join(', '));
+      }
+      expect(terms, field.name).toEqual(expectedTerms);
+      expect(values, field.name).toEqual(expectedValues);
+      // The only editable controls are the two guidance textareas.
+      expect(within(group).getAllByRole('textbox').map((node) => node.getAttribute('aria-label'))).toEqual([
+        `Description guidance for ${field.name}`,
+        `Examples guidance for ${field.name} (JSON array)`,
+      ]);
+      for (const role of ['checkbox', 'spinbutton', 'combobox', 'radio'] as const) {
+        expect(within(group).queryAllByRole(role), `${field.name} ${role}`).toEqual([]);
+      }
+    }
+  });
+
+  it('labels the canonical section as protected and the guidance as the only editable content', () => {
+    renderEditor();
+    const section = screen.getByRole('region', { name: 'Canonical output fields' });
+    expect(section).toHaveTextContent(
+      'Name, type, required, default and enum are code-owned and cannot be changed here.',
+    );
+  });
+
+  it('edits guidance for a canonical field that has no saved override', () => {
+    const onDescription = vi.fn();
+    const onExamples = vi.fn();
+    renderEditor({ onEditFieldDescription: onDescription, onEditFieldExamples: onExamples });
+    const group = screen.getByRole('group', { name: 'Canonical field: intent' });
+    const description = within(group).getByRole('textbox', { name: 'Description guidance for intent' });
+    const examples = within(group).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' });
+    expect(description).toHaveValue('');
+    expect(examples).toHaveValue('');
+    fireEvent.change(description, { target: { value: 'Prefer build for new decks.' } });
+    fireEvent.change(examples, { target: { value: '["build"]' } });
+    expect(onDescription).toHaveBeenCalledWith('intent', 'Prefer build for new decks.');
+    expect(onExamples).toHaveBeenCalledWith('intent', '["build"]');
+  });
+
+  it('shows saved canonical guidance in its canonical row', () => {
+    const def: DraftDefinition = {
+      ...structuredClone(syntheticDraftDefinitions.architect),
+      schema_overlay: {
+        field_overrides: { intent: { description: 'Saved intent guidance', examples: ['build'] } },
+        additional_optional_fields: [],
+      },
+    };
+    render(
+      <OutputSchemaEditor
+        agentKey="architect"
+        entry={{ ...v1Entry(), saved: def, local: formFromDefinition(def) }}
+        disabled={false}
+        onToggleOptionalField={noop}
+        onEditFieldDescription={noop}
+        onEditFieldExamples={noop}
+        onUpgradeSchemaContract={noop}
+      />,
+    );
+    const group = screen.getByRole('group', { name: 'Canonical field: intent' });
+    expect(within(group).getByRole('textbox', { name: 'Description guidance for intent' }))
+      .toHaveValue('Saved intent guidance');
+    expect(within(group).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' }))
+      .toHaveValue('["build"]');
+    // A canonical override is shown in its canonical row, never again as a loose override.
+    expect(screen.queryByRole('group', { name: 'Field override: intent' })).toBeNull();
+  });
+
+  it('shows a malformed examples value as a visible error on that field', () => {
+    const entry = v1Entry();
+    const withBadExamples = {
+      ...entry,
+      local: {
+        ...entry.local,
+        schema_overlay: {
+          additional_optional_fields: [],
+          field_overrides: { intent: { description: '', examples: '["build"' } },
+        },
+      },
+    };
+    render(
+      <OutputSchemaEditor
+        agentKey="architect"
+        entry={withBadExamples}
+        disabled={false}
+        onToggleOptionalField={noop}
+        onEditFieldDescription={noop}
+        onEditFieldExamples={noop}
+        onUpgradeSchemaContract={noop}
+      />,
+    );
+    const group = screen.getByRole('group', { name: 'Canonical field: intent' });
+    expect(within(group).getByRole('alert')).toHaveTextContent('Examples must be a JSON array.');
+    expect(within(group).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' }))
+      .toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByRole('group', { name: 'Canonical field: message' })).not.toContainElement(
+      screen.queryByRole('alert'),
+    );
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
   });
 });
 

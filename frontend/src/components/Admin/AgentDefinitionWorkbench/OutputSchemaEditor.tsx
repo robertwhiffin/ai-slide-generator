@@ -1,10 +1,15 @@
 /**
- * Output Schema Editor — displays the server-owned field descriptor metadata
- * as read-only protected labels, and exposes description/examples guidance
- * editing plus the `diagnostic_notes` optional-field picker (v2 contracts only).
+ * Output Schema Editor — displays the server-owned canonical-field and optional-field
+ * descriptor metadata as read-only protected labels, and exposes only description/examples
+ * guidance editing plus the `diagnostic_notes` optional-field picker (v2 contracts only).
  */
-import type { AgentKey, FieldDescriptor } from '../../../api/agentDefinitions';
+import type {
+  AgentKey,
+  CanonicalFieldDescriptor,
+  FieldDescriptor,
+} from '../../../api/agentDefinitions';
 import {
+  overlayExamplesError,
   schemaOverlayFormFromDefinition,
   type DraftEditorEntry,
   type EditableSchemaOverlayForm,
@@ -42,6 +47,103 @@ function ProtectedLabel({ name, value }: ProtectedLabelProps) {
   );
 }
 
+function ExamplesError({ id, message }: { id: string; message: string | null }) {
+  return message ? (
+    <span id={id} role="alert" className="mt-1 block text-xs text-red-700">{message}</span>
+  ) : null;
+}
+
+interface CanonicalFieldRowProps {
+  agentKey: AgentKey;
+  field: CanonicalFieldDescriptor;
+  guidanceDescription: string;
+  guidanceExamples: string;
+  disabled: boolean;
+  onDescriptionChange(value: string): void;
+  onExamplesChange(value: string): void;
+}
+
+/**
+ * One code-owned canonical output field. Name, type, required, default and enum are
+ * server-derived text in a description list — never inputs. The two guidance textareas
+ * carry field-specific accessible names so no name is a substring of another's.
+ */
+function CanonicalFieldRow({
+  agentKey,
+  field,
+  guidanceDescription,
+  guidanceExamples,
+  disabled,
+  onDescriptionChange,
+  onExamplesChange,
+}: CanonicalFieldRowProps) {
+  const descId = `${agentKey}-canonical-desc-${field.name}`;
+  const examplesId = `${agentKey}-canonical-examples-${field.name}`;
+  const examplesErrorId = `${examplesId}-error`;
+  const examplesError = overlayExamplesError(guidanceExamples);
+  const properties: Array<[string, string]> = [
+    ['name', field.name],
+    ['type', field.type],
+    ['required', field.required ? 'yes' : 'no'],
+  ];
+  if (!field.required) properties.push(['default', JSON.stringify(field.default)]);
+  if (field.enum !== null) properties.push(['enum', field.enum.join(', ')]);
+
+  return (
+    <div
+      role="group"
+      aria-label={`Canonical field: ${field.name}`}
+      className="rounded-md border border-gray-200 bg-white p-3 space-y-2"
+    >
+      <p className="text-sm font-semibold text-gray-900 font-mono">{field.name}</p>
+      <div role="group" aria-label={`Protected properties of ${field.name}`}>
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-2 text-xs text-gray-500">
+          {properties.map(([term, value]) => (
+            <div key={term} className="contents">
+              <dt className="font-medium">{term}</dt>
+              <dd className="font-mono break-words">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+      <div className="space-y-2">
+        <div>
+          <label htmlFor={descId} className="block text-xs font-medium text-gray-700">
+            Description guidance
+          </label>
+          <textarea
+            id={descId}
+            aria-label={`Description guidance for ${field.name}`}
+            value={guidanceDescription}
+            disabled={disabled}
+            onChange={(event) => onDescriptionChange(event.currentTarget.value)}
+            rows={2}
+            className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm font-normal disabled:bg-gray-50"
+          />
+        </div>
+        <div>
+          <label htmlFor={examplesId} className="block text-xs font-medium text-gray-700">
+            Examples guidance (JSON array)
+          </label>
+          <textarea
+            id={examplesId}
+            aria-label={`Examples guidance for ${field.name} (JSON array)`}
+            aria-invalid={examplesError !== null}
+            aria-describedby={examplesError !== null ? examplesErrorId : undefined}
+            value={guidanceExamples}
+            disabled={disabled}
+            onChange={(event) => onExamplesChange(event.currentTarget.value)}
+            rows={2}
+            placeholder='["example value"]'
+            className="mt-1 w-full rounded-md border border-gray-300 p-2 font-mono text-xs disabled:bg-gray-50"
+          />
+          <ExamplesError id={examplesErrorId} message={examplesError} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface OptionalFieldRowProps {
   descriptor: FieldDescriptor;
   isSelected: boolean;
@@ -66,6 +168,8 @@ function OptionalFieldRow({
   const checkboxId = `optional-field-${descriptor.name}`;
   const descId = `optional-field-desc-${descriptor.name}`;
   const examplesId = `optional-field-examples-${descriptor.name}`;
+  const examplesErrorId = `${examplesId}-error`;
+  const examplesError = overlayExamplesError(guidanceExamples);
 
   return (
     <div
@@ -122,6 +226,8 @@ function OptionalFieldRow({
           <textarea
             id={examplesId}
             aria-label="Examples override (JSON array)"
+            aria-invalid={examplesError !== null}
+            aria-describedby={examplesError !== null ? examplesErrorId : undefined}
             value={guidanceExamples}
             disabled={disabled}
             onChange={(event) => onExamplesChange(event.currentTarget.value)}
@@ -129,6 +235,7 @@ function OptionalFieldRow({
             placeholder='["example value"]'
             className="mt-1 w-full rounded-md border border-gray-300 p-2 font-mono text-xs disabled:bg-gray-50"
           />
+          <ExamplesError id={examplesErrorId} message={examplesError} />
         </div>
       </div>
     </div>
@@ -146,6 +253,7 @@ export function OutputSchemaEditor({
 }: OutputSchemaEditorProps) {
   const overlay = effectiveOverlay(entry);
   const selectableFields = entry.saved.selectable_optional_fields;
+  const canonicalFields = entry.saved.canonical_fields;
   const isV2Schema = entry.saved.schema_contract.version >= 2;
 
   return (
@@ -167,6 +275,38 @@ export function OutputSchemaEditor({
           </button>
         )}
       </div>
+
+      {/* Code-owned canonical fields: protected labels plus editable guidance */}
+      {canonicalFields.length > 0 && (
+        <section
+          role="region"
+          aria-labelledby={`${agentKey}-canonical-fields-heading`}
+          className="space-y-3"
+        >
+          <h4 id={`${agentKey}-canonical-fields-heading`} className="text-sm font-semibold text-gray-800">
+            Canonical output fields
+          </h4>
+          <p className="text-xs text-gray-500">
+            Name, type, required, default and enum are code-owned and cannot be changed here.
+            Only description and examples guidance is editable.
+          </p>
+          {canonicalFields.map((field) => {
+            const guidance = overlay.field_overrides[field.name];
+            return (
+              <CanonicalFieldRow
+                key={field.name}
+                agentKey={agentKey}
+                field={field}
+                guidanceDescription={guidance?.description ?? ''}
+                guidanceExamples={guidance?.examples ?? ''}
+                disabled={disabled}
+                onDescriptionChange={(value) => onEditFieldDescription(field.name, value)}
+                onExamplesChange={(value) => onEditFieldExamples(field.name, value)}
+              />
+            );
+          })}
+        </section>
+      )}
 
       {/* Selectable optional fields (v2 only) */}
       {isV2Schema && selectableFields.length > 0 && (
@@ -191,11 +331,11 @@ export function OutputSchemaEditor({
         </div>
       )}
 
-      {/* Existing field overrides (for fields already in schema_overlay.field_overrides) */}
+      {/* Any other saved override (a name that is neither canonical nor selectable) stays
+          visible so no stored guidance is hidden; the server rejects it on the next Save. */}
       {Object.entries(overlay.field_overrides)
-        // Only show entries for canonical fields (not selectable optional fields — those
-        // are shown above). If there are no canonical overrides, this section is empty.
-        .filter(([key]) => !selectableFields.some((d) => d.name === key))
+        .filter(([key]) => !selectableFields.some((d) => d.name === key)
+          && !canonicalFields.some((field) => field.name === key))
         .map(([fieldName, guidance]) => (
           <div
             key={fieldName}
@@ -232,12 +372,17 @@ export function OutputSchemaEditor({
                 <textarea
                   id={`${agentKey}-override-examples-${fieldName}`}
                   aria-label="Examples override (JSON array)"
+                  aria-invalid={overlayExamplesError(guidance.examples) !== null}
                   value={guidance.examples}
                   disabled={disabled}
                   onChange={(event) => onEditFieldExamples(fieldName, event.currentTarget.value)}
                   rows={2}
                   placeholder='["example value"]'
                   className="mt-1 w-full rounded-md border border-gray-300 p-2 font-mono text-xs disabled:bg-gray-50"
+                />
+                <ExamplesError
+                  id={`${agentKey}-override-examples-${fieldName}-error`}
+                  message={overlayExamplesError(guidance.examples)}
                 />
               </div>
             </div>

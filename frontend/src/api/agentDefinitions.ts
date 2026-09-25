@@ -72,6 +72,29 @@ export interface FieldDescriptor {
   schema: FieldDescriptorSchema;
 }
 
+/** Any JSON value, as the server serializes it. */
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+/**
+ * Code-owned, read-only display data for one canonical output field of the role's
+ * Pydantic output schema. Never a request field: the client shows it as protected
+ * labels and may only attach description/examples guidance under `field_overrides`.
+ * `default` is present exactly when `required` is false.
+ */
+export interface CanonicalFieldDescriptor {
+  name: string;
+  type: string;
+  required: boolean;
+  enum: string[] | null;
+  default?: JsonValue;
+}
+
 /**
  * The editable schema overlay included in a save candidate.
  * `field_overrides` keys are canonical or selectable optional field names.
@@ -153,6 +176,11 @@ interface DefinitionContent {
    * but the server always derives it from the registry.
    */
   selectable_optional_fields: FieldDescriptor[];
+  /**
+   * Read-only server-derived display data for every canonical output field, in model
+   * field order. Never a request field and never stored.
+   */
+  canonical_fields: CanonicalFieldDescriptor[];
 }
 
 export interface PublishedDefinition extends DefinitionContent {
@@ -441,6 +469,34 @@ function isFieldDescriptor(value: unknown): value is FieldDescriptor {
     && isFieldDescriptorSchema(value.schema);
 }
 
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isPlainRecord(value) && Object.values(value).every(isJsonValue);
+}
+
+function isCanonicalFieldDescriptor(value: unknown): value is CanonicalFieldDescriptor {
+  if (!isPlainRecord(value) || typeof value.required !== 'boolean') return false;
+  const keys = value.required
+    ? ['name', 'type', 'required', 'enum']
+    : ['name', 'type', 'required', 'enum', 'default'];
+  return hasExactKeys(value, keys)
+    && typeof value.name === 'string' && value.name.length > 0
+    && typeof value.type === 'string' && value.type.length > 0
+    && (value.enum === null || (
+      Array.isArray(value.enum)
+      && value.enum.length > 0
+      && value.enum.every((item) => typeof item === 'string')
+    ))
+    && (value.required || isJsonValue(value.default));
+}
+
+function isCanonicalFieldList(value: unknown): value is CanonicalFieldDescriptor[] {
+  if (!Array.isArray(value) || !value.every(isCanonicalFieldDescriptor)) return false;
+  return new Set(value.map((field) => field.name)).size === value.length;
+}
+
 function isAssemblyBlock(value: unknown): value is AssemblyBlock {
   if (!isPlainRecord(value) || typeof value.kind !== 'string') return false;
   if (value.kind === 'authored_prompt') {
@@ -543,7 +599,7 @@ function isDraftDefinition(value: unknown): value is DraftDefinition {
     && hasExactKeys(value, [
       'base_revision_id', 'candidate_hash', 'definition_version', 'prompt_text', 'model',
       'schema_overlay', 'assembly_rules', 'protected_assembly', 'schema_contract',
-      'protected_stage_view', 'selectable_optional_fields',
+      'protected_stage_view', 'selectable_optional_fields', 'canonical_fields',
     ])
     && isPositiveInteger(value.base_revision_id)
     && typeof value.candidate_hash === 'string' && /^[0-9a-f]{64}$/.test(value.candidate_hash)
@@ -557,7 +613,8 @@ function isDraftDefinition(value: unknown): value is DraftDefinition {
     && Array.isArray(value.protected_stage_view)
     && value.protected_stage_view.every(isProtectedStageView)
     && Array.isArray(value.selectable_optional_fields)
-    && value.selectable_optional_fields.every(isFieldDescriptor);
+    && value.selectable_optional_fields.every(isFieldDescriptor)
+    && isCanonicalFieldList(value.canonical_fields);
 }
 
 export function parseDraftSaveSuccessResponse(value: unknown): DraftSaveSuccessResponse | null {
