@@ -7,11 +7,7 @@ import {
   type CollaborationReleaseGroup,
 } from '@/services/api';
 import { GraphVersionStatus } from './GraphVersionStatus';
-import {
-  MixedReleaseWarning,
-  type MixedReleaseWarningProps,
-  SURFACE_ACCESSIBLE_NAMES,
-} from './MixedReleaseWarning';
+import { MixedReleaseWarning, type MixedReleaseWarningProps } from './MixedReleaseWarning';
 
 /**
  * The mandated display vocabulary, written out LITERALLY rather than imported
@@ -170,7 +166,20 @@ describe('MixedReleaseWarning', () => {
 
     const region = screen.getByTestId('mixed-release-warning');
     expect(region.textContent).toBe(HISTORY_UNAVAILABLE_TEXT);
-    expect(region.innerHTML).not.toMatch(/Contributor|Graph Version|Legacy/);
+    // outerHTML, NOT innerHTML, and the accessibility-tree oracle beside it.
+    //
+    // The `loadFailed` branch returns its OWN root <div>, so upgrading the
+    // non-failure branch's guard left this one reading innerHTML with no
+    // pattern assertion: a distinct UUID leaked into an `aria-label` on THIS
+    // root was green across all 23 unit tests and red only in e2e T4 — the
+    // same branch-asymmetry one branch over. Both branches now carry the same
+    // two oracles, so neither can drift without the other noticing.
+    expect(region.outerHTML).not.toMatch(/Contributor|Graph Version|Legacy/);
+    expect(region.outerHTML).not.toMatch(UUID_PATTERN);
+    expect(region.outerHTML).not.toContain('@');
+    expect(screen.queryByLabelText(UUID_PATTERN)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/@/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(UUID_PATTERN)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: DISCLOSURE_LABEL })).not.toBeInTheDocument();
   });
 
@@ -339,21 +348,70 @@ describe('MixedReleaseWarning', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
-  it("no surface's accessible name nests inside another's", () => {
-    // Read from the component so the guard covers the REAL set rather than a
-    // hand-maintained copy. The literal 4 is what stops a shrunk record passing
-    // vacuously; the wording itself is pinned by literals in the tests above.
-    expect(SURFACE_ACCESSIBLE_NAMES).toHaveLength(4);
-    expect(new Set(SURFACE_ACCESSIBLE_NAMES).size).toBe(4);
-    expect(SURFACE_ACCESSIBLE_NAMES).toContain(DISCLOSURE_LABEL);
-    expect(SURFACE_ACCESSIBLE_NAMES).toContain(COLLABORATION_DISCLOSURE_LABEL);
+  it("no surface's accessible name nests inside another's", async () => {
+    // THE SUBJECT COMES OFF THE RENDERED DOM, not from an export of the
+    // component's own vocabulary table.
+    //
+    // An earlier version read `SURFACE_ACCESSIBLE_NAMES`, exported by the
+    // component purely for this guard, and that gave the guard a vacuity mode:
+    // decoupling the export to a hardcoded copy while leaving a REAL nesting
+    // collision in the rendered vocabulary left this assertion green on a set
+    // that no longer reflected what the component renders. Only the literal
+    // wording assertions above caught it — defence in depth held, but the
+    // guard itself proved nothing. Rendering both surfaces and reading their
+    // names back closes that: the set cannot disagree with the DOM, because it
+    // IS the DOM.
+    render(
+      <>
+        <MixedReleaseWarning
+          surface="conversation"
+          history={MIXED_HISTORY}
+          loadFailed={false}
+          isSessionPersisted
+        />
+        <MixedReleaseWarning
+          surface="collaboration"
+          history={MIXED_HISTORY}
+          loadFailed={false}
+          isSessionPersisted
+        />
+      </>,
+    );
 
-    // Playwright's DEFAULT name matching is case-insensitive substring. Both
-    // placements are mounted together whenever the Share dialog is open, so a
+    // Both placements coexist whenever the Share dialog is open, which is the
+    // only state in which a nesting collision can bite.
+    const disclosures = screen.getAllByTestId('mixed-release-disclosure');
+    expect(disclosures).toHaveLength(2);
+    for (const disclosure of disclosures) {
+      await act(async () => {
+        fireEvent.click(disclosure);
+      });
+    }
+    const lists = screen.getAllByTestId('mixed-release-provenance');
+    expect(lists).toHaveLength(2);
+
+    // A <button>'s accessible name is its contents, and a <ul>'s is its
+    // aria-label — so these four strings are the names an assistive
+    // technology and Playwright both compute.
+    const names = [
+      ...disclosures.map((element) => element.textContent ?? ''),
+      ...lists.map((element) => element.getAttribute('aria-label') ?? ''),
+    ];
+
+    // LITERAL cardinality, so a vocabulary that shrank to one surface cannot
+    // pass vacuously, plus the four mandated literals by name.
+    expect(names).toHaveLength(4);
+    expect(new Set(names).size).toBe(4);
+    expect(names).toContain(DISCLOSURE_LABEL);
+    expect(names).toContain(COLLABORATION_DISCLOSURE_LABEL);
+    expect(names).toContain(PROVENANCE_LIST_LABEL);
+    expect(names).toContain(COLLABORATION_LIST_LABEL);
+
+    // Playwright's DEFAULT name matching is case-insensitive substring, so a
     // name nesting inside another makes an existing locator resolve to two
     // elements — the strict-mode failure this epic has paid for twice.
-    for (const outer of SURFACE_ACCESSIBLE_NAMES) {
-      for (const inner of SURFACE_ACCESSIBLE_NAMES) {
+    for (const outer of names) {
+      for (const inner of names) {
         if (outer === inner) continue;
         expect(outer.toLowerCase()).not.toContain(inner.toLowerCase());
       }

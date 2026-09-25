@@ -169,7 +169,22 @@ test.describe('mixed-release collaboration', () => {
     await expect(page.getByTestId('graph-version-status')).toContainText(
       'Pinned Graph Version 1; latest is 2',
     );
-    const warning = page.getByTestId('mixed-release-warning-text');
+    // SCOPED to the conversation surface root.
+    //
+    // Only the two ROOT testids ('mixed-release-warning' and
+    // 'shared-deck-provenance') are surface-specific; every inner testid
+    // ('-text', '-disclosure', '-provenance', '-row', '-unavailable') is SHARED
+    // by both AC5 placements, because they are one component rendered twice.
+    // An unscoped inner locator is therefore unambiguous only while the Share
+    // dialog is shut, which is a property of the test rather than of the
+    // locator: swapping T6's count assertion for an unscoped
+    // 'mixed-release-warning-text' matcher gives
+    // `strict mode violation: ... resolved to 2 elements`. Every single-surface
+    // assertion below scopes to its root so opening the dialog in a future test
+    // cannot silently make it ambiguous; the deliberate cross-surface counts in
+    // T6 stay unscoped and say so.
+    const conversation = page.getByTestId('mixed-release-warning');
+    const warning = conversation.getByTestId('mixed-release-warning-text');
     await expect(warning).toHaveText('This shared deck has changes from multiple Graph Versions.');
     await expect(warning).toHaveAttribute('role', 'status');
 
@@ -179,7 +194,7 @@ test.describe('mixed-release collaboration', () => {
     await expect(list).toHaveCount(1);
     // LITERAL 3, not MIXED_HISTORY.groups.length: a fixture-sourced count
     // shrinks with the fixture and so cannot fail.
-    await expect(page.getByTestId('mixed-release-row')).toHaveCount(3);
+    await expect(conversation.getByTestId('mixed-release-row')).toHaveCount(3);
 
     // Each FULL row name is individually addressable under substring matching.
     for (const name of MIXED_ROW_NAMES) {
@@ -194,8 +209,7 @@ test.describe('mixed-release collaboration', () => {
     // `aria-label` on the region root, which is where a leak would be
     // invisible to a text-only guard while still reaching the accessibility
     // tree as the region's computed name.
-    const region = page.getByTestId('mixed-release-warning');
-    const rendered = await region.evaluate((el) => el.outerHTML);
+    const rendered = await conversation.evaluate((el) => el.outerHTML);
     expect(rendered).not.toMatch(UUID_PATTERN);
     expect(rendered).not.toContain('@');
     expect(rendered).not.toContain(SESSION_A);
@@ -225,7 +239,9 @@ test.describe('mixed-release collaboration', () => {
     await allowEditing(page);
 
     await page.goto(`/sessions/${SESSION_A}/edit`);
-    await expect(page.getByTestId('mixed-release-warning-text')).toBeVisible();
+    // Scoped to the conversation root — see T1 on the shared inner testids.
+    const conversation = page.getByTestId('mixed-release-warning');
+    await expect(conversation.getByTestId('mixed-release-warning-text')).toBeVisible();
 
     await page.getByRole('button', { name: 'Start latest' }).click();
     await expect(page).toHaveURL(new RegExp(`/sessions/${SESSION_B}/edit`));
@@ -233,7 +249,7 @@ test.describe('mixed-release collaboration', () => {
     // A brand-new graph-capable session, server-assigned id, nothing else sent.
     expect(creationBodies).toEqual([{ graph_capable: true }]);
     // The new conversation has no evidence of its own, so no warning.
-    await expect(page.getByTestId('mixed-release-warning-text')).toHaveCount(0);
+    await expect(conversation.getByTestId('mixed-release-warning-text')).toHaveCount(0);
     await expect(page.getByTestId('graph-version-status')).toContainText('Pinned Graph Version 2');
 
     // Revisit the original: pin and evidence are byte-for-byte what they were.
@@ -241,7 +257,7 @@ test.describe('mixed-release collaboration', () => {
     await expect(page.getByTestId('graph-version-status')).toContainText(
       'Pinned Graph Version 1; latest is 2',
     );
-    await expect(page.getByTestId('mixed-release-warning-text')).toBeVisible();
+    await expect(conversation.getByTestId('mixed-release-warning-text')).toBeVisible();
     await openProvenance(page);
     for (const name of MIXED_ROW_NAMES) {
       await expect(page.getByRole('listitem', { name })).toHaveCount(1);
@@ -269,13 +285,15 @@ test.describe('mixed-release collaboration', () => {
 
     await page.goto(`/sessions/${SESSION_A}/edit`);
     // One release only, so no mixed-release warning — the disclosure still is offered.
-    await expect(page.getByTestId('mixed-release-warning-text')).toHaveCount(0);
+    // Scoped to the conversation root — see T1 on the shared inner testids.
+    const conversation = page.getByTestId('mixed-release-warning');
+    await expect(conversation.getByTestId('mixed-release-warning-text')).toHaveCount(0);
     await openProvenance(page);
 
     await expect(
       page.getByRole('listitem', { name: 'Contributor 1, Legacy (no graph release), 2 changes' }),
     ).toHaveCount(1);
-    const rendered = (await page.getByTestId('mixed-release-warning').textContent()) ?? '';
+    const rendered = (await conversation.textContent()) ?? '';
     expect(rendered.toLowerCase()).not.toContain('active');
   });
 
@@ -295,16 +313,16 @@ test.describe('mixed-release collaboration', () => {
 
     await page.goto(`/sessions/${SESSION_A}/edit`);
 
-    const unavailable = page.getByTestId('mixed-release-unavailable');
+    // Scoped to the conversation root — see T1 on the shared inner testids.
+    const conversation = page.getByTestId('mixed-release-warning');
+    const unavailable = conversation.getByTestId('mixed-release-unavailable');
     await expect(unavailable).toHaveText('Collaboration history unavailable');
     await expect(unavailable).toHaveAttribute('role', 'status');
 
     // No contributor, no version, no id — and no way to tell a real-but-denied
     // session from a fabricated one. outerHTML, so the root's own attributes
     // are covered too.
-    const rendered = await page
-      .getByTestId('mixed-release-warning')
-      .evaluate((el) => el.outerHTML);
+    const rendered = await conversation.evaluate((el) => el.outerHTML);
     expect(rendered).not.toContain(GUESSED_CONTRIBUTOR);
     expect(rendered).not.toMatch(UUID_PATTERN);
     expect(rendered).not.toMatch(/Contributor|Graph Version|Legacy/);
@@ -380,7 +398,10 @@ test.describe('mixed-release collaboration', () => {
     await expect(page.getByTestId('graph-version-status')).toContainText(
       'Pinned Graph Version 1; latest is 2',
     );
-    await expect(page.getByTestId('mixed-release-warning-text')).toBeVisible();
+    // Scoped to the conversation root — see T1 on the shared inner testids.
+    await expect(
+      page.getByTestId('mixed-release-warning').getByTestId('mixed-release-warning-text'),
+    ).toBeVisible();
 
     const unexpected = nonGetToOriginal.filter(
       (entry) => !entry.endsWith(`/api/sessions/${SESSION_A}/duplicate`),

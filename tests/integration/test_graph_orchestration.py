@@ -576,14 +576,44 @@ def test_a_position_left_uncommitted_by_a_completed_batch_is_placeheld_by_the_st
     env.recorder.configure(slide_count=3, fail_positions={1})
 
     real_commit_placeholder = SlideWriter.commit_placeholder
+    forwarded_contexts = []
 
-    def only_the_foreman_may_placehold(self, session_id, position, error_message=""):
+    def only_the_foreman_may_placehold(
+        self, session_id, position, error_message="", mutation=None
+    ):
+        # THIS DOUBLE TAKES AND FORWARDS `mutation`, and asserts what is in it.
+        #
+        # `commit_placeholder` grew a `mutation: DeckMutationContext` parameter,
+        # and this double did not: every call raised `TypeError: ... unexpected
+        # keyword argument 'mutation'` inside `_placehold_failed_position`, which
+        # swallows writer failures on purpose ("the foreman will reconcile it"),
+        # so the position was never placeheld, the foreman never converged and
+        # the turn died at the recursion limit instead of failing on the claim
+        # under test.
+        #
+        # A bare `**kwargs` swallow would make the TypeError go away and leave
+        # the placeholder row landing with NO collaboration evidence, unnoticed.
+        # So the context is asserted and forwarded to the real writer: a caller
+        # that dropped it, or passed one naming the wrong actor, release or
+        # operation, fails HERE rather than silently writing an unattributed row.
+        assert mutation is not None, (
+            f"commit_placeholder reached position {position} without a "
+            "DeckMutationContext; the placeholder row would carry no evidence"
+        )
+        assert (mutation.operation, mutation.object_type) == ("write_slide", "slide")
+        assert mutation.actor.actor_session_id == session_id
+        assert mutation.actor.graph_release_id == env.graph_release_id
+        forwarded_contexts.append((position, error_message, mutation))
         # placeholder_node passes this message; builder_node passes the
         # exception's type name.
         if error_message != "Slide generation did not complete":
             raise RuntimeError("transient DB failure on the builder's placeholder")
         return real_commit_placeholder(
-            self, session_id, position, error_message=error_message
+            self,
+            session_id,
+            position,
+            error_message=error_message,
+            mutation=mutation,
         )
 
     monkeypatch.setattr(
@@ -611,6 +641,18 @@ def test_a_position_left_uncommitted_by_a_completed_batch_is_placeheld_by_the_st
         f"position 2 committed; saw {prefixes}"
     )
     assert prefixes[-1] == [0, 1, 2]
+
+    # Both call sites were reached WITH a context, in this order: the builder's
+    # own attempt (which this double fails transiently) and then the foreman's
+    # stall path (which succeeds). A run that placeheld without ever carrying a
+    # context cannot satisfy this, and neither can one that only reached one
+    # call site.
+    assert [
+        (position, error_message) for position, error_message, _ in forwarded_contexts
+    ] == [
+        (1, "RuntimeError"),
+        (1, "Slide generation did not complete"),
+    ]
 
 
 def test_an_edit_turn_dispatches_only_its_target_positions(graph_turn_env):
