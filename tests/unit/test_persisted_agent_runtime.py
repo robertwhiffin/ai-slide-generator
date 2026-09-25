@@ -821,6 +821,16 @@ PERMITTED_LOG_FIELDS = {
     "error_class",
 }
 
+#: The sink's whole message, on both the success and the error branch.  Pinned
+#: POSITIVELY rather than by a denylist of forbidden spellings: ``emitted_fields``
+#: subtracts every standard LogRecord attribute, and ``msg`` is one of them, so the
+#: exact-set assertion above is structurally blind to anything written into the
+#: message itself.  A leak there was measured to produce ZERO failures while every
+#: extras guard stayed green (Ruling C-37).  Asserting equality makes ANY content
+#: in the message fail, not just the spellings someone thought to forbid.  Do not
+#: relax this to a substring or a `not in` check.
+EXPECTED_LOG_MESSAGE = "persisted_agent_invocation"
+
 #: Every attribute the stdlib puts on a LogRecord, so the difference is exactly
 #: what the sink's ``extra=`` contributed.  ``message``/``asctime``/``taskName`` are
 #: added when a record is FORMATTED (caplog formats them), and ``logging`` refuses
@@ -856,6 +866,8 @@ def test_logging_sink_logs_identity_outcome_and_error_class_only(caplog):
     # assertion: a guard on the success branch alone would leave the branch that
     # runs when something already went wrong free to leak.
     assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert record.msg == EXPECTED_LOG_MESSAGE
+    assert record.args in (None, ())
     rendered = str(vars(record))
     assert "owner-session-9f" not in rendered
     assert "contributor-session-3b" not in rendered
@@ -886,6 +898,8 @@ def test_the_identity_carries_the_session_ids_that_the_log_must_not(caplog):
     assert seen[0].actor_session_id == "contributor-session-3b"
     record = caplog.records[-1]
     assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert record.msg == EXPECTED_LOG_MESSAGE
+    assert record.args in (None, ())
     assert not hasattr(record, "root_session_id")
     assert not hasattr(record, "actor_session_id")
 
@@ -916,6 +930,8 @@ def test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output(caplog
     # The EXACT emitted set, not a list of forbidden names — see
     # PERMITTED_LOG_FIELDS for why the name-based form could not hold.
     assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert record.msg == EXPECTED_LOG_MESSAGE
+    assert record.args in (None, ())
     rendered = str(vars(record))
     for secret in ("private", "payload", "owner-session-9f", "contributor-session-3b"):
         assert secret not in rendered
