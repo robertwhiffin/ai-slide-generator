@@ -132,3 +132,37 @@ The zero-count evidence is as follows. Within TD at `18b0f8cd`, no existing test
 4. **`requests` is imported directly** for the C3 mapping. It is transitive via `databricks-sdk` and not declared in the app wheel, but `src/services/agent_runtime.py` already does the same, and `test_app_wheel_dependencies` passes.
 5. **The production factory builds a `WorkspaceClient` on every validation**, from a config copy with no auth re-init and no network. It is not cached, so a `get_system_client(force_new=True)` refresh is always honoured. The cost is about a few milliseconds per save.
 6. **Carried forward, not Task 2 work.** Between Task 2 and Task 3 the production PUT does not validate remotely (C7). Legacy rows with path-shaped names remain a runtime exposure, parked by C4.
+
+## Fix round 1
+
+- **Base:** `e696eb31758c9258e6e88f67f06bb7afaa518e3c`, pinned. This is the controller's docs ledger commit.
+- **Fix commit:** `ad568eada98e53be64043af2aca44cafca4e15aa`, "test: pin the catalog client's per-request timeout (#266)". It changes only `tests/unit/test_model_endpoint_catalog.py`. No production code changed.
+
+**I1, unguarded `http_timeout_seconds`.** Two catalog tests were tightened:
+
+- `test_bounded_endpoint_catalog_client_reuses_system_credentials_and_leaves_it_unchanged` now asserts literal values on the bounded client: `retry_timeout_seconds == 5` and `http_timeout_seconds == 3`. It also asserts that the system client's `http_timeout_seconds is None`, alongside the existing `retry_timeout_seconds is None` and unchanged `_inner`.
+- `test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_unavailable` now records the `timeout=` passed to each stubbed `requests.Session.request` call. It asserts `set(...) == {3}`, which proves the bound at the transport.
+
+**Sabotage evidence** (driver `/tmp/t266-2/sab.py`, spec `FR1.json`):
+
+| Step | Result |
+| --- | --- |
+| Mutation | `config.http_timeout_seconds = CATALOG_HTTP_TIMEOUT_SECONDS` becomes `pass  # T266_2_FR1_HTTP_TIMEOUT` |
+| Anchor count | exactly 1 |
+| `rg -c` marker | 1 after mutation, 0 after restore |
+| Scope | `tests/unit/test_model_endpoint_catalog.py tests/unit/test_graph_configuration_draft.py` (220 tests) |
+| RED | 2 failed, 218 passed: `…reuses_system_credentials_and_leaves_it_unchanged` fails with `assert None == 3`; `…turns_a_transport_outage_into_endpoint_unavailable` fails with `{60} == {3}`, because the transport received the SDK default of 60 s |
+| Restore | `git checkout ad568eada98e53be64043af2aca44cafca4e15aa -- src/services/model_endpoint_catalog.py`, then 0 diff lines |
+| GREEN | 220 passed |
+
+**Gates:**
+
+- **Focused (catalog and draft):** 220 passed.
+- **Full `tests/unit -q -p no:randomly -rf`:** started 18:39 UTC. Result: 6 failed, 5980 passed, 110 skipped, 136 warnings. The 6 are exactly the baseline node IDs and causes:
+  - autoscaling ×2
+  - `_FakeSession.execute` ×3
+  - no active Graph Release ×1
+- **`ruff check`** on the changed test file: clean.
+- **Environment:** `.venv` was absent before and after, and the triple check is empty.
+
+The reviewer's three Minors are deferred, as directed.
