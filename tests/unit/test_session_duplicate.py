@@ -2,7 +2,7 @@
 
 import json
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from unittest.mock import patch
 
@@ -19,6 +19,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
 )
 from src.core.database import Base
+from src.database.models.graph_configuration import GraphRelease
 from src.database.models.deck_contributor import DeckContributor
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
@@ -40,6 +41,18 @@ def db():
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     session = Session()
+    now = datetime.now(timezone.utc)
+    session.add(
+        GraphRelease(
+            id=200,
+            version_number=2,
+            release_note="active duplicate fixture release",
+            published_by="duplicate-fixture@example.com",
+            published_at=now,
+            effective_from=now,
+        )
+    )
+    session.commit()
     yield session
     session.close()
     engine.dispose()

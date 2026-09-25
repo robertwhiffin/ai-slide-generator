@@ -38,6 +38,16 @@ export function DeckHistory({
   refreshKey,
 }: DeckHistoryProps) {
   const { isMobile } = useSidebar()
+  // Deliberately carries NO mixed-release / change-provenance indicator.
+  // `GET /api/sessions` returns no collaboration summary; adding one here was
+  // deferred under C-19 on two surviving grounds (correction C-25 retracted
+  // the N+1 premise — a single grouped query over all listed roots is not an
+  // N+1): (1) a summary on duplicate is vacuous by construction (C-5), and
+  // (2) no consumer existed — Task 5 answered the C-19 follow-up with a
+  // measured no, confirming the conversation surface (MixedReleaseWarning,
+  // beside the pinned-version badge) is sufficient and adds zero commit
+  // latency.  Do not add a per-row fetch here to "fix" the absence; if a
+  // future consumer justifies it, revisit the two surviving grounds above.
   const [sessions, setSessions] = useState<Session[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)

@@ -16,6 +16,7 @@ Two assertions
    load-bearing of the previously-uncollected files; a future re-drop must be
    loud).
 """
+import pytest
 import yaml
 from pathlib import Path
 
@@ -204,6 +205,24 @@ def test_conversation_pin_creation_is_collected_by_integration_graph():
     )
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "test_mixed_release_creation_postgres.py",
+        "test_conversation_creator_exclusions_postgres.py",
+    ],
+)
+def test_remaining_creation_lock_suites_are_collected_by_integration_graph(filename):
+    """Task-2 creator ordering and exclusions require graph-job PostgreSQL."""
+    target = f"tests/integration/{filename}"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Task-2 creator lock and exclusion coverage "
+        "must execute against PostgreSQL."
+    )
+
+
 def test_persisted_graph_runtime_failures_are_collected_by_integration_graph():
     """Persisted runtime failure coverage requires the graph job's PostgreSQL."""
     target = "tests/integration/test_persisted_graph_runtime_failures_postgres.py"
@@ -223,4 +242,81 @@ def test_conversation_pin_acceptance_is_collected_by_integration_graph():
         f"{target!r} is not named in integration-graph's run block in "
         ".github/workflows/test.yml. Its compiled-graph pin assertions must "
         "execute against PostgreSQL."
+    )
+
+
+def test_shared_deck_mutation_migration_is_collected_by_integration_graph():
+    """The append-only evidence migration/lifecycle suite requires PostgreSQL."""
+    target = "tests/integration/test_shared_deck_mutation_migration_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its trigger and FK lifecycle assertions must "
+        "execute against PostgreSQL."
+    )
+
+
+def test_shared_deck_mutation_lifecycle_is_collected_by_integration_graph():
+    """The evidence-preserving deletion/expiry lifecycle requires PostgreSQL."""
+    target = "tests/integration/test_shared_deck_mutation_lifecycle_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its cascade and per-candidate transaction "
+        "assertions must execute against PostgreSQL."
+    )
+
+
+def test_mixed_release_collaboration_acceptance_is_collected_by_integration_graph():
+    """#262's cross-writer acceptance and both final contract audits need PostgreSQL.
+
+    Four of its claims cannot be cashed anywhere else. The ``ON DELETE SET NULL``
+    retention needs real cascades — the SQLite fixtures report
+    ``PRAGMA foreign_keys = 0``, so a delete there leaves a dangling FK rather
+    than a nulled one and the retention assertion would pass vacuously. The
+    append-only trigger and the ``collaboration_identity`` immutability trigger
+    are PL/pgSQL. The forced creation lock orderings need two genuinely
+    concurrent transactions plus ``pg_stat_activity`` to observe a waiter, which
+    a single shared SQLite connection cannot produce. And the one grouped
+    statement is counted against the real dialect's aggregation.
+
+    The two executable contract audits ride in the same module deliberately:
+    they are the plan's final ``rg`` sweeps, and a sweep whose result lives in a
+    report is re-run by hand or not at all.
+    """
+    target = "tests/integration/test_mixed_release_collaboration_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its cross-writer acceptance, cascade "
+        "retention, trigger, lock-ordering and contract-audit assertions must "
+        "execute against PostgreSQL."
+    )
+
+
+def test_collaboration_history_api_is_collected_by_integration_graph():
+    """The authorization-scoped collaboration history API requires PostgreSQL.
+
+    Its load-bearing assertions are dialect-specific: the five-check CAN_VIEW
+    predicate against real ``uuid``/``varchar`` columns and PostgreSQL's NULL
+    semantics for ``IN``, newest-first grouped aggregation despite PostgreSQL's
+    ``NULLS FIRST`` default for ``DESC``, and evidence surviving real
+    ``ON DELETE SET NULL`` cascades.
+
+    That last claim is the one this docstring must actually be able to cash, and
+    only PostgreSQL can cash it: the unit fixture's in-memory SQLite reports
+    ``PRAGMA foreign_keys = 0``, so no cascade fires there at all and a ``DELETE``
+    would leave a dangling FK rather than a nulled one. The PostgreSQL module
+    therefore owns three real deletions — every actor, the deck row, and the root
+    session — plus the two-actors-on-one-release guard that is the only shape able
+    to catch grouping on ``actor_session_id`` instead of the opaque
+    ``actor_session_identity``.
+    """
+    target = "tests/integration/test_collaboration_history_api_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its five-check CAN_VIEW predicate, grouped "
+        "projection ordering and SET NULL survival assertions must execute "
+        "against PostgreSQL."
     )

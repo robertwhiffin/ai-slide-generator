@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
@@ -32,6 +33,7 @@ from src.core.database import Base, _run_migrations  # imported FIRST: importing
 # (src.core.__init__ -> settings_db -> src.database.models).
 import src.database.models  # noqa: E402,F401 — registers every ORM model on Base
 from src.database.models.session import SessionSlide, SessionSlideDeck, UserSession
+from src.database.models.graph_configuration import GraphRelease
 from src.domain.deck_spec import DeckSpec
 from src.domain.finding import Finding, SlideReviewOutput
 from src.domain.skill_io import ArchitectOutput, BuilderOutput, FixerOutput
@@ -375,7 +377,24 @@ def _build_env(monkeypatch, url: str):
     session_id = f"graph-{uuid.uuid4().hex[:10]}"
     db = factory()
     try:
-        db.add(UserSession(session_id=session_id, created_by="owner@example.com"))
+        effective = datetime(2026, 9, 23, 9, 0, tzinfo=timezone.utc)
+        release = GraphRelease(
+            version_number=1,
+            release_note="graph fixture release",
+            published_by="test",
+            published_at=effective,
+            effective_from=effective,
+            effective_to=None,
+        )
+        db.add(release)
+        db.flush()
+        db.add(
+            UserSession(
+                session_id=session_id,
+                created_by="owner@example.com",
+                graph_release_id=release.id,
+            )
+        )
         db.commit()
     finally:
         db.close()

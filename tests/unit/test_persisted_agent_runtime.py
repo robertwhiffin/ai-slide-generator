@@ -795,10 +795,64 @@ def test_provider_failure_is_converted_before_recording_sink_observes_it():
     assert sink.error_classes == ["PinnedInvocationEndpointError"]
 
 
+#: The seven fields the #260 PRD amendment permits this sink to log, written as
+#: LITERALS and not imported from the module under test: the contract is
+#: "**only** graph version, release ID, role, revision ID, content hash, outcome,
+#: and error class; **it never logs payload, prompt, output, session/user ID**,
+#: tools, or slide HTML"
+#: (docs/superpowers/plans/2026-09-22-conversation-pins-runtime-v1.md:21).
+#:
+#: Asserted as an EXACT SET rather than as a list of forbidden names.  The
+#: name-based guard this replaces read
+#: ``for forbidden in ("prompt", "payload", "output", "session_id", "user_id",
+#: "response"): assert not hasattr(record, forbidden)`` — and #262's
+#: ``root_session_id``/``actor_session_id`` walked straight past it, because
+#: ``hasattr(record, "session_id")`` is False when the field is called something
+#: else.  The suite stayed green while a written prohibition was broken
+#: (Ruling C-32).  An exact set cannot be walked past by naming: any new field
+#: fails this until someone amends the contract deliberately.
+PERMITTED_LOG_FIELDS = {
+    "graph_version",
+    "graph_release_id",
+    "agent_key",
+    "agent_definition_revision_id",
+    "content_hash",
+    "outcome",
+    "error_class",
+}
+
+#: The sink's whole message, on both the success and the error branch.  Pinned
+#: POSITIVELY rather than by a denylist of forbidden spellings: ``emitted_fields``
+#: subtracts every standard LogRecord attribute, and ``msg`` is one of them, so the
+#: exact-set assertion above is structurally blind to anything written into the
+#: message itself.  A leak there was measured to produce ZERO failures while every
+#: extras guard stayed green (Ruling C-37).  Asserting equality makes ANY content
+#: in the message fail, not just the spellings someone thought to forbid.  Do not
+#: relax this to a substring or a `not in` check.
+EXPECTED_LOG_MESSAGE = "persisted_agent_invocation"
+
+#: Every attribute the stdlib puts on a LogRecord, so the difference is exactly
+#: what the sink's ``extra=`` contributed.  ``message``/``asctime``/``taskName`` are
+#: added when a record is FORMATTED (caplog formats them), and ``logging`` refuses
+#: an ``extra`` key that collides with an existing record attribute — it raises
+#: ``KeyError: "Attempt to overwrite 'message' in LogRecord"`` — so no sink field
+#: can ever hide behind one of these three names.
+_STANDARD_LOG_RECORD_ATTRS = frozenset(
+    vars(logging.LogRecord("n", logging.INFO, "p", 1, "m", None, None))
+) | {"message", "asctime", "taskName"}
+
+
+def emitted_fields(record: logging.LogRecord) -> set:
+    """The fields the sink added to *record* — its whole disclosure surface."""
+    return {name for name in vars(record) if name not in _STANDARD_LOG_RECORD_ATTRS}
+
+
 def test_logging_sink_logs_identity_outcome_and_error_class_only(caplog):
     logger = logging.getLogger("test.persisted.runtime")
     sink = LoggingAgentInvocationIdentitySink(logger=logger)
-    identity = AgentInvocationIdentity(7, 41, "architect", 23, "a" * 64)
+    identity = AgentInvocationIdentity(
+        7, 41, "architect", 23, "a" * 64, "owner-session-9f", "contributor-session-3b"
+    )
 
     with caplog.at_level(logging.INFO, logger=logger.name):
         with pytest.raises(RuntimeError, match="ordinary"):
@@ -808,9 +862,46 @@ def test_logging_sink_logs_identity_outcome_and_error_class_only(caplog):
     assert record.outcome == "error"
     assert record.error_class == "RuntimeError"
     assert record.graph_release_id == 41
-    assert not hasattr(record, "prompt")
-    assert not hasattr(record, "payload")
-    assert not hasattr(record, "output")
+    # The ERROR branch has its own extra= dict, so it needs its own exact-set
+    # assertion: a guard on the success branch alone would leave the branch that
+    # runs when something already went wrong free to leak.
+    assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert record.msg == EXPECTED_LOG_MESSAGE
+    assert record.args in (None, ())
+    rendered = str(vars(record))
+    assert "owner-session-9f" not in rendered
+    assert "contributor-session-3b" not in rendered
+
+
+def test_the_identity_carries_the_session_ids_that_the_log_must_not(caplog):
+    """The separation #262 depends on: attributable trace, unchanged log surface.
+
+    ``AgentInvocationIdentity`` carries the root and actor sessions so a shared-deck
+    mutation is attributable, and the sink is handed that identity — while the log
+    record it writes stays inside the seven permitted fields.
+    """
+    logger = logging.getLogger("test.persisted.runtime.separation")
+    seen = []
+
+    class _Spy(LoggingAgentInvocationIdentitySink):
+        def invoke(self, identity, callback):
+            seen.append(identity)
+            return super().invoke(identity, callback)
+
+    identity = AgentInvocationIdentity(
+        7, 41, "architect", 23, "a" * 64, "owner-session-9f", "contributor-session-3b"
+    )
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        _Spy(logger=logger).invoke(identity, lambda: None)
+
+    assert seen[0].root_session_id == "owner-session-9f"
+    assert seen[0].actor_session_id == "contributor-session-3b"
+    record = caplog.records[-1]
+    assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert record.msg == EXPECTED_LOG_MESSAGE
+    assert record.args in (None, ())
+    assert not hasattr(record, "root_session_id")
+    assert not hasattr(record, "actor_session_id")
 
 
 def test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output(caplog):
@@ -827,7 +918,7 @@ def test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output(caplog
             "architect",
             41,
             {"session_id": "private", "secret": "payload"},
-            AgentAssemblyContext(False),
+            AgentAssemblyContext(False, "owner-session-9f", "contributor-session-3b"),
         )
 
     assert result.output is output
@@ -836,8 +927,14 @@ def test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output(caplog
     record = records[0]
     assert record.outcome == "success"
     assert record.error_class is None
-    for forbidden in ("prompt", "payload", "output", "session_id", "user_id", "response"):
-        assert not hasattr(record, forbidden)
+    # The EXACT emitted set, not a list of forbidden names — see
+    # PERMITTED_LOG_FIELDS for why the name-based form could not hold.
+    assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert record.msg == EXPECTED_LOG_MESSAGE
+    assert record.args in (None, ())
+    rendered = str(vars(record))
+    for secret in ("private", "payload", "owner-session-9f", "contributor-session-3b"):
+        assert secret not in rendered
 
 
 def test_compatibility_loader_constructs_exact_synthetic_persisted_definitions():

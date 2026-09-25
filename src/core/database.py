@@ -608,6 +608,14 @@ def _run_migrations(engine, schema: str | None = None):
         # constraint/index are present and re-homed during the same boot.
         _migrate_conversation_pin_schema(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- Shared-deck attribution: opaque identities + append-only events ---
+        # Keep immediately after Conversation Pins: event provenance consumes the
+        # exact actor pin and every later owner-reassignment pass must see the new
+        # table, indexes, functions, and triggers in this same transaction.
+        _migrate_shared_deck_mutation_schema(
+            conn, inspector, schema, _qual, is_sqlite
+        )
+
         # --- Graph Configuration: database-enforced published-row immutability ---
         # create_all owns the six fresh table definitions. These PostgreSQL-only
         # guards add the mutation boundary that constraints alone cannot express.
@@ -667,6 +675,259 @@ def _migrate_conversation_pin_schema(
         text(
             "CREATE INDEX IF NOT EXISTS ix_user_sessions_graph_release_id "
             f"ON {qualified_sessions} (graph_release_id)"
+        )
+    )
+
+
+def _migrate_shared_deck_mutation_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add stable collaboration UUIDs and the append-only mutation aggregate."""
+    from sqlalchemy import inspect, text
+
+    from src.database.models.session import SharedDeckMutationEvent
+
+    for table_name in ("user_sessions", "session_slide_decks"):
+        fresh_inspector = inspect(conn)
+        try:
+            columns = {
+                column["name"]
+                for column in fresh_inspector.get_columns(table_name, schema=schema)
+            }
+        except Exception:
+            continue
+        if not columns:
+            continue
+
+        qualified_table = _qual(table_name)
+        if "collaboration_identity" not in columns:
+            column_type = "VARCHAR(32)" if is_sqlite else "UUID"
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    f"ADD COLUMN collaboration_identity {column_type} NULL"
+                )
+            )
+
+        if is_sqlite:
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE collaboration_identity IS NULL"
+                )
+            )
+            # The column definition in src/database/models/session.py carries the
+            # server-side default, so any table create_all() built already generates
+            # an identity for non-ORM inserts. A legacy table reached here through
+            # ALTER TABLE ADD COLUMN cannot: SQLite rejects a non-constant default in
+            # ADD COLUMN ("Cannot add a column with non-constant default") and has no
+            # ALTER COLUMN SET DEFAULT. Without this trigger such a table would let a
+            # raw-SQL insert store NULL, and every later mutation on that row would
+            # fail in shared_deck_attribution with "collaboration identities must
+            # exist before mutation evidence". The trigger is the SQLite equivalent of
+            # the PostgreSQL DEFAULT below, fires only when the writer supplied no
+            # identity, and so never touches an identity that already exists.
+            conn.execute(
+                text(
+                    f"CREATE TRIGGER IF NOT EXISTS "
+                    f"trg_{table_name}_collaboration_identity_default "
+                    f"AFTER INSERT ON {qualified_table} "
+                    "WHEN NEW.collaboration_identity IS NULL "
+                    "BEGIN "
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE rowid = NEW.rowid; "
+                    "END"
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = gen_random_uuid() "
+                    "WHERE collaboration_identity IS NULL"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ALTER COLUMN collaboration_identity SET DEFAULT gen_random_uuid()"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ALTER COLUMN collaboration_identity SET NOT NULL"
+                )
+            )
+
+    # Production calls create_all first, but this explicit create owns the legacy
+    # path where the event table did not exist before this migration shipped.
+    SharedDeckMutationEvent.__table__.create(bind=conn, checkfirst=True)
+
+    if is_sqlite:
+        return
+
+    preparer = conn.dialect.identifier_preparer
+    namespace = preparer.quote(schema or "public")
+
+    def qualified(name: str) -> str:
+        return f"{namespace}.{preparer.quote(name)}"
+
+    identity_guard = qualified("guard_collaboration_identity_immutable")
+    event_guard = qualified("guard_shared_deck_mutation_event_append_only")
+    event_table = qualified("shared_deck_mutation_event")
+    sessions_table = qualified("user_sessions")
+    decks_table = qualified("session_slide_decks")
+
+    # Task 3 classifies the direct CRUD delete as a whole-deck rewrite while
+    # SlideWriter.delete_slide remains a row deletion.  Upgrade an interim
+    # Task-1 table as well as fresh installs, so the same operation is valid for
+    # both explicitly classified object types.
+    operation_object_check = preparer.quote(
+        "ck_shared_deck_mutation_event_operation_object"
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} DROP CONSTRAINT IF EXISTS "
+            f"{operation_object_check}"
+        )
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} ADD CONSTRAINT {operation_object_check} "
+            "CHECK ((object_type = 'slide' AND operation IN "
+            "('write_slide', 'delete_slide')) OR "
+            "(object_type = 'deck' AND operation IN "
+            "('save_deck', 'save_deck_slides', 'write_deck_level', "
+            "'insert_slide', 'update_slide', 'duplicate_slide', "
+            "'delete_slide', 'reorder_slides', 'restore_version')))"
+        )
+    )
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {identity_guard}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF NEW.collaboration_identity
+                    IS DISTINCT FROM OLD.collaboration_identity
+                THEN
+                    RAISE EXCEPTION '% collaboration identity is immutable', TG_TABLE_NAME
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    for table_name, trigger_name in (
+        ("user_sessions", "trg_user_sessions_collaboration_identity_immutable"),
+        (
+            "session_slide_decks",
+            "trg_session_slide_decks_collaboration_identity_immutable",
+        ),
+    ):
+        table = qualified(table_name)
+        trigger = preparer.quote(trigger_name)
+        conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+        conn.execute(
+            text(
+                f"CREATE TRIGGER {trigger} BEFORE UPDATE ON {table} "
+                f"FOR EACH ROW EXECUTE FUNCTION {identity_guard}()"
+            )
+        )
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {event_guard}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'shared deck mutation events are append-only'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                IF NOT (
+                    NEW.id IS NOT DISTINCT FROM OLD.id
+                    AND NEW.root_session_identity
+                        IS NOT DISTINCT FROM OLD.root_session_identity
+                    AND NEW.root_deck_identity
+                        IS NOT DISTINCT FROM OLD.root_deck_identity
+                    AND NEW.actor_session_identity
+                        IS NOT DISTINCT FROM OLD.actor_session_identity
+                    AND NEW.graph_release_id IS NOT DISTINCT FROM OLD.graph_release_id
+                    AND NEW.graph_version IS NOT DISTINCT FROM OLD.graph_version
+                    AND NEW.operation IS NOT DISTINCT FROM OLD.operation
+                    AND NEW.object_type IS NOT DISTINCT FROM OLD.object_type
+                    AND NEW.object_id IS NOT DISTINCT FROM OLD.object_id
+                    AND NEW.occurred_at IS NOT DISTINCT FROM OLD.occurred_at
+                    AND (
+                        NEW.root_session_id IS DISTINCT FROM OLD.root_session_id
+                        OR NEW.root_deck_id IS DISTINCT FROM OLD.root_deck_id
+                        OR NEW.actor_session_id IS DISTINCT FROM OLD.actor_session_id
+                    )
+                    AND (
+                        NEW.root_session_id IS NOT DISTINCT FROM OLD.root_session_id
+                        OR (
+                            OLD.root_session_id IS NOT NULL
+                            AND NEW.root_session_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {sessions_table}
+                                WHERE id = OLD.root_session_id
+                            )
+                        )
+                    )
+                    AND (
+                        NEW.root_deck_id IS NOT DISTINCT FROM OLD.root_deck_id
+                        OR (
+                            OLD.root_deck_id IS NOT NULL
+                            AND NEW.root_deck_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {decks_table}
+                                WHERE id = OLD.root_deck_id
+                            )
+                        )
+                    )
+                    AND (
+                        NEW.actor_session_id IS NOT DISTINCT FROM OLD.actor_session_id
+                        OR (
+                            OLD.actor_session_id IS NOT NULL
+                            AND NEW.actor_session_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {sessions_table}
+                                WHERE id = OLD.actor_session_id
+                            )
+                        )
+                    )
+                ) THEN
+                    RAISE EXCEPTION 'shared deck mutation events are append-only'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    event_trigger = preparer.quote(
+        "trg_shared_deck_mutation_event_append_only"
+    )
+    conn.execute(text(f"DROP TRIGGER IF EXISTS {event_trigger} ON {event_table}"))
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {event_trigger} "
+            f"BEFORE UPDATE OR DELETE ON {event_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {event_guard}()"
         )
     )
 

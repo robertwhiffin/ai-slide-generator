@@ -140,6 +140,21 @@ def client(test_db_engine, test_db_factory, test_db):
 
 
 @pytest.fixture(autouse=True)
+def active_graph_release(test_db_factory):
+    """Every route that creates a session needs an active Graph Release.
+
+    This module's own tests drive `client` directly rather than through an `api`
+    wrapper, so they never reached the bootstrap its three importing siblings get
+    from their own fixtures. Without it `POST /api/sessions` raises
+    ConversationGraphReleaseIntegrityError and returns 500. Deliberately NOT
+    exported to those siblings, which seed for themselves.
+    """
+    from src.services.graph_configuration import bootstrap_graph_configuration
+
+    bootstrap_graph_configuration(test_db_factory)
+
+
+@pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset service singletons between tests to avoid cross-test pollution."""
     import src.api.services.chat_service as cs_mod

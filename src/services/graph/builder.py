@@ -69,12 +69,17 @@ import uuid
 from typing import Any, Callable, Dict, Optional
 
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import func, select
+from sqlalchemy.orm import aliased, sessionmaker
 
 from src.core.checkpointer import get_checkpointer
 from src.core.database import get_session_local
 from src.core.user_context import get_current_user
-from src.services.conversation_pins import load_conversation_pin
+from src.database.models.session import UserSession
+from src.services.conversation_pins import (
+    ConversationSessionNotFoundError,
+    load_conversation_pin,
+)
 from src.services.foreman_service import CAP
 from src.services.graph.event_emitter import (
     set_chat_request_id,
@@ -187,6 +192,74 @@ def get_graph():
     return _compiled_graph
 
 
+def load_collaboration_root(session_factory: sessionmaker, session_id: str) -> str:
+    """Return the ``session_id`` of the session that OWNS *session_id*'s deck.
+
+    One query and one hop.  ``UserSession.parent_session_id`` is NULL on a root
+    and points at the owner on a contributor session, and
+    ``SessionManager.get_or_create_contributor_session`` refuses to create a
+    contributor session on another contributor session, so the owner is always
+    exactly one hop away — the same single-hop
+    ``coalesce(parent_session_id, id)`` join the collaboration-history resolver
+    uses, and the reason Ruling C-16 withdrew the chain-walking variant.
+
+    Returns *session_id* itself for a root session, so an owner working on their
+    own deck traces root == actor.
+
+    **Fail-closed, exactly as ``authorized_collaboration_root`` is.**  The join
+    requires ``root.parent_session_id IS NULL``, so a hand-forced depth-2 row —
+    reachable only through raw SQL or a pre-guard legacy database — resolves to
+    NOTHING and raises, rather than naming the intermediate contributor as the deck
+    owner.  Without that predicate the **four** root resolvers disagree four ways
+    on such a row:
+
+    1. ``PermissionService._resolve_root_session`` — walks the full chain,
+       returns the real root.
+    2. ``authorized_collaboration_root`` (``collaboration_history.py:243``) —
+       returns ``None`` (fail-closed via ``IS NULL`` guard).
+    3. This function — raises (fail-closed via ``IS NULL`` guard).
+    4. ``SessionManager._get_deck_owner_session`` (``session_manager.py:926``)
+       — returns the **intermediate** contributor; has 32 call sites and
+       supplies ``deck_owner`` to every ``record_shared_deck_mutation`` call,
+       i.e. AC4's persisted root value.
+
+    A fifth site, ``conversation_pins.py:197``, inlines
+    ``coalesce(parent_session_id, id)`` unguarded (pre-existing, #261).
+
+    The consequence is nevertheless **benign**: the attribution seam
+    fail-closes independently on ``deck.session_id != deck_owner.id``
+    (``shared_deck_attribution.py:83-84``), so no mis-attributed evidence row
+    is constructible even from a hand-forced depth-2 row.  Recording a
+    non-root session as the owner is the one thing AC4 exists to prevent, and
+    that invariant is enforced — just by a different predicate than this
+    docstring once claimed (Ruling C-38).  C-16 justifies the one-hop join
+    *shape*; it does not license dropping the guard that makes the hop safe.
+
+    An absent conversation and a hand-forced depth-2 row are indistinguishable
+    here, and deliberately share one outcome: neither has a legal root, so neither
+    may run a turn.  The refusal lands before any node or writer, exactly as the
+    null-pin refusal does (Ruling C-3).
+    """
+    with session_factory() as db:
+        requested = aliased(UserSession)
+        root = aliased(UserSession)
+        owner_session_id = db.scalar(
+            select(root.session_id)
+            .select_from(requested)
+            .join(
+                root,
+                root.id == func.coalesce(requested.parent_session_id, requested.id),
+            )
+            .where(
+                requested.session_id == session_id,
+                root.parent_session_id.is_(None),
+            )
+        )
+        if owner_session_id is None:
+            raise ConversationSessionNotFoundError(session_id)
+        return owner_session_id
+
+
 def invoke_graph(
     session_id: str,
     initial: Optional[Dict[str, Any]] = None,
@@ -196,6 +269,7 @@ def invoke_graph(
     describe_only: bool = False,
     request_id: Optional[str] = None,
     pin_loader: Callable[[sessionmaker, str], int] = load_conversation_pin,
+    root_loader: Callable[[sessionmaker, str], str] = load_collaboration_root,
 ) -> Dict[str, Any]:
     """Run one turn of the graph for *session_id*.
 
@@ -239,6 +313,15 @@ def invoke_graph(
     turn-scoped reducer compares, so reusing one would let turn 2 inherit turn
     1's landed positions and go straight to deck review having built nothing.
 
+    The collaboration trace is resolved **once**, here, for the same reason:
+    ``actor_session_id`` is this session and ``root_session_id`` is the session
+    that owns the deck, so a contributor's turn on a shared deck records
+    root = owner and actor = contributor at every handoff.  Both are written
+    AFTER the caller's ``initial``, so a seeded root or actor is overwritten
+    rather than trusted.  **Neither ID selects the release** — the actor's
+    persisted pin, loaded above, does — so a contributor pinned to R2 runs R2 on
+    an owner's R1 deck, which is the entire point of the mixed-release epic.
+
     ``principal or get_current_user()`` is resolved **once**, here, into
     ``initiated_by``, and every node reads it from state.  A node calling
     ``get_current_user()`` itself works today and breaks the first time the graph
@@ -253,7 +336,14 @@ def invoke_graph(
     1's poll would receive turn 2's reply and turn 2's own poll would never see
     it.
     """
+    # The pin FIRST, and that order is load-bearing (Ruling C-3): a legacy
+    # conversation with no persisted release must raise
+    # ConversationPinMissingError here, before any node runs, any row is written
+    # and any mutation event is recorded.  ws4d's sweeper catches that failure,
+    # releases its claim and leaves the marker queued and retryable.  Resolving
+    # the owner first would spend a query on a turn that cannot legally run.
     graph_release_id = pin_loader(get_session_local(), session_id)
+    root_session_id = root_loader(get_session_local(), session_id)
     turn_id = uuid.uuid4().hex
     initiated_by = principal or get_current_user()
 
@@ -267,6 +357,12 @@ def invoke_graph(
             "graph_release_id": graph_release_id,
             "turn_id": turn_id,
             "initiated_by": initiated_by,
+            # AFTER dict(initial), so a caller-seeded root or actor is
+            # OVERWRITTEN rather than trusted.  The actor is this session by
+            # definition — thread_id is session_id — and the root is whatever the
+            # database says owns the deck.
+            "root_session_id": root_session_id,
+            "actor_session_id": session_id,
             "describe_only": scoped(turn_id, bool(describe_only)),
         }
     )

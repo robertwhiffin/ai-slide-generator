@@ -10,6 +10,7 @@ Session access is controlled by:
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -34,6 +35,10 @@ from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import UserSession
+from src.services.collaboration_history import (
+    authorized_collaboration_root,
+    get_collaboration_history,
+)
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.permission_service import (
     VALID_DECK_GLOBAL_PERMISSIONS,
@@ -366,6 +371,11 @@ async def get_or_create_contributor_session(
 
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -374,6 +384,104 @@ async def get_or_create_contributor_session(
             status_code=500,
             detail="Failed to create contributor session",
         ) from e
+
+
+class CollaborationReleaseGroupResponse(BaseModel):
+    """One opaque contributor's mutations on one exact Graph Release.
+
+    Deliberately carries no actor session id, session name, collaboration UUID,
+    internal release id, pin, prompt, content, user id or principal. A null
+    ``graph_version`` means legacy / no graph release — never "active".
+    """
+
+    actor_label: str = Field(description="Response-local label, e.g. 'Contributor 1'")
+    graph_version: Optional[int] = Field(
+        description="Persisted Graph Version, or null for legacy / no graph release"
+    )
+    mutation_count: int = Field(description="Shared-deck mutations in this group")
+    last_mutation_at: datetime = Field(description="Most recent mutation in this group")
+
+
+class CollaborationHistoryResponse(BaseModel):
+    """Privacy-safe collaboration summary plus its grouped evidence."""
+
+    mixed_release_warning: bool = Field(
+        description="True only when two or more persisted non-null Graph Versions appear"
+    )
+    has_legacy_evidence: bool = Field(
+        description="True when any evidence has no persisted Graph Release"
+    )
+    groups: list[CollaborationReleaseGroupResponse]
+
+
+@router.get(
+    "/{session_id}/collaboration-history",
+    response_model=CollaborationHistoryResponse,
+)
+async def get_collaboration_history_for_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """Grouped, privacy-safe collaboration history for a shared deck.
+
+    ``authorized_collaboration_root`` is the only entry lookup: it resolves the
+    requested session to its deck-owning root and authorizes the caller in one
+    statement. When it returns ``None`` — unknown id, unauthorized caller,
+    guessed contributor id, missing or deleted root, deckless root — this route
+    returns the byte-identical 404 that ``GET /api/sessions/{session_id}``
+    returns for an unknown id, before any history query runs. An unauthorized
+    real id and a fabricated id are therefore indistinguishable.
+
+    Args:
+        session_id: Root or contributor session ID.
+
+    Returns:
+        The two summary flags and the newest-first contributor/release groups.
+    """
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    permission_context = get_permission_context()
+
+    try:
+        root = await asyncio.to_thread(
+            authorized_collaboration_root,
+            db,
+            requested_session_id=session_id,
+            permission_context=permission_context,
+        )
+        if root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session not found: {session_id}",
+            )
+
+        warning, has_legacy, groups = await asyncio.to_thread(
+            get_collaboration_history, db, root=root
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get collaboration history: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get collaboration history",
+        ) from e
+
+    return CollaborationHistoryResponse(
+        mixed_release_warning=warning,
+        has_legacy_evidence=has_legacy,
+        groups=[
+            CollaborationReleaseGroupResponse(
+                actor_label=group.actor_label,
+                graph_version=group.graph_version,
+                mutation_count=group.mutation_count,
+                last_mutation_at=group.last_mutation_at,
+            )
+            for group in groups
+        ],
+    )
 
 
 @router.get("/{session_id}")
@@ -550,6 +658,11 @@ async def duplicate_session(
         )
     except SessionAccessDeniedError as e:
         raise HTTPException(status_code=403, detail=e.message) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except HTTPException:
         raise
     except ValueError as e:

@@ -37,6 +37,7 @@ import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { GraphVersionStatus } from '../Conversation/GraphVersionStatus';
+import { MixedReleaseWarning } from '../Conversation/MixedReleaseWarning';
 
 type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
 
@@ -199,6 +200,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     graphVersion,
     activeGraphVersion,
     isGraphVersionOlder,
+    collaborationHistory,
+    collaborationHistoryFailed,
+    isSessionPersisted,
     createNewSession,
     markSessionPersisted,
     switchSession,
@@ -1179,6 +1183,30 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       onStartLatest={handleStartLatest}
                       isStartingLatest={isStartingLatest}
                     />
+                    {/* BESIDE the #261 badge, never inside it: a failed
+                        collaboration-history load must not erase the pinned
+                        Graph Version, and a sibling makes that structural
+                        rather than a thing a future edit can regress.
+
+                        Two instances exist in the app: this one
+                        (surface="conversation") and a second in the Share Deck
+                        dialog body (surface="collaboration", AppLayout ~line
+                        1501).  They are safe to coexist because
+                        SURFACE_VOCABULARY gives them wholly distinct wording
+                        ("Change provenance" vs "Who changed this deck"),
+                        distinct listLabels and testIds, and announce:false on
+                        the dialog copy — the accessible-name collision that
+                        cost this epic twice cannot occur.  Do not consolidate
+                        them into one instance: the conversation copy lives
+                        here (always visible), the collaboration copy lives in
+                        the share dialog (scoped to one deck), and each surface
+                        answers AC5 for its own context. */}
+                    <MixedReleaseWarning
+                      surface="conversation"
+                      history={collaborationHistory}
+                      loadFailed={collaborationHistoryFailed}
+                      isSessionPersisted={isSessionPersisted}
+                    />
                     <ChatPanel
                       key="chat-panel"
                       ref={chatPanelRef}
@@ -1471,6 +1499,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
               </button>
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-4">
+              {/* AC5's second surface. Its wording is wholly DISTINCT from the
+                  conversation copy's, not suffixed: this overlay leaves the
+                  conversation copy mounted behind it, and Playwright matches
+                  accessible names by case-insensitive substring, so a suffix
+                  would make the conversation locator ambiguous. The dialog copy
+                  is also the only one that is CLICKABLE while the overlay is up
+                  — the conversation copy fails a pointer-events check behind it,
+                  which is why interactions here scope to a container. */}
+              <MixedReleaseWarning
+                surface="collaboration"
+                history={collaborationHistory}
+                loadFailed={collaborationHistoryFailed}
+                isSessionPersisted={isSessionPersisted}
+              />
               <DeckContributorsManager
                 sessionId={sessionId}
                 onSharingChange={() => setSessionsRefreshKey((k) => k + 1)}
