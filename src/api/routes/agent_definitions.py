@@ -197,10 +197,21 @@ def _request_error_message(
     return _OWNED_ASSEMBLY_MESSAGES.get((shape, code), str(error["msg"]))
 
 
-def _request_validation_errors(exc: ValidationError) -> list[DraftFieldErrorResponse]:
+def _request_validation_errors(
+    exc: ValidationError, *, prefix: tuple[str, ...] = ()
+) -> list[DraftFieldErrorResponse]:
+    """Render a ValidationError into the ordered envelope.
+
+    ``prefix`` roots a nested model's own locations in the request path that
+    reached it — the domain overlay validates in isolation, so its ``loc`` is
+    relative to itself and would otherwise report ``field_overrides.x`` where the
+    client sent ``candidate.schema_overlay.field_overrides.x``.  Kept as a
+    parameter rather than a second renderer so every ordered 422 in this module
+    still comes from one place.
+    """
     errors: list[DraftFieldErrorResponse] = []
     for error in exc.errors():
-        location = error["loc"]
+        location = (*prefix, *error["loc"])
         field = ".".join(str(part) for part in location) or "$"
         error_type = error["type"]
         code = _validation_error_code(field, error_type, error.get("input"))
@@ -387,15 +398,27 @@ async def save_agent_definition_draft(
     except ValidationError as exc:
         return _draft_validation_response(_request_validation_errors(exc))
 
-    candidate = EditableModelDraft(
-        prompt_text=save_request.candidate.prompt_text,
-        endpoint_name=save_request.candidate.model.endpoint_name,
-        temperature=save_request.candidate.model.temperature,
-        max_tokens=save_request.candidate.model.max_tokens,
-        top_p=save_request.candidate.model.top_p,
-        assembly_rules=_domain_assembly_rules(save_request.candidate.assembly_rules),
-        schema_overlay=_domain_schema_overlay(save_request.candidate.schema_overlay),
-    )
+    # The wire overlay is deliberately loosely typed so that unknown guidance
+    # properties reach the domain validator and come back as the stable
+    # ``overlay_guidance_property_forbidden`` domain issue.  The cost is that a
+    # TYPE error passes the wire layer and raises here instead, which reached the
+    # client as a 500 until this catch existed.  Convert it to the same ordered
+    # 422 every other rejection uses; do NOT tighten the wire types, which would
+    # turn a documented domain issue into a Pydantic message.
+    try:
+        candidate = EditableModelDraft(
+            prompt_text=save_request.candidate.prompt_text,
+            endpoint_name=save_request.candidate.model.endpoint_name,
+            temperature=save_request.candidate.model.temperature,
+            max_tokens=save_request.candidate.model.max_tokens,
+            top_p=save_request.candidate.model.top_p,
+            assembly_rules=_domain_assembly_rules(save_request.candidate.assembly_rules),
+            schema_overlay=_domain_schema_overlay(save_request.candidate.schema_overlay),
+        )
+    except ValidationError as exc:
+        return _draft_validation_response(
+            _request_validation_errors(exc, prefix=("candidate", "schema_overlay"))
+        )
     try:
         outcome = GraphConfiguration().save_editable_model_draft(
             db,

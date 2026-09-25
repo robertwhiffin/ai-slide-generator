@@ -61,8 +61,6 @@ from src.services.graph_configuration import (
 )
 from src.services.agent_schema_registry import (
     SCHEMA_CONTRACT_BUNDLES,
-    _V2_OPTIONAL_DESCRIPTORS,
-    _descriptor_material,
 )
 from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import load_graph_v1_manifest
@@ -1392,6 +1390,7 @@ def test_no_request_model_accepts_a_protected_stage_view_or_display_field(
     """Catches a client-supplied protected view, digest, or display override."""
     server_owned = {
         "protected_stage_view",
+        "selectable_optional_fields",
         "display_text",
         "locked",
         "bundle_version",
@@ -2736,6 +2735,65 @@ def test_put_schema_overlay_type_field_is_rejected_as_extra_forbidden(
     assert after == before
 
 
+@pytest.mark.parametrize(
+    ("schema_overlay", "expected_field", "expected_message"),
+    [
+        # Top-level schema_overlay is not a dict — fires _OWNED_SCHEMA_OVERLAY_MESSAGES
+        # key ("candidate.schema_overlay", "strict_type")
+        (
+            [],
+            "candidate.schema_overlay",
+            "Schema overlay must be an object.",
+        ),
+        # field_overrides value is not a dict — fires key
+        # ("candidate.schema_overlay.field_overrides", "strict_type")
+        (
+            {"field_overrides": "string"},
+            "candidate.schema_overlay.field_overrides",
+            "Field overrides must be an object.",
+        ),
+        # additional_optional_fields value is not a list — fires key
+        # ("candidate.schema_overlay.additional_optional_fields", "strict_type")
+        (
+            {"additional_optional_fields": {}},
+            "candidate.schema_overlay.additional_optional_fields",
+            "Additional optional fields must be an array.",
+        ),
+    ],
+)
+def test_put_schema_overlay_wire_type_error_uses_owned_message(
+    session_factory, monkeypatch, schema_overlay, expected_field, expected_message
+):
+    """Catches removal of _OWNED_SCHEMA_OVERLAY_MESSAGES or its lookup branch.
+
+    Each case is caught by DraftSaveRequest.model_validate (wire layer) and routed
+    through _request_error_message.  Without the overlay_msg lookup branch, the
+    function falls through to _OWNED_ASSEMBLY_MESSAGES then to Pydantic's default
+    message, which differs from the owned string.
+
+    Mutation: delete the overlay_msg lookup branch in _request_error_message.
+    Result: each case returns Pydantic's default message — assertion fails.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        candidate = _editable_candidate(_model_node(before, "architect"))
+        candidate["schema_overlay"] = schema_overlay
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "invalid_draft"
+    assert body["errors"][0]["field"] == expected_field
+    assert body["errors"][0]["code"] == "strict_type"
+    assert body["errors"][0]["message"] == expected_message
+    assert after == before
+
+
 def test_put_schema_overlay_domain_rejections_carry_candidate_prefix(
     session_factory, monkeypatch
 ):
@@ -2895,6 +2953,84 @@ def test_put_schema_overlay_stale_conflict_echoes_overlay_in_client_candidate(
     }
 
 
+@pytest.mark.parametrize(
+    ("schema_overlay", "expected_field"),
+    [
+        # A: field_overrides value is a string (model_type at SchemaOverlay.model_validate)
+        (
+            {"field_overrides": {"intent": "not-a-dict"}, "additional_optional_fields": []},
+            "candidate.schema_overlay.field_overrides.intent",
+        ),
+        # B: field_overrides value is a list (model_type)
+        (
+            {"field_overrides": {"intent": [1, 2, 3]}, "additional_optional_fields": []},
+            "candidate.schema_overlay.field_overrides.intent",
+        ),
+        # C: field_overrides value is an int (model_type)
+        (
+            {"field_overrides": {"intent": 42}, "additional_optional_fields": []},
+            "candidate.schema_overlay.field_overrides.intent",
+        ),
+        # D: inner description is an int, not a string (string_type)
+        (
+            {
+                "field_overrides": {
+                    "intent": {"description": 99, "examples": ["ok"]}
+                },
+                "additional_optional_fields": [],
+            },
+            "candidate.schema_overlay.field_overrides.intent.description",
+        ),
+        # E: inner examples is a string, not a sequence (tuple_type)
+        (
+            {
+                "field_overrides": {
+                    "intent": {"description": "ok", "examples": "not-a-list"}
+                },
+                "additional_optional_fields": [],
+            },
+            "candidate.schema_overlay.field_overrides.intent.examples",
+        ),
+        # F: field_overrides value is null (model_type)
+        (
+            {"field_overrides": {"intent": None}, "additional_optional_fields": []},
+            "candidate.schema_overlay.field_overrides.intent",
+        ),
+    ],
+)
+def test_put_schema_overlay_domain_conversion_type_error_returns_ordered_422(
+    session_factory, monkeypatch, schema_overlay, expected_field
+):
+    """Catches an unhandled ValidationError from _domain_schema_overlay.
+
+    Shapes A-F pass the wire model (field_overrides: dict[str, object]) but fail at
+    SchemaOverlay.model_validate, producing HTTP 500 without the try/except catch.
+    With the catch, each returns an ordered 422 with the error field rooted at
+    candidate.schema_overlay, and no write occurs.
+
+    Mutation: remove the try/except around _domain_schema_overlay in
+    save_agent_definition_draft.  Each parametrised case returns 500 (or raises),
+    not 422.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        before = _workbench(client)
+        candidate = _editable_candidate(_model_node(before, "architect"))
+        candidate["schema_overlay"] = schema_overlay
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "invalid_draft"
+    assert body["errors"][0]["field"] == expected_field
+    assert body["errors"][0]["code"] == "strict_type"
+    assert after == before
+
+
 def test_schema_upgrade_exposes_v2_selectable_optional_field_descriptors(
     session_factory, monkeypatch
 ):
@@ -2909,7 +3045,29 @@ def test_schema_upgrade_exposes_v2_selectable_optional_field_descriptors(
     draft_descriptors = node["draft"]["selectable_optional_fields"]
     assert len(draft_descriptors) == 1
     descriptor = draft_descriptors[0]
-    expected = _descriptor_material(_V2_OPTIONAL_DESCRIPTORS["architect"])
+    expected = {
+        "name": "diagnostic_notes",
+        "description": (
+            "Concise assumptions or ambiguities that influenced the selected intent; "
+            "never substitute for `message`, `deck_spec`, `data_request`, targets, or a "
+            "design proposal."
+        ),
+        "examples": [
+            "Assumed the request refers to the existing Q2 deck; no target slide numbers "
+            "were supplied."
+        ],
+        "schema": {
+            "type": ["array", "null"],
+            "default": None,
+            "max_items": 8,
+            "items": {
+                "type": "string",
+                "strip_whitespace": True,
+                "min_length": 1,
+                "max_length": 280,
+            },
+        },
+    }
     assert descriptor == expected
     # published is still v1 -- no descriptors
     assert node["published"]["selectable_optional_fields"] == []
@@ -2943,7 +3101,29 @@ def test_schema_contract_upgrade_response_includes_selectable_optional_fields(
     definition = response.json()["definition"]
     assert "selectable_optional_fields" in definition
     assert len(definition["selectable_optional_fields"]) == 1
-    expected = _descriptor_material(_V2_OPTIONAL_DESCRIPTORS["data_analyst"])
+    expected = {
+        "name": "diagnostic_notes",
+        "description": (
+            "Concise retrieval limitations, source disagreement, or interpretation "
+            "assumptions; never replace `outcome`, `synthesis`, `sources`, `gap`, "
+            "`reason`, or `tried_tools`."
+        ),
+        "examples": [
+            "The two sources use different fiscal calendars; synthesis compares "
+            "calendar-quarter totals."
+        ],
+        "schema": {
+            "type": ["array", "null"],
+            "default": None,
+            "max_items": 8,
+            "items": {
+                "type": "string",
+                "strip_whitespace": True,
+                "min_length": 1,
+                "max_length": 280,
+            },
+        },
+    }
     assert definition["selectable_optional_fields"][0] == expected
 
 
