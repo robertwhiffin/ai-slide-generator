@@ -365,6 +365,10 @@ def test_bounded_endpoint_catalog_client_reuses_system_credentials_and_leaves_it
     assert bounded is not system_client
     assert bounded.config.retry_timeout_seconds == CATALOG_RETRY_TIMEOUT_SECONDS
     assert 0 < CATALOG_RETRY_TIMEOUT_SECONDS <= 15
+    # Literal pins: a 5 s retry window and a 3 s per-request timeout together
+    # keep one hung socket inside the ruled 15 s bound (SDK default is 60 s).
+    assert bounded.config.retry_timeout_seconds == 5
+    assert bounded.config.http_timeout_seconds == 3
     assert bounded.config.host == system_client.config.host
     # Same credential source: the copy shares the resolved header factory.
     assert bounded.config._header_factory is system_client.config._header_factory
@@ -372,6 +376,7 @@ def test_bounded_endpoint_catalog_client_reuses_system_credentials_and_leaves_it
     # The system client's own configuration is never changed.
     assert system_client.config._inner == system_inner
     assert system_client.config.retry_timeout_seconds is None
+    assert system_client.config.http_timeout_seconds is None
 
 
 def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_unavailable(
@@ -380,9 +385,11 @@ def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_
     clock = _SteppingClock()
     system_client = _offline_system_client(monkeypatch, clock=clock)
     requested: list[tuple[str, str]] = []
+    transport_timeouts: list[object] = []
 
     def _refused(self, method, url, **kwargs):
         requested.append((method, url))
+        transport_timeouts.append(kwargs.get("timeout"))
         raise requests.exceptions.ConnectionError("connection refused")
 
     monkeypatch.setattr(requests.Session, "request", _refused)
@@ -398,6 +405,8 @@ def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_
     assert requested and set(requested) == {
         ("GET", "https://unit.invalid/api/2.0/serving-endpoints/exact endpoint name")
     }
+    # Every attempt reached the transport with the bounded 3 s timeout.
+    assert transport_timeouts and set(transport_timeouts) == {3}
     # The SDK stops retrying once the bounded window elapses; one final sleep
     # (at most min(10, attempt) + 1 s) may overshoot it.
     elapsed = clock.now - started
