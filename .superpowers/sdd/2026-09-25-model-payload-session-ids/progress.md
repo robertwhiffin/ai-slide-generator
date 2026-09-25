@@ -37,3 +37,8 @@ Focused 286 passed. Full unit: 7 failed = 6 baseline + 1 environmental
 0 skipped. Ruff: +2 F811 graph_env (the file's existing fixture pattern), else equal.
 
 ## 6. Commit
+
+## Controller record — 2026-09-25
+Implementer DONE at `771c23558`. Controller re-probe of the 7th full-unit failure: at `771c23558` in a detached worktree at a path containing neither "payload" nor "private", `tests/unit/test_persisted_agent_runtime.py tests/unit/test_graph_nodes.py` = 274 passed — the failure is the worktree-path needle (this worktree's name contains "payload"), environmental. Epic item: that log test's substring needles match `pathname`; use unique tokens.
+Ruling: removing the nested `previous_deck_review.author` email from the architect's payload is within the user's rule (no user identity reaches a model). Cost if wrong: none observed; no prompt instruction references it.
+Ruling: catalog/design row IDs in the architect payload (`available_design_contract`, `current_deck_spec`, `design_system_library`) are KEPT — the architect's prompt names these fields and its output (`proposed_design_contract`) depends on them; they identify configuration rows, not a session or user. Cost if wrong: the architect sees configuration row IDs.
