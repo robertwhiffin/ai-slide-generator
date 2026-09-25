@@ -1,0 +1,10 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-09-25-graph-release-publication.md
+
+Plan drafted 2026-09-25 by a planning agent at `b9cc4cb27` on `plan/publish-release-269` (base `c040dbde0`), 949 lines, Tasks 0-9. Not yet plan-reviewed; not executable until #266, #267, #268 integrate and Task 0 phase B runs.
+Unverified by the planner: `_lock_current_parents` (`graph_configuration_workbench.py:209-227`) raising an integrity error (500) instead of 409 when a save/read queues behind a committing publication — reasoned, not probed; Task 2's RED must prove it. Every #267/#268 shape is assumed from the user's draft plans.
+Ruling: Q1 — #269 owns the publication transaction, evidence linking and the Review & Publish page; #268 delivers readiness, verdicts and cleanup only. Its draft Tasks 5-6 that extend a publication transaction and a Review & Publish page are to be re-scoped in #268's own PLAN-CORRECTIONS (not by editing the user's draft plan file). Cost if wrong: #268 and #269 both build part of one transaction.
+Ruling: Q3 — a verdict on a run already linked to a release is immutable (enforced by #269's trigger step). Cost if wrong: published evidence can be retroactively changed.
+Ruling: Q5 — a changed role with no active required case is a readiness gap (publication refused with an ordered issue), not an integrity error; link only the newest eligible approval per required case, never optional cases. Cost if wrong: a missing case 500s instead of explaining itself.
+Ruling: Q6 — keep `409 nothing_to_publish`; successful publish returns 200 to match existing admin writes; release note max 2000 characters. Cost if wrong: a status-code change at the wire, cheap before any client exists.
+Deferred to Task 0 phase B (need #267/#268 as built): Q2 cleanup lock order, Q4 which readiness callable binds inside the transaction, Q8 test-case versioning identity, Q9 whether case/verdict writers take the draft lock. Deferred to #270: Q7 rollback draft-content semantics.
+Before execution: an independent plan review (doc review loop) against the issue, design and code.
