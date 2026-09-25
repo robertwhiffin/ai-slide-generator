@@ -1053,3 +1053,95 @@ My whole-branch brief listed it among the files "ten tasks touched in sequence".
 `git diff --name-only 795262c16..HEAD -- src/services/conversation_pins.py` returns **empty**,
 against 111 files in the range. It is the **site** of the inherited failures, not a modified
 file. A reviewer taking my list at face value would have hunted for a diff that does not exist.
+
+## Correction 42 — subagents unavailable: an organisation budget cap, not a code or plan failure
+
+Both dispatched agents were terminated mid-task by `HTTP 403`: budget
+`ai-devtools-prod-runaway` reached its limit of $4750. The #264 Task 5 agent had barely started
+and left a clean tree. The #262 fix agent died entering C4, having completed C3 and C5
+uncommitted.
+
+**No tree was poisoned.** Both worktrees were checked for live mutation markers before anything
+else; the only hits in `src/` and `tests/` were pre-existing docstrings and legitimate constant
+names. This is the hazard correction 40 exists for, and the check cost one command.
+
+Per the salvage practice, the stalled agent's work was reviewed line by line rather than
+re-dispatched, and its volunteered citation — `shared_deck_attribution.py:83-84` for the
+fail-closed seam — was verified against the code before commit. It was accurate. Its
+`deck-history` comment was also **better than the brief asked for**: instead of deleting the
+retracted N+1 premise it preserved C-19's two surviving grounds, which matches C-25 faithfully.
+
+The controller then completed C1, C2 and C4 directly. This is a deviation from
+subagent-driven-development, forced by the environment rather than chosen.
+
+## Correction 43 — C4's cause was 39 failures across THREE files, not 24 across two
+
+The review scoped C4 to two sibling files and measured 24 failures. Reproduced exactly:
+`test_spec_dirty_marker_routes.py` **11 failed to 11 passed**; `test_slide_id_is_durable.py`
+**13 failed and 1 passed, to 14 passed**.
+
+But `test_savepoint_e2e.py` — the module that *defines* the `client` and `test_db_factory`
+fixtures the three siblings import — carries **15 more failures of the identical cause**
+(`ConversationGraphReleaseIntegrityError: no active Graph Release`). It drives `client` directly
+in its own tests rather than through an `api` wrapper, so it never reached any bootstrap. The
+review described it only as the harness provider, so its own tests were never counted.
+
+Fixed with a module-scoped `autouse` fixture, deliberately **not** exported to the siblings,
+which now seed for themselves. Measured:
+
+| Scope | Before | After |
+| --- | --- | --- |
+| `test_savepoint_e2e.py` | 15 failed | **15 passed** |
+| the four harness-family files | — | **48 passed** |
+| `tests/integration` (whole directory) | 22 failed / 603 passed | **7 failed / 618 passed** |
+
+The 15-failure delta reconciles on both sides of that last row, which is the check that the
+seed did the work rather than something else moving.
+
+## Correction 44 — C1's root/actor collapse is FOUR-wide, not one
+
+While placing C1's test, the intended anchor matched **four** times and the harness refused the
+patch rather than writing to an ambiguous site — correction 40's guard working as designed, and
+the refusal was the finding.
+
+The literal-shape assertion block is copy-pasted across four node test classes —
+`TestBuilderNode`, `TestBuildReviewerRowWrite`, `TestFixerNode`, `TestFixReviewerNode` — and
+**all four run an owner working on their own deck**, so all four hold equally whether the actor
+is read from `session_id` or from `root_session_id`. The review found the hole at `builder_node`
+and scoped C1 to one test.
+
+Only the builder is closed here, because that is C1's scope. The other three are recorded rather
+than silently widened — the scope call belongs to whoever owns the follow-up, not to me. Measured
+for the builder, with the command, per correction 58:
+
+```
+pytest -q tests/unit/test_graph_nodes.py        # 142 collected
+attributing the write to the deck root:  before 0 failed  ->  after 1 failed (the named test only)
+restored:                                142 passed, SHA-matched
+```
+
+The review's figure for the same direction was 201 tests; that is a wider scope than this one
+file. The direction of the result is identical under either, and the review had already proved by
+instrumentation that the patched line is reached on genuine contributor turns — so the zero was
+an absence of coverage, not an absence of execution.
+
+## Correction 45 — C2's guard was verified against the incidental-RED trap that nearly inverted C-37
+
+C2's fix pins the log record's message by equality, plus empty `args`, in all three guarded
+tests. Both sink branches emit the fixed literal `persisted_agent_invocation` with no args, so
+equality is exact rather than approximate.
+
+Injecting `MODEL_OUTPUT_LEAK<h1>secret deck html</h1>` into the error branch's message:
+
+| | Before C2 | After C2 |
+| --- | --- | --- |
+| `pytest -q tests/unit/test_persisted_agent_runtime.py` | **0 failed** (measured by the review) | **13 failed** |
+
+13 is larger than the 3 guarded tests, so the count alone could be an incidental RED — the exact
+trap that made the review's own S1 misleading. Checked rather than banked: the failure output
+names `assert record.msg == EXPECTED_LOG_MESSAGE`, my new line, and scoping to `-k logging_sink`
+gives **1 failed and 2 passed**, the one failure being the error-branch test, which is where the
+leak was injected. The other two pass because the success branch was not mutated. That is a
+precise result, not a coincidental one.
+
+Restored to **76 passed** with a verified SHA match.
