@@ -18,6 +18,7 @@ import type {
   LegacyPromptSourceResponse,
   ModelAgentNode,
   ProtectedStageView,
+  SystemModelEndpoint,
 } from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
@@ -1486,3 +1487,64 @@ export const ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
     },
   ],
 };
+
+// ============================================================
+// #266 model endpoint discovery (GET /api/admin/agent-definitions/model-endpoints)
+// ============================================================
+
+/** The exact seed endpoint every packaged role starts on. */
+export const SEED_MODEL_ENDPOINT_NAME = 'databricks-claude-opus-4-6';
+
+/**
+ * A populated discovery list in backend order. The second item's display name differs
+ * from its exact name, and the third keeps an exotic spelling with spaces, so a client
+ * that selects anything but `name` byte-for-byte is observable.
+ */
+export const syntheticSystemModelEndpoints: SystemModelEndpoint[] = [
+  {
+    name: 'databricks-claude-opus-4-6',
+    display_name: 'Claude Opus 4.6',
+    description: 'Synthetic frontier chat model.',
+    docs: 'https://docs.example.invalid/claude-opus-4-6',
+  },
+  {
+    name: 'databricks-gpt-oss-120b',
+    display_name: 'GPT OSS 120B',
+    description: 'Synthetic open-weight chat model.',
+    docs: null,
+  },
+  {
+    name: 'Team Shared Endpoint (EU)',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
+];
+
+/** A newer family member that a refresh may expose; it must never move the seed. */
+export const syntheticNewerModelEndpoint: SystemModelEndpoint = {
+  name: 'databricks-claude-opus-4-7',
+  display_name: 'Claude Opus 4.7',
+  description: 'Synthetic newer frontier chat model.',
+  docs: 'https://docs.example.invalid/claude-opus-4-7',
+};
+
+export function syntheticModelEndpointDiscovery(
+  items: SystemModelEndpoint[] = syntheticSystemModelEndpoints,
+): { items: SystemModelEndpoint[] } {
+  return { items: structuredClone(items) };
+}
+
+/** The exact 403 envelope the discovery route returns for a forbidden identity. */
+export const MODEL_ENDPOINT_DISCOVERY_FORBIDDEN = {
+  code: 'catalog_forbidden',
+  message: 'Model endpoint discovery is not permitted with this workspace identity.',
+  retryable: false,
+} as const;
+
+/** The exact 503 envelope the discovery route returns when the catalog is unavailable. */
+export const MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE = {
+  code: 'catalog_unavailable',
+  message: 'Model endpoint discovery is temporarily unavailable. Retry the request.',
+  retryable: true,
+} as const;

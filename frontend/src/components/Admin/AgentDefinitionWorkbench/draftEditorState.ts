@@ -530,12 +530,47 @@ export function draftStatus(entry: DraftEditorEntry): DraftStatus {
   return 'Needs test';
 }
 
+/** The server's exact `endpoint_url_not_allowed` table message (#266). */
+export const ENDPOINT_URL_NOT_ALLOWED_MESSAGE = 'Endpoint must be a Databricks endpoint name, not a URL.';
+
+const ENDPOINT_URL_PREFIX = /^\s*(?:https?:\/\/|\/\/|[a-z][a-z0-9+.-]*:\/\/)/i;
+const ENDPOINT_PATH_METACHARACTERS = /[/\\?#%]/;
+
+function hasAsciiControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Mirrors `validate_endpoint_name_policy` in `src/services/model_endpoint_catalog.py`
+ * (#266 correction 4): a URL prefix, any of `/ \ ? # %`, an ASCII control character,
+ * or a bare `.`/`..` dot segment is rejected; every other name is accepted verbatim and
+ * never trimmed. Returns the table message, or null for an acceptable name.
+ */
+export function endpointNamePolicyError(name: string): string | null {
+  if (ENDPOINT_URL_PREFIX.test(name)
+    || ENDPOINT_PATH_METACHARACTERS.test(name)
+    || hasAsciiControlCharacter(name)
+    || name === '.'
+    || name === '..') {
+    return ENDPOINT_URL_NOT_ALLOWED_MESSAGE;
+  }
+  return null;
+}
+
 export function validateDraftForm(form: EditableModelDraftForm):
   | { ok: true; candidate: EditableModelDraft }
   | { ok: false; errors: Partial<Record<DraftFieldErrorKey, string>> } {
   const errors: Partial<Record<DraftFieldErrorKey, string>> = {};
   if (!form.prompt_text.trim()) errors.prompt_text = 'Prompt text must not be blank.';
   if (!form.endpoint_name.trim()) errors.endpoint_name = 'Endpoint name must not be blank.';
+  else {
+    const endpointPolicyError = endpointNamePolicyError(form.endpoint_name);
+    if (endpointPolicyError !== null) errors.endpoint_name = endpointPolicyError;
+  }
   if (typeof form.temperature !== 'number'
     || !Number.isFinite(form.temperature)
     || form.temperature < 0

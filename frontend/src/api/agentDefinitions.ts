@@ -874,3 +874,117 @@ export async function readDraftLegacyPromptSource(
   }
   throw new AgentDefinitionApiError(status, payload, statusText, true);
 }
+
+// ============================================================
+// #266 model endpoint discovery: GET /api/admin/agent-definitions/model-endpoints
+// ============================================================
+
+const MODEL_ENDPOINTS_URL = `${API_BASE_URL}/api/admin/agent-definitions/model-endpoints`;
+
+/** One discovered Databricks foundation-model endpoint. Only `name` is ever saved. */
+export interface SystemModelEndpoint {
+  name: string;
+  display_name: string | null;
+  description: string | null;
+  docs: string | null;
+}
+
+export type ModelEndpointCatalogFailureCode = 'catalog_forbidden' | 'catalog_unavailable';
+
+/** A valid, typed 403 or 503 discovery envelope. The message is the server's own text. */
+export class ModelEndpointCatalogApiError extends Error {
+  readonly status: 403 | 503;
+  readonly code: ModelEndpointCatalogFailureCode;
+  readonly retryable: boolean;
+
+  constructor(
+    status: 403 | 503,
+    code: ModelEndpointCatalogFailureCode,
+    message: string,
+    retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'ModelEndpointCatalogApiError';
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+
+/** A 2xx discovery response that does not match the exact contract. */
+export class InvalidModelEndpointCatalogResponseError extends Error {
+  constructor() {
+    super('Model endpoint discovery response did not match the expected contract.');
+    this.name = 'InvalidModelEndpointCatalogResponseError';
+  }
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function isSystemModelEndpoint(value: unknown): value is SystemModelEndpoint {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['name', 'display_name', 'description', 'docs'])
+    && typeof value.name === 'string' && value.name.length > 0
+    && isNullableString(value.display_name)
+    && isNullableString(value.description)
+    && isNullableString(value.docs);
+}
+
+function parseSystemModelDiscovery(value: unknown): SystemModelEndpoint[] | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['items'])) return null;
+  const { items } = value;
+  if (!Array.isArray(items) || !items.every(isSystemModelEndpoint)) return null;
+  if (new Set(items.map((item) => item.name)).size !== items.length) return null;
+  return items.map((item) => ({
+    name: item.name,
+    display_name: item.display_name,
+    description: item.description,
+    docs: item.docs,
+  }));
+}
+
+const CATALOG_FAILURE_CONTRACT = {
+  403: { code: 'catalog_forbidden', retryable: false },
+  503: { code: 'catalog_unavailable', retryable: true },
+} as const;
+
+function parseModelEndpointCatalogFailure(
+  status: number,
+  value: unknown,
+): ModelEndpointCatalogApiError | null {
+  if (status !== 403 && status !== 503) return null;
+  const contract = CATALOG_FAILURE_CONTRACT[status];
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['code', 'message', 'retryable'])
+    || value.code !== contract.code
+    || value.retryable !== contract.retryable
+    || typeof value.message !== 'string') return null;
+  return new ModelEndpointCatalogApiError(status, contract.code, value.message, contract.retryable);
+}
+
+/**
+ * Reads the identity-scoped discovery list. Every call is its own GET: nothing is
+ * cached or coalesced, so each explicit Refresh reaches the server. The body is read
+ * once. A malformed 200 is `InvalidModelEndpointCatalogResponseError`; a valid 403/503
+ * envelope is `ModelEndpointCatalogApiError`; any other status is
+ * `AgentDefinitionApiError`; a transport failure propagates unchanged.
+ */
+export async function getSystemModelEndpoints(): Promise<SystemModelEndpoint[]> {
+  const response = await fetch(MODEL_ENDPOINTS_URL, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+  const payload: unknown = await response.json().catch(() => undefined);
+
+  if (response.status === 200) {
+    const items = parseSystemModelDiscovery(payload);
+    if (items === null) throw new InvalidModelEndpointCatalogResponseError();
+    return items;
+  }
+  if (response.ok) throw new InvalidModelEndpointCatalogResponseError();
+  const failure = parseModelEndpointCatalogFailure(response.status, payload);
+  if (failure !== null) throw failure;
+  throw new AgentDefinitionApiError(response.status, payload ?? null, response.statusText);
+}

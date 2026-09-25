@@ -5,6 +5,7 @@ import type {
   CustomAnchor,
   DraftFieldError,
   ModelAgentNode,
+  SystemModelEndpoint,
 } from '../../../api/agentDefinitions';
 import { AssemblyEditor } from './AssemblyEditor';
 import { OutputSchemaEditor } from './OutputSchemaEditor';
@@ -12,6 +13,7 @@ import {
   definitionFormatVersion,
   draftStatus,
   editableFormsEqual,
+  endpointNamePolicyError,
   formFromCandidate,
   formFromDefinition,
   isLegacyCompositeRole,
@@ -29,6 +31,26 @@ const TAB_LABELS: Record<DefinitionTab, string> = {
   'output-schema': 'Output Schema',
   assembly: 'Assembly',
 };
+
+/**
+ * The one workbench-owned discovery catalog (#266 correction 16). `items` is the last
+ * good list: loading and failure keep it, and only a successful read replaces it.
+ */
+export interface ModelEndpointCatalogView {
+  status: 'idle' | 'loading' | 'ready' | 'empty' | 'error';
+  items: readonly SystemModelEndpoint[];
+  errorMessage: string | null;
+}
+
+export const EMPTY_MODEL_DISCOVERY_MESSAGE =
+  'No Databricks foundation-model endpoints are available to this identity.';
+
+function matchesModelSearch(item: SystemModelEndpoint, search: string): boolean {
+  const needle = search.trim().toLocaleLowerCase();
+  if (!needle) return true;
+  return [item.name, item.display_name, item.description]
+    .some((text) => text !== null && text.toLocaleLowerCase().includes(needle));
+}
 
 /** The exact upgrade-only code that requires manual prompt resolution. */
 export const MANUAL_RESOLUTION_CODE = 'legacy_prompt_manual_resolution_required';
@@ -81,6 +103,10 @@ interface DefinitionEditorProps {
   onRestoreSavedPrompt(agentKey: AgentKey): void;
   onRestoreRetained(agentKey: AgentKey, retainedId: string): void;
   onDiscardRetained(agentKey: AgentKey, retainedId: string): void;
+  modelCatalog: ModelEndpointCatalogView;
+  /** Called on every Model-tab selection; the workbench reads the catalog only once. */
+  onOpenModelTab(): void;
+  onRefreshModels(): void;
 }
 
 function FieldError({ id, message }: { id: string; message?: string }) {
@@ -134,12 +160,17 @@ export function DefinitionEditor({
   onRestoreSavedPrompt,
   onRestoreRetained,
   onDiscardRetained,
+  modelCatalog,
+  onOpenModelTab,
+  onRefreshModels,
 }: DefinitionEditorProps) {
   const [activeTab, setActiveTab] = useState<DefinitionTab>('prompt');
+  const [modelSearch, setModelSearch] = useState('');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const selectTab = (tab: DefinitionTab, focus = false) => {
     setActiveTab(tab);
+    if (tab === 'model') onOpenModelTab();
     if (focus) {
       const index = DEFINITION_TABS.indexOf(tab);
       queueMicrotask(() => tabRefs.current[index]?.focus());
@@ -172,6 +203,17 @@ export function DefinitionEditor({
   const manualResolutionRequired = entry.responseIssues.some(
     (issue) => issue.code === MANUAL_RESOLUTION_CODE,
   );
+  // A server issue wins; otherwise the local URL/path policy explains a disabled Save.
+  const endpointMessage = entry.fieldErrors.endpoint_name
+    ?? endpointNamePolicyError(entry.local.endpoint_name)
+    ?? undefined;
+  const visibleModels = modelCatalog.items.filter((item) => matchesModelSearch(item, modelSearch));
+  let modelCatalogStatus = '';
+  if (modelCatalog.status === 'loading') modelCatalogStatus = 'Loading discovered models…';
+  else if (modelCatalog.status === 'empty') modelCatalogStatus = EMPTY_MODEL_DISCOVERY_MESSAGE;
+  else if (modelCatalog.items.length > 0 && visibleModels.length === 0) {
+    modelCatalogStatus = 'No discovered models match the search.';
+  }
 
   const issueList = (issues: DraftFieldError[]) => (
     <section
@@ -360,17 +402,78 @@ export function DefinitionEditor({
         hidden={activeTab !== 'model'}
         className="min-h-72 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4"
       >
+        <div className="space-y-2">
+          <div className="flex items-end justify-between gap-2">
+            <label htmlFor={`${agentKey}-model-search`} className="block text-sm font-medium text-gray-700">
+              Search discovered models
+            </label>
+            <button
+              type="button"
+              onClick={onRefreshModels}
+              className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700"
+            >
+              Refresh models
+            </button>
+          </div>
+          <input
+            id={`${agentKey}-model-search`}
+            type="search"
+            value={modelSearch}
+            onChange={(event) => setModelSearch(event.currentTarget.value)}
+            className="block w-full rounded-md border border-gray-300 p-2 font-normal"
+          />
+          <p aria-live="polite" className="text-xs text-gray-600">{modelCatalogStatus}</p>
+          {modelCatalog.status === 'error' && modelCatalog.errorMessage !== null && (
+            <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+              {modelCatalog.errorMessage} Use Refresh models to try again.
+            </div>
+          )}
+          {visibleModels.length > 0 && (
+            <div role="radiogroup" aria-label="Discovered models" className="max-h-48 space-y-1 overflow-y-auto">
+              {visibleModels.map((item) => {
+                const optionId = `${agentKey}-discovered-model-${modelCatalog.items.indexOf(item)}`;
+                const details = [item.display_name, item.description].filter((text): text is string => text !== null);
+                return (
+                  <div key={item.name} className="flex items-start gap-2 text-sm">
+                    <input
+                      id={optionId}
+                      type="radio"
+                      name={`${agentKey}-discovered-model`}
+                      value={item.name}
+                      checked={entry.local.endpoint_name === item.name}
+                      aria-describedby={details.length > 0 ? `${optionId}-details` : undefined}
+                      // Selection is only the #263 endpoint setter: the exact name, no save.
+                      onChange={() => onEdit(agentKey, 'endpoint_name', item.name)}
+                      className="mt-1"
+                    />
+                    <div>
+                      <label htmlFor={optionId} className="break-all font-mono">{item.name}</label>
+                      {details.length > 0 && (
+                        <span id={`${optionId}-details`} className="block text-xs text-gray-500">
+                          {details.join(' — ')}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <div>
-          <label htmlFor={`${agentKey}-endpoint`} className="block text-sm font-medium text-gray-700">Endpoint</label>
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Advanced</p>
+          <label htmlFor={`${agentKey}-endpoint`} className="block text-sm font-medium text-gray-700">
+            Custom endpoint name
+          </label>
           <input
             id={`${agentKey}-endpoint`}
-            aria-describedby={entry.fieldErrors.endpoint_name ? `${agentKey}-endpoint-error` : undefined}
+            aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
             type="text"
             value={entry.local.endpoint_name}
             onChange={(event) => onEdit(agentKey, 'endpoint_name', event.currentTarget.value)}
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
-          <FieldError id={`${agentKey}-endpoint-error`} message={entry.fieldErrors.endpoint_name} />
+          <FieldError id={`${agentKey}-endpoint-error`} message={endpointMessage} />
         </div>
         <div>
           <label htmlFor={`${agentKey}-temperature`} className="block text-sm font-medium text-gray-700">Temperature</label>

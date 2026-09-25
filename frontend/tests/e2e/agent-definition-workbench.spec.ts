@@ -20,6 +20,7 @@ import {
   syntheticDraftSaveConflict,
   syntheticDraftSaveSuccess,
   syntheticLegacyPromptSource,
+  syntheticModelEndpointDiscovery,
   syntheticNullCandidateConflict,
   syntheticSchemaUpgradeSuccess,
   syntheticSchemaV2DraftDefinition,
@@ -30,6 +31,7 @@ import {
 import { ALLOWED_ACTION_NAMES, forbidsActionName } from '../fixtures/forbiddenActionNames';
 
 const WORKBENCH_ENDPOINT = '**/api/admin/agent-definitions/workbench';
+const MODEL_ENDPOINTS_ENDPOINT = '**/api/admin/agent-definitions/model-endpoints';
 const SAVE_ENDPOINT = '**/api/admin/agent-definitions/draft/*';
 const NODE_ORDER = [
   'Architect',
@@ -61,6 +63,14 @@ async function installExactIdentityMock(page: Page) {
 
 async function installWorkbenchMock(page: Page, status = 200, body: unknown = syntheticAgentDefinitionWorkbench) {
   let requestCount = 0;
+  // The one shared default discovery answer (#266 correction 17): the first Model-tab
+  // opening reads the catalog, and there is no catch-all route to absorb it. A test
+  // that needs another catalog answer registers its own route later, which wins.
+  await page.route(MODEL_ENDPOINTS_ENDPOINT, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(syntheticModelEndpointDiscovery()),
+  }));
   await page.route(WORKBENCH_ENDPOINT, (route) => {
     requestCount += 1;
     return route.fulfill({
@@ -105,7 +115,7 @@ async function fulfillJson(route: Route, status: number, body: unknown) {
 async function editArchitectFiveFields(page: Page) {
   await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
   await page.getByRole('tab', { name: 'Model' }).click();
-  await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-a2');
+  await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-a2');
   await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.4');
   await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('8192');
   await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.8');
@@ -115,7 +125,7 @@ async function expectArchitectFiveFields(page: Page) {
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
   await page.getByRole('tab', { name: 'Model' }).click();
-  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-a2');
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-a2');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.4');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('8192');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.8');
@@ -125,7 +135,7 @@ async function expectBuilderFormUnchanged(page: Page) {
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
   await page.getByRole('tab', { name: 'Model' }).click();
-  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('databricks-claude-opus-4-6');
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('databricks-claude-opus-4-6');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
@@ -151,7 +161,7 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
   );
 
   await page.getByRole('tab', { name: 'Model' }).click();
-  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('databricks-claude-opus-4-6');
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('databricks-claude-opus-4-6');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
@@ -1038,7 +1048,7 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   // A refused dirty Upgrade leaves one pre-existing alternative to queue later.
   await prompt.fill(DIRTY_LEGACY_PROMPT);
   await page.getByRole('tab', { name: 'Model' }).click();
-  await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-retained-A');
+  await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-retained-A');
   await page.getByRole('tab', { name: 'Assembly' }).click();
   await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
   expect(upgrades).toHaveLength(0);
@@ -1057,7 +1067,7 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(prompt).toBeDisabled();
   await page.getByRole('tab', { name: 'Model' }).click();
-  const endpoint = page.getByRole('textbox', { name: 'Endpoint' });
+  const endpoint = page.getByRole('textbox', { name: 'Custom endpoint name' });
   await expect(endpoint).toBeEnabled();
   await endpoint.fill('endpoint-local-B');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toBeEnabled();
@@ -1077,7 +1087,7 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
   await page.getByRole('tab', { name: 'Model' }).click();
   // Safe edits made while pending survive the authoritative adoption.
-  await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-retained-A');
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-retained-A');
   expect(upgrades).toHaveLength(1);
   expect(saves).toHaveLength(0);
 });
@@ -1160,7 +1170,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // A pre-existing retained v1 alternative carrying its own sentinels.
       await prompt.fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-retained-A');
+      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-retained-A');
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.11');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('1111');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.11');
@@ -1173,7 +1183,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // ordinary Save is what crosses the version, because the reducer refuses to
       // start an Upgrade from a dirty affected prompt at all.
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-local-B');
+      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-local-B');
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.22');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('2222');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.22');
@@ -1194,7 +1204,7 @@ for (const agentKey of AFFECTED_ROLES) {
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-local-B');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-local-B');
       await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.22');
 
       // Reload appends a further alternative rather than overwriting either one.
@@ -1223,14 +1233,14 @@ for (const agentKey of AFFECTED_ROLES) {
       // Each stable ID restores its own safe fields and never its prompt.
       await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-retained-A');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-retained-A');
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('1111');
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
 
       await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-local-B');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-local-B');
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('2222');
 
       // The immediate PUT can contain none of the v1 or manual-only strings.
@@ -1267,7 +1277,7 @@ for (const agentKey of AFFECTED_ROLES) {
       await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
       await page.getByRole('textbox', { name: 'Prompt text' }).fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-unselected-A');
+      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-unselected-A');
       await navigation.getByRole('button', { name: 'Architect' }).click();
       if (operation === 'save') {
         await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
@@ -1298,7 +1308,7 @@ for (const agentKey of AFFECTED_ROLES) {
 
       await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-unselected-A');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-unselected-A');
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(page.getByRole('textbox', { name: 'Prompt text' }))
         .toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
@@ -1915,7 +1925,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // A pre-existing retained v1 alternative with its own safe sentinels.
       await prompt.fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-keep-A');
+      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-keep-A');
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.33');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('3333');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.33');
@@ -1927,7 +1937,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // Distinct current-local sentinels, and a dirty prompt only where the reducer
       // permits the operation to start at all.
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Endpoint' }).fill('endpoint-keep-B');
+      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-keep-B');
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.44');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('4444');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.44');
@@ -1975,7 +1985,7 @@ for (const agentKey of AFFECTED_ROLES) {
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-B');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-keep-B');
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('4444');
       await page.getByRole('tab', { name: 'Assembly' }).click();
       await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
@@ -1983,10 +1993,10 @@ for (const agentKey of AFFECTED_ROLES) {
       // Each retained ID still restores its own safe tuple independently after Keep local.
       await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-A');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-keep-A');
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('3333');
       await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
-      await expect(page.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-keep-B');
+      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-keep-B');
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
 
