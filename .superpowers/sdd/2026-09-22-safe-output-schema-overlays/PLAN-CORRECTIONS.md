@@ -1114,3 +1114,64 @@ the wrong reason** until it was found and fixed.
 That is the vacuous-assertion family again, arriving through a container helper rather than a fixture
 or a constant: the assertion was satisfied by the thaw's silent pass-through, not by the property it
 named. Any later task relying on a freeze/thaw round-trip must not assume symmetry.
+
+## Correction 52 — 49(b)'s REASONING is withdrawn; the ruling stands on landed precedent instead
+
+**Controller error on a point of fact, and it turns out this was never a judgement call.**
+
+49(b) justified evaluating `already_current` after the stale check by saying that reporting it from a
+stale read "asserts a fact about current state from an outdated observation". **That is false.** The
+comparison reads `locked.selected.draft.content` **under the row lock** — committed current state. The
+staleness lives entirely in the *client's* `expected_lock_version`. The server does know the contract
+is already v2.
+
+The real warrant, found by Task 4's reviewer through mutation M7: **`:1560` is #265's landed, tested
+precedence for exactly this combination** — already-current plus stale returns 409 with
+`upgrade_calls == []`. So there was existing tested behaviour for the precise case, and flipping the
+new method's order would make the two upgrade paths disagree on a **second** axis beyond the one c17
+sanctions. That drift is what c17 exists to contain.
+
+Two supporting facts: the 409 body carries `schema_contract.version`, so no information is lost and
+the cost really is one round trip; and an aggregate-level integer check before a role-level content
+judgement is the natural containment order.
+
+**Replace the reasoning, keep the ruling.** And note what the mistake was: the controller reasoned from
+first principles about a case that already had landed, tested behaviour, and did not look for it.
+
+## Correction 53 — F1, MANDATORY before Task 5: a ruling with no test at the gate gets reverted by accident
+
+Task 4's reviewer measured the consequence of 49(b) having no dedicated guard. Its **R2 flips
+`already_current` ahead of the stale check and 116 of 116 focused tests still pass.** Only the
+PostgreSQL two-session test catches it, and only **incidentally** — via `assert rejections == {}`, a
+side effect of the loser re-reading committed v2 content.
+
+No test is named for the ordering, and the focused scope contains **no already-current-plus-stale
+scenario at all**. The sibling path has a dedicated test for exactly that combination at `:1560`; the
+new method has none.
+
+**Why this is mandatory rather than Minor:** Task 5's and Task 6's checklists gate on the **focused**
+suite. Any later agent that flips this ordering — or refactors past it — ships green and silently
+reverts a recorded ruling. Roughly fifteen lines in `test_graph_configuration_draft.py` closes it.
+
+This is a coverage defect, not a code defect: the shipped behaviour is correct. It is the second
+instance in this epic of a decision surviving only by accident — the first was the log allow-list's
+spelling denylist — and both were found by mutation rather than by reading.
+
+## Correction 54 — F2, folded in: the "no second lookup" clause is unpinned while "no second writer" is pinned twelvefold
+
+Same class as 53. The reviewer's **R7 adds a second lookup and REDs nothing**, while R1 adding a second
+writer REDs **12** across two scopes. The plan forbids both; only one is guarded.
+
+Pin the lookup clause alongside the writer clause. The asymmetry matters because a second lookup is the
+cheaper mistake to make accidentally — a helper that reads the row again "just to be safe" reads as
+defensive rather than as a violation.
+
+## Correction 55 — C-50's window was stated imprecisely
+
+C-50 said the next agent to baseline was "inside the window" because the date had just rolled over.
+Task 4's reviewer ran 00:18–00:40 UTC and was **clear** of it, verified empirically with
+`test_usage_service.py` passing and absent from both full runs.
+
+The window is the **few minutes before** a UTC midnight, not after: `NOW = datetime.utcnow()` is
+captured at module import, so the hazard is a run that *starts* before the boundary and asserts across
+it. Corrected so nobody discounts a genuine failure by appealing to a flake that cannot apply.
