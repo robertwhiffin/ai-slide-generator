@@ -1052,3 +1052,65 @@ from the sibling and ordered 422 from the new method —
 `test_the_two_upgrades_deliberately_differ_in_precedence`. M7 (removing the sibling's stale
 short-circuit) REDs **4/116**, including the landed `:1517` guard, so the #265-regression risk
 c17 named is now instrumented rather than merely avoided.
+
+## Correction 49 — controller rulings on Task 4, and c18's brief was wrong
+
+**(a) c18: Task 4's reading is better than the controller's brief, and the brief is corrected.**
+The brief said Task 4's "consumption not new work" position was *wrong for the client path*, implying a
+guard was owed there. Task 4 measured the path and declined, with the stronger argument:
+`EditableModelDraftRequest` is `extra="forbid"` over three fields, so `candidate.schema_contract`
+produces `extra_forbidden` and can never produce `immutable_field`. Adding an `immutable_field` guard
+would **be** c18's own stated cost-if-wrong — "a duplicate rejection path with a second code for one
+condition".
+
+The identity is not unrejected; it is **unreachable**. So the correct move is to pin the
+unreachability rather than add a second path, which is what it did: no identity field on
+`EditableModelDraft`, constructing one raises `TypeError`, and **M15 REDs 2/116** when the field is
+added. The landed trusted-path rejection is separately pinned with literals (M13, M14).
+
+Ruling: accepted as shipped. The controller's brief over-read c18 by treating an unreachable state as
+an ungated one.
+
+**(b) The `already_current`-versus-stale ordering is ruled: after the stale check, as shipped.**
+No correction covered this sub-decision and Task 4 flagged it rather than burying it. Reporting
+`already_current` from a **stale** read asserts a fact about current state using an outdated
+observation — the state may have moved again, so the honest answer is 409, after which the client
+refetches and gets `already_current` from a fresh read. It also matches the sibling's
+stale-before-invalid precedence that c17 exists to protect, so the two upgrade paths agree on
+precedence even though they disagree on invalid-versus-stale.
+
+Cost if wrong: a repeated upgrade against a stale lock costs one extra round trip instead of
+returning a terminal answer immediately. The reviewer may challenge this; it is a judgement call, not
+a measurement.
+
+**(c) The partial TDD inversion is accepted on correction 40(b)'s terms**, third time in this epic —
+genuine REDs exist (3 inherited plus 2 PostgreSQL premise failures) but most new tests came after the
+code and rest on the mutation table. Residual routed to the reviewer as an explicit objective.
+
+**(d) `EditableModelDraft` gaining a field no route populates until Task 5 is accepted as forced.**
+The plan gives Task 5 only the two API files and requires it to reuse the one writer, so the field has
+to exist before its populator. Recorded so it is not read as speculative generality.
+
+## Correction 50 — EPIC-WIDE: `test_usage_service.py` is a latent UTC-midnight flake
+
+Task 4 hit **four REDs that were not its own** and settled it by measurement rather than attribution.
+`tests/unit/test_usage_service.py` computes `NOW = datetime.utcnow()` **at module import**, so tests
+that straddle a UTC day boundary fail. Its clock read 00:04 UTC; a re-run clear of the boundary
+returned the exact baseline.
+
+**Binding for every later baseline in this epic:** four REDs in `test_usage_service.py` near a UTC day
+boundary are **this flake, not a regression**. Check the clock before attributing them, and re-run
+clear of the boundary before recording a cause. This is live right now — the date has just rolled
+over, so the next agent to baseline is in the window.
+
+Cost if wrong: an agent records four phantom causes, or worse, "fixes" a passing module.
+
+## Correction 51 — `thaw_json_containers` is asymmetric with `freeze_json_containers`
+
+Recorded by Task 4 as its correction 46 and restated here because of *how* it surfaced: `thaw` has no
+`list` branch where `freeze` does, and **that asymmetry made one of Task 4's own assertions pass for
+the wrong reason** until it was found and fixed.
+
+That is the vacuous-assertion family again, arriving through a container helper rather than a fixture
+or a constant: the assertion was satisfied by the thaw's silent pass-through, not by the property it
+named. Any later task relying on a freeze/thaw round-trip must not assume symmetry.
