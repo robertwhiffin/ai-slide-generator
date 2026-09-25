@@ -46,3 +46,13 @@
 - Hand to #268's pre-pass: the verdict route path, and a recommendation that readiness filters on `run_kind`.
 - Hand to #269's Task 0-B: the fake adapter location, the verdict column list, the transaction-2 lock statement, and the case-writer lock.
 - Out of scope, noted for the whole-branch review: the existing `test_postgres_restricts_deletion_of_referenced_release_and_revision` passes through the 23514 immutability trigger, so it does not prove the FK.
+
+## User decisions and controller rulings — 2026-09-25
+User decisions: P1 — the published baseline is shown as soon as it exists (newest completed published-baseline run), labelled "not approved" until approved; P2 — a case `name` is its immutable identity; P3 — replacing a case is two actions (add the new case, then retire the old; the last-required-case guard makes the order matter); P6 — session identifiers are stripped from EVERY role's model payload, not only the builder's (delivered as a separate reviewed change on `feat/langgraph-core` before #267 Task 4).
+Ruling: P4 — the only approval gate in #267 is the runtime's schema validation; role-specific deterministic checks are deferred. Cost if wrong: approvals accept schema-valid but semantically poor output until checks are added.
+Ruling: P5 — admins may run only active case versions. Cost if wrong: historical versions cannot be re-run from the UI.
+Ruling: P7 — the synthetic-data rule is a UI warning, not server-enforced. Cost if wrong: a real-customer payload can be saved deliberately.
+Ruling: P8 — no rate or cost limiting in #267; recorded as an epic follow-up. Cost if wrong: an admin can run many live model calls.
+Ruling: P9 — NULL token usage is acceptable evidence, displayed as "not reported". Cost if wrong: cost reporting has gaps for endpoints that omit usage.
+Controller correction: the earlier ledger claim that the builder seed payload is "bootstrap-hashed" was false as worded (correction 10 here): it is test-pinned and first-boot-checked, not hashed.
+Status: `fix/builder-owner-session-id` merged locally at `6cbab388a`, so correction 10's Task 4 precondition is met; this branch must rebase onto the post-#266 integration head before Task 1.
