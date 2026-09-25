@@ -3782,3 +3782,36 @@ def test_production_remote_endpoint_validator_uses_a_bounded_system_client(
         ("catalog", bounded_client),
         ("validate", content.model.endpoint_name),
     ]
+
+
+def test_production_remote_endpoint_validator_maps_a_system_client_failure_to_unavailable(
+    monkeypatch,
+) -> None:
+    """Catches a system-client construction failure escaping the save as a 500."""
+    import src.core.databricks_client as databricks_client
+    from src.services import graph_configuration
+    from src.services import model_endpoint_catalog as catalog_module
+
+    built: list[object] = []
+
+    def _failing_system_client():
+        raise databricks_client.DatabricksClientError("SECRET_TOKEN_266")
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _failing_system_client)
+    monkeypatch.setattr(
+        catalog_module, "DatabricksModelEndpointCatalog", lambda client: built.append(client)
+    )
+
+    validator = graph_configuration.build_remote_endpoint_draft_validator()
+    content = load_graph_v1_manifest().definitions[0]
+    with pytest.raises(catalog_module.EndpointValidationFailure) as raised:
+        validator.validate(content)
+
+    assert raised.value.code == "endpoint_unavailable"
+    assert raised.value.message == (
+        "Endpoint validation is temporarily unavailable. Retry the save."
+    )
+    assert raised.value.retryable is True
+    assert "SECRET_TOKEN_266" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, databricks_client.DatabricksClientError)
+    assert built == []

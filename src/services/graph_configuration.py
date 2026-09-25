@@ -56,16 +56,24 @@ def build_remote_endpoint_draft_validator() -> RemoteEndpointDraftValidator:
 
     Each validation derives a bounded-retry client from the system client's own
     configuration (no new credential source) and checks the exact candidate
-    endpoint.  Nothing is built until the first validation.
+    endpoint.  Nothing is built until the first validation.  A system-client
+    failure is the typed ``endpoint_unavailable`` outcome, never a 500; its text
+    is not read.
     """
     from src.core import databricks_client
     from src.services import model_endpoint_catalog
 
     def _catalog() -> model_endpoint_catalog.ModelEndpointCatalog:
+        try:
+            system_client = databricks_client.get_system_client()
+        except databricks_client.DatabricksClientError as error:
+            raise model_endpoint_catalog.EndpointValidationFailure(
+                "endpoint_unavailable",
+                "Endpoint validation is temporarily unavailable. Retry the save.",
+                True,
+            ) from error
         return model_endpoint_catalog.DatabricksModelEndpointCatalog(
-            model_endpoint_catalog.bounded_catalog_workspace_client(
-                databricks_client.get_system_client()
-            )
+            model_endpoint_catalog.bounded_catalog_workspace_client(system_client)
         )
 
     return CatalogRemoteEndpointDraftValidator(_catalog)
