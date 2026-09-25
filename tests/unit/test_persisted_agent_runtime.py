@@ -901,6 +901,21 @@ PERMITTED_LOG_FIELDS = {
 #: relax this to a substring or a `not in` check.
 EXPECTED_LOG_MESSAGE = "persisted_agent_invocation"
 
+#: The SUCCESS record's exact field set: the seven above plus #264's
+#: ``additional_fields`` — the registry's allowlisted optional projection — and
+#: nothing else.  This is the COMBINED surface of #262 and #264 on one sink
+#: (PLAN-CORRECTIONS 43: the second integrator owns one positive assertion, not a
+#: denylist of spellings).  The ERROR record is exactly ``PERMITTED_LOG_FIELDS``.
+#:
+#: It pins CURRENT behaviour and is not a privacy ruling.  Two product decisions
+#: are open and held by the user: whether session IDs may ever reach the log (they
+#: do not today — the sink projects the five identity fields), and whether
+#: ``additional_fields`` should carry ``diagnostic_notes`` as VALUES at all.  Today
+#: it does: up to eight model-authored strings of up to 280 characters each — model
+#: output, often paraphrasing the user's request — reach the success record.  Any
+#: change to either decision must change this constant deliberately.
+SUCCESS_LOG_FIELDS = PERMITTED_LOG_FIELDS | {"additional_fields"}
+
 #: Every attribute the stdlib puts on a LogRecord, so the difference is exactly
 #: what the sink's ``extra=`` contributed.  ``message``/``asctime``/``taskName`` are
 #: added when a record is FORMATTED (caplog formats them), and ``logging`` refuses
@@ -974,14 +989,26 @@ def test_the_identity_carries_the_session_ids_that_the_log_must_not(caplog):
     assert seen[0].root_session_id == "owner-session-9f"
     assert seen[0].actor_session_id == "contributor-session-3b"
     record = caplog.records[-1]
-    assert emitted_fields(record) == PERMITTED_LOG_FIELDS | {"additional_fields"}
+    assert emitted_fields(record) == SUCCESS_LOG_FIELDS
     assert record.msg == EXPECTED_LOG_MESSAGE
     assert record.args in (None, ())
     assert not hasattr(record, "root_session_id")
     assert not hasattr(record, "actor_session_id")
 
 
-def test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output(caplog):
+def test_runtime_logging_sink_success_record_is_identity_outcome_and_optional_projection_only(
+    caplog,
+):
+    """The success record is exactly ``SUCCESS_LOG_FIELDS``.
+
+    Renamed from ``…does_not_log_prompt_payload_or_model_output`` (PLAN-CORRECTIONS
+    43): once ``diagnostic_notes`` values are logged, "no model output" is false,
+    so the name now states what the assertions prove — no prompt, payload or
+    session ID, and no field beyond the permitted identity, outcome, error class and
+    the optional projection.  This run selects no optional, so the projection is
+    empty; ``test_exact_optional_values_reach_diagnostics_and_both_sink_traces``
+    pins the non-empty case.
+    """
     logger = logging.getLogger("test.persisted.runtime.success")
     values = _output_values("architect")
     runtime = AgentRuntime(
@@ -1005,18 +1032,15 @@ def test_runtime_logging_sink_does_not_log_prompt_payload_or_model_output(caplog
     assert record.outcome == "success"
     assert record.error_class is None
     # The EXACT emitted set, not a list of forbidden names — see
-    # PERMITTED_LOG_FIELDS for why the name-based form could not hold.  The success
-    # record adds exactly one field to the seven: #264's ``additional_fields``.
-    assert emitted_fields(record) == PERMITTED_LOG_FIELDS | {"additional_fields"}
+    # PERMITTED_LOG_FIELDS and SUCCESS_LOG_FIELDS for why the name-based form could
+    # not hold.
+    assert emitted_fields(record) == SUCCESS_LOG_FIELDS
     assert record.msg == EXPECTED_LOG_MESSAGE
     assert record.args in (None, ())
     rendered = str(vars(record))
     for secret in ("private", "payload", "owner-session-9f", "contributor-session-3b"):
         assert secret not in rendered
-    # #264 Task 3 DISCLOSURE: this test's name predates the change and is now broader
-    # than the guarantee.  The success record does carry ONE model-derived field, the
-    # registry's allowlisted optional projection — and nothing else.  With no optional
-    # selected by this v1 overlay it is exactly the empty mapping.
+    # With no optional selected by this v1 overlay the projection is exactly empty.
     assert dict(record.additional_fields) == {}
 
 
@@ -1137,6 +1161,7 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
         assert len(records) == 1
         assert records[0].outcome == "error"
         assert records[0].error_class == "PinnedInvocationEndpointError"
+        assert emitted_fields(records[0]) == PERMITTED_LOG_FIELDS
 
 
 def test_removed_endpoint_is_attempted_once_without_a_default_fallback():
@@ -1432,7 +1457,12 @@ def test_exact_optional_values_reach_diagnostics_and_both_sink_traces(
     assert len(records) == 1
     assert records[0].outcome == "success"
     assert records[0].error_class is None
+    # Current behaviour, pinned rather than endorsed: the notes reach the log as
+    # VALUES (see SUCCESS_LOG_FIELDS for the open decision).
     assert dict(records[0].additional_fields) == expected
+    assert emitted_fields(records[0]) == SUCCESS_LOG_FIELDS
+    assert records[0].msg == EXPECTED_LOG_MESSAGE
+    assert records[0].args in (None, ())
 
 
 def test_diagnostics_optional_projection_is_immutable_and_deeply_frozen() -> None:
@@ -1559,9 +1589,13 @@ def test_invalid_output_logs_one_error_outcome_and_no_success_field(
     assert len(records) == 1
     assert records[0].outcome == "error"
     assert records[0].error_class == "AgentOutputValidationError"
-    assert not hasattr(records[0], "additional_fields")
-    for forbidden in ("prompt", "payload", "output", "secret", "response"):
-        assert not hasattr(records[0], forbidden)
+    # One positive assertion replaces the denylist of spellings (PLAN-CORRECTIONS
+    # 43): the error record is exactly the seven permitted fields, so it carries
+    # no ``additional_fields`` and no field under ANY name beyond them.
+    assert emitted_fields(records[0]) == PERMITTED_LOG_FIELDS
+    assert records[0].msg == EXPECTED_LOG_MESSAGE
+    assert records[0].args in (None, ())
+    assert "never log" not in str(vars(records[0]))
 
 
 def test_an_unselected_optional_output_field_is_rejected_as_undeclared() -> None:
