@@ -903,3 +903,48 @@ because someone disbelieved a number rather than banking it.
 
 Cost of my original error: an agent obeying C-32 exactly could produce an empty backup set and never
 know.
+
+### C-34 — EPIC-WIDE: "not mine" is not "not ours". Only the integration base establishes "inherited"
+
+**Controller error, and the most instructive one in this ticket.**
+
+Slice 4B restored **its own seven files** from HEAD, observed that two integration failures persisted,
+and reported them as pre-existing. Its reviewer confirmed that restore twice by blob hash. The
+controller recorded them as "inherited, Task-3-era fixture drift, **unowned by any open slice**".
+
+Task 6 measured them against a `git archive` export of the integration base and found both suites
+**green there**. The controller then verified independently in the main worktree, which *is* the
+integration head `3ed8f9b6a`: `test_graph_orchestration.py` **19 passed**,
+`test_persisted_graph_runtime_failures_postgres.py` **7 passed**.
+
+**They were #262's own Task-3-era regressions all along.** Both are now repaired under C-11's R3
+treatment and both suites match the base exactly.
+
+The logic that failed: restoring *your own* files and seeing a failure persist establishes only that
+**your diff** did not cause it. It says nothing about the other twenty-two commits on the same branch.
+Three agents and the controller all read that proof as "inherited" because the word for "not caused by
+my diff" and the word for "present on the base" were allowed to be the same word.
+
+**Binding: a failure may be called inherited only after it is measured on the integration base itself
+— not after a partial restore, however rigorously hash-verified.** And a second rule that let this
+survive: **every cause baseline must cover both lanes.** Every earlier baseline in this ticket was
+unit-only, so the integration lane was never compared to the base at all until the final task.
+
+Cost of the original error: two regressions from this ticket were carried as somebody else's problem
+through four tasks and three independent reviews, and would have reached the whole-branch review
+labelled as not ours.
+
+### C-35 — Ruling: keep M15's unreachable-state guard
+
+Task 6 asked for a keep-or-drop decision on a guard whose discriminating shape — one actor holding two
+releases — is **unreachable in production**, because pins are immutable per session and attribution
+rejects a mismatched release. It re-scoped the mutation to the unit suite, where the helper inserts
+directly, and got a RED there.
+
+**Keep it.** Same reasoning as #265's I-3 pair: a guard for a state the code cannot currently produce
+is defence in depth against the change that makes it producible, and it costs one test. The C-16 class
+of "structurally unreachable but asserted anyway" has already earned its place twice in this epic — in
+slice 4A's fail-closed depth predicate and in slice 4B's re-armed resolver.
+
+Recorded so no later reader deletes it as dead: **it is deliberately a guard for an impossible state,
+and its unreachability is the reason it exists, not a reason to remove it.**
