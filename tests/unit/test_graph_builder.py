@@ -563,9 +563,11 @@ class TestARealTurn:
         branch tracing BLANK with nothing raising and both static guards green.
 
         Two runtime observations close that: the keys survive a real three-slide turn
-        into final state, and the ``Send`` payload each builder actually received
-        carries them — which is only possible if ``build_branch_payload`` could read
-        them off state mid-run.
+        into final state, and the assembly context each builder actually handed the
+        runtime carries them — which is only possible if its ``Send`` payload carried
+        them, i.e. if ``build_branch_payload`` could read them off state mid-run.
+        The context, not the model-facing payload, is the observation point: the
+        builder keeps every session identifier out of what the model sees (#258).
         """
         env = graph_env_threadsafe
         _wire_three_slide_turn(env)
@@ -580,10 +582,14 @@ class TestARealTurn:
 
         assert final["root_session_id"] == "owner-of-the-deck"
         assert final["actor_session_id"] == "the-contributor"
-        fanned = [call["payload"] for call in env.skills.calls_for("builder")]
+        fanned = env.skills.calls_for("builder")
         assert len(fanned) == 3, "no builder fanned out — the check would be vacuous"
-        assert {p["root_session_id"] for p in fanned} == {"owner-of-the-deck"}
-        assert {p["actor_session_id"] for p in fanned} == {"the-contributor"}
+        assert {c["root_session_id"] for c in fanned} == {"owner-of-the-deck"}
+        assert {c["actor_session_id"] for c in fanned} == {"the-contributor"}
+        for call in fanned:
+            assert "root_session_id" not in call["payload"]
+            assert "actor_session_id" not in call["payload"]
+            assert "session_id" not in call["payload"]
 
     def test_one_reviewer_per_slide_each_with_its_own_position(
         self, graph_env_threadsafe

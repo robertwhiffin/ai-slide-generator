@@ -3398,6 +3398,114 @@ class TestRuntimeRootActorTrace:
         assert collab.contributor_session_id not in prompt
 
 
+# The builder's model-facing payload, stated POSITIVELY as the user decided (#258):
+# nothing session-, user-, turn- or release-specific reaches the model.  A literal
+# here, not an import of the production allowlist, so a widened production set
+# fails this test instead of silently agreeing with it.
+_BUILDER_MODEL_KEYS = frozenset(
+    {
+        "position",
+        "slide_spec",
+        "assumes",
+        "hands_off",
+        "resolved_data",
+        "section_html",
+        "section_css",
+        "resolved_style",
+        "design_system_active",
+    }
+)
+_BUILDER_RETRY_MODEL_KEYS = _BUILDER_MODEL_KEYS | {"corrective_instruction"}
+
+
+def _prompt_payload(prompt: str) -> dict:
+    """Decode the runtime payload JSON object out of an assembled prompt."""
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(prompt):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(prompt, index)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and "slide_spec" in value:
+            return value
+    raise AssertionError("no runtime payload object found in the builder prompt")
+
+
+class TestTheBuilderPromptCarriesOnlySlideContent:
+    """The user's decision (#258): nothing session- or user-specific reaches the
+    builder's model.
+
+    Asserted on what the model ADAPTER is handed — the fully assembled prompt —
+    on both the first invocation and the unsafe-output retry, for an owner on
+    their own deck and for a contributor (root != actor).  The key set is an
+    exact, positive assertion; the identifying VALUES are also checked against
+    the whole prompt text.  The node still uses every removed value for the
+    trace, the mutation actor and the carried record.
+    """
+
+    @pytest.mark.parametrize("case", ["owner", "contributor"])
+    def test_both_builder_calls_hand_the_model_exactly_the_allowed_keys(
+        self, graph_env, monkeypatch, case
+    ):
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "builder": [
+                    BuilderOutput(position=0, html=UNSAFE_HTML, scripts=""),
+                    BuilderOutput(position=0, html=CLEAN_HTML, scripts=""),
+                ]
+            },
+        )
+        if case == "owner":
+            actor, release = collab.owner_session_id, collab.r1_id
+        else:
+            actor, release = collab.contributor_session_id, collab.r2_id
+        turn_id = f"turn-{uuid.uuid4().hex[:10]}"
+        payload = _branch_payload(
+            graph_env,
+            0,
+            session_id=actor,
+            root_session_id=collab.owner_session_id,
+            actor_session_id=actor,
+            graph_release_id=release,
+            turn_id=turn_id,
+            initiated_by=USER,
+        )
+
+        updates = builder_node(payload)
+
+        prompts = [prompt for key, prompt in trace.adapter.prompts if key == "builder"]
+        assert len(prompts) == 2, "the first call and the retry must both run"
+        assert set(_prompt_payload(prompts[0])) == _BUILDER_MODEL_KEYS
+        assert set(_prompt_payload(prompts[1])) == _BUILDER_RETRY_MODEL_KEYS
+        for index, prompt in enumerate(prompts):
+            for value in {collab.owner_session_id, actor, turn_id, USER}:
+                assert value not in prompt, f"builder call {index} carries {value!r}"
+
+        # The node's non-model uses of the removed values are untouched.
+        record = updates["slides"]["vals"][0]
+        assert record["html"] == CLEAN_HTML
+        assert record["session_id"] == actor
+        assert record["root_session_id"] == collab.owner_session_id
+        assert record["actor_session_id"] == actor
+        assert record["turn_id"] == turn_id
+        assert record["initiated_by"] == USER
+        assert record["graph_release_id"] == release
+        # design_contract carries only session-resolved row IDs the model cannot
+        # use, so it stays out of the prompt but is still carried in the record.
+        assert record["design_contract"] == payload["design_contract"]
+        assert updates["slides"]["turn"] == turn_id
+        assert [call.agent_key for call in trace.sink.calls] == ["builder", "builder"]
+        for call in trace.sink.calls:
+            assert call.root_session_id == collab.owner_session_id
+            assert call.actor_session_id == actor
+            assert call.graph_release_id == release
+
+
 # ---------------------------------------------------------------------------
 # The structural guard: no call site may trace blank
 # ---------------------------------------------------------------------------

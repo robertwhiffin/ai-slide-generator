@@ -20,7 +20,11 @@ from src.database.models.graph_configuration import (
     GraphReleaseAgent,
 )
 from src.domain.skill_io import OUTPUT_SCHEMAS
-from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+from src.services.agent_runtime import (
+    AgentAssemblyContext,
+    AgentRuntime,
+    UnknownAgentKeyError,
+)
 from src.services.agent_runtime_identity import RecordingAgentInvocationIdentitySink
 from src.services.graph_configuration import GraphConfiguration
 from src.services.graph_configuration_content import definition_content_from_row
@@ -260,6 +264,48 @@ def test_resolves_v1_and_v2_by_their_persisted_ids_not_active_release(
     loader = PersistedGraphReleaseLoader(session_factory=session_factory)
     assert loader.resolve(v1_release_id, "architect").graph_version == 1
     assert loader.resolve(v2_id, "architect").graph_version == 2
+
+
+@pytest.mark.parametrize("agent_key", ["foreman", "unknown", "Architect"])
+def test_production_runtime_raises_unknown_agent_key_before_resolution_and_model(
+    session_factory, v1_release_id, agent_key
+):
+    """#259's typed guard, on the PRODUCTION loader rather than the test-only one.
+
+    A plain ``snapshot[agent_key]`` lookup surfaced a bare ``KeyError`` here.  The
+    guard runs before resolution, so an unknown role opens no session either.
+    """
+
+    class RecordingAdapter:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def invoke(self, **kwargs):
+            self.calls.append(kwargs)
+            return OUTPUT_SCHEMAS["architect"].model_construct()
+
+    opened = []
+
+    def counting_factory():
+        opened.append(True)
+        return session_factory()
+
+    adapter = RecordingAdapter()
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(
+            session_factory=counting_factory
+        ),
+        model_adapter=adapter,
+        identity_sink=sink,
+    )
+
+    with pytest.raises(UnknownAgentKeyError, match=agent_key):
+        runtime.run(agent_key, v1_release_id, {}, AgentAssemblyContext(False))
+
+    assert adapter.calls == []
+    assert sink.calls == []
+    assert opened == [], "an unknown role key reached release resolution"
 
 
 def test_absent_release_raises_not_found_without_active_or_latest_lookup(session_factory):
