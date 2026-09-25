@@ -258,7 +258,8 @@ class TestAgentRuntimeSeam:
         agent_key, graph_release_id, payload, assembly_context = runtime.calls[0]
         assert agent_key == "architect"
         assert graph_release_id == 1
-        assert payload["session_id"] == graph_env.session_id
+        # #258: no session identifier in the model-facing payload.
+        assert "session_id" not in payload
         assert assembly_context.design_system_active is False
 
     def test_foreman_stays_outside_agent_runtime(self, graph_env, monkeypatch):
@@ -3504,6 +3505,302 @@ class TestTheBuilderPromptCarriesOnlySlideContent:
             assert call.root_session_id == collab.owner_session_id
             assert call.actor_session_id == actor
             assert call.graph_release_id == release
+
+
+# Every role's model-facing payload, stated POSITIVELY as the user decided (#258):
+# nothing session-, user-, turn- or release-specific reaches ANY role's model.
+# Literals, not imports of production key sets, so a widened production payload
+# fails here instead of silently agreeing.  One entry per model invocation in the
+# order a full turn makes them; the deck-level re-review is the architect's own
+# build_reviewer pass, the one call that carries ``deck_brief``.
+_SLIDE_REVIEW_MODEL_KEYS = frozenset(
+    {
+        "position",
+        "slide_spec",
+        "resolved_style",
+        "section_css",
+        "resolved_data",
+        "html",
+        "scripts",
+    }
+)
+_FIXER_MODEL_KEYS = frozenset(
+    {
+        "position",
+        "finding",
+        "html",
+        "scripts",
+        "slide_spec",
+        "resolved_style",
+        "section_css",
+    }
+)
+_EVERY_MODEL_CALL = (
+    ("data_analyst", "data_analyst", frozenset({"data_request", "deck_purpose"})),
+    (
+        "architect",
+        "architect",
+        frozenset(
+            {
+                "conversation",
+                "message",
+                "current_deck_spec",
+                "committed_slide_count",
+                "previous_deck_review",
+                "available_design_contract",
+                "template_sections",
+                "resolved_style",
+                "design_system_library",
+            }
+        ),
+    ),
+    (
+        "deck_level_rereview",
+        "build_reviewer",
+        _SLIDE_REVIEW_MODEL_KEYS | {"deck_brief"},
+    ),
+    ("builder", "builder", _BUILDER_MODEL_KEYS),
+    ("builder_retry", "builder", _BUILDER_RETRY_MODEL_KEYS),
+    ("build_reviewer", "build_reviewer", _SLIDE_REVIEW_MODEL_KEYS),
+    ("fixer", "fixer", _FIXER_MODEL_KEYS),
+    ("fixer_retry", "fixer", _FIXER_MODEL_KEYS | {"corrective_instruction"}),
+    ("fix_reviewer", "fix_reviewer", _FIXER_MODEL_KEYS | {"change_summary"}),
+    (
+        "deck_reviewer",
+        "deck_reviewer",
+        frozenset({"narrative_arc", "call_to_action", "slide_count", "slides"}),
+    ),
+)
+_COMMITTED_HTML = "<div class='slide'>committed zero</div>"
+
+
+def _largest_json_object(prompt: str) -> dict:
+    """The runtime payload: the longest JSON object embedded in the prompt."""
+    decoder = json.JSONDecoder()
+    best, span = None, -1
+    for index, char in enumerate(prompt):
+        if char != "{":
+            continue
+        try:
+            value, end = decoder.raw_decode(prompt, index)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and end - index > span:
+            best, span = value, end - index
+    if best is None:
+        raise AssertionError("no runtime payload object found in the prompt")
+    return best
+
+
+def _full_turn_prompts(env, monkeypatch, case):
+    """Drive every model invocation of a turn through the REAL ``AgentRuntime``.
+
+    A persisted spec, a committed slide and a stored deck review authored by the
+    user are seeded, then the architect commits a deck-level change, so the turn
+    makes all ten calls: analyst, architect, the deck-level re-review, builder
+    and its unsafe-output retry, build reviewer, fixer and its retry, fix
+    reviewer, deck reviewer.
+    """
+    from src.api.services.deck_level_writer import write_deck_level_columns
+    from src.database.models.session import SessionSlideDeck
+    from src.services.deck_review_store import save_deck_review
+
+    collab = _collaboration(env)
+    old_spec = make_spec((0,))
+    new_spec = old_spec.model_copy(update={"audience": "the CFO, not engineers"})
+    env.seed_slides([_COMMITTED_HTML])
+    write_deck_level_columns(
+        collab.owner_session_id, deck_spec=old_spec.to_json(), modified_by=USER
+    )
+    db = env.factory()
+    try:
+        deck = (
+            db.query(SessionSlideDeck)
+            .filter(SessionSlideDeck.session_id == collab.owner_pk)
+            .one()
+        )
+        save_deck_review(
+            db,
+            deck.id,
+            compute_deck_digest([_COMMITTED_HTML]),
+            [finding("arc_gap", slide_index=-1, message="gap")],
+            USER,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    trace = _trace_runtime(
+        monkeypatch,
+        collab,
+        {
+            "data_analyst": [
+                AnalystOutput(
+                    outcome="success",
+                    synthesis="ok",
+                    figures=[],
+                    gaps=[],
+                    sources=["c.s.t"],
+                )
+            ],
+            "architect": [architect_build(new_spec)],
+            "build_reviewer": [
+                review_out(0),
+                review_out(0, [finding("overflow")]),
+            ],
+            "builder": [
+                BuilderOutput(position=0, html=UNSAFE_HTML, scripts=""),
+                BuilderOutput(position=0, html=CLEAN_HTML, scripts=""),
+            ],
+            "fixer": [
+                FixerOutput(
+                    position=0,
+                    html=UNSAFE_HTML,
+                    scripts="",
+                    changed=True,
+                    change_summary="unsafe",
+                ),
+                FixerOutput(
+                    position=0,
+                    html="<div class='slide'>fixed</div>",
+                    scripts="",
+                    changed=True,
+                    change_summary="fixed",
+                ),
+            ],
+            "fix_reviewer": [review_out(0)],
+            "deck_reviewer": [DeckReviewOutput(findings=[])],
+        },
+    )
+    if case == "owner":
+        actor, release = collab.owner_session_id, collab.r1_id
+    else:
+        actor, release = collab.contributor_session_id, collab.r2_id
+    turn_id = f"turn-{uuid.uuid4().hex[:10]}"
+    state = env.state(
+        session_id=actor,
+        graph_release_id=release,
+        turn_id=turn_id,
+        root_session_id=collab.owner_session_id,
+        actor_session_id=actor,
+        initiated_by=USER,
+    )
+
+    data_analyst_node({**state, "architect_message": "how many users?"})
+    state = {
+        **state,
+        **architect_node({**state, "architect_message": "retarget at the CFO"}),
+    }
+    built = builder_node(build_branch_payload(state, 0))
+    state["slides"] = built["slides"]
+    reviewed = build_reviewer_node(
+        graph_routers.build_reviewer_refan_router(state)[0].arg
+    )
+    state["fix_map"] = reviewed["fix_map"]
+    fixed = fixer_node(state)
+    state["fix_map"] = turn_scoped_merge(state["fix_map"], fixed["fix_map"])
+    state["fixed"] = fixed["fixed"]
+    state["fix_target"] = fixed["fix_target"]
+    fix_reviewer_node(state)
+    deck_reviewer_node(state)
+
+    identifying = {
+        "owner session id": collab.owner_session_id,
+        "actor session id": actor,
+        "turn id": turn_id,
+        "user email": USER,
+        "contributor email": "contributor@example.com",
+    }
+    return SimpleNamespace(
+        trace=trace,
+        collab=collab,
+        actor=actor,
+        release=release,
+        identifying=identifying,
+        built=built,
+    )
+
+
+class TestNoRolesModelPromptCarriesSessionIdentifiers:
+    """The user's decision (#258), for EVERY role: the model sees content only.
+
+    Asserted on the fully assembled prompt the model adapter is handed, for all
+    ten invocations of one turn, for an owner on their own deck and for a
+    contributor (root != actor).  The payload key set is an exact positive
+    assertion per call; the identifying VALUES are checked against the whole
+    prompt, which also catches a value nested inside an allowed key.
+    """
+
+    @pytest.mark.parametrize("case", ["owner", "contributor"])
+    @pytest.mark.parametrize(
+        "index, label, role, allowed",
+        [(i, *call) for i, call in enumerate(_EVERY_MODEL_CALL)],
+        ids=[call[0] for call in _EVERY_MODEL_CALL],
+    )
+    def test_the_model_payload_is_exactly_the_allowed_content_keys(
+        self, graph_env, monkeypatch, case, index, label, role, allowed
+    ):
+        run = _full_turn_prompts(graph_env, monkeypatch, case)
+        prompts = run.trace.adapter.prompts
+
+        assert [key for key, _ in prompts] == [
+            call[1] for call in _EVERY_MODEL_CALL
+        ], "the turn did not make the ten model calls this test enumerates"
+        agent_key, prompt = prompts[index]
+        assert agent_key == role
+        payload = _largest_json_object(prompt)
+        assert set(payload) == allowed, label
+        for name, value in run.identifying.items():
+            assert value not in prompt, f"{label} ({case}) carries the {name}"
+
+    @pytest.mark.parametrize("case", ["owner", "contributor"])
+    def test_the_nodes_still_use_every_removed_value_off_the_prompt(
+        self, graph_env, monkeypatch, case
+    ):
+        run = _full_turn_prompts(graph_env, monkeypatch, case)
+        prompts = dict(
+            (label, prompt)
+            for (label, _role, _allowed), (_key, prompt) in zip(
+                _EVERY_MODEL_CALL, run.trace.adapter.prompts
+            )
+        )
+
+        # The architect still sees the previous verdict — only its author is gone.
+        review = _largest_json_object(prompts["architect"])["previous_deck_review"]
+        assert set(review) == {"digest", "findings"}
+        assert [f["criterion"] for f in review["findings"]] == ["arc_gap"]
+        # The trace still records the owner as root and the acting session as
+        # actor, on the release the turn pinned, for every call.
+        calls = run.trace.sink.calls
+        assert len(calls) == len(_EVERY_MODEL_CALL)
+        for call in calls:
+            assert call.root_session_id == run.collab.owner_session_id
+            assert call.actor_session_id == run.actor
+            assert call.graph_release_id == run.release
+        # The builder's carried record keeps every identifier for the node's use.
+        record = run.built["slides"]["vals"][0]
+        assert record["session_id"] == run.actor
+        assert record["turn_id"] == run.identifying["turn id"]
+        assert record["initiated_by"] == USER
+        # The analyst's answer is still persisted on the acting session, and the
+        # deck review is still written for the owner's deck with the user as
+        # its author.
+        from src.api.services.session_manager import get_session_manager
+        from src.services.deck_review_store import get_deck_review as _read_review
+
+        assert any(
+            m.get("message_type") == "info" and "Sources: c.s.t" in m.get("content", "")
+            for m in get_session_manager().get_messages(run.actor)
+        )
+        db = graph_env.factory()
+        try:
+            deck_id = nodes._resolve_deck_id(db, run.actor)
+            stored = _read_review(db, deck_id, compute_deck_digest(
+                [row.html for row in graph_env.rows()]
+            ))
+        finally:
+            db.close()
+        assert stored is not None and stored["author"] == USER
 
 
 # ---------------------------------------------------------------------------
