@@ -7,7 +7,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.api.routes._authz import _check_deck_permission_for_session
+from src.api.routes._authz import _check_deck_permission_for_session, require_admin
 from src.api.schemas.agent_config import (
     AgentConfig,
     resolve_agent_config,
@@ -281,6 +281,9 @@ async def update_profile(profile_id: int, body: UpdateProfileRequest):
     with get_db_session() as db:
         perm_service.require_edit_profile(db, profile_id)
         profile = _get_profile(db, profile_id)
+
+        if body.is_default is True:
+            require_admin()
 
         if body.name is not None:
             profile.name = body.name
