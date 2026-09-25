@@ -17,7 +17,7 @@
   - `FakeStructuredOutputProbe` and `SavedEndpointProbeResult`.
   - `PROBE_TIMEOUT_SECONDS` and `PROBE_MAX_RETRIES`.
   - It calls `agent_runtime.bind_structured_output_model(...)` and contains no `with_structured_output` or `ChatDatabricks` text.
-- **`graph_configuration_draft.py`** gains `read_draft_probe_candidate` and `DraftProbeCandidate`. The method copies the selected role's saved model, hash and lock under `read_workbench`'s FOR SHARE locks inside `with session.begin():`. A stale lock returns the null-candidate `DraftSaveConflict` (it uses `_draft_aggregate_snapshot`). After the transaction ends, it re-runs the policy on the saved name through `_endpoint_name_policy_validator` (C4). It writes nothing, and `_write_locked_content` is not touched. `_validate_common` has its lock and agent-key half split out, with identical issue order. Everything is below `_LEGACY_SOURCE_ROLES` (C19).
+- **`graph_configuration_draft.py`** gains `read_draft_probe_candidate` and `DraftProbeCandidate`. The method copies the selected role's saved model, hash and lock under `read_workbench`'s FOR SHARE locks inside `with session.begin():`. A stale lock returns the null-candidate `DraftSaveConflict` (it uses `_draft_aggregate_snapshot`). After the transaction ends, it re-runs the policy on the saved name through `_endpoint_name_policy_validator` (C4). It writes nothing, and `_write_locked_content` is not touched. `_validate_common` has its lock and agent-key half split out, with identical issue order. *(Corrected in fix round 1: not everything is below `_LEGACY_SOURCE_ROLES`. The dataclass `DraftProbeCandidate` is at `:96`, above that tuple at `:158`. The method, the validation split and all other additions are below it. The C19 text-read slices from `_LEGACY_SOURCE_ROLES` to `= (`, and `DraftProbeCandidate` contains neither that name nor that prefix, so the join is unaffected. The class was not moved.)*
 - **`graph_configuration.py`** exports `DraftProbeCandidate`.
 - **`schemas/agent_definitions.py`** adds `StructuredOutputProbeSuccessResponse` and `StructuredOutputProbeFailureResponse`, strict siblings of `BaseModel` (C9).
 - **`routes/agent_definitions.py`** adds `POST /draft/{agent_key}/model-endpoint-probe`:
@@ -120,3 +120,56 @@
 ## Triple check
 
 `git status --porcelain`, `git diff HEAD` and `git diff --cached` were all empty after the implementation commit and before this report was added.
+
+## Fix round 1
+
+Base, pinned: `53825d60809e29e59b745de6bbecb0c32472ebe0`, the controller ledger commit.
+Fix commit: `281cfc7201a3a540fae5d7bbf267b706c581f687`, `fix: classify probe failures by the provider's real errors (#266)`.
+
+**I1 and the routed M1.** The review measured that the real `ChatDatabricks` 0.9.0 raises openai-client exceptions. As a result, the probe's `PermissionDenied` and `NotImplementedError` branches were unreachable in production, and every rejection became the retryable 503. I re-measured this with `/tmp/t266-5/measure_fr1.py`: real `ChatDatabricks` over an `httpx.MockTransport` returns `BadRequestError`, `AuthenticationError`, `PermissionDeniedError`, `NotFoundError`, `UnprocessableEntityError`, `RateLimitError`, `InternalServerError` and `APIConnectionError` for 400, 401, 403, 404, 422, 429, 500 and a connection failure respectively, with one request each.
+
+**Controller ruling (recorded here; it overrides the plan's classification table).** Classification now happens at invoke:
+
+| Outcome at invoke | Code | Status | Retryable |
+|---|---|---|---|
+| `openai.PermissionDeniedError`, `openai.AuthenticationError` | `endpoint_probe_forbidden` | 403 | no |
+| `openai.BadRequestError`, `openai.NotFoundError`, `openai.UnprocessableEntityError` | `unsupported_structured_output` | 422 | no |
+| `openai.RateLimitError`, `APIConnectionError`, `APITimeoutError`, `InternalServerError`, anything else | `structured_output_probe_failed` | 503 | yes |
+
+- The SDK `PermissionDenied` branch (binding or invoke) and the binding `NotImplementedError` branch are kept.
+- Messages stay code-owned, and exception text is never read. The log carries only the code and the class name.
+- The unit-level `openai-400` case moved from the ambiguous list to unsupported.
+- The code comments avoid the literal `ChatDatabricks`, because the runtime guard forbids that text in the probe module.
+
+**`openai` provenance.** It is not declared in `packages/databricks-tellr-app/pyproject.toml`. It arrives transitively: the pinned `databricks-langchain==0.9.0` requires `openai>=1.99.9`, and 1.105.0 is installed. `src/services/agent_runtime.py` already imported `openai` at base. Nothing was installed.
+
+**Tests** use the real `ChatDatabricks` through the production model factory:
+- `DatabricksStructuredOutputProbe(client_factory=lambda: MockTransportWorkspace(...))`. That workspace stand-in exposes only `serving_endpoints.get_open_ai_client(**kwargs)`, which is what `databricks_langchain.utils.get_openai_client` calls.
+- It returns a real `openai.OpenAI` whose only transport is `httpx.MockTransport`, with the literal key `unit-test-dummy-key` and the host `probe.invalid`.
+- No `WorkspaceClient` is built, so no environment, profile or SDK auth is read.
+- The tests assert:
+  - the `get_open_ai_client` kwargs are exactly `{"timeout": 30.0, "max_retries": 0}`, so the bound reaches openai;
+  - exactly one request, to `probe.invalid`, with the dummy bearer token.
+- `test_model_endpoint_probe_real_provider_success_over_mock_transport` checks that the real binding parses `ok`, that the request `model` is the exact saved endpoint, and that the messages are exactly `[_PROBE_PROMPT]`.
+- `test_model_endpoint_probe_real_provider_errors_are_classified[×8]` covers the probe level.
+- `test_model_endpoint_probe_route_maps_real_provider_errors[×8]` covers the route: status, code, retryable and endpoint identity. No provider text, `leak.example`, mock host or key appears in the response.
+
+**RED against the pre-fix probe.** I checked out `53825d608:src/services/model_endpoint_probe.py` temporarily and ran `-k real_provider`: **10 failed / 7 passed**. The failures were 400, 401, 403, 404 and 422, each at both the probe and the route level, and every one returned `structured_output_probe_failed`. The 429, 500, connection and success cases passed, as expected. My working copy was then restored and gave 17 passed.
+
+**Sabotage** (`/tmp/t266-5/mutate.py`, output in `mut-fr1.txt`; scope `test_model_endpoint_probe.py test_agent_definition_workbench_routes.py -k real_provider`):
+
+| ID / marker | Mutation | Anchor | RED | Restore | GREEN |
+|---|---|---|---|---|---|
+| F1 `T5F1_DROP_OPENAI_FORBIDDEN` | delete the `except _OPENAI_FORBIDDEN` clause | 1; marker `grep -c` 1 | 4/17: `…real_provider_errors_are_classified[401-…,403-…]`, `…route_maps_real_provider_errors[401-…,403-…]` | `git checkout 281cfc720 -- src/services/model_endpoint_probe.py`; marker 0; clean | 17 |
+| F2 `T5F2_BADREQUEST_TO_503` | remove `openai.BadRequestError` from the unsupported tuple, so it falls to 503 | 1; marker `grep -c` 1 | 2/17: `…[400-unsupported_structured_output]` at the probe and the route | same | 17 |
+
+**Gates:**
+- `tests/unit/test_model_endpoint_probe.py tests/unit/test_agent_definition_workbench_routes.py tests/unit/test_agent_runtime.py`: **317 passed**.
+- Full `tests/unit -q -p no:randomly -rf`: **6 failed / 6143 passed / 110 skipped**. The failures are the same six baseline nodes and causes: autoscaling ×2, `_FakeSession.execute` ×3, `no active Graph Release` ×1. The pass count is 6127 plus 16 new tests.
+  - The F1/F2 mutations ran while this suite was collecting. The run shows zero failures outside the baseline, so no mutated module was imported into a failing state.
+- PostgreSQL `test_agent_definition_workbench_postgres.py`: **17 passed, zero skips**.
+- Ruff: both changed test files and `src/services/model_endpoint_probe.py` are clean. `test_agent_definition_workbench_routes.py` has only the same two base findings (I001, F401).
+
+**⚠️ corrected:** see the correction to the `graph_configuration_draft.py` bullet above.
+
+Concern 3 from the first pass, openai 400 shown as a retryable 503, is resolved by this ruling.
