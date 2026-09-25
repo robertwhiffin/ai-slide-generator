@@ -1186,12 +1186,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     {/* BESIDE the #261 badge, never inside it: a failed
                         collaboration-history load must not erase the pinned
                         Graph Version, and a sibling makes that structural
-                        rather than a thing a future edit can regress. Rendered
-                        exactly ONCE in the app — a second instance (e.g. in the
-                        share dialog) would put two identical "Change
-                        provenance" accessible names on screen together, which
-                        is the strict-mode collision this epic has already paid
-                        for twice. */}
+                        rather than a thing a future edit can regress.
+
+                        Two instances exist in the app: this one
+                        (surface="conversation") and a second in the Share Deck
+                        dialog body (surface="collaboration", AppLayout ~line
+                        1501).  They are safe to coexist because
+                        SURFACE_VOCABULARY gives them wholly distinct wording
+                        ("Change provenance" vs "Who changed this deck"),
+                        distinct listLabels and testIds, and announce:false on
+                        the dialog copy — the accessible-name collision that
+                        cost this epic twice cannot occur.  Do not consolidate
+                        them into one instance: the conversation copy lives
+                        here (always visible), the collaboration copy lives in
+                        the share dialog (scoped to one deck), and each surface
+                        answers AC5 for its own context. */}
                     <MixedReleaseWarning
                       surface="conversation"
                       history={collaborationHistory}
