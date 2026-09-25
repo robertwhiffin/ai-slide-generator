@@ -3408,7 +3408,6 @@ _BUILDER_MODEL_KEYS = frozenset(
         "slide_spec",
         "assumes",
         "hands_off",
-        "design_contract",
         "resolved_data",
         "section_html",
         "section_css",
@@ -3496,6 +3495,9 @@ class TestTheBuilderPromptCarriesOnlySlideContent:
         assert record["turn_id"] == turn_id
         assert record["initiated_by"] == USER
         assert record["graph_release_id"] == release
+        # design_contract carries only session-resolved row IDs the model cannot
+        # use, so it stays out of the prompt but is still carried in the record.
+        assert record["design_contract"] == payload["design_contract"]
         assert updates["slides"]["turn"] == turn_id
         assert [call.agent_key for call in trace.sink.calls] == ["builder", "builder"]
         for call in trace.sink.calls:
