@@ -99,7 +99,7 @@ _CATALOG_UNAVAILABLE_MESSAGE = (
 
 
 class _SystemModelEndpointDiscovery:
-    """Production discovery over the bounded system catalog client.
+    """Production discovery over the discovery-bounded system catalog client.
 
     Nothing is built until ``list_system_models``.  A system-client failure is
     the typed unavailable outcome, never a 500; its text is not read.
@@ -113,7 +113,7 @@ class _SystemModelEndpointDiscovery:
                 "catalog_unavailable", _CATALOG_UNAVAILABLE_MESSAGE, True
             ) from error
         catalog = model_endpoint_catalog.DatabricksModelEndpointCatalog(
-            model_endpoint_catalog.bounded_catalog_workspace_client(system_client)
+            model_endpoint_catalog.bounded_discovery_workspace_client(system_client)
         )
         return catalog.list_system_models()
 

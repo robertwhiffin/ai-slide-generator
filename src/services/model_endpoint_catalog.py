@@ -111,8 +111,20 @@ CATALOG_RETRY_TIMEOUT_SECONDS = 5
 CATALOG_HTTP_TIMEOUT_SECONDS = 3
 
 
-def bounded_catalog_workspace_client(system_client: WorkspaceClient) -> WorkspaceClient:
-    """Derive a short-retry catalog client from the system client's own config.
+#: Discovery holds no draft lock, so it gets its own, longer but still finite
+#: bound: a slow-but-healthy ``list()`` must not read as unavailable, and an
+#: outage must still end rather than wait out the SDK's 300 s default.
+DISCOVERY_RETRY_TIMEOUT_SECONDS = 30
+DISCOVERY_HTTP_TIMEOUT_SECONDS = 30
+
+
+def _derived_workspace_client(
+    system_client: WorkspaceClient,
+    *,
+    retry_timeout_seconds: int,
+    http_timeout_seconds: int,
+) -> WorkspaceClient:
+    """Derive a bounded client from the system client's own config.
 
     No credential source is introduced: the copy keeps the system client's host
     and resolved header factory.  ``Config.copy`` is shallow and shares its
@@ -121,9 +133,27 @@ def bounded_catalog_workspace_client(system_client: WorkspaceClient) -> Workspac
     """
     config = system_client.config.copy()
     config._inner = dict(config._inner)
-    config.retry_timeout_seconds = CATALOG_RETRY_TIMEOUT_SECONDS
-    config.http_timeout_seconds = CATALOG_HTTP_TIMEOUT_SECONDS
+    config.retry_timeout_seconds = retry_timeout_seconds
+    config.http_timeout_seconds = http_timeout_seconds
     return WorkspaceClient(config=config)
+
+
+def bounded_catalog_workspace_client(system_client: WorkspaceClient) -> WorkspaceClient:
+    """The save path's short-retry catalog client (it runs under the draft lock)."""
+    return _derived_workspace_client(
+        system_client,
+        retry_timeout_seconds=CATALOG_RETRY_TIMEOUT_SECONDS,
+        http_timeout_seconds=CATALOG_HTTP_TIMEOUT_SECONDS,
+    )
+
+
+def bounded_discovery_workspace_client(system_client: WorkspaceClient) -> WorkspaceClient:
+    """The discovery route's catalog client (no lock held; longer finite bound)."""
+    return _derived_workspace_client(
+        system_client,
+        retry_timeout_seconds=DISCOVERY_RETRY_TIMEOUT_SECONDS,
+        http_timeout_seconds=DISCOVERY_HTTP_TIMEOUT_SECONDS,
+    )
 
 
 class DatabricksModelEndpointCatalog:
