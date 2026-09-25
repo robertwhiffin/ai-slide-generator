@@ -3398,6 +3398,68 @@ class TestRuntimeRootActorTrace:
         assert collab.contributor_session_id not in prompt
 
 
+_SESSION_IDENTIFIER_KEYS = ("session_id", "root_session_id", "actor_session_id")
+
+
+class TestTheBuilderPromptCarriesNoSessionIdentifier:
+    """The user's decision (#258): no session ID reaches the builder's model.
+
+    Asserted on what the model ADAPTER is handed — the fully assembled prompt —
+    on both the first invocation and the unsafe-output retry, for an owner on
+    their own deck and for a contributor (root != actor).  The node still uses
+    the IDs for the trace, the mutation actor and the carried record.
+    """
+
+    @pytest.mark.parametrize("case", ["owner", "contributor"])
+    def test_neither_builder_call_hands_the_model_a_session_identifier(
+        self, graph_env, monkeypatch, case
+    ):
+        collab = _collaboration(graph_env)
+        trace = _trace_runtime(
+            monkeypatch,
+            collab,
+            {
+                "builder": [
+                    BuilderOutput(position=0, html=UNSAFE_HTML, scripts=""),
+                    BuilderOutput(position=0, html=CLEAN_HTML, scripts=""),
+                ]
+            },
+        )
+        if case == "owner":
+            actor, release = collab.owner_session_id, collab.r1_id
+        else:
+            actor, release = collab.contributor_session_id, collab.r2_id
+        payload = _branch_payload(
+            graph_env,
+            0,
+            session_id=actor,
+            root_session_id=collab.owner_session_id,
+            actor_session_id=actor,
+            graph_release_id=release,
+        )
+
+        updates = builder_node(payload)
+
+        prompts = [prompt for key, prompt in trace.adapter.prompts if key == "builder"]
+        assert len(prompts) == 2, "the first call and the retry must both run"
+        for index, prompt in enumerate(prompts):
+            for value in {collab.owner_session_id, actor}:
+                assert value not in prompt, f"builder call {index} carries {value!r}"
+            for key in _SESSION_IDENTIFIER_KEYS:
+                assert f'"{key}"' not in prompt, f"builder call {index} carries {key!r}"
+
+        # The node's non-model uses of the IDs are untouched.
+        assert updates["slides"]["vals"][0]["html"] == CLEAN_HTML
+        record = updates["slides"]["vals"][0]
+        assert record["session_id"] == actor
+        assert record["root_session_id"] == collab.owner_session_id
+        assert record["actor_session_id"] == actor
+        for call in trace.sink.calls:
+            assert call.agent_key == "builder"
+            assert call.root_session_id == collab.owner_session_id
+            assert call.actor_session_id == actor
+
+
 # ---------------------------------------------------------------------------
 # The structural guard: no call site may trace blank
 # ---------------------------------------------------------------------------

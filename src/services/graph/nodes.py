@@ -2044,6 +2044,13 @@ def foreman_node(state: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# Session identifiers a ``Send`` payload carries for attribution and tracing,
+# never for the model.  Excluded from the builder's model-facing payload.
+_MODEL_EXCLUDED_SESSION_KEYS = frozenset(
+    {"session_id", "root_session_id", "actor_session_id"}
+)
+
+
 def builder_node(payload: dict) -> Dict[str, Any]:
     """Author one slide's body HTML from its pre-copied payload.
 
@@ -2082,7 +2089,15 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         object_type="slide",
     )
 
-    skill_payload = dict(payload)
+    # The model-facing payload carries no session identifier (#258, user
+    # decision).  The IDs stay in ``payload`` for everything that is not the
+    # model: the mutation actor above, the trace via ``_assembly_context``, the
+    # placeholder and the carried ``slides[position]`` record below.
+    skill_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in _MODEL_EXCLUDED_SESSION_KEYS
+    }
 
     try:
         out = get_agent_runtime().run(
@@ -2136,7 +2151,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         return {"placeheld_positions": scoped(turn_id, {position})}
 
     record = {
-        **skill_payload,
+        **payload,
         "graph_release_id": payload["graph_release_id"],
         "html": html,
         "scripts": out.scripts,
