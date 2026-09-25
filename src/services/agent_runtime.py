@@ -555,6 +555,15 @@ class AgentRuntime:
         payload: dict[str, Any],
         assembly_context: AgentAssemblyContext,
     ) -> AgentInvocationResult:
+        # The role-key contract is the runtime's, not a loader's: checked before
+        # resolution so every loader (the production one did a bare dict lookup)
+        # raises the typed error, no session is opened, and it cannot be mapped
+        # into a persisted-configuration failure by the handlers below.
+        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
+            raise UnknownAgentKeyError(
+                f"Unknown model-driven agent key {agent_key!r}; "
+                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
+            )
         try:
             definition = self._persisted_release_loader.resolve(graph_release_id, agent_key)
         except PersistedRuntimeError:

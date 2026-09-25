@@ -154,6 +154,11 @@ class SkillStub:
                 "graph_release_id": graph_release_id,
                 "payload": payload,
                 "design_system_active": design_system_active,
+                # The out-of-band trace channel, recorded so a test can prove a
+                # Send-reached node threaded the IDs without reading them from
+                # the model-facing payload (which, for the builder, has none).
+                "root_session_id": getattr(assembly_context, "root_session_id", None),
+                "actor_session_id": getattr(assembly_context, "actor_session_id", None),
             }
         )
         if name not in self._handlers:
