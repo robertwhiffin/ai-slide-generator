@@ -45,3 +45,9 @@ Before execution: an independent plan review (doc review loop) against the issue
 - Carry Correction 13's ruling and Correction 1's last-required-case boot hazard into #267's PLAN-CORRECTIONS.
 - At Task 0-B, record #268's retention rule for an unlinked approval outside the latest 20 (Correction 19).
 - Q2, Q4, Q8 and Q9 stay deferred to Task 0-B, and Q7 to #270.
+
+## Controller rulings on the corrections pass — 2026-09-25
+Corrections pass `818aa7de7`: 28 corrections. Accepted departures: I5 is Phase B (binds Task 6); C2 uses FOR SHARE on both parents as the first statement of `_validate_current_graph` rather than REPEATABLE READ (the implementer probed RR breaking `test_graph_configuration_bootstrap_postgres.py:105`).
+Ruling: C1 knock-on — #267's case writer must REFUSE deactivating or retiring a role's last active required case (ordered 422), preserving the bootstrap invariant at `graph_configuration_bootstrap.py:196-198`. Carry into #267's corrections at its Task 0. Cost if wrong: an admin action makes the next boot exit.
+Carry-forward to #267's corrections (binding): (a) correction 13 — the test-run executor commits or releases every lock before any model call; (b) the C1 knock-on above; (c) the builder smoke-case payload at `graph_configuration_seed.py:23-35` must match the production builder allowlist (see the builder fix branch ledger).
+Deferred to Task 0-B: correction 19's two outcomes (#268 cleanup vs unlinked approvals outside the latest 20 runs), Q2, Q4, Q8, Q9; Q7 to #270.
