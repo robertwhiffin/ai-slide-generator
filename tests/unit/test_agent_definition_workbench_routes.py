@@ -29,6 +29,7 @@ from src.api.schemas.agent_definitions import (
     EditableAssemblyRulesRequest,
     EditableModelDraftModelRequest,
     EditableModelDraftRequest,
+    EditableSchemaOverlayRequest,
 )
 from src.core.database import Base, get_db
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
@@ -57,6 +58,11 @@ from src.services.graph_configuration import (
     DraftValidationIssue,
     GraphConfiguration,
     GraphConfigurationIntegrityError,
+)
+from src.services.agent_schema_registry import (
+    SCHEMA_CONTRACT_BUNDLES,
+    _V2_OPTIONAL_DESCRIPTORS,
+    _descriptor_material,
 )
 from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import load_graph_v1_manifest
@@ -266,6 +272,7 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
             "protected_assembly",
             "schema_contract",
             "protected_stage_view",
+            "selectable_optional_fields",
         }
         assert set(draft) == {
             "base_revision_id",
@@ -278,6 +285,7 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
             "protected_assembly",
             "schema_contract",
             "protected_stage_view",
+            "selectable_optional_fields",
         }
         assert draft["base_revision_id"] == published["revision_id"]
         assert published["definition_version"] == 2
@@ -297,6 +305,7 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
             "field_overrides",
             "additional_optional_fields",
         }
+        assert published["selectable_optional_fields"] == []
         assert set(published["assembly_rules"]) == {
             "format_version",
             "separator",
@@ -567,6 +576,9 @@ def test_main_app_registers_the_dedicated_workbench_route():
         "/api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade": {
             "POST"
         },
+        "/api/admin/agent-definitions/draft/{agent_key}/schema-contract-upgrade": {
+            "POST"
+        },
         "/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source": {"POST"},
     }
     for path, methods in expected_methods.items():
@@ -804,7 +816,6 @@ def test_put_stale_cross_agent_conflict_has_all_current_candidates(session_facto
             "Top-p must be between 0 and 1.",
         ),
         ("candidate.model.top_p", "0.5", "candidate.model.top_p", "strict_type", ""),
-        ("candidate.schema_overlay", {}, "candidate.schema_overlay", "extra_forbidden", ""),
         (
             "candidate.model.model_alias",
             "secret",
@@ -1095,6 +1106,13 @@ ALREADY_CURRENT_ERRORS = [
         "message": "Protected assembly is already current.",
     }
 ]
+SCHEMA_ALREADY_CURRENT_ERRORS = [
+    {
+        "field": "schema_contract",
+        "code": "already_current",
+        "message": "Schema contract is already current.",
+    }
+]
 MANUAL_RESOLUTION_ERRORS = [
     {
         "field": "prompt_text",
@@ -1147,6 +1165,10 @@ def _upgrade_url(agent_key: str = "architect") -> str:
     return f"/api/admin/agent-definitions/draft/{agent_key}/protected-assembly-upgrade"
 
 
+def _schema_contract_upgrade_url(agent_key: str = "architect") -> str:
+    return f"/api/admin/agent-definitions/draft/{agent_key}/schema-contract-upgrade"
+
+
 def _source_url(agent_key: str = "data_analyst") -> str:
     return f"/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source"
 
@@ -1194,6 +1216,12 @@ def _stage_ids(node_definition: dict[str, object]) -> list[str]:
 
 def _post_upgrade(client: TestClient, agent_key: str, lock_version: int):
     return client.post(_upgrade_url(agent_key), json={"lock_version": lock_version})
+
+
+def _post_schema_contract_upgrade(client: TestClient, agent_key: str, lock_version: int):
+    return client.post(
+        _schema_contract_upgrade_url(agent_key), json={"lock_version": lock_version}
+    )
 
 
 def _edit_prompt_by_one_code_point(
@@ -1382,6 +1410,7 @@ def test_no_request_model_accepts_a_protected_stage_view_or_display_field(
         EditableModelDraftRequest,
         EditableModelDraftModelRequest,
         EditableAssemblyRulesRequest,
+        EditableSchemaOverlayRequest,
         CustomTextBlockRequest,
         DraftLockRequest,
     ):
@@ -2300,6 +2329,7 @@ def test_stale_v2_save_conflict_echoes_the_facade_candidate_rules(
         "prompt_text": "Stale v2 edit.",
         "model": candidate["model"],
         "assembly_rules": {"format_version": 2, "custom_blocks": [block]},
+        "schema_overlay": None,
     }
     assert body["expected_lock_version"] == 0
     assert body["current_lock_version"] == 1
@@ -2348,3 +2378,590 @@ def test_both_post_routes_require_a_trusted_principal_before_any_body_parse(
     assert calls == []
     assert response.status_code == 403
     assert response.json() == {"detail": "Authenticated principal required"}
+
+
+# ===========================================================================
+# Task 5: Schema contract upgrade route and schema overlay PUT editing
+# ===========================================================================
+
+
+def test_schema_contract_upgrade_route_returns_exact_success_and_preserves_release(
+    session_factory, monkeypatch
+):
+    """Catches a schema-contract upgrade route that writes twice or mutates the release."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        response = _post_schema_contract_upgrade(client, "architect", 0)
+        after = _workbench(client)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"draft", "definition", "changed"}
+    assert body["changed"] is True
+    assert body["draft"]["lock_version"] == 1
+    assert body["draft"]["updated_by"] == "task4-user@example.com"
+    assert body["definition"] == _model_node(after, "architect")["draft"]
+    assert body["definition"]["schema_contract"]["version"] == 2
+    assert after["active_release"] == before["active_release"]
+    assert (
+        _model_node(after, "architect")["published"]
+        == _model_node(before, "architect")["published"]
+    )
+    for agent_key in set(EXPECTED_TOPOLOGY_ORDER) - {"foreman", "architect"}:
+        assert (
+            _model_node(after, agent_key)["draft"]
+            == _model_node(before, agent_key)["draft"]
+        )
+
+
+def test_schema_contract_upgrade_route_already_current_returns_ordered_422(
+    session_factory, monkeypatch
+):
+    """Catches a route that reports a missing contract check or the wrong field/code."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        repeated = _post_schema_contract_upgrade(client, "architect", 1)
+        after = _workbench(client)
+
+    assert repeated.status_code == 422
+    assert repeated.json() == {"code": "invalid_draft", "errors": SCHEMA_ALREADY_CURRENT_ERRORS}
+    assert after["draft"]["lock_version"] == 1
+
+
+def test_schema_contract_upgrade_route_stale_returns_coherent_409_with_null_candidate(
+    session_factory, monkeypatch
+):
+    """Catches a stale upgrade route returning 422 or echoing a non-null candidate."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        stale = _post_schema_contract_upgrade(client, "architect", 0)
+        after = _workbench(client)
+
+    assert stale.status_code == 409
+    stale_body = stale.json()
+    assert set(stale_body) == {
+        "code",
+        "expected_lock_version",
+        "current_lock_version",
+        "client_candidate",
+        "server",
+    }
+    assert stale_body["code"] == "stale_draft"
+    assert stale_body["expected_lock_version"] == 0
+    assert stale_body["current_lock_version"] == 1
+    assert stale_body["client_candidate"] is None
+    assert stale_body["server"]["draft"] == after["draft"]
+    assert set(stale_body["server"]["definitions"]) == set(EXPECTED_TOPOLOGY_ORDER) - {"foreman"}
+    for agent_key, definition in stale_body["server"]["definitions"].items():
+        assert definition == _model_node(after, agent_key)["draft"]
+
+
+def test_schema_contract_upgrade_already_current_plus_stale_is_coherent_409(
+    session_factory, monkeypatch
+):
+    """Pins stale-before-already-current ordering in the schema-contract upgrade route.
+
+    Corrections 52/53: the stale check outranks the already_current check, so
+    already-current+stale returns 409 (not 422).  The 409 body carries
+    schema_contract.version so the client needs no second round trip to discover
+    the contract is already current.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        # lock is now 1; send stale lock=0 on already-v2 content
+        stale_and_current = _post_schema_contract_upgrade(client, "architect", 0)
+        after = _workbench(client)
+
+    assert stale_and_current.status_code == 409
+    body = stale_and_current.json()
+    assert body["code"] == "stale_draft"
+    assert body["expected_lock_version"] == 0
+    assert body["current_lock_version"] == 1
+    assert body["client_candidate"] is None
+    # The conflict body carries schema_contract.version so client infers already current
+    assert (
+        body["server"]["definitions"]["architect"]["schema_contract"]["version"] == 2
+    )
+    assert body["server"]["draft"] == after["draft"]
+
+
+def test_schema_contract_upgrade_route_non_admin_denied_before_body_parse(
+    session_factory, monkeypatch
+):
+    """Catches a schema-contract upgrade route that parses the body before auth."""
+    _force_admin(monkeypatch, is_admin=False)
+    with _app_for(session_factory) as client:
+        response = client.post(
+            _schema_contract_upgrade_url(),
+            content=b"{not json; should not be parsed}",
+            headers={"content-type": "application/json"},
+        )
+    assert response.status_code == 403
+
+
+def test_schema_contract_upgrade_route_requires_trusted_principal_before_body_parse(
+    session_factory, monkeypatch
+):
+    """Catches a schema-contract upgrade route that reaches the facade without a principal."""
+    _force_admin(monkeypatch, is_admin=True)
+    set_current_user(None)
+    calls: list[str] = []
+
+    def _must_not_reach(*_args, **_kwargs):
+        calls.append("facade")
+        raise AssertionError("missing principal reached the facade")
+
+    monkeypatch.setattr(
+        GraphConfiguration, "upgrade_draft_schema_contract", _must_not_reach
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[agent_definition_routes.require_admin] = lambda: None
+
+    def _override_db_t5() -> Iterator[Session]:
+        with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_db_t5
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            _schema_contract_upgrade_url("data_analyst"),
+            content=b"{not json; should not be parsed}",
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Authenticated principal required"}
+
+
+@pytest.mark.parametrize("agent_key", ["unknown", "foreman"])
+def test_schema_contract_upgrade_route_rejects_unknown_or_deterministic_agent_key(
+    session_factory, monkeypatch, agent_key
+):
+    """Catches a schema-contract upgrade route that ignores the agent_key guard."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        response = client.post(
+            _schema_contract_upgrade_url(agent_key), json={"lock_version": 0}
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "agent_key",
+                "code": "unknown_agent",
+                "message": "Agent key must identify an editable model role.",
+            }
+        ],
+    }
+    assert after == before
+
+
+def test_schema_contract_upgrade_route_accepts_only_strict_lock_version_body(
+    session_factory, monkeypatch
+):
+    """Catches a schema-contract upgrade accepting anything beyond a lock_version body."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.post(
+            _schema_contract_upgrade_url(),
+            json={"lock_version": 0, "schema_overlay": {"field_overrides": {}}},
+        )
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": _extra_forbidden_errors("schema_overlay"),
+    }
+
+
+def test_schema_contract_upgrade_route_rejects_malformed_json(
+    session_factory, monkeypatch
+):
+    """Catches a schema-contract upgrade route that swallows JSON parse errors."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        response = client.post(
+            _schema_contract_upgrade_url(),
+            content=b'{"lock_version": ',
+            headers={"content-type": "application/json"},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json() == MALFORMED_JSON_BODY
+    assert after == before
+
+
+def test_schema_contract_upgrade_route_persisted_integrity_error_is_nonleaking(
+    session_factory, monkeypatch
+):
+    """Catches a leaking 500 from the schema-contract upgrade route."""
+    _force_admin(monkeypatch, is_admin=True)
+    _remove_draft_agent(session_factory)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        response = client.post(
+            _schema_contract_upgrade_url("architect"), json={"lock_version": 0}
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Graph configuration is incomplete"}
+
+
+def test_put_accepts_schema_overlay_and_round_trips_via_workbench(
+    session_factory, monkeypatch
+):
+    """Catches a PUT route that ignores or drops the schema_overlay field."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        node = _model_node(_workbench(client), "architect")
+        candidate = _editable_candidate(node)
+        candidate["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 1, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["definition"]["schema_overlay"]["additional_optional_fields"] == [
+        "diagnostic_notes"
+    ]
+    assert _model_node(after, "architect")["draft"]["schema_overlay"][
+        "additional_optional_fields"
+    ] == ["diagnostic_notes"]
+
+
+def test_put_null_schema_overlay_retains_stored_overlay(
+    session_factory, monkeypatch
+):
+    """Catches a route that clears the overlay when schema_overlay is omitted."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        node = _model_node(_workbench(client), "architect")
+        # First save: add optional field
+        first = _editable_candidate(node)
+        first["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+        r1 = client.put(_draft_save_url(), json={"lock_version": 1, "candidate": first})
+        assert r1.status_code == 200
+        # Second save: omit schema_overlay entirely — must retain prior value
+        second = _editable_candidate(_model_node(_workbench(client), "architect"))
+        assert "schema_overlay" not in second
+        r2 = client.put(_draft_save_url(), json={"lock_version": 2, "candidate": second})
+        after = _workbench(client)
+
+    assert r2.status_code == 200
+    assert _model_node(after, "architect")["draft"]["schema_overlay"][
+        "additional_optional_fields"
+    ] == ["diagnostic_notes"]
+
+
+def test_put_schema_overlay_same_content_reports_unchanged(
+    session_factory, monkeypatch
+):
+    """Catches a route that marks every overlay save as changed."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        node = _model_node(_workbench(client), "architect")
+        candidate = _editable_candidate(node)
+        candidate["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+        r1 = client.put(_draft_save_url(), json={"lock_version": 1, "candidate": candidate})
+        assert r1.status_code == 200
+        assert r1.json()["changed"] is True
+        # Resend the same overlay — must report unchanged
+        same_candidate = _editable_candidate(_model_node(_workbench(client), "architect"))
+        same_candidate["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+        r2 = client.put(
+            _draft_save_url(), json={"lock_version": 2, "candidate": same_candidate}
+        )
+
+    assert r2.status_code == 200
+    assert r2.json()["changed"] is False
+
+
+def test_put_schema_overlay_type_field_is_rejected_as_extra_forbidden(
+    session_factory, monkeypatch
+):
+    """Catches a route that admits a protected top-level key inside schema_overlay.
+
+    Controller sabotage: switch EditableSchemaOverlayRequest from extra='forbid'
+    to extra='allow'.  A 'type' key at the overlay root then passes through silently.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        node = _model_node(before, "architect")
+        candidate = _editable_candidate(node)
+        candidate["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": [],
+            "type": "object",
+        }
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": _extra_forbidden_errors("candidate.schema_overlay.type"),
+    }
+    assert after == before
+
+
+def test_put_schema_overlay_domain_rejections_carry_candidate_prefix(
+    session_factory, monkeypatch
+):
+    """Catches a route that strips or mis-prefixes overlay domain issues."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        node = _model_node(before, "architect")
+        candidate = _editable_candidate(node)
+        candidate["schema_overlay"] = {
+            "field_overrides": {"no_such_field": {"description": "x"}},
+            "additional_optional_fields": [],
+        }
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "invalid_draft"
+    assert (
+        body["errors"][0]["field"]
+        == "candidate.schema_overlay.field_overrides.no_such_field"
+    )
+    assert body["errors"][0]["code"] == "overlay_unknown_canonical_field"
+    assert after == before
+
+
+def test_put_schema_overlay_guidance_forbidden_property_is_domain_rejected(
+    session_factory, monkeypatch
+):
+    """Catches a route that passes a 'type' guidance property without domain rejection."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        before = _workbench(client)
+        # architect has 'intent' as a canonical field; 'type' inside guidance is forbidden
+        candidate = _editable_candidate(_model_node(before, "architect"))
+        candidate["schema_overlay"] = {
+            "field_overrides": {"intent": {"type": "string"}},
+            "additional_optional_fields": [],
+        }
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "invalid_draft"
+    errors = body["errors"]
+    assert len(errors) == 1
+    assert errors[0]["field"] == "candidate.schema_overlay.field_overrides.intent.type"
+    assert errors[0]["code"] == "overlay_guidance_property_forbidden"
+    assert errors[0]["message"] == "Only description and examples are editable."
+    assert after == before
+
+
+def test_put_schema_overlay_invalid_plus_stale_returns_ordered_422(
+    session_factory, monkeypatch
+):
+    """Catches a route that returns 409 instead of 422 for invalid+stale overlay.
+
+    Correction 16: local_candidate_validators run before the stale check, so an
+    invalid candidate returns 422 even when the lock is stale.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        # Advance the lock so lock=0 is stale
+        _edit_prompt_by_one_code_point(client, "architect", 0)
+        before = _workbench(client)
+        node = _model_node(before, "architect")
+        candidate = _editable_candidate(node)
+        # Invalid overlay: no_such_field does not exist
+        candidate["schema_overlay"] = {
+            "field_overrides": {"no_such_field": {"description": "x"}},
+            "additional_optional_fields": [],
+        }
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "invalid_draft"
+    assert (
+        body["errors"][0]["field"]
+        == "candidate.schema_overlay.field_overrides.no_such_field"
+    )
+    assert body["errors"][0]["code"] == "overlay_unknown_canonical_field"
+    assert after == before
+
+
+def test_put_valid_schema_overlay_plus_stale_lock_returns_coherent_409(
+    session_factory, monkeypatch
+):
+    """Catches a route that 422s a valid overlay with a stale lock.
+
+    Correction 16: a valid candidate with a stale lock returns 409.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        _edit_prompt_by_one_code_point(client, "architect", 0)
+        before = _workbench(client)
+        node = _model_node(before, "architect")
+        candidate = _editable_candidate(node)
+        # Valid but empty overlay; stale lock=0
+        candidate["schema_overlay"] = {"field_overrides": {}, "additional_optional_fields": []}
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+        after = _workbench(client)
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "stale_draft"
+    assert body["expected_lock_version"] == 0
+    assert body["current_lock_version"] == 1
+    # schema_overlay is echoed as part of the candidate
+    assert body["client_candidate"]["schema_overlay"] == {
+        "field_overrides": {},
+        "additional_optional_fields": [],
+    }
+    assert set(body["server"]["definitions"]) == set(EXPECTED_TOPOLOGY_ORDER) - {"foreman"}
+    assert after == before
+
+
+def test_put_schema_overlay_stale_conflict_echoes_overlay_in_client_candidate(
+    session_factory, monkeypatch
+):
+    """Catches a stale echo built without the schema_overlay field."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        _edit_prompt_by_one_code_point(client, "architect", 0)
+        node = _model_node(_workbench(client), "architect")
+        candidate = _editable_candidate(node)
+        candidate["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": [],
+        }
+        response = client.put(
+            _draft_save_url(),
+            json={"lock_version": 0, "candidate": candidate},
+        )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert "schema_overlay" in body["client_candidate"]
+    assert body["client_candidate"]["schema_overlay"] == {
+        "field_overrides": {},
+        "additional_optional_fields": [],
+    }
+
+
+def test_schema_upgrade_exposes_v2_selectable_optional_field_descriptors(
+    session_factory, monkeypatch
+):
+    """Catches a response that omits or corrupts optional field descriptor display data."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        after = _workbench(client)
+
+    node = _model_node(after, "architect")
+    # v2 draft must expose exactly one descriptor -- diagnostic_notes
+    draft_descriptors = node["draft"]["selectable_optional_fields"]
+    assert len(draft_descriptors) == 1
+    descriptor = draft_descriptors[0]
+    expected = _descriptor_material(_V2_OPTIONAL_DESCRIPTORS["architect"])
+    assert descriptor == expected
+    # published is still v1 -- no descriptors
+    assert node["published"]["selectable_optional_fields"] == []
+    # Other roles with v1 schema_contract still have no descriptors
+    data_analyst = _model_node(after, "data_analyst")
+    assert data_analyst["draft"]["selectable_optional_fields"] == []
+
+
+def test_v1_schema_has_no_selectable_optional_fields(
+    session_factory, monkeypatch
+):
+    """Catches a response that returns descriptors for v1 schemas."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        body = _workbench(client)
+
+    for node in _model_nodes(body):
+        assert node["draft"]["selectable_optional_fields"] == []
+        assert node["published"]["selectable_optional_fields"] == []
+
+
+def test_schema_contract_upgrade_response_includes_selectable_optional_fields(
+    session_factory, monkeypatch
+):
+    """Catches an upgrade success response that omits the descriptor display data."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = _post_schema_contract_upgrade(client, "data_analyst", 0)
+
+    assert response.status_code == 200
+    definition = response.json()["definition"]
+    assert "selectable_optional_fields" in definition
+    assert len(definition["selectable_optional_fields"]) == 1
+    expected = _descriptor_material(_V2_OPTIONAL_DESCRIPTORS["data_analyst"])
+    assert definition["selectable_optional_fields"][0] == expected
+
+
+def test_schema_contract_upgrade_route_exact_seven_stale_conflict_snapshot(
+    session_factory, monkeypatch
+):
+    """Catches a stale schema-contract upgrade that drops definitions or mixes roles."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        # Advance the lock so lock=0 is stale
+        assert _post_schema_contract_upgrade(client, "architect", 0).status_code == 200
+        stale = _post_schema_contract_upgrade(client, "architect", 0)
+        after = _workbench(client)
+
+    assert stale.status_code == 409
+    server = stale.json()["server"]
+    assert set(server["definitions"]) == set(EXPECTED_TOPOLOGY_ORDER) - {"foreman"}
+    for agent_key, definition in server["definitions"].items():
+        assert definition == _model_node(after, agent_key)["draft"]
+        # Every definition in the snapshot must carry selectable_optional_fields
+        assert "selectable_optional_fields" in definition

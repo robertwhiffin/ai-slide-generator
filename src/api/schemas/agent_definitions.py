@@ -16,6 +16,10 @@ from pydantic import (
     model_validator,
 )
 
+from src.services.agent_schema_registry import (
+    SCHEMA_CONTRACT_BUNDLES,
+    _descriptor_material,
+)
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
@@ -144,6 +148,14 @@ class _DefinitionContentResponse(_AttributeResponse):
     protected_stage_view: tuple[ProtectedStageViewResponse, ...] = Field(
         validation_alias=AliasChoices("protected_stage_view", "content")
     )
+    #: Read-only descriptor display data for the optional fields available for
+    #: this schema contract version.  Empty for v1; one entry for v2.  Never a
+    #: request field — the client may display it and select from it, but the
+    #: server computes it from the registry; it is never accepted from the wire.
+    selectable_optional_fields: tuple[dict[str, object], ...] = Field(
+        validation_alias=AliasChoices("selectable_optional_fields", "content"),
+        default=(),
+    )
 
     @field_validator("protected_stage_view", mode="before")
     @classmethod
@@ -154,6 +166,19 @@ class _DefinitionContentResponse(_AttributeResponse):
                 agent_key=value.agent_key,
                 identity=value.protected_assembly,
             )
+        return value
+
+    @field_validator("selectable_optional_fields", mode="before")
+    @classmethod
+    def derive_selectable_optional_fields(cls, value: object) -> object:
+        """Read the registry's descriptor list for the stored schema contract version."""
+        if isinstance(value, DefinitionContent):
+            bundle = SCHEMA_CONTRACT_BUNDLES.get(
+                (value.agent_key, value.schema_contract.version)
+            )
+            if bundle is None:
+                return ()
+            return tuple(_descriptor_material(d) for d in bundle.optional_fields)
         return value
 
 
@@ -269,10 +294,24 @@ class EditableAssemblyRulesRequest(_StrictDraftRequest):
     custom_blocks: list[CustomTextBlockRequest]
 
 
+class EditableSchemaOverlayRequest(_StrictDraftRequest):
+    """Editable overlay request.  Extra top-level keys are rejected via extra='forbid'.
+
+    Inner ``field_overrides`` values are ``dict[str, object]`` so that extra guidance
+    properties pass through to the domain validator, which reports them as the stable
+    ``overlay_guidance_property_forbidden`` domain issue rather than leaking Pydantic's
+    own implementation message.
+    """
+
+    field_overrides: dict[str, object] = Field(default_factory=dict)
+    additional_optional_fields: list[str] = Field(default_factory=list)
+
+
 class EditableModelDraftRequest(_StrictDraftRequest):
     prompt_text: str
     model: EditableModelDraftModelRequest
     assembly_rules: EditableAssemblyRulesRequest | None = None
+    schema_overlay: EditableSchemaOverlayRequest | None = None
 
     @field_validator("prompt_text", mode="after")
     @classmethod

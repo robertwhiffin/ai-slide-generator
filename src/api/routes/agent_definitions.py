@@ -24,11 +24,13 @@ from src.api.schemas.agent_definitions import (
     EditableAssemblyRulesRequest,
     EditableModelDraftModelRequest,
     EditableModelDraftRequest,
+    EditableSchemaOverlayRequest,
     GraphWorkbenchResponse,
     LegacyPromptSourceResponse,
 )
 from src.core.database import get_db
 from src.core.user_context import get_current_user
+from src.services.agent_schema_types import SchemaOverlay
 from src.services.graph_configuration import (
     DraftContentRejected,
     DraftLegacyPromptSource,
@@ -73,6 +75,15 @@ _OWNED_FIELD_MESSAGES = {
 }
 
 
+_OWNED_SCHEMA_OVERLAY_MESSAGES = {
+    ("candidate.schema_overlay", "strict_type"): "Schema overlay must be an object.",
+    ("candidate.schema_overlay.field_overrides", "strict_type"): (
+        "Field overrides must be an object."
+    ),
+    ("candidate.schema_overlay.additional_optional_fields", "strict_type"): (
+        "Additional optional fields must be an array."
+    ),
+}
 _OWNED_ASSEMBLY_MESSAGES = {
     ("candidate.assembly_rules", "strict_type"): "Assembly rules must be an object.",
     (
@@ -149,7 +160,7 @@ def _validation_error_code(field: str, error_type: str, error_input: object) -> 
         if shape == "candidate.assembly_rules.custom_blocks.*.condition":
             return "unknown_condition" if isinstance(error_input, str) else "strict_type"
         return "strict_type"
-    if error_type in {"uuid_type", "uuid_parsing", "list_type", "tuple_type"}:
+    if error_type in {"uuid_type", "uuid_parsing", "list_type", "tuple_type", "dict_type"}:
         return "strict_type"
     if error_type in {"greater_than", "greater_than_equal"}:
         return "positive_integer" if field == "candidate.model.max_tokens" else "out_of_range"
@@ -179,9 +190,11 @@ def _request_error_message(
         return owned
     if error["type"] in {"missing", "extra_forbidden"}:
         return str(error["msg"])
-    return _OWNED_ASSEMBLY_MESSAGES.get(
-        (_field_shape(field), code), str(error["msg"])
-    )
+    shape = _field_shape(field)
+    overlay_msg = _OWNED_SCHEMA_OVERLAY_MESSAGES.get((shape, code))
+    if overlay_msg is not None:
+        return overlay_msg
+    return _OWNED_ASSEMBLY_MESSAGES.get((shape, code), str(error["msg"]))
 
 
 def _request_validation_errors(exc: ValidationError) -> list[DraftFieldErrorResponse]:
@@ -258,6 +271,20 @@ async def _parse_lock_request(
         return _draft_validation_response(_request_validation_errors(exc))
 
 
+def _domain_schema_overlay(
+    overlay: EditableSchemaOverlayRequest | None,
+) -> SchemaOverlay | None:
+    """Convert the parsed wire overlay to the domain type, or leave stored as-is."""
+    if overlay is None:
+        return None
+    return SchemaOverlay.model_validate(
+        {
+            "field_overrides": overlay.field_overrides,
+            "additional_optional_fields": overlay.additional_optional_fields,
+        }
+    )
+
+
 def _domain_assembly_rules(
     rules: EditableAssemblyRulesRequest | None,
 ) -> AssemblyRulesV2 | None:
@@ -271,6 +298,18 @@ def _client_candidate_response(
     candidate: EditableModelDraft,
 ) -> EditableModelDraftRequest:
     """Serialize exactly the candidate the locked facade returned, nothing else."""
+    overlay: EditableSchemaOverlayRequest | None = None
+    if candidate.schema_overlay is not None:
+        overlay = EditableSchemaOverlayRequest(
+            field_overrides=dict(
+                candidate.schema_overlay.serialize_field_overrides(
+                    candidate.schema_overlay.field_overrides
+                )
+            ),
+            additional_optional_fields=list(
+                candidate.schema_overlay.additional_optional_fields
+            ),
+        )
     return EditableModelDraftRequest(
         prompt_text=candidate.prompt_text,
         model=EditableModelDraftModelRequest(
@@ -296,6 +335,7 @@ def _client_candidate_response(
                 ],
             )
         ),
+        schema_overlay=overlay,
     )
 
 
@@ -354,6 +394,7 @@ async def save_agent_definition_draft(
         max_tokens=save_request.candidate.model.max_tokens,
         top_p=save_request.candidate.model.top_p,
         assembly_rules=_domain_assembly_rules(save_request.candidate.assembly_rules),
+        schema_overlay=_domain_schema_overlay(save_request.candidate.schema_overlay),
     )
     try:
         outcome = GraphConfiguration().save_editable_model_draft(
@@ -422,6 +463,46 @@ async def upgrade_agent_definition_protected_assembly(
         return _conflict_response(outcome, client_candidate=None)
 
     raise AssertionError(f"Unexpected upgrade outcome: {type(outcome)!r}")
+
+
+@router.post(
+    "/draft/{agent_key}/schema-contract-upgrade",
+    response_model=DraftSaveSuccessResponse,
+)
+async def upgrade_agent_definition_schema_contract(
+    request: Request,
+    agent_key: str,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    db: Session = Depends(get_db),
+) -> DraftSaveSuccessResponse | JSONResponse:
+    """Apply the one permitted v1 to v2 schema-contract upgrade through the locked facade."""
+    parsed = await _parse_lock_request(request, agent_key)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+
+    try:
+        outcome = GraphConfiguration().upgrade_draft_schema_contract(
+            db,
+            agent_key=cast(AgentKey, agent_key),
+            expected_lock_version=parsed.lock_version,
+            actor=actor,
+        )
+    except DraftContentRejected as exc:
+        return _rejection_response(exc)
+    except GraphConfigurationIntegrityError as exc:
+        logger.exception("Persisted Graph Configuration is incomplete")
+        raise HTTPException(
+            status_code=500,
+            detail="Graph configuration is incomplete",
+        ) from exc
+
+    if isinstance(outcome, DraftSaveResult):
+        return DraftSaveSuccessResponse.model_validate(outcome, from_attributes=True)
+
+    if isinstance(outcome, DraftSaveConflict):
+        return _conflict_response(outcome, client_candidate=None)
+
+    raise AssertionError(f"Unexpected schema-contract upgrade outcome: {type(outcome)!r}")
 
 
 @router.post(
