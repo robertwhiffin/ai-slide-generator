@@ -1260,3 +1260,47 @@ docstring narrowing.
 **Cost if wrong:** an unreviewed test-only diff in one file reaches #264's whole-branch review,
 which reads the full branch anyway. Both F5 and F6 are already queued there, so that reviewer
 sees this file regardless.
+
+## Correction 59 — Task 5 complete; the brief's 422/409 warning earned its space
+
+Task 5 landed at `3f102c666`, `feat: expose safe schema overlay editing`: 742 insertions across
+`src/api/schemas/agent_definitions.py`, `src/api/routes/agent_definitions.py` and
+`tests/unit/test_agent_definition_workbench_routes.py`. Gate, with the command per correction 58:
+
+```
+PYTHONPATH=<worktree> /Users/robert.whiffin/.pyenv/shims/python -m pytest -q \
+  tests/unit/test_agent_definition_workbench_routes.py
+  => 148 passed
+```
+
+RED before GREEN was an `ImportError` on `EditableSchemaOverlayRequest` with 0 tests collected.
+That is a legitimate RED for a missing module but a **weak** one — it proves the symbol is absent,
+not that any behaviour is pinned. The load-bearing proof is the sabotage below.
+
+**Controller sabotage, reproduced independently.** The plan assigns the controller "admits
+protected `type`". Replacing `EditableSchemaOverlayRequest`'s strict base with a permissive one:
+
+```
+RED 1/148 — test_put_schema_overlay_type_field_is_rejected_as_extra_forbidden
+restored with a verified SHA match; 148 passed
+```
+
+Same test the implementer named, measured here rather than relayed.
+
+**The notable part: the implementer self-corrected on the trap this brief was written to prevent.**
+Its first test asserted `already_current + stale -> 422`. That is wrong — corrections 52/53 pin it
+to a coherent **409**, because the stale check outranks the already-current comparison. It caught
+this, replaced the test with
+`test_schema_contract_upgrade_already_current_plus_stale_is_coherent_409`, and disclosed the
+correction unprompted. Verified: the wrong test name has **zero** occurrences in the file, and the
+replacement's docstring cites the ordering and the `schema_contract.version` body.
+
+Worth recording because I nearly made the same error in the opposite direction while writing the
+brief — I began drafting a correction claiming the plan's 422 contradicted correction 16, checked
+before writing it, and found the plan right. Two cases, two codes, and the pair has now confused
+the controller once and the implementer once. The brief's explicit table is what caught the second
+one; #264's whole-branch review should consider whether the production code deserves the same
+table as a comment at the branch point.
+
+Task 5's independent review is dispatched with a **different** sabotage target — issue ordering and
+the exact-seven 409 snapshot validation — so the controller's and reviewer's targets do not overlap.
