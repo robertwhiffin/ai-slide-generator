@@ -2077,9 +2077,23 @@ def _upgrade_schema(
         )
 
 
+# Literal v2 digests, kept honest by AgentSchemaRegistry.__init__'s frozen-digest
+# check which fails closed at module import (M19 confirmed: changing any digest here
+# produces SchemaContractMaterialChangedError before a single test runs).
+# Source of truth: src/services/agent_schema_registry._V2_DIGESTS.
+_V2_SCHEMA_DIGESTS: dict[str, str] = {
+    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
+    "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
+    "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
+    "fixer": "a77a9896705534109179e75a542eec212dbb25fd78582dff256d6b6c976a6143",
+    "fix_reviewer": "bbe6bf025d5c2e5dcbe1c23db029caff425890602f7e3819c6472c46e7fdfd99",
+    "deck_reviewer": "c466043b24678ceef8c80d3707f7e80672275415a8b1c0e4385f94bfea7104d3",
+}
+
+
 def _v2_schema_identity(agent_key: str = "architect") -> ContentIdentity:
-    identity = AgentSchemaRegistry().identity_for(agent_key, 2)
-    return ContentIdentity(version=identity.version, digest=identity.digest)
+    return ContentIdentity(version=2, digest=_V2_SCHEMA_DIGESTS[agent_key])
 
 
 # ---------------------------------------------------------------------------
@@ -2376,15 +2390,15 @@ def test_a_client_overlay_never_reaches_the_protected_identity(session_factory) 
 
 
 def test_content_identity_cannot_carry_a_role_so_the_pydantic_carrier_gate_is_safe() -> None:
-    """Guards the reachable half of the registry's identity-carrier gate.
+    """Pins the field set of ContentIdentity so that widening it is loud rather than silent.
 
-    Task 4 is the first live caller to route a *Pydantic* identity carrier through
-    ``_replacement_schema_contract_identity``.  Its BaseModel branch revalidates
-    only ``version``/``digest``, so a carrier that also held ``agent_key`` would
-    silently retain its own role (defaulted) or raise a generic ``ValidationError``
-    (required) — the two failure modes the dataclass branch names and refuses.
-    ``ContentIdentity`` is safe because it carries no role.  Widening it to the
-    full identity triple must fail here rather than in the registry.
+    The registry's carrier gate (``_replacement_schema_contract_identity``) revalidates
+    only ``version`` and ``digest``; a carrier that also held ``agent_key`` would
+    silently retain its own role.  The primary safety guard is the
+    protected-assembly digest check, which fails closed at **import** time if
+    ``ContentIdentity`` is widened (confirmed by M17).  This assertion is belt-and-braces:
+    it pins the exact field set so a widening is visible at the unit-test gate rather
+    than discovered only at import.
     """
     assert set(ContentIdentity.model_fields) == {"version", "digest"}
 
@@ -2518,6 +2532,74 @@ def test_a_stale_schema_upgrade_is_a_coherent_409_that_writes_nothing(
     assert write_log == []
     assert _stored_content(session_factory) == (seeded, seeded_hash)
     assert _database_snapshot(session_factory) == before_db
+
+
+def test_stale_schema_upgrade_is_a_conflict_even_when_content_is_already_current(
+    session_factory, monkeypatch
+) -> None:
+    """Pins the stale-before-already-current ordering in upgrade_draft_schema_contract.
+
+    Correction 52 rules: the stale check must outrank ``already_current``.  R2 (flip
+    ``already_current`` ahead of the stale check) REDs 0/116 focused tests without
+    this guard — any later agent can silently revert the ruling.  Modelled on the
+    sibling precedent
+    ``test_repeated_upgrade_is_already_current_only_for_a_current_request`` (line
+    1560), which tests the same combination for ``upgrade_draft_protected_assembly``.
+
+    The conflict body must carry ``schema_contract.version`` so the client can infer
+    the contract is already current without a second round trip.
+    """
+    # First upgrade brings content to v2; lock_version advances from 0 to 1.
+    assert isinstance(_upgrade_schema(session_factory, lock_version=0), DraftSaveResult)
+    before_db = _database_snapshot(session_factory)
+    upgrade_calls: list[str] = []
+    original_upgrade = draft_module.upgrade_content_to_v2
+
+    def _spy_upgrade(content):
+        upgrade_calls.append(content.agent_key)
+        return original_upgrade(content)
+
+    # Spy on the upgrade authority: the stale short-circuit must fire before any
+    # upgrade is attempted.
+    monkeypatch.setattr(draft_module, "upgrade_content_to_v2", _spy_upgrade)
+
+    # Stale request (lock_version=0) on content that is already v2 (current lock=1).
+    result = _upgrade_schema(
+        session_factory, lock_version=0, actor="test:already-current-stale"
+    )
+
+    assert isinstance(result, DraftSaveConflict)
+    assert result.expected_lock_version == 0
+    assert result.current_lock_version == 1
+    assert result.client_candidate is None
+    # The 409 body carries schema_contract.version: one round trip suffices.
+    assert result.server.definitions["architect"].content.schema_contract.version == 2
+    assert upgrade_calls == []
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_schema_upgrade_path_performs_exactly_one_row_lookup(
+    session_factory, monkeypatch
+) -> None:
+    """Pins the no-second-lookup clause on the new upgrade entry point.
+
+    The plan forbids a second row lookup on the draft-write path.  R1 adding a second
+    writer REDs 12 across two scopes; R7 adding a second lookup REDs 0 without this
+    test.  This makes the lookup clause as enforceable as the writer clause.
+    """
+    read_log: list[str] = []
+    original_read = GraphConfiguration._read_workbench_for_draft_write
+
+    def _spy_read(self, session, *, agent_key):
+        read_log.append("read")
+        return original_read(self, session, agent_key=agent_key)
+
+    monkeypatch.setattr(GraphConfiguration, "_read_workbench_for_draft_write", _spy_read)
+
+    result = _upgrade_schema(session_factory, lock_version=0, actor="test:one-lookup")
+
+    assert isinstance(result, DraftSaveResult)
+    assert read_log == ["read"]
 
 
 def test_an_invalid_plus_stale_schema_upgrade_is_an_ordered_422(
