@@ -47,3 +47,15 @@ These are open questions 1–9 in the plan:
 ## Before execution
 
 Run an independent plan review against the issue, the design, #269's plan and corrections, and the code.
+
+## Controller rulings on the planner's open questions — 2026-09-26
+Ruling: OQ1 (Q7) — three-way draft rebase ACCEPTED: per role, a draft equal to the pre-rollback active content resets to the restored content; a pending edit is kept exactly. Reported to the user as a visible behaviour they may override. Cost if wrong: the rollback's draft effect differs from what admins expect.
+Ruling: OQ2 — refuse a rollback to the active release, or to a mapping identical to the active one, with 409. Cost if wrong: a no-op rollback is refused rather than silently succeeding.
+Ruling: OQ3 — link all of the selected source release's linked runs with `source_release_id` = the selected source (not the release that originally approved each). Cost if wrong: provenance points one hop short.
+Ruling: OQ4 — for v1, `changed_agents` lists all seven roles. Cost if wrong: a display difference.
+Ruling: OQ5 — exact whole-name exemptions only; controls must use FIXED accessible names (e.g. "Roll back to this version", "Inspect this version") scoped by their row, with the version number in visible text or a description, never a numbered accessible name. Cost if wrong: one Playwright locator style.
+Ruling: OQ6 — keep the draft `lock_version` stale check (conservative: an unrelated draft save between preview and confirm forces a re-preview). Cost if wrong: an occasional extra 409 and retry.
+Ruling: OQ7 — logs carry only the outcome code and role key names. Consistent with the user's log decision.
+Ruling: OQ8 — #270 follows whatever router module #269 lands. Cost if wrong: none.
+Ruling: OQ9 — rollback does NOT block on the remote endpoint check (no network call under the publication lock), but the rollback PREVIEW runs #266's bounded remote endpoint validation outside any lock and shows a warning for any restored endpoint that no longer resolves. Cost if wrong: an admin can still restore a removed endpoint after a warning; pinned conversations then fail as §15 describes.
+Next: independent plan review, then corrections, before any execution (Task 1 Phase A is runnable at `a08389ec3`; Tasks 2+ wait for #268 and #269).
