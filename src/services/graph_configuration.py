@@ -28,6 +28,21 @@ from src.services.graph_configuration_draft import (
     RemoteEndpointDraftValidator,
     _GraphConfigurationDraft,
 )
+from src.services.graph_configuration_publication import (
+    EvidenceKind,
+    EvidenceLink,
+    NothingToPublish,
+    PublicationConflict,
+    PublicationEvidenceGate,
+    PublicationGap,
+    PublicationGapCode,
+    PublicationNotReady,
+    PublicationOutcome,
+    PublicationRejected,
+    PublishedMapping,
+    PublishedRelease,
+    _GraphConfigurationPublication,
+)
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
 from src.services.graph_configuration_workbench import (
     ActiveReleaseSnapshot,
@@ -45,11 +60,16 @@ if TYPE_CHECKING:
 
 
 class GraphConfiguration(
+    _GraphConfigurationPublication,
     _GraphConfigurationDraft,
     _GraphConfigurationWorkbench,
     _GraphConfigurationBootstrap,
 ):
-    """Read, edit, or atomically bootstrap the Graph Configuration aggregate."""
+    """Read, edit, publish, or atomically bootstrap the Graph Configuration aggregate.
+
+    ``_GraphConfigurationBootstrap`` and ``_GraphConfigurationPublication`` rely
+    on ``_GraphConfigurationWorkbench``'s parent lock through this MRO.
+    """
 
 
 def build_remote_endpoint_draft_validator() -> RemoteEndpointDraftValidator:
@@ -102,11 +122,23 @@ __all__ = [
     "DraftSaveResult",
     "DraftValidationIssue",
     "EditableModelDraft",
+    "EvidenceKind",
+    "EvidenceLink",
     "GraphConfiguration",
     "GraphConfigurationIntegrityError",
     "GraphWorkbenchSnapshot",
     "ModelAgentNodeSnapshot",
+    "NothingToPublish",
+    "PublicationConflict",
+    "PublicationEvidenceGate",
+    "PublicationGap",
+    "PublicationGapCode",
+    "PublicationNotReady",
+    "PublicationOutcome",
+    "PublicationRejected",
     "PublishedDefinitionSnapshot",
+    "PublishedMapping",
+    "PublishedRelease",
     "REQUIRED_SMOKE_PAYLOADS",
     "RemoteEndpointDraftValidator",
     "bootstrap_graph_configuration",
