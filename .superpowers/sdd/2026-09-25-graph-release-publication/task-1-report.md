@@ -133,3 +133,34 @@ The brief's controller (M01) and reviewer (M02) targets and the corrections' Tas
 2. **Three surviving mutants (M12, M13, M23)** are equivalent or defensive guards with no reachable input. I kept them as belt-and-braces and did not write tests that fake impossible states.
 3. **C8's reviewer prediction is partly wrong (M04):** `[interval_closed]` and `[draft_rebased]` RED with `PendingRollbackError`, not the predicted causes. It is still RED, but the recorded cause differs.
 4. The unit and PostgreSQL gate runs overlapped in time, with distinct `DATABASE_URL` files. Results are as listed above.
+
+## Fix round 1 (review PASS/APPROVE, 3 Minor + 2 ruled pins); base `6fe29ead3`
+
+**Commit:** `df4d4118d` test: pin stale-before-nothing, persisted lineage, bounded L0 order test, single-sourced parent lock (#269). It touches tests only; no production code changed. The report section is committed separately.
+
+| Finding | Status | Change |
+|---|---|---|
+| m1: stale before nothing-to-publish | addressed | New `test_stale_lock_with_nothing_changed_is_a_conflict_not_nothing_to_publish`. A save followed by a revert takes the lock 0→2, and every node reads `changed is False`. A publish at lock 0 returns exactly `PublicationConflict(0, 2, v1.id, 1, draft)`, writes nothing, and the gate is never called. |
+| m2: persisted lineage | addressed | The PostgreSQL exact test now asserts the persisted `v2.previous_release_id == v1.id` and `v2.restored_from_release_id is None`, plus `result.release.previous_release_id == v1.id`. |
+| m3: L0-order test hangs on failure | addressed | The holder is now rolled back in an inner `try/finally` inside the executor block, before the pool joins the publisher. The publisher's transaction runs `SET LOCAL lock_timeout = '30s'`. `future.result` is bounded at 60 s. |
+| Concern-1 (a): FOR SHARE `OF` order | addressed | New PostgreSQL `test_shared_parent_lock_names_release_before_draft`. It asserts that `read_workbench`'s first and only locking statement ends with `FOR SHARE OF GRAPH_RELEASE, GRAPH_DRAFT`. |
+| Concern-1 (b): single-sourced parent lock | addressed | New `tests/unit/test_graph_parent_lock_is_single_sourced.py`, an AST scan of `src/**/*.py`. Only `services/graph_configuration_workbench.py::_lock_current_parents` may combine `with_for_update` with both the `GraphRelease` and `GraphDraft` names, or hold a string literal that has `FOR UPDATE/SHARE` plus both table names. Release-only locks such as `conversation_pins._active_release_for_update` pass. A tmp-dir non-vacuity test proves the scanner reports an ORM rogue and a raw-SQL rogue, and ignores a release-only lock. |
+
+**Concern-1 correction:** my earlier concern ("the order is a planner choice") was wrong in its conclusion. M25 flipped only the `FROM` order. The reviewer is right: the order comes from the `OF` list, which is statement text, and it is now pinned for both modes, plus single-sourced.
+
+**Mutations** (each restored with `git checkout df4d4118d -- src tests`, then `git diff --exit-code` and a clean `grep MUTANT-`; the script is `/tmp/t269-1-fr1.py`):
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 | stale check only when some role changed | RED: the m1 test observes `NothingToPublish` |
+| F2 | new release `previous_release_id=None` | RED: `test_publication_is_exact_and_contiguous_on_postgresql` |
+| F3 | exclusive `of=(GraphDraft, GraphRelease)` | RED in 9 s wall (bounded): `test_parent_lock_statement_takes_release_before_draft` fails at the SKIP LOCKED assertion ("the waiting L0 statement must already hold the release"), and `test_publication_lock_statement_sequence` fails too |
+| F3-old | F3 against the **pre-fix** test from `256f2233c`, copied to a temporary file | **HUNG**, killed by `timeout 90` at 90 s. This proves m3 was real. The run leaked `tellr_int_cd98b01737cd428d`. That database was absent from the list captured immediately before the run and had 0 backends, so it was provably mine, and I dropped it. The list is back to the original 4. The temporary file was removed. |
+| F4 | shared `of=(GraphDraft, GraphRelease)` | RED: `test_shared_parent_lock_names_release_before_draft` |
+| F5 | a rogue `select(GraphDraft, GraphRelease).with_for_update()` in the publication module | RED: `test_only_lock_current_parents_locks_both_graph_parents` |
+
+**Gates** (`test ! -e .venv` held before and after):
+- **Focused unit** (the 7 files plus the new scanner file): 940 passed.
+- **Full unit suite:** 6 failed / 6822 passed / 110 skipped. The failures are the same 6 nodes with the same first lines (A×2, B×3, C×1).
+- **PostgreSQL** `test_graph_release_publication_postgres.py`: 10 passed, 0 skipped.
+- **Ruff:** clean on the three changed or new test files.
