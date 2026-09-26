@@ -21,6 +21,7 @@ import {
   listTestCases,
   retireTestCase,
   updateTestCase,
+  type TestRunEvidence,
 } from '../../../api/agentDefinitions';
 import { emptyAgentTestingState, type AgentTestingState } from './draftEditorState';
 import { TestRunPanel, type TestRunPanelProps } from './TestRunPanel';
@@ -484,6 +485,19 @@ function onlyCall(fetchMock: ReturnType<typeof vi.fn>) {
   return fetchMock.mock.calls[0] as [string, RequestInit];
 }
 
+/** A stored run carrying a recorded verdict (#268 C16): read back, so the flags are null. */
+function approvedEvidence(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
+  return syntheticTestRunEvidence({
+    candidate_is_current: null,
+    base_release_is_current: null,
+    verdict: 'approved',
+    verdict_reviewer: 'reviewer@test.com',
+    verdict_at: '2026-09-26T10:05:00Z',
+    verdict_notes: 'Looks right.',
+    ...overrides,
+  });
+}
+
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
   try {
     await promise;
@@ -534,7 +548,30 @@ describe('the test run client', () => {
   });
 
   it.each([
-    ['a verdict field #268 has not added', { ...syntheticTestRunEvidence(), verdict: 'approved' }],
+    ['an approval with notes', approvedEvidence()],
+    ['an approval without notes', approvedEvidence({ verdict_notes: null })],
+    ['a rejection', approvedEvidence({ verdict: 'rejected', verdict_notes: 'Wrong tone.' })],
+  ])('accepts stored evidence carrying %s', async (_label, body) => {
+    stubFetch(200, body);
+
+    await expect(getTestRun(501)).resolves.toEqual(body);
+  });
+
+  it.each([
+    ['an unknown key', { ...syntheticTestRunEvidence(), verdict_by: 'admin@test.com' }],
+    ['a missing verdict key', (() => {
+      const rest: Record<string, unknown> = { ...syntheticTestRunEvidence() };
+      delete rest.verdict_notes;
+      return rest;
+    })()],
+    ['an unknown verdict', { ...syntheticTestRunEvidence(), verdict: 'passed' }],
+    ['a verdict with no reviewer', { ...approvedEvidence(), verdict_reviewer: null }],
+    ['a verdict with no time', { ...approvedEvidence(), verdict_at: null }],
+    ['a reviewer with no verdict', syntheticTestRunEvidence({ verdict_reviewer: 'admin@test.com' })],
+    ['a time with no verdict', syntheticTestRunEvidence({ verdict_at: '2026-09-26T10:05:00Z' })],
+    ['notes with no verdict', syntheticTestRunEvidence({ verdict_notes: 'Orphan note.' })],
+    ['a non-string reviewer', { ...approvedEvidence(), verdict_reviewer: 7 }],
+    ['a non-string notes value', { ...approvedEvidence(), verdict_notes: 7 }],
     ['a missing field', (() => {
       const rest: Record<string, unknown> = { ...syntheticTestRunEvidence() };
       delete rest.run_by;

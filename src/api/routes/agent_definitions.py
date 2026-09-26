@@ -22,6 +22,7 @@ from src.api.schemas.agent_definitions import (
     DraftDefinitionResponse,
     DraftFieldErrorResponse,
     DraftLockRequest,
+    DraftReadinessResponse,
     DraftSaveConflictResponse,
     DraftSaveConflictServerResponse,
     DraftSaveRequest,
@@ -32,6 +33,7 @@ from src.api.schemas.agent_definitions import (
     EditableModelDraftRequest,
     EditableSchemaOverlayRequest,
     GraphWorkbenchResponse,
+    IneligibleForApprovalResponse,
     LegacyPromptSourceResponse,
     ModelEndpointCatalogErrorResponse,
     StructuredOutputProbeFailureResponse,
@@ -46,6 +48,8 @@ from src.api.schemas.agent_definitions import (
     TestRunListResponse,
     TestRunUnavailableResponse,
     UpdateTestCaseRequest,
+    VerdictRequest,
+    VerdictValidationErrorResponse,
 )
 from src.core import databricks_client
 from src.core.database import get_db
@@ -55,6 +59,7 @@ from src.services.agent_schema_types import SchemaOverlay
 from src.services.agent_test_workbench import (
     MAX_RUN_LIST_LIMIT,
     AgentTestWorkbench,
+    IneligibleForApprovalError,
     TestCaseNotFound,
     TestCaseRejected,
     TestCaseStale,
@@ -64,6 +69,7 @@ from src.services.agent_test_workbench import (
     TestRunEvidence,
     TestRunNotFound,
     TestRunUnavailable,
+    VerdictRejected,
 )
 from src.services.graph_configuration import (
     DraftContentRejected,
@@ -1228,3 +1234,132 @@ def list_agent_test_case_runs(
     except TestCaseNotFound as exc:
         raise _test_case_not_found() from exc
     return TestRunListResponse(items=[_test_run_response(run) for run in runs])
+
+
+# --- Verdicts and readiness (#268 Task 3) ------------------------------------
+# Still the one admin router (C15).  The verdict takes its reviewer from
+# ``require_draft_write_principal`` and reads the body only after both gates; the
+# body is exactly ``{verdict, notes}``.  The writer waits on the run row's L3
+# ``FOR UPDATE`` lock, so it runs in the threadpool (a body route must be
+# ``async`` to read the body).  Readiness waits on the shared L0 parent lock and
+# is a plain ``def`` handler, which FastAPI runs there.  An ``IntegrityError``
+# from the verdict write (the DDL checks, or #269's linked-verdict trigger) is
+# never mapped: it propagates as a 500 and #269 owns any friendlier mapping (C7).
+
+_INELIGIBLE_MESSAGES = {
+    "not_completed": "Only a completed run can take a verdict.",
+    "checks_failed": "A run whose deterministic checks failed cannot be approved.",
+}
+
+
+def _verdict_validation_response(errors: list[DraftFieldErrorResponse]) -> JSONResponse:
+    response = VerdictValidationErrorResponse(code="invalid_verdict", errors=errors)
+    return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
+
+
+def _ineligible_response(exc: IneligibleForApprovalError) -> JSONResponse:
+    response = IneligibleForApprovalResponse(
+        code="ineligible_for_approval",
+        reason=exc.reason,
+        message=_INELIGIBLE_MESSAGES[exc.reason],
+    )
+    return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
+
+
+async def _parse_verdict_request(request: Request) -> VerdictRequest | JSONResponse:
+    """Malformed JSON, then the strict body; every 422 is ``invalid_verdict``."""
+    try:
+        raw_body = await request.json()
+    except json.JSONDecodeError:
+        return _verdict_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field="$",
+                    code="invalid_json",
+                    message="Request body must be valid JSON.",
+                )
+            ]
+        )
+    try:
+        return VerdictRequest.model_validate(raw_body)
+    except ValidationError as exc:
+        return _verdict_validation_response(_request_validation_errors(exc))
+
+
+@router.post(
+    "/test-runs/{run_id}/verdict",
+    response_model=TestRunEvidenceResponse,
+    responses={
+        403: {"description": "Admin access or an authenticated principal required"},
+        404: {"description": "Test run not found"},
+        422: {"model": VerdictValidationErrorResponse | IneligibleForApprovalResponse},
+    },
+)
+async def record_agent_test_run_verdict(
+    request: Request,
+    run_id: int,
+    reviewer: Annotated[str, Depends(require_draft_write_principal)],
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> TestRunEvidenceResponse | JSONResponse:
+    """Approve or reject one stored run; returns its evidence with the verdict.
+
+    The reviewer is the authenticated principal, never a body field.  An
+    identical re-submit writes nothing and returns the stored evidence.
+    """
+    parsed = await _parse_verdict_request(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    if not _is_storable_row_id(run_id):
+        raise _test_run_not_found()
+    try:
+        evidence = await run_in_threadpool(
+            workbench.record_verdict,
+            db,
+            run_id=run_id,
+            verdict=parsed.verdict,
+            reviewer=reviewer,
+            notes=parsed.notes,
+        )
+    except VerdictRejected as exc:
+        if any(issue.field == "actor" for issue in exc.issues):
+            # The writer's blank-reviewer issue: the principal, not the body, is
+            # at fault, so it is the principal gate's 403, never a client 422.
+            raise HTTPException(
+                status_code=403,
+                detail="Authenticated principal required",
+            ) from exc
+        return _verdict_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field=issue.field, code=issue.code, message=issue.message
+                )
+                for issue in exc.issues
+            ]
+        )
+    except TestRunNotFound as exc:
+        raise _test_run_not_found() from exc
+    except IneligibleForApprovalError as exc:
+        return _ineligible_response(exc)
+    return _test_run_response(evidence)
+
+
+@router.get("/readiness", response_model=DraftReadinessResponse)
+def get_agent_definition_draft_readiness(
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> DraftReadinessResponse:
+    """Each changed role's required cases and whether they block publication.
+
+    Informational: #269's publication gate performs its own locked read.
+    """
+    try:
+        result = workbench.draft_readiness(db)
+    except GraphConfigurationIntegrityError as exc:
+        # Includes the un-retried parent-handoff diagnosis, as ``/workbench``.
+        logger.exception("Persisted Graph Configuration is incomplete")
+        raise HTTPException(
+            status_code=500,
+            detail="Graph configuration is incomplete",
+        ) from exc
+    return DraftReadinessResponse.model_validate(result, from_attributes=True)

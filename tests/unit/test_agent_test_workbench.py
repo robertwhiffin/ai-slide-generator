@@ -1172,6 +1172,13 @@ def test_a_completed_run_persists_one_row_with_null_verdict_columns(factory):
         None,
         None,
     )
+    # #268 C16: the evidence carries the four verdict fields, null until a verdict.
+    assert (
+        evidence.verdict,
+        evidence.verdict_reviewer,
+        evidence.verdict_at,
+        evidence.verdict_notes,
+    ) == (None, None, None, None)
 
 
 def test_no_candidate_sentinel_reaches_the_evidence_or_its_row(factory):
@@ -2497,6 +2504,12 @@ def test_an_identical_resubmit_writes_nothing_and_returns_the_stored_evidence(fa
     assert captured.updates() == []
     assert _full_row(factory, run_id) == before
     assert evidence.run_id == run_id
+    assert (
+        evidence.verdict,
+        evidence.verdict_reviewer,
+        evidence.verdict_at,
+        evidence.verdict_notes,
+    ) == ("approved", REVIEWER, _OLD_VERDICT_AT, "Looks right.")
 
 
 @pytest.mark.parametrize(
@@ -2523,7 +2536,7 @@ def test_any_changed_field_restamps_all_four_columns(factory, change):
     submitted.update(change)
     before = _evidence_columns(factory, run_id)
 
-    _record(factory, run_id=run_id, **submitted)
+    evidence = _record(factory, run_id=run_id, **submitted)
 
     verdict, reviewer, verdict_at, notes = _verdict_of(factory, run_id)
     assert (verdict, reviewer, notes) == (
@@ -2533,6 +2546,13 @@ def test_any_changed_field_restamps_all_four_columns(factory, change):
     )
     assert verdict_at is not None and verdict_at.replace(tzinfo=None) > _OLD_VERDICT_AT
     assert _evidence_columns(factory, run_id) == before
+    # The returned evidence is the re-stamped row, not the pre-write copy (#268 C16).
+    assert (
+        evidence.verdict,
+        evidence.verdict_reviewer,
+        evidence.verdict_at,
+        evidence.verdict_notes,
+    ) == (verdict, reviewer, verdict_at, notes)
 
 
 def test_the_lock_read_refreshes_a_run_already_cached_in_the_session(factory):
