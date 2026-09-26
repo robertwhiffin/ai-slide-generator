@@ -1457,6 +1457,24 @@ class AgentTestWorkbench:
         begins, commits or rolls back, takes no lock (no case lock: C11), writes
         nothing, and touches no runtime (C27).  Cases and runs are read in one
         statement (``_readiness_statement``).
+
+        Only ``session.in_transaction()`` is checked here.  The L0 precondition
+        cannot be checked in code; a caller without the parent lock gets a result
+        whose draft hashes may move underneath it.
+
+        INFORMATIONAL inside #269's publication, never the gate (#269 C32).  The
+        case writer (L2) and the verdict writer (L3) do not conflict with L0, so
+        a supersede, retirement, ``is_required`` flip, new case or verdict can
+        commit after this statement's snapshot.  The publication caller:
+
+        - must not decide publication on ``all_ready``, ``blocking_agents``,
+          ``missing_required_case`` or any case ``status``;
+        - must not link ``cases[].run_id``: it was read without an L3 lock;
+        - must do its own C29 locking: lock the changed roles' case rows
+          unfiltered in id order, re-select the active required cases in a new
+          statement, then lock the run rows it links;
+        - must not call this after any publication write: once the draft is
+          rebased every role reads unchanged and ``all_ready`` is ``True``.
         """
         if not session.in_transaction():
             raise RuntimeError(
