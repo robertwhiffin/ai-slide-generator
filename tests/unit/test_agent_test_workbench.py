@@ -3498,9 +3498,16 @@ def test_the_cleanup_statements_carry_every_protection_on_both_sides():
 
 
 def test_cleanup_never_touches_a_runtime(factory, monkeypatch):
-    """C27: cleanup resolves no runtime and touches no adapter."""
+    """C27: cleanup resolves no runtime and touches no adapter, on the DELETE path too.
+
+    Two runs of one case with ``per_case_limit=1`` put one run past the limit, so the
+    call reaches the lock-then-DELETE statements rather than the early ``return 0``
+    (#268 Task 4 review M2).
+    """
     workbench, _runtime_, _adapter = _executor(factory)
-    run = _run_candidate(factory, workbench)
+    older = _run_candidate(factory, workbench)
+    newer = _run_candidate(factory, workbench)
+    assert newer.run_id > older.run_id
 
     def _refuse():
         raise AssertionError("cleanup resolved the test runtime")
@@ -3509,6 +3516,7 @@ def test_cleanup_never_touches_a_runtime(factory, monkeypatch):
     isolated = AgentTestWorkbench(runtime=_ExplodingRuntime())  # type: ignore[arg-type]
     monkeypatch.setattr(isolated, "_runtime", _refuse)
 
-    assert _cleanup(factory, isolated, per_case_limit=1) == 0
+    assert _cleanup(factory, isolated, per_case_limit=1) == 1
     with factory() as session:
-        assert session.get(AgentTestRun, run.run_id) is not None
+        assert session.get(AgentTestRun, older.run_id) is None
+        assert session.get(AgentTestRun, newer.run_id) is not None
