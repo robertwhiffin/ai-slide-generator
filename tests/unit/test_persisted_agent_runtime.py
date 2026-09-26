@@ -1898,10 +1898,17 @@ def test_no_canonical_schema_carries_a_dump_mode_divergent_field_type() -> None:
 
 
 # ---------------------------------------------------------------------------
-# #267 Task 3: a candidate run logs through the SAME production sink, with the
-# SAME exact field sets.  Its identity is the ``-1`` sentinel identity (Correction
-# 27): no release, revision or session is claimed, and nothing new is logged.
+# #267 Task 3: a candidate run never reaches the production identity log.  A
+# draft has no release or revision identity, so nothing is fabricated there
+# (Task 3 ruling R1, #266's precedent).  The run writes ONE record of its own,
+# whose field set is pinned exactly, like the sink's.  No log record of any
+# logger carries model output, payload, prompt or provider text.
 # ---------------------------------------------------------------------------
+
+#: The candidate record's EXACT fields.  No ids, endpoint, payload, prompt,
+#: output or exception text; ``error_code`` is the code part of error_detail.
+CANDIDATE_LOG_FIELDS = {"agent_key", "status", "error_code", "error_class"}
+CANDIDATE_LOG_MESSAGE = "agent_candidate_run"
 
 
 def _candidate_content(agent_key: str = "architect") -> tuple[DefinitionContent, str]:
@@ -1925,14 +1932,49 @@ def _logging_candidate_runtime(adapter: object, logger: logging.Logger) -> Agent
     )
 
 
-def test_a_candidate_run_success_record_is_the_exact_success_set_with_sentinels(caplog):
+def _rendered(record: logging.LogRecord) -> str:
+    """Everything a handler could write for *record*, including a traceback."""
+    parts = [record.getMessage(), repr(record.args), str(vars(record))]
+    if record.exc_info:
+        parts.append(logging.Formatter().formatException(record.exc_info))
+    if record.exc_text:
+        parts.append(record.exc_text)
+    return "\n".join(parts)
+
+
+def _candidate_records(caplog) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.msg == CANDIDATE_LOG_MESSAGE]
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "error_code", "error_class"),
+    [
+        ("success", "completed", None, None),
+        (
+            "provider_unavailable",
+            "model_error",
+            "endpoint_unavailable",
+            "PinnedInvocationEndpointError",
+        ),
+        ("invalid_optional_field", "incomplete", "invalid_output", "AgentOutputValidationError"),
+        (
+            "structured_output_unsupported",
+            "model_error",
+            "structured_output_unsupported",
+            "NotImplementedError",
+        ),
+    ],
+)
+def test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record(
+    mode, status, error_code, error_class, caplog
+):
     from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
 
-    logger = logging.getLogger("test.persisted.runtime.candidate.success")
-    runtime = _logging_candidate_runtime(DeterministicFakeModelAdapter(), logger)
+    logger = logging.getLogger(f"test.persisted.runtime.candidate.{mode}")
+    runtime = _logging_candidate_runtime(DeterministicFakeModelAdapter(mode=mode), logger)
     content, candidate_hash = _candidate_content()
 
-    with caplog.at_level(logging.INFO, logger=logger.name):
+    with caplog.at_level(logging.DEBUG):
         outcome = runtime.run_candidate(
             "architect",
             content,
@@ -1941,54 +1983,99 @@ def test_a_candidate_run_success_record_is_the_exact_success_set_with_sentinels(
             AgentAssemblyContext(False),
         )
 
-    assert outcome.status == "completed"
-    records = [record for record in caplog.records if record.msg == EXPECTED_LOG_MESSAGE]
+    assert outcome.status == status
+    # Zero production identity records: no fabricated -1 release/revision.
+    assert [r for r in caplog.records if r.msg == EXPECTED_LOG_MESSAGE] == []
+    records = _candidate_records(caplog)
     assert len(records) == 1
     record = records[0]
-    assert emitted_fields(record) == SUCCESS_LOG_FIELDS
+    assert emitted_fields(record) == CANDIDATE_LOG_FIELDS
     assert record.args in (None, ())
-    assert (
-        record.graph_version,
-        record.graph_release_id,
-        record.agent_key,
-        record.agent_definition_revision_id,
-        record.content_hash,
-        record.outcome,
-        record.error_class,
-        record.additional_field_names,
-    ) == (-1, -1, "architect", -1, candidate_hash, "success", None, [])
-    rendered = str(vars(record))
-    assert "never-log-this-payload" not in rendered
-    assert "draft candidate prompt" not in rendered
+    assert record.exc_info is None
+    assert (record.agent_key, record.status, record.error_code, record.error_class) == (
+        "architect",
+        status,
+        error_code,
+        error_class,
+    )
+    for record in caplog.records:
+        rendered = _rendered(record)
+        for secret in (
+            "never-log-this-payload",
+            "draft candidate prompt",
+            candidate_hash,
+            "databricks-claude-opus-4-6",
+        ):
+            assert secret not in rendered
 
 
-@pytest.mark.parametrize(
-    ("mode", "error_class"),
-    [
-        ("provider_unavailable", "PinnedInvocationEndpointError"),
-        ("invalid_optional_field", "AgentOutputValidationError"),
-        ("structured_output_unsupported", "NotImplementedError"),
-    ],
-)
-def test_a_candidate_run_error_record_is_the_exact_error_set_with_sentinels(
-    mode, error_class, caplog
-):
-    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+def test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text(caplog):
+    """I-2: no traceback, message, arg or extra carries the provider's text."""
 
-    logger = logging.getLogger(f"test.persisted.runtime.candidate.{mode}")
-    runtime = _logging_candidate_runtime(DeterministicFakeModelAdapter(mode=mode), logger)
+    class _Boom:
+        def invoke(self, **_kwargs):
+            raise RuntimeError("provider text https://secret-host-267/token=abc")
+
+    runtime = _logging_candidate_runtime(_Boom(), logging.getLogger("test.candidate.boom"))
     content, candidate_hash = _candidate_content()
 
-    with caplog.at_level(logging.INFO, logger=logger.name):
+    with caplog.at_level(logging.DEBUG):
         outcome = runtime.run_candidate(
             "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
         )
 
-    assert outcome.status != "completed"
-    records = [record for record in caplog.records if record.msg == EXPECTED_LOG_MESSAGE]
+    assert outcome.error_detail == "unexpected_error:RuntimeError"
+    records = _candidate_records(caplog)
     assert len(records) == 1
-    record = records[0]
-    assert emitted_fields(record) == PERMITTED_LOG_FIELDS
-    assert (record.graph_release_id, record.graph_version) == (-1, -1)
-    assert record.agent_definition_revision_id == -1
-    assert (record.outcome, record.error_class) == ("error", error_class)
+    assert (records[0].error_code, records[0].error_class) == (
+        "unexpected_error",
+        "RuntimeError",
+    )
+    for record in caplog.records:
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "secret-host-267" not in _rendered(record)
+
+
+class _SentinelOutputAdapter:
+    """Answers the architect with a unique string that must never be logged."""
+
+    OUTPUT = "never-log-this-model-output-267"
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        return schema.model_validate({"intent": "discuss", "message": self.OUTPUT})
+
+
+def test_neither_run_nor_run_candidate_logs_model_output_anywhere(caplog):
+    """I-3: the raw-output seam cannot leak the model's output to any logger."""
+    sink_logger = logging.getLogger("test.persisted.runtime.no-output")
+    content, candidate_hash = _candidate_content()
+    production = AgentRuntime(
+        persisted_release_loader=_Loader(
+            ResolvedDefinition(7, 41, "architect", 23, candidate_hash, content)
+        ),
+        model_adapter=_SentinelOutputAdapter(),
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=sink_logger),
+    )
+    candidate = _logging_candidate_runtime(_SentinelOutputAdapter(), sink_logger)
+
+    with caplog.at_level(logging.DEBUG):
+        result = production.run("architect", 41, {}, AgentAssemblyContext(False))
+        outcome = candidate.run_candidate(
+            "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+        )
+
+    # The output really was produced (so its absence from the log is meaningful).
+    assert result.output.message == _SentinelOutputAdapter.OUTPUT
+    assert outcome.raw_output["message"] == _SentinelOutputAdapter.OUTPUT
+    runtime_records = [
+        record
+        for record in caplog.records
+        if record.name in {"src.services.agent_runtime", sink_logger.name}
+    ]
+    assert sorted(record.msg for record in runtime_records) == [
+        CANDIDATE_LOG_MESSAGE,
+        EXPECTED_LOG_MESSAGE,
+    ]
+    for record in caplog.records:
+        assert _SentinelOutputAdapter.OUTPUT not in _rendered(record)

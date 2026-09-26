@@ -637,6 +637,43 @@ def _classify_candidate_failure(
     return "model_error", f"unexpected_error:{type(error).__name__}"
 
 
+class _PassThroughIdentitySink:
+    """Run the callback and record nothing: the sink for a candidate run."""
+
+    def invoke(
+        self,
+        identity: AgentInvocationIdentity,
+        callback: Callable[[], ValidatedAgentOutput],
+    ) -> ValidatedAgentOutput:
+        del identity
+        return callback()
+
+
+_PASS_THROUGH_IDENTITY_SINK = _PassThroughIdentitySink()
+
+#: The one log record a candidate run writes, and its EXACT fields: the role,
+#: the outcome status, the code part of ``error_detail`` and the exception class
+#: name.  No release/revision id (a draft has none), no endpoint, payload, prompt,
+#: output or exception text — the #266 probe's standard.
+CANDIDATE_RUN_LOG_MESSAGE = "agent_candidate_run"
+
+
+def _log_candidate_run(agent_key: str, outcome: CandidateRunOutcome) -> None:
+    logger.info(
+        CANDIDATE_RUN_LOG_MESSAGE,
+        extra={
+            "agent_key": agent_key,
+            "status": outcome.status,
+            "error_code": (
+                outcome.error_detail.split(":", 1)[0] if outcome.error_detail else None
+            ),
+            "error_class": (
+                type(outcome.error).__name__ if outcome.error is not None else None
+            ),
+        },
+    )
+
+
 class AgentRuntime:
     """Resolve and execute one model-driven Agent Definition."""
 
@@ -715,9 +752,12 @@ class AgentRuntime:
         the loader is never touched.  After the caller-contract checks (role,
         then the content's role, then the hash) the candidate is wrapped in the
         sentinel identity and handed to the same ``_run_resolved`` production
-        uses — the same revalidation, assembly, schema composition, adapter and
-        identity sink — so its prompt bytes equal production's for the same
-        content.  Only the #267 test workbench may call this (spec §7.1).
+        uses — the same revalidation, assembly, schema composition and adapter
+        — so its prompt bytes equal production's for the same content.  The
+        production identity log is bypassed: the run writes one
+        ``agent_candidate_run`` record of its own, carrying the role, status,
+        error code and error class only.  Only the #267 test workbench may call
+        this (spec §7.1).
         """
         if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
             raise UnknownAgentKeyError(
@@ -748,32 +788,37 @@ class AgentRuntime:
 
         try:
             result = self._run_resolved(
-                resolved, payload, assembly_context, _raw_output_observer=observe
+                resolved,
+                payload,
+                assembly_context,
+                _raw_output_observer=observe,
+                # A draft has no release or revision identity, so the runtime's
+                # identity sink (the production invocation log) never sees a
+                # candidate run (Task 3 ruling R1).  The pass-through sink keeps
+                # nothing, so the lru_cached test runtime cannot grow.
+                _identity_sink=_PASS_THROUGH_IDENTITY_SINK,
             )
         except Exception as error:  # noqa: BLE001 - every run failure is evidence
             status, detail = _classify_candidate_failure(
                 error, endpoint_name=candidate_content.model.endpoint_name
             )
-            if detail.startswith("unexpected_error:"):
-                logger.error(
-                    "candidate run failed unexpectedly (%s)",
-                    type(error).__name__,
-                    exc_info=error,
-                )
-            return CandidateRunOutcome(
+            outcome = CandidateRunOutcome(
                 status=status,
                 result=None,
                 raw_output=observed[0] if observed else None,
                 error=error,
                 error_detail=detail,
             )
-        return CandidateRunOutcome(
-            status="completed",
-            result=result,
-            raw_output=observed[0] if observed else None,
-            error=None,
-            error_detail=None,
-        )
+        else:
+            outcome = CandidateRunOutcome(
+                status="completed",
+                result=result,
+                raw_output=observed[0] if observed else None,
+                error=None,
+                error_detail=None,
+            )
+        _log_candidate_run(agent_key, outcome)
+        return outcome
 
     def _run_resolved(
         self,
@@ -782,6 +827,7 @@ class AgentRuntime:
         assembly_context: AgentAssemblyContext,
         *,
         _raw_output_observer: Callable[[Mapping[str, Any]], None] | None = None,
+        _identity_sink: AgentInvocationIdentitySink | None = None,
     ) -> AgentInvocationResult:
         try:
             content = DefinitionContent.model_validate(definition.content.model_dump(mode="python"))
@@ -875,7 +921,8 @@ class AgentRuntime:
             return self._schema_registry.validate_output(composed, supplied)
 
         started = time.perf_counter()
-        validated = self._identity_sink.invoke(identity, callback)
+        sink = _identity_sink if _identity_sink is not None else self._identity_sink
+        validated = sink.invoke(identity, callback)
         latency_ms = (time.perf_counter() - started) * 1000
 
         return AgentInvocationResult(

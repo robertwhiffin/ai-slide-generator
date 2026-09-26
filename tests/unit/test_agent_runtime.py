@@ -33,7 +33,6 @@ from src.services.agent_runtime import (
     _schema_contract_material,
 )
 from src.services.agent_runtime_identity import (
-    AgentInvocationIdentity,
     RecordingAgentInvocationIdentitySink,
 )
 from src.services.agent_schema_registry import (
@@ -966,14 +965,10 @@ def test_run_candidate_runs_every_role_through_the_fake_and_records_the_sentinel
     assert f"{agent_key} draft candidate prompt" in call.prompt
     _assert_composed_schema(call.schema, agent_key, 1)
     assert outcome.result.diagnostics.assembled_prompt == call.prompt
-    # Exactly one identity, and it is the sentinel identity: no release, no
-    # revision, no session.
-    assert sink.calls == [
-        AgentInvocationIdentity(-1, -1, agent_key, -1, candidate_hash, "", "")
-    ]
-    assert sink.calls[0].graph_release_id == runtime_module.CANDIDATE_RUN_GRAPH_RELEASE_ID
-    assert len(sink.successes) == 1
-    assert sink.error_classes == []
+    # The runtime's own identity sink is never handed a candidate run: a draft
+    # has no release or revision identity to record (Task 3 ruling R1).
+    assert sink.calls == []
+    assert sink.successes == []
     assert loader.calls == []
 
 
@@ -1091,7 +1086,7 @@ def test_a_v2_overlay_candidate_binds_the_composed_schema_now():
     assert outcome.status == "completed"
     _assert_composed_schema(adapter.calls[0].schema, "architect", 2)
     assert outcome.result.diagnostics.schema_contract.version == 2
-    assert len(sink.successes) == 1
+    assert sink.calls == []
 
 
 def test_a_v1_candidate_with_an_overlay_is_an_assembly_error_before_the_model():
@@ -1184,8 +1179,7 @@ def test_a_failing_model_call_is_classified_and_does_not_escape(
     assert outcome.result is None
     assert outcome.raw_output is None
     assert len(adapter.calls) == 1
-    assert len(sink.calls) == 1
-    assert sink.successes == []
+    assert sink.calls == []
 
 
 def test_a_provider_endpoint_error_names_the_sentinel_release_not_a_real_one():
@@ -1220,6 +1214,39 @@ def test_an_output_parser_exception_is_incomplete():
         "incomplete",
         "invalid_output:OutputParserException",
     )
+
+
+def test_classification_reads_the_exception_type_never_its_text():
+    """Provider prose must not steer the evidence status (I-4).
+
+    A parser exception with bland text is still ``incomplete``, and an ordinary
+    exception whose text *reads* like a parse failure is still unexpected.
+    """
+    from langchain_core.exceptions import OutputParserException
+
+    class _Raises:
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+
+        def invoke(self, **_kwargs):
+            raise self.error
+
+    content, candidate_hash = _candidate("architect")
+    outcomes = {}
+    for label, error in (
+        ("bland_parser", OutputParserException("x")),
+        ("parse_sounding", RuntimeError("could not parse output: 1 validation error")),
+    ):
+        runtime, _, _, _ = _candidate_runtime(_Raises(error))
+        outcome = runtime.run_candidate(
+            "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+        )
+        outcomes[label] = (outcome.status, outcome.error_detail)
+
+    assert outcomes == {
+        "bland_parser": ("incomplete", "invalid_output:OutputParserException"),
+        "parse_sounding": ("model_error", "unexpected_error:RuntimeError"),
+    }
 
 
 def test_an_unexpected_failure_is_a_model_error_carrying_only_its_class_name():
@@ -1261,7 +1288,7 @@ def test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete(v2_schema):
     ]
     assert outcome.result is None
     assert outcome.raw_output == fake_output("architect", **INVALID_OPTIONAL_FIELD)
-    assert sink.error_classes == ["AgentOutputValidationError"]
+    assert sink.calls == []
 
 
 def test_run_still_raises_the_validation_error_it_always_raised():
