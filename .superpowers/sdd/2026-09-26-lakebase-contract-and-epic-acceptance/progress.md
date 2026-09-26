@@ -33,3 +33,12 @@ This plan was drafted on 2026-09-26 by a planning agent on `plan/lakebase-contra
 ## Open questions
 
 Q1–Q4 are listed at the end of the plan.
+
+## Controller rulings — 2026-09-26
+Controller check of the planner's "file changed on disk before commit" note: working tree clean; committed plan is 1005 lines and is the file on disk; no other agent works in this worktree. Nothing to reconcile.
+Ruling: OQ1 — the conftest REFUSES to run a unit suite whose `DATABASE_URL` names `ai_slide_generator` (fail fast), and defaults to a throwaway SQLite URL when unset. Cost if wrong: a developer who deliberately points unit tests at the dev DB must override explicitly.
+Ruling: OQ2 — deleting the now-unread authored prompt text in `src/core/skills` is OUT of #271's scope (a follow-up); protected constants stay. Cost if wrong: dead text remains for a while.
+Ruling: OQ3 — a documented developer command to re-record the Playwright contract is acceptable (no new make target). Cost if wrong: none.
+Ruling: OQ4 — the local merge of #271 may proceed with #266 m9 unverified; the epic is NOT reported shippable until the user authorises and the dev-workspace check passes. Surfaced to the user. Cost if wrong: none locally.
+Ruling: the planner's follow-up split is accepted — style-exclusivity ×4 in scope (Task 1); deploy-autoscaling ×2 out (pre-epic, needs an issue); #266 m7 out (needs an issue); `openai` declared (Task 5); typecheck gap and log needles in scope.
+Next: independent plan review before execution. Phase A (Tasks 0-A, 1, 5) is runnable at `a08389ec3`.
