@@ -21,10 +21,12 @@ from src.database.models.graph_checkpoint import (
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     AgentTestCase,
+    AgentTestRun,
     GraphDraft,
     GraphDraftAgent,
     GraphRelease,
     GraphReleaseAgent,
+    GraphReleaseTestRun,
 )
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
@@ -54,6 +56,7 @@ __all__ = [
     "AppIdentity",
     "AgentDefinitionRevision",
     "AgentTestCase",
+    "AgentTestRun",
     "ChatRequest",
     "ConfigGenieSpace",
     "DeckContributor",
@@ -77,6 +80,7 @@ __all__ = [
     "GraphDraftAgent",
     "GraphRelease",
     "GraphReleaseAgent",
+    "GraphReleaseTestRun",
     "IdentityType",
     "ImageAsset",
     "PermissionLevel",
