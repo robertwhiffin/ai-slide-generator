@@ -59,3 +59,31 @@ Ruling: OQ7 — logs carry only the outcome code and role key names. Consistent 
 Ruling: OQ8 — #270 follows whatever router module #269 lands. Cost if wrong: none.
 Ruling: OQ9 — rollback does NOT block on the remote endpoint check (no network call under the publication lock), but the rollback PREVIEW runs #266's bounded remote endpoint validation outside any lock and shows a warning for any restored endpoint that no longer resolves. Cost if wrong: an admin can still restore a removed endpoint after a warning; pinned conversations then fail as §15 describes.
 Next: independent plan review, then corrections, before any execution (Task 1 Phase A is runnable at `a08389ec3`; Tasks 2+ wait for #268 and #269).
+
+## Plan review 1 — 2026-09-26
+
+**Verdict:** APPROVE WITH CORRECTIONS.
+
+| Severity | Count |
+|---|---|
+| Critical | 1 |
+| Important | 6 |
+| Minor | 16 |
+| **Total** | **23** |
+
+**Correction numbers:** 1 (C1), 2 (I1), 3 (I2), 4 (I3), 5 (I4), 6 (I5), 7 (I6), 8 (M1), 9 (M2), 10 (M3), 11 (M4), 12 (M5), 13 (M6), 14 (M7), 15 (M8), 16 (M9), 17 (M10), 18 (M11), 19 (M12), 20 (M13), 21 (M14), 22 (M15), 23 (M16).
+
+**Corrections that block Task 1 (Phase A — must be in Task 1's brief):**
+- Correction 11 (M4): `populate_existing=True` in `list_release_history` code template.
+- Correction 14 (M7): Task 0 Step 3 baseline loop must include three missing PostgreSQL files and one unit file before the baseline is recorded.
+
+**Corrections that block Phase B (after #268/#269 integration, before named task):**
+- Before Task 2: Corrections 1 (C1), 2 (I1), 12 (M5), 20 (M13), 22 (M15).
+- Before Task 3a: Corrections 15 (M8), 16 (M9), 18 (M11), 19 (M12), 21 (M14).
+- Before Task 4: Correction 6 (I5).
+- Before Task 6: Correction 13 (M6).
+- Before Task 7: Corrections 3 (I2), 4 (I3), 23 (M16).
+- Before Task 8: Correction 7 (I6).
+- Before Task 9: Correction 5 (I4).
+
+**Non-blocking (apply in named task):** Corrections 8 (M1), 9 (M2), 10 (M3), 17 (M10).
