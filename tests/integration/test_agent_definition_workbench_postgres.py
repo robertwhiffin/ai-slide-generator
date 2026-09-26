@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import event, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.api.routes import _authz
@@ -1801,3 +1801,247 @@ def test_model_endpoint_probe_holds_no_lock_while_the_model_call_is_in_flight(
         lock_version=0,
     )
     assert _immutable_graph_artifacts(factory) == artifacts_before
+
+
+# ===========================================================================
+# #267 Task 2: Agent Test Case writer (C9 L2 lock and last-required refusal; C22)
+# ===========================================================================
+
+from src.database.models.graph_configuration import AgentTestCase  # noqa: E402
+from src.services.agent_test_workbench import (  # noqa: E402
+    AgentTestWorkbench,
+    TestCaseRejected,
+    TestCaseVersion,
+)
+from src.services.graph_configuration import BootstrapResult  # noqa: E402
+from src.services.graph_configuration_content import (  # noqa: E402
+    GraphConfigurationIntegrityError,
+)
+
+
+def _case_tuple(factory, test_case_id: int) -> tuple[object, ...]:
+    with factory() as session:
+        return tuple(
+            session.execute(
+                select(
+                    AgentTestCase.id,
+                    AgentTestCase.agent_key,
+                    AgentTestCase.name,
+                    AgentTestCase.version,
+                    AgentTestCase.is_active,
+                    AgentTestCase.is_required,
+                    AgentTestCase.synthetic_payload,
+                    AgentTestCase.assembly_context,
+                    AgentTestCase.created_by,
+                    AgentTestCase.created_at,
+                    AgentTestCase.updated_by,
+                    AgentTestCase.updated_at,
+                ).where(AgentTestCase.id == test_case_id)
+            ).one()
+        )
+
+
+def _pg_seed_case_id(factory, agent_key: str = "architect") -> int:
+    with factory() as session:
+        return session.scalar(
+            select(AgentTestCase.id).where(
+                AgentTestCase.agent_key == agent_key,
+                AgentTestCase.name == f"{agent_key}_required_smoke_v1",
+            )
+        )
+
+
+def test_postgres_case_versions_are_new_rows_and_every_write_records_its_actor(
+    postgres_engine,
+) -> None:
+    """Catches an in-place update, a lost actor, or a non-idempotent retirement (C22)."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    workbench = AgentTestWorkbench()
+
+    with factory() as session:
+        created = workbench.create_test_case(
+            session,
+            agent_key="architect",
+            name="architect_pg_extra",
+            synthetic_payload={"message": "v1", "nested": {"n": [1, 2.5, None]}},
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="creator@example.com",
+        )
+    assert (created.version, created.is_active, created.created_by, created.updated_by) == (
+        1,
+        True,
+        "creator@example.com",
+        "creator@example.com",
+    )
+    v1_before = _case_tuple(factory, created.id)
+    assert v1_before[6] == {"message": "v1", "nested": {"n": [1, 2.5, None]}}
+
+    with factory() as session:
+        v2 = workbench.update_test_case(
+            session,
+            test_case_id=created.id,
+            synthetic_payload={"message": "v2"},
+            assembly_context={"design_system_active": True},
+            is_required=False,
+            actor="editor@example.com",
+        )
+    assert v2.id != created.id
+    assert (v2.name, v2.version, v2.is_active, v2.created_by, v2.updated_by) == (
+        "architect_pg_extra",
+        2,
+        True,
+        "editor@example.com",
+        "editor@example.com",
+    )
+    v1_after = _case_tuple(factory, created.id)
+    # Only the retirement columns changed on version 1.
+    assert v1_after[:4] == v1_before[:4]
+    assert v1_after[5:10] == v1_before[5:10]
+    assert (v1_after[4], v1_after[10]) == (False, "editor@example.com")
+    assert v1_after[11] >= v1_before[11]
+
+    with factory() as session:
+        retired = workbench.deactivate_test_case(
+            session, test_case_id=v2.id, actor="retirer@example.com"
+        )
+    assert (retired.id, retired.is_active, retired.updated_by) == (
+        v2.id,
+        False,
+        "retirer@example.com",
+    )
+    v2_retired = _case_tuple(factory, v2.id)
+    with factory() as session:
+        again = workbench.deactivate_test_case(
+            session, test_case_id=v2.id, actor="someone-else@example.com"
+        )
+    assert again == retired
+    assert _case_tuple(factory, v2.id) == v2_retired
+    assert _case_tuple(factory, created.id) == v1_after
+    with factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(AgentTestCase).where(
+                AgentTestCase.name == "architect_pg_extra"
+            )
+        ) == 2
+    boot = GraphConfiguration().bootstrap_v1(factory)
+    assert isinstance(boot, BootstrapResult) and boot.created is False
+
+
+@pytest.mark.parametrize("first", ["seed", "second"])
+def test_two_sessions_retiring_a_roles_last_two_required_cases_serialize_and_one_is_refused(
+    postgres_engine, first
+) -> None:
+    """Catches the L2 lock missing or filtered, letting both retirements commit (C9).
+
+    Cases A (the seed) and B are architect's only two required cases.  The first
+    session is paused just before its UPDATE, after every read it decides from;
+    the second retires the other case.  With the L2 ``FOR UPDATE`` the second
+    session is blocked on the lock, then re-reads A/B and is refused.  Without it
+    both commit and the next boot raises.
+    """
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    workbench = AgentTestWorkbench()
+    seed_id = _pg_seed_case_id(factory)
+    with factory() as session:
+        second = workbench.create_test_case(
+            session,
+            agent_key="architect",
+            name="architect_second_required",
+            synthetic_payload={"message": "second"},
+            assembly_context={"design_system_active": False},
+            is_required=True,
+            actor="setup@example.com",
+        )
+    targets = {"seed": seed_id, "second": second.id}
+    order = [first, "second" if first == "seed" else "seed"]
+
+    first_paused = threading.Event()
+    release_first = threading.Event()
+    guard = threading.Lock()
+    pids: dict[str, int] = {}
+    outcomes: dict[str, object] = {}
+
+    @event.listens_for(postgres_engine, "before_cursor_execute")
+    def _pause_first_before_update(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        normalized = " ".join(statement.upper().split())
+        if (
+            threading.current_thread().name == "retire-first"
+            and normalized.startswith("UPDATE AGENT_TEST_CASE")
+            and not first_paused.is_set()
+        ):
+            first_paused.set()
+            assert release_first.wait(timeout=20), "test never released the first session"
+
+    def _retire(thread_name: str, case_key: str) -> None:
+        threading.current_thread().name = thread_name
+        # One pinned connection, so the recorded backend PID is the writer's.
+        with postgres_engine.connect() as connection:
+            pid = connection.scalar(text("SELECT pg_backend_pid()"))
+            connection.commit()
+            with guard:
+                pids[thread_name] = pid
+            session = Session(bind=connection, expire_on_commit=False)
+            try:
+                outcomes[case_key] = workbench.deactivate_test_case(
+                    session,
+                    test_case_id=targets[case_key],
+                    actor=f"{thread_name}@example.com",
+                )
+            except TestCaseRejected as exc:
+                outcomes[case_key] = exc
+            finally:
+                session.close()
+
+    observed_waiter = False
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(_retire, "retire-first", order[0])
+            assert first_paused.wait(timeout=10), "first session never reached its UPDATE"
+            second_future = pool.submit(_retire, "retire-second", order[1])
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not second_future.done():
+                with guard:
+                    second_pid = pids.get("retire-second")
+                if second_pid is not None and _observe_lock_waiter(
+                    postgres_engine, second_pid, timeout=0.2
+                ):
+                    observed_waiter = True
+                    break
+            release_first.set()
+            first_future.result(timeout=20)
+            second_future.result(timeout=20)
+    finally:
+        release_first.set()
+        event.remove(postgres_engine, "before_cursor_execute", _pause_first_before_update)
+
+    try:
+        boot: object = GraphConfiguration().bootstrap_v1(factory)
+    except GraphConfigurationIntegrityError as exc:
+        boot = exc
+
+    kinds = {
+        key: ("committed" if isinstance(value, TestCaseVersion) else "refused")
+        for key, value in outcomes.items()
+    }
+    assert kinds == {order[0]: "committed", order[1]: "refused"}, (
+        f"outcomes={kinds}; bootstrap afterwards={boot!r}"
+    )
+    refused = outcomes[order[1]]
+    assert isinstance(refused, TestCaseRejected)
+    assert [(i.field, i.code) for i in refused.issues] == [("is_active", "last_required_case")]
+    assert observed_waiter is True, "the second retirement was never blocked on the L2 lock"
+    assert isinstance(boot, BootstrapResult) and boot.created is False
+    with factory() as session:
+        active_required = session.scalars(
+            select(AgentTestCase.id).where(
+                AgentTestCase.agent_key == "architect",
+                AgentTestCase.is_active.is_(True),
+                AgentTestCase.is_required.is_(True),
+            )
+        ).all()
+    assert active_required == [targets[order[1]]]

@@ -632,13 +632,17 @@ def test_main_app_registers_the_dedicated_workbench_route():
         },
         "/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source": {"POST"},
         "/api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe": {"POST"},
+        "/api/admin/agent-definitions/test-cases": {"GET", "POST"},
+        "/api/admin/agent-definitions/test-cases/{test_case_id}": {"PUT", "DELETE"},
     }
     for path, methods in expected_methods.items():
         matches = [
             route for route in app.routes if getattr(route, "path", None) == path
         ]
-        assert len(matches) == 1, path
-        assert matches[0].methods == methods, path
+        # One route object per method: a path serving two methods has two.
+        assert len(matches) == len(methods), path
+        assert all(len(route.methods) == 1 for route in matches), path
+        assert set().union(*(route.methods for route in matches)) == methods, path
     assert (
         len(
             [
@@ -649,7 +653,7 @@ def test_main_app_registers_the_dedicated_workbench_route():
                 )
             ]
         )
-        == len(expected_methods)
+        == sum(len(methods) for methods in expected_methods.values())
     )
 
 
@@ -4657,3 +4661,552 @@ def test_model_endpoint_probe_route_maps_real_provider_errors(
     assert "leak.example" not in response.text
     assert MOCK_HOST not in response.text
     assert "unit-test-dummy-key" not in response.text
+
+
+# ===========================================================================
+# #267 Task 2: Agent Test Case CRUD routes on the one admin router (C9, C22, C23)
+# ===========================================================================
+
+from src.database.models.graph_configuration import AgentTestCase  # noqa: E402
+from src.services.agent_test_workbench import AgentTestWorkbench  # noqa: E402
+
+_TEST_CASES_URL = "/api/admin/agent-definitions/test-cases"
+_TEST_CASE_KEYS = {
+    "id",
+    "agent_key",
+    "name",
+    "version",
+    "is_active",
+    "is_required",
+    "synthetic_payload",
+    "assembly_context",
+    "created_by",
+    "created_at",
+    "updated_by",
+    "updated_at",
+    "is_synthetic_data_warning",
+}
+_LAST_REQUIRED_MESSAGE = (
+    "A role must keep at least one active required test case. "
+    "Add its replacement before retiring this one."
+)
+
+
+def _test_case_url(test_case_id: int) -> str:
+    return f"{_TEST_CASES_URL}/{test_case_id}"
+
+
+def _seed_test_case_id(session_factory: sessionmaker, agent_key: str = "architect") -> int:
+    with session_factory() as session:
+        return session.scalar(
+            select(AgentTestCase.id).where(
+                AgentTestCase.agent_key == agent_key,
+                AgentTestCase.name == f"{agent_key}_required_smoke_v1",
+            )
+        )
+
+
+def _test_case_rows(session_factory: sessionmaker) -> list[tuple[object, ...]]:
+    with session_factory() as session:
+        return [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    AgentTestCase.id,
+                    AgentTestCase.agent_key,
+                    AgentTestCase.name,
+                    AgentTestCase.version,
+                    AgentTestCase.is_active,
+                    AgentTestCase.is_required,
+                    AgentTestCase.synthetic_payload,
+                    AgentTestCase.assembly_context,
+                    AgentTestCase.created_by,
+                    AgentTestCase.updated_by,
+                    AgentTestCase.updated_at,
+                ).order_by(AgentTestCase.id)
+            )
+        ]
+
+
+def _create_body(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "agent_key": "architect",
+        "name": "architect_extra",
+        "synthetic_payload": {"message": "Synthetic smoke input."},
+        "assembly_context": {"design_system_active": False},
+        "is_required": False,
+    }
+    body.update(overrides)
+    return body
+
+
+def _update_body(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "synthetic_payload": {"message": "revised"},
+        "assembly_context": {"design_system_active": True},
+        "is_required": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def _without_timestamps(body: dict[str, object]) -> dict[str, object]:
+    assert set(body) == _TEST_CASE_KEYS
+    assert isinstance(body["created_at"], str) and body["created_at"]
+    assert isinstance(body["updated_at"], str) and body["updated_at"]
+    return {key: value for key, value in body.items() if not key.endswith("_at")}
+
+
+def _invalid_test_case(*issues: tuple[str, str, str]) -> dict[str, object]:
+    return {
+        "code": "invalid_test_case",
+        "issues": [
+            {"field": field, "code": code, "message": message}
+            for field, code, message in issues
+        ],
+    }
+
+
+_TEST_CASE_ROUTES = [
+    ("POST", lambda _id: _TEST_CASES_URL),
+    ("GET", lambda _id: _TEST_CASES_URL),
+    ("PUT", _test_case_url),
+    ("DELETE", _test_case_url),
+]
+_TEST_CASE_WRITE_ROUTES = [route for route in _TEST_CASE_ROUTES if route[0] != "GET"]
+
+
+def _forbid_test_case_service(monkeypatch, calls: list[str]) -> None:
+    def _must_not_reach(*_args, **_kwargs):
+        calls.append("service")
+        raise AssertionError("authorization reached the test-case service")
+
+    for method in (
+        "list_test_cases",
+        "create_test_case",
+        "update_test_case",
+        "deactivate_test_case",
+    ):
+        monkeypatch.setattr(AgentTestWorkbench, method, _must_not_reach)
+
+
+@pytest.mark.parametrize(("method", "url_for"), _TEST_CASE_ROUTES, ids=lambda v: str(v))
+def test_test_case_routes_deny_non_admins_before_body_or_service(
+    session_factory, monkeypatch, method, url_for
+):
+    """Catches a test-case route outside the admin router or parsing before auth (C23)."""
+    _force_admin(monkeypatch, is_admin=False)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("authorization parsed the raw request body")
+
+    _forbid_test_case_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    seed_id = _seed_test_case_id(session_factory)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        response = client.request(
+            method,
+            url_for(seed_id),
+            content=b'{not json; "name": "SUPER_SECRET_CASE"}',
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Admin access required"}
+    assert "SUPER_SECRET_CASE" not in response.text
+    assert _test_case_rows(session_factory) == before
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for"), _TEST_CASE_WRITE_ROUTES, ids=lambda v: str(v)
+)
+@pytest.mark.parametrize("principal", [None, " \t "])
+def test_test_case_writes_require_a_trusted_principal_before_body_or_service(
+    session_factory, monkeypatch, method, url_for, principal
+):
+    _force_admin(monkeypatch, is_admin=True)
+    set_current_user(principal)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("a missing principal parsed the body")
+
+    _forbid_test_case_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    seed_id = _seed_test_case_id(session_factory)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[agent_definition_routes.require_admin] = lambda: None
+
+    def _override_db() -> Iterator[Session]:
+        with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_db
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.request(
+            method,
+            url_for(seed_id),
+            content=b"{not json; should not be parsed}",
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Authenticated principal required"}
+
+
+def test_post_test_case_returns_201_with_the_exact_snapshot(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.post(_TEST_CASES_URL, json=_create_body(name="  architect_extra "))
+
+    assert response.status_code == 201
+    body = response.json()
+    assert isinstance(body["id"], int)
+    assert _without_timestamps(body) == {
+        "id": body["id"],
+        "agent_key": "architect",
+        "name": "architect_extra",
+        "version": 1,
+        "is_active": True,
+        "is_required": False,
+        "synthetic_payload": {"message": "Synthetic smoke input."},
+        "assembly_context": {"design_system_active": False},
+        "created_by": "task4-user@example.com",
+        "updated_by": "task4-user@example.com",
+        "is_synthetic_data_warning": True,
+    }
+
+
+def test_post_test_case_projects_the_ordered_domain_rejection(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.post(
+            _TEST_CASES_URL,
+            json=_create_body(name="  ", synthetic_payload={"k": "x" * 70_000}),
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("name", "blank", "Test case name must not be blank."),
+        (
+            "synthetic_payload",
+            "too_large",
+            "Synthetic payload must be at most 65536 bytes as JSON.",
+        ),
+    )
+    assert _test_case_rows(session_factory) == before
+
+
+@pytest.mark.parametrize("agent_key", ["unknown", "foreman"])
+def test_post_test_case_rejects_an_unknown_or_deterministic_role(
+    session_factory, monkeypatch, agent_key
+):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.post(_TEST_CASES_URL, json=_create_body(agent_key=agent_key))
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("agent_key", "unknown_agent", "Agent key must identify an editable model role.")
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            _create_body(sentinel="x"),
+            [("sentinel", "extra_forbidden", "Extra inputs are not permitted")],
+        ),
+        (
+            _create_body(is_active=False),
+            [("is_active", "extra_forbidden", "Extra inputs are not permitted")],
+        ),
+        (
+            _create_body(assembly_context={"design_system_active": False, "x": 1}),
+            [("assembly_context.x", "extra_forbidden", "Extra inputs are not permitted")],
+        ),
+        (
+            _create_body(is_required="yes"),
+            [("is_required", "strict_type", "Input should be a valid boolean")],
+        ),
+        (
+            {"agent_key": "architect"},
+            [
+                ("name", "strict_type", "Field required"),
+                ("synthetic_payload", "strict_type", "Field required"),
+                ("assembly_context", "strict_type", "Field required"),
+                ("is_required", "strict_type", "Field required"),
+            ],
+        ),
+    ],
+    ids=["unknown-field", "is-active", "context-extra", "required-type", "missing"],
+)
+def test_post_test_case_accepts_only_the_strict_create_body(
+    session_factory, monkeypatch, body, expected
+):
+    _force_admin(monkeypatch, is_admin=True)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.post(_TEST_CASES_URL, json=body)
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(*expected)
+    assert _test_case_rows(session_factory) == before
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for"), [("POST", lambda _id: _TEST_CASES_URL), ("PUT", _test_case_url)]
+)
+def test_test_case_body_routes_reject_malformed_json(
+    session_factory, monkeypatch, method, url_for
+):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.request(
+            method,
+            url_for(_seed_test_case_id(session_factory)),
+            content=b"{not json",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("$", "invalid_json", "Request body must be valid JSON.")
+    )
+
+
+def test_put_test_case_returns_the_new_version_and_retires_the_old(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.put(_test_case_url(seed_id), json=_update_body())
+        listed = client.get(
+            _TEST_CASES_URL, params={"agent_key": "architect", "include_inactive": True}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] != seed_id
+    assert _without_timestamps(body) == {
+        "id": body["id"],
+        "agent_key": "architect",
+        "name": "architect_required_smoke_v1",
+        "version": 2,
+        "is_active": True,
+        "is_required": True,
+        "synthetic_payload": {"message": "revised"},
+        "assembly_context": {"design_system_active": True},
+        "created_by": "task4-user@example.com",
+        "updated_by": "task4-user@example.com",
+        "is_synthetic_data_warning": True,
+    }
+    assert listed.status_code == 200
+    assert [
+        (item["id"], item["version"], item["is_active"]) for item in listed.json()["items"]
+    ] == [(seed_id, 1, False), (body["id"], 2, True)]
+
+
+def test_put_test_case_rename_and_last_required_are_one_ordered_422(
+    session_factory, monkeypatch
+):
+    """Catches a rename or an un-require of the last required case slipping through (C9, C22)."""
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.put(
+            _test_case_url(seed_id), json=_update_body(name="renamed", is_required=False)
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("name", "name_immutable", "A test case name cannot be changed."),
+        ("is_required", "last_required_case", _LAST_REQUIRED_MESSAGE),
+    )
+    assert _test_case_rows(session_factory) == before
+
+
+def test_put_test_case_unrequiring_the_last_required_case_is_the_exact_422(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.put(_test_case_url(seed_id), json=_update_body(is_required=False))
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("is_required", "last_required_case", _LAST_REQUIRED_MESSAGE)
+    )
+    assert _test_case_rows(session_factory) == before
+    assert GraphConfiguration().bootstrap_v1(session_factory).created is False
+
+
+def test_put_test_case_on_a_superseded_version_is_409_stale(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    with _app_for(session_factory) as client:
+        assert client.put(_test_case_url(seed_id), json=_update_body()).status_code == 200
+        before = _test_case_rows(session_factory)
+        response = client.put(_test_case_url(seed_id), json=_update_body())
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "stale_test_case",
+        "test_case_id": seed_id,
+        "message": "This test case version is no longer active. Reload and retry.",
+    }
+    assert _test_case_rows(session_factory) == before
+
+
+def test_put_test_case_rejects_an_unknown_field_before_the_service(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    calls: list[str] = []
+    _forbid_test_case_service(monkeypatch, calls)
+    with _app_for(session_factory) as client:
+        response = client.put(
+            _test_case_url(_seed_test_case_id(session_factory)),
+            json=_update_body(agent_key="builder"),
+        )
+
+    assert calls == []
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("agent_key", "extra_forbidden", "Extra inputs are not permitted")
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "body"), [("PUT", _update_body()), ("DELETE", None)]
+)
+def test_test_case_writes_on_an_unknown_id_are_404(session_factory, monkeypatch, method, body):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.request(method, _test_case_url(999_999), json=body)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Test case not found"}
+
+
+def test_delete_test_case_deactivates_and_returns_the_snapshot(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        created = client.post(_TEST_CASES_URL, json=_create_body()).json()
+        response = client.delete(_test_case_url(created["id"]))
+        again = client.delete(_test_case_url(created["id"]))
+
+    assert response.status_code == 200
+    expected = {**_without_timestamps(created), "is_active": False}
+    assert _without_timestamps(response.json()) == expected
+    assert again.status_code == 200
+    assert again.json() == response.json()
+    with session_factory() as session:
+        assert session.get(AgentTestCase, created["id"]) is not None
+
+
+def test_delete_test_case_of_the_last_required_case_is_the_exact_422(
+    session_factory, monkeypatch
+):
+    """Catches the one admin click that makes the next boot exit (C9)."""
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory, "deck_reviewer")
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.delete(_test_case_url(seed_id))
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("is_active", "last_required_case", _LAST_REQUIRED_MESSAGE)
+    )
+    assert _test_case_rows(session_factory) == before
+    assert GraphConfiguration().bootstrap_v1(session_factory).created is False
+
+
+def test_get_test_cases_lists_active_versions_with_the_exact_item_shape(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.get(_TEST_CASES_URL)
+        builder_only = client.get(_TEST_CASES_URL, params={"agent_key": "builder"})
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"items"}
+    items = response.json()["items"]
+    assert [item["agent_key"] for item in items] == list(
+        ("architect", "data_analyst", "builder", "build_reviewer", "fixer", "fix_reviewer",
+         "deck_reviewer")
+    )
+    assert all(_without_timestamps(item)["is_synthetic_data_warning"] is True for item in items)
+    assert [item["name"] for item in builder_only.json()["items"]] == [
+        "builder_required_smoke_v1"
+    ]
+
+
+@pytest.mark.parametrize("agent_key", ["unknown", "foreman"])
+def test_get_test_cases_rejects_an_unknown_role_filter(session_factory, monkeypatch, agent_key):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.get(_TEST_CASES_URL, params={"agent_key": agent_key})
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("agent_key", "unknown_agent", "Agent key must identify an editable model role.")
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for", "body", "service_method"),
+    [
+        ("POST", lambda _id: _TEST_CASES_URL, _create_body(), "create_test_case"),
+        ("PUT", _test_case_url, _update_body(), "update_test_case"),
+        ("DELETE", _test_case_url, None, "deactivate_test_case"),
+        ("GET", lambda _id: _TEST_CASES_URL, None, "list_test_cases"),
+    ],
+    ids=["POST", "PUT", "DELETE", "GET"],
+)
+def test_test_case_routes_run_the_locking_writer_off_the_event_loop(
+    session_factory, monkeypatch, method, url_for, body, service_method
+):
+    """Catches a case write that can wait on the L2 row lock on the event loop."""
+    import asyncio
+
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+    original = getattr(AgentTestWorkbench, service_method)
+
+    def _observing(self, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop_running.append(False)
+        else:
+            loop_running.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentTestWorkbench, service_method, _observing)
+    with _app_for(session_factory) as client:
+        if method == "DELETE":
+            created = client.post(_TEST_CASES_URL, json=_create_body(name="to_retire"))
+            target = created.json()["id"]
+        else:
+            target = _seed_test_case_id(session_factory)
+        loop_running.clear()
+        response = client.request(method, url_for(target), json=body)
+
+    assert response.status_code in {200, 201}
+    assert loop_running == [False]

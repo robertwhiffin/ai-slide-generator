@@ -508,3 +508,75 @@ class StructuredOutputProbeFailureResponse(BaseModel):
     endpoint_name: str
     candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
     lock_version: int
+
+
+# --- Agent Test Cases (#267) -------------------------------------------------
+# Strict sibling DTOs: none of them extends a draft request or response type.
+
+
+class TestCaseAssemblyContextRequest(_StrictDraftRequest):
+    """Exactly the one field the runtime's assembler reads (C22)."""
+
+    design_system_active: bool
+
+
+class CreateTestCaseRequest(_StrictDraftRequest):
+    #: A plain string so an unknown role reaches the service's ``unknown_agent``.
+    agent_key: str
+    name: str
+    synthetic_payload: dict[str, object]
+    assembly_context: TestCaseAssemblyContextRequest
+    is_required: bool
+
+
+class UpdateTestCaseRequest(_StrictDraftRequest):
+    """A supersede body.  ``name`` may be echoed but never changed (C22)."""
+
+    name: str | None = None
+    synthetic_payload: dict[str, object]
+    assembly_context: TestCaseAssemblyContextRequest
+    is_required: bool
+
+
+class TestCaseAssemblyContextResponse(_AttributeResponse):
+    design_system_active: bool
+
+
+class TestCaseResponse(_AttributeResponse):
+    id: int
+    agent_key: AgentKey
+    name: str
+    version: int
+    is_active: bool
+    is_required: bool
+    synthetic_payload: dict[str, object]
+    assembly_context: TestCaseAssemblyContextResponse
+    created_by: str
+    created_at: datetime
+    updated_by: str
+    updated_at: datetime
+    #: Display-only reminder that payloads must be synthetic (spec §16, P7).
+    is_synthetic_data_warning: Literal[True] = True
+
+
+class TestCaseListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[TestCaseResponse]
+
+
+class TestCaseValidationErrorResponse(BaseModel):
+    """The ordered case 422 named by correction 9."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["invalid_test_case"]
+    issues: list[DraftFieldErrorResponse]
+
+
+class TestCaseConflictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["stale_test_case"]
+    test_case_id: int
+    message: str
