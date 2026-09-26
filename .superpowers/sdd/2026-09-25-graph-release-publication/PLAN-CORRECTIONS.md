@@ -710,3 +710,23 @@ Restore, prove the marker is gone, then GREEN.
   - Correction 8 part 2 (the evidence-link injection);
   - Corrections 10–14 (I8–I12).
 - **Non-blocking (apply in the task named):** Corrections 15–28 (M1–M14).
+
+## Correction 29 — BLOCKING (Phase B, Task 4): the case lock must not filter; a concurrent supersede drops a required case out of the gate
+
+Source: #267's whole-branch review (`.worktrees/issue-267-plan/.superpowers/sdd/2026-09-23-agent-test-case-runs/whole-branch-review.md`, I-2), proved on a throwaway PostgreSQL database.
+
+The plan's case-lock statement (plan :721-725) takes `FOR SHARE` on the ACTIVE REQUIRED cases of the changed roles and gates on that result set. #267's case writer supersedes a case by UPDATE-retiring the old row and INSERTing `version+1` in one transaction. When the publisher's `FOR SHARE` waits behind that writer, PostgreSQL's READ COMMITTED re-check re-evaluates the retired row, finds it no longer matches `is_active`, and drops it; the new version is an INSERT the statement never sees. Measured: the publisher's locked set was `[A]`; a fresh re-read showed `[A, B v2]`. The required case B drops out of the gate and publication proceeds with no approval for it.
+
+This supersedes Correction 20's reasoning and the #267 ledger's "false no_required_case, retry clears" note, both wrong for roles with more than one required case.
+
+Replacement instruction: lock the changed roles' `agent_test_case` rows WITHOUT an `is_active`/`is_required` filter, ordered by id (`FOR SHARE`), as #267's `_lock_role_of` does for writers; then, in a NEW statement, re-select the active required cases and gate on that. Add a PostgreSQL ordering test with a role holding two required cases, where a supersede of one commits while the publisher waits: the gate must see the new version (and refuse if it is unapproved). Sabotage: restore the filtered lock → that test REDs.
+
+Cost if wrong: an unapproved required case is published.
+
+## Correction 30 — carried from #267's whole-branch review
+
+- `run_kind='candidate'` must filter the evidence gate's run query (plan :727-735).
+- The verdict route path is `/api/admin/agent-definitions/test-runs/{run_id}/verdict` (#267 C23), not `/api/admin/agent-test-runs/...`.
+- #269's C14 trigger coexists with #267's `trg_agent_test_run_evidence_immutable`; the idempotence test expects both.
+- Verdict columns: `verdict`, `verdict_reviewer`, `verdict_at`, `verdict_notes`. ORM fallbacks must supply `run_kind`, `model_payload`, both `compared_*` and `deterministic_check_results`.
+- The fake adapter lives at `tests/fixtures/deterministic_model_adapter.py`.
