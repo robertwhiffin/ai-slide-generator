@@ -49,7 +49,11 @@ class BootstrapResult:
 
 
 class _GraphConfigurationBootstrap:
-    """Create Graph Version 1 once or validate the complete persisted history."""
+    """Create Graph Version 1 once or validate the complete persisted history.
+
+    Depends on ``_GraphConfigurationWorkbench._lock_current_parents`` through the
+    ``GraphConfiguration`` facade MRO (the only way bootstrap is instantiated).
+    """
 
     def bootstrap_v1(
         self,
@@ -113,6 +117,10 @@ class _GraphConfigurationBootstrap:
             )
 
     def _validate_current_graph(self, session: Session) -> BootstrapResult:
+        # One consistent parent lock (#269 Correction 2): FOR SHARE on the active
+        # release and the draft excludes a publisher for the whole validation, in
+        # the global order advisory lock -> L0 release -> L0 draft.
+        self._lock_current_parents(session, exclusive=False)
         releases = list(session.scalars(select(GraphRelease).order_by(GraphRelease.id)))
         active = [release for release in releases if release.effective_to is None]
         if len(active) != 1:

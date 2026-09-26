@@ -24,6 +24,7 @@ from src.database.models.graph_configuration import (
 )
 from src.services.conversation_pins import lock_active_graph_release
 from src.services.graph_configuration import (
+    BootstrapResult,
     DraftSaveConflict,
     DraftSaveResult,
     EditableModelDraft,
@@ -961,3 +962,96 @@ def test_stale_publisher_after_intervening_save_is_conflict_not_v3(postgres_engi
         (v2.release.release_id, 2, True),
     }
     assert _revision_ids(factory) == revisions_before
+
+
+# ---------------------------------------------------------------------------
+# Correction 2: boot validation reads under one consistent parent lock
+# ---------------------------------------------------------------------------
+
+_MAPPING_READ_BACK = "SELECT GRAPH_RELEASE_AGENT.AGENT_KEY"
+_BOOT_RELEASE_LIST = "FROM GRAPH_RELEASE ORDER BY GRAPH_RELEASE.ID"
+
+
+def _boot(service, factory):
+    def _call():
+        return service.bootstrap_v1(factory)
+
+    return _call
+
+
+def test_boot_validation_queued_behind_publication_sees_new_release(postgres_engine):
+    factory = _factory(postgres_engine)
+    lock = _save_prompt(factory, "architect", "\n\nTune A.", lock=0).draft.lock_version
+    v1 = _release(factory, 1)
+    service = _RaceObservedGraphConfiguration()
+
+    published, booted = _race(
+        postgres_engine,
+        service,
+        blocker=("publisher", _publish_as(service, factory, lock=lock)),
+        waiter=("boot", _boot(service, factory)),
+        pause_when=lambda normalized: _MAPPING_READ_BACK in normalized,
+    )
+
+    result = published.result()
+    assert isinstance(result, PublishedRelease)
+    assert result.release.version_number == 2
+    assert result.previous_release_id == v1.id
+    assert booted.result() == BootstrapResult(False, result.release.release_id, 2)
+
+
+def test_publication_during_boot_validation_waits_for_boot(postgres_engine):
+    factory = _factory(postgres_engine)
+    lock = _save_prompt(factory, "architect", "\n\nTune A.", lock=0).draft.lock_version
+    v1 = _release(factory, 1)
+    service = _RaceObservedGraphConfiguration()
+    fired: list[str] = []
+    blocked: list[bool] = []
+    publisher: dict[str, object] = {}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+
+        @event.listens_for(postgres_engine, "after_cursor_execute")
+        def _start_publisher(_conn, _cursor, statement, _params, _context, _many):
+            normalized = _normalized(statement)
+            if (
+                threading.current_thread().name != "boot"
+                or fired
+                or _BOOT_RELEASE_LIST not in normalized
+                or " FOR " in normalized
+            ):
+                return
+            fired.append(normalized)
+            publisher["future"] = pool.submit(
+                _named("publisher", _publish_as(service, factory, lock=lock))
+            )
+            if service.attempted_event("publisher").wait(timeout=_WAIT_SECONDS):
+                blocked.append(
+                    _await_blocked_by(
+                        postgres_engine,
+                        waiter_pid=service.pids["publisher"],
+                        blocker_pid=service.pids["boot"],
+                    )
+                )
+
+        try:
+            boot_future = pool.submit(_named("boot", _boot(service, factory)))
+            boot_error = boot_future.exception(timeout=_WAIT_SECONDS * 3)
+            publish_future = publisher.get("future")
+            publish_error = (
+                None
+                if publish_future is None
+                else publish_future.exception(timeout=_WAIT_SECONDS * 2)
+            )
+        finally:
+            event.remove(postgres_engine, "after_cursor_execute", _start_publisher)
+
+    assert boot_error is None, boot_error
+    assert boot_future.result() == BootstrapResult(False, v1.id, 1)
+    assert len(fired) == 1
+    assert blocked == [True], "the publisher must queue behind boot validation"
+    assert publish_error is None, publish_error
+    result = publish_future.result()
+    assert isinstance(result, PublishedRelease)
+    assert result.release.version_number == 2
+    assert result.previous_release_id == v1.id
