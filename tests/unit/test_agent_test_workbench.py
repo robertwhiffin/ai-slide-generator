@@ -3316,3 +3316,38 @@ def test_readiness_never_touches_a_runtime(factory, monkeypatch, entry):
                 result = isolated.readiness_under_parent_lock(session)
 
     assert _status(result) == ("approved", False, run_id, "approved", True)
+
+
+def test_the_eligibility_clause_carries_every_term_including_the_ddl_backed_ones():
+    """Pins the terms no behaviour test can reach: ``completed`` and ``passing``
+    are also enforced by ``ck_agent_test_run_approved_only_if_completed_and_passing``,
+    and the draft role term is implied by readiness's own join; cleanup (Task 4)
+    reuses the clause and must not lose them."""
+    clause = workbench_module.eligible_approval_clause(
+        AgentTestRun, AgentTestCase, GraphDraftAgent
+    )
+    compiled = str(clause.compile(dialect=postgresql.dialect()))
+
+    terms = [term.strip() for term in compiled.split(" AND ")]
+    assert terms == [
+        "agent_test_run.run_kind = %(run_kind_1)s",
+        "agent_test_run.test_case_id = agent_test_case.id",
+        "agent_test_run.test_case_version = agent_test_case.version",
+        "agent_test_run.agent_key = agent_test_case.agent_key",
+        "graph_draft_agent.agent_key = agent_test_case.agent_key",
+        "agent_test_run.candidate_hash = graph_draft_agent.candidate_hash",
+        "agent_test_run.verdict = %(verdict_1)s",
+        "agent_test_run.execution_status = %(execution_status_1)s",
+        "agent_test_run.deterministic_checks_passed IS true",
+    ]
+
+
+def test_both_run_lookups_break_run_at_ties_by_id_and_cases_are_in_id_order():
+    """C13: ``run_at DESC, id DESC``.  Tie behaviour without the id term follows
+    the index scan direction on both engines, so the order is pinned here."""
+    compiled = str(workbench_module._readiness_statement().compile(dialect=postgresql.dialect()))
+
+    orders = re.findall(r"ORDER BY (\S+)\.run_at DESC, (\S+)\.id DESC", compiled)
+    assert len(orders) == 2, compiled
+    assert all(run_at == run_id for run_at, run_id in orders)
+    assert compiled.rstrip().endswith("ORDER BY agent_test_case.id")
