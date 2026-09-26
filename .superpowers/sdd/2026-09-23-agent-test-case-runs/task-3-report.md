@@ -161,3 +161,97 @@ As instructed, I did not run the controller or reviewer sabotage that C33 assign
    - `get_agent_test_runtime`: that module and `src/api/routes/agent_definitions.py`.
 
    Tasks 4 and 5 must call from those modules only.
+
+## Fix round 1
+
+**Base:** the controller ledger commit `05dd5a37c`, pinned.
+
+**Commits:**
+- `3f5e7a44f` — fix: keep candidate runs out of the production identity log (#267).
+- `029aa3eb7` — test: renames the every-role candidate test to `…_bypasses_the_identity_sink`.
+
+**I-1 (ruling R1 rejected).** A candidate run no longer writes to the production identity log.
+- `_run_resolved` takes a second private keyword-only argument, `_identity_sink`.
+- `run_candidate` always passes `_PASS_THROUGH_IDENTITY_SINK`. It runs the callback and records nothing, so the `lru_cache`d test runtime cannot grow.
+- `run_candidate` then writes one record of its own, `agent_candidate_run`, with exactly `{agent_key, status, error_code, error_class}`.
+  - `error_code` is the code part of `error_detail`.
+  - The record has no ids, endpoint, payload, prompt, output or `exc_info`.
+- **Replaced tests:** the two persisted-runtime sentinel-record tests became `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record`, covering 4 modes. Each mode asserts:
+  - zero `persisted_agent_invocation` records;
+  - one candidate record with the exact field set;
+  - no payload, prompt, hash or endpoint in any record.
+- **Updated tests:** the recording-sink assertions in `test_agent_runtime.py` now assert `sink.calls == []`.
+- **Sentinel:** the `-1` is now observable only on `PinnedInvocationEndpointError`. M06 still turns that test RED.
+- **Unchanged:** `get_agent_test_runtime` keeps the logging sink. Its baseline reruns go through `run` against a real release, so they belong in that log, and that test was not changed.
+
+**I-2.** The traceback (`exc_info`) is removed; only the class name is logged.
+- New test: `test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text`, captured at DEBUG on the root logger.
+- It asserts every record has `exc_info` and `exc_text` of `None`.
+- It asserts `secret-host-267` appears in no record's message, args, vars or formatted traceback.
+
+**I-3.** New test: `test_neither_run_nor_run_candidate_logs_model_output_anywhere`, captured at DEBUG on the root logger. It asserts:
+- the unique output string really was produced;
+- the runtime and sink loggers wrote exactly one production record and one candidate record;
+- the string appears in no record at all.
+
+The reviewer's R1 mutation (the observer defaults to a raw-output logger) turns it RED.
+
+**I-4.** New test: `test_classification_reads_the_exception_type_never_its_text`.
+- `OutputParserException("x")` is classified `incomplete`.
+- `RuntimeError("could not parse output: 1 validation error")` is classified `model_error`, with `unexpected_error:RuntimeError`.
+
+The reviewer's R2 text-match mutation turns it RED.
+
+**Invariants.**
+- `run` and `get_agent_runtime` are AST-identical to base `dec69b365`.
+- The production adapter's kwargs are unchanged. `:645-677` and `test_the_production_runtime_adapter_still_hands_no_transport_options` both pass.
+
+**Mutations.** `/tmp/t267-3/mutate-fix1.py`, pinned at `3f5e7a44f`, over the three runtime test files:
+- M01–M23 were re-run. M10 and M17 got new anchors for the reformatted call.
+- S1–S6 are new, and include the reviewer's R1 and R2.
+
+Every row had anchor 1 and marker 1, turned RED, and restored clean. After all restores, 239 passed and no `T267_3_` marker remains.
+
+| Clause | File | Anchor | Marker | RED | Failing tests | Restore |
+|---|---|---|---|---|---|---|
+| M01 role check first (C12.1/C14) | `src/services/agent_runtime.py` | 1 | `T267_3_M01` = 1 | 3 failed, 236 passed | `test_run_candidate_rejects_an_unknown_or_deterministic_role_first` ×3 | marker after restore 0, clean=True |
+| M02 content-role check (C12.2) | `src/services/agent_runtime.py` | 1 | `T267_3_M02` = 1 | 1 failed, 238 passed | `test_run_candidate_rejects_content_for_another_role_before_the_hash` | marker after restore 0, clean=True |
+| M03 hash check (C12.3; plan Step 4) | `src/services/agent_runtime.py` | 1 | `T267_3_M03` = 1 | 1 failed, 238 passed | `test_run_candidate_rejects_a_hash_that_does_not_match_the_content` | marker after restore 0, clean=True |
+| M04 check order: hash before content role (C12) | `src/services/agent_runtime.py` | 1 | `T267_3_M04` = 1 | 1 failed, 238 passed | `test_run_candidate_rejects_content_for_another_role_before_the_hash` | marker after restore 0, clean=True |
+| M05 no session identity (user decision) | `src/services/agent_runtime.py` | 1 | `T267_3_M05` = 1 | 2 failed, 237 passed | `test_run_candidate_refuses_a_session_identity` ×2 | marker after restore 0, clean=True |
+| M06 sentinel release id on identity (C27) | `src/services/agent_runtime.py` | 1 | `T267_3_M06` = 1 | 1 failed, 238 passed | `test_a_provider_endpoint_error_names_the_sentinel_release_not_a_real_one` | marker after restore 0, clean=True |
+| M07 sentinel value is -1, never a real id (C27) | `src/services/agent_runtime.py` | 1 | `T267_3_M07` = 1 | 3 failed, 236 passed | `test_a_provider_endpoint_error_names_the_sentinel_release_not_a_real_one`; `test_candidate_run_sentinels_are_negative_runtime_identity_constants`; `test_the_candidate_sentinel_release_id_never_resolves_through_run` | marker after restore 0, clean=True |
+| M08 observer called (C15 sabotage) | `src/services/agent_runtime.py` | 1 | `T267_3_M08` = 1 | 10 failed, 229 passed | `test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete` ×2; `test_neither_run_nor_run_candidate_logs_model_output_anywhere`; `test_run_candidate_runs_every_role_through_the_fake_and_records_the_sentinel_identity` ×7 | marker after restore 0, clean=True |
+| M09 observer before validate_output (C15/C34) | `src/services/agent_runtime.py` | 1 | `T267_3_M09` = 1 | 2 failed, 237 passed | `test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete` ×2 | marker after restore 0, clean=True |
+| M10 never resolves a release (C12) | `src/services/agent_runtime.py` | 1 | `T267_3_M10` = 1 | 54 failed, 185 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×4; `test_a_failing_model_call_is_classified_and_does_not_escape` ×3; `test_a_provider_endpoint_error_names_the_sentinel_release_not_a_real_one`; `test_a_v1_candidate_with_an_overlay_is_an_assembly_error_before_the_model`; `test_a_v2_overlay_candidate_binds_the_composed_schema_now`; `test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete` ×2; `test_an_output_parser_exception_is_incomplete`; `test_an_unavailable_protected_bundle_is_an_assembly_error_before_the_model`; `test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text`; `test_an_unexpected_failure_is_a_model_error_carrying_only_its_class_name`; `test_candidate_prompt_schema_and_configuration_equal_the_production_path` ×28; `test_classification_reads_the_exception_type_never_its_text`; `test_neither_run_nor_run_candidate_logs_model_output_anywhere`; `test_run_candidate_delegates_to_run_resolved_and_never_to_run`; `test_run_candidate_runs_every_role_through_the_fake_and_records_the_sentinel_identity` ×7 | marker after restore 0, clean=True |
+| M11 NotImplementedError classified (C33) | `src/services/agent_runtime.py` | 1 | `T267_3_M11` = 1 | 2 failed, 237 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×1; `test_a_failing_model_call_is_classified_and_does_not_escape` ×1 | marker after restore 0, clean=True |
+| M12 provider parse error is incomplete (C15) | `src/services/agent_runtime.py` | 1 | `T267_3_M12` = 1 | 3 failed, 236 passed | `test_a_failing_model_call_is_classified_and_does_not_escape` ×1; `test_an_output_parser_exception_is_incomplete`; `test_classification_reads_the_exception_type_never_its_text` | marker after restore 0, clean=True |
+| M13 failures do not escape (C15/C34) | `src/services/agent_runtime.py` | 1 | `T267_3_M13` = 1 | 10 failed, 229 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×2; `test_a_failing_model_call_is_classified_and_does_not_escape` ×2; `test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete` ×2; `test_an_output_parser_exception_is_incomplete`; `test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text`; `test_an_unexpected_failure_is_a_model_error_carrying_only_its_class_name`; `test_classification_reads_the_exception_type_never_its_text` | marker after restore 0, clean=True |
+| M14 no exception text in detail (C16) | `src/services/agent_runtime.py` | 1 | `T267_3_M14` = 1 | 3 failed, 236 passed | `test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text`; `test_an_unexpected_failure_is_a_model_error_carrying_only_its_class_name`; `test_classification_reads_the_exception_type_never_its_text` | marker after restore 0, clean=True |
+| M15 adapter forwards transport_options (C33) | `src/services/agent_runtime.py` | 1 | `T267_3_M15` = 1 | 2 failed, 237 passed | `test_databricks_model_adapter_forwards_transport_options_to_the_one_binding`; `test_the_agent_test_runtime_bounds_its_model_call_to_120_seconds_and_no_retry` | marker after restore 0, clean=True |
+| M16 test runtime timeout is 120 s (C33) | `src/services/agent_runtime.py` | 1 | `T267_3_M16` = 1 | 1 failed, 238 passed | `test_the_agent_test_runtime_bounds_its_model_call_to_120_seconds_and_no_retry` | marker after restore 0, clean=True |
+| M17 prompt parity: candidate payload unchanged | `src/services/agent_runtime.py` | 1 | `T267_3_M17` = 1 | 28 failed, 211 passed | `test_candidate_prompt_schema_and_configuration_equal_the_production_path` ×28 | marker after restore 0, clean=True |
+| M18 run passes no observer (C15) | `src/services/agent_runtime.py` | 1 | `T267_3_M18` = 1 | 1 failed, 238 passed | `test_production_run_passes_no_raw_output_observer` | marker after restore 0, clean=True |
+| M19 v1 overlay guard kept (C13) | `src/services/agent_runtime.py` | 1 | `T267_3_M19` = 1 | 2 failed, 237 passed | `test_a_v1_candidate_with_an_overlay_is_an_assembly_error_before_the_model`; `test_a_v1_schema_contract_still_rejects_a_non_empty_overlay_before_the_model` | marker after restore 0, clean=True |
+| M20 call-site guard: run_candidate from graph/ (C12) | `src/services/graph/nodes.py` | 1 | `T267_3_M20` = 1 | 1 failed, 238 passed | `test_run_candidate_is_reachable_only_from_the_agent_test_workbench` | marker after restore 0, clean=True |
+| M21 call-site guard: test runtime from graph/ (C33) | `src/services/graph/nodes.py` | 1 | `T267_3_M21` = 1 | 1 failed, 238 passed | `test_the_bounded_test_runtime_is_reachable_only_from_the_workbench_and_its_route` | marker after restore 0, clean=True |
+| M22 one binding: workbench binds itself (C31) | `src/services/agent_test_workbench.py` | 1 | `T267_3_M22` = 1 | 1 failed, 238 passed | `test_no_module_binds_a_structured_model_outside_the_one_helper` | marker after restore 0, clean=True |
+| M23 workbench never names ChatDatabricks (C31) | `src/services/agent_test_workbench.py` | 1 | `T267_3_M23` = 1 | 1 failed, 238 passed | `test_no_module_binds_a_structured_model_outside_the_one_helper` | marker after restore 0, clean=True |
+| S1 candidate runs bypass the production identity sink (I-1) | `src/services/agent_runtime.py` | 1 | `T267_3_S1` = 1 | 18 failed, 221 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×4; `test_a_failing_model_call_is_classified_and_does_not_escape` ×3; `test_a_v2_overlay_candidate_binds_the_composed_schema_now`; `test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete` ×2; `test_neither_run_nor_run_candidate_logs_model_output_anywhere`; `test_run_candidate_runs_every_role_through_the_fake_and_records_the_sentinel_identity` ×7 | marker after restore 0, clean=True |
+| S2 the override is honoured in _run_resolved (I-1) | `src/services/agent_runtime.py` | 1 | `T267_3_S2` = 1 | 18 failed, 221 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×4; `test_a_failing_model_call_is_classified_and_does_not_escape` ×3; `test_a_v2_overlay_candidate_binds_the_composed_schema_now`; `test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete` ×2; `test_neither_run_nor_run_candidate_logs_model_output_anywhere`; `test_run_candidate_runs_every_role_through_the_fake_and_records_the_sentinel_identity` ×7 | marker after restore 0, clean=True |
+| S3 no traceback in the candidate log (I-2) | `src/services/agent_runtime.py` | 1 | `T267_3_S3` = 1 | 4 failed, 235 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×3; `test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text` | marker after restore 0, clean=True |
+| S4 exact candidate log field set (I-1) | `src/services/agent_runtime.py` | 1 | `T267_3_S4` = 1 | 4 failed, 235 passed | `test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record` ×4 | marker after restore 0, clean=True |
+| S5 reviewer R1: default observer logs raw output (I-3) | `src/services/agent_runtime.py` | 1 | `T267_3_S5` = 1 | 1 failed, 238 passed | `test_neither_run_nor_run_candidate_logs_model_output_anywhere` | marker after restore 0, clean=True |
+| S6 reviewer R2: classify by exception text (I-4) | `src/services/agent_runtime.py` | 1 | `T267_3_S6` = 1 | 1 failed, 238 passed | `test_classification_reads_the_exception_type_never_its_text` | marker after restore 0, clean=True |
+
+**Gates:**
+
+| Gate | Result |
+|---|---|
+| Focused, same 18 files | 1343 passed, 0 skipped |
+| Full `tests/unit`, `DATABASE_URL=sqlite:////tmp/t267-3.sqlite` | 6 failed, 6379 passed, 110 skipped, 136 warnings. The six failures are the baseline nodes and causes. |
+| PG runtime failures | 7 passed, zero skips |
+| `ruff check` | clean |
+| `.venv` | absent |
+
+Minors M-1–M-4 are deferred as instructed. M-1 must go into Task 4's brief.
