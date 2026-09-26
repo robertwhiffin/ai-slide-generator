@@ -46,6 +46,9 @@ dependencies = [
     "langchain-text-splitters>=0.0.1",
     "litellm==1.80.11",
     "mcp>=1.0.0",
+    # agent_runtime.py and model_endpoint_probe.py import openai at module level;
+    # databricks-langchain>=0.1.0 requires openai>=1.99.9 transitively.
+    "openai>=1.99.9",
     "python-pptx>=0.6.0",
     "playwright>=1.40.0",
     "Pillow>=10.0.0",
