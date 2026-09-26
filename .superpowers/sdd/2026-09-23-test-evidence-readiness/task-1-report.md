@@ -173,3 +173,26 @@ Logs are in `/tmp/t268-1/`: `full-unit.txt`, `pg-*.txt`, `red-*.txt`, `mutations
 - `git status --short` after the report commit: clean.
 - `git stash list`: none of mine. No stash was used.
 - `test ! -e .venv`: it holds, and no install was made.
+
+## Fix round 1
+
+- **FIX_BASE:** `961d3753f19e0874db8869dddd29f1ed4eed81fe` (the controller's ledger commit).
+- **Fix commit:** `7d3593415832087a59f809a928e4295be73bc584` `test: pin the verdict lock's fresh read of a cached run (#268)`. This is a test-only change.
+- **I1:** `populate_existing=True` on `_verdict_lock_statement` was pinned by no test. It is now pinned by the new test `test_the_lock_read_refreshes_a_run_already_cached_in_the_session`.
+  1. Session A loads the run row with `verdict` NULL, keeps a **strong reference** to it and commits. With `expire_on_commit=False` the stale copy stays mapped.
+  2. Session B records `approved / reviewer / "Looks right."` and commits.
+  3. Session A calls `record_verdict` with identical values.
+  4. The test asserts that `captured.updates() == []`, that the stored verdict tuple, including `verdict_at`, is unchanged, and that the cached object now reads `approved`.
+- **A trap on the way:** the first draft held no reference to the object from `session.get`. The identity map is weak, so the object was garbage-collected and re-loaded fresh, and the test stayed GREEN under the sabotage. The strong reference is required, and the test's comment says why.
+- **Sabotage F1** (driver `/tmp/t268-1/fix1_mutate.py`):
+  - **Mutation:** remove `.execution_options(populate_existing=True)` from `_verdict_lock_statement`. The anchor count was 1, and `grep -cE 'MUTATION F1( |$)'` gave 1.
+  - **RED** (whole file `tests/unit/test_agent_test_workbench.py`): 1 failed, 185 passed. The failure is `test_the_lock_read_refreshes_a_run_already_cached_in_the_session`, with `AssertionError: assert [('UPDATE age... right.', 1))] == []`.
+  - **Restore:** `git checkout 961d3753f -- src/services/agent_test_workbench.py`; `git diff --quiet` on `src` was clean.
+  - **GREEN:** 186 passed.
+- **Gates:**
+  - `test_agent_test_workbench.py`: 186 passed.
+  - Full `tests/unit` (`DATABASE_URL=sqlite:////tmp/t268-1.sqlite`, `-q -p no:randomly -rf`): 6 failed, 6667 passed, 110 skipped. The six are the baseline nodes and causes: `test_deploy_autoscaling` ×2, the chokepoint `_FakeSession.execute` ×3, and the persistence boundary `no active Graph Release` ×1.
+  - PostgreSQL `test_agent_definition_workbench_postgres.py`: 31 passed, 0 skipped.
+  - `ruff check`: clean.
+  - `.venv` was absent before and after.
+- **Concern 3 in §7 is closed by this round.**
