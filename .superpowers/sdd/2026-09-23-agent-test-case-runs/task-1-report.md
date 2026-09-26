@@ -116,3 +116,41 @@ None. The tests are self-contained, use the real SQLite session fixture, and req
 production code changes. The `match=` parameter is mandatory in both unit tests, preventing
 any other `GraphConfigurationIntegrityError` (e.g. from a different guard) from passing
 silently.
+
+---
+
+## Fix round 1
+
+**Finding:** the two single-role tests (architect + data_analyst) left the guard falsifiable by dropping any of the other five roles. The controller reproduced this by narrowing to `(_EXPECTED_AGENT_KEYS - {'deck_reviewer'}).issubset(...)`: all 21 tests stayed GREEN.
+
+**Fix:** replaced the two single-role tests with:
+1. `test_ac1_integrity_guard_rejects_deactivated_role_case` — `@pytest.mark.parametrize` over all seven roles in canonical order (architect, data_analyst, builder, build_reviewer, fixer, fix_reviewer, deck_reviewer). Each case deactivates that role's only required case and asserts the exact `match=` message.
+2. `test_ac1_integrity_guard_treats_unrequired_active_case_as_missing` — sets architect's case to `is_required=False` (keeping `is_active=True`) and asserts the guard still raises, pinning the `is_required` filter at `:188-194`.
+
+**Base SHA for this round:** `69cba58b4d72a87632a1efd1452f670c496f8fb5`
+
+**Sabotage verification:**
+
+Per-role (reviewer seam `:195` — drop role X from `_EXPECTED_AGENT_KEYS`):
+
+| Role dropped | Predicted RED | Observed |
+|---|---|---|
+| architect | `[architect]` | 1 failed |
+| data_analyst | `[data_analyst]` | 1 failed |
+| builder | `[builder]` | 1 failed |
+| build_reviewer | `[build_reviewer]` | 1 failed |
+| fixer | `[fixer]` | 1 failed |
+| fix_reviewer | `[fix_reviewer]` | 1 failed |
+| deck_reviewer | `[deck_reviewer]` | 1 failed |
+
+Each sabotage caused exactly the targeted role's parametrised case to RED; all others stayed GREEN. Production restored and `git diff` empty after each.
+
+`is_required` filter (reviewer seam `:188-194` — remove `AgentTestCase.is_required.is_(True)`):
+- `test_ac1_integrity_guard_treats_unrequired_active_case_as_missing` → 1 failed (RED). Restored.
+
+**Gates (post-fix):**
+- Bootstrap unit: 27 passed (was 21; +6 from parametrize replacing 2, +1 un-required = net +6)
+- PostgreSQL bootstrap: 3 passed, 0 skips (unchanged)
+- Full `tests/unit`: 6 failed (baseline), 6202 passed, 110 skipped — no new cause
+
+**Clause-to-mutation table (corrected):** The narrowed-`issubset` mutation at `:195` does NOT affect the PG seeding test — that test compares `{c.agent_key: c.synthetic_payload for c in cases} == REQUIRED_SMOKE_PAYLOADS` from actual seeded rows, which the guard never changes.

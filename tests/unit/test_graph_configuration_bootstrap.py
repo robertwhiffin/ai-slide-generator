@@ -699,48 +699,56 @@ def test_existing_state_detects_corruption_across_complete_aggregate(
 # ---------------------------------------------------------------------------
 # AC1 contract: one required active smoke case per role
 # ---------------------------------------------------------------------------
-# Clause-to-mutation table (controller seam: `:196-198`; reviewer seam: `:195`)
+# Clause-to-mutation table (controller seam `:196-198`; reviewer seam `:195` and `:188-194`)
 #
-# | Clause                           | Mutation                                | Predicted outcome             |
-# |----------------------------------|-----------------------------------------|-------------------------------|
-# | one required, active case exists | deactivate architect's only req. case   | guard raises (new test RED)   |
-# | synthetic payload stored         | existing test_fresh_bootstrap covers it | —                             |
-# | missing/inactive case refused    | guard raises with exact message text    | new test validates match=     |
-# | all seven roles covered          | only one role kept present              | reviewer sabotage: RED        |
+# | Clause                              | Mutation                                 | Predicted RED cases             |
+# |-------------------------------------|------------------------------------------|---------------------------------|
+# | one required+active case per role   | drop role X from _EXPECTED_AGENT_KEYS   | exactly role-X parametrised case|
+# | all seven roles enforced            | (same, for each X in seven-role order)  | same                            |
+# | is_required flag checked            | remove is_required filter from query    | un-required variant             |
+# | is_active flag checked              | (deactivation already covered above)   | —                               |
+# | guard raises, not returns           | delete raise at `:196-198`              | all 8 cases (7+1)               |
+# | exact message text                  | match= on both test variants            | different message → RED         |
 #
-# Controller sabotage target:  delete `raise GraphConfigurationIntegrityError(` at `:196-198`.
-#   Predicted RED: the test returns BootstrapResult instead of raising.
-# Reviewer sabotage target:    change `_EXPECTED_AGENT_KEYS.issubset(...)` at `:195` so it
-#   only checks whether {"architect"} is a subset, allowing other roles to be absent.
-#   Predicted RED: removing data_analyst's case still passes the weakened guard but fails
-#   the seven-role assertion in the integration test; removing architect's case still raises
-#   because the weakened check still detects the architect gap.
-#   A cleaner reviewer sabotage: replace _EXPECTED_AGENT_KEYS with frozenset({"architect"})
-#   so the check only enforces one role — the test deactivates architect, which is still
-#   caught, but deactivating any other role is not. The test must use a non-architect role
-#   to expose the weakness; the controller runs architect. They use different roles.
-#
-# The test below is the controller target (deactivates architect).
-# The reviewer's fresh sabotage must RED on a non-architect role (e.g. data_analyst).
-def test_ac1_integrity_guard_rejects_missing_role_required_case(session_factory):
-    """The ongoing AC1 guard in _validate_current_graph raises with the exact
-    message when any role has no active required case.
+# Controller sabotage target:  delete `raise` at `:196-198`.  All 8 cases RED.
+# Reviewer sabotage targets:
+#   (a) drop any role from `_EXPECTED_AGENT_KEYS` at `:195` → that role's case REDs.
+#   (b) remove `AgentTestCase.is_required.is_(True)` from the query at `:188-194`
+#       → the un-required variant REDs.
 
-    Sabotage: deleting ``raise GraphConfigurationIntegrityError`` at
-    ``graph_configuration_bootstrap.py:196-198`` causes this test to return a
-    ``BootstrapResult`` instead of raising — RED.
 
-    Anchor count (``grep -c``): the message
+@pytest.mark.parametrize(
+    "agent_key",
+    [
+        "architect",
+        "data_analyst",
+        "builder",
+        "build_reviewer",
+        "fixer",
+        "fix_reviewer",
+        "deck_reviewer",
+    ],
+)
+def test_ac1_integrity_guard_rejects_deactivated_role_case(session_factory, agent_key):
+    """The ongoing AC1 guard raises with the exact message when any role's only
+    required case is deactivated.  Parametrised over all seven roles in canonical
+    order so that narrowing the guard to any proper subset still leaves at least
+    one case RED.
+
+    Controller sabotage: delete ``raise`` at ``:196-198`` → all seven cases RED.
+    Reviewer sabotage: drop role X from ``_EXPECTED_AGENT_KEYS`` at ``:195``
+        → exactly role-X's parametrised case REDs (the other six stay GREEN).
+
+    Anchor count: the message
     ``"active required Agent Test Cases do not cover every graph role"``
-    appears exactly once in the production module.
+    appears exactly once in the production module (verified by ``grep -c``).
     """
     service = GraphConfiguration()
     service.bootstrap_v1(session_factory)
 
-    # Deactivate architect's only required case to leave that role uncovered.
     with session_factory.begin() as session:
         row = session.scalar(
-            select(AgentTestCase).where(AgentTestCase.agent_key == "architect")
+            select(AgentTestCase).where(AgentTestCase.agent_key == agent_key)
         )
         row.is_active = False
 
@@ -756,26 +764,23 @@ def test_ac1_integrity_guard_rejects_missing_role_required_case(session_factory)
         )
 
 
-def test_ac1_integrity_guard_rejects_missing_non_architect_role_required_case(
-    session_factory,
-):
-    """Reviewer sabotage target: if the guard at ``:195`` is narrowed to check
-    only one role (e.g. ``frozenset({"architect"}).issubset(...)``), this test
-    must go RED because it deactivates data_analyst's case, which would no longer
-    be detected.
+def test_ac1_integrity_guard_treats_unrequired_active_case_as_missing(session_factory):
+    """Setting a case to ``is_required=False`` (while ``is_active`` stays True)
+    removes it from the guard's covered set, because the query at ``:188-194``
+    filters on *both* flags.
 
-    Together with the architect-deactivation test above, the two tests pin both
-    sides of the ``issubset`` check and force the reviewer to prove the full set.
+    Reviewer sabotage: drop the ``is_required.is_(True)`` filter from that query
+        → an un-required-but-active case is counted as covering its role
+        → this test goes RED (no exception raised).
     """
     service = GraphConfiguration()
     service.bootstrap_v1(session_factory)
 
-    # Deactivate data_analyst's only required case (a different role from architect).
     with session_factory.begin() as session:
         row = session.scalar(
-            select(AgentTestCase).where(AgentTestCase.agent_key == "data_analyst")
+            select(AgentTestCase).where(AgentTestCase.agent_key == "architect")
         )
-        row.is_active = False
+        row.is_required = False  # still active; no longer required
 
     with pytest.raises(
         GraphConfigurationIntegrityError,
