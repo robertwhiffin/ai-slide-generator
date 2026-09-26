@@ -26,6 +26,7 @@ from src.services.graph_configuration_workbench import (
     DraftDefinitionSnapshot,
     DraftMetadataSnapshot,
     GraphWorkbenchSnapshot,
+    ModelAgentNodeSnapshot,
     _GraphConfigurationWorkbench,
     _LockedDraftWriteAggregate,
 )
@@ -104,6 +105,36 @@ class DraftProbeCandidate:
     lock_version: int
     candidate_hash: str
     model: ModelConfiguration
+
+
+@dataclass(frozen=True)
+class DraftTestCandidate:
+    """An immutable copy of one role's saved candidate for a #267 test run.
+
+    The probe's sibling: taken by the same read (the workbench's shared parent
+    locks inside a transaction that has ended when this is returned), so the
+    caller's model call holds no database lock.  It also carries the complete
+    content and the identity the run is compared against: the draft's base
+    release and that release's mapped revision for the role.
+    """
+
+    agent_key: AgentKey
+    lock_version: int
+    candidate_hash: str
+    content: DefinitionContent
+    base_release_id: int
+    base_revision_id: int
+    published_revision_id: int
+    published_content_hash: str
+    active_release_id: int
+
+
+@dataclass(frozen=True)
+class _SavedCandidateRead:
+    """The post-transaction copy the probe and the test run both project from."""
+
+    snapshot: GraphWorkbenchSnapshot
+    node: ModelAgentNodeSnapshot
 
 
 ClientCandidateT = TypeVar("ClientCandidateT")
@@ -618,6 +649,57 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
         is then re-checked against the local policy after the locks are
         released, so a URL- or path-shaped stored name never reaches a provider.
         """
+        read = self._read_saved_candidate(
+            session, agent_key=agent_key, expected_lock_version=expected_lock_version
+        )
+        if isinstance(read, DraftSaveConflict):
+            return read
+        return DraftProbeCandidate(
+            agent_key=agent_key,
+            lock_version=read.snapshot.draft.lock_version,
+            candidate_hash=read.node.draft.candidate_hash,
+            model=read.node.draft.content.model,
+        )
+
+    def read_draft_test_candidate(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+        expected_lock_version: int,
+    ) -> DraftTestCandidate | DraftSaveConflict[None]:
+        """Copy one role's saved candidate for a #267 test run (Correction 32).
+
+        The same read as ``read_draft_probe_candidate``: lock and role checks
+        first, one short shared-lock transaction, the null-candidate conflict
+        on a stale lock, and the endpoint-name policy re-check after the locks
+        are released.  Read-only.
+        """
+        read = self._read_saved_candidate(
+            session, agent_key=agent_key, expected_lock_version=expected_lock_version
+        )
+        if isinstance(read, DraftSaveConflict):
+            return read
+        return DraftTestCandidate(
+            agent_key=agent_key,
+            lock_version=read.snapshot.draft.lock_version,
+            candidate_hash=read.node.draft.candidate_hash,
+            content=read.node.draft.content,
+            base_release_id=read.snapshot.draft.base_release_id,
+            base_revision_id=read.node.draft.base_revision_id,
+            published_revision_id=read.node.published.revision_id,
+            published_content_hash=read.node.published.content_hash,
+            active_release_id=read.snapshot.active_release.release_id,
+        )
+
+    def _read_saved_candidate(
+        self,
+        session: Session,
+        *,
+        agent_key: AgentKey,
+        expected_lock_version: int,
+    ) -> _SavedCandidateRead | DraftSaveConflict[None]:
+        """The one saved-candidate read behind the probe and the test run."""
         self._validate_lock_and_agent_key(expected_lock_version, agent_key)
         with session.begin():
             snapshot = self.read_workbench(session)
@@ -629,17 +711,15 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     client_candidate=None,
                     server=aggregate,
                 )
-            selected = aggregate.definitions[agent_key]
-            candidate = DraftProbeCandidate(
-                agent_key=agent_key,
-                lock_version=snapshot.draft.lock_version,
-                candidate_hash=selected.candidate_hash,
-                model=selected.content.model,
+            node = next(
+                node
+                for node in snapshot.nodes
+                if node.execution_kind == "model" and node.agent_key == agent_key
             )
         self._run_candidate_validators(
-            (_endpoint_name_policy_validator,), selected.content
+            (_endpoint_name_policy_validator,), node.draft.content
         )
-        return candidate
+        return _SavedCandidateRead(snapshot=snapshot, node=node)
 
     @staticmethod
     def _legacy_prompt_source(
