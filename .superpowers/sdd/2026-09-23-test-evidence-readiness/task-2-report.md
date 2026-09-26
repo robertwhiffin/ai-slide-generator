@@ -198,3 +198,19 @@ I created and then removed three temporary detached worktrees for the parallel f
 - `/tmp/t268-2/base-wt`
 
 No other worktree was touched.
+
+## Fix round 1
+
+- **Base:** `905209759`.
+- **I1 (docstring only, no behaviour change):** `readiness_under_parent_lock` now states the following in the code:
+  - Only `in_transaction()` is checked. The L0 precondition cannot be checked in code.
+  - Inside #269's publication its result is INFORMATIONAL and never the gate (#269 C32). The case and verdict writers do not conflict with L0, so later commits are not seen.
+  - The publication caller must not decide publication on `all_ready`, `blocking_agents`, `missing_required_case` or any case `status`.
+  - The caller must not link `cases[].run_id`, because it was read without an L3 lock.
+  - The caller must do its own C29 locking: case rows unfiltered in id order, a fresh select of the active required cases, then the run rows.
+  - The caller must not call it after any publication write, because after the rebase every role reads unchanged and `all_ready=True`.
+- **Committed alongside:** the reviewer's `task-2-review.md`, with `git add -f`.
+- **Gate:**
+  - `tests/unit/test_agent_test_workbench.py`: 231 passed.
+  - `ruff check src/services/agent_test_workbench.py`: clean.
+  - `.venv` absent.
