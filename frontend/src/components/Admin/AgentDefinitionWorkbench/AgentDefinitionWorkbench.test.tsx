@@ -21,6 +21,10 @@ import {
   syntheticTestRunEvidence,
   syntheticTestRunUnavailable,
   syntheticDraftDefinitions,
+  syntheticDraftReadinessBody,
+  syntheticAgentReadiness,
+  syntheticTestCaseReadiness,
+  syntheticVerdictIneligible,
   syntheticLegacyPromptSource,
   syntheticModelEndpointDiscovery,
   syntheticNewerModelEndpoint,
@@ -136,6 +140,26 @@ function isWorkbenchUrl(url: unknown) {
 }
 
 /**
+ * #268's readiness read (C24) is routed by URL too. The workbench reads it once on load
+ * and again after every settled write, so every harness answers it with the default
+ * all-unchanged body unless a test supplies its own.
+ */
+const READINESS_SUFFIX = '/api/admin/agent-definitions/readiness';
+
+function isReadinessUrl(url: unknown) {
+  return String(url).endsWith(READINESS_SUFFIX);
+}
+
+function defaultReadinessResponse() {
+  return apiResponse(200, syntheticDraftReadinessBody());
+}
+
+function readinessGets(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([url, init]) =>
+    isReadinessUrl(url) && (init as RequestInit | undefined)?.method === 'GET');
+}
+
+/**
  * The #266 probe POST is routed by URL (correction 17): every harness below otherwise
  * parses an unmatched non-GET as a PUT, which would answer a probe with a save body.
  */
@@ -155,6 +179,7 @@ const BASELINE_RUN_URL = /\/api\/admin\/agent-definitions\/published\/([a-z_]+)\
 const TEST_CASES_URL = /\/api\/admin\/agent-definitions\/test-cases(?:\?agent_key=([a-z_]+))?$/;
 const TEST_CASE_URL = /\/api\/admin\/agent-definitions\/test-cases\/(\d+)$/;
 const TEST_CASE_RUNS_URL = /\/api\/admin\/agent-definitions\/test-cases\/(\d+)\/runs\?limit=100$/;
+const VERDICT_URL = /\/api\/admin\/agent-definitions\/test-runs\/(\d+)\/verdict$/;
 
 function isAgentTestUrl(url: unknown) {
   const text = String(url);
@@ -192,6 +217,7 @@ function mockFetchResponse(status: number, body: unknown) {
 }
 
 function mockedResponse(url: string, status: number, body: unknown) {
+  if (isReadinessUrl(url)) return defaultReadinessResponse();
   return (isCatalogUrl(url)
     ? defaultCatalogResponse()
     : {
@@ -282,6 +308,7 @@ function mockWorkbenchWithPuts(
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (isCatalogUrl(url)) return catalog(catalogCall++);
     if (isWorkbenchUrl(url)) return apiResponse(200, workbench);
+    if (isReadinessUrl(url)) return defaultReadinessResponse();
     if (isProbeUrl(url)) {
       if (!probe) throw new Error('unexpected probe POST');
       const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
@@ -537,12 +564,14 @@ describe('AgentDefinitionWorkbench', () => {
     expect(() => expectNoForbiddenActionNames()).toThrow();
   });
 
-  it('issues exactly one read when mounted', async () => {
+  it('issues exactly the workbench read and the readiness read when mounted', async () => {
     renderSuccessfulWorkbench();
     await loadedNodeNavigation();
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    // #268 C24: the workbench GET, then the one readiness GET on load.
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
     expect(workbenchGets()).toHaveLength(1);
+    expect(readinessGets()).toHaveLength(1);
     expect(catalogGets()).toHaveLength(0);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/admin\/agent-definitions\/workbench$/),
@@ -943,7 +972,10 @@ describe('AgentDefinitionWorkbench', () => {
       .getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
-    expect(allGets(fetchMock)).toHaveLength(1);
+    // The workbench GET and the one on-load readiness GET (#268 C24); the tab switch
+    // re-reads neither.
+    expect(readinessGets(fetchMock)).toHaveLength(1);
+    expect(allGets(fetchMock)).toHaveLength(2);
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
 });
@@ -976,14 +1008,23 @@ function mockWorkbenchApi(routes: {
   retireCase?: TestCaseRetireResponder;
   updateCase?: (testCaseId: number, body: Record<string, unknown>, call: number) => Promise<object> | object;
   listRuns?: (testCaseId: number, call: number) => Promise<object> | object;
+  /** #268: the readiness GET; the default is the all-unchanged body at lock 0. */
+  readiness?: (call: number) => Promise<object> | object;
+  /** #268: the verdict POST. */
+  verdict?: (runId: number, body: Record<string, unknown>, call: number) => Promise<object> | object;
+  workbench?: object;
 }) {
   const counts = {
     put: 0, upgrade: 0, source: 0, probe: 0,
     candidateRun: 0, baselineRun: 0, listCases: 0, createCase: 0, retireCase: 0, updateCase: 0, listRuns: 0,
+    readiness: 0, verdict: 0,
   };
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (isCatalogUrl(url)) return defaultCatalogResponse();
-    if (isWorkbenchUrl(url)) return apiResponse(200, syntheticAgentDefinitionWorkbench);
+    if (isWorkbenchUrl(url)) return apiResponse(200, routes.workbench ?? syntheticAgentDefinitionWorkbench);
+    if (isReadinessUrl(url) && init?.method === 'GET') {
+      return routes.readiness ? routes.readiness(counts.readiness++) : defaultReadinessResponse();
+    }
     // #267's bodyless GET and DELETE are routed before any body is parsed.
     const listMatch = TEST_CASES_URL.exec(url);
     if (listMatch && init?.method === 'GET') {
@@ -1001,6 +1042,11 @@ function mockWorkbenchApi(routes: {
       return routes.retireCase(Number(retireMatch[1]), counts.retireCase++);
     }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const verdictMatch = VERDICT_URL.exec(url);
+    if (verdictMatch && init?.method === 'POST') {
+      if (!routes.verdict) throw new Error('unexpected verdict POST');
+      return routes.verdict(Number(verdictMatch[1]), body, counts.verdict++);
+    }
     const candidateMatch = CANDIDATE_RUN_URL.exec(url);
     if (candidateMatch && init?.method === 'POST') {
       if (!routes.candidateRun) throw new Error('unexpected candidate test run POST');
@@ -1286,7 +1332,10 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
-    expect(allGets(fetchMock)).toHaveLength(1);
+    // The only other reads are #268's readiness GETs: one on load and one after the
+    // refused Upgrade settled (C24).
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+    expect(allGets(fetchMock)).toHaveLength(3);
     expect(promptPanel()).toBeVisible();
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect local edit');
     expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
@@ -1604,7 +1653,9 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
       .getAllByRole('group', { name: /^Custom block \d at/ })).toHaveLength(1);
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
-    expect(allGets(fetchMock)).toHaveLength(1);
+    // #268's readiness GETs: one on load and one after the Upgrade settled (C24).
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+    expect(allGets(fetchMock)).toHaveLength(3);
     expect(upgradeCalls(fetchMock)).toHaveLength(1);
   });
 });
@@ -1886,15 +1937,17 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The workbench GET and #268's one on-load readiness GET (C24), answered 500 here.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(readinessGets(fetchMock)).toHaveLength(1);
     const requests = () => fetchMock.mock.calls.length;
 
     fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
     const picker = screen.getByRole('checkbox', { name: 'Select diagnostic_notes' });
     fireEvent.click(picker);
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
     // The optional descriptor's text is code-owned: its row offers no textbox (#264 I2).
     const optional = screen.getByRole('group', { name: 'Optional field: diagnostic_notes' });
     expect(within(optional).queryAllByRole('textbox')).toEqual([]);
@@ -1902,20 +1955,20 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
     fireEvent.change(within(intent).getByRole('textbox', { name: 'Description guidance for intent' }), {
       target: { value: 'Intent guidance' },
     });
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
     fireEvent.change(within(intent).getByRole('textbox', { name: 'Examples guidance for intent (JSON array)' }), {
       target: { value: '["build"]' },
     });
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' }));
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' }));
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
     fireEvent.click(screen.getByRole('tab', { name: 'Assembly' }));
     fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
     fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
     fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
-    expect(requests()).toBe(1);
+    expect(requests()).toBe(2);
 
     // The edits were local and persisted across tab and role navigation.
     expect(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' })).toBeChecked();
@@ -3094,6 +3147,9 @@ const NAMES_267 = [
   'Test case name', 'Synthetic payload (JSON)', 'Required test case', 'Design system active',
   'Test run views', 'Input', 'Compare', 'Checks', 'Synthetic payload', 'Assembled prompt',
   'Model payload sent', 'Test case evidence', 'Published baseline evidence', 'Test case issues',
+  // #268's verdict controls (C26), held to the same #266 disjointness rule.
+  'Approve run', 'Reject run', 'Candidate run verdict', 'Published baseline verdict',
+  'Candidate run verdict notes', 'Published baseline verdict notes',
 ];
 
 describe('AgentDefinitionWorkbench isolated testing', () => {
@@ -3128,7 +3184,9 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     await act(async () => { await Promise.resolve(); });
-    expect(allGets(fetchMock)).toHaveLength(1);
+    // The workbench GET and #268's one on-load readiness GET (C24); no case read.
+    expect(readinessGets(fetchMock)).toHaveLength(1);
+    expect(allGets(fetchMock)).toHaveLength(2);
 
     const select = await loadTestCasesForSelectedRole();
     expect(select).toHaveValue('101');
@@ -3140,11 +3198,12 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     await waitFor(() => expect(callsMatching(fetchMock, TEST_CASE_RUNS_URL, 'GET')).toHaveLength(1));
     expect(String(callsMatching(fetchMock, TEST_CASE_RUNS_URL, 'GET')[0][0]))
       .toMatch(/\/api\/admin\/agent-definitions\/test-cases\/101\/runs\?limit=100$/);
-    expect(allGets(fetchMock)).toHaveLength(3);
+    // Plus the on-load readiness GET: reads settle no write, so they ask for no readiness.
+    expect(allGets(fetchMock)).toHaveLength(4);
 
     fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
     expect(asideButton('Load Agent Test Cases')).toBeEnabled();
-    expect(allGets(fetchMock)).toHaveLength(3);
+    expect(allGets(fetchMock)).toHaveLength(4);
     fireEvent.click(within(navigation).getByRole('button', { name: 'Foreman' }));
     expect(testingAside()).toHaveTextContent('Foreman is deterministic and has no Agent Test Cases.');
     expect(within(testingAside()).queryByRole('button')).not.toBeInTheDocument();
@@ -3177,8 +3236,10 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(callsMatching(fetchMock, BASELINE_RUN_URL, 'POST')).toHaveLength(0);
-    // The workbench, the case list and the one history read of the selected case.
-    expect(allGets(fetchMock)).toHaveLength(3);
+    // The workbench, the case list and the one history read of the selected case, plus
+    // #268's readiness GETs: one on load and one after the run settled (C24).
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+    expect(allGets(fetchMock)).toHaveLength(5);
     expectNoForbiddenActionNames();
     expect(asideButton(RUN_BUTTON)).toBeEnabled();
     expect(asideButton(BASELINE_BUTTON)).toBeEnabled();
@@ -3272,6 +3333,9 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     fireEvent.click(asideButton(BASELINE_BUTTON));
     await waitFor(() => expect(callsMatching(fetchMock, BASELINE_RUN_URL, 'POST')).toHaveLength(1));
     expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(0);
+    // The settled rerun asks for #268's readiness GET (C24); let it land on this harness
+    // before the hook below swaps `fetch`.
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
 
     const hookFetch = vi.fn().mockResolvedValue(apiResponse(201, syntheticTestRunEvidence()));
     vi.stubGlobal('fetch', hookFetch);
@@ -3670,7 +3734,10 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Run 900'));
     expect(callsMatching(fetchMock, TEST_CASE_RUNS_URL, 'GET').map(([url]) => String(url).split('/').at(-2)))
       .toEqual(['101', '102', '101']);
-    expect(allGets(fetchMock)).toHaveLength(5);
+    // The workbench, the case list and three history reads, plus #268's one on-load
+    // readiness GET (C24): a read settles no write, so none asks for another.
+    expect(readinessGets(fetchMock)).toHaveLength(1);
+    expect(allGets(fetchMock)).toHaveLength(6);
   });
 
   it('a history read still in flight when a run completes is dropped, so the newer run stays', async () => {
@@ -3715,5 +3782,301 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
 
     await act(async () => { held.pending[0](apiResponse(201, syntheticAgentTestCase({ id: 203, name: 'Held case' }))); });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+  });
+});
+
+// ============================================================
+// #268 Task 6 — readiness-derived status and the verdict controls
+// ============================================================
+
+const CHANGED_ARCHITECT_HASH = 'd'.repeat(64);
+
+/** The synthetic workbench with Architect's saved candidate changed from the published one. */
+function workbenchWithChangedArchitect(): AgentDefinitionWorkbenchResponse {
+  const body: AgentDefinitionWorkbenchResponse = structuredClone(syntheticAgentDefinitionWorkbench);
+  for (const node of body.nodes) {
+    if (node.execution_kind === 'model' && node.agent_key === 'architect') {
+      node.draft = { ...node.draft, candidate_hash: CHANGED_ARCHITECT_HASH };
+      node.changed = true;
+    }
+  }
+  return body;
+}
+
+function architectReadiness(
+  status: 'needs_test' | 'test_failed' | 'awaiting_review' | 'approved',
+  lockVersion = 0,
+  candidateHash = CHANGED_ARCHITECT_HASH,
+) {
+  const approved = status === 'approved';
+  return syntheticDraftReadinessBody({
+    draft_lock_version: lockVersion,
+    all_ready: approved,
+    blocking_agents: approved ? [] : ['architect'],
+    agents: {
+      architect: syntheticAgentReadiness('architect', {
+        candidate_hash: candidateHash,
+        is_changed_from_base: true,
+        ready: approved,
+        cases: [syntheticTestCaseReadiness({
+          status,
+          blocking: !approved,
+          run_id: status === 'needs_test' ? null : 501,
+          run_verdict: approved ? 'approved' : null,
+          run_checks_passed: status === 'needs_test' ? null : true,
+        })],
+      }),
+    },
+  });
+}
+
+function storedChangedRun(overrides = {}) {
+  return syntheticTestRunEvidence({
+    candidate_hash: CHANGED_ARCHITECT_HASH,
+    candidate_is_current: null,
+    base_release_is_current: null,
+    ...overrides,
+  });
+}
+
+function approvedChangedRun(notes: string | null = 'Ship it.') {
+  return storedChangedRun({
+    verdict: 'approved',
+    verdict_reviewer: 'admin@test.com',
+    verdict_at: '2026-09-26T10:05:00Z',
+    verdict_notes: notes,
+  });
+}
+
+function verdictBodies(fetchMock: ReturnType<typeof vi.fn>) {
+  return callsMatching(fetchMock, VERDICT_URL, 'POST').map(([url, init]) => [
+    String(url).split('/').at(-2),
+    String((init as RequestInit).body),
+  ]);
+}
+
+describe('AgentDefinitionWorkbench readiness-derived status (#268)', () => {
+  it.each([
+    ['needs_test', 'Needs test'],
+    ['awaiting_review', 'Awaiting review'],
+    ['test_failed', 'Test failed'],
+    ['approved', 'Approved'],
+  ] as const)('labels a changed role from its readiness item on load: %s is "%s"', async (status, label) => {
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      readiness: () => apiResponse(200, architectReadiness(status)),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent(label));
+    // The same derivation labels the editor's own status badge.
+    const badges = screen.getAllByRole('status').map((element) => element.textContent);
+    expect(badges).toContain(label);
+    // Unchanged roles stay Clean whatever readiness says.
+    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveTextContent('Clean');
+    expect(readinessGets(fetchMock)).toHaveLength(1);
+    // Codes stay on the wire; the labels are the client's own.
+    expect(document.body).not.toHaveTextContent(status);
+  });
+
+  it('drops a readiness answer read at another lock, so it cannot paint Approved', async () => {
+    mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      readiness: () => apiResponse(200, architectReadiness('approved', 3)),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await waitFor(() => expect(readinessGets()).toHaveLength(1));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(architectStatus(navigation)).not.toHaveTextContent('Approved');
+  });
+
+  it('never shows Approved for readiness of another saved candidate', async () => {
+    mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      readiness: () => apiResponse(200, architectReadiness('approved', 0, 'e'.repeat(64))),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await waitFor(() => expect(readinessGets()).toHaveLength(1));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+  });
+
+  it('a malformed or failed readiness read is contained: the role reads Needs test', async () => {
+    mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      readiness: () => apiResponse(200, { ...architectReadiness('approved'), extra: true }),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await waitFor(() => expect(readinessGets()).toHaveLength(1));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('re-reads readiness after a settled save', async () => {
+    const fetchMock = mockWorkbenchApi({
+      put: (agentKey, body) => apiResponse(200, saveSuccess(
+        agentKey,
+        (body as unknown as DraftSaveRequest).candidate,
+        1,
+      )),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(1));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+    const order = fetchMock.mock.calls.map(([url, init]) =>
+      `${(init as RequestInit | undefined)?.method} ${String(url).split('/api/admin/agent-definitions').at(-1)}`);
+    expect(order.indexOf('GET /readiness', order.indexOf('PUT /draft/architect'))).toBeGreaterThan(-1);
+  });
+});
+
+describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
+  it('Approve run posts exactly {verdict, notes}, shows the response as the evidence, and re-reads readiness to Approved', async () => {
+    const held = heldResponses();
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      listCases: caseList(),
+      listRuns: () => apiResponse(200, { items: [storedChangedRun()] }),
+      readiness: (call) => apiResponse(200, architectReadiness(call === 0 ? 'awaiting_review' : 'approved')),
+      verdict: held.responder,
+      put: () => apiResponse(500, null),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Awaiting review'));
+    await loadTestCasesForSelectedRole();
+    const compare = asideTab('Compare');
+    const region = await within(compare).findByRole('region', { name: 'Candidate run verdict' });
+    expect(region).toHaveTextContent('No verdict recorded');
+
+    fireEvent.change(within(region).getByRole('textbox', { name: 'Candidate run verdict notes' }), {
+      target: { value: 'Ship it.' },
+    });
+    fireEvent.click(within(region).getByRole('button', { name: 'Approve run' }));
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+
+    // The verdict holds the one gate (C24).
+    expect(testingAside()).toHaveTextContent('Recording the verdict…');
+    expect(within(region).getByRole('button', { name: 'Approve run' })).toBeDisabled();
+    expect(within(region).getByRole('button', { name: 'Reject run' })).toBeDisabled();
+    expect(asideButton(RUN_BUTTON)).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    fireEvent.click(within(region).getByRole('button', { name: 'Reject run' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(callsMatching(fetchMock, VERDICT_URL, 'POST')).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), {
+      target: { value: modelNode('architect').draft.prompt_text },
+    });
+
+    await act(async () => { held.pending[0](apiResponse(200, approvedChangedRun())); });
+
+    const settled = within(asideTab('Compare')).getByRole('region', { name: 'Candidate run verdict' });
+    await waitFor(() => expect(settled).toHaveTextContent('Approved by admin@test.com at 2026-09-26T10:05:00Z'));
+    expect(settled).toHaveTextContent('Notes: Ship it.');
+    expect(within(settled).queryByRole('button', { name: 'Approve run' })).not.toBeInTheDocument();
+    expect(within(settled).getByRole('button', { name: 'Reject run' })).toBeEnabled();
+    expect(within(asideTab('Compare')).getByRole('region', { name: 'Test case evidence' }))
+      .toHaveTextContent('Published baseline (approved)');
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Approved'));
+
+    expect(verdictBodies(fetchMock)).toEqual([['501', '{"verdict":"approved","notes":"Ship it."}']]);
+    // The response is the evidence: no run read follows, and no draft write happened.
+    expect(fetchMock.mock.calls.filter(([url]) => /\/test-runs\/\d+$/.test(String(url)))).toHaveLength(0);
+    expect(callsMatching(fetchMock, TEST_CASE_RUNS_URL, 'GET')).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    // Readiness: once on load, once after the verdict settled.
+    expect(readinessGets(fetchMock)).toHaveLength(2);
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expectNoForbiddenActionNames();
+  });
+
+  it('a Reject run with no notes sends notes null, and a rejected run offers Approve run', async () => {
+    const rejected = storedChangedRun({
+      verdict: 'rejected', verdict_reviewer: 'admin@test.com', verdict_at: '2026-09-26T10:06:00Z', verdict_notes: null,
+    });
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      listCases: caseList(),
+      listRuns: () => apiResponse(200, { items: [storedChangedRun()] }),
+      readiness: (call) => apiResponse(200, architectReadiness(call === 0 ? 'awaiting_review' : 'test_failed')),
+      verdict: () => apiResponse(200, rejected),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    const region = await within(asideTab('Compare')).findByRole('region', { name: 'Candidate run verdict' });
+
+    fireEvent.click(within(region).getByRole('button', { name: 'Reject run' }));
+
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Test failed'));
+    const settled = within(asideTab('Compare')).getByRole('region', { name: 'Candidate run verdict' });
+    expect(settled).toHaveTextContent('Rejected by admin@test.com');
+    expect(within(settled).getByRole('button', { name: 'Approve run' })).toBeEnabled();
+    expect(verdictBodies(fetchMock)).toEqual([['501', '{"verdict":"rejected","notes":null}']]);
+  });
+
+  it('a refused verdict is a contained alert that keeps the evidence, and still re-reads readiness', async () => {
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      listCases: caseList(),
+      listRuns: () => apiResponse(200, { items: [storedChangedRun()] }),
+      readiness: () => apiResponse(200, architectReadiness('awaiting_review')),
+      verdict: () => apiResponse(422, syntheticVerdictIneligible('checks_failed')),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    const region = await within(asideTab('Compare')).findByRole('region', { name: 'Candidate run verdict' });
+
+    fireEvent.click(within(region).getByRole('button', { name: 'Approve run' }));
+
+    const alert = await within(testingAside()).findByRole('alert');
+    expect(alert).toHaveTextContent('Deterministic checks did not pass, so this run cannot be approved.');
+    expect(alert).not.toHaveTextContent('A run whose deterministic checks failed');
+    expect(within(asideTab('Compare')).getByRole('region', { name: 'Candidate run verdict' }))
+      .toHaveTextContent('No verdict recorded');
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+    expect(within(asideTab('Compare')).getByRole('button', { name: 'Approve run' })).toBeEnabled();
+  });
+
+  it('a run whose checks failed offers no enabled Approve run, and names why', async () => {
+    const failing = storedChangedRun({
+      deterministic_checks_passed: false,
+      deterministic_check_results: [
+        { name: 'execution', passed: true, message: null, issues: [] },
+        { name: 'output_contract', passed: false, message: 'Missing title.', issues: [] },
+      ],
+    });
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      listCases: caseList(),
+      listRuns: () => apiResponse(200, { items: [failing] }),
+      readiness: () => apiResponse(200, architectReadiness('test_failed')),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    const region = await within(asideTab('Compare')).findByRole('region', { name: 'Candidate run verdict' });
+
+    const approve = within(region).getByRole('button', { name: 'Approve run' });
+    expect(approve).toBeDisabled();
+    expect(region).toHaveTextContent('Deterministic checks did not pass');
+    fireEvent.click(approve);
+    await act(async () => { await Promise.resolve(); });
+    expect(callsMatching(fetchMock, VERDICT_URL, 'POST')).toHaveLength(0);
   });
 });

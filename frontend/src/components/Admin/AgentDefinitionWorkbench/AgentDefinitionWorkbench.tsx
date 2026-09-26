@@ -13,6 +13,7 @@ import type {
 import { DefinitionEditor, type ModelEndpointCatalogView } from './DefinitionEditor';
 import {
   TEST_OPERATIONS,
+  agentReadinessFor,
   definitionFormatVersion,
   draftStatus,
   isLegacyCompositeRole,
@@ -86,6 +87,13 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
   const [selectedKey, setSelectedKey] = useState(workbench.nodes[0]?.agent_key);
   const editor = useDraftEditor(workbench);
   const modelCatalog = useModelEndpointCatalog();
+  const { loadReadiness } = editor;
+  const readinessRefresh = editor.state.readiness.refreshRequested;
+  // Readiness is read on load and again after every settled write that asks for it
+  // (#268 C24): a counted, ungated read, never a draft operation.
+  useEffect(() => {
+    void loadReadiness();
+  }, [loadReadiness, readinessRefresh]);
   const selectedNode = workbench.nodes.find((node) => node.agent_key === selectedKey)
     ?? workbench.nodes[0];
 
@@ -131,7 +139,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
               {workbench.nodes.map((node) => {
                 const selected = node.agent_key === selectedNode.agent_key;
                 const status = node.execution_kind === 'model'
-                  ? draftStatus(editor.state.byAgent[node.agent_key])
+                  ? draftStatus(editor.state.byAgent[node.agent_key], agentReadinessFor(editor.state, node.agent_key))
                   : null;
                 return (
                   <button
@@ -184,6 +192,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                     agentKey={node.agent_key}
                     node={node}
                     entry={entry}
+                    readiness={agentReadinessFor(editor.state, node.agent_key)}
                     saveDisabled={operationsDisabled || !validateDraftForm(entry.local).ok}
                     operationsDisabled={operationsDisabled}
                     probePending={probePending}
@@ -236,6 +245,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                 onRetireTestCase={editor.retireAgentTestCase}
                 onUpdateTestCase={editor.updateAgentTestCase}
                 onLoadTestRuns={editor.loadTestRuns}
+                onRecordVerdict={editor.recordVerdict}
               />
             ) : (
               <p className="mt-3 text-sm leading-6 text-gray-600">

@@ -1,9 +1,13 @@
-import { useReducer, useRef } from 'react';
+import { useCallback, useReducer, useRef } from 'react';
 import {
   AgentDefinitionApiError,
   createTestCase,
   executeCandidateTestRun,
   executePublishedBaselineTestRun,
+  getDraftReadiness,
+  recordTestRunVerdict,
+  type TestRunEvidence,
+  type TestRunVerdict,
   listTestCaseRuns,
   listTestCases,
   probeDraftStructuredOutput,
@@ -329,11 +333,30 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     }
   };
 
+  /**
+   * Reads the draft's readiness (#268 C24): an ungated read in the one slot. Its ID from
+   * the one counter only lets the reducer drop an answer that is not the latest; the
+   * reducer also drops one read at another lock than the saved one. It reads no state,
+   * so it is stable, and the workbench calls it on load and whenever a settled write
+   * asks for a fresh read (`state.readiness.refreshRequested`).
+   */
+  const loadReadiness = useCallback(async (): Promise<void> => {
+    const requestId = nextRequestIdRef.current++;
+    dispatch({ type: 'readinessLoadStarted', requestId });
+    try {
+      const readiness = await getDraftReadiness();
+      dispatch({ type: 'readinessLoaded', requestId, readiness });
+    } catch {
+      dispatch({ type: 'readinessLoadFailed', requestId });
+    }
+  }, []);
+
   /** Starts one #267 operation on the one gate, or returns `null` when it is held. */
   const startTestOperation = (
     operation: TestOperationKind,
     agentKey: AgentKey,
     testCaseId?: number,
+    verdict?: { runId: number; verdict: TestRunVerdict },
   ): { requestId: number; expectedLockVersion: number } | null => {
     if (operationBlocked()) return null;
     const requestId = nextRequestIdRef.current++;
@@ -348,6 +371,7 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
         expectedLockVersion,
         submittedCandidate: null,
         ...(testCaseId === undefined ? {} : { testCaseId }),
+        ...(verdict === undefined ? {} : verdict),
       },
     });
     return { requestId, expectedLockVersion };
@@ -462,10 +486,36 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     }
   };
 
+  /**
+   * Records an admin's verdict on one shown run (#268) on the one gate. The body is
+   * exactly `{ verdict, notes }`; the response is the run's evidence, so no run GET
+   * follows, and the settled verdict asks for a fresh readiness read (C26).
+   */
+  const recordVerdict = async (
+    agentKey: AgentKey,
+    evidence: TestRunEvidence,
+    verdict: TestRunVerdict,
+    notes: string | null,
+  ): Promise<void> => {
+    const started = startTestOperation('verdict', agentKey, evidence.test_case_id, { runId: evidence.run_id, verdict });
+    if (started === null) return;
+    const { requestId } = started;
+    try {
+      const recorded = await recordTestRunVerdict(evidence.run_id, { verdict, notes });
+      dispatch({ type: 'testVerdictRecorded', requestId, evidence: recorded });
+    } catch (error) {
+      dispatch({ type: 'testOperationFailed', requestId, ...testOperationFailure(error, 'verdict') });
+    } finally {
+      finishTestOperation(requestId);
+    }
+  };
+
   return {
     state,
     edit,
     save,
+    loadReadiness,
+    recordVerdict,
     updateAgentTestCase,
     loadTestRuns,
     probeStructuredOutput,

@@ -1,6 +1,7 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 import type {
   AgentKey,
+  AgentReadiness,
   AssemblyCondition,
   CustomAnchor,
   DraftFieldError,
@@ -80,6 +81,8 @@ interface DefinitionEditorProps {
   agentKey: AgentKey;
   node: ModelAgentNode;
   entry: DraftEditorEntry;
+  /** The role's item from the last readiness accepted at the saved lock (#268 C25). */
+  readiness: AgentReadiness | null;
   saveDisabled: boolean;
   /** True while any Save, Upgrade, SourceRecovery, SchemaUpgrade, or Probe request is in flight. */
   operationsDisabled: boolean;
@@ -192,6 +195,7 @@ export function DefinitionEditor({
   agentKey,
   node,
   entry,
+  readiness,
   saveDisabled,
   operationsDisabled,
   probePending,
@@ -298,7 +302,7 @@ export function DefinitionEditor({
     <>
       <div className="mb-3 flex items-center justify-between gap-3">
         <span role="status" className="rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
-          {draftStatus(entry)}
+          {draftStatus(entry, readiness)}
         </span>
         <button
           type="button"
