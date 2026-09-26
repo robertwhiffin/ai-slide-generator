@@ -939,7 +939,7 @@ def test_candidate_run_sentinels_are_negative_runtime_identity_constants():
 
 
 @pytest.mark.parametrize("agent_key", MODEL_DRIVEN_AGENT_KEYS)
-def test_run_candidate_runs_every_role_through_the_fake_and_records_the_sentinel_identity(
+def test_run_candidate_runs_every_role_through_the_fake_and_bypasses_the_identity_sink(
     agent_key,
 ):
     runtime, adapter, sink, loader = _candidate_runtime()
