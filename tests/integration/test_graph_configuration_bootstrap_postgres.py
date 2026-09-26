@@ -17,7 +17,10 @@ from src.database.models.graph_configuration import (
     GraphRelease,
     GraphReleaseAgent,
 )
-from src.services.graph_configuration import GraphConfiguration
+from src.services.graph_configuration import (
+    REQUIRED_SMOKE_PAYLOADS,
+    GraphConfiguration,
+)
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
 
 pytestmark = pytest.mark.postgres
@@ -205,3 +208,30 @@ def test_two_bootstraps_observe_second_backend_waiting_on_advisory_lock(
         row.agent_key: row.candidate_hash for row in final["draft_agents"]
     } == revision_hashes
     assert {row.graph_release_id for row in final["mappings"]} == {first.release_id}
+
+
+# ---------------------------------------------------------------------------
+# AC1 integration assertion: seven required active cases with exact payloads
+# ---------------------------------------------------------------------------
+def test_ac1_bootstrap_seeds_seven_required_active_cases_matching_smoke_payloads(
+    postgres_engine,
+):
+    """Bootstrap must seed exactly seven active, required cases — one per role —
+    whose ``synthetic_payload`` values equal ``REQUIRED_SMOKE_PAYLOADS``.
+
+    Uses an identity comparison (not a count) so any payload divergence is caught.
+    Runs against a real PostgreSQL bootstrap with zero skips.
+    """
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+
+    with factory() as session:
+        cases = session.scalars(
+            select(AgentTestCase).where(
+                AgentTestCase.version == 1,
+                AgentTestCase.is_active.is_(True),
+                AgentTestCase.is_required.is_(True),
+            )
+        ).all()
+
+    assert {c.agent_key: c.synthetic_payload for c in cases} == REQUIRED_SMOKE_PAYLOADS
