@@ -758,3 +758,5 @@ Source: #268 Task 4 (`3b0d2070a`), reproduced on PostgreSQL by `test_postgres_cl
 Ruling for #269: any write whose safety depends on a correlated sub-predicate over rows another transaction may change must (1) lock the target rows `FOR UPDATE` (id order) in one statement, then (2) re-evaluate the predicate in a NEW statement (fresh READ COMMITTED snapshot) before or as part of the write. The C29 gate re-verify already follows (1)+(2) — keep it that way; do not collapse it into one statement. Each such site needs a PID-observed ordering test, or a ledgered argument that no concurrent writer can change the sub-predicate's rows.
 
 Cost if wrong: publication links, or cleanup deletes, a row whose protection committed during the wait.
+
+Addendum (from #268 Task 4 review): every multi-row L3 run lock in #269 (the gate re-verify, the linker) takes rows `FOR UPDATE` in `ORDER BY id`, matching #268 cleanup, so two L3 lockers never cross.
