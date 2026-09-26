@@ -64,3 +64,9 @@ Ruling: Q5 — show the newest completed baseline, with its own verdict label; a
 Ruling: Q6 — baseline runs are NOT subject to the 20-run candidate retention (C12/C19: cleanup is candidate-only). Cost if wrong: baseline rows accumulate slowly.
 Ruling: Q7 — no verdict withdrawal back to "no verdict" in #268; a verdict can be changed (approve ↔ reject) while unlinked. Cost if wrong: an admin cannot clear a verdict, only flip it.
 Pre-pass: 30 corrections (24 blocking). GO for Task 1 once #267 merges, conditional on rebase + baseline + C3 re-probe of the evidence field set after #267's token-usage fix wave.
+
+## REBASED onto a08389ec3 (#267 merged) — 2026-09-26, controller
+`git rebase --onto a08389ec3 b0c4d8aeb`: 2 of 2 commits `=`, 0 behind; backup tag `backup/268-pre-rebase-*`. IMPLEMENTATION_BASE = `a08389ec3`.
+C3 re-probe after #267's token wave: `src/api/schemas/agent_definitions.py` unchanged between `b0c4d8aeb` and `a08389ec3` (evidence field set unchanged); `agent_test_workbench.py` changed only to persist `input_tokens`/`output_tokens` from the observation.
+Baseline at the rebased HEAD (`DATABASE_URL=sqlite:///...`, `-q -p no:randomly -rf`): 6 failed / 6625 passed / 110 skipped — the same six nodes and causes.
+Task 1: GO — conditions met (rebase, IMPLEMENTATION_BASE, baseline, C3). Task 1 brief carries C4-C9 and C27.
