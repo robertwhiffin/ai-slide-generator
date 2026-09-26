@@ -402,3 +402,20 @@ def test_graph_release_publication_acceptance_is_collected_by_integration_graph(
         ".github/workflows/test.yml. Its end-to-end publication and preview "
         "shared-lock assertions must execute against PostgreSQL."
     )
+
+
+def test_graph_release_history_is_collected_by_integration_graph():
+    """#270's release-history read model belongs in the graph CI job.
+
+    Its coherence assertion forces a publication to commit between the history
+    read's statements under READ COMMITTED, and its no-lock assertion inspects
+    rendered row-lock clauses; SQLite can express neither, so the file must run
+    in the graph job's PostgreSQL environment rather than the unit job.
+    """
+    target = "tests/integration/test_graph_release_history_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its statement-coherence and no-lock "
+        "assertions must execute against PostgreSQL."
+    )
