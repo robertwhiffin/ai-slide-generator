@@ -87,3 +87,17 @@ Next: independent plan review, then corrections, before any execution (Task 1 Ph
 - Before Task 9: Correction 5 (I4).
 
 **Non-blocking (apply in named task):** Corrections 8 (M1), 9 (M2), 10 (M3), 17 (M10).
+
+## Task 0 phase A — 2026-09-26
+
+- **TASK1_BASE** = `dbbea85e1` (file `TASK1_BASE`). `a08389ec3` is an ancestor; src/tests/frontend/packages/.github identical to it. Python 3.11.0; no `.venv`.
+- **Implementation facts (re-verified at a08389ec3, all match the plan's lines):** `GraphRelease` models:193 with a non-deferrable partial unique one-active index (two active rows are unrepresentable on both backends; zero active is the reachable integrity case); `GraphReleaseTestRun` :493; `AgentTestRun.run_kind` check :453–454; guards database.py:935 (release first-close only :1019–1020, deferred exactly-one :1110); `validate_definition_hash` graph_configuration_content.py:128; `GRAPH_V1_AGENT_KEYS` manifest:66; `_publish_v2` recipe test_conversation_pin_acceptance_postgres.py:125; `postgres_engine` conftest:235. SQLite returns naive datetimes, PostgreSQL aware; the read model returns them as stored.
+- **Unit baseline (full tests/unit):** 6 failed / 6625 passed / 110 skipped. The 6 expected nodes; causes: deploy_autoscaling ×2 (`'provisioned' == 'autoscaling'`; provisioned mock not called), style_exclusivity_chokepoint ×3 (`'_FakeSession' object has no attribute 'execute'`), persistence_boundary ×1 (`ConversationGraphReleaseIntegrityError: no active Graph Release`). None touches #270.
+- **PostgreSQL baseline (Correction 14's corrected loop, 11 files, one invocation each):** all green, 0 skips (159 tests). Detail in `reports/preflight-phase-a.md`.
+
+## Task 1 — 2026-09-26 — DONE (`d0e4d693a`)
+
+- `src/services/graph_release_history.py` (lock-free; first statement `select(GraphRelease).order_by(version_number.desc()).execution_options(populate_existing=True)` per C11; every later statement filtered to that id set; evidence read filtered to `run_kind='candidate'` plus a filtered/unfiltered link-count comparison; no logging; no model/runtime import). Unit file (17 tests), PostgreSQL file (4 tests, 0 skips), CI enrollment in `test.yml` and a pin test in `test_ci_collects_integration_tests.py`.
+- Gates: full unit 6 failed / 6643 passed / 110 skipped, the same 6 nodes and causes as baseline (+18 new passes); 12 PostgreSQL files 163 passed, 0 skips; ruff no new findings vs base.
+- 23 clause mutations, each anchor=1, marker grep -c=1, probe-proven executed, RED, restored byte-identical (grep -c 0, `git diff --exit-code`). Controller sabotage (changed vs own mapping) REDs `test_history_lists_every_version_newest_first_with_exact_lineage` (+2 PG tests); reviewer sabotage (`restored_from=ref(previous_release_id)`) REDs the lineage test on SQLite and `test_history_reads_under_guards_and_restored_lineage_is_exact` on PostgreSQL, observing `Ref(v3)`. Report: `task-1-report.md`.
+- Deviations from the plan text: see report "Deviations". Phase A ends; Task 2 waits for Task 0 Step 4 (phase B).
