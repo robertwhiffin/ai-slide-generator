@@ -123,3 +123,69 @@ The C10 controller target ("executor passes unfiltered") is the same edit as M05
    - A PostgreSQL test proves that transaction 2 waits behind an L0 `FOR UPDATE` holder without deadlock, and commits after it. #269 C13 item 3's two-order test against a *real* publication remains #269 Task 4's job, because no publication code exists yet.
    - After a publication, #269's `_lock_current_parents` retry, if it lands, composes with this executor's own single retry: at most two rounds, and the model is never re-invoked.
 7. **Test infrastructure:** `_HookedFakeAdapter`'s hook runs inside the model call. An exception there becomes a persisted `unexpected_error` run instead of a test error. The hooks used only append to lists or perform committed writes.
+
+## Fix round 1
+
+Base: `07d4cf874`, pinned. Commits:
+- `19d910ac5` refactor: give test runs a public runtime observer hook (#267)
+- `913cdfe40` fix: check the published endpoint name before a baseline rerun (#267)
+
+### I-1: a public observer hook in place of private-attribute wrapping (ADDRESSED)
+- **Removed from `agent_test_workbench.py`:**
+  - `_ObservingModelAdapter`;
+  - `_observed()`, the per-run `copy.copy` that overwrote `_model_adapter`;
+  - the imports of the private `_classify_candidate_failure` and `_supplied_output_keys`.
+- **Added to `agent_runtime.py`** (additive only):
+  - `RunObservation`, a public recorder of three values: `prompt` (the exact prompt passed to the adapter), `raw_output` (the supplied keys, observed before validation) and `model_latency_ms` (the adapter call's duration, recorded on both return and raise).
+  - `run_candidate(..., *, observation=None)`.
+  - `run_published_baseline(agent_key, graph_release_id, payload, assembly_context, *, observation=None) -> CandidateRunOutcome`:
+    - Its role check and its loader `try/except` are pinned AST-equal to `run`'s by `test_run_published_baseline_resolves_exactly_as_run_does`.
+    - A loader failure raises exactly as it does from `run`.
+    - It then calls the same `_run_resolved`, with the production identity sink (concern-2 ruling), and classifies failures into the outcome.
+  - A private `_run_observed`, shared by both public entries.
+  - A private keyword-only `_observation` on `_run_resolved`. It sets the prompt before `invoke` and the latency in a `finally`. `run` passes nothing.
+  - `_classify_candidate_failure` is renamed to the public `classify_test_run_failure`. It is used inside the runtime only.
+- **The workbench** calls `run_candidate(..., observation=...)` and `run_published_baseline(..., observation=...)`. Resolution errors are mapped as before: `lakebase_unavailable` is a 503; any other code, or a missing or incomplete release, is `assembly_error`.
+- **AST proof** (`/tmp/t267-4/ast_identity.py`, `ast_identity.txt`): `AgentRuntime.run`, `get_agent_runtime` and `get_agent_test_runtime` are IDENTICAL to `b678b48fd`, to `07d4cf874` and to Task 3's base `dec69b365`.
+- **Other constraints held:**
+  - There is still exactly one `with_structured_output(` in `src`.
+  - The production adapter kwargs test (`:645-677`) passes unedited.
+  - The prompt-parity tests (28 cases), the byte-identical builder parity and the log exact-set tests stay green.
+  - `test_run_candidate_delegates_to_run_resolved_and_never_to_run` now follows `run_candidate` → `_run_observed` → `_run_resolved`, with the same forbidden-name set.
+- **New guards in `test_agent_runtime.py`:**
+  - `test_run_published_baseline_is_reachable_only_from_the_agent_test_workbench`
+  - `test_no_module_outside_the_runtime_touches_its_model_adapter` (the `_model_adapter` attribute or name may appear only in `agent_runtime.py`)
+  - `test_no_module_imports_a_private_name_from_the_runtime`
+  - Hook tests: the baseline entry sends `run`'s prompt and records the real identity; an observation keeps the prompt and duration of a failed call; loader failures raise as they do from `run`.
+
+### I-2: re-check the published endpoint name before a baseline rerun (ADDRESSED)
+- **The check:** after transaction 1 and before the model call, `validate_endpoint_name_policy(endpoint_name)` runs on the published revision's endpoint name.
+- **The refusal:** a URL- or path-shaped name raises `DraftContentRejected(DraftValidationIssue("published.model.endpoint_name", failure.code, failure.message))`. This is the candidate path's outcome family: 422 with the catalog-owned code `endpoint_url_not_allowed` and its fixed message.
+- **What does not happen:** the stored name is never echoed, there is no model call, and no row is written, so nothing reaches `error_detail`.
+- **Test:** `test_a_url_shaped_published_endpoint_is_refused_before_a_baseline_call`, the twin of the candidate URL test.
+  - RED against `19d910ac5`: `DID NOT RAISE DraftContentRejected` (`/tmp/t267-4/fix1-red.txt`).
+  - GREEN at `913cdfe40`.
+
+### Sabotage (driver `/tmp/t267-4/fix1_mut.py`, pin `913cdfe40`)
+- Scope: `tests/unit/test_agent_test_workbench.py tests/unit/test_agent_runtime.py`.
+- Every row had anchor count 1, marker count 1 on the mutated line, marker 0 after restore, and a clean diff.
+
+| Id | Clause | File | Anchors | Marker | RED | Restore |
+|---|---|---|---|---|---|---|
+| F1 | I-1 sabotage: private adapter override in the workbench | `agent_test_workbench.py` | 1 | 1 | 1 failed, 242 passed, 5 warnings — test_no_module_outside_the_runtime_touches_its_model_adapter | `git checkout 913cdfe40`; marker 0, clean=True |
+| F2 | I-1 sabotage: private runtime import in the workbench | `agent_test_workbench.py` | 1 | 1 | 1 failed, 242 passed, 5 warnings — test_no_module_imports_a_private_name_from_the_runtime | `git checkout 913cdfe40`; marker 0, clean=True |
+| F3 | I-2 sabotage: remove the published endpoint check | `agent_test_workbench.py` | 1 | 1 | 1 failed, 242 passed, 5 warnings — test_a_url_shaped_published_endpoint_is_refused_before_a_baseline_call | `git checkout 913cdfe40`; marker 0, clean=True |
+| F4 | hook: prompt not recorded | `agent_runtime.py` | 1 | 1 | 4 failed, 239 passed, 5 warnings — test_a_model_failure_is_a_persisted_model_error_with_a_code_only[provider_unavailable-endpoint_unavailable:{endpoint}], test_a_model_failure_is_a_persisted_model_error_with_a_code_only[structured_output_unsupported-structured_output_unsupported:{endpoint}], test_run_published_baseline_hands_the_model_runs_prompt_and_records_the_real_identity, test_an_observation_keeps_the_prompt_and_duration_of_a_failed_model_call | `git checkout 913cdfe40`; marker 0, clean=True |
+| F5 | hook: failed-call latency not recorded | `agent_runtime.py` | 1 | 1 | 2 failed, 241 passed, 5 warnings — test_run_published_baseline_hands_the_model_runs_prompt_and_records_the_real_identity, test_an_observation_keeps_the_prompt_and_duration_of_a_failed_model_call | `git checkout 913cdfe40`; marker 0, clean=True |
+| F6 | hook: baseline resolution drifts from run (drops the SQLAlchemy mapping) | `agent_runtime.py` | 1 | 1 | 2 failed, 241 passed, 5 warnings — test_run_published_baseline_resolves_exactly_as_run_does, test_run_published_baseline_raises_loader_failures_as_run_does | `git checkout 913cdfe40`; marker 0, clean=True |
+| F7 | hook: baseline uses the pass-through sink (not the production log) | `agent_runtime.py` | 1 | 1 | 1 failed, 242 passed, 5 warnings — test_run_published_baseline_hands_the_model_runs_prompt_and_records_the_real_identity | `git checkout 913cdfe40`; marker 0, clean=True |
+
+### Gates
+- **Focused** (the Task 4 files plus `test_agent_runtime`, `test_persisted_agent_runtime`, `test_agent_test_workbench`, `test_graph_nodes`, `test_model_endpoint_probe`, `test_graph_configuration_draft`, the routes, the workbench and the CI collector): **1063 passed**.
+- **Full `tests/unit`** (`DATABASE_URL=sqlite:////tmp/t267-4.sqlite`): **6 failed, 6485 passed, 110 skipped**. These are exactly the baseline six nodes with the same causes.
+- **PostgreSQL**, zero skips: workbench **24**, runtime failures **7**.
+- **Ruff:** clean on the touched files.
+- `.venv` was absent before and after, and nothing was installed.
+
+### Deferred
+- **m-1:** transaction 2 retries only the `_lock_current_parents` handoff diagnosis, not a SQLAlchemy `IntegrityError`. A run insert racing a publication either waits on the lock or sees the handoff, so the two are near-equivalent. This is recorded here and not changed.
