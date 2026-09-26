@@ -1287,6 +1287,41 @@ def test_a_provider_parse_failure_is_incomplete_without_raw_output(factory):
     )
 
 
+class _NotedAdapter(DeterministicFakeModelAdapter):
+    """Answer with the role's output plus one valid diagnostic note."""
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        super().invoke(
+            agent_key=agent_key, configuration=configuration, schema=schema, prompt=prompt
+        )
+        return schema.model_validate(fake_output(agent_key, diagnostic_notes=["a note"]))
+
+
+def test_a_v2_overlay_candidates_structured_output_keeps_its_optional_fields(factory):
+    """C15: structured output is the canonical dump merged with the validated
+    optional fields the overlay declared."""
+    from src.services.agent_schema_registry import AgentSchemaRegistry
+    from src.services.agent_schema_types import SchemaOverlay
+
+    _rewrite_draft(
+        factory,
+        "architect",
+        schema_contract=ContentIdentity(
+            version=2, digest=AgentSchemaRegistry().identity_for("architect", 2).digest
+        ),
+        schema_overlay=SchemaOverlay(
+            field_overrides={}, additional_optional_fields=("diagnostic_notes",)
+        ),
+    )
+    workbench, _runtime_, _adapter = _executor(factory, _NotedAdapter())
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "completed", evidence.error_detail
+    assert evidence.candidate_structured_output["diagnostic_notes"] == ["a note"]
+    assert evidence.candidate_raw_output["diagnostic_notes"] == ["a note"]
+
+
 def test_an_unassemblable_candidate_is_an_assembly_error_before_the_model(factory):
     _rewrite_draft(
         factory,
@@ -1699,10 +1734,23 @@ def test_no_baseline_is_shown_before_one_is_run(factory):
     assert first.run_id != second.run_id
 
 
+class _NumberedAdapter(DeterministicFakeModelAdapter):
+    """Answer the architect with a message numbered by call, so runs differ."""
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        super().invoke(
+            agent_key=agent_key, configuration=configuration, schema=schema, prompt=prompt
+        )
+        return schema.model_validate(
+            fake_output(agent_key, message=f"answer {len(self.calls)}")
+        )
+
+
 def test_a_candidate_run_copies_the_newest_completed_baseline_outputs(factory):
-    workbench, _runtime_, _adapter = _executor(factory)
-    _run_baseline(factory, workbench)
+    workbench, _runtime_, _adapter = _executor(factory, _NumberedAdapter())
+    oldest = _run_baseline(factory, workbench)
     newest = _run_baseline(factory, workbench)
+    assert oldest.candidate_structured_output != newest.candidate_structured_output
 
     evidence = _run_candidate(factory, workbench)
 
