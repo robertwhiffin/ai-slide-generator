@@ -40,15 +40,12 @@ candidate (``execute_candidate_run``) or the active published definition
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Mapping
 
-from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -66,11 +63,9 @@ from src.services.agent_model_payload import model_payload_for
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     AgentInvocationResult,
-    AgentModelConfiguration,
     AgentRuntime,
+    RunObservation,
     UnknownAgentKeyError,
-    _classify_candidate_failure,
-    _supplied_output_keys,
     get_agent_test_runtime,
 )
 from src.services.agent_schema_registry import AgentOutputValidationError
@@ -510,63 +505,6 @@ class _Execution:
     latency_ms: float | None
 
 
-class _ObservingModelAdapter:
-    """Pass every call to the runtime's own adapter; keep what it was handed.
-
-    It records the exact prompt sent (so a failed run still has its Input) and
-    the model call's duration, plus the provider's supplied keys for the
-    published path, whose ``run`` has no raw-output observer.  The inner adapter
-    receives the identical arguments and its result or exception passes through
-    unchanged: there is no second invocation path (AC10).
-    """
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.prompt: str | None = None
-        self.raw_output: dict[str, Any] | None = None
-        self.latency_ms: float | None = None
-
-    def invoke(
-        self,
-        *,
-        agent_key: str,
-        configuration: AgentModelConfiguration,
-        schema: type[BaseModel],
-        prompt: str,
-    ) -> BaseModel:
-        self.prompt = prompt
-        started = time.perf_counter()
-        try:
-            output = self._inner.invoke(
-                agent_key=agent_key,
-                configuration=configuration,
-                schema=schema,
-                prompt=prompt,
-            )
-        finally:
-            self.latency_ms = (time.perf_counter() - started) * 1000
-        try:
-            self.raw_output = to_jsonable_python(
-                dict(_supplied_output_keys(output)), fallback=str
-            )
-        except Exception:  # noqa: BLE001 - observing must never change the outcome
-            self.raw_output = None
-        return output
-
-
-def _observed(runtime: AgentRuntime) -> tuple[AgentRuntime, _ObservingModelAdapter]:
-    """A per-run shallow copy of ``runtime`` whose adapter is observed.
-
-    Loader, identity sink, assembler and schema registry are the same objects;
-    only the adapter is wrapped, per run, so concurrent runs never share an
-    observation.
-    """
-    observer = _ObservingModelAdapter(runtime._model_adapter)
-    observed = copy.copy(runtime)
-    observed._model_adapter = observer
-    return observed, observer
-
-
 def _structured_output(result: AgentInvocationResult) -> dict[str, Any]:
     """C15: the canonical output plus the validated optional fields."""
     document = result.output.model_dump(mode="json")
@@ -634,7 +572,7 @@ def _execution_from_outcome(
     *,
     result: AgentInvocationResult | None,
     raw_output: Mapping[str, Any] | None,
-    observer: _ObservingModelAdapter,
+    observation: RunObservation,
 ) -> _Execution:
     completed = status == "completed" and result is not None
     return _Execution(
@@ -644,9 +582,11 @@ def _execution_from_outcome(
         raw_output=dict(raw_output) if raw_output is not None else None,
         structured_output=_structured_output(result) if completed else None,
         assembled_prompt=(
-            result.diagnostics.assembled_prompt if completed else observer.prompt
+            result.diagnostics.assembled_prompt if completed else observation.prompt
         ),
-        latency_ms=result.diagnostics.latency_ms if completed else observer.latency_ms,
+        latency_ms=(
+            result.diagnostics.latency_ms if completed else observation.model_latency_ms
+        ),
     )
 
 
@@ -980,17 +920,18 @@ class AgentTestWorkbench:
             baseline_revision_id=candidate.base_revision_id,
         )
         model_payload = model_payload_for(agent_key, case.synthetic_payload)
-        runtime, observer = _observed(self._runtime())
+        observation = RunObservation()
 
         if session.in_transaction():  # pragma: no cover - C8 invariant
             raise RuntimeError("a test run must not hold a transaction across the model call")
         try:
-            outcome = runtime.run_candidate(
+            outcome = self._runtime().run_candidate(
                 agent_key,
                 candidate.content,
                 candidate.candidate_hash,
                 model_payload,
                 AgentAssemblyContext(design_system_active=case.design_system_active),
+                observation=observation,
             )
         except (UnknownAgentKeyError, ValueError) as error:
             # run_candidate's own caller checks (C16): the snapshot copy cannot
@@ -1001,7 +942,7 @@ class AgentTestWorkbench:
                 error,
                 result=None,
                 raw_output=None,
-                observer=observer,
+                observation=observation,
             )
         else:
             execution = _execution_from_outcome(
@@ -1010,7 +951,7 @@ class AgentTestWorkbench:
                 outcome.error,
                 result=outcome.result,
                 raw_output=outcome.raw_output,
-                observer=observer,
+                observation=observation,
             )
         return self._persist_run(
             session,
@@ -1032,9 +973,10 @@ class AgentTestWorkbench:
     ) -> TestRunEvidence:
         """Rerun one active case version against the active published definition.
 
-        It goes through ``AgentRuntime.run`` on the active release, the real
-        published path (C20), and is persisted as ``published_baseline``
-        evidence whose ``candidate_*`` columns hold its output.
+        It goes through ``AgentRuntime.run_published_baseline`` on the active
+        release, which resolves exactly as ``run`` does (C20), and is persisted
+        as ``published_baseline`` evidence whose ``candidate_*`` columns hold its
+        output.
         """
         self._require_no_transaction(session)
         self._require_actor(actor)
@@ -1057,28 +999,36 @@ class AgentTestWorkbench:
                     compared_release_id=snapshot.active_release.release_id,
                     compared_definition_revision_id=node.published.revision_id,
                 )
-                endpoint_name = node.published.content.model.endpoint_name
                 case = self._load_active_case(
                     session, agent_key=agent_key, test_case_id=test_case_id
                 )
         except SQLAlchemyError as error:
             raise _unavailable("read_published", agent_key, error) from error
         model_payload = model_payload_for(agent_key, case.synthetic_payload)
-        runtime, observer = _observed(self._runtime())
+        observation = RunObservation()
 
         if session.in_transaction():  # pragma: no cover - C8 invariant
             raise RuntimeError("a test run must not hold a transaction across the model call")
         try:
-            result = runtime.run(
+            outcome = self._runtime().run_published_baseline(
                 agent_key,
                 identity.compared_release_id,
                 model_payload,
                 AgentAssemblyContext(design_system_active=case.design_system_active),
+                observation=observation,
             )
         except PersistedConfigurationUnavailableError as error:
+            # A resolution failure, raised exactly as ``run`` raises it.
             if error.code == "lakebase_unavailable":
                 raise _unavailable("resolve_published", agent_key, error) from error
-            execution = self._failed_execution(error, endpoint_name, observer)
+            execution = _execution_from_outcome(
+                "assembly_error",
+                error.code,
+                error,
+                result=None,
+                raw_output=None,
+                observation=observation,
+            )
         except (GraphReleaseNotFoundError, GraphReleaseIncompleteError) as error:
             execution = _execution_from_outcome(
                 "assembly_error",
@@ -1086,18 +1036,16 @@ class AgentTestWorkbench:
                 error,
                 result=None,
                 raw_output=None,
-                observer=observer,
+                observation=observation,
             )
-        except Exception as error:  # noqa: BLE001 - every run failure is evidence
-            execution = self._failed_execution(error, endpoint_name, observer)
         else:
             execution = _execution_from_outcome(
-                "completed",
-                None,
-                None,
-                result=result,
-                raw_output=observer.raw_output,
-                observer=observer,
+                outcome.status,
+                outcome.error_detail,
+                outcome.error,
+                result=outcome.result,
+                raw_output=outcome.raw_output,
+                observation=observation,
             )
         return self._persist_run(
             session,
@@ -1167,20 +1115,6 @@ class AgentTestWorkbench:
         issues = _actor_issues(actor)
         if issues:
             raise TestCaseRejected(*issues)
-
-    @staticmethod
-    def _failed_execution(
-        error: Exception, endpoint_name: str, observer: _ObservingModelAdapter
-    ) -> _Execution:
-        status, detail = _classify_candidate_failure(error, endpoint_name=endpoint_name)
-        return _execution_from_outcome(
-            status,
-            detail,
-            error,
-            result=None,
-            raw_output=observer.raw_output,
-            observer=observer,
-        )
 
     @staticmethod
     def _load_active_case(

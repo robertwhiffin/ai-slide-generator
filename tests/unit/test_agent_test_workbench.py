@@ -913,20 +913,41 @@ class _SpyRuntime(AgentRuntime):
         super().__init__(**kwargs)
         self.candidate_calls: list[tuple] = []
         self.run_calls: list[tuple] = []
+        self.baseline_calls: list[tuple] = []
 
     def run_candidate(
-        self, agent_key, candidate_content, candidate_hash, payload, assembly_context
+        self,
+        agent_key,
+        candidate_content,
+        candidate_hash,
+        payload,
+        assembly_context,
+        *,
+        observation=None,
     ):
         self.candidate_calls.append(
             (agent_key, candidate_content, candidate_hash, payload, assembly_context)
         )
         return super().run_candidate(
-            agent_key, candidate_content, candidate_hash, payload, assembly_context
+            agent_key,
+            candidate_content,
+            candidate_hash,
+            payload,
+            assembly_context,
+            observation=observation,
         )
 
     def run(self, agent_key, graph_release_id, payload, assembly_context):
         self.run_calls.append((agent_key, graph_release_id, payload, assembly_context))
         return super().run(agent_key, graph_release_id, payload, assembly_context)
+
+    def run_published_baseline(
+        self, agent_key, graph_release_id, payload, assembly_context, *, observation=None
+    ):
+        self.baseline_calls.append((agent_key, graph_release_id, payload, assembly_context))
+        return super().run_published_baseline(
+            agent_key, graph_release_id, payload, assembly_context, observation=observation
+        )
 
 
 def _runtime(factory: sessionmaker, adapter) -> _SpyRuntime:
@@ -1682,15 +1703,15 @@ def test_a_baseline_for_an_unknown_role_is_refused(factory):
 # --- C20: the published baseline -------------------------------------------
 
 
-def test_a_baseline_rerun_goes_through_run_on_the_active_release(factory):
+def test_a_baseline_rerun_goes_through_the_published_entry_on_the_active_release(factory):
     workbench, runtime, adapter = _executor(factory)
     identity = _identity(factory)
 
     evidence = _run_baseline(factory, workbench)
 
     assert runtime.candidate_calls == []
-    assert len(runtime.run_calls) == 1
-    agent_key, release_id, payload, context = runtime.run_calls[0]
+    assert len(runtime.baseline_calls) == 1
+    agent_key, release_id, payload, context = runtime.baseline_calls[0]
     assert (agent_key, release_id) == ("architect", identity["release_id"])
     assert payload == model_payload_for("architect", REQUIRED_SMOKE_PAYLOADS["architect"])
     assert (context.root_session_id, context.actor_session_id) == ("", "")

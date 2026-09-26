@@ -602,6 +602,24 @@ class CandidateRunOutcome:
     error_detail: str | None
 
 
+class RunObservation:
+    """What one #267 test run handed the model, and what came back.
+
+    A public, test-run-only recorder: ``run_candidate`` and
+    ``run_published_baseline`` fill it when given one.  ``prompt`` is the exact
+    assembled prompt passed to the model adapter (``None`` when assembly failed
+    before the call); ``raw_output`` is the JSON-safe top-level keys the provider
+    supplied, observed before validation; ``model_latency_ms`` is the adapter
+    call's duration, recorded whether it returned or raised.  ``run`` never
+    takes one, so production behaviour is unchanged.
+    """
+
+    def __init__(self) -> None:
+        self.prompt: str | None = None
+        self.raw_output: dict[str, Any] | None = None
+        self.model_latency_ms: float | None = None
+
+
 def _is_provider_parse_error(error: Exception) -> bool:
     """A structured-output parser rejected the provider's response.
 
@@ -617,7 +635,7 @@ def _is_provider_parse_error(error: Exception) -> bool:
     return isinstance(error, OutputParserException)
 
 
-def _classify_candidate_failure(
+def classify_test_run_failure(
     error: Exception, *, endpoint_name: str
 ) -> tuple[CandidateRunStatus, str]:
     """Map one failure out of ``_run_resolved`` to (status, detail) — #267 C16/C33.
@@ -745,6 +763,8 @@ class AgentRuntime:
         candidate_hash: str,
         payload: dict[str, Any],
         assembly_context: AgentAssemblyContext,
+        *,
+        observation: RunObservation | None = None,
     ) -> CandidateRunOutcome:
         """Run one saved DRAFT candidate through ``run``'s own private path.
 
@@ -781,44 +801,104 @@ class AgentRuntime:
             content_hash=candidate_hash,
             content=candidate_content,
         )
-        observed: list[Mapping[str, Any]] = []
+        outcome = self._run_observed(
+            resolved,
+            payload,
+            assembly_context,
+            observation=observation,
+            # A draft has no release or revision identity, so the runtime's
+            # identity sink (the production invocation log) never sees a
+            # candidate run (Task 3 ruling R1).  The pass-through sink keeps
+            # nothing, so the lru_cached test runtime cannot grow.
+            identity_sink=_PASS_THROUGH_IDENTITY_SINK,
+        )
+        _log_candidate_run(agent_key, outcome)
+        return outcome
+
+    def run_published_baseline(
+        self,
+        agent_key: str,
+        graph_release_id: int,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+        *,
+        observation: RunObservation | None = None,
+    ) -> CandidateRunOutcome:
+        """Rerun a published definition for a #267 baseline: ``run``, observed.
+
+        Resolution mirrors ``run`` exactly (the role check, the loader and its
+        error mapping, pinned equal to ``run``'s by an AST test), so a loader
+        failure raises just as it does from ``run``.  From there it is the same
+        ``_run_resolved`` with the production identity sink — a baseline is a
+        genuine invocation of published content — and every run failure is
+        classified into the outcome instead of raised.  Only the #267 test
+        workbench may call this.
+        """
+        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
+            raise UnknownAgentKeyError(
+                f"Unknown model-driven agent key {agent_key!r}; "
+                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
+            )
+        try:
+            definition = self._persisted_release_loader.resolve(graph_release_id, agent_key)
+        except PersistedRuntimeError:
+            raise
+        except SQLAlchemyError as exc:
+            raise PersistedConfigurationUnavailableError(code="lakebase_unavailable") from exc
+        except (GraphConfigurationIntegrityError, ValidationError, TypeError) as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="invalid_persisted_definition"
+            ) from exc
+        return self._run_observed(
+            definition,
+            payload,
+            assembly_context,
+            observation=observation,
+            identity_sink=None,
+        )
+
+    def _run_observed(
+        self,
+        definition: ResolvedDefinition,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+        *,
+        observation: RunObservation | None,
+        identity_sink: AgentInvocationIdentitySink | None,
+    ) -> CandidateRunOutcome:
+        """``_run_resolved`` with the raw output observed and failures classified."""
+        record = observation if observation is not None else RunObservation()
 
         def observe(raw: Mapping[str, Any]) -> None:
-            observed.append(to_jsonable_python(dict(raw), fallback=str))
+            record.raw_output = to_jsonable_python(dict(raw), fallback=str)
 
         try:
             result = self._run_resolved(
-                resolved,
+                definition,
                 payload,
                 assembly_context,
                 _raw_output_observer=observe,
-                # A draft has no release or revision identity, so the runtime's
-                # identity sink (the production invocation log) never sees a
-                # candidate run (Task 3 ruling R1).  The pass-through sink keeps
-                # nothing, so the lru_cached test runtime cannot grow.
-                _identity_sink=_PASS_THROUGH_IDENTITY_SINK,
+                _identity_sink=identity_sink,
+                _observation=record,
             )
         except Exception as error:  # noqa: BLE001 - every run failure is evidence
-            status, detail = _classify_candidate_failure(
-                error, endpoint_name=candidate_content.model.endpoint_name
+            status, detail = classify_test_run_failure(
+                error, endpoint_name=definition.content.model.endpoint_name
             )
-            outcome = CandidateRunOutcome(
+            return CandidateRunOutcome(
                 status=status,
                 result=None,
-                raw_output=observed[0] if observed else None,
+                raw_output=record.raw_output,
                 error=error,
                 error_detail=detail,
             )
-        else:
-            outcome = CandidateRunOutcome(
-                status="completed",
-                result=result,
-                raw_output=observed[0] if observed else None,
-                error=None,
-                error_detail=None,
-            )
-        _log_candidate_run(agent_key, outcome)
-        return outcome
+        return CandidateRunOutcome(
+            status="completed",
+            result=result,
+            raw_output=record.raw_output,
+            error=None,
+            error_detail=None,
+        )
 
     def _run_resolved(
         self,
@@ -828,6 +908,7 @@ class AgentRuntime:
         *,
         _raw_output_observer: Callable[[Mapping[str, Any]], None] | None = None,
         _identity_sink: AgentInvocationIdentitySink | None = None,
+        _observation: RunObservation | None = None,
     ) -> AgentInvocationResult:
         try:
             content = DefinitionContent.model_validate(definition.content.model_dump(mode="python"))
@@ -899,6 +980,12 @@ class AgentRuntime:
         )
 
         def callback() -> ValidatedAgentOutput:
+            # Private and keyword-only, like the raw observer: ``run`` passes
+            # none.  A test run records the exact prompt sent and the call's
+            # duration, whether the adapter returns or raises (#267 Task 4).
+            if _observation is not None:
+                _observation.prompt = prompt
+            invoke_started = time.perf_counter()
             try:
                 provider_output = self._model_adapter.invoke(
                     agent_key=definition.agent_key,
@@ -912,6 +999,11 @@ class AgentRuntime:
                     graph_release_id=definition.graph_release_id,
                     agent_definition_revision_id=definition.agent_definition_revision_id,
                 ) from exc
+            finally:
+                if _observation is not None:
+                    _observation.model_latency_ms = (
+                        time.perf_counter() - invoke_started
+                    ) * 1000
             supplied = _supplied_output_keys(provider_output)
             # Private and keyword-only: ``run`` passes none, so production
             # behaviour and error types are unchanged.  A candidate run records
