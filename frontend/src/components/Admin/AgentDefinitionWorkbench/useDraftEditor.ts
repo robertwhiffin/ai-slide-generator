@@ -503,7 +503,9 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     try {
       const recorded = await recordTestRunVerdict(evidence.run_id, { verdict, notes });
       dispatch({ type: 'testVerdictRecorded', requestId, evidence: recorded });
-      return true;
+      // The client already checked the run and the verdict; the reducer also requires the
+      // role (`verdictEvidenceIsCoherent`), so only a response it accepts clears the notes.
+      return recorded.agent_key === agentKey;
     } catch (error) {
       dispatch({ type: 'testOperationFailed', requestId, ...testOperationFailure(error, 'verdict') });
       return false;

@@ -3116,6 +3116,18 @@ describe('the one readiness slot (C24)', () => {
     expect(next.readiness.refreshRequested).toBe(state.readiness.refreshRequested + 1);
   });
 
+  it.each([
+    ['a probe 409', 'probeStarted', 'probeConflicted', () => probePending()],
+    ['a source-recovery 409', 'sourceRecoveryStarted', 'sourceRecoveryConflicted', () => sourcePending('architect')],
+  ] as const)('asks for a fresh readiness read when %s adopts another lock (whole-branch m2)', (_label, start, conflicted, pending) => {
+    const state = createDraftEditorState(workbench());
+    const started = draftEditorReducer(state, { type: start, pending: pending() });
+    const next = draftEditorReducer(started, { type: conflicted, requestId: 1, conflict: syntheticNullCandidateConflict(0, 1) });
+    expect(next.draft.lock_version).toBe(1);
+    expect(next.pendingSave).toBeNull();
+    expect(next.readiness.refreshRequested).toBe(state.readiness.refreshRequested + 1);
+  });
+
   it('asks for nothing after a probe, a source recovery read, or a dropped completion', () => {
     const state = createDraftEditorState(workbench());
     const probing = draftEditorReducer(state, { type: 'probeStarted', pending: probePending() });
