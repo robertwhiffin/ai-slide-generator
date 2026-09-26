@@ -617,7 +617,7 @@ def _run_migrations(engine, schema: str | None = None):
         )
 
         # --- Graph Configuration: database-enforced published-row immutability ---
-        # create_all owns the six fresh table definitions. These PostgreSQL-only
+        # create_all owns the eight fresh table definitions. These PostgreSQL-only
         # guards add the mutation boundary that constraints alone cannot express.
         # Keep this before owner reassignment so new functions/triggers are re-homed
         # in the same migration transaction.
@@ -941,7 +941,9 @@ def _install_graph_configuration_mutation_guards(
     rejects delete and every update except its first ``effective_to`` transition from
     NULL to a non-NULL value with all other fields unchanged. A deferred constraint
     trigger also requires exactly one active release at transaction end, while allowing
-    the atomic close-and-insert transition used by publication.
+    the atomic close-and-insert transition used by publication. Agent Test Run evidence
+    rejects every update that changes a column other than its four verdict columns;
+    deletes stay allowed (bounded cleanup), subject to the RESTRICT release link.
     """
     if is_sqlite:
         return
@@ -958,6 +960,8 @@ def _install_graph_configuration_mutation_guards(
     release_function = qualified("guard_graph_release_mutation")
     exactly_one_function = qualified("enforce_graph_release_exactly_one_active")
     release_table = qualified("graph_release")
+    evidence_function = qualified("guard_agent_test_run_evidence_mutation")
+    evidence_table = qualified("agent_test_run")
 
     conn.execute(
         text(
@@ -1062,6 +1066,44 @@ def _install_graph_configuration_mutation_guards(
             f"CREATE TRIGGER {release_trigger} "
             f"BEFORE UPDATE OR DELETE ON {release_table} "
             f"FOR EACH ROW EXECUTE FUNCTION {release_function}()"
+        )
+    )
+
+    # Compare whole rows minus the verdict columns, so a column added later is
+    # immutable by default rather than silently writable.
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {evidence_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF (to_jsonb(NEW)
+                        - ARRAY['verdict', 'verdict_reviewer', 'verdict_at', 'verdict_notes'])
+                   IS DISTINCT FROM
+                   (to_jsonb(OLD)
+                        - ARRAY['verdict', 'verdict_reviewer', 'verdict_at', 'verdict_notes'])
+                THEN
+                    RAISE EXCEPTION
+                        'agent_test_run evidence is immutable except for its verdict'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    evidence_trigger = preparer.quote("trg_agent_test_run_evidence_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {evidence_trigger} ON {evidence_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {evidence_trigger} "
+            f"BEFORE UPDATE ON {evidence_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {evidence_function}()"
         )
     )
 

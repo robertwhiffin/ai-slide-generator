@@ -694,3 +694,101 @@ def test_existing_state_detects_corruption_across_complete_aggregate(
             session_factory,
             manifest_loader=lambda: (_ for _ in ()).throw(AssertionError("manifest loaded")),
         )
+
+
+# ---------------------------------------------------------------------------
+# AC1 contract: one required active smoke case per role
+# ---------------------------------------------------------------------------
+# Clause-to-mutation table (controller seam `:196-198`; reviewer seam `:195` and `:188-194`)
+#
+# | Clause                              | Mutation                                 | Predicted RED cases             |
+# |-------------------------------------|------------------------------------------|---------------------------------|
+# | one required+active case per role   | drop role X from _EXPECTED_AGENT_KEYS   | exactly role-X parametrised case|
+# | all seven roles enforced            | (same, for each X in seven-role order)  | same                            |
+# | is_required flag checked            | remove is_required filter from query    | un-required variant             |
+# | is_active flag checked              | (deactivation already covered above)   | —                               |
+# | guard raises, not returns           | delete raise at `:196-198`              | all 8 cases (7+1)               |
+# | exact message text                  | match= on both test variants            | different message → RED         |
+#
+# Controller sabotage target:  delete `raise` at `:196-198`.  All 8 cases RED.
+# Reviewer sabotage targets:
+#   (a) drop any role from `_EXPECTED_AGENT_KEYS` at `:195` → that role's case REDs.
+#   (b) remove `AgentTestCase.is_required.is_(True)` from the query at `:188-194`
+#       → the un-required variant REDs.
+
+
+@pytest.mark.parametrize(
+    "agent_key",
+    [
+        "architect",
+        "data_analyst",
+        "builder",
+        "build_reviewer",
+        "fixer",
+        "fix_reviewer",
+        "deck_reviewer",
+    ],
+)
+def test_ac1_integrity_guard_rejects_deactivated_role_case(session_factory, agent_key):
+    """The ongoing AC1 guard raises with the exact message when any role's only
+    required case is deactivated.  Parametrised over all seven roles in canonical
+    order so that narrowing the guard to any proper subset still leaves at least
+    one case RED.
+
+    Controller sabotage: delete ``raise`` at ``:196-198`` → all seven cases RED.
+    Reviewer sabotage: drop role X from ``_EXPECTED_AGENT_KEYS`` at ``:195``
+        → exactly role-X's parametrised case REDs (the other six stay GREEN).
+
+    Anchor count: the message
+    ``"active required Agent Test Cases do not cover every graph role"``
+    appears exactly once in the production module (verified by ``grep -c``).
+    """
+    service = GraphConfiguration()
+    service.bootstrap_v1(session_factory)
+
+    with session_factory.begin() as session:
+        row = session.scalar(
+            select(AgentTestCase).where(AgentTestCase.agent_key == agent_key)
+        )
+        row.is_active = False
+
+    with pytest.raises(
+        GraphConfigurationIntegrityError,
+        match="active required Agent Test Cases do not cover every graph role",
+    ):
+        service.bootstrap_v1(
+            session_factory,
+            manifest_loader=lambda: (_ for _ in ()).throw(
+                AssertionError("manifest loaded")
+            ),
+        )
+
+
+def test_ac1_integrity_guard_treats_unrequired_active_case_as_missing(session_factory):
+    """Setting a case to ``is_required=False`` (while ``is_active`` stays True)
+    removes it from the guard's covered set, because the query at ``:188-194``
+    filters on *both* flags.
+
+    Reviewer sabotage: drop the ``is_required.is_(True)`` filter from that query
+        → an un-required-but-active case is counted as covering its role
+        → this test goes RED (no exception raised).
+    """
+    service = GraphConfiguration()
+    service.bootstrap_v1(session_factory)
+
+    with session_factory.begin() as session:
+        row = session.scalar(
+            select(AgentTestCase).where(AgentTestCase.agent_key == "architect")
+        )
+        row.is_required = False  # still active; no longer required
+
+    with pytest.raises(
+        GraphConfigurationIntegrityError,
+        match="active required Agent Test Cases do not cover every graph role",
+    ):
+        service.bootstrap_v1(
+            session_factory,
+            manifest_loader=lambda: (_ for _ in ()).throw(
+                AssertionError("manifest loaded")
+            ),
+        )

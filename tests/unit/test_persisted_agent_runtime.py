@@ -65,6 +65,7 @@ from src.services.prompt_assembler import (
     V2_PROTECTED_ASSEMBLY_IDENTITY,
     ResolvedPromptStage,
 )
+from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -108,19 +109,8 @@ class _Loader:
         return self.definition
 
 
-VALID_OUTPUT_VALUES: dict[str, dict[str, object]] = {
-    "architect": {"intent": "discuss", "message": "an answer"},
-    "data_analyst": {
-        "outcome": "success",
-        "synthesis": "a finding",
-        "sources": ["warehouse.sales"],
-    },
-    "builder": {"position": 3, "html": "<section></section>"},
-    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
-    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
-    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
-    "deck_reviewer": {},
-}
+#: The one shared table (#267 Correction 26), not a local copy that could drift.
+VALID_OUTPUT_VALUES = FAKE_OUTPUTS
 
 
 def _output_values(agent_key: str, **extra: object) -> dict[str, object]:
@@ -1905,3 +1895,187 @@ def test_no_canonical_schema_carries_a_dump_mode_divergent_field_type() -> None:
     assert findings == []
     # Aim check: the walker really does reach the nested models, not just the roots.
     assert len(walked) >= 13
+
+
+# ---------------------------------------------------------------------------
+# #267 Task 3: a candidate run never reaches the production identity log.  A
+# draft has no release or revision identity, so nothing is fabricated there
+# (Task 3 ruling R1, #266's precedent).  The run writes ONE record of its own,
+# whose field set is pinned exactly, like the sink's.  No log record of any
+# logger carries model output, payload, prompt or provider text.
+# ---------------------------------------------------------------------------
+
+#: The candidate record's EXACT fields.  No ids, endpoint, payload, prompt,
+#: output or exception text; ``error_code`` is the code part of error_detail.
+CANDIDATE_LOG_FIELDS = {"agent_key", "status", "error_code", "error_class"}
+CANDIDATE_LOG_MESSAGE = "agent_candidate_run"
+
+
+def _candidate_content(agent_key: str = "architect") -> tuple[DefinitionContent, str]:
+    data = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
+    ).model_dump(mode="python")
+    data["prompt_text"] = "draft candidate prompt"
+    content = DefinitionContent.model_validate(data)
+    return content, definition_content_hash(content)
+
+
+def _logging_candidate_runtime(adapter: object, logger: logging.Logger) -> AgentRuntime:
+    class _NoRelease:
+        def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+            raise AssertionError("a candidate run must never resolve a release")
+
+    return AgentRuntime(
+        persisted_release_loader=_NoRelease(),
+        model_adapter=adapter,  # type: ignore[arg-type]
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=logger),
+    )
+
+
+def _rendered(record: logging.LogRecord) -> str:
+    """Everything a handler could write for *record*, including a traceback."""
+    parts = [record.getMessage(), repr(record.args), str(vars(record))]
+    if record.exc_info:
+        parts.append(logging.Formatter().formatException(record.exc_info))
+    if record.exc_text:
+        parts.append(record.exc_text)
+    return "\n".join(parts)
+
+
+def _candidate_records(caplog) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.msg == CANDIDATE_LOG_MESSAGE]
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "error_code", "error_class"),
+    [
+        ("success", "completed", None, None),
+        (
+            "provider_unavailable",
+            "model_error",
+            "endpoint_unavailable",
+            "PinnedInvocationEndpointError",
+        ),
+        ("invalid_optional_field", "incomplete", "invalid_output", "AgentOutputValidationError"),
+        (
+            "structured_output_unsupported",
+            "model_error",
+            "structured_output_unsupported",
+            "NotImplementedError",
+        ),
+    ],
+)
+def test_a_candidate_run_writes_no_identity_record_and_one_exact_candidate_record(
+    mode, status, error_code, error_class, caplog
+):
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    logger = logging.getLogger(f"test.persisted.runtime.candidate.{mode}")
+    runtime = _logging_candidate_runtime(DeterministicFakeModelAdapter(mode=mode), logger)
+    content, candidate_hash = _candidate_content()
+
+    with caplog.at_level(logging.DEBUG):
+        outcome = runtime.run_candidate(
+            "architect",
+            content,
+            candidate_hash,
+            {"secret": "never-log-this-payload"},
+            AgentAssemblyContext(False),
+        )
+
+    assert outcome.status == status
+    # Zero production identity records: no fabricated -1 release/revision.
+    assert [r for r in caplog.records if r.msg == EXPECTED_LOG_MESSAGE] == []
+    records = _candidate_records(caplog)
+    assert len(records) == 1
+    record = records[0]
+    assert emitted_fields(record) == CANDIDATE_LOG_FIELDS
+    assert record.args in (None, ())
+    assert record.exc_info is None
+    assert (record.agent_key, record.status, record.error_code, record.error_class) == (
+        "architect",
+        status,
+        error_code,
+        error_class,
+    )
+    for record in caplog.records:
+        rendered = _rendered(record)
+        for secret in (
+            "never-log-this-payload",
+            "draft candidate prompt",
+            candidate_hash,
+            "databricks-claude-opus-4-6",
+        ):
+            assert secret not in rendered
+
+
+def test_an_unexpected_candidate_failure_logs_its_class_name_and_no_provider_text(caplog):
+    """I-2: no traceback, message, arg or extra carries the provider's text."""
+
+    class _Boom:
+        def invoke(self, **_kwargs):
+            raise RuntimeError("provider text https://secret-host-267/token=abc")
+
+    runtime = _logging_candidate_runtime(_Boom(), logging.getLogger("test.candidate.boom"))
+    content, candidate_hash = _candidate_content()
+
+    with caplog.at_level(logging.DEBUG):
+        outcome = runtime.run_candidate(
+            "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+        )
+
+    assert outcome.error_detail == "unexpected_error:RuntimeError"
+    records = _candidate_records(caplog)
+    assert len(records) == 1
+    assert (records[0].error_code, records[0].error_class) == (
+        "unexpected_error",
+        "RuntimeError",
+    )
+    for record in caplog.records:
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert "secret-host-267" not in _rendered(record)
+
+
+class _SentinelOutputAdapter:
+    """Answers the architect with a unique string that must never be logged."""
+
+    OUTPUT = "never-log-this-model-output-267"
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        return schema.model_validate({"intent": "discuss", "message": self.OUTPUT})
+
+
+def test_neither_run_nor_run_candidate_logs_model_output_anywhere(caplog):
+    """I-3: the raw-output seam cannot leak the model's output to any logger."""
+    sink_logger = logging.getLogger("test.persisted.runtime.no-output")
+    content, candidate_hash = _candidate_content()
+    production = AgentRuntime(
+        persisted_release_loader=_Loader(
+            ResolvedDefinition(7, 41, "architect", 23, candidate_hash, content)
+        ),
+        model_adapter=_SentinelOutputAdapter(),
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=sink_logger),
+    )
+    candidate = _logging_candidate_runtime(_SentinelOutputAdapter(), sink_logger)
+
+    with caplog.at_level(logging.DEBUG):
+        result = production.run("architect", 41, {}, AgentAssemblyContext(False))
+        outcome = candidate.run_candidate(
+            "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+        )
+
+    # The output really was produced (so its absence from the log is meaningful).
+    assert result.output.message == _SentinelOutputAdapter.OUTPUT
+    assert outcome.raw_output["message"] == _SentinelOutputAdapter.OUTPUT
+    runtime_records = [
+        record
+        for record in caplog.records
+        if record.name in {"src.services.agent_runtime", sink_logger.name}
+    ]
+    assert sorted(record.msg for record in runtime_records) == [
+        CANDIDATE_LOG_MESSAGE,
+        EXPECTED_LOG_MESSAGE,
+    ]
+    for record in caplog.records:
+        assert _SentinelOutputAdapter.OUTPUT not in _rendered(record)

@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -32,6 +33,12 @@ GRAPH_AGENT_KEY_CHECK = (
     "'fixer', 'fix_reviewer', 'deck_reviewer')"
 )
 _JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
+# Evidence columns bind Python ``None`` as SQL NULL, not the JSON ``'null'`` literal
+# that plain JSON stores. Otherwise ``None`` would satisfy NOT NULL and slip past the
+# ``IS NOT NULL`` / ``IS NULL`` checks and every query that reads absent output.
+_EVIDENCE_JSON_DOCUMENT = JSON(none_as_null=True).with_variant(
+    JSONB(none_as_null=True), "postgresql"
+)
 
 DEFINITION_CONTENT_COLUMN_NAMES = (
     "agent_key",
@@ -360,4 +367,171 @@ class AgentTestCase(Base):
             "version",
             name="uq_agent_test_case_agent_name_version",
         ),
+    )
+
+
+class AgentTestRun(Base):
+    """Immutable evidence row for one isolated candidate or published-baseline run.
+
+    Only the four verdict columns may change after insert; #268 writes them, and a
+    PostgreSQL trigger installed by ``_run_migrations`` rejects every other update.
+    """
+
+    __tablename__ = "agent_test_run"
+
+    id = Column(Integer, primary_key=True)
+
+    # Case version that was run: a snapshot, because case versions are immutable.
+    test_case_id = Column(Integer, nullable=False)
+    test_case_version = Column(Integer, nullable=False)
+
+    # Identity of what ran. A baseline run's candidate_hash is its revision's hash.
+    agent_key = Column(String(32), nullable=False)
+    run_kind = Column(String(24), nullable=False)
+    candidate_hash = Column(String(64), nullable=False)
+
+    # The published release and role-compatible revision this run compares against.
+    compared_release_id = Column(Integer, nullable=False)
+    compared_definition_revision_id = Column(Integer, nullable=False)
+
+    # Input actually sent: the projected model payload and the assembled prompt,
+    # which is absent when assembly failed.
+    model_payload = Column(_EVIDENCE_JSON_DOCUMENT, nullable=False)
+    assembled_prompt = Column(Text)
+
+    # Outputs, absent when assembly or the model call failed before producing them.
+    candidate_raw_output = Column(_EVIDENCE_JSON_DOCUMENT)
+    candidate_structured_output = Column(_EVIDENCE_JSON_DOCUMENT)
+    baseline_raw_output = Column(_EVIDENCE_JSON_DOCUMENT)
+    baseline_structured_output = Column(_EVIDENCE_JSON_DOCUMENT)
+
+    # Always written by the service, so there is deliberately no server default.
+    deterministic_check_results = Column(_EVIDENCE_JSON_DOCUMENT, nullable=False)
+    deterministic_checks_passed = Column(Boolean, nullable=False, default=False)
+
+    execution_status = Column(String(32), nullable=False)
+    error_detail = Column(Text)
+
+    latency_ms = Column(Float)
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
+
+    run_by = Column(Text, nullable=False)
+    run_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Verdict columns: #267 owns the DDL, #268 writes them.
+    verdict = Column(String(16))
+    verdict_reviewer = Column(Text)
+    verdict_at = Column(DateTime(timezone=True))
+    verdict_notes = Column(Text)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["test_case_id"],
+            ["agent_test_case.id"],
+            name="fk_agent_test_run_test_case",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["compared_release_id"],
+            ["graph_release.id"],
+            name="fk_agent_test_run_release",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["compared_definition_revision_id", "agent_key"],
+            ["agent_definition_revision.id", "agent_definition_revision.agent_key"],
+            name="fk_agent_test_run_compatible_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(GRAPH_AGENT_KEY_CHECK, name="ck_agent_test_run_agent_key"),
+        CheckConstraint(
+            "test_case_version > 0",
+            name="ck_agent_test_run_case_version_positive",
+        ),
+        CheckConstraint(
+            "run_kind IN ('candidate', 'published_baseline')",
+            name="ck_agent_test_run_run_kind",
+        ),
+        CheckConstraint(
+            "execution_status IN ('completed', 'model_error', 'assembly_error', 'incomplete')",
+            name="ck_agent_test_run_execution_status",
+        ),
+        CheckConstraint(
+            "verdict IS NULL OR verdict IN ('approved', 'rejected')",
+            name="ck_agent_test_run_verdict_enum",
+        ),
+        CheckConstraint(
+            "(verdict IS NULL) = (verdict_reviewer IS NULL)",
+            name="ck_agent_test_run_verdict_reviewer_paired",
+        ),
+        CheckConstraint(
+            "(verdict IS NULL) = (verdict_at IS NULL)",
+            name="ck_agent_test_run_verdict_at_paired",
+        ),
+        CheckConstraint(
+            "verdict != 'approved' OR "
+            "(execution_status = 'completed' AND deterministic_checks_passed)",
+            name="ck_agent_test_run_approved_only_if_completed_and_passing",
+        ),
+        CheckConstraint(
+            "execution_status <> 'completed' OR candidate_structured_output IS NOT NULL",
+            name="ck_agent_test_run_completed_has_output",
+        ),
+        CheckConstraint(
+            "length(trim(candidate_hash)) = 64",
+            name="ck_agent_test_run_candidate_hash_len",
+        ),
+        CheckConstraint(
+            "length(trim(run_by)) > 0",
+            name="ck_agent_test_run_run_by_nonblank",
+        ),
+        Index("ix_agent_test_run_case_run_at", "test_case_id", "run_at"),
+    )
+
+
+class GraphReleaseTestRun(Base):
+    """Links a Graph Release to the run evidence it was published against.
+
+    The link is the retention anchor: its RESTRICT foreign key keeps linked runs
+    from being deleted. #269 writes these rows; #267 owns only the DDL.
+    """
+
+    __tablename__ = "graph_release_test_run"
+
+    graph_release_id = Column(Integer, primary_key=True, autoincrement=False)
+    agent_test_run_id = Column(Integer, primary_key=True, autoincrement=False)
+    evidence_kind = Column(String(20), nullable=False)
+    source_release_id = Column(Integer)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["graph_release_id"],
+            ["graph_release.id"],
+            name="fk_graph_release_test_run_release",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["agent_test_run_id"],
+            ["agent_test_run.id"],
+            name="fk_graph_release_test_run_run",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_release_id"],
+            ["graph_release.id"],
+            name="fk_graph_release_test_run_source",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "evidence_kind IN ('approval', 'historical_restore')",
+            name="ck_graph_release_test_run_evidence_kind",
+        ),
+        CheckConstraint(
+            "(evidence_kind = 'historical_restore') = (source_release_id IS NOT NULL)",
+            name="ck_graph_release_test_run_source_paired",
+        ),
+        # The primary key leads with graph_release_id, so run-side lookups
+        # (#268's NOT EXISTS, #269's linked-verdict trigger) need their own index.
+        Index("ix_graph_release_test_run_run", "agent_test_run_id"),
     )

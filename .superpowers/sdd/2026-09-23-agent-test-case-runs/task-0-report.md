@@ -1,0 +1,193 @@
+# Task 0 report — #267 DDL: `agent_test_run` and `graph_release_test_run`
+
+**Status:** DONE_WITH_CONCERNS (one design deviation from the letter of C19, which is recorded below as a finding). Worktree `.worktrees/issue-267-plan`, branch `feat/agent-test-case-runs-267`, TASK_BASE `a143090164042b12d19a7693f10a4c6d06c76e4b`.
+
+**Commits**
+- `c80ab897f` feat: add agent_test_run and graph_release_test_run ORM models (#267)
+- `17cf746ec` test: prove graph_release_test_run.evidence_kind NOT NULL in PostgreSQL (#267), which closes the one mutation gap the sweep found
+- this report (committed with `git add -f`)
+
+## What changed (additive only)
+- `src/database/models/graph_configuration.py`: import `Float`. Add `_EVIDENCE_JSON_DOCUMENT`. Append `AgentTestRun` and `GraphReleaseTestRun`. No existing class, column or constraint changed. There is no `ForeignKey` import: every FK is a named `ForeignKeyConstraint(..., ondelete="RESTRICT")` (C1, C2).
+- `src/database/models/__init__.py`: import and `__all__` export both models (C19; the module has no `__all__`).
+- `src/core/database.py`, `_install_graph_configuration_mutation_guards`: C24 function `guard_agent_test_run_evidence_mutation` plus `trg_agent_test_run_evidence_immutable` (`BEFORE UPDATE`, idempotent `DROP TRIGGER IF EXISTS` / `CREATE OR REPLACE`). It compares `to_jsonb(NEW) - verdict cols` with `to_jsonb(OLD) - verdict cols`, so a later-added column is immutable by default. It raises 23514. DELETE stays allowed. Docstring updated, and the "six fresh table" comment now says eight.
+- The bootstrap, the seed, content hashing and existing tables are untouched.
+
+### DDL as built
+`agent_test_run`: `id` PK; NOT NULL: `test_case_id`, `test_case_version`, `agent_key` String(32), `run_kind` String(24), `candidate_hash` String(64), `compared_release_id`, `compared_definition_revision_id`, `model_payload` (JSONB), `deterministic_check_results` (JSONB, **no server default**), `deterministic_checks_passed` (Boolean, Python `default=False`), `execution_status` String(32), `run_by` Text, `run_at` (tz, `server_default now()`). Nullable: `assembled_prompt`, `candidate_raw_output`, `candidate_structured_output`, `baseline_raw_output`, `baseline_structured_output` (JSONB), `error_detail`, `latency_ms` Float, `input_tokens`, `output_tokens`, `verdict` String(16), `verdict_reviewer`, `verdict_at` (tz, no default), `verdict_notes`.
+- FKs (all RESTRICT): `fk_agent_test_run_test_case` (test_case_id→agent_test_case.id), `fk_agent_test_run_release` (compared_release_id→graph_release.id), `fk_agent_test_run_compatible_revision` ((compared_definition_revision_id, agent_key)→agent_definition_revision(id, agent_key)).
+- Checks: `ck_agent_test_run_agent_key`, `_case_version_positive`, `_run_kind`, `_execution_status`, `_verdict_enum`, `_verdict_reviewer_paired`, `_verdict_at_paired`, `_approved_only_if_completed_and_passing`, `_completed_has_output`, `_candidate_hash_len`, `_run_by_nonblank`. The plan's SQL text is kept; C19's two are added.
+- Index: `ix_agent_test_run_case_run_at (test_case_id, run_at)`. No `index=True` on any column.
+
+`graph_release_test_run`: PK `(graph_release_id, agent_test_run_id)` (`autoincrement=False`), `evidence_kind` String(20) NOT NULL, `source_release_id` nullable. FKs `fk_graph_release_test_run_release`, `_run` and `_source`, all RESTRICT. Checks `ck_graph_release_test_run_evidence_kind` and `_source_paired`. Index `ix_graph_release_test_run_run (agent_test_run_id)`.
+
+## Finding: plain `_JSON_DOCUMENT` stores Python `None` as JSON `'null'` (a deviation from C19's letter)
+- **First GREEN run:** 3 PostgreSQL failures and 1 SQLite failure. `candidate_structured_output=None` on a `completed` row passed `ck_agent_test_run_completed_has_output`, and `model_payload=None` / `deterministic_check_results=None` passed NOT NULL. The cause is SQLAlchemy's `JSON(none_as_null=False)` default, which binds `None` as the JSON literal `null`, and that is not SQL NULL.
+- **Fix:** `_EVIDENCE_JSON_DOCUMENT = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")` on all six evidence JSON columns. It is still JSONB on PostgreSQL, which is C19's intent and is asserted in the catalogue. `_JSON_DOCUMENT` itself and the existing tables are unchanged.
+- **Pins:** the unit test asserts `none_as_null` on both dialect types. A PostgreSQL test asserts that `IS NULL` holds for None outputs. Mutation `JSON-none_as_null` REDs 2 unit and 4 PostgreSQL tests.
+- **Consequence for Task 4 / #268:** writing `None` now means SQL NULL, so C15's "`candidate_structured_output IS NULL`" is real. The existing `agent_test_case`, revision and draft JSON columns keep the old `None`→`'null'` behaviour. This is out of scope and noted for the whole-branch review.
+
+## Migration path
+- `_run_migrations` has no create step for graph-configuration tables. `init_db` runs `Base.metadata.create_all()` first, and that creates the two new tables on fresh **and** existing databases, because the tables are new and `checkfirst` applies. No new columns are added to existing tables, so no `ALTER` entry is needed.
+- The trigger is installed by `_install_graph_configuration_mutation_guards`, which runs after `create_all` and before owner reassignment, as its siblings do.
+- **Proof:**
+  - `test_postgres_create_all_builds_both_evidence_tables_with_jsonb_and_indexes` runs on the fixture's fresh database (`create_all` then `_run_migrations`): both tables, six `jsonb` columns in `information_schema`, both `ix_` indexes with exact column lists.
+  - The idempotence test runs `_run_migrations` twice, then three times. It lists `trg_agent_test_run_evidence_immutable` and executes its body after the re-run.
+  - Driver `/tmp/t267-0/create_all_check.py` runs the full-repository `create_all` + `_run_migrations` (×2) on SQLite and on a throwaway PostgreSQL database, which is dropped afterwards. Both give 41 tables, with both indexes present and the trigger present. The `index=True`/`Index` name collision hazard is absent.
+
+## RED (before implementation)
+```
+tests/unit/test_graph_configuration_models.py:
+E   ImportError: cannot import name 'AgentTestRun' from 'src.database.models.graph_configuration'
+tests/integration/test_graph_configuration_constraints_postgres.py:
+E   ImportError: cannot import name 'AgentTestRun' from 'src.database.models.graph_configuration'
+```
+Collection error only. No other test in either file is affected, because the RED is the missing import.
+
+## Tests added
+- **Unit (`test_graph_configuration_models.py`, 8 → 27):**
+  - `EXPECTED_TABLES`, `ROLE_TABLES`, `EXPECTED_CHECKS`, the exports, the timestamps (`run_at`, `verdict_at` with no default) and the JSONB + `none_as_null` pins are extended. The FK count is **12**, and the relationship-cascade loop includes both models.
+  - `test_agent_test_run_model_exists` and `test_graph_release_test_run_model_exists` check the exact column→nullable map, PK, FK names/columns/targets, RESTRICT, exact index map, no `index=True`, and `Float`.
+  - SQLite: a well-formed insert (run, approved run, link); 12 parametrized check violations, each matched by constraint name; 3 link check violations; restrict-delete of a case or a linked run.
+- **PostgreSQL (`test_graph_configuration_constraints_postgres.py`, 7 → 59):**
+  - schema existence, JSONB and indexes;
+  - a well-formed insert (approval plus historical_restore links, None→NULL);
+  - 12 check violations asserting `pgcode == 23514` and `diag.constraint_name`;
+  - 12 NOT NULL columns asserting 23502 and `diag.column_name`, plus the `evidence_kind` 23502;
+  - 3 link check violations;
+  - composite role-compatible FK and case FK, each 23503 plus constraint name;
+  - delete of a referenced case: 23503 `fk_agent_test_run_test_case` (no trigger on that table);
+  - delete of a linked run: 23503 `fk_graph_release_test_run_run`, with the link inserted by raw SQL, and an unlinked run still deletable;
+  - a `pg_constraint` check that all 6 FKs have `confdeltype='r'` and the right target (C21, because `graph_release` deletes hit the 23514 trigger first);
+  - 17 parametrized evidence-column immutability updates (23514, row unchanged);
+  - verdict columns writable, with every other column unchanged;
+  - an idempotence test extended with the new trigger.
+
+## Clause-to-mutation table
+- **Driver:** `/tmp/t267-0/mutate.py`.
+- **Anchors:** each mutation is a literal replace whose anchor count is asserted to be exactly 1 before it is applied.
+- **Marker:** the replacement's first line, `grep -c` after the edit. Where the count is 0, the mutation is a deletion and the marker is the removed text's absence.
+- **Command, per row:** `PYTHONPATH=<wt>:<wt>/packages/databricks-tellr DATABASE_URL=sqlite:////tmp/t267-0.sqlite TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres python -m pytest -q -p no:randomly -rfE <file>`.
+- **Scope:** two invocations per row, on the unit file and then the PostgreSQL file.
+- **Restore:** `git checkout <GREEN> -- <file>`, then `git diff --exit-code <GREEN> -- <file>`. It was clean for all 48 rows (`c80ab897f` for 47, `17cf746ec` for the re-run `NN-evidence_kind`). The final `git status --porcelain` was empty.
+- **GREEN:** each restored file is byte-identical to the GREEN commit, and the GREEN gates were re-run afterwards (below).
+- **Executed:** every mutation ran; no row had a collection error. `DEF-run_at` REDs every insert test, and that is exactly the clause under test: raw inserts omit `run_at` and depend on the server default.
+- **Unit-only rows:** `TYPE-float`, `DEF-no_results_default` and the `EXP-*` rows are model-metadata facts with no PostgreSQL behaviour. They are RED in the unit file only.
+- **PostgreSQL-only rows:** the `TRG-*` rows are PostgreSQL-only (SQLite has no guard), so they are RED in PostgreSQL only.
+- **Before the fix:** `NN-evidence_kind` was GREEN in PostgreSQL on its first run, because the evidence-kind check passes NULL. That led to commit `17cf746ec`. It is now RED in both files.
+
+| # | Clause | File | Anchor | Marker (`grep -c` after) | Unit RED | PostgreSQL RED | Restore | GREEN |
+|---|---|---|---|---|---|---|---|---|
+| C21-ctrl | approved-only: drop AND deterministic_checks_passed | models | 1 | `"(execution_status = 'completed')",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-7]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-7]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| C21-rev | fk_agent_test_run_test_case RESTRICT->CASCADE | models | 1 | `name="fk_agent_test_run_test_case",` (1) | `test_agent_test_run_model_exists`<br>`test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades` | `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint`<br>`test_postgres_restricts_deleting_a_test_case_referenced_by_a_run` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-agent_key | ck_agent_test_run_agent_key | models | 1 | `CheckConstraint("1 = 1", name="ck_agent_test_run_agent_key")` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_agent_key-0]`<br>`test_tables_expose_exact_named_checks_and_identical_closed_role_sql` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_agent_key-0]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-case_version | ck_agent_test_run_case_version_positive | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_case_version_positive-1]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_case_version_positive-1]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-run_kind | ck_agent_test_run_run_kind | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_run_kind-2]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_run_kind-2]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-exec_status | ck_agent_test_run_execution_status | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_execution_status-3]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_execution_status-3]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-verdict_enum | ck_agent_test_run_verdict_enum | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_verdict_enum-4]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_verdict_enum-4]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-reviewer_paired | ck_agent_test_run_verdict_reviewer_paired | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_verdict_reviewer_paired-5]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_verdict_reviewer_paired-5]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-at_paired | ck_agent_test_run_verdict_at_paired | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_verdict_at_paired-6]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_verdict_at_paired-6]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-approved_whole | ck_agent_test_run_approved_only_if_completed_and_passing (whole) | models | 1 | `"1 = 1 OR "` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-7]`<br>`test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-8]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-7]`<br>`test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-8]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-completed_output | ck_agent_test_run_completed_has_output | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_completed_has_output-9]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_completed_has_output-9]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-hash_len | ck_agent_test_run_candidate_hash_len | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_candidate_hash_len-10]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_candidate_hash_len-10]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-run_by | ck_agent_test_run_run_by_nonblank | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_run_by_nonblank-11]` | `test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_run_by_nonblank-11]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-evidence_kind | ck_graph_release_test_run_evidence_kind | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_release_link_check_violation[ck_graph_release_test_run_evidence_kind-rollback-False]` | `test_postgres_rejects_each_release_link_check_violation[ck_graph_release_test_run_evidence_kind-rollback-False]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| CK-source_paired | ck_graph_release_test_run_source_paired | models | 1 | `"1 = 1",` (1) | `test_sqlite_rejects_each_release_link_check_violation[ck_graph_release_test_run_source_paired-approval-True]`<br>`test_sqlite_rejects_each_release_link_check_violation[ck_graph_release_test_run_source_paired-historical_restore-False]` | `test_postgres_rejects_each_release_link_check_violation[ck_graph_release_test_run_source_paired-approval-True]`<br>`test_postgres_rejects_each_release_link_check_violation[ck_graph_release_test_run_source_paired-historical_restore-False]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| FK-run_release | fk_agent_test_run_release RESTRICT->CASCADE | models | 1 | `name="fk_agent_test_run_release",` (1) | `test_agent_test_run_model_exists`<br>`test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades` | `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| FK-compatible | fk_agent_test_run_compatible_revision RESTRICT->CASCADE | models | 1 | `name="fk_agent_test_run_compatible_revision",` (1) | `test_agent_test_run_model_exists`<br>`test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades` | `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| FK-composite | fk_agent_test_run_compatible_revision composite -> id only | models | 1 | `["compared_definition_revision_id"],` (1) | `test_agent_test_run_model_exists` | `test_postgres_run_revision_fk_is_role_compatible` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| FK-link_release | fk_graph_release_test_run_release RESTRICT->CASCADE | models | 1 | `name="fk_graph_release_test_run_release",` (1) | `test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades`<br>`test_graph_release_test_run_model_exists` | `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| FK-link_run | fk_graph_release_test_run_run RESTRICT->CASCADE | models | 1 | `name="fk_graph_release_test_run_run",` (1) | `test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades`<br>`test_graph_release_test_run_model_exists`<br>`test_sqlite_restricts_deleting_a_case_or_run_that_evidence_references` | `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint`<br>`test_postgres_restricts_deleting_a_run_linked_to_a_release` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| FK-link_source | fk_graph_release_test_run_source RESTRICT->CASCADE | models | 1 | `name="fk_graph_release_test_run_source",` (1) | `test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades`<br>`test_graph_release_test_run_model_exists` | `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-test_case_id | NOT NULL test_case_id | models | 1 | `test_case_id = Column(Integer, nullable=True)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[test_case_id]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-test_case_version | NOT NULL test_case_version | models | 1 | `test_case_version = Column(Integer, nullable=True)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[test_case_version]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-agent_key | NOT NULL agent_key (run) | models | 1 | `revision's hash.` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[agent_key]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-run_kind | NOT NULL run_kind | models | 1 | `run_kind = Column(String(24), nullable=True)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[run_kind]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-candidate_hash | NOT NULL candidate_hash (run) | models | 1 | `run_kind = Column(String(24), nullable=False)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[candidate_hash]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-compared_release | NOT NULL compared_release_id | models | 1 | `compared_release_id = Column(Integer, nullable=True)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[compared_release_id]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-compared_revision | NOT NULL compared_definition_revision_id | models | 1 | `compared_definition_revision_id = Column(Integer, nullabl...` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[compared_definition_revision_id]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-model_payload | NOT NULL model_payload | models | 1 | `model_payload = Column(_EVIDENCE_JSON_DOCUMENT, nullable=...` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[model_payload]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-check_results | NOT NULL deterministic_check_results | models | 1 | `deterministic_check_results = Column(_EVIDENCE_JSON_DOCUM...` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[deterministic_check_results]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-checks_passed | NOT NULL deterministic_checks_passed | models | 1 | `deterministic_checks_passed = Column(Boolean, nullable=Tr...` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[deterministic_checks_passed]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-exec_status | NOT NULL execution_status | models | 1 | `execution_status = Column(String(32), nullable=True)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[execution_status]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-run_by | NOT NULL run_by | models | 1 | `run_by = Column(Text, nullable=True)` (1) | `test_agent_test_run_model_exists` | `test_postgres_rejects_null_in_each_required_agent_test_run_column[run_by]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| NN-evidence_kind | NOT NULL evidence_kind | models | 1 | `evidence_kind = Column(String(20), nullable=True)` (1) | `test_graph_release_test_run_model_exists` | `test_postgres_rejects_null_evidence_kind_on_a_release_link` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| PK-link | graph_release_test_run composite PK | models | 1 | `agent_test_run_id = Column(Integer, nullable=False)` (1) | `test_graph_release_test_run_model_exists` | `test_postgres_accepts_well_formed_agent_test_run_and_release_link` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| DEF-run_at | run_at server_default now() | models | 1 | `run_at = Column(DateTime(timezone=True), nullable=False)` (1) | 18 tests (all inserts) | 38 tests (all inserts) | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| DEF-no_results_default | deterministic_check_results has no server_default | models | 1 | `deterministic_check_results = Column(_EVIDENCE_JSON_DOCUM...` (1) | `test_semantic_columns_use_json_variants_numeric_decimals_and_database_timestamps` | — (GREEN) | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| TYPE-float | latency_ms Float | models | 1 | `latency_ms = Column(Numeric(12, 3))` (1) | `test_agent_test_run_model_exists` | — (GREEN) | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| JSON-none_as_null | evidence JSON binds None as SQL NULL | models | 1 | `_EVIDENCE_JSON_DOCUMENT = _JSON_DOCUMENT` (1) | `test_semantic_columns_use_json_variants_numeric_decimals_and_database_timestamps`<br>`test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_completed_has_output-9]` | `test_postgres_accepts_well_formed_agent_test_run_and_release_link`<br>`test_postgres_rejects_each_agent_test_run_check_violation[ck_agent_test_run_completed_has_output-9]`<br>`test_postgres_rejects_null_in_each_required_agent_test_run_column[deterministic_check_results]`<br>`test_postgres_rejects_null_in_each_required_agent_test_run_column[model_payload]` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| JSON-jsonb | evidence JSON is JSONB on PostgreSQL | models | 1 | `_EVIDENCE_JSON_DOCUMENT = JSON(none_as_null=True)` (1) | `test_semantic_columns_use_json_variants_numeric_decimals_and_database_timestamps` | `test_postgres_create_all_builds_both_evidence_tables_with_jsonb_and_indexes` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| IX-case_run_at | ix_agent_test_run_case_run_at columns | models | 1 | `Index("ix_agent_test_run_case_run_at", "test_case_id"),` (1) | `test_agent_test_run_model_exists` | `test_postgres_create_all_builds_both_evidence_tables_with_jsonb_and_indexes` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| IX-link_run | ix_graph_release_test_run_run present | models | 1 | `Index("ix_graph_release_test_run_run", "agent_test_run_id"),` (0) | `test_graph_release_test_run_model_exists` | `test_postgres_create_all_builds_both_evidence_tables_with_jsonb_and_indexes` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| IX-no_index_true | no index=True beside explicit Index | models | 1 | `agent_test_run_id = Column(Integer, primary_key=True, aut...` (1) | `test_graph_release_test_run_model_exists` | `test_postgres_create_all_builds_both_evidence_tables_with_jsonb_and_indexes` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| EXP-AgentTestRun | export AgentTestRun in __all__ | __init__ | 1 | `"AgentTestRun",` (0) | `test_graph_configuration_tables_and_public_models_are_registered` | — (GREEN) | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| EXP-GraphReleaseTestRun | export GraphReleaseTestRun in __all__ | __init__ | 1 | `"GraphReleaseTestRun",` (0) | `test_graph_configuration_tables_and_public_models_are_registered` | — (GREEN) | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| TRG-body | evidence trigger raises on non-verdict change | database.py | 1 | `IF FALSE AND (to_jsonb(NEW)` (1) | — (GREEN) | 18 tests (all inserts) | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| TRG-event | evidence trigger is BEFORE UPDATE only (delete allowed) | database.py | 1 | `f"BEFORE UPDATE OR DELETE ON {evidence_table} "` (1) | — (GREEN) | `test_postgres_restricts_deleting_a_run_linked_to_a_release` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+| TRG-exempt | verdict columns exempt from the trigger | database.py | 1 | `(to_jsonb(NEW)` (1) | — (GREEN) | `test_postgres_agent_test_run_verdict_columns_stay_writable` | git checkout GREEN; diff clean=True | byte-identical to GREEN commit |
+
+## Sabotage targets (C21, replacing the plan's column-name sabotage)
+- **Controller**, already run: `C21-ctrl` removes `AND deterministic_checks_passed` from `ck_agent_test_run_approved_only_if_completed_and_passing`. RED was exactly as predicted: only the "approved on a failing run" insert, `test_sqlite_rejects_each_agent_test_run_check_violation[ck_agent_test_run_approved_only_if_completed_and_passing-7]` and `test_postgres_rejects_each_agent_test_run_check_violation[...-7]`. Every other test was GREEN, including `-8` (approved on `model_error`, still rejected).
+- **Reviewer**, also run in the sweep, so the reviewer should pick a different one: `C21-rev` sets `fk_agent_test_run_test_case` to `ondelete="CASCADE"`. It hits `test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades` and `test_agent_test_run_model_exists` (unit), and `test_postgres_restricts_deleting_a_test_case_referenced_by_a_run` (23503) and `test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint` (PostgreSQL). Suggested fresh reviewer targets: widen the trigger's exempt array with `'run_by'` (predicted RED: `...evidence_columns_are_immutable[run_by]` only), or drop `, "run_at"` from the case index (predicted RED: the `IX-case_run_at` pair).
+- The SQLite restrict-delete test stays GREEN under `C21-rev`. That is correct: the case delete cascades to the run, and the run is still blocked by its RESTRICT link. The PostgreSQL case-delete test has no link row, so it proves the case FK directly.
+
+## Gates
+| Gate | Command | Result by cause |
+|---|---|---|
+| Focused unit (15 files: §7's ten plus the five #266-shared files) | `python -m pytest -q -p no:randomly` over the 15 files | **1051 passed, 0 failed, 0 skipped**. Baseline 865 + 167 = 1032, plus 19 new model tests. |
+| Full unit | `python -m pytest tests/unit -q -p no:randomly -rf` (DATABASE_URL sqlite) | **6 failed, 6194 passed, 110 skipped, 136 warnings**. The 6 are exactly the baseline nodes and causes: `test_deploy_autoscaling` ×2 (`'provisioned' == 'autoscaling'`; `_get_or_create_lakebase_provisioned` called 0 times), chokepoint ×3 (`_FakeSession` has no `execute`), persistence-boundary ×1 (`no active Graph Release`). Passed is 6175 + 19. Skips and warnings are unchanged. |
+| PostgreSQL constraints | `TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres python -m pytest -q -p no:randomly -rs tests/integration/test_graph_configuration_constraints_postgres.py` | **59 passed, 0 skipped** (was 7) |
+| PostgreSQL bootstrap / workbench / overlay / runtime-failures | the same, one file per invocation | 2 / 17 / 10 / 7 passed, 0 skipped. Identical to the C39 baseline. |
+| CI collection guard | `tests/unit/test_ci_collects_integration_tests.py` (in the focused run) | GREEN. No new PostgreSQL file was added. The constraints file is already enrolled at `.github/workflows/test.yml:451`. |
+| ruff | `ruff check --output-format concise` on the 5 touched files, compared with the same files at TASK_BASE (line numbers stripped) | Identical finding set: 22 pre-existing findings, all in `src/core/database.py`, none new. The test files are clean. |
+| `.venv` | `test ! -e .venv` before and after | Absent both times. |
+
+## Concerns
+1. **C19 deviation** (the finding above): the evidence columns use `_EVIDENCE_JSON_DOCUMENT` (`none_as_null=True`), not `_JSON_DOCUMENT` verbatim. It is still JSONB. Without it, three C19 NOT NULL / completed-output guarantees are vacuous for ORM writes.
+2. **What #269 assumes that this DDL changes**, read from its plan and corrections, read only:
+   - Its plan row 80 lists the `AgentTestRun` columns, and all are present. Its Task 4 test fallback, "insert `AgentTestRun` rows with the ORM", must now also supply `run_kind`, `model_payload`, `compared_release_id` and `compared_definition_revision_id` (NOT NULL, and the last must match the row's `agent_key` through the composite FK), and `deterministic_check_results` (no default).
+   - Its eligible-approval query (plan :727-735) does not filter `run_kind`. An approved `published_baseline` run whose `candidate_hash` equals a changed role's draft hash cannot occur (the hashes differ), but recommend `run_kind = 'candidate'` there and in #268 readiness.
+   - Its C14 trigger `trg_agent_test_run_linked_verdict_immutable` (`BEFORE UPDATE OF verdict…`) coexists with this `trg_agent_test_run_evidence_immutable` (`BEFORE UPDATE`, non-verdict columns). The two guard disjoint column sets. #269's idempotence test must now expect both rows for `agent_test_run`. The verdict column list for its Task 0-B probe is `verdict`, `verdict_reviewer`, `verdict_at`, `verdict_notes`.
+   - Its "`DELETE FROM agent_test_run WHERE id = b` → IntegrityError" holds, as 23503 `fk_graph_release_test_run_run`.
+   - `ix_graph_release_test_run_run` serves its trigger's `EXISTS` lookup.
+3. **#268:** its plan (:412) says the verdict update is the only allowed mutation. That is now database-enforced. A re-verdict (approved→rejected) on an **unlinked** run is still permitted by this trigger. That is #268's and #269's policy.
+4. **Out of scope, carried forward:** `test_postgres_restricts_deletion_of_referenced_release_and_revision` still proves only the 23514 trigger, not the FK (C21). The existing JSON columns still store `None` as `'null'` (see the finding).
+5. The review question's AC1 half (bootstrap and integrity guard) belongs to Task 1 under C3 and C5. It was not re-asserted here.
+
+## Fix round 1
+
+**Base:** `84afadbd8e4529d5480fe4303e6d6d3fcff44281`, pinned. **Fix commit:** `03992199b` test: pin evidence immutability for every non-verdict column (#267). Test-only: `tests/integration/test_graph_configuration_constraints_postgres.py`.
+
+**I1 (Important):** the immutability test rewrote 17 of the 23 non-verdict columns. It skipped `id`, `test_case_id`, `agent_key`, `compared_release_id`, `compared_definition_revision_id` and `run_at`, so exempting them left the file GREEN.
+
+**Fix:**
+- `EVIDENCE_COLUMN_REWRITES` gains all six.
+- Five of them resolve at run time against a second set of valid parents:
+  - `id` → `run_id + 1000`, an unused PK;
+  - `test_case_id` → a second architect case;
+  - `compared_release_id` → a second, closed release (v2);
+  - `compared_definition_revision_id` → a second architect revision (role-compatible);
+  - `run_at` → `run_at - 1 day`.
+- `agent_key` → `'builder'` passes the check, but no revision can satisfy the composite FK for both roles. That FK is an AFTER row trigger, so the BEFORE evidence trigger raises first. The test asserts SQLSTATE 23514 and the message `agent_test_run evidence is immutable`, and the row is unchanged.
+- New `test_evidence_rewrites_cover_every_non_verdict_agent_test_run_column` asserts `set(EVIDENCE_COLUMN_REWRITES) == set(AgentTestRun.__table__.columns.keys()) - VERDICT_COLUMNS`, with the column list read from table metadata.
+
+**Sabotage** (driver `/tmp/t267-0/fix1.py`; each anchor count is 1; each restore is `git checkout 03992199b… -- <file>` and `git diff --exit-code` is clean; scope is the PostgreSQL constraints file):
+
+| Mutation | File | Anchor | Marker (`grep -c`) | RED | Restore | GREEN |
+|---|---|---|---|---|---|---|
+| exempt `run_at` in both trigger arrays | database.py | 1 | `'run_at']` (2) | `test_postgres_agent_test_run_evidence_columns_are_immutable[run_at]` only | clean | 66 passed |
+| exempt `id` | database.py | 1 | `'id']` (2) | `…[id]` only | clean | 66 passed |
+| exempt all six | database.py | 1 | six-name array (2) | `…[agent_key]`, `…[compared_definition_revision_id]`, `…[compared_release_id]`, `…[id]`, `…[run_at]`, `…[test_case_id]` | clean | 66 passed |
+| add `sabotage_dummy = Column(Text)` to `AgentTestRun` | models | 1 | `sabotage_dummy = Column(Text)` (1) | `test_evidence_rewrites_cover_every_non_verdict_agent_test_run_column` only | clean | 66 passed |
+
+**Cause check (exempt all six):** five tests failed with `DID NOT RAISE`, because the update committed. That proves their values are FK- and check-valid, so only the trigger stops them. `agent_key` failed with `'23503' == '23514'`, because the composite FK is the next guard once the trigger no longer fires, as documented above.
+
+**Gates**
+| Gate | Result |
+|---|---|
+| `TELLR_TEST_POSTGRES_URL=… python -m pytest -q -p no:randomly -rs tests/integration/test_graph_configuration_constraints_postgres.py` | 66 passed, 0 skipped (was 59) |
+| `tests/unit/test_graph_configuration_models.py` | 27 passed |
+| full `tests/unit -q -p no:randomly -rf` (`DATABASE_URL=sqlite:////tmp/t267-0.sqlite`) | 6 failed, 6202 passed, 110 skipped, 136 warnings. The 6 are the baseline nodes and causes. The +8 passed come from Task 1's commits since `4d685d03d`; this fix touches no unit file. |
+| ruff on the touched file | clean |
+| `.venv` | absent before and after |

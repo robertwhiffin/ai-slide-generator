@@ -19,6 +19,8 @@ import type {
   ModelAgentNode,
   ProtectedStageView,
   SystemModelEndpoint,
+  TestCaseListEntry,
+  TestRunEvidence,
 } from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
@@ -1647,4 +1649,105 @@ export function syntheticProbeFailure(
 ) {
   const failure = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
   return { code, message: failure.message, retryable: failure.retryable, ...probeIdentity(identity) };
+}
+
+// ============================================================
+// #267 Agent Test Cases and Test Runs
+// ============================================================
+// Appended last, and every new name is a function or a constant that begins with no
+// existing exported name (the Python joins find blocks with `index("export const X")`).
+
+/** One active Agent Test Case version exactly as `GET /test-cases` serializes it. */
+export function syntheticAgentTestCase(overrides: Partial<TestCaseListEntry> = {}): TestCaseListEntry {
+  return {
+    id: 101,
+    agent_key: 'architect',
+    name: 'Architect quarterly revenue outline',
+    version: 1,
+    is_active: true,
+    is_required: true,
+    synthetic_payload: {
+      user_request: 'Outline a five-slide quarterly revenue review for a fictional retailer.',
+      session_id: 'synthetic-session-0001',
+    },
+    assembly_context: { design_system_active: false },
+    created_by: 'system:bootstrap',
+    created_at: '2026-09-21T12:00:00Z',
+    updated_by: 'system:bootstrap',
+    updated_at: '2026-09-21T12:00:00Z',
+    is_synthetic_data_warning: true,
+    ...overrides,
+  };
+}
+
+/** The exact list body for `GET /test-cases?agent_key=<role>`. */
+export function syntheticAgentTestCaseList(items: TestCaseListEntry[] = [syntheticAgentTestCase()]) {
+  return { items };
+}
+
+/**
+ * One persisted run exactly as the execute routes serialize it: an execute response
+ * carries boolean currency flags, and no verdict field exists (#268 adds verdicts).
+ */
+export function syntheticTestRunEvidence(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
+  return {
+    run_id: 501,
+    run_kind: 'candidate',
+    test_case_id: 101,
+    test_case_version: 1,
+    agent_key: 'architect',
+    candidate_hash: 'a'.repeat(64),
+    compared_release_id: 41,
+    compared_definition_revision_id: 11,
+    synthetic_payload: {
+      user_request: 'Outline a five-slide quarterly revenue review for a fictional retailer.',
+      session_id: 'synthetic-session-0001',
+    },
+    model_payload: {
+      user_request: 'Outline a five-slide quarterly revenue review for a fictional retailer.',
+    },
+    assembled_prompt: 'Synthetic assembled Architect prompt for the saved candidate.',
+    execution_status: 'completed',
+    error_detail: null,
+    deterministic_checks_passed: true,
+    deterministic_check_results: [
+      { name: 'execution', passed: true, message: null, issues: [] },
+      { name: 'output_contract', passed: true, message: null, issues: [] },
+    ],
+    candidate_raw_output: { title: 'Synthetic candidate raw title' },
+    candidate_structured_output: { title: 'Synthetic candidate structured title' },
+    baseline_raw_output: null,
+    baseline_structured_output: null,
+    latency_ms: 812.5,
+    input_tokens: null,
+    output_tokens: null,
+    run_by: 'admin@test.com',
+    run_at: '2026-09-26T10:00:00Z',
+    candidate_is_current: true,
+    base_release_is_current: true,
+    ...overrides,
+  };
+}
+
+/** The route's exact 503 body: no row was written, and the request may be retried. */
+export function syntheticTestRunUnavailable() {
+  return {
+    code: 'test_run_unavailable' as const,
+    message: 'Test run storage is temporarily unavailable. Retry the request.',
+    retryable: true as const,
+  };
+}
+
+/** The exact 409 body for a superseded or retired case version (Task 2's envelope). */
+export function syntheticStaleTestCase(testCaseId = 101) {
+  return {
+    code: 'stale_test_case' as const,
+    test_case_id: testCaseId,
+    message: 'This test case version is no longer active. Reload and retry.',
+  };
+}
+
+/** The exact ordered 422 envelope for a refused case write or a role-mismatched run. */
+export function syntheticInvalidTestCase(issues: Array<{ field: string; code: string; message: string }>) {
+  return { code: 'invalid_test_case' as const, issues };
 }
