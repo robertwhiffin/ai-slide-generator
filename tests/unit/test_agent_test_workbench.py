@@ -771,3 +771,35 @@ def test_an_active_optional_case_does_not_stop_the_unrequire_refusal(factory):
     assert caught.value.issues == (LAST_REQUIRED_REQUIRED,)
     assert _rows(factory) == before
     _bootstrap_ok(factory)
+
+
+# --- fix round 2: the inactive-row 409 precedes the no-op -----------------------
+
+
+@pytest.mark.parametrize("state", ["superseded", "retired"])
+def test_an_identical_save_to_an_inactive_version_is_still_stale(factory, state):
+    """Catches the no-op check running before the inactive-row 409 (fix round 2)."""
+    if state == "superseded":
+        target = _seed_case_id(factory)
+        _update(factory, target)
+    else:
+        target = _create(factory, name="architect_to_retire").id
+        _deactivate(factory, target)
+    with factory() as session:
+        row = session.get(AgentTestCase, target)
+        stored = (row.name, row.synthetic_payload, row.assembly_context, row.is_required)
+        assert row.is_active is False
+    before = _rows(factory)
+
+    with pytest.raises(TestCaseStale) as caught:
+        _update(
+            factory,
+            target,
+            name=stored[0],
+            synthetic_payload=stored[1],
+            assembly_context=stored[2],
+            is_required=stored[3],
+        )
+
+    assert caught.value.test_case_id == target
+    assert _rows(factory) == before

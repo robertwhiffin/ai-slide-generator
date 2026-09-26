@@ -5210,3 +5210,31 @@ def test_test_case_routes_run_the_locking_writer_off_the_event_loop(
 
     assert response.status_code in {200, 201}
     assert loop_running == [False]
+
+
+def test_put_identical_content_to_a_superseded_version_is_409_stale(
+    session_factory, monkeypatch
+):
+    """Catches an identical PUT to a superseded id returning 200 (fix round 2)."""
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    with _app_for(session_factory) as client:
+        listed = client.get(_TEST_CASES_URL, params={"agent_key": "architect"}).json()
+        seed = next(item for item in listed["items"] if item["id"] == seed_id)
+        identical = {
+            "name": seed["name"],
+            "synthetic_payload": seed["synthetic_payload"],
+            "assembly_context": seed["assembly_context"],
+            "is_required": seed["is_required"],
+        }
+        assert client.put(_test_case_url(seed_id), json=_update_body()).status_code == 200
+        before = _test_case_rows(session_factory)
+        response = client.put(_test_case_url(seed_id), json=identical)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "stale_test_case",
+        "test_case_id": seed_id,
+        "message": "This test case version is no longer active. Reload and retry.",
+    }
+    assert _test_case_rows(session_factory) == before
