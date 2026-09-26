@@ -1096,7 +1096,7 @@ class AgentTestWorkbench:
     def list_test_runs(
         self, session: Session, *, test_case_id: int, limit: int = 20
     ) -> list[TestRunEvidence]:
-        """One case version's runs, newest first."""
+        """One case version's runs, newest first.  An unknown case is not found."""
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -1109,6 +1109,8 @@ class AgentTestWorkbench:
                     AgentTestCase.id == test_case_id
                 )
             )
+            if synthetic_payload is None:  # the column is NOT NULL: no such case
+                raise TestCaseNotFound(test_case_id)
             rows = session.scalars(
                 select(AgentTestRun)
                 .where(AgentTestRun.test_case_id == test_case_id)

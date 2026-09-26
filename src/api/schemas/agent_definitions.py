@@ -580,3 +580,101 @@ class TestCaseConflictResponse(BaseModel):
     code: Literal["stale_test_case"]
     test_case_id: int
     message: str
+
+
+# --- Agent Test Runs (#267 Task 5) -------------------------------------------
+# Strict siblings again: the run bodies name only what the admin chooses — the
+# case, and for a candidate the lock that pins the candidate on their screen.
+# The endpoint, sampling values, prompt, payload and baseline are server-owned.
+
+#: A stored row id: ``agent_test_case.id`` / ``agent_test_run.id`` are
+#: ``Integer`` columns, so a larger value could never name a row and would be a
+#: driver range error in PostgreSQL rather than a clean refusal.
+MAX_ROW_ID = 2**31 - 1
+_RowId = Annotated[int, Field(ge=1, le=MAX_ROW_ID)]
+
+
+class CandidateTestRunRequest(_StrictDraftRequest):
+    """``POST /draft/{agent_key}/test-runs``: exactly ``{test_case_id, lock_version}``."""
+
+    test_case_id: _RowId
+    lock_version: Annotated[int, Field(ge=0)]
+
+
+class BaselineTestRunRequest(_StrictDraftRequest):
+    """``POST /published/{agent_key}/test-runs``: exactly ``{test_case_id}``; no draft is read."""
+
+    test_case_id: _RowId
+
+
+class DeterministicCheckIssueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    field: str | None
+
+
+class DeterministicCheckResultResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Literal["output_contract", "execution"]
+    passed: bool
+    message: str | None
+    issues: list[DeterministicCheckIssueResponse]
+
+
+class TestRunEvidenceResponse(BaseModel):
+    """One immutable ``agent_test_run`` row, as evidence (Phase A).
+
+    Every field is the stored row, except ``synthetic_payload`` (the run's own
+    immutable case version) and the two currency flags.  Those are computed
+    when the run is written: an execute response carries booleans, and a later
+    read returns ``null`` because nothing recomputes them (C8.5).  The verdict
+    columns are #268's and are absent, not ``null``.  Release and revision ids
+    are ``ge=1`` so no ``-1`` sentinel can ever serialize (Task 3 M-1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: _RowId
+    run_kind: Literal["candidate", "published_baseline"]
+    test_case_id: _RowId
+    test_case_version: Annotated[int, Field(ge=1)]
+    agent_key: AgentKey
+    candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
+    compared_release_id: _RowId
+    compared_definition_revision_id: _RowId
+    synthetic_payload: dict[str, object]
+    model_payload: dict[str, object]
+    assembled_prompt: str | None
+    execution_status: Literal["completed", "model_error", "assembly_error", "incomplete"]
+    error_detail: str | None
+    deterministic_checks_passed: bool
+    deterministic_check_results: list[DeterministicCheckResultResponse]
+    candidate_raw_output: dict[str, object] | None
+    candidate_structured_output: dict[str, object] | None
+    baseline_raw_output: dict[str, object] | None
+    baseline_structured_output: dict[str, object] | None
+    latency_ms: float | None
+    input_tokens: int | None
+    output_tokens: int | None
+    run_by: str
+    run_at: datetime
+    candidate_is_current: bool | None
+    base_release_is_current: bool | None
+
+
+class TestRunListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[TestRunEvidenceResponse]
+
+
+class TestRunUnavailableResponse(BaseModel):
+    """503: the database failed before or after the model call; no run was written."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["test_run_unavailable"]
+    message: str
+    retryable: Literal[True]
