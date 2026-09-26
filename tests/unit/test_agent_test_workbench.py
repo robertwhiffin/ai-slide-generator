@@ -2535,6 +2535,38 @@ def test_any_changed_field_restamps_all_four_columns(factory, change):
     assert _evidence_columns(factory, run_id) == before
 
 
+def test_the_lock_read_refreshes_a_run_already_cached_in_the_session(factory):
+    """C6 ``populate_existing``: a session that cached the run before another
+    session recorded a verdict must decide on the locked, fresh row.  A stale
+    identity-map copy (verdict NULL) would re-write an identical verdict."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    with factory() as cached:
+        # A strong reference: the identity map is weak, so an unreferenced
+        # copy would be collected and re-loaded fresh, proving nothing.
+        stale = cached.get(AgentTestRun, run.run_id)
+        assert stale.verdict is None
+        cached.commit()  # ``expire_on_commit=False``: the stale copy stays mapped
+
+        _record(factory, run_id=run.run_id, notes="Looks right.")
+        written = _verdict_of(factory, run.run_id)
+        assert written[:2] == ("approved", REVIEWER)
+
+        with _CapturedStatements(factory) as captured:
+            workbench.record_verdict(
+                cached,
+                run_id=run.run_id,
+                verdict="approved",
+                reviewer=REVIEWER,
+                notes="Looks right.",
+            )
+
+    assert captured.updates() == []
+    assert _verdict_of(factory, run.run_id) == written
+    assert stale.verdict == "approved"  # the locked read refreshed the cached copy
+
+
 def test_an_approval_flips_to_a_rejection_and_back_while_eligible(factory):
     workbench, _runtime_, _adapter = _executor(factory)
     run = _run_candidate(factory, workbench)
