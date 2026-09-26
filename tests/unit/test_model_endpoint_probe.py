@@ -58,7 +58,7 @@ CONFIGURATION = AgentModelConfiguration(
 
 EXPECTED_FAILURES = {
     "unsupported_structured_output": (
-        "This endpoint does not support structured output.",
+        "The endpoint rejected the structured-output test request.",
         False,
     ),
     "endpoint_probe_forbidden": (

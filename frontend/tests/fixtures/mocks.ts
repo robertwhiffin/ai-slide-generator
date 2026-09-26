@@ -1602,7 +1602,7 @@ export const SEED_CANDIDATE_HASH = 'a'.repeat(64);
 export const STRUCTURED_OUTPUT_PROBE_FAILURES = {
   unsupported_structured_output: {
     status: 422,
-    message: 'This endpoint does not support structured output.',
+    message: 'The endpoint rejected the structured-output test request.',
     retryable: false,
   },
   endpoint_probe_forbidden: {
