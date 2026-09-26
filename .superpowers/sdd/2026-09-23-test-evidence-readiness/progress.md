@@ -54,3 +54,13 @@
 - **Task 1:** conditional GO once #267 merges. The conditions are the rebase and `IMPLEMENTATION_BASE`, the re-derived baseline, the Correction 3 re-probe (especially the evidence field set after the token wave), and a brief carrying C4–C9 and C27.
 - **Task 5:** deleted.
 - **Task 6:** can proceed on Q2's default.
+
+## Controller rulings on the pre-pass's product questions — 2026-09-26
+The user asked for autonomous progress without interruption; these are reversible defaults, recorded here and reported to the user for override.
+Ruling: Q1 — cleanup ships as a service method with NO automatic caller in #268; an admin-triggered route or a schedule is a follow-up decision. Cost if wrong: unpublished runs accumulate until a trigger is chosen.
+Ruling: Q2 — a role's badge is worst-first across its required cases (the pre-pass default). Cost if wrong: a label change.
+Ruling: Q3 — an admin MAY record a verdict on a stale-candidate or retired-version run (it is truthful evidence); readiness ignores such approvals. Cost if wrong: harmless verdicts on runs that cannot unlock publication.
+Ruling: Q5 — show the newest completed baseline, with its own verdict label; an older approved baseline is not preferred over a newer unapproved one. Cost if wrong: display only.
+Ruling: Q6 — baseline runs are NOT subject to the 20-run candidate retention (C12/C19: cleanup is candidate-only). Cost if wrong: baseline rows accumulate slowly.
+Ruling: Q7 — no verdict withdrawal back to "no verdict" in #268; a verdict can be changed (approve ↔ reject) while unlinked. Cost if wrong: an admin cannot clear a verdict, only flip it.
+Pre-pass: 30 corrections (24 blocking). GO for Task 1 once #267 merges, conditional on rebase + baseline + C3 re-probe of the evidence field set after #267's token-usage fix wave.
