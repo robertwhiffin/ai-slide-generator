@@ -6,6 +6,7 @@
 - **Not yet integrated:**
   - #266 is on `plan/model-discovery-266`, at `18b0f8cd3`, Task 2.
   - The builder payload fix is on `fix/builder-owner-session-id` (`9894e55a5`), and it is **not** an ancestor of HEAD.
+- **Rebased 2026-09-26:** onto `e91fcd856` (Merge #266, with the builder fix `6cbab388a` and the all-roles payload fix `50c8cbf35`). §12 (Corrections 29–40) re-probes this file against that head and **overrides §1–§11 where they differ**. `IMPLEMENTATION_BASE=e91fcd856`.
 - **Phase:** this is Task 0 phase A. Task 1 may dispatch only after the Phase-A-at-dispatch re-probe in §7.
 - **Numbering:**
   - Corrections 1–7 are the user's seven: U-B1..U-B3 and U-A1..U-A4.
@@ -601,3 +602,284 @@ Sabotage assignment: the controller and reviewer targets named above differ for 
 4. Corrections 3, 12, 15 and 23 are re-probed against #266's final `agent_runtime.py`, routes and `graph_configuration.py`.
 
 Task 0 has no external gate beyond those four. **Task 4 is NO-GO** until `fix/builder-owner-session-id` is reviewed and merged locally (Correction 10). Phase B Task 8 waits for #266's helper (Correction 18).
+
+---
+
+## 12. Conditional-GO discharge at `e91fcd856` (2026-09-26)
+
+Every line number in this section was measured at the rebased HEAD (`c7cb587c7`, whose code equals `e91fcd856`). Where §1–§11 cite an older line, this section wins. Each item is **CONFIRMED** (the earlier correction stands, sometimes with refreshed lines), **CORRECTED** (the earlier ruling changes) or **NEW DEFECT** (the plan or an earlier correction missed it).
+
+### Correction 29 — `IMPLEMENTATION_BASE=e91fcd856`, and the rebase — CONFIRMED — BLOCKING (all tasks)
+- **Evidence:**
+  - Triple check (`git status --porcelain`, `git diff HEAD`, `git diff --cached`) was empty. Backup tag `backup/267-pre-rebase-e06f78241`.
+  - `git rebase --onto e91fcd856 c040dbde0 feat/agent-test-case-runs-267` took `e06f78241` to `c7cb587c7`. `git range-diff c040dbde0..backup/267-pre-rebase-e06f78241 e91fcd856..HEAD` shows `1: e6bb42ff0 = 1: ac1168242` and `2: e06f78241 = 2: c7cb587c7`. `git rev-list --count HEAD..e91fcd856` is 0. The name-only diff is the same two ledger files before and after.
+  - `6cbab388a`, `50c8cbf35`, `e91fcd856` and `c040dbde0` are all ancestors of HEAD. `src/services/model_endpoint_catalog.py` exists.
+- **Ruling:**
+  - `IMPLEMENTATION_BASE=e91fcd856`. This replaces Correction 28's "recorded at Task 1 dispatch" placeholder.
+  - Correction 6's Phase B gate for #266 is now met: #266's merge is an ancestor, and the catalog module exists.
+  - Correction 10's Task 4 gate is now met (see Correction 37). No external gate is left on any #267 task. Phase B Task 8's dependency on #266's helper is also met (see Correction 31).
+- **Unchanged since `c040dbde0`:** `git diff --quiet c040dbde0 e91fcd856` is clean for these paths:
+  - `graph_configuration_bootstrap.py` and its unit test
+  - `graph_configuration_seed.py`
+  - `graph_configuration_workbench.py`
+  - `src/database/`
+  - `src/core/database.py`
+  - `agent_schema_registry.py`
+  - `prompt_assembler.py`
+  - `agent_runtime_identity.py`
+  - `persisted_graph_release.py`
+  - `frontend/tests/fixtures/forbiddenActionNames.ts`
+
+  So Corrections 1, 2, 4, 19, 21, 22 and 24 keep their line citations.
+
+### Correction 30 — re-probe of Correction 3 (the Task 1 guard) — CONFIRMED — BLOCKING (Task 1)
+- **Evidence:** the bootstrap module and its test are byte-unchanged (Correction 29). `graph_configuration_bootstrap.py:187-198` is still the every-boot guard:
+  - the subset check `_EXPECTED_AGENT_KEYS.issubset(required_case_keys)` is at `:195`;
+  - `raise GraphConfigurationIntegrityError(` is at `:196`;
+  - the message `"active required Agent Test Cases do not cover every graph role"` is at `:197`.
+
+  #266 touched nothing on this path.
+- **Ruling:** Correction 3 stands verbatim: the real SQLite `session_factory`, the mandatory `match=`, the controller sabotage deleting `:196-198`, and the reviewer sabotage at `:195`.
+
+### Correction 31 — re-probe of Correction 12 (`run_candidate` through `_run_resolved`) against #266's runtime — CONFIRMED, with refreshed lines — BLOCKING (Task 3)
+- **Evidence** (`src/services/agent_runtime.py`):
+  - **`run` (`:593-619`):**
+    - It now begins with `if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET: raise UnknownAgentKeyError(...)` at `:604-608`, before the loader. So Correction 14 is integrated, not pending.
+    - The loader error mapping is at `:609-619`.
+    - The four-positional arity is still pinned by `tests/unit/test_graph_nodes.py:222` (`test_every_production_runtime_call_passes_all_four_pinned_arguments`).
+  - **`_run_resolved` (`:621-731`):**
+    - content revalidation `:628`;
+    - the v1-overlay guard `:634-641`;
+    - `compose` `:646`;
+    - `assemble` `:649`;
+    - `configuration = saved_model_configuration(content.model)` `:681` (new with #266);
+    - identity `:683-694`;
+    - `callback` `:696-713`, with the adapter at `:698` and `PinnedInvocationEndpointError` at `:705`;
+    - `validate_output` `:710`;
+    - the sink `:715`;
+    - latency `:716`.
+  - **#266's helpers:**
+    - `saved_model_configuration` is at `:391-402`.
+    - `bind_structured_output_model` is at `:405-431`. It contains the one `with_structured_output(` in `src/` (`:431`; `grep -rn` finds no other).
+    - `DatabricksModelAdapter.invoke` (`:458-503`) binds through the helper at `:489-494` inside its `provider_errors` catch (`:469-487`, `:496-503`).
+  - **Pins that now include the probe module:**
+    - `test_agent_runtime.py:435` (count == 1);
+    - the AST guard `:489-553`;
+    - `:751-780` `test_structured_output_binding_has_one_call_site_and_the_probe_has_none`;
+    - `:645-677`, which pins the runtime adapter's exact `model_factory` kwargs: no `timeout` and no `max_retries`.
+- **Ruling:**
+  - Correction 12 stands: `run_candidate` → `_run_resolved`, with the same three checks in order, the `-1` sentinels (Correction 27) and `run` byte-identical.
+  - `run_candidate` reaches #266's helper only transitively, through the adapter. It calls neither `bind_structured_output_model` nor `saved_model_configuration` itself, because `_run_resolved` `:681` already does the conversion.
+  - The Correction 12 AST guard is extended. `src/services/agent_test_workbench.py` must contain no `with_structured_output`, no `bind_structured_output_model(` and no `ChatDatabricks`. Mirror `:751-780`.
+- **Phase B Task 8 (Correction 18):** the helper now exists. Usage capture extends `bind_structured_output_model` or the adapter around it, and must keep `:431` the only binding and `:645-677`'s kwargs unchanged for the production adapter.
+
+### Correction 32 — the executor's candidate read reuses #266's probe read path; it does not build a parallel one — CORRECTED (Corrections 8 and 23) — BLOCKING (Task 4)
+- **Evidence:**
+  - `read_draft_probe_candidate` (`graph_configuration_draft.py:605-642`) is exactly Correction 8's transaction-1 pattern. In order it:
+    1. validates the lock and agent key before any transaction (`:621`, `_validate_lock_and_agent_key` `:702-708` over `_lock_and_agent_key_issues` `:710-738`);
+    2. runs `with session.begin(): read_workbench → _draft_aggregate_snapshot` (`:622-624`);
+    3. returns the null-candidate `DraftSaveConflict` on a stale lock (`:625-631`);
+    4. copies into a frozen value (`:632-638`);
+    5. leaves the transaction;
+    6. re-checks the stored endpoint name against `_endpoint_name_policy_validator` after the locks are released (`:639-641`), so a URL- or path-shaped stored name never reaches a provider.
+  - #266 proves the lock release in PostgreSQL (`test_agent_definition_workbench_postgres.py:1683` `test_model_endpoint_probe_holds_no_lock_while_the_model_call_is_in_flight`, which reads `pg_locks` and `pg_stat_activity` at `:1767-1771`).
+  - It **cannot be called as-is**. `DraftProbeCandidate` (`:95-107`) carries only `agent_key`, `lock_version`, `candidate_hash` and `model`. The executor also needs the full `DefinitionContent`, `draft.base_release_id`, the role's `base_revision_id` and the published `revision_id`/`content_hash`. All of these are on `GraphWorkbenchSnapshot` (`graph_configuration_workbench.py:40-138`).
+- **Ruling:**
+  - **Do not widen `DraftProbeCandidate`,** and do not change `read_draft_probe_candidate`'s signature or return type. They are #266's pinned contract.
+  - Task 4 extracts the probe method's body into one private helper on `_GraphConfigurationDraft`, which returns the post-transaction copy (snapshot-derived values) or the conflict:
+    - the lock and agent-key check;
+    - the `session.begin()` read of `read_workbench` plus the aggregate;
+    - the stale-lock conflict;
+    - the post-release endpoint-policy re-check.
+  - `read_draft_probe_candidate` becomes a projection of that helper, with its behaviour unchanged.
+  - Add a public sibling, `read_draft_test_candidate(session, *, agent_key, expected_lock_version) -> DraftTestCandidate | DraftSaveConflict[None]`. `DraftTestCandidate` is frozen: `agent_key`, `lock_version`, `candidate_hash`, `content`, `base_release_id`, `base_revision_id`, `published_revision_id`, `published_content_hash`, `active_release_id`.
+  - This is the only edit #267 makes to `graph_configuration_draft.py`. §6's "read-only / do not modify" row for that file is replaced by "additive: one extraction, one sibling; #266's probe tests unchanged".
+  - **Correction 8's transaction 1 becomes two short read transactions,** both before the model call and both closed before it:
+    - **1a** is `read_draft_test_candidate`.
+    - **1b** is `with session.begin():` loading the `AgentTestCase` row (id, version, agent_key, is_active, synthetic_payload, assembly_context) and the Correction 20 baseline row.
+
+    The split is safe. Every value read in 1b is immutable: case versions (Correction 22), baseline evidence (the Correction 24 trigger) and the published revision. The one exception is `is_active`, which transaction 2 re-checks. The rest of Correction 8 stands: the `in_transaction()` assert before the call, transaction 2 under `_lock_current_parents(exclusive=False)` (`workbench.py:188-238`, unchanged), persisting verbatim, the currency flags and the one retry.
+  - **Candidate runs carry the lock** (this corrects Correction 23's body), exactly as the probe does. The body is `{"test_case_id": int, "lock_version": int}`, strict, with `lock_version` `ge=0`. A stale lock returns the route's existing `_conflict_response(outcome, client_candidate=None)` 409. That is the same body as the probe's and upgrade's, and it comes with no model call and no row.
+  - The baseline run (`POST /published/{agent_key}/test-runs`) reads no draft. Its body stays `{"test_case_id": int}`.
+  - **Tests:**
+    - #266's probe suites stay green, unedited, as the refactor's regression proof: `test_model_endpoint_probe.py`, the `-k probe` route tests, and PostgreSQL `:1683`.
+    - #267's PostgreSQL lock proof reuses `:1683`'s harness shape.
+    - Unit: a stale-lock run gives a 409 with zero adapter calls and zero `agent_test_run` rows.
+    - Unit: a URL-shaped stored endpoint name gives a 422 with zero adapter calls.
+    - **Controller sabotage:** drop the lock comparison in the shared helper. Predicted RED: #267's stale-lock test **and** #266's probe stale-lock test.
+- **Cost if wrong:** a parallel read path drifts from the probe's lock and name-policy rules. Or an admin runs, and later approves, a candidate other than the one on their screen.
+
+### Correction 33 — the test-run model call must be request-bounded, and must not borrow the probe's classification — NEW DEFECT — BLOCKING (Tasks 3 and 4)
+- **Evidence:**
+  - #266 ruled that the probe runs inside one admin request, so it must not inherit the provider client's default window of ten minutes per attempt with retries. It binds with `transport_options={"timeout": 30.0, "max_retries": 0}` (`model_endpoint_probe.py:99-100`, `:160-169`). The #266 ledger's Task 5 records this as "probe model call bounded to 30 s with no retries … Accepted".
+  - The helper's contract says `transport_options` "is for the probe's call bound only; the runtime passes none" (`agent_runtime.py:420-421`).
+  - The plan's executor (and Corrections 8 and 12) run a real role prompt through the production `DatabricksModelAdapter()` (`get_agent_runtime` `:735-743`). That adapter passes no transport options (pinned at `test_agent_runtime.py:645-677`). So a #267 run inherits the unbounded window inside an admin HTTP request. This is the defect #266 closed for the probe.
+  - The adapter collapses **every** provider failure into `ModelProviderUnavailableError` (`:496-503`). `test_structured_output_runtime_adapter_still_collapses_permission_denied` (`test_agent_runtime.py:807`) pins that the runtime keeps collapsing. The probe's 403/422/503 table (`model_endpoint_probe.py:112-120`, `:170-185`: openai PermissionDenied/Authentication → forbidden, BadRequest/NotFound/Unprocessable → unsupported, everything else → retryable) is **only** reachable through the probe adapter.
+- **Ruling:**
+  - **Bound, same binding:**
+    - Add a keyword-only `transport_options: Mapping[str, Any] | None = None` to `DatabricksModelAdapter.__init__`. `invoke` forwards it to `bind_structured_output_model`. The default `None` keeps the production adapter's kwargs byte-identical, so `:645-677` stays green unedited.
+    - Update the helper docstring (`:420-421`) to name both bounded callers.
+    - Add `get_agent_test_runtime()`, `lru_cache`d, beside `get_agent_runtime`: the same `PersistedGraphReleaseLoader` and `LoggingAgentInvocationIdentitySink`, with `DatabricksModelAdapter(transport_options={"timeout": TEST_RUN_TIMEOUT_SECONDS, "max_retries": TEST_RUN_MAX_RETRIES})`, where the constants are `120.0` and `0`.
+    - Both `execute_candidate_run` and `execute_baseline_rerun` use it. Sampling values, prompt and schema are unchanged, and transport bounds are not model configuration (#266's own ruling).
+    - The Correction 12 call-site guard extends to it: `get_agent_test_runtime` is referenced only from `agent_test_workbench.py` and the route dependency, never from `src/services/graph/`.
+  - **Classification (honouring #266 without copying it):**
+    - #267 does **not** reuse the probe adapter, its codes or its 403/422/503 statuses. A second, classifying invocation path would diverge from what production does (AC10).
+    - A provider failure, including a timeout, is a **persisted** `model_error` run with `error_detail="endpoint_unavailable:<endpoint_name>"` (Correction 16), returned as a successful evidence write. It is never an HTTP 403/422/503, because the run did happen.
+    - The UI may point the admin to "Test structured output" to diagnose a failure.
+    - Correction 16 gains one row: `NotImplementedError` raised from the binding step (the type the probe classifies as unsupported, `:170`) is `model_error` with `error_detail="structured_output_unsupported:<endpoint_name>"`, not `unexpected_error`.
+  - **Tests:**
+    - The test runtime's adapter hands `model_factory` `timeout=120.0, max_retries=0` (mirror `:645-677` with recording factories).
+    - The production `get_agent_runtime()` adapter still hands neither.
+    - **Controller sabotage:** build the test runtime with the default adapter. Predicted RED: the kwargs test.
+    - **Reviewer sabotage:** have `DatabricksModelAdapter` pass `transport_options or {}` into the kwargs pinned at `:645-677` for the default too, with a non-empty default. Predicted RED: `:645-677`.
+- **Cost if wrong:** an admin request hangs for up to about ten minutes per attempt, with retries, on a slow endpoint (the exact defect #266 fixed for the probe). Or #267 grows a second classifying invocation path that reports failures production never distinguishes.
+- **Product note (not blocking):** 120 s is a controller value. A healthy builder call slower than that is persisted as `model_error`, and the admin can run it again.
+
+### Correction 34 — re-probe of Correction 15 (raw output, unclassified escapes) — CONFIRMED, with refreshed lines — BLOCKING (Tasks 3 and 4)
+- **Evidence:**
+  - `AgentInvocationResult` is still only `output` and `diagnostics` (`agent_runtime.py:204-206`).
+  - `_supplied_output_keys` is at `:544-554`, and is called only inside `callback` (`:710-712`).
+  - `AgentOutputValidationError` (`agent_schema_registry.py:338`, raised `:521`/`:536`/`:563`) is still caught by nothing in `_run_resolved`.
+  - The adapter's `provider_errors` (`:469-487`) still exclude pydantic `ValidationError` from `structured_model.invoke` (`:495`), and `NotImplementedError` from the binding (`:489`). Both still escape raw through the sink.
+- **Ruling:** Correction 15 stands. The private keyword-only `_raw_output_observer` is called immediately before `validate_output` at `:710`. `run` passes `None`. Correction 33 adds the `NotImplementedError` mapping.
+
+### Correction 35 — re-probe of Correction 17 (deterministic checks from the runtime's one validation) — CONFIRMED — BLOCKING (Task 4)
+- **Evidence:** `AgentSchemaRegistry.validate_output` (`agent_schema_registry.py:511`, the #264 registry, byte-unchanged) is the only output validation. It is called once, from `_run_resolved`'s callback (`agent_runtime.py:710`), on the composed model from `compose` (`:646`). There is no `model_validate` of provider output anywhere else in the runtime.
+- **Ruling:** Correction 17 stands. `output_contract` passes iff the run is `completed`, and fails with `AgentOutputValidationError.issues` when it is `incomplete`. There is no second `model_validate`.
+
+### Correction 36 — re-probe of Correction 23 (routes on the one admin router) against #266's routes — CORRECTED — BLOCKING (Tasks 2 and 5)
+- **Evidence** (`src/api/routes/agent_definitions.py`):
+  - The router is `:71-75` (prefix `/api/admin/agent-definitions`, `Depends(require_admin)`). `require_draft_write_principal` is `:78-86`.
+  - #266 added three things:
+    - `GET /model-endpoints` `:503-533`;
+    - `POST /draft/{agent_key}/model-endpoint-probe` `:740-790`, which is async, parses the body after authorization with `_parse_lock_request` (`:392-405`), and runs the service via `await run_in_threadpool(...)` `:770`;
+    - the PUT `:536-617`, which now also runs `save_editable_model_draft` through `run_in_threadpool` (`:589`) because it makes a remote call.
+  - Loop-observer tests pin both (`test_agent_definition_workbench_routes.py:4406`, `:4431`).
+  - The probe DTOs are strict siblings (`src/api/schemas/agent_definitions.py:391-394` `DraftLockRequest`, `:481-510`).
+- **Ruling:**
+  - Correction 23's path list stands. None of #267's paths collides with `/workbench`, `/model-endpoints` or `/draft/{agent_key}/model-endpoint-probe`.
+  - **Every #267 route that reaches a model** (`POST /draft/{agent_key}/test-runs` and `POST /published/{agent_key}/test-runs`) is `async def`. It parses after authorization, as `_parse_lock_request` does: malformed JSON first, then unknown agent, then a strict DTO. It then runs the executor with `await run_in_threadpool(...)`.
+  - Each gets a loop-observer test copied from `:4406`. **Sabotage:** call the executor directly. Predicted RED: that test.
+  - The case CRUD routes make no model call and may stay `def`.
+  - Run request DTOs are new `_StrictDraftRequest` siblings. The candidate body has `lock_version` (Correction 32).
+- **Cost if wrong:** a live model call blocks the event loop for every admin and user request. This is the Important defect #266's whole-branch review found in its own PUT.
+
+### Correction 37 — builder-and-every-role payload parity, re-ruled after `6cbab388a` and `50c8cbf35` — CORRECTED (Correction 10) — BLOCKING (Task 4)
+- **Evidence:**
+  - Only the builder has a named allowlist: `_BUILDER_MODEL_PAYLOAD_KEYS` (`src/services/graph/nodes.py:2063-2075`), filtered in payload order at `:2121-2125`. The builder retry adds `corrective_instruction` **after** filtering (`:2140-2143`).
+  - Every other role's model payload is a literal dict built for the model (architect `:1466`ff, with the nested `previous_deck_review` reduced to `{digest, findings}` at `:1430-1436`; data analyst `:1870`ff; deck reviewer `:3015`ff).
+  - The exact per-call key sets are pinned only in the test: `tests/unit/test_graph_nodes.py:3406-3419` and `:3516-3573` (`_EVERY_MODEL_CALL`). `TestNoRolesModelPromptCarriesSessionIdentifiers` (`:3724-3784`) asserts the exact key set for all ten calls and that no session ID, turn ID or email appears anywhere in the prompt.
+  - The seed (`graph_configuration_seed.py`, unchanged) projected onto those sets drops exactly these keys:
+    - architect: `session_id`;
+    - data_analyst: `session_id`;
+    - builder: `session_id`, `turn_id`, `initiated_by`, `design_contract`;
+    - deck_reviewer: `session_id`.
+
+    Every remaining key of all seven seeds is inside its role's production union. build_reviewer's seed is the deck-level re-review shape (`+ deck_brief`), and fix_reviewer's is `_FIXER_MODEL_KEYS + change_summary`.
+- **Ruling (replaces Correction 10 items 3 and 5; items 1, 2 and 4 stand, and the gate in item 2 is discharged):**
+  1. **The seed stays unedited.** It is test-pinned (`test_graph_configuration_bootstrap.py:45`), first-boot-verified, and persisted in every database, so editing it would leave existing environments diverged. The executor filters.
+  2. **One projection for every role:**
+     - `src/services/agent_model_payload.py` (import-light, with no graph import) holds `MODEL_PAYLOAD_KEYS: Mapping[AgentKey, frozenset[str]]` for all seven roles. Each is the **union of that role's production calls**:
+       - builder: the 9 keys plus `corrective_instruction`;
+       - build_reviewer: 7 keys plus `deck_brief`;
+       - fixer: 7 keys plus `corrective_instruction`;
+       - fix_reviewer: 7 keys plus `change_summary`;
+       - architect: 9 keys;
+       - data_analyst: 2 keys;
+       - deck_reviewer: 4 keys.
+     - It also holds `model_payload_for(agent_key, payload) -> dict`. That function projects top-level keys in payload order, and applies the one nested rule production has: a dict `previous_deck_review` is reduced to `{digest, findings}`.
+     - An unknown role raises `UnknownAgentKeyError`.
+  3. **`nodes.py` is not edited by #267.** This reverses Correction 10 item 3. Routing `builder_node` through a union that includes `corrective_instruction` would widen production's pre-retry filter, and the other nodes are already literal allowlists.
+  4. **Parity is proved by one source of truth for the key sets:**
+     - Task 4 moves `_BUILDER_MODEL_KEYS`, `_BUILDER_RETRY_MODEL_KEYS`, `_SLIDE_REVIEW_MODEL_KEYS`, `_FIXER_MODEL_KEYS` and `_EVERY_MODEL_CALL` verbatim into `tests/fixtures/model_payload_keys.py`, and `test_graph_nodes.py` imports them. This is a pure move: the node-ID list of `test_graph_nodes.py` must be identical before and after, and must be recorded.
+     - A new unit test asserts two things:
+       - for every role, the union of that role's `EVERY_MODEL_CALL` sets `== MODEL_PAYLOAD_KEYS[role]`;
+       - `MODEL_PAYLOAD_KEYS["builder"] - {"corrective_instruction"} == nodes._BUILDER_MODEL_PAYLOAD_KEYS`.
+
+       Production equals the fixture (pinned by `:3724`), and the fixture equals #267's table (pinned here).
+  5. **Executor tests (all seven roles):**
+     - Run each role's seeded case through `execute_candidate_run` with the fake adapter. Assert that the prompt's payload object has exactly `set(seed) & MODEL_PAYLOAD_KEYS[role]` as its keys.
+     - Assert that none of `synthetic-architect`, `synthetic-data-analyst`, `synthetic-builder`, `synthetic-turn`, `system:bootstrap` or `synthetic-deck-reviewer` appears in any prompt.
+     - Keep the builder byte-identical prompt parity against `builder_node` from Correction 10.
+     - **Controller sabotage:** add `"session_id"` to `MODEL_PAYLOAD_KEYS["architect"]`. Predicted RED: the union-equality test and the architect no-identifier test.
+     - **Reviewer sabotage:** have the executor pass the stored payload unprojected. Predicted RED: the per-role key-set tests for architect, data_analyst, builder and deck_reviewer.
+  6. **Evidence:** `model_payload` (Correction 19) stores the projection. The Input view shows the stored synthetic payload and the projection "sent to the model", so an admin sees which keys were dropped.
+- **Cost if wrong:** approved evidence certifies prompts production never sends, or a session, turn or email value reaches a test prompt, against the user's P6 decision for every role.
+
+### Correction 38 — frontend pre-brief refresh for #266's UI — CORRECTED (Correction 25) — BLOCKING (Task 6)
+- **Evidence:**
+  - `forbiddenActionNames.ts` is byte-unchanged. `FORBIDDEN_ACTION_STEMS` (`:18-19`) still includes `\brun\b`, and `ALLOWED_ACTION_NAMES` (`:28-32`) has 3 entries. It strips exempt names before testing (`:35-41`).
+  - Both lanes assert `'Run isolated test'` **is** forbidden: `AgentDefinitionWorkbench.test.tsx:308` (list) and `:474` (the `<img alt>` name-source case), and `agent-definition-workbench.spec.ts:1470`. So Correction 25's "remove only the `\brun\b` stem" would turn three existing guard tests RED, and weaken the guard.
+  - `toHaveLength(3)` is at `test.tsx:320` and `spec.ts:1480`, not at `:1462`. "Isolated testing is not available in this release." is asserted at `test.tsx:455` and `spec.ts:1500`. The pane is `<aside aria-label="Isolated testing">` at `AgentDefinitionWorkbench.tsx:210-215`.
+  - #266's accessible names in the definition editor: button `Test structured output` (`DefinitionEditor.tsx:539-546`), button `Retry structured output test` (`:163-165`), region `Structured output test result` (`:144-145`), status text `Testing the saved candidate…` (`:548`), button `Refresh models`, radiogroup `Discovered models` (`:492`). They are pinned as constants at `test.tsx:2575-2580`.
+- **Ruling:**
+  - **Keep `\brun\b`.** Exempt exactly `'Run test case'` and `'Run published baseline'` in `ALLOWED_ACTION_NAMES`, change `toHaveLength(3)` to `5` at `test.tsx:320` and `spec.ts:1480`, and add the shield cases `'Run test case and publish'` → forbidden and `'Run published baseline, then approve'` → forbidden in both lanes.
+  - No other #267 control may contain a whole-word "run" (for example, a "View run 12" link). Headings and status text are not swept.
+  - **No accessible-name collision with #266.** Playwright's `getByRole(..., { name: '<string>' })` is a case-insensitive **substring** match. So no #267 accessible name may contain, or be contained in, any #266 name above. In particular, no #267 name may contain "structured output", "test result" or "Retry". Use:
+    - buttons `Run test case` and `Run published baseline`;
+    - regions `Test case evidence` and `Published baseline evidence`;
+    - the case list `Agent Test Cases`.
+  - Mount in the existing `<aside>` at `:210`.
+  - **Candidate runs send `lock_version`** (Correction 32). The run is disabled while a Save is pending, as the probe is (`test.tsx:2832`), and it runs the **saved** candidate.
+  - **`mocks.ts` text-read rules** (the Python joins read it as text):
+    - Append #267 fixtures at the end of the file.
+    - No new `export const` name may begin with an existing exported name, because `_client_rejection_triple` (`test_agent_definition_workbench_postgres.py:1132-1136`) uses `index("export const NAME")` with no colon. This is also #266 Task 4's rule for `ENDPOINT_NAME_POLICY_CASES`.
+    - Blocks read by `_client_json_fixture` (`test_agent_definition_workbench_routes.py:3330-3341`) stay `export const NAME: T = {` … `\n};` in strict JSON.
+    - `STRUCTURED_OUTPUT_PROBE_FAILURES` keeps its five-line entries (`test_probe_failure_contract_client_join.py:21-24`, `:48-55`).
+  - **`agentDefinitions.ts` rules:**
+    - `const PROBE_FAILURE_CONTRACT = {` and `export type StructuredOutputProbeFailureCode =` must each appear exactly once.
+    - The exact line `  if (status !== 403 && status !== 422 && status !== 503) return null;` must appear exactly once (`test_probe_failure_contract_client_join.py:65`, `:126`). #267's own response parser must not repeat that line.
+    - If #267 adds a client failure contract, it gets its own Python join in a new file, in the same style.
+  - **Routing:** route the test-run POSTs by URL in both Vitest harnesses and in Playwright (#266 c17). Add an unrouted-POST tripwire, which is #266's deferred m2.
+- **Cost if wrong:** three guard tests go RED, or the guard is weakened. A Playwright locator from #266 or #267 resolves two controls (a strict-mode violation). Or a Python text-read join goes RED on a frontend-only edit.
+
+### Correction 39 — cause baseline re-derived at `e91fcd856` — CONFIRMED (no new cause) — BLOCKING (the reference for every task)
+- **Environment:** `DATABASE_URL=sqlite:////tmp/t267-base.sqlite` (the full suite otherwise commits to the dev database, per #266's fix-wave finding) with `PYTHONPATH=<wt>:<wt>/packages/databricks-tellr` and the pyenv shim. `test ! -e .venv` held before and after. Nothing was installed, no frontend was run, and `ai_slide_generator` was untouched.
+- **Full unit suite** (`tests/unit -q -p no:randomly -rf`): **6 failed, 6175 passed, 110 skipped, 136 warnings** (417 s). The same six node IDs and causes as §7:
+  - `test_deploy_autoscaling.py::TestGetOrCreateLakebase::test_returns_autoscaling_when_available`: `:124 'provisioned' == 'autoscaling'`.
+  - `…::test_falls_back_when_autoscaling_creation_fails`: `:152 _get_or_create_lakebase_provisioned called 0 times`.
+  - `test_style_exclusivity_chokepoint.py::TestModelDumpIsNotTheChokepoint::{test_create_session_normalizes_a_raw_both_set_dict, test_create_session_still_stores_a_single_authority_config_unchanged, test_create_session_still_accepts_no_agent_config}`: `AttributeError: '_FakeSession' object has no attribute 'execute'` (`conversation_pins.py:79`, via `session_manager.py:780`).
+  - `test_style_exclusivity_persistence_boundary.py::TestEveryWriterIsNormalized::test_session_manager_create_session`: `ConversationGraphReleaseIntegrityError: no active Graph Release` (`conversation_pins.py:83`).
+
+  The passed count moved from 5881 to 6175: that is #266's tests plus the payload fixes, and it equals #266's fix-wave count. The warning count moved from 135 to 136. Every warning location in the summary is in a module that neither #266 nor #267 touches. This is noted, not a cause.
+- **Focused unit matrix** (the §7 ten files, one invocation): **865 passed, 0 failed, 0 skipped** (was 724).
+- **#266 files #267 now shares** (one invocation): **167 passed, 0 skipped**. The files are `test_model_endpoint_probe`, `test_graph_configuration_workbench`, `test_probe_failure_contract_client_join`, `test_endpoint_name_policy_client_join` and `test_prompt_assembler`. They are added to the focused matrix from Task 3 on, because Tasks 3, 4 and 6 touch their subjects.
+- **PostgreSQL** (`TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres`, one invocation per file, **zero skips each**):
+  - bootstrap 2;
+  - constraints 7;
+  - workbench **17** (was 15; +2 are #266's);
+  - overlay 10;
+  - runtime failures 7.
+
+### Correction 40 — §6 shared-file table, refreshed for the post-#266 head — CORRECTED — Advisory
+Rows that change (all others stand):
+
+| File | #267 task | Rule now |
+|---|---|---|
+| `src/services/agent_runtime.py` | 3 (`run_candidate`, observer, sentinels), 3/4 (`DatabricksModelAdapter(transport_options=)`, `get_agent_test_runtime`), 8 | one binding at `:431`; `run` byte-identical; production adapter kwargs unchanged (`test_agent_runtime.py:645-677`) — C31, C33 |
+| `src/services/graph_configuration_draft.py` | 4 | additive: extract the probe read body, add `read_draft_test_candidate`; #266 probe tests unedited — C32. #269 Task 1 edits `_write_locked_content` (now `:911-948`): sequence by file |
+| `src/services/graph/nodes.py` | **none** | not edited by #267 — C37 |
+| `src/services/agent_model_payload.py` | 4 (new) | all-role projection — C37 |
+| `tests/fixtures/model_payload_keys.py` (new), `tests/unit/test_graph_nodes.py` | 4 | pure move of the key sets; node-ID list identical — C37 |
+| `src/services/model_endpoint_probe.py` | read-only | never imported by #267's executor — C33 |
+| `src/api/routes/agent_definitions.py` | 2, 5 | async + `run_in_threadpool` for model-calling routes; loop-observer tests — C36 |
+| `frontend/.../AgentDefinitionWorkbench.tsx` | 6 | aside at `:210`; names per C38 |
+| `frontend/src/api/agentDefinitions.ts`, `frontend/tests/fixtures/mocks.ts` | 6 | text-read rules per C38 |
+
+### §12 summary: GO/NO-GO for Task 1
+
+**GO.** All four conditions from §11 are discharged:
+1. #266's reviewed merge `e91fcd856` is on `feat/langgraph-core`, and this branch is rebased onto it (C29).
+2. `IMPLEMENTATION_BASE=e91fcd856` is recorded (C29).
+3. The cause baseline was re-derived, with the same six nodes and causes and no new cause (C39).
+4. Corrections 3, 12, 15 and 23 were re-probed (C30, C31, C34, C36).
+
+Task 1 touches only `tests/unit/test_graph_configuration_bootstrap.py`, which is byte-unchanged since `c040dbde0`, and its guard (`bootstrap.py:187-198`) is unchanged. None of Corrections 32–38 binds Task 1.
+
+The Task 4 external gate (Correction 10) is also discharged by `6cbab388a` and `50c8cbf35`. Its brief must now carry Corrections 32, 33, 36 and 37.
+
+Pre-brief additions to §8:
+- **Task 3:** 31, 33 (adapter `transport_options`, `get_agent_test_runtime`, the `NotImplementedError` row), 34.
+- **Task 4:** 32, 33, 35, 37.
+- **Tasks 2 and 5:** 36.
+- **Task 6:** 38.

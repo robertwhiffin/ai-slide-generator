@@ -56,3 +56,35 @@ Ruling: P8 — no rate or cost limiting in #267; recorded as an epic follow-up. 
 Ruling: P9 — NULL token usage is acceptable evidence, displayed as "not reported". Cost if wrong: cost reporting has gaps for endpoints that omit usage.
 Controller correction: the earlier ledger claim that the builder seed payload is "bootstrap-hashed" was false as worded (correction 10 here): it is test-pinned and first-boot-checked, not hashed.
 Status: `fix/builder-owner-session-id` merged locally at `6cbab388a`, so correction 10's Task 4 precondition is met; this branch must rebase onto the post-#266 integration head before Task 1.
+
+## 2026-09-26 — rebase onto #266 and conditional-GO discharge (controller)
+
+**Rebase:**
+- The triple check was empty. Backup tag: `backup/267-pre-rebase-e06f78241`.
+- Command: `git rebase --onto e91fcd856 c040dbde0`, which took `e06f78241` to `c7cb587c7`.
+- `git range-diff`: both commits `=` (`e6bb42ff0`→`ac1168242`, `e06f78241`→`c7cb587c7`).
+- The branch is 0 behind, and the name-only diff is the same two ledger files.
+- **IMPLEMENTATION_BASE=e91fcd856.**
+
+**Corrections 29–40** (PLAN-CORRECTIONS §12):
+- **CONFIRMED:** 29, 30 (C3), 31 (C12; C14 is now integrated at `run` `:604-608`), 34 (C15), 35 (C17 = #264's `validate_output` `:511`, called once at runtime `:710`), 39 (baseline).
+- **CORRECTED:**
+  - 32: reuse #266's probe read path by extraction, not a parallel copy. Candidate runs carry `lock_version`. Transaction 1 becomes two short reads.
+  - 36: model-calling routes are async and use `run_in_threadpool`, with loop-observer tests.
+  - 37: an all-role projection in `agent_model_payload.py`. `nodes.py` is untouched. The key sets move to `tests/fixtures`. The seed is unedited.
+  - 38: keep `\brun\b` and exempt two names. Naming rules avoid collisions with #266's names. mocks.ts and agentDefinitions.ts text-read rules.
+  - 40: the §6 table.
+- **NEW DEFECT:** 33. A test run inherited the production adapter's unbounded provider window inside an admin request. The fix is a bounded `get_agent_test_runtime()` through an additive `DatabricksModelAdapter(transport_options=)`. #267 does not borrow the probe's 403/422/503 classification: a provider failure is a persisted `model_error` run.
+- **Blocking:** 29–39. 40 is advisory.
+
+**Baseline at `e91fcd856`, by cause:**
+- **Full unit** (with `DATABASE_URL=sqlite:////tmp/t267-base.sqlite`): 6 failed, 6175 passed, 110 skipped, 136 warnings. The same six nodes and causes as at `c040dbde0`: `test_deploy_autoscaling` ×2, chokepoint `_FakeSession.execute` ×3, persistence-boundary "no active Graph Release" ×1. The warning count went +1, and none of the warnings is in a #266 or #267 file.
+- **Focused:** 865 passed and 0 skipped for the ten files. The five #266-shared files: 167 passed.
+- **PostgreSQL:** bootstrap 2, constraints 7, workbench 17 (+2 from #266), overlay 10, runtime failures 7, with zero skips.
+
+**Rulings:**
+- 120 s and 0 retries is the test-run transport bound (C33). Cost if wrong: a healthy but slow builder call is persisted as `model_error`, and can be run again.
+- Candidate runs are lock-pinned like the probe (C32). Cost if wrong: an admin approves evidence for a candidate that is not on their screen.
+- `nodes.py` is not routed through #267's union (C37). Cost if wrong: none to production. Parity is held by the fixture-equality test.
+
+**Gate: Task 1 GO.** The four §11 conditions are discharged, and Task 1's files are byte-unchanged since `c040dbde0`. The Task 4 external gate is also discharged. Task 4's brief must carry 32, 33, 36 and 37.
