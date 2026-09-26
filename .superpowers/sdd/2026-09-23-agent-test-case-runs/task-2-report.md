@@ -184,3 +184,21 @@ Three pins cover it:
 - **PostgreSQL workbench:** 21 passed, zero skips.
 - **Ruff:** clean on the changed files.
 - **Environment:** `test ! -e .venv` held before and after.
+
+## Fix round 2 (scoped re-review; base pinned `1675d6b0a`)
+**Commit:** `f350a2e42` test: pin that an identical save to a superseded case is still stale (#267). It changes tests only.
+
+- **The gap:** moving the no-op check above the inactive-row 409 stayed GREEN. Every stale test submitted content that differed from the stored row.
+- **The new pins:** each submits content byte-identical to the inactive row's stored name, payload, context and `is_required`. Each asserts 409 `stale_test_case` with no row change.
+  - `test_agent_test_workbench.py::test_an_identical_save_to_an_inactive_version_is_still_stale[superseded|retired]`
+  - `test_agent_definition_workbench_routes.py::test_put_identical_content_to_a_superseded_version_is_409_stale`. This one also checks the exact 409 body through the route.
+- **Sabotage `MUT267-2F2-NOOP-FIRST`:** the no-op block was moved above `if not old.is_active: raise TestCaseStale`.
+  - Each of the three anchors (the stale block, the no-op start and the no-op end) had count 1, and the marker `grep -c` was 1.
+  - RED: 3 failed, 338 passed. The failures were exactly the three new tests.
+  - Restored with `git checkout f350a2e42 -- src/services/agent_test_workbench.py`, and `git diff --exit-code` was clean.
+  - GREEN afterwards: 341 passed.
+- **Gates:**
+  - The two unit files: 341 passed.
+  - Full `tests/unit` (`DATABASE_URL=sqlite:////tmp/t267-2.sqlite`): 6 failed, 6308 passed, 110 skipped, 136 warnings. The failures are exactly the baseline six nodes and causes. Passed rose by 3, the new tests.
+  - Ruff was clean, and `test ! -e .venv` held before and after.
+  - No temp worktree was used. Every run was from inside `.worktrees/issue-267-plan`, so `src` resolved to this worktree.
