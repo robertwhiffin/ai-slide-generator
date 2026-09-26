@@ -3311,6 +3311,43 @@ def test_postgres_cleanup_deletes_an_approval_on_an_optional_case(postgres_engin
     assert _pg_run_ids_of_case(factory, optional.id) == ids[5:]
 
 
+def test_postgres_cleanup_windows_each_case_version_row_separately(postgres_engine) -> None:
+    """C19d: "per case" is per case VERSION ROW.  15 runs on v1 and 15 on its
+    superseding v2 are two windows of 15, so nothing goes; a window over the
+    role, or over the case name, would delete ten."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    seed = _pg_seed_case_id(factory)
+    v1_ids = _pg_history(factory, 15, source_run_id=source.run_id)
+    with factory() as session:
+        successor = AgentTestWorkbench().update_test_case(
+            session,
+            test_case_id=seed,
+            synthetic_payload={"message": "A superseding input."},
+            assembly_context={"design_system_active": False},
+            is_required=True,
+            actor="author@example.com",
+        )
+    with factory() as session:
+        v2_source = _pg_executor(
+            factory, DeterministicFakeModelAdapter()
+        ).execute_candidate_run(
+            session,
+            agent_key="architect",
+            test_case_id=successor.id,
+            expected_lock_version=_pg_run_identity(factory)["lock_version"],
+            actor="runner@example.com",
+        )
+    v2_ids = _pg_history(factory, 15, source_run_id=v2_source.run_id)
+
+    assert _pg_cleanup(factory) == 0
+
+    assert _pg_run_ids_of_case(factory, seed) == v1_ids
+    assert _pg_run_ids_of_case(factory, successor.id) == v2_ids
+    assert _pg_cleanup(factory, per_case_limit=10) == 10
+    assert _pg_run_ids_of_case(factory, seed) == v1_ids[5:]
+    assert _pg_run_ids_of_case(factory, successor.id) == v2_ids[5:]
+
+
 def test_postgres_cleanup_breaks_tied_run_at_by_id(postgres_engine) -> None:
     """C19b / S4c: 21 runs inserted in one transaction tie on ``run_at``; the
     lowest id is the oldest and is the one deleted."""
