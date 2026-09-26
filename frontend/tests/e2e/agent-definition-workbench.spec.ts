@@ -266,7 +266,7 @@ test('explicit Save is the only write and sends the exact five-field candidate w
   });
   await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
   await expect(page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' }))
-    .toContainText('Needs test');
+    .toHaveAccessibleDescription('Needs test');
   await expect(page.getByRole('heading', { name: 'Graph Version 1' })).toBeVisible();
 });
 
@@ -290,7 +290,7 @@ test('cross-agent conflict reconciles Builder and Keep local retries only on exp
   await expect.poll(workbenchRequestCount).toBe(1);
   await navigation.getByRole('button', { name: 'Builder' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder server B1');
-  await expect(navigation.getByRole('button', { name: 'Builder' })).toContainText('Needs test');
+  await expect(navigation.getByRole('button', { name: 'Builder' })).toHaveAccessibleDescription('Needs test');
   await navigation.getByRole('button', { name: 'Architect' }).click();
   await conflict.getByRole('button', { name: 'Keep local' }).click();
   expect(saves).toHaveLength(1);
@@ -376,7 +376,7 @@ test('a pending Architect save globally blocks Builder while preserving A3', asy
   expect(saves[1].body.lock_version).toBe(1);
   await navigation.getByRole('button', { name: 'Architect' }).click();
   await expect(prompt).toHaveValue('Architect A3');
-  await expect(navigation.getByRole('button', { name: 'Architect' })).toContainText('Unsaved');
+  await expect(navigation.getByRole('button', { name: 'Architect' })).toHaveAccessibleDescription('Unsaved');
 });
 
 const invalidSaveCases: Array<{
@@ -813,7 +813,7 @@ test('custom blocks are added, edited, reordered and deleted locally, and only a
   });
   await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
   await expect(page.getByRole('navigation', { name: 'Graph nodes' })
-    .getByRole('button', { name: 'Architect' })).toContainText('Needs test');
+    .getByRole('button', { name: 'Architect' })).toHaveAccessibleDescription('Needs test');
 });
 
 test('an ordered three-issue 422 renders inline beside its field and keeps every other issue in exact server order', async ({ page }) => {
@@ -1465,7 +1465,7 @@ test('a repeated same-content save is accepted with changed false and still adva
   await expect(page.getByText('Lock version').locator('..')).toContainText('2');
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: 'Graph nodes' })
-    .getByRole('button', { name: 'Architect' })).toContainText('Needs test');
+    .getByRole('button', { name: 'Architect' })).toHaveAccessibleDescription('Needs test');
 });
 
 test('a legacy source response whose role or lock disagrees is contained without a write', async ({ page }) => {
@@ -2157,8 +2157,21 @@ function probeResultRegion(page: Page) {
   return page.getByRole('region', { name: PROBE_RESULT_REGION });
 }
 
+/**
+ * Architect's nav button. Its status badge is its accessible description, beside the
+ * button rather than inside it (#268 fix round 1, I1), so status assertions read
+ * `toHaveAccessibleDescription`, and the button's own text is only the display name.
+ */
 function architectNavStatus(page: Page) {
   return page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' });
+}
+
+/** The text of the badge a nav button names with `aria-describedby`. */
+async function navStatusText(button: ReturnType<Page['getByRole']>) {
+  return button.evaluate((element) => {
+    const id = element.getAttribute('aria-describedby');
+    return id === null ? null : document.getElementById(id)?.textContent ?? null;
+  });
 }
 
 test('model endpoint discovery: first Model-tab read, local search, a refresh exposing a newer entry, explicit exact save, then an explicit probe of the saved candidate', async ({ page }) => {
@@ -2202,7 +2215,7 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
   await expect(newer).not.toBeChecked();
   await expect(group.getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME, exact: true })).toBeChecked();
   await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
-  await expect(architectNavStatus(page)).not.toContainText('Unsaved');
+  await expect(architectNavStatus(page)).not.toHaveAccessibleDescription('Unsaved');
   expect(saves).toHaveLength(0);
   expect(probes.posts).toHaveLength(0);
 
@@ -2219,7 +2232,7 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
       model: { endpoint_name: syntheticNewerModelEndpoint.name, ...SEED_MODEL },
     },
   });
-  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
 
   const probe = panel.getByRole('button', { name: PROBE_BUTTON });
   await expect(probe).toBeEnabled();
@@ -2232,7 +2245,7 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
   expect(saves).toHaveLength(1);
   expect(reads).toHaveLength(2);
   expectBareCatalogReads(reads);
-  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
   await expect.poll(workbenchRequestCount).toBe(1);
 });
 
@@ -2284,7 +2297,7 @@ test('model endpoint manual custom name: an exact name absent from discovery sav
   }
 
   // Exact retention after success: the name, the lock and the status.
-  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
   await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(manual);
   await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
 
@@ -2339,7 +2352,7 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.3');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.5');
-  await expect(architectNavStatus(page)).toContainText('Unsaved');
+  await expect(architectNavStatus(page)).toHaveAccessibleDescription('Unsaved');
   await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect unsaved prompt');
@@ -2357,7 +2370,7 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
       model: { endpoint_name: corrected, temperature: 0.3, max_tokens: 60000, top_p: 0.5 },
     },
   });
-  await expect(architectNavStatus(page)).toContainText('Needs test');
+  await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
   await expect(endpoint).toHaveValue(corrected);
   await expect(endpoint).toHaveAttribute('data-remount-marker', 'kept');
   await expect(panel.getByRole('alert')).toHaveCount(0);
@@ -2381,14 +2394,14 @@ for (const code of ['unsupported_structured_output', 'endpoint_probe_forbidden',
     await page.getByRole('tab', { name: 'Model' }).click();
     const panel = modelTabPanel(page);
     await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
-    const statusBefore = await architectNavStatus(page).textContent();
+    const statusBefore = await navStatusText(architectNavStatus(page));
 
     await panel.getByRole('button', { name: PROBE_BUTTON }).click();
     const region = probeResultRegion(page);
     await expect(region.getByRole('alert')).toHaveText(message);
     await expect(region).toContainText(probeIdentityText(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
     await expect(region).not.toContainText(PROBE_SUCCEEDED_TEXT);
-    expect(await architectNavStatus(page).textContent()).toBe(statusBefore);
+    expect(await navStatusText(architectNavStatus(page))).toBe(statusBefore);
     await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
     expect(probes.raw).toEqual(['{"lock_version":0}']);
 
@@ -2947,7 +2960,7 @@ test('Verdicts: Approve run posts exactly {verdict, notes}, the badge turns Appr
   const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
   await openWorkbench(page);
   const architect = page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' });
-  await expect(architect).toContainText('Awaiting review');
+  await expect(architect).toHaveAccessibleDescription('Awaiting review');
   // The dev build runs under StrictMode, which mounts effects twice, so load may read
   // readiness twice; the reducer drops the older answer by request ID.
   await expect.poll(() => readinessReads.length).toBeGreaterThanOrEqual(1);
@@ -2964,8 +2977,14 @@ test('Verdicts: Approve run posts exactly {verdict, notes}, the badge turns Appr
   await expect(verdict).toContainText('Notes: Ship it.');
   await expect(verdict.getByRole('button', { name: 'Approve run' })).toHaveCount(0);
   await expect(verdict.getByRole('button', { name: 'Reject run' })).toBeEnabled();
-  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Published baseline (approved)');
-  await expect(architect).toContainText('Approved');
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Published baseline (not approved)');
+  await expect(architect).toHaveAccessibleDescription('Approved');
+  // An Approved role's nav button carries only its name as text: the textContent lane
+  // of the guard sees no `approve` stem (#268 fix round 1, I1).
+  await expect(architect).toHaveText('Architect');
+  const navText = await page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button')
+    .evaluateAll((controls) => controls.map((control) => control.textContent ?? ''));
+  for (const text of navText) expect(forbidsActionName(text)).toBe(false);
   // Exactly one readiness re-read after the settled verdict (C26).
   await expect.poll(() => readinessReads.length).toBe(readsBeforeVerdict + 1);
   expect(new Set(readinessReads)).toEqual(new Set(['GET']));
@@ -2976,11 +2995,9 @@ test('Verdicts: Approve run posts exactly {verdict, notes}, the badge turns Appr
   // The response is the evidence: no run GET follows, and nothing was saved.
   expect(requests.filter((request) => request.method === 'GET' && /\/test-runs\/\d+$/.test(request.path))).toHaveLength(0);
   expect(saves).toHaveLength(0);
-  // The verdict controls stay inside the guard. The sweep walks the testing panel: an
-  // Approved role's navigation button carries the status label in its text content
-  // ("ArchitectApproved"), which this lane's text-content source flags on the `approve`
-  // stem although the control's accessible name is "Architect" (reported, not loosened).
-  const names = await testingAside(page).locator('button, a')
+  // The verdict controls, and every other control of the panel in this Approved state,
+  // stay inside the guard on every name source, text content included.
+  const names = await page.getByRole('tabpanel', { name: 'Agent Definitions' }).locator('button, a')
     .evaluateAll((controls) => controls.flatMap((control) => [
       control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
     ].filter((source) => source.trim() !== '')));
@@ -3000,6 +3017,6 @@ test('Verdicts: a readiness answer read at another lock never paints Approved', 
   await openWorkbench(page);
   await expect.poll(() => reads).toBeGreaterThanOrEqual(1);
   const architect = page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' });
-  await expect(architect).toContainText('Needs test');
-  await expect(architect).not.toContainText('Approved');
+  await expect(architect).toHaveAccessibleDescription('Needs test');
+  await expect(architect).not.toHaveAccessibleDescription('Approved');
 });

@@ -8,6 +8,7 @@ import {
 } from '../../../../tests/fixtures/mocks';
 import {
   AgentDefinitionApiError,
+  InvalidReadinessResponseError,
   InvalidTestRunResponseError,
   TestRunVerdictApiError,
   getDraftReadiness,
@@ -279,10 +280,13 @@ describe('the readiness client', () => {
     expect(parseDraftReadinessResponse(build())).toBeNull();
   });
 
-  it('contains a malformed 200 as an invalid response', async () => {
+  it('contains a malformed 200 as a readiness-specific invalid response, not a test-run one', async () => {
     stubFetch(200, { ...syntheticDraftReadinessBody(), extra: 1 });
 
-    expect(await rejection(getDraftReadiness())).toBeInstanceOf(InvalidTestRunResponseError);
+    const error = await rejection(getDraftReadiness());
+    expect(error).toBeInstanceOf(InvalidReadinessResponseError);
+    expect(error).not.toBeInstanceOf(InvalidTestRunResponseError);
+    expect((error as Error).message).toBe('Draft readiness response did not match the expected contract.');
   });
 
   it('leaves a 500 a plain API error', async () => {

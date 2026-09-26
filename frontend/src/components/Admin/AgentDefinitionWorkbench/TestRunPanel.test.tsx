@@ -59,7 +59,7 @@ function renderPanel(overrides: Partial<TestRunPanelProps> = {}) {
     onRetireTestCase: vi.fn(),
     onUpdateTestCase: vi.fn().mockResolvedValue(null),
     onLoadTestRuns: vi.fn(),
-    onRecordVerdict: vi.fn(),
+    onRecordVerdict: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
   return { props, ...render(<TestRunPanel {...props} />) };
@@ -548,7 +548,7 @@ describe('TestRunPanel verdict controls', () => {
 
   it('sends the verdict with the optional notes, and null when the notes are blank', async () => {
     const evidence = syntheticTestRunEvidence();
-    const onRecordVerdict = vi.fn().mockResolvedValue(undefined);
+    const onRecordVerdict = vi.fn().mockResolvedValue(true);
     renderPanel({ testing: readyTesting({ candidateEvidence: evidence }), onRecordVerdict });
 
     const region = candidateVerdict();
@@ -563,6 +563,19 @@ describe('TestRunPanel verdict controls', () => {
     fireEvent.change(notes, { target: { value: '   ' } });
     await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Reject run' })); });
     expect(onRecordVerdict).toHaveBeenLastCalledWith('architect', evidence, 'rejected', null);
+  });
+
+  it('keeps the typed notes when the verdict was refused, so the admin can retry without retyping', async () => {
+    const onRecordVerdict = vi.fn().mockResolvedValue(false);
+    renderPanel({ testing: readyTesting({ candidateEvidence: syntheticTestRunEvidence() }), onRecordVerdict });
+
+    const region = candidateVerdict();
+    const notes = within(region).getByRole('textbox', { name: 'Candidate run verdict notes' });
+    fireEvent.change(notes, { target: { value: 'Tone is right.' } });
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve run' })); });
+
+    expect(onRecordVerdict).toHaveBeenCalledTimes(1);
+    expect(notes).toHaveValue('Tone is right.');
   });
 
   it('an approved run shows its reviewer, time and notes as text only, and offers only Reject run', () => {
@@ -598,23 +611,39 @@ describe('TestRunPanel verdict controls', () => {
     expect(within(region).getByText(CHECKS_DID_NOT_PASS)).toBeVisible();
   });
 
-  it.each([
-    [null, 'not approved'],
-    ['approved', 'approved'],
-    ['rejected', 'rejected'],
-  ] as const)('labels the published baseline inside a %s candidate run "(%s)"', (verdict, label) => {
-    const evidence = verdict === null
-      ? syntheticTestRunEvidence({ baseline_structured_output: { title: 'Stored baseline' } })
-      : reviewed({ verdict, baseline_structured_output: { title: 'Stored baseline' } });
-    renderPanel({ testing: readyTesting({ candidateEvidence: evidence }) });
+  it.each([null, 'approved', 'rejected'] as const)(
+    'labels the baseline column inside a %s candidate run "(not approved)": the candidate\'s verdict is not the baseline\'s',
+    (verdict) => {
+      const evidence = verdict === null
+        ? syntheticTestRunEvidence({ baseline_structured_output: { title: 'Stored baseline' } })
+        : reviewed({ verdict, baseline_structured_output: { title: 'Stored baseline' } });
+      renderPanel({ testing: readyTesting({ candidateEvidence: evidence }) });
 
-    const region = within(openTab('Compare')).getByRole('region', { name: 'Test case evidence' });
-    expect(region).toHaveTextContent(`Published baseline (${label})`);
+      const region = within(openTab('Compare')).getByRole('region', { name: 'Test case evidence' });
+      expect(region).toHaveTextContent('Published baseline (not approved)');
+      expect(region).not.toHaveTextContent('Published baseline (approved)');
+      expect(region).not.toHaveTextContent('Published baseline (rejected)');
+    },
+  );
+
+  it('an approved candidate keeps its baseline column "(not approved)" while an approved baseline rerun reads "(approved)"', () => {
+    renderPanel({
+      testing: readyTesting({
+        candidateEvidence: reviewed({ baseline_structured_output: { title: 'Stored baseline' } }),
+        baselineEvidence: reviewed({ run_id: 777, run_kind: 'published_baseline' }),
+      }),
+    });
+
+    const compare = openTab('Compare');
+    expect(within(compare).getByRole('region', { name: 'Test case evidence' }))
+      .toHaveTextContent('Published baseline (not approved)');
+    expect(within(compare).getByRole('region', { name: 'Published baseline evidence' }))
+      .toHaveTextContent('Published baseline rerun (approved)');
   });
 
   it('offers the controls on the published baseline rerun too (P1), with a verdict-aware label', async () => {
     const baseline = syntheticTestRunEvidence({ run_id: 777, run_kind: 'published_baseline' });
-    const onRecordVerdict = vi.fn().mockResolvedValue(undefined);
+    const onRecordVerdict = vi.fn().mockResolvedValue(true);
     const { rerender, props } = renderPanel({ testing: readyTesting({ baselineEvidence: baseline }), onRecordVerdict });
 
     const compare = openTab('Compare');
