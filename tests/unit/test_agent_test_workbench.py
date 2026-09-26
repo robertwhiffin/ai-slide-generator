@@ -2702,6 +2702,9 @@ def test_the_verdict_writer_never_touches_a_runtime(factory, monkeypatch):
 
     monkeypatch.setattr(workbench_module, "get_agent_test_runtime", _refuse)
     isolated = AgentTestWorkbench(runtime=_ExplodingRuntime())  # type: ignore[arg-type]
+    # Resolving the runtime at all is a use: ``_runtime`` returns an override
+    # without touching it, so the exploding object alone cannot see the call.
+    monkeypatch.setattr(isolated, "_runtime", _refuse)
 
     _record(factory, workbench=isolated, run_id=run.run_id)
 

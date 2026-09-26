@@ -2692,6 +2692,10 @@ def test_postgres_verdict_waits_on_the_run_row_lock_and_decides_on_the_fresh_row
             ),
             {"reviewer": _PG_REVIEWER, "id": run.run_id},
         )
+        # The holder's own stamp, read before the waiter can write anything.
+        holder_stamp = holder.scalar(
+            text("SELECT verdict_at FROM agent_test_run WHERE id = :id"), {"id": run.run_id}
+        )
         with ThreadPoolExecutor(max_workers=1) as pool:
             recorded = pool.submit(_pg_record, factory, run.run_id)
             try:
@@ -2719,10 +2723,6 @@ def test_postgres_verdict_waits_on_the_run_row_lock_and_decides_on_the_fresh_row
                 holder.rollback()
     finally:
         holder.close()
-    with factory() as session:
-        holder_stamp = session.scalar(
-            select(AgentTestRun.verdict_at).where(AgentTestRun.id == run.run_id)
-        )
 
     verdict = _pg_verdict_of(factory, run.run_id)
     assert verdict == ("approved", _PG_REVIEWER, holder_stamp, "Looks right.")
