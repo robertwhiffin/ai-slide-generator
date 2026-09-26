@@ -619,3 +619,126 @@ def test_list_rejects_an_unknown_role_filter(factory):
     with factory() as session, pytest.raises(TestCaseRejected) as caught:
         AgentTestWorkbench().list_test_cases(session, agent_key="foreman")
     assert caught.value.issues == (UNKNOWN_AGENT,)
+
+
+# --- fix round 1: identical saves, atomic supersede, optional rows ------------
+
+
+def _case_count(factory: sessionmaker) -> int:
+    return len(_rows(factory))
+
+
+def test_an_identical_update_is_a_no_op_returning_the_current_version(factory):
+    """Catches an unchanged save orphaning the current version's approvals (I1)."""
+    created = _create(
+        factory,
+        synthetic_payload={"b": [1, 2.5, True, None], "a": {"y": "z"}},
+        assembly_context={"design_system_active": True},
+        is_required=False,
+    )
+    before = _rows(factory)
+
+    same = _update(
+        factory,
+        created.id,
+        name="architect_extra",
+        # Different key order, same content.
+        synthetic_payload={"a": {"y": "z"}, "b": [1, 2.5, True, None]},
+        assembly_context={"design_system_active": True},
+        is_required=False,
+        actor="someone-else@example.com",
+    )
+
+    assert same == created
+    assert _rows(factory) == before
+
+
+@pytest.mark.parametrize(
+    ("stored", "submitted"),
+    [(1, True), (1, 1.0), (True, 1), (0, False), (1.0, 1)],
+    ids=["int-to-bool", "int-to-float", "bool-to-int", "zero-to-false", "float-to-int"],
+)
+def test_a_type_only_payload_change_is_a_real_new_version(factory, stored, submitted):
+    """Catches Python == equating 1, 1.0 and True and dropping a real edit (I1)."""
+    created = _create(factory, synthetic_payload={"a": stored})
+    updated = _update(
+        factory,
+        created.id,
+        synthetic_payload={"a": submitted},
+        assembly_context=CONTEXT,
+        is_required=False,
+    )
+    assert (updated.version, updated.id != created.id) == (2, True)
+    assert type(updated.synthetic_payload["a"]) is type(submitted)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"is_required": True},
+        {"assembly_context": {"design_system_active": True}},
+        {"synthetic_payload": {"message": "Synthetic smoke input!"}},
+    ],
+    ids=["is_required", "assembly_context", "synthetic_payload"],
+)
+def test_any_single_field_change_is_a_real_new_version(factory, change):
+    created = _create(factory)
+    arguments = {
+        "synthetic_payload": PAYLOAD,
+        "assembly_context": CONTEXT,
+        "is_required": False,
+        **change,
+    }
+    assert _update(factory, created.id, **arguments).version == 2
+
+
+def test_an_update_commits_exactly_once(factory):
+    """Catches a supersede split across commits (I2)."""
+    seed_id = _seed_case_id(factory)
+    commits: list[str] = []
+    with factory() as session:
+        event.listen(session, "after_commit", lambda _s: commits.append("commit"))
+        AgentTestWorkbench().update_test_case(
+            session,
+            test_case_id=seed_id,
+            synthetic_payload={"message": "revised"},
+            assembly_context=CONTEXT,
+            is_required=True,
+            actor=ACTOR,
+        )
+    assert commits == ["commit"]
+
+
+def test_a_failed_successor_insert_leaves_the_old_version_active(factory):
+    """Catches a retirement committed without its successor (I2)."""
+    seed_id = _seed_case_id(factory)
+    before = _rows(factory)
+    engine = factory.kw["bind"]
+
+    def _fail_successor_insert(_conn, _cursor, statement, _params, _context, _many):
+        if " ".join(statement.upper().split()).startswith("INSERT INTO AGENT_TEST_CASE"):
+            raise RuntimeError("injected successor insert failure")
+
+    event.listen(engine, "before_cursor_execute", _fail_successor_insert)
+    try:
+        with pytest.raises(RuntimeError, match="injected successor insert failure"):
+            _update(factory, seed_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", _fail_successor_insert)
+
+    assert _rows(factory) == before
+    seed = next(row for row in _rows(factory) if row[0] == seed_id)
+    assert (seed[4], seed[5]) == (True, True)
+    _bootstrap_ok(factory)
+
+
+def test_an_active_optional_case_does_not_stop_the_unrequire_refusal(factory):
+    """Catches a last-required count that ignores is_required on the update path (I3)."""
+    seed_id = _seed_case_id(factory)
+    _create(factory, name="architect_optional", is_required=False)
+    before = _rows(factory)
+    with pytest.raises(TestCaseRejected) as caught:
+        _update(factory, seed_id, is_required=False)
+    assert caught.value.issues == (LAST_REQUIRED_REQUIRED,)
+    assert _rows(factory) == before
+    _bootstrap_ok(factory)

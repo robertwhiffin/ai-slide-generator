@@ -1970,6 +1970,17 @@ def test_two_sessions_retiring_a_roles_last_two_required_cases_serialize_and_one
             is_required=True,
             actor="setup@example.com",
         )
+        # An active OPTIONAL case: a guard that counts active rows while
+        # ignoring is_required would see three and let both retirements commit.
+        optional = workbench.create_test_case(
+            session,
+            agent_key="architect",
+            name="architect_optional",
+            synthetic_payload={"message": "optional"},
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="setup@example.com",
+        )
     targets = {"seed": seed_id, "second": second.id}
     order = [first, "second" if first == "seed" else "seed"]
 
@@ -2060,3 +2071,47 @@ def test_two_sessions_retiring_a_roles_last_two_required_cases_serialize_and_one
             )
         ).all()
     assert active_required == [targets[order[1]]]
+    assert _case_tuple(factory, optional.id)[4:6] == (True, False)
+
+
+def test_postgres_identical_save_is_a_no_op_but_a_type_change_is_a_new_version(
+    postgres_engine,
+) -> None:
+    """Catches JSONB round-tripping breaking the type-exact no-op comparison (I1)."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    workbench = AgentTestWorkbench()
+    payload = {"z": 1, "f": 1.0, "b": True, "n": None, "nested": {"k": [2.5, "s"]}}
+    with factory() as session:
+        created = workbench.create_test_case(
+            session,
+            agent_key="builder",
+            name="builder_pg_noop",
+            synthetic_payload=payload,
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="creator@example.com",
+        )
+    before = _case_tuple(factory, created.id)
+    with factory() as session:
+        same = workbench.update_test_case(
+            session,
+            test_case_id=created.id,
+            synthetic_payload=dict(reversed(list(payload.items()))),
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="editor@example.com",
+        )
+    assert same.id == created.id and same.version == 1
+    assert _case_tuple(factory, created.id) == before
+    with factory() as session:
+        changed = workbench.update_test_case(
+            session,
+            test_case_id=created.id,
+            synthetic_payload={**payload, "z": 1.0},
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="editor@example.com",
+        )
+    assert (changed.version, changed.id != created.id) == (2, True)
+    assert _case_tuple(factory, created.id)[4] is False

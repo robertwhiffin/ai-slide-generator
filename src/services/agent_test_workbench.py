@@ -298,6 +298,15 @@ def _is_version_collision(error: IntegrityError) -> bool:
     return _SQLITE_UNIQUE_VERSION_MESSAGE in str(original)
 
 
+def _canonical_json(document: object) -> str:
+    """Type-exact canonical text: ``1``, ``1.0`` and ``true`` stay distinct.
+
+    Python ``==`` would treat ``{"a": 1}``, ``{"a": 1.0}`` and ``{"a": True}``
+    as equal and silently drop a real edit, so content identity never uses it.
+    """
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _copy_json(document: Mapping[str, Any]) -> dict[str, Any]:
     """Store a detached copy so a caller's later mutation cannot reach the row."""
     return json.loads(json.dumps(document))
@@ -409,7 +418,11 @@ class AgentTestWorkbench:
         actor: str,
         name: str | None = None,
     ) -> TestCaseVersion:
-        """Supersede the active version ``test_case_id`` with ``version + 1``."""
+        """Supersede the active version ``test_case_id`` with ``version + 1``.
+
+        The retirement and the insert commit together or not at all.  Content
+        identical to the current version returns it unchanged.
+        """
         issues = _actor_issues(actor)
         if issues:
             raise TestCaseRejected(*issues)
@@ -444,6 +457,16 @@ class AgentTestWorkbench:
                     raise TestCaseRejected(*issues)
                 if not old.is_active:
                     raise TestCaseStale(test_case_id)
+                # An identical save is a no-op: no retire, no new version, and
+                # no approval of the current version orphaned.
+                if (
+                    is_required is old.is_required
+                    and _canonical_json(synthetic_payload)
+                    == _canonical_json(old.synthetic_payload)
+                    and _canonical_json(assembly_context)
+                    == _canonical_json(old.assembly_context)
+                ):
+                    return TestCaseVersion.from_row(old)
 
                 old.is_active = False
                 old.updated_by = actor
