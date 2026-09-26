@@ -803,3 +803,1123 @@ def test_an_identical_save_to_an_inactive_version_is_still_stale(factory, state)
 
     assert caught.value.test_case_id == target
     assert _rows(factory) == before
+
+
+# ===========================================================================
+# #267 Task 4: test run execution and persistence
+#
+# Binding corrections: C8/C32 (no transaction or lock across the model call;
+# the saved-candidate read is #266's probe read; a stale lock is the 409 with no
+# model call), C10/C37 (every role's model sees the production projection),
+# C15/C16/C17 (raw output from the runtime's observer, the exact status map, no
+# exception text, checks from the runtime's single validation), C20 (the
+# baseline is the newest completed published-baseline run for this case row
+# and revision, copied in; reruns go through ``run``), C27/M-1 (identity from
+# the transaction-1 snapshot, never a ``-1`` sentinel).
+# ===========================================================================
+
+import logging  # noqa: E402
+
+from sqlalchemy import update  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
+
+from src.database.models.graph_configuration import (  # noqa: E402
+    AgentTestRun,
+    GraphDraft,
+    GraphDraftAgent,
+    GraphRelease,
+    GraphReleaseAgent,
+)
+from src.services.agent_model_payload import (  # noqa: E402
+    MODEL_PAYLOAD_KEYS,
+    model_payload_for,
+)
+from src.services.agent_runtime import (  # noqa: E402
+    MODEL_DRIVEN_AGENT_KEYS,
+    AgentRuntime,
+)
+from src.services.agent_runtime_identity import (  # noqa: E402
+    RecordingAgentInvocationIdentitySink,
+)
+from src.services.agent_test_workbench import (  # noqa: E402
+    DeterministicCheckIssue,
+    DeterministicCheckResult,
+    TestRunCaseInactive,
+    TestRunCaseRoleMismatch,
+    TestRunEvidence,
+    TestRunNotFound,
+    TestRunUnavailable,
+)
+from src.services.graph_configuration import (  # noqa: E402
+    DraftContentRejected,
+    DraftSaveConflict,
+    EditableModelDraft,
+)
+from src.services.graph_configuration_content import (  # noqa: E402
+    GraphConfigurationIntegrityError,
+    definition_content_from_row,
+    definition_content_values,
+)
+from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS  # noqa: E402
+from src.services.graph_definition_manifest import (  # noqa: E402
+    ContentIdentity,
+    definition_content_hash,
+)
+from src.services.persisted_graph_release import (  # noqa: E402
+    PersistedGraphReleaseLoader,
+)
+from tests.fixtures.deterministic_model_adapter import (  # noqa: E402
+    DeterministicFakeModelAdapter,
+    fake_output,
+)
+
+RUNNER = "runner@example.com"
+_SEEDED_IDENTIFIERS = (
+    "synthetic-architect",
+    "synthetic-data-analyst",
+    "synthetic-builder",
+    "synthetic-turn",
+    "system:bootstrap",
+    "synthetic-deck-reviewer",
+)
+_PASSED_CONTRACT = DeterministicCheckResult(
+    name="output_contract", passed=True, message=None, issues=()
+)
+
+
+class _HookedFakeAdapter(DeterministicFakeModelAdapter):
+    """The deterministic fake, plus a hook run inside ``invoke`` (C8 proofs)."""
+
+    def __init__(self, *, on_invoke=None, raise_error: Exception | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.on_invoke = on_invoke
+        self.raise_error = raise_error
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        if self.on_invoke is not None:
+            self.on_invoke()
+        if self.raise_error is not None:
+            self.calls.append(None)  # type: ignore[arg-type]
+            raise self.raise_error
+        return super().invoke(
+            agent_key=agent_key, configuration=configuration, schema=schema, prompt=prompt
+        )
+
+
+class _SpyRuntime(AgentRuntime):
+    """The real runtime, recording the arguments of its two public entry points."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.candidate_calls: list[tuple] = []
+        self.run_calls: list[tuple] = []
+
+    def run_candidate(
+        self, agent_key, candidate_content, candidate_hash, payload, assembly_context
+    ):
+        self.candidate_calls.append(
+            (agent_key, candidate_content, candidate_hash, payload, assembly_context)
+        )
+        return super().run_candidate(
+            agent_key, candidate_content, candidate_hash, payload, assembly_context
+        )
+
+    def run(self, agent_key, graph_release_id, payload, assembly_context):
+        self.run_calls.append((agent_key, graph_release_id, payload, assembly_context))
+        return super().run(agent_key, graph_release_id, payload, assembly_context)
+
+
+def _runtime(factory: sessionmaker, adapter) -> _SpyRuntime:
+    return _SpyRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=factory),
+        model_adapter=adapter,
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+
+
+def _executor(factory: sessionmaker, adapter=None, **kwargs):
+    adapter = adapter if adapter is not None else DeterministicFakeModelAdapter()
+    runtime = _runtime(factory, adapter)
+    return AgentTestWorkbench(runtime=runtime, **kwargs), runtime, adapter
+
+
+def _lock_version(factory: sessionmaker) -> int:
+    with factory() as session:
+        return session.scalar(select(GraphDraft.lock_version))
+
+
+def _run_candidate(factory, workbench, agent_key="architect", test_case_id=None, **kwargs):
+    arguments = {
+        "agent_key": agent_key,
+        "test_case_id": test_case_id
+        if test_case_id is not None
+        else _seed_case_id(factory, agent_key),
+        "expected_lock_version": _lock_version(factory),
+        "actor": RUNNER,
+    }
+    arguments.update(kwargs)
+    with factory() as session:
+        return workbench.execute_candidate_run(session, **arguments)
+
+
+def _run_baseline(factory, workbench, agent_key="architect", test_case_id=None, **kwargs):
+    arguments = {
+        "agent_key": agent_key,
+        "test_case_id": test_case_id
+        if test_case_id is not None
+        else _seed_case_id(factory, agent_key),
+        "actor": RUNNER,
+    }
+    arguments.update(kwargs)
+    with factory() as session:
+        return workbench.execute_baseline_rerun(session, **arguments)
+
+
+def _run_rows(factory: sessionmaker) -> list[AgentTestRun]:
+    with factory() as session:
+        return list(session.scalars(select(AgentTestRun).order_by(AgentTestRun.id)))
+
+
+def _identity(factory: sessionmaker, agent_key: str = "architect") -> dict[str, object]:
+    """The real identity a run must record, read straight from the tables."""
+    with factory() as session:
+        release_id = session.scalar(
+            select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
+        )
+        revision_id = session.scalar(
+            select(GraphReleaseAgent.agent_definition_revision_id).where(
+                GraphReleaseAgent.graph_release_id == release_id,
+                GraphReleaseAgent.agent_key == agent_key,
+            )
+        )
+        draft_row = session.scalar(
+            select(GraphDraftAgent).where(GraphDraftAgent.agent_key == agent_key)
+        )
+        from src.database.models.graph_configuration import AgentDefinitionRevision
+
+        revision_hash = session.scalar(
+            select(AgentDefinitionRevision.content_hash).where(
+                AgentDefinitionRevision.id == revision_id
+            )
+        )
+        return {
+            "release_id": release_id,
+            "revision_id": revision_id,
+            "revision_hash": revision_hash,
+            "draft_hash": draft_row.candidate_hash,
+            "draft_content": definition_content_from_row(draft_row),
+        }
+
+
+def _rewrite_draft(factory: sessionmaker, agent_key: str, **content_update) -> str:
+    """Store a changed draft candidate directly, with its matching hash."""
+    with factory() as session:
+        row = session.scalar(
+            select(GraphDraftAgent).where(GraphDraftAgent.agent_key == agent_key)
+        )
+        content = definition_content_from_row(row).model_copy(update=content_update)
+        for column, value in definition_content_values(content).items():
+            setattr(row, column, value)
+        row.candidate_hash = definition_content_hash(content)
+        session.commit()
+        return row.candidate_hash
+
+
+def _saver(prompt_text: str):
+    def _save(factory: sessionmaker, agent_key: str = "architect") -> None:
+        content = _identity(factory, agent_key)["draft_content"]
+        with factory() as session:
+            outcome = GraphConfiguration().save_editable_model_draft(
+                session,
+                agent_key=agent_key,
+                expected_lock_version=_lock_version(factory),
+                candidate=EditableModelDraft(
+                    prompt_text=prompt_text,
+                    endpoint_name=content.model.endpoint_name,
+                    temperature=float(content.model.temperature),
+                    max_tokens=content.model.max_tokens,
+                    top_p=float(content.model.top_p),
+                ),
+                actor="saver@example.com",
+            )
+        assert not isinstance(outcome, DraftSaveConflict)
+
+    return _save
+
+
+# --- the call, and the completed evidence ----------------------------------
+
+
+def test_a_candidate_run_hands_run_candidate_the_saved_draft_content_and_hash(factory):
+    workbench, runtime, _adapter = _executor(factory)
+    identity = _identity(factory)
+
+    _run_candidate(factory, workbench)
+
+    assert len(runtime.candidate_calls) == 1
+    agent_key, content, candidate_hash, payload, context = runtime.candidate_calls[0]
+    assert agent_key == "architect"
+    assert content == identity["draft_content"]
+    assert candidate_hash == identity["draft_hash"]
+    assert payload == model_payload_for("architect", REQUIRED_SMOKE_PAYLOADS["architect"])
+    assert (context.design_system_active, context.root_session_id, context.actor_session_id) == (
+        False,
+        "",
+        "",
+    )
+    assert runtime.run_calls == []
+
+
+def test_a_completed_candidate_run_returns_exact_evidence(factory):
+    workbench, _runtime_, adapter = _executor(factory)
+    identity = _identity(factory)
+    case_id = _seed_case_id(factory)
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert isinstance(evidence, TestRunEvidence)
+    assert evidence.run_kind == "candidate"
+    assert evidence.execution_status == "completed"
+    assert evidence.error_detail is None
+    assert evidence.deterministic_checks_passed is True
+    assert evidence.deterministic_check_results == (_PASSED_CONTRACT,)
+    assert (evidence.test_case_id, evidence.test_case_version) == (case_id, 1)
+    assert evidence.agent_key == "architect"
+    assert evidence.candidate_hash == identity["draft_hash"]
+    assert evidence.compared_release_id == identity["release_id"]
+    assert evidence.compared_definition_revision_id == identity["revision_id"]
+    assert evidence.synthetic_payload == REQUIRED_SMOKE_PAYLOADS["architect"]
+    assert evidence.model_payload == model_payload_for(
+        "architect", REQUIRED_SMOKE_PAYLOADS["architect"]
+    )
+    assert evidence.assembled_prompt == adapter.calls[0].prompt
+    assert evidence.candidate_raw_output == fake_output("architect")
+    assert evidence.candidate_structured_output["intent"] == "discuss"
+    assert evidence.candidate_structured_output["message"] == "an answer"
+    assert (evidence.baseline_raw_output, evidence.baseline_structured_output) == (None, None)
+    assert isinstance(evidence.latency_ms, float) and evidence.latency_ms > 0
+    assert (evidence.input_tokens, evidence.output_tokens) == (None, None)
+    assert evidence.run_by == RUNNER
+    assert evidence.run_at is not None
+    assert (evidence.candidate_is_current, evidence.base_release_is_current) == (True, True)
+
+
+def test_a_completed_run_persists_one_row_with_null_verdict_columns(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    identity = _identity(factory)
+
+    evidence = _run_candidate(factory, workbench)
+
+    rows = _run_rows(factory)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.id == evidence.run_id
+    assert (
+        row.agent_key,
+        row.run_kind,
+        row.candidate_hash,
+        row.test_case_id,
+        row.test_case_version,
+        row.compared_release_id,
+        row.compared_definition_revision_id,
+        row.execution_status,
+        row.deterministic_checks_passed,
+        row.run_by,
+    ) == (
+        "architect",
+        "candidate",
+        identity["draft_hash"],
+        _seed_case_id(factory),
+        1,
+        identity["release_id"],
+        identity["revision_id"],
+        "completed",
+        True,
+        RUNNER,
+    )
+    assert row.deterministic_check_results == [
+        {"name": "output_contract", "passed": True, "message": None, "issues": []}
+    ]
+    assert row.model_payload == evidence.model_payload
+    assert row.assembled_prompt == evidence.assembled_prompt
+    assert row.candidate_raw_output == evidence.candidate_raw_output
+    assert row.candidate_structured_output == evidence.candidate_structured_output
+    assert row.latency_ms == evidence.latency_ms
+    assert (row.verdict, row.verdict_reviewer, row.verdict_at, row.verdict_notes) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_no_candidate_sentinel_reaches_the_evidence_or_its_row(factory):
+    """M-1: identity comes from the transaction-1 snapshot, never ``-1``."""
+    workbench, _runtime_, _adapter = _executor(factory)
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.compared_release_id > 0
+    assert evidence.compared_definition_revision_id > 0
+    for name, value in dataclasses_asdict(evidence).items():
+        assert value != -1, name
+    row = _run_rows(factory)[0]
+    for column in AgentTestRun.__table__.columns:
+        assert getattr(row, column.key) != -1, column.key
+
+
+def dataclasses_asdict(value) -> dict[str, object]:
+    import dataclasses
+
+    return {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
+
+
+# --- the status map (C16/C33), checks (C17), raw output (C15) ---------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "detail"),
+    [
+        ("provider_unavailable", "endpoint_unavailable:{endpoint}"),
+        ("structured_output_unsupported", "structured_output_unsupported:{endpoint}"),
+    ],
+)
+def test_a_model_failure_is_a_persisted_model_error_with_a_code_only(factory, mode, detail):
+    workbench, _runtime_, adapter = _executor(
+        factory, DeterministicFakeModelAdapter(mode=mode)
+    )
+    endpoint = _identity(factory)["draft_content"].model.endpoint_name
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "model_error"
+    assert evidence.error_detail == detail.format(endpoint=endpoint)
+    assert evidence.deterministic_checks_passed is False
+    assert evidence.deterministic_check_results == (
+        DeterministicCheckResult(
+            name="execution",
+            passed=False,
+            message="The run produced no model output to check.",
+            issues=(),
+        ),
+    )
+    assert (evidence.candidate_raw_output, evidence.candidate_structured_output) == (None, None)
+    # The prompt was assembled and sent, so the Input view still has it.
+    assert evidence.assembled_prompt == adapter.calls[0].prompt
+    assert len(_run_rows(factory)) == 1
+
+
+def test_an_unexpected_failure_persists_its_class_name_and_never_its_text(factory):
+    secret = "provider echoed SECRET-PROMPT-TEXT"
+    workbench, _runtime_, _adapter = _executor(
+        factory, _HookedFakeAdapter(raise_error=KeyError(secret))
+    )
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "model_error"
+    assert evidence.error_detail == "unexpected_error:KeyError"
+    row = _run_rows(factory)[0]
+    stored = json.dumps(
+        {column.key: str(getattr(row, column.key)) for column in AgentTestRun.__table__.columns}
+    )
+    assert "SECRET-PROMPT-TEXT" not in stored
+    assert "SECRET-PROMPT-TEXT" not in json.dumps(dataclasses_asdict(evidence), default=str)
+
+
+def test_an_undeclared_output_field_is_incomplete_with_its_raw_keys_and_issue(factory):
+    workbench, _runtime_, _adapter = _executor(
+        factory, DeterministicFakeModelAdapter(mode="invalid_optional_field")
+    )
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "incomplete"
+    assert evidence.error_detail == "invalid_output:AgentOutputValidationError"
+    assert evidence.candidate_structured_output is None
+    assert evidence.candidate_raw_output == fake_output(
+        "architect", diagnostic_notes=["  "]
+    )
+    assert evidence.deterministic_checks_passed is False
+    assert evidence.deterministic_check_results == (
+        DeterministicCheckResult(
+            name="output_contract",
+            passed=False,
+            message="The model output does not satisfy the output contract.",
+            issues=(
+                DeterministicCheckIssue(
+                    code="output_undeclared_top_level_field", field="diagnostic_notes"
+                ),
+            ),
+        ),
+    )
+    row = _run_rows(factory)[0]
+    assert row.deterministic_check_results == [
+        {
+            "name": "output_contract",
+            "passed": False,
+            "message": "The model output does not satisfy the output contract.",
+            "issues": [
+                {"code": "output_undeclared_top_level_field", "field": "diagnostic_notes"}
+            ],
+        }
+    ]
+    assert row.candidate_structured_output is None
+
+
+def test_a_provider_parse_failure_is_incomplete_without_raw_output(factory):
+    workbench, _runtime_, _adapter = _executor(
+        factory, DeterministicFakeModelAdapter(mode="provider_parse_error")
+    )
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "incomplete"
+    assert evidence.error_detail == "invalid_output:ValidationError"
+    assert evidence.candidate_raw_output is None
+    assert evidence.deterministic_check_results == (
+        DeterministicCheckResult(
+            name="output_contract",
+            passed=False,
+            message="The model output does not satisfy the output contract.",
+            issues=(),
+        ),
+    )
+
+
+def test_an_unassemblable_candidate_is_an_assembly_error_before_the_model(factory):
+    _rewrite_draft(
+        factory,
+        "architect",
+        protected_assembly=ContentIdentity(version=999, digest="0" * 64),
+    )
+    workbench, _runtime_, adapter = _executor(factory)
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "assembly_error"
+    assert evidence.error_detail == "protected_bundle_unavailable"
+    assert evidence.assembled_prompt is None
+    assert evidence.latency_ms is None
+    assert adapter.calls == []
+    assert evidence.deterministic_check_results[0].name == "execution"
+    assert len(_run_rows(factory)) == 1
+
+
+# --- C8: no transaction across the model call -------------------------------
+
+
+def test_the_model_is_called_with_no_open_transaction(factory):
+    observed: list[bool] = []
+    holder: dict[str, object] = {}
+
+    def _check() -> None:
+        observed.append(holder["session"].in_transaction())
+
+    workbench, _runtime_, _adapter = _executor(factory, _HookedFakeAdapter(on_invoke=_check))
+    with factory() as session:
+        holder["session"] = session
+        workbench.execute_candidate_run(
+            session,
+            agent_key="architect",
+            test_case_id=_seed_case_id(factory),
+            expected_lock_version=_lock_version(factory),
+            actor=RUNNER,
+        )
+
+    assert observed == [False]
+
+
+def test_the_baseline_model_is_called_with_no_open_transaction(factory):
+    observed: list[bool] = []
+    holder: dict[str, object] = {}
+
+    def _check() -> None:
+        observed.append(holder["session"].in_transaction())
+
+    workbench, _runtime_, _adapter = _executor(factory, _HookedFakeAdapter(on_invoke=_check))
+    with factory() as session:
+        holder["session"] = session
+        workbench.execute_baseline_rerun(
+            session,
+            agent_key="architect",
+            test_case_id=_seed_case_id(factory),
+            actor=RUNNER,
+        )
+
+    assert observed == [False]
+
+
+@pytest.mark.parametrize("method", ["candidate", "baseline"])
+def test_an_executor_refuses_a_session_already_in_a_transaction(factory, method):
+    workbench, _runtime_, adapter = _executor(factory)
+    case_id = _seed_case_id(factory)
+    with factory() as session:
+        session.execute(select(1))
+        assert session.in_transaction()
+        with pytest.raises(RuntimeError):
+            if method == "candidate":
+                workbench.execute_candidate_run(
+                    session,
+                    agent_key="architect",
+                    test_case_id=case_id,
+                    expected_lock_version=0,
+                    actor=RUNNER,
+                )
+            else:
+                workbench.execute_baseline_rerun(
+                    session, agent_key="architect", test_case_id=case_id, actor=RUNNER
+                )
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+def test_a_draft_saved_during_the_call_is_recorded_as_not_current(factory):
+    """C8.5: the run records exactly what ran, and says the draft moved on."""
+    before = _identity(factory)["draft_hash"]
+    save = _saver("changed while the model was running")
+    workbench, _runtime_, _adapter = _executor(
+        factory, _HookedFakeAdapter(on_invoke=lambda: save(factory))
+    )
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert _identity(factory)["draft_hash"] != before
+    assert evidence.candidate_hash == before
+    assert (evidence.candidate_is_current, evidence.base_release_is_current) == (False, True)
+    assert _run_rows(factory)[0].candidate_hash == before
+
+
+def test_a_case_retired_during_the_call_is_recorded_as_not_current(factory):
+    extra = _create(factory, name="architect_retired_mid_run")
+    workbench, _runtime_, _adapter = _executor(
+        factory, _HookedFakeAdapter(on_invoke=lambda: _deactivate(factory, extra.id))
+    )
+
+    evidence = _run_candidate(factory, workbench, test_case_id=extra.id)
+
+    assert evidence.execution_status == "completed"
+    assert (evidence.candidate_is_current, evidence.base_release_is_current) == (False, True)
+    assert _run_rows(factory)[0].test_case_id == extra.id
+
+
+def _publish_same_content(factory: sessionmaker) -> int:
+    """Stand in for #269's publication on SQLite: close v1, open v2, rebase."""
+    with factory() as session:
+        v1 = session.scalar(select(GraphRelease).where(GraphRelease.effective_to.is_(None)))
+        from datetime import timedelta
+
+        now = v1.effective_from + timedelta(minutes=1)
+        v1.effective_to = now
+        session.flush()
+        v2 = GraphRelease(
+            version_number=v1.version_number + 1,
+            previous_release_id=v1.id,
+            release_note="published during a test run",
+            published_by="publisher@example.com",
+            published_at=now,
+            effective_from=now,
+            effective_to=None,
+        )
+        session.add(v2)
+        session.flush()
+        for mapping in session.scalars(
+            select(GraphReleaseAgent).where(GraphReleaseAgent.graph_release_id == v1.id)
+        ).all():
+            session.add(
+                GraphReleaseAgent(
+                    graph_release_id=v2.id,
+                    agent_key=mapping.agent_key,
+                    agent_definition_revision_id=mapping.agent_definition_revision_id,
+                )
+            )
+        session.execute(update(GraphDraft).values(base_release_id=v2.id))
+        session.commit()
+        return v2.id
+
+
+def test_a_publication_during_the_call_keeps_the_run_on_its_base_release(factory):
+    """C8.5 publication-first: the run records v1 and says the base moved."""
+    v1 = _identity(factory)["release_id"]
+    published: list[int] = []
+    workbench, _runtime_, _adapter = _executor(
+        factory,
+        _HookedFakeAdapter(on_invoke=lambda: published.append(_publish_same_content(factory))),
+    )
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert published and published[0] != v1
+    assert evidence.compared_release_id == v1
+    assert evidence.base_release_is_current is False
+    assert _run_rows(factory)[0].compared_release_id == v1
+
+
+# --- C8.6: the one retry, and 503 with no run ---------------------------------
+
+
+class _FlakyParents(GraphConfiguration):
+    """``_lock_current_parents`` raises the handoff diagnosis ``failures`` times
+    once armed (the executor arms it after the model call)."""
+
+    def __init__(self, failures: int, message: str) -> None:
+        super().__init__()
+        self.failures = failures
+        self.message = message
+        self.armed = False
+        self.raised = 0
+
+    def _lock_current_parents(self, session, *, exclusive):
+        if self.armed and self.raised < self.failures:
+            self.raised += 1
+            raise GraphConfigurationIntegrityError(self.message)
+        return super()._lock_current_parents(session, exclusive=exclusive)
+
+
+_HANDOFF = "graph configuration parent snapshot is inconsistent"
+
+
+def test_a_handoff_race_in_transaction_two_is_retried_once(factory):
+    parents = _FlakyParents(1, _HANDOFF)
+    adapter = _HookedFakeAdapter(on_invoke=lambda: setattr(parents, "armed", True))
+    workbench, _runtime_, _adapter = _executor(factory, adapter, graph_configuration=parents)
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert parents.raised == 1
+    assert evidence.execution_status == "completed"
+    assert len(adapter.calls) == 1
+    assert len(_run_rows(factory)) == 1
+
+
+@pytest.mark.parametrize(
+    ("failures", "message"),
+    [(2, _HANDOFF), (1, "graph configuration must have exactly one active release")],
+)
+def test_a_second_handoff_race_or_another_integrity_failure_is_unavailable(
+    factory, failures, message
+):
+    parents = _FlakyParents(failures, message)
+    adapter = _HookedFakeAdapter(on_invoke=lambda: setattr(parents, "armed", True))
+    workbench, _runtime_, _adapter = _executor(factory, adapter, graph_configuration=parents)
+
+    with pytest.raises(TestRunUnavailable):
+        _run_candidate(factory, workbench)
+
+    assert len(adapter.calls) == 1, "the model must never be re-invoked"
+    assert _run_rows(factory) == []
+
+
+class _UnavailableReads(GraphConfiguration):
+    def read_workbench(self, session):
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+
+def test_a_database_failure_before_the_call_is_unavailable_with_no_call(factory):
+    workbench, _runtime_, adapter = _executor(
+        factory, graph_configuration=_UnavailableReads()
+    )
+
+    with pytest.raises(TestRunUnavailable):
+        _run_candidate(factory, workbench)
+
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+def test_a_database_failure_at_the_insert_is_unavailable_with_no_row(factory, monkeypatch):
+    from sqlalchemy.orm import Session as OrmSession
+
+    workbench, _runtime_, adapter = _executor(factory)
+    original_flush = OrmSession.flush
+
+    def _failing_flush(self, *args, **kwargs):
+        if any(isinstance(obj, AgentTestRun) for obj in self.new):
+            raise OperationalError("INSERT", {}, Exception("connection reset"))
+        return original_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(OrmSession, "flush", _failing_flush)
+
+    with pytest.raises(TestRunUnavailable):
+        _run_candidate(factory, workbench)
+
+    monkeypatch.undo()
+    assert len(adapter.calls) == 1
+    assert _run_rows(factory) == []
+
+
+# --- C32: the lock pin and the saved endpoint policy ------------------------
+
+
+def test_a_stale_lock_is_the_null_candidate_conflict_with_no_call_and_no_row(factory):
+    workbench, _runtime_, adapter = _executor(factory)
+    _saver("moved the lock on")(factory)
+
+    outcome = _run_candidate(factory, workbench, expected_lock_version=0)
+
+    assert isinstance(outcome, DraftSaveConflict)
+    assert (outcome.expected_lock_version, outcome.current_lock_version) == (0, 1)
+    assert outcome.client_candidate is None
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+def test_a_url_shaped_stored_endpoint_is_refused_before_any_call(factory):
+    content = _identity(factory)["draft_content"]
+    _rewrite_draft(
+        factory,
+        "architect",
+        model=content.model.model_copy(update={"endpoint_name": "https://example.com/x"}),
+    )
+    workbench, _runtime_, adapter = _executor(factory)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _run_candidate(factory, workbench)
+
+    assert [issue.field for issue in caught.value.issues] == ["candidate.model.endpoint_name"]
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+# --- the case: found, same role, active (C22) -------------------------------
+
+
+def test_an_unknown_case_is_not_found_with_no_call(factory):
+    workbench, _runtime_, adapter = _executor(factory)
+
+    with pytest.raises(TestCaseNotFound):
+        _run_candidate(factory, workbench, test_case_id=987654)
+    with pytest.raises(TestCaseNotFound):
+        _run_baseline(factory, workbench, test_case_id=987654)
+
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+def test_a_case_of_another_role_is_refused_with_no_call(factory):
+    workbench, _runtime_, adapter = _executor(factory)
+    builder_case = _seed_case_id(factory, "builder")
+
+    with pytest.raises(TestRunCaseRoleMismatch):
+        _run_candidate(factory, workbench, agent_key="architect", test_case_id=builder_case)
+    with pytest.raises(TestRunCaseRoleMismatch):
+        _run_baseline(factory, workbench, agent_key="architect", test_case_id=builder_case)
+
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+def test_an_inactive_case_version_is_refused_with_no_call(factory):
+    seed = _seed_case_id(factory)
+    _update(factory, seed)  # supersede: the seed row is now inactive
+    workbench, _runtime_, adapter = _executor(factory)
+
+    with pytest.raises(TestRunCaseInactive):
+        _run_candidate(factory, workbench, test_case_id=seed)
+    with pytest.raises(TestRunCaseInactive):
+        _run_baseline(factory, workbench, test_case_id=seed)
+
+    assert adapter.calls == []
+    assert _run_rows(factory) == []
+
+
+@pytest.mark.parametrize("actor", ["", "   ", None])
+def test_a_run_requires_a_nonblank_actor(factory, actor):
+    workbench, _runtime_, adapter = _executor(factory)
+
+    with pytest.raises(TestCaseRejected):
+        _run_candidate(factory, workbench, actor=actor)
+    with pytest.raises(TestCaseRejected):
+        _run_baseline(factory, workbench, actor=actor)
+
+    assert adapter.calls == []
+
+
+def test_a_baseline_for_an_unknown_role_is_refused(factory):
+    workbench, _runtime_, adapter = _executor(factory)
+
+    with pytest.raises(TestCaseRejected):
+        _run_baseline(factory, workbench, agent_key="foreman")
+
+    assert adapter.calls == []
+
+
+# --- C20: the published baseline -------------------------------------------
+
+
+def test_a_baseline_rerun_goes_through_run_on_the_active_release(factory):
+    workbench, runtime, adapter = _executor(factory)
+    identity = _identity(factory)
+
+    evidence = _run_baseline(factory, workbench)
+
+    assert runtime.candidate_calls == []
+    assert len(runtime.run_calls) == 1
+    agent_key, release_id, payload, context = runtime.run_calls[0]
+    assert (agent_key, release_id) == ("architect", identity["release_id"])
+    assert payload == model_payload_for("architect", REQUIRED_SMOKE_PAYLOADS["architect"])
+    assert (context.root_session_id, context.actor_session_id) == ("", "")
+    assert evidence.run_kind == "published_baseline"
+    assert evidence.execution_status == "completed"
+    assert evidence.candidate_hash == identity["revision_hash"]
+    assert evidence.compared_release_id == identity["release_id"]
+    assert evidence.compared_definition_revision_id == identity["revision_id"]
+    assert (evidence.baseline_raw_output, evidence.baseline_structured_output) == (None, None)
+    assert evidence.candidate_raw_output == fake_output("architect")
+    assert evidence.assembled_prompt == adapter.calls[0].prompt
+    row = _run_rows(factory)[0]
+    assert (row.run_kind, row.compared_release_id, row.candidate_hash) == (
+        "published_baseline",
+        identity["release_id"],
+        identity["revision_hash"],
+    )
+
+
+def test_a_failed_baseline_rerun_is_persisted_with_the_same_status_map(factory):
+    workbench, _runtime_, _adapter = _executor(
+        factory, DeterministicFakeModelAdapter(mode="provider_unavailable")
+    )
+    endpoint = _identity(factory)["draft_content"].model.endpoint_name
+
+    evidence = _run_baseline(factory, workbench)
+
+    assert evidence.execution_status == "model_error"
+    assert evidence.error_detail == f"endpoint_unavailable:{endpoint}"
+    assert _run_rows(factory)[0].run_kind == "published_baseline"
+
+
+def test_no_baseline_is_shown_before_one_is_run(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+
+    first = _run_candidate(factory, workbench)
+    second = _run_candidate(factory, workbench)
+
+    # A candidate run is never anyone's baseline, including its own successor's.
+    assert (second.baseline_raw_output, second.baseline_structured_output) == (None, None)
+    assert first.run_id != second.run_id
+
+
+def test_a_candidate_run_copies_the_newest_completed_baseline_outputs(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    _run_baseline(factory, workbench)
+    newest = _run_baseline(factory, workbench)
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.baseline_raw_output == newest.candidate_raw_output
+    assert evidence.baseline_structured_output == newest.candidate_structured_output
+    row = next(row for row in _run_rows(factory) if row.id == evidence.run_id)
+    assert row.baseline_raw_output == newest.candidate_raw_output
+    assert row.baseline_structured_output == newest.candidate_structured_output
+
+
+def test_a_failed_baseline_is_never_the_stored_baseline(factory):
+    good, _r, _a = _executor(factory)
+    completed = _run_baseline(factory, good)
+    failing, _r2, _a2 = _executor(
+        factory, DeterministicFakeModelAdapter(mode="provider_unavailable")
+    )
+    _run_baseline(factory, failing)
+
+    evidence = _run_candidate(factory, good)
+
+    assert evidence.baseline_structured_output == completed.candidate_structured_output
+
+
+def test_a_baseline_for_another_case_version_is_not_this_cases_baseline(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    seed = _seed_case_id(factory)
+    _run_baseline(factory, workbench, test_case_id=seed)
+    successor = _update(factory, seed)
+
+    evidence = _run_candidate(factory, workbench, test_case_id=successor.id)
+
+    assert (evidence.baseline_raw_output, evidence.baseline_structured_output) == (None, None)
+
+
+def test_a_baseline_for_another_revision_is_not_this_candidates_baseline(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    _run_baseline(factory, workbench)
+    # Re-point the stored baseline at another revision of the same role.
+    with factory() as session:
+        other_revision = session.scalar(
+            select(GraphReleaseAgent.agent_definition_revision_id).where(
+                GraphReleaseAgent.agent_key == "architect"
+            )
+        )
+        from src.database.models.graph_configuration import AgentDefinitionRevision
+
+        clone = session.get(AgentDefinitionRevision, other_revision)
+        copy = AgentDefinitionRevision(
+            **{
+                column.key: getattr(clone, column.key)
+                for column in AgentDefinitionRevision.__table__.columns
+                if column.key not in {"id", "created_at"}
+            }
+        )
+        copy.content_hash = "f" * 64
+        session.add(copy)
+        session.flush()
+        session.execute(
+            update(AgentTestRun)
+            .where(AgentTestRun.run_kind == "published_baseline")
+            .values(compared_definition_revision_id=copy.id)
+        )
+        session.commit()
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert (evidence.baseline_raw_output, evidence.baseline_structured_output) == (None, None)
+
+
+# --- C10/C37: what every role's model sees ----------------------------------
+
+
+def _prompt_payload_object(prompt: str, expected_keys: set[str]) -> dict:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(prompt):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(prompt, index)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and set(value) == expected_keys:
+            return value
+    raise AssertionError(f"no payload object with keys {sorted(expected_keys)} in the prompt")
+
+
+@pytest.mark.parametrize("role", MODEL_DRIVEN_AGENT_KEYS)
+def test_every_role_model_sees_exactly_the_projected_seed_keys(factory, role):
+    workbench, _runtime_, adapter = _executor(factory)
+    seed = REQUIRED_SMOKE_PAYLOADS[role]
+    expected = set(seed) & set(MODEL_PAYLOAD_KEYS[role])
+
+    evidence = _run_candidate(factory, workbench, agent_key=role)
+
+    assert evidence.execution_status == "completed", evidence.error_detail
+    assert set(evidence.model_payload) == expected
+    prompt = adapter.calls[0].prompt
+    assert _prompt_payload_object(prompt, expected) == evidence.model_payload
+    for identifier in _SEEDED_IDENTIFIERS:
+        assert identifier not in prompt, (role, identifier)
+
+
+@pytest.mark.parametrize("role", MODEL_DRIVEN_AGENT_KEYS)
+def test_every_role_baseline_model_sees_exactly_the_projected_seed_keys(factory, role):
+    workbench, _runtime_, adapter = _executor(factory)
+    expected = set(REQUIRED_SMOKE_PAYLOADS[role]) & set(MODEL_PAYLOAD_KEYS[role])
+
+    evidence = _run_baseline(factory, workbench, agent_key=role)
+
+    assert evidence.execution_status == "completed", evidence.error_detail
+    prompt = adapter.calls[0].prompt
+    assert _prompt_payload_object(prompt, expected) == evidence.model_payload
+    for identifier in _SEEDED_IDENTIFIERS:
+        assert identifier not in prompt, (role, identifier)
+
+
+def test_the_builder_prompt_carries_no_seeded_session_identifier(factory):
+    workbench, _runtime_, adapter = _executor(factory)
+
+    _run_candidate(factory, workbench, agent_key="builder")
+
+    prompt = adapter.calls[0].prompt
+    assert "synthetic-builder" not in prompt
+    assert "synthetic-turn" not in prompt
+    assert "system:bootstrap" not in prompt
+    assert "design_system_id" not in prompt
+
+
+# --- logging ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["success", "invalid_optional_field", "provider_unavailable"])
+def test_the_executor_logs_no_payload_prompt_or_output(factory, caplog, mode):
+    workbench, _runtime_, adapter = _executor(factory, DeterministicFakeModelAdapter(mode=mode))
+    caplog.set_level(logging.DEBUG)
+
+    _run_candidate(factory, workbench)
+    _run_baseline(factory, workbench)
+
+    forbidden = [
+        "Create a three-slide demo roadmap",
+        "Synthetic demo style",
+        "an answer",
+        adapter.calls[0].prompt[:200],
+    ]
+    for record in caplog.records:
+        text = record.getMessage() + json.dumps(
+            {key: str(value) for key, value in vars(record).items()}
+        )
+        for value in forbidden:
+            assert value not in text, (record.name, record.getMessage())
+
+
+# --- reads ------------------------------------------------------------------
+
+
+def test_get_test_run_returns_the_persisted_evidence(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    evidence = _run_candidate(factory, workbench)
+
+    with factory() as session:
+        read = workbench.get_test_run(session, run_id=evidence.run_id)
+
+    expected = dataclasses_asdict(evidence)
+    expected.update(candidate_is_current=None, base_release_is_current=None)
+    assert dataclasses_asdict(read) == expected
+
+
+def test_get_test_run_of_an_unknown_id_is_not_found(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+
+    with factory() as session, pytest.raises(TestRunNotFound):
+        workbench.get_test_run(session, run_id=424242)
+
+
+def test_list_test_runs_returns_a_cases_runs_newest_first_and_bounded(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    first = _run_candidate(factory, workbench)
+    second = _run_baseline(factory, workbench)
+    third = _run_candidate(factory, workbench)
+    _run_candidate(factory, workbench, agent_key="builder")
+
+    with factory() as session:
+        runs = workbench.list_test_runs(session, test_case_id=_seed_case_id(factory))
+        limited = workbench.list_test_runs(
+            session, test_case_id=_seed_case_id(factory), limit=2
+        )
+
+    assert [run.run_id for run in runs] == [third.run_id, second.run_id, first.run_id]
+    assert [run.run_id for run in limited] == [third.run_id, second.run_id]
+
+
+@pytest.mark.parametrize("limit", [0, -1, 101, True])
+def test_list_test_runs_rejects_an_out_of_range_limit(factory, limit):
+    workbench, _runtime_, _adapter = _executor(factory)
+
+    with factory() as session, pytest.raises(ValueError):
+        workbench.list_test_runs(session, test_case_id=1, limit=limit)
+
+
+# --- C33: the bounded runtime -----------------------------------------------
+
+
+def test_the_default_executor_uses_the_bounded_test_runtime(factory, monkeypatch):
+    adapter = DeterministicFakeModelAdapter()
+    runtime = _runtime(factory, adapter)
+    calls: list[str] = []
+
+    def _bounded() -> AgentRuntime:
+        calls.append("get_agent_test_runtime")
+        return runtime
+
+    monkeypatch.setattr(workbench_module, "get_agent_test_runtime", _bounded)
+    workbench = AgentTestWorkbench()
+    assert calls == [], "the runtime is resolved lazily, not at construction"
+
+    _run_candidate(factory, workbench)
+
+    assert calls == ["get_agent_test_runtime"]
+    assert len(runtime.candidate_calls) == 1

@@ -75,6 +75,13 @@ from src.services.shared_deck_attribution import (
     MutationActor,
 )
 from src.utils.slide_hash import compute_slide_hash
+from tests.fixtures.model_payload_keys import (
+    BUILDER_MODEL_KEYS as _BUILDER_MODEL_KEYS,
+)
+from tests.fixtures.model_payload_keys import (
+    BUILDER_RETRY_MODEL_KEYS as _BUILDER_RETRY_MODEL_KEYS,
+)
+from tests.fixtures.model_payload_keys import EVERY_MODEL_CALL as _EVERY_MODEL_CALL
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
     DEFAULT_STYLE,
     TEMPLATE_LAYOUT,
@@ -3399,24 +3406,9 @@ class TestRuntimeRootActorTrace:
         assert collab.contributor_session_id not in prompt
 
 
-# The builder's model-facing payload, stated POSITIVELY as the user decided (#258):
-# nothing session-, user-, turn- or release-specific reaches the model.  A literal
-# here, not an import of the production allowlist, so a widened production set
-# fails this test instead of silently agreeing with it.
-_BUILDER_MODEL_KEYS = frozenset(
-    {
-        "position",
-        "slide_spec",
-        "assumes",
-        "hands_off",
-        "resolved_data",
-        "section_html",
-        "section_css",
-        "resolved_style",
-        "design_system_active",
-    }
-)
-_BUILDER_RETRY_MODEL_KEYS = _BUILDER_MODEL_KEYS | {"corrective_instruction"}
+# The builder's model-facing payload key sets live in
+# ``tests/fixtures/model_payload_keys.py`` (imported at the top), the one source
+# of truth #267's payload projection is also pinned to (C37).
 
 
 def _prompt_payload(prompt: str) -> dict:
@@ -3507,70 +3499,10 @@ class TestTheBuilderPromptCarriesOnlySlideContent:
             assert call.graph_release_id == release
 
 
-# Every role's model-facing payload, stated POSITIVELY as the user decided (#258):
-# nothing session-, user-, turn- or release-specific reaches ANY role's model.
-# Literals, not imports of production key sets, so a widened production payload
-# fails here instead of silently agreeing.  One entry per model invocation in the
-# order a full turn makes them; the deck-level re-review is the architect's own
-# build_reviewer pass, the one call that carries ``deck_brief``.
-_SLIDE_REVIEW_MODEL_KEYS = frozenset(
-    {
-        "position",
-        "slide_spec",
-        "resolved_style",
-        "section_css",
-        "resolved_data",
-        "html",
-        "scripts",
-    }
-)
-_FIXER_MODEL_KEYS = frozenset(
-    {
-        "position",
-        "finding",
-        "html",
-        "scripts",
-        "slide_spec",
-        "resolved_style",
-        "section_css",
-    }
-)
-_EVERY_MODEL_CALL = (
-    ("data_analyst", "data_analyst", frozenset({"data_request", "deck_purpose"})),
-    (
-        "architect",
-        "architect",
-        frozenset(
-            {
-                "conversation",
-                "message",
-                "current_deck_spec",
-                "committed_slide_count",
-                "previous_deck_review",
-                "available_design_contract",
-                "template_sections",
-                "resolved_style",
-                "design_system_library",
-            }
-        ),
-    ),
-    (
-        "deck_level_rereview",
-        "build_reviewer",
-        _SLIDE_REVIEW_MODEL_KEYS | {"deck_brief"},
-    ),
-    ("builder", "builder", _BUILDER_MODEL_KEYS),
-    ("builder_retry", "builder", _BUILDER_RETRY_MODEL_KEYS),
-    ("build_reviewer", "build_reviewer", _SLIDE_REVIEW_MODEL_KEYS),
-    ("fixer", "fixer", _FIXER_MODEL_KEYS),
-    ("fixer_retry", "fixer", _FIXER_MODEL_KEYS | {"corrective_instruction"}),
-    ("fix_reviewer", "fix_reviewer", _FIXER_MODEL_KEYS | {"change_summary"}),
-    (
-        "deck_reviewer",
-        "deck_reviewer",
-        frozenset({"narrative_arc", "call_to_action", "slide_count", "slides"}),
-    ),
-)
+# Every role's model-facing payload key sets, one entry per model invocation in
+# the order a full turn makes them, live in ``tests/fixtures/model_payload_keys.py``
+# (imported at the top), the one source of truth #267's payload projection is
+# also pinned to (C37).
 _COMMITTED_HTML = "<div class='slide'>committed zero</div>"
 
 
@@ -3858,3 +3790,100 @@ class TestNoCallSiteMayTraceBlank:
             and node.func.id == "AgentAssemblyContext"
         ]
         assert len(constructions) == 1, [ast.unparse(n) for n in constructions]
+
+
+# ---------------------------------------------------------------------------
+# #267 C10/C37: a test run hands the builder's model production's exact prompt
+# ---------------------------------------------------------------------------
+
+
+def _bootstrapped_graph_configuration():
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    import src.database.models  # noqa: F401 - register the complete ORM metadata
+    from src.core.database import Base
+    from src.services.graph_configuration import GraphConfiguration
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    return engine, factory
+
+
+def test_a_builder_test_run_prompt_is_byte_identical_to_the_builder_nodes(
+    graph_env, monkeypatch  # noqa: F811 - the conftest_graph fixture, as elsewhere here
+):
+    """C10 item 5: the seeded builder case through the test executor, and the same
+    payload through ``builder_node``, hand the model the same bytes."""
+    from sqlalchemy import select
+
+    from src.database.models.graph_configuration import AgentTestCase, GraphDraft
+    from src.services.agent_runtime import AgentRuntime as _Runtime
+    from src.services.agent_test_workbench import AgentTestWorkbench
+    from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
+    from src.services.persisted_graph_release import PersistedGraphReleaseLoader
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    seed = REQUIRED_SMOKE_PAYLOADS["builder"]
+    collab = _collaboration(graph_env)
+    trace = _trace_runtime(
+        monkeypatch,
+        collab,
+        {"builder": [BuilderOutput(position=seed["position"], html=CLEAN_HTML, scripts="")]},
+    )
+    node_payload = {
+        **seed,
+        "session_id": collab.owner_session_id,
+        "turn_id": TURN,
+        "initiated_by": USER,
+        "graph_release_id": collab.r1_id,
+        "root_session_id": collab.owner_session_id,
+        "actor_session_id": collab.owner_session_id,
+    }
+    builder_node(node_payload)
+    node_prompts = [prompt for key, prompt in trace.adapter.prompts if key == "builder"]
+    assert len(node_prompts) == 1
+
+    engine, factory = _bootstrapped_graph_configuration()
+    try:
+        adapter = DeterministicFakeModelAdapter()
+        workbench = AgentTestWorkbench(
+            runtime=_Runtime(
+                persisted_release_loader=PersistedGraphReleaseLoader(session_factory=factory),
+                model_adapter=adapter,
+                identity_sink=RecordingAgentInvocationIdentitySink(),
+            )
+        )
+        with factory() as session:
+            case_id = session.scalar(
+                select(AgentTestCase.id).where(
+                    AgentTestCase.name == "builder_required_smoke_v1"
+                )
+            )
+            lock_version = session.scalar(select(GraphDraft.lock_version))
+        with factory() as session:
+            evidence = workbench.execute_candidate_run(
+                session,
+                agent_key="builder",
+                test_case_id=case_id,
+                expected_lock_version=lock_version,
+                actor="runner@example.com",
+            )
+    finally:
+        engine.dispose()
+
+    assert evidence.execution_status == "completed", evidence.error_detail
+    assert [call.prompt for call in adapter.calls] == node_prompts
+    assert evidence.assembled_prompt == node_prompts[0]
+    for identifier in ("synthetic-builder", "synthetic-turn", "system:bootstrap"):
+        assert identifier not in node_prompts[0]

@@ -2115,3 +2115,326 @@ def test_postgres_identical_save_is_a_no_op_but_a_type_change_is_a_new_version(
         )
     assert (changed.version, changed.id != created.id) == (2, True)
     assert _case_tuple(factory, created.id)[4] is False
+
+
+# ===========================================================================
+# #267 Task 4: test run execution and persistence (C8/C32 lock release, C19/C20
+# row identity, #269 C13's transaction-2 ordering against an L0 writer)
+# ===========================================================================
+
+from src.database.models.graph_configuration import AgentTestRun  # noqa: E402
+from src.services.agent_runtime import AgentRuntime  # noqa: E402
+from src.services.agent_runtime_identity import (  # noqa: E402
+    RecordingAgentInvocationIdentitySink,
+)
+from src.services.agent_test_workbench import TestRunEvidence  # noqa: E402
+from src.services.persisted_graph_release import (  # noqa: E402
+    PersistedGraphReleaseLoader,
+)
+from tests.fixtures.deterministic_model_adapter import (  # noqa: E402
+    DeterministicFakeModelAdapter,
+)
+
+_RUN_TABLES = ("graph_release", "graph_draft", "agent_test_case", "agent_test_run")
+
+
+def _pg_executor(factory, adapter, graph_configuration=None) -> AgentTestWorkbench:
+    runtime = AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=factory),
+        model_adapter=adapter,
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+    return AgentTestWorkbench(runtime=runtime, graph_configuration=graph_configuration)
+
+
+def _pg_run_identity(factory, agent_key: str = "architect") -> dict[str, object]:
+    with factory() as session:
+        release_id = session.scalar(
+            select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
+        )
+        revision_id, revision_hash = session.execute(
+            select(AgentDefinitionRevision.id, AgentDefinitionRevision.content_hash)
+            .join(
+                GraphReleaseAgent,
+                GraphReleaseAgent.agent_definition_revision_id == AgentDefinitionRevision.id,
+            )
+            .where(
+                GraphReleaseAgent.graph_release_id == release_id,
+                GraphReleaseAgent.agent_key == agent_key,
+            )
+        ).one()
+        draft_hash = session.scalar(
+            select(GraphDraftAgent.candidate_hash).where(
+                GraphDraftAgent.agent_key == agent_key
+            )
+        )
+        lock_version = session.scalar(select(GraphDraft.lock_version))
+    return {
+        "release_id": release_id,
+        "revision_id": revision_id,
+        "revision_hash": revision_hash,
+        "draft_hash": draft_hash,
+        "lock_version": lock_version,
+    }
+
+
+def _run_row_identity(factory, run_id: int) -> tuple[object, ...]:
+    with factory() as session:
+        return tuple(
+            session.execute(
+                select(
+                    AgentTestRun.agent_key,
+                    AgentTestRun.run_kind,
+                    AgentTestRun.candidate_hash,
+                    AgentTestRun.test_case_id,
+                    AgentTestRun.test_case_version,
+                    AgentTestRun.compared_release_id,
+                    AgentTestRun.compared_definition_revision_id,
+                    AgentTestRun.execution_status,
+                    AgentTestRun.deterministic_checks_passed,
+                    AgentTestRun.run_by,
+                    AgentTestRun.verdict,
+                    AgentTestRun.verdict_reviewer,
+                    AgentTestRun.verdict_at,
+                    AgentTestRun.verdict_notes,
+                ).where(AgentTestRun.id == run_id)
+            ).one()
+        )
+
+
+def test_postgres_candidate_and_baseline_runs_persist_their_exact_identity(
+    postgres_engine,
+) -> None:
+    """Plan Task 4 Step 3: the rows exist with the exact identity and no verdict."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    identity = _pg_run_identity(factory)
+    case_id = _pg_seed_case_id(factory)
+    workbench = _pg_executor(factory, DeterministicFakeModelAdapter())
+
+    with factory() as session:
+        baseline = workbench.execute_baseline_rerun(
+            session, agent_key="architect", test_case_id=case_id, actor="runner@example.com"
+        )
+    with factory() as session:
+        candidate = workbench.execute_candidate_run(
+            session,
+            agent_key="architect",
+            test_case_id=case_id,
+            expected_lock_version=identity["lock_version"],
+            actor="runner@example.com",
+        )
+
+    assert isinstance(baseline, TestRunEvidence) and isinstance(candidate, TestRunEvidence)
+    assert _run_row_identity(factory, baseline.run_id) == (
+        "architect",
+        "published_baseline",
+        identity["revision_hash"],
+        case_id,
+        1,
+        identity["release_id"],
+        identity["revision_id"],
+        "completed",
+        True,
+        "runner@example.com",
+        None,
+        None,
+        None,
+        None,
+    )
+    assert _run_row_identity(factory, candidate.run_id) == (
+        "architect",
+        "candidate",
+        identity["draft_hash"],
+        case_id,
+        1,
+        identity["release_id"],
+        identity["revision_id"],
+        "completed",
+        True,
+        "runner@example.com",
+        None,
+        None,
+        None,
+        None,
+    )
+    # C20: the candidate row carries a copy of the baseline's outputs.
+    with factory() as session:
+        stored = session.get(AgentTestRun, candidate.run_id)
+        assert stored.baseline_raw_output == baseline.candidate_raw_output
+        assert stored.baseline_structured_output == baseline.candidate_structured_output
+        assert stored.model_payload == candidate.model_payload
+        assert "session_id" not in stored.model_payload
+        assert stored.run_at is not None and stored.run_at.tzinfo is not None
+    assert candidate.baseline_structured_output == baseline.candidate_structured_output
+
+
+def test_candidate_run_holds_no_lock_while_the_model_call_is_in_flight(
+    postgres_engine,
+) -> None:
+    """C8/C32: with the fake model paused mid-call, the executor's backend holds
+    no lock and no open transaction, a concurrent save commits unblocked, and the
+    run then persists the pre-save hash with ``candidate_is_current=False``."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    bootstrap_content, bootstrap_hash = _stored_draft(factory, "architect")
+    case_id = _pg_seed_case_id(factory)
+
+    in_flight = threading.Event()
+    release_model = threading.Event()
+    guard = threading.Lock()
+    pids: dict[str, list[int]] = {}
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            with guard:
+                pids.setdefault(threading.current_thread().name, []).append(pid)
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    adapter = DeterministicFakeModelAdapter(
+        mode="pause", entered=in_flight, release=release_model, pause_timeout=20
+    )
+    workbench = _pg_executor(factory, adapter, ObservedGraphConfiguration())
+    outcomes: dict[str, object] = {}
+
+    def _run() -> None:
+        threading.current_thread().name = "runner"
+        with factory() as session:
+            outcomes["run"] = workbench.execute_candidate_run(
+                session,
+                agent_key="architect",
+                test_case_id=case_id,
+                expected_lock_version=0,
+                actor="runner@example.com",
+            )
+
+    def _save() -> None:
+        threading.current_thread().name = "saver"
+        with factory() as session:
+            outcomes["save"] = GraphConfiguration().save_editable_model_draft(
+                session,
+                agent_key="architect",
+                expected_lock_version=0,
+                candidate=_editable_candidate(
+                    bootstrap_content, prompt_text="saved while the model ran"
+                ),
+                actor="saver@example.com",
+            )
+
+    observer = postgres_engine.connect()
+    observer_pid = observer.scalar(text("SELECT pg_backend_pid()"))
+    observer.commit()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            running = pool.submit(_run)
+            assert in_flight.wait(timeout=10), "the run never reached the model call"
+            with guard:
+                run_pid = pids["runner"][0]
+            assert run_pid != observer_pid
+            held = observer.scalar(
+                text("SELECT count(*) FROM pg_locks WHERE pid = :pid"), {"pid": run_pid}
+            )
+            held_on_run_tables = observer.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation"
+                    " WHERE l.pid = :pid AND c.relname = ANY(:tables)"
+                ),
+                {"pid": run_pid, "tables": list(_RUN_TABLES)},
+            )
+            state = observer.scalar(
+                text("SELECT state FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": run_pid},
+            )
+            observer.commit()
+            assert (held, held_on_run_tables) == (0, 0)
+            assert state != "idle in transaction"
+            saving = pool.submit(_save)
+            saving.result(timeout=10)
+            assert not running.done()
+            release_model.set()
+            running.result(timeout=20)
+    finally:
+        release_model.set()
+        observer.close()
+
+    saved = outcomes["save"]
+    assert isinstance(saved, DraftSaveResult)
+    _content, saved_hash = _stored_draft(factory, "architect")
+    assert saved_hash != bootstrap_hash
+    run = outcomes["run"]
+    assert isinstance(run, TestRunEvidence)
+    assert run.candidate_hash == bootstrap_hash
+    assert (run.candidate_is_current, run.base_release_is_current) == (False, True)
+    assert _run_row_identity(factory, run.run_id)[2] == bootstrap_hash
+    assert len(adapter.calls) == 1
+
+
+def test_candidate_run_insert_waits_behind_an_exclusive_parent_holder_without_deadlock(
+    postgres_engine,
+) -> None:
+    """#269 C13: transaction 2 takes release then draft ``FOR SHARE``, so an L0
+    ``FOR UPDATE`` holder (a publisher or draft writer) makes it wait, never
+    deadlock; the run commits once the holder does."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    case_id = _pg_seed_case_id(factory)
+    identity = _pg_run_identity(factory)
+
+    in_flight = threading.Event()
+    release_model = threading.Event()
+    guard = threading.Lock()
+    pids: list[int] = []
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            with guard:
+                pids.append(pid)
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    adapter = DeterministicFakeModelAdapter(
+        mode="pause", entered=in_flight, release=release_model, pause_timeout=20
+    )
+    workbench = _pg_executor(factory, adapter, ObservedGraphConfiguration())
+    outcomes: dict[str, object] = {}
+
+    def _run() -> None:
+        with factory() as session:
+            outcomes["run"] = workbench.execute_candidate_run(
+                session,
+                agent_key="architect",
+                test_case_id=case_id,
+                expected_lock_version=identity["lock_version"],
+                actor="runner@example.com",
+            )
+
+    holder = factory()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(_run)
+            assert in_flight.wait(timeout=10)
+            holder.begin()
+            GraphConfiguration()._lock_current_parents(holder, exclusive=True)
+            release_model.set()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                with guard:
+                    if len(pids) == 2:
+                        break
+                time.sleep(0.02)
+            with guard:
+                assert len(pids) == 2, "transaction 2 never reached its parent lock"
+                insert_pid = pids[1]
+            assert _observe_lock_waiter(postgres_engine, insert_pid)
+            assert not running.done()
+            holder.commit()
+            running.result(timeout=20)
+    finally:
+        release_model.set()
+        holder.close()
+
+    run = outcomes["run"]
+    assert isinstance(run, TestRunEvidence)
+    assert run.compared_release_id == identity["release_id"]
+    assert (run.candidate_is_current, run.base_release_is_current) == (True, True)
