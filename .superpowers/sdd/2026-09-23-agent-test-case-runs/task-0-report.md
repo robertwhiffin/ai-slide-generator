@@ -154,3 +154,40 @@ Collection error only. No other test in either file is affected, because the RED
 3. **#268:** its plan (:412) says the verdict update is the only allowed mutation. That is now database-enforced. A re-verdict (approved→rejected) on an **unlinked** run is still permitted by this trigger. That is #268's and #269's policy.
 4. **Out of scope, carried forward:** `test_postgres_restricts_deletion_of_referenced_release_and_revision` still proves only the 23514 trigger, not the FK (C21). The existing JSON columns still store `None` as `'null'` (see the finding).
 5. The review question's AC1 half (bootstrap and integrity guard) belongs to Task 1 under C3 and C5. It was not re-asserted here.
+
+## Fix round 1
+
+**Base:** `84afadbd8e4529d5480fe4303e6d6d3fcff44281`, pinned. **Fix commit:** `03992199b` test: pin evidence immutability for every non-verdict column (#267). Test-only: `tests/integration/test_graph_configuration_constraints_postgres.py`.
+
+**I1 (Important):** the immutability test rewrote 17 of the 23 non-verdict columns. It skipped `id`, `test_case_id`, `agent_key`, `compared_release_id`, `compared_definition_revision_id` and `run_at`, so exempting them left the file GREEN.
+
+**Fix:**
+- `EVIDENCE_COLUMN_REWRITES` gains all six.
+- Five of them resolve at run time against a second set of valid parents:
+  - `id` → `run_id + 1000`, an unused PK;
+  - `test_case_id` → a second architect case;
+  - `compared_release_id` → a second, closed release (v2);
+  - `compared_definition_revision_id` → a second architect revision (role-compatible);
+  - `run_at` → `run_at - 1 day`.
+- `agent_key` → `'builder'` passes the check, but no revision can satisfy the composite FK for both roles. That FK is an AFTER row trigger, so the BEFORE evidence trigger raises first. The test asserts SQLSTATE 23514 and the message `agent_test_run evidence is immutable`, and the row is unchanged.
+- New `test_evidence_rewrites_cover_every_non_verdict_agent_test_run_column` asserts `set(EVIDENCE_COLUMN_REWRITES) == set(AgentTestRun.__table__.columns.keys()) - VERDICT_COLUMNS`, with the column list read from table metadata.
+
+**Sabotage** (driver `/tmp/t267-0/fix1.py`; each anchor count is 1; each restore is `git checkout 03992199b… -- <file>` and `git diff --exit-code` is clean; scope is the PostgreSQL constraints file):
+
+| Mutation | File | Anchor | Marker (`grep -c`) | RED | Restore | GREEN |
+|---|---|---|---|---|---|---|
+| exempt `run_at` in both trigger arrays | database.py | 1 | `'run_at']` (2) | `test_postgres_agent_test_run_evidence_columns_are_immutable[run_at]` only | clean | 66 passed |
+| exempt `id` | database.py | 1 | `'id']` (2) | `…[id]` only | clean | 66 passed |
+| exempt all six | database.py | 1 | six-name array (2) | `…[agent_key]`, `…[compared_definition_revision_id]`, `…[compared_release_id]`, `…[id]`, `…[run_at]`, `…[test_case_id]` | clean | 66 passed |
+| add `sabotage_dummy = Column(Text)` to `AgentTestRun` | models | 1 | `sabotage_dummy = Column(Text)` (1) | `test_evidence_rewrites_cover_every_non_verdict_agent_test_run_column` only | clean | 66 passed |
+
+**Cause check (exempt all six):** five tests failed with `DID NOT RAISE`, because the update committed. That proves their values are FK- and check-valid, so only the trigger stops them. `agent_key` failed with `'23503' == '23514'`, because the composite FK is the next guard once the trigger no longer fires, as documented above.
+
+**Gates**
+| Gate | Result |
+|---|---|
+| `TELLR_TEST_POSTGRES_URL=… python -m pytest -q -p no:randomly -rs tests/integration/test_graph_configuration_constraints_postgres.py` | 66 passed, 0 skipped (was 59) |
+| `tests/unit/test_graph_configuration_models.py` | 27 passed |
+| full `tests/unit -q -p no:randomly -rf` (`DATABASE_URL=sqlite:////tmp/t267-0.sqlite`) | 6 failed, 6202 passed, 110 skipped, 136 warnings. The 6 are the baseline nodes and causes. The +8 passed come from Task 1's commits since `4d685d03d`; this fix touches no unit file. |
+| ruff on the touched file | clean |
+| `.venv` | absent before and after |
