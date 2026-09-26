@@ -2486,6 +2486,7 @@ async function installAgentTestMock(
     listCases?: (route: Route, call: number) => Promise<void> | void;
     createCase?: (route: Route, call: number) => Promise<void> | void;
     retireCase?: (route: Route, call: number) => Promise<void> | void;
+    updateCase?: (route: Route, call: number) => Promise<void> | void;
     candidateRun?: (route: Route, call: number) => Promise<void> | void;
     baselineRun?: (route: Route, call: number) => Promise<void> | void;
   },
@@ -2500,6 +2501,7 @@ async function installAgentTestMock(
     const key = method === 'GET' && /\/test-cases$/.test(url.pathname) ? 'listCases'
       : method === 'POST' && /\/test-cases$/.test(url.pathname) ? 'createCase'
         : method === 'DELETE' && /\/test-cases\/\d+$/.test(url.pathname) ? 'retireCase'
+          : method === 'PUT' && /\/test-cases\/\d+$/.test(url.pathname) ? 'updateCase'
           : method === 'POST' && /\/draft\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'candidateRun'
             : method === 'POST' && /\/published\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'baselineRun'
               : null;
@@ -2744,4 +2746,41 @@ test('Agent Test Cases: every control stays inside the guard, and no #266 or #26
   await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveCount(1);
   await expect(page.getByRole('region', { name: 'Test case evidence' })).toHaveCount(1);
   await expect(page.getByRole('region', { name: PROBE_RESULT_REGION })).toHaveCount(0);
+});
+
+test('Agent Test Cases: Edit test case saves a new version of the same case, and the next run uses it', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const version2 = syntheticAgentTestCase({ id: 111, version: 2, synthetic_payload: { user_request: 'Revised ask' } });
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    updateCase: (route) => fulfillJson(route, 200, version2),
+    candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({ test_case_id: 111, test_case_version: 2 })),
+  });
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+  await expect(aside).toContainText('saves a new version of the same case');
+
+  await aside.getByRole('button', { name: 'Edit test case' }).click();
+  await expect(aside).toContainText('Name: Architect quarterly revenue outline');
+  await aside.getByRole('textbox', { name: 'Synthetic payload (JSON)' }).fill('{"user_request": "Revised ask"}');
+  await aside.getByRole('button', { name: 'Save new version' }).click();
+  await expect(aside.getByRole('combobox', { name: 'Agent Test Cases' })).toHaveValue('111');
+  await expect(aside.getByRole('combobox', { name: 'Agent Test Cases' })).toContainText('v2');
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  const compare = await openTestView(page, 'Compare');
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Case version 2');
+  const put = requests.filter((request) => request.method === 'PUT');
+  expect(put.map((request) => request.path)).toEqual(['/api/admin/agent-definitions/test-cases/101']);
+  expect(JSON.parse(put[0].raw ?? '')).toEqual({
+    name: 'Architect quarterly revenue outline',
+    synthetic_payload: { user_request: 'Revised ask' },
+    assembly_context: { design_system_active: false },
+    is_required: true,
+  });
+  expect(runBodies(requests, 'draft')).toEqual(['{"test_case_id":111,"lock_version":0}']);
+  expect(saves).toHaveLength(0);
 });

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   syntheticAgentTestCase,
@@ -20,6 +20,7 @@ import {
   listTestCaseRuns,
   listTestCases,
   retireTestCase,
+  updateTestCase,
 } from '../../../api/agentDefinitions';
 import { emptyAgentTestingState, type AgentTestingState } from './draftEditorState';
 import { TestRunPanel, type TestRunPanelProps } from './TestRunPanel';
@@ -30,6 +31,8 @@ const REPLACE_ORDER_HINT =
   'To replace a test case, add the new case first and then retire the old one: '
   + 'a role cannot lose its last required case.';
 const UNSAVED_HINT = "Save this role's edits before running a test case.";
+const EDIT_HINT =
+  'Edit test case saves a new version of the same case and keeps the old version as history.';
 
 function readyTesting(overrides: Partial<AgentTestingState> = {}): AgentTestingState {
   return {
@@ -53,6 +56,7 @@ function renderPanel(overrides: Partial<TestRunPanelProps> = {}) {
     onRunPublishedBaseline: vi.fn(),
     onCreateTestCase: vi.fn().mockResolvedValue(null),
     onRetireTestCase: vi.fn(),
+    onUpdateTestCase: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
   return { props, ...render(<TestRunPanel {...props} />) };
@@ -296,7 +300,7 @@ describe('TestRunPanel', () => {
   it('disables every test operation while the one gate is held', () => {
     renderPanel({ operationsDisabled: true });
 
-    for (const name of ['Run test case', 'Run published baseline', 'Add test case', 'Retire test case']) {
+    for (const name of ['Run test case', 'Run published baseline', 'Add test case', 'Retire test case', 'Edit test case']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
     }
   });
@@ -364,6 +368,61 @@ describe('TestRunPanel', () => {
       assembly_context: { design_system_active: true },
       is_required: false,
     });
+  });
+
+  it('distinguishes editing a case (a new version) from replacing it with another (add, then retire)', () => {
+    renderPanel();
+
+    expect(screen.getByText(EDIT_HINT)).toBeInTheDocument();
+    expect(screen.getByText(REPLACE_ORDER_HINT)).toBeInTheDocument();
+  });
+
+  it('edits the selected case as a new version with its name fixed, sending exactly the supersede body', async () => {
+    const onUpdateTestCase = vi.fn().mockResolvedValue(syntheticAgentTestCase({ id: 111, version: 2 }));
+    renderPanel({ onUpdateTestCase });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit test case' }));
+    expect(screen.queryByRole('textbox', { name: 'Test case name' })).not.toBeInTheDocument();
+    expect(screen.getByText('Name: Architect quarterly revenue outline')).toBeInTheDocument();
+    const payload = screen.getByRole('textbox', { name: 'Synthetic payload (JSON)' });
+    expect(JSON.parse((payload as HTMLTextAreaElement).value)).toEqual(syntheticAgentTestCase().synthetic_payload);
+    expect(screen.getByRole('checkbox', { name: 'Required test case' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Design system active' })).not.toBeChecked();
+    expect(payload.parentElement).toHaveTextContent(SYNTHETIC_DATA_WARNING);
+
+    fireEvent.change(payload, { target: { value: '[]' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
+    expect(screen.getByText('The synthetic payload must be a JSON object.')).toBeInTheDocument();
+    expect(onUpdateTestCase).not.toHaveBeenCalled();
+
+    fireEvent.change(payload, { target: { value: '{"user_request": "Revised synthetic ask"}' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Design system active' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
+    await vi.waitFor(() => expect(onUpdateTestCase).toHaveBeenCalledTimes(1));
+    expect(onUpdateTestCase).toHaveBeenCalledWith('architect', 101, {
+      name: 'Architect quarterly revenue outline',
+      synthetic_payload: { user_request: 'Revised synthetic ask' },
+      assembly_context: { design_system_active: true },
+      is_required: true,
+    });
+    await vi.waitFor(() => expect(screen.queryByRole('button', { name: 'Save new version' })).not.toBeInTheDocument());
+  });
+
+  it('keeps the edit form open when the new version is refused', async () => {
+    renderPanel({ onUpdateTestCase: vi.fn().mockResolvedValue(null) });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit test case' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole('button', { name: 'Save new version' })).toBeInTheDocument();
+  });
+
+  it('shows the panel notice without an alert', () => {
+    renderPanel({ testing: readyTesting({ notice: 'No change: this content matches version 1, so no new version was created.' }) });
+
+    expect(screen.getByText('No change: this content matches version 1, so no new version was created.'))
+      .toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('shows a contained panel error and the ordered server issues', () => {
@@ -577,6 +636,43 @@ describe('the test run client', () => {
     await expect(listTestCaseRuns(101)).resolves.toEqual([stored]);
     const [listUrl] = onlyCall(listFetch);
     expect(listUrl).toMatch(/\/api\/admin\/agent-definitions\/test-cases\/101\/runs$/);
+  });
+});
+
+describe('the test case supersede client', () => {
+  const request = {
+    name: 'Architect quarterly revenue outline',
+    synthetic_payload: { user_request: 'Revised synthetic ask' },
+    assembly_context: { design_system_active: true },
+    is_required: true,
+  };
+
+  it('supersedes one version with exactly the update body', async () => {
+    const next = syntheticAgentTestCase({ id: 111, version: 2 });
+    const fetchMock = stubFetch(200, next);
+
+    await expect(updateTestCase(101, request)).resolves.toEqual(next);
+
+    const [url, init] = onlyCall(fetchMock);
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/test-cases\/101$/);
+    expect(init.method).toBe('PUT');
+    expect(Object.keys(JSON.parse(String(init.body)))).toEqual([
+      'name', 'synthetic_payload', 'assembly_context', 'is_required',
+    ]);
+    expect(JSON.parse(String(init.body))).toEqual(request);
+  });
+
+  it('surfaces a stale 409, an ordered 422 and an inactive 200 exactly', async () => {
+    stubFetch(409, syntheticStaleTestCase(101));
+    expect(((await rejection(updateTestCase(101, request))) as AgentTestApiError).failure)
+      .toEqual(syntheticStaleTestCase(101));
+
+    const refused = syntheticInvalidTestCase([{ field: 'is_required', code: 'last_required_case', message: 'x' }]);
+    stubFetch(422, refused);
+    expect(((await rejection(updateTestCase(101, request))) as AgentTestApiError).failure).toEqual(refused);
+
+    stubFetch(200, syntheticAgentTestCase({ is_active: false }));
+    expect(await rejection(updateTestCase(101, request))).toBeInstanceOf(InvalidTestRunResponseError);
   });
 });
 

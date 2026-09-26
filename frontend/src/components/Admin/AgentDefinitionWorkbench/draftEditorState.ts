@@ -165,6 +165,8 @@ export interface AgentTestingState {
   error: string | null;
   /** The exact ordered server issues of the last refused test operation. */
   issues: DraftFieldError[];
+  /** An informational outcome that is not an error, such as an edit that changed nothing. */
+  notice: string | null;
 }
 
 export function emptyAgentTestingState(): AgentTestingState {
@@ -176,6 +178,7 @@ export function emptyAgentTestingState(): AgentTestingState {
     baselineEvidence: null,
     error: null,
     issues: [],
+    notice: null,
   };
 }
 
@@ -202,10 +205,10 @@ export interface DraftEditorEntry {
  * under the lock exactly as the probe does, and a baseline rerun and a case write are
  * the panel's other writes, so none needs a second in-flight flag.
  */
-export type TestOperationKind = 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire';
+export type TestOperationKind = 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire' | 'testCaseUpdate';
 
 export const TEST_OPERATIONS: readonly TestOperationKind[] = [
-  'testRun', 'baselineRun', 'testCaseCreate', 'testCaseRetire',
+  'testRun', 'baselineRun', 'testCaseCreate', 'testCaseRetire', 'testCaseUpdate',
 ];
 
 export type DraftOperationKind =
@@ -286,6 +289,7 @@ export type DraftEditorAction =
   | { type: 'testRunConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
   | { type: 'testCaseCreated'; requestId: number; testCase: TestCaseListEntry }
   | { type: 'testCaseRetired'; requestId: number; testCase: TestCaseListEntry }
+  | { type: 'testCaseUpdated'; requestId: number; testCase: TestCaseListEntry }
   | { type: 'testOperationFailed'; requestId: number; message: string; issues: DraftFieldError[] }
   | { type: 'schemaOverlayOptionalFieldToggled'; agentKey: AgentKey; fieldName: string }
   | { type: 'schemaOverlayFieldDescriptionChanged'; agentKey: AgentKey; fieldName: string; description: string }
@@ -742,12 +746,13 @@ export const TEST_RUN_REJECTED_MESSAGE = 'The saved candidate was refused.';
 export const TEST_CASE_INVALID_RESPONSE_MESSAGE =
   'Unable to update the test case because the server response was invalid.';
 
-export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load';
+export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load' | 'update';
 
 const TEST_OPERATION_SUBJECT: Record<TestOperationVerb, string> = {
   run: 'run the test case',
   create: 'save the test case',
   retire: 'retire the test case',
+  update: 'save the new test case version',
   load: 'load Agent Test Cases',
 };
 
@@ -1153,7 +1158,7 @@ function runEvidenceIsCoherent(
 }
 
 function settledTesting(testing: AgentTestingState): AgentTestingState {
-  return { ...testing, error: null, issues: [] };
+  return { ...testing, error: null, issues: [], notice: null };
 }
 
 export function draftEditorReducer(
@@ -1400,6 +1405,34 @@ export function draftEditorReducer(
         casesStatus: 'ready',
         casesRequestId: null,
         cases: testing.cases.filter((item) => item.id !== action.testCase.id),
+      }));
+    }
+    case 'testCaseUpdated': {
+      const pending = matchingTestPending(state, action.requestId);
+      if (pending === null || pending.operation !== 'testCaseUpdate') return state;
+      const edited = state.byAgent[pending.agentKey].testing.cases.find((item) => item.id === pending.testCaseId);
+      if (action.testCase.agent_key !== pending.agentKey
+        || !action.testCase.is_active
+        || (edited !== undefined && action.testCase.name !== edited.name)) {
+        return settleTestOperation(state, pending, (testing) => ({
+          ...testing, error: TEST_CASE_INVALID_RESPONSE_MESSAGE, issues: [],
+        }));
+      }
+      // The server's identical-content no-op returns the version it was asked to edit.
+      if (action.testCase.id === pending.testCaseId) {
+        return settleTestOperation(state, pending, (testing) => ({
+          ...settledTesting(testing),
+          notice: `No change: this content matches version ${action.testCase.version}, so no new version was created.`,
+        }));
+      }
+      return settleTestOperation(state, pending, (testing) => ({
+        ...settledTesting(testing),
+        casesStatus: 'ready',
+        casesRequestId: null,
+        cases: [
+          ...testing.cases.filter((item) => item.id !== pending.testCaseId && item.id !== action.testCase.id),
+          action.testCase,
+        ],
       }));
     }
     case 'testOperationFailed': {

@@ -234,6 +234,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                 onRunPublishedBaseline={editor.runPublishedBaseline}
                 onCreateTestCase={editor.createAgentTestCase}
                 onRetireTestCase={editor.retireAgentTestCase}
+                onUpdateTestCase={editor.updateAgentTestCase}
               />
             ) : (
               <p className="mt-3 text-sm leading-6 text-gray-600">
