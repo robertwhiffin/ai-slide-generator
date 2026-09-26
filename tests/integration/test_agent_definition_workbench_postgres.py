@@ -14,6 +14,7 @@ from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.api.routes import _authz
+from src.api.routes import agent_definitions as agent_definition_routes
 from src.api.routes.agent_definitions import router as agent_definition_router
 from src.api.schemas.agent_definitions import (
     DraftDefinitionResponse,
@@ -43,6 +44,7 @@ from src.database.models.graph_configuration import (
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_configuration import (
+    CatalogRemoteEndpointDraftValidator,
     DraftContentRejected,
     DraftLegacyPromptSource,
     DraftSaveConflict,
@@ -60,6 +62,7 @@ from src.services.graph_definition_manifest import (
     DefinitionContent,
     definition_content_hash,
 )
+from src.services.model_endpoint_catalog import FakeModelEndpointCatalog
 from src.services.prompt_assembler import (
     ROLE_UNTRUSTED_DATA_NOTICE,
     V1_PROTECTED_ASSEMBLY_IDENTITY,
@@ -1291,6 +1294,11 @@ def real_route_stack(postgres_engine, monkeypatch):
             yield session
 
     app.dependency_overrides[get_db] = _override_db
+    # The PUT's production remote endpoint validator needs a workspace client;
+    # this stack proves persistence, so every remote endpoint check accepts.
+    app.dependency_overrides[
+        agent_definition_routes.get_remote_endpoint_draft_validator
+    ] = lambda: CatalogRemoteEndpointDraftValidator(FakeModelEndpointCatalog)
     monkeypatch.setenv("ENVIRONMENT", "production")
     set_current_user("task6-admin@example.com")
     monkeypatch.setattr(_authz, "_admin_acl_probe", lambda _user: True)
@@ -1537,3 +1545,259 @@ def test_real_upgrade_route_rejects_a_stale_lock_with_a_null_candidate_conflict(
     # A refused upgrade writes nothing of its own.
     assert _draft_meta(factory)[0] == 1
     assert _stored_draft(factory, "data_analyst")[0].protected_assembly.version == 1
+
+
+# ---------------------------------------------------------------------------
+# #266 Task 2: the remote endpoint phase under real PostgreSQL row locks.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validation(
+    postgres_engine, monkeypatch
+) -> None:
+    """Catches the remote endpoint check running for a stale concurrent loser.
+
+    The winner blocks inside a deterministic remote validator while it holds the
+    draft locks; a second, locally valid save against the same lock version
+    waits on a real PostgreSQL lock, then sees the winner's commit and returns
+    the coherent 409 without ever invoking remote validation or writing.
+    """
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    bootstrap_content, _ = _stored_draft(factory, "architect")
+    artifacts_before = _immutable_graph_artifacts(factory)
+
+    winner_validating = threading.Event()
+    release_winner = threading.Event()
+    loser_started = threading.Event()
+    guard = threading.Lock()
+    pids: dict[str, int] = {}
+    outcomes: dict[str, object] = {}
+    remote_calls: list[tuple[str, str]] = []
+    writes: list[str] = []
+
+    class BlockingRemoteEndpointValidator:
+        def validate(self, content: DefinitionContent) -> None:
+            with guard:
+                remote_calls.append(
+                    (threading.current_thread().name, content.model.endpoint_name)
+                )
+            if threading.current_thread().name == "endpoint-winner":
+                winner_validating.set()
+                assert release_winner.wait(timeout=20), "test never released the winner"
+
+    original_write = GraphConfiguration._write_locked_content
+
+    def _recording_write(session, *, locked, content, actor):
+        with guard:
+            writes.append(actor)
+        return original_write(session, locked=locked, content=content, actor=actor)
+
+    monkeypatch.setattr(
+        GraphConfiguration, "_write_locked_content", staticmethod(_recording_write)
+    )
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            with guard:
+                pids[threading.current_thread().name] = pid
+            if threading.current_thread().name == "endpoint-loser":
+                loser_started.set()
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    service = ObservedGraphConfiguration(
+        remote_endpoint_validator=BlockingRemoteEndpointValidator()
+    )
+    loser_candidate = EditableModelDraft(
+        prompt_text="stale loser edit",
+        endpoint_name="loser endpoint name",
+        temperature=float(bootstrap_content.model.temperature),
+        max_tokens=bootstrap_content.model.max_tokens,
+        top_p=float(bootstrap_content.model.top_p),
+    )
+
+    def _save(thread_name: str, candidate: EditableModelDraft) -> None:
+        threading.current_thread().name = thread_name
+        with factory() as session:
+            outcomes[thread_name] = service.save_editable_model_draft(
+                session,
+                agent_key="architect",
+                expected_lock_version=0,
+                candidate=candidate,
+                actor=thread_name,
+            )
+
+    winner_candidate = EditableModelDraft(
+        prompt_text="winner edit",
+        endpoint_name="winner endpoint name",
+        temperature=float(bootstrap_content.model.temperature),
+        max_tokens=bootstrap_content.model.max_tokens,
+        top_p=float(bootstrap_content.model.top_p),
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winner = pool.submit(_save, "endpoint-winner", winner_candidate)
+            assert winner_validating.wait(timeout=10), "winner never reached remote validation"
+            loser = pool.submit(_save, "endpoint-loser", loser_candidate)
+            assert loser_started.wait(timeout=10), "loser never attempted the parent lock"
+            with guard:
+                loser_pid = pids.get("endpoint-loser")
+                winner_pid = pids.get("endpoint-winner")
+            assert loser_pid is not None and winner_pid is not None
+            assert winner_pid != loser_pid
+            assert _observe_lock_waiter(postgres_engine, loser_pid) is True
+            with guard:
+                assert remote_calls == [("endpoint-winner", "winner endpoint name")]
+            release_winner.set()
+            winner.result(timeout=20)
+            loser.result(timeout=20)
+    finally:
+        release_winner.set()
+
+    won = outcomes["endpoint-winner"]
+    lost = outcomes["endpoint-loser"]
+    assert isinstance(won, DraftSaveResult)
+    assert won.draft.lock_version == 1
+    assert won.draft.updated_by == "endpoint-winner"
+    persisted, persisted_hash = _stored_draft(factory, "architect")
+    assert persisted.prompt_text == "winner edit"
+    assert persisted.model.endpoint_name == "winner endpoint name"
+    assert persisted_hash == definition_content_hash(persisted)
+    assert _draft_meta(factory)[:2] == (1, "endpoint-winner")
+
+    assert isinstance(lost, DraftSaveConflict)
+    assert lost.expected_lock_version == 0
+    assert lost.current_lock_version == 1
+    assert lost.client_candidate is loser_candidate
+    assert set(lost.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+    assert len(lost.server.definitions) == 7
+    assert lost.server.definitions["architect"].content.prompt_text == "winner edit"
+
+    # The stale loser never reached the remote phase and never wrote.
+    assert remote_calls == [("endpoint-winner", "winner endpoint name")]
+    assert writes == ["endpoint-winner"]
+    assert _immutable_graph_artifacts(factory) == artifacts_before
+
+
+def test_model_endpoint_probe_holds_no_lock_while_the_model_call_is_in_flight(
+    postgres_engine,
+) -> None:
+    """Correction 13: the probe's snapshot read releases every lock before the call.
+
+    A deterministic probe blocks mid-call.  While it is in flight, the backend
+    that took the snapshot's FOR SHARE parent locks must hold no lock and no open
+    transaction, and a concurrent save (which needs FOR UPDATE on the same
+    parents) must commit without waiting.  The probe then reports its copied
+    pre-save identity, not the committed one.
+    """
+    from src.services.model_endpoint_probe import (
+        ModelEndpointProbeService,
+        SavedEndpointProbeIdentity,
+    )
+
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    bootstrap_content, bootstrap_hash = _stored_draft(factory, "architect")
+    artifacts_before = _immutable_graph_artifacts(factory)
+
+    probe_in_flight = threading.Event()
+    release_probe = threading.Event()
+    guard = threading.Lock()
+    pids: dict[str, int] = {}
+    probed: list[str] = []
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            with guard:
+                pids.setdefault(threading.current_thread().name, pid)
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    class BlockingProbe:
+        def probe(self, configuration) -> None:
+            with guard:
+                probed.append(configuration.endpoint_name)
+            probe_in_flight.set()
+            assert release_probe.wait(timeout=20), "test never released the probe"
+
+    service = ModelEndpointProbeService(
+        BlockingProbe(), configuration_factory=ObservedGraphConfiguration
+    )
+    outcomes: dict[str, object] = {}
+
+    def _probe() -> None:
+        threading.current_thread().name = "probe"
+        with factory() as session:
+            outcomes["probe"] = service.probe_saved_candidate(
+                session, agent_key="architect", expected_lock_version=0
+            )
+
+    def _save() -> None:
+        threading.current_thread().name = "saver"
+        with factory() as session:
+            outcomes["save"] = GraphConfiguration().save_editable_model_draft(
+                session,
+                agent_key="architect",
+                expected_lock_version=0,
+                candidate=EditableModelDraft(
+                    prompt_text=bootstrap_content.prompt_text,
+                    endpoint_name="saved while probing",
+                    temperature=float(bootstrap_content.model.temperature),
+                    max_tokens=bootstrap_content.model.max_tokens,
+                    top_p=float(bootstrap_content.model.top_p),
+                ),
+                actor="saver",
+            )
+
+    # The observer's connection is checked out before the probe starts, so the
+    # pool cannot hand it the probe's released connection and have it count its
+    # own locks.
+    observer = postgres_engine.connect()
+    observer_pid = observer.scalar(text("SELECT pg_backend_pid()"))
+    observer.commit()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            probing = pool.submit(_probe)
+            assert probe_in_flight.wait(timeout=10), "probe never reached the model call"
+            with guard:
+                probe_pid = pids["probe"]
+            assert probe_pid != observer_pid
+            held = observer.scalar(
+                text("SELECT count(*) FROM pg_locks WHERE pid = :pid"),
+                {"pid": probe_pid},
+            )
+            state = observer.scalar(
+                text("SELECT state FROM pg_stat_activity WHERE pid = :pid"),
+                {"pid": probe_pid},
+            )
+            observer.commit()
+            assert held == 0
+            assert state != "idle in transaction"
+            saving = pool.submit(_save)
+            # The save must finish while the probe is still blocked mid-call.
+            saving.result(timeout=10)
+            assert not probing.done()
+            release_probe.set()
+            probing.result(timeout=20)
+    finally:
+        release_probe.set()
+        observer.close()
+
+    saved = outcomes["save"]
+    assert isinstance(saved, DraftSaveResult)
+    assert saved.draft.lock_version == 1
+    persisted, persisted_hash = _stored_draft(factory, "architect")
+    assert persisted.model.endpoint_name == "saved while probing"
+    assert persisted_hash != bootstrap_hash
+
+    result = outcomes["probe"]
+    assert probed == [bootstrap_content.model.endpoint_name]
+    assert result.failure is None
+    assert result.identity == SavedEndpointProbeIdentity(
+        agent_key="architect",
+        endpoint_name=bootstrap_content.model.endpoint_name,
+        candidate_hash=bootstrap_hash,
+        lock_version=0,
+    )
+    assert _immutable_graph_artifacts(factory) == artifacts_before

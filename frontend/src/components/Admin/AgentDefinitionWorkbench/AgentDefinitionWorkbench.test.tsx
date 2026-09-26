@@ -3,15 +3,26 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ALREADY_CURRENT_REJECTION,
   DIRTY_LEGACY_PROMPT,
+  ENDPOINT_NAME_POLICY_CASES,
   MANUAL_RESOLUTION_REJECTION,
+  MODEL_ENDPOINT_DISCOVERY_FORBIDDEN,
+  MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE,
   PUBLISHED_V1_PROMPT_SOURCE,
   SCHEMA_ALREADY_CURRENT_REJECTION,
+  SEED_CANDIDATE_HASH,
+  SEED_MODEL_ENDPOINT_NAME,
+  STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
   syntheticDraftDefinitions,
   syntheticLegacyPromptSource,
+  syntheticModelEndpointDiscovery,
+  syntheticNewerModelEndpoint,
   syntheticNullCandidateConflict,
+  syntheticProbeFailure,
+  syntheticProbeSuccess,
   syntheticSchemaV2DraftDefinition,
+  syntheticSystemModelEndpoints,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
 } from '../../../../tests/fixtures/mocks';
@@ -28,9 +39,15 @@ import type {
   DraftSaveSuccessResponse,
   EditableModelDraft,
 } from '../../../api/agentDefinitions';
+import {
+  AgentDefinitionApiError,
+  InvalidModelEndpointCatalogResponseError,
+  ModelEndpointCatalogApiError,
+  getSystemModelEndpoints,
+} from '../../../api/agentDefinitions';
 import { AdminPage } from '../AdminPage';
 import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
-import { LEGACY_COMPOSITE_ROLES } from './draftEditorState';
+import { LEGACY_COMPOSITE_ROLES, validateDraftForm } from './draftEditorState';
 import { useDraftEditor } from './useDraftEditor';
 
 vi.mock('../UsageDashboard', () => ({ UsageDashboard: () => <div>Usage panel fixture</div> }));
@@ -87,15 +104,6 @@ function expectNoForbiddenActionNames() {
   expect(interactiveControls().length).toBeGreaterThan(0);
 }
 
-function mockFetchResponse(status: number, body: unknown) {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    statusText: status === 403 ? 'Forbidden' : status === 500 ? 'Internal Server Error' : 'OK',
-    json: vi.fn().mockResolvedValue(body),
-  }));
-}
-
 function apiResponse(status: number, body: unknown) {
   return {
     ok: status >= 200 && status < 300,
@@ -103,6 +111,65 @@ function apiResponse(status: number, body: unknown) {
     statusText: status === 409 ? 'Conflict' : status === 422 ? 'Unprocessable Entity' : 'OK',
     json: vi.fn().mockResolvedValue(body),
   };
+}
+
+/**
+ * Every harness routes by URL (#266 correction 17). The workbench aggregate is answered
+ * only on its own URL, and the discovery catalog gets a default accepting list, so a
+ * catalog GET can never be answered with a workbench body (or vice versa).
+ */
+const WORKBENCH_SUFFIX = '/api/admin/agent-definitions/workbench';
+const CATALOG_SUFFIX = '/api/admin/agent-definitions/model-endpoints';
+
+function isCatalogUrl(url: unknown) {
+  return String(url).endsWith(CATALOG_SUFFIX);
+}
+
+function isWorkbenchUrl(url: unknown) {
+  return String(url).endsWith(WORKBENCH_SUFFIX);
+}
+
+/**
+ * The #266 probe POST is routed by URL (correction 17): every harness below otherwise
+ * parses an unmatched non-GET as a PUT, which would answer a probe with a save body.
+ */
+const PROBE_SUFFIX = '/model-endpoint-probe';
+
+function isProbeUrl(url: unknown) {
+  return String(url).endsWith(PROBE_SUFFIX);
+}
+
+function probeCalls(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([url]) => isProbeUrl(url));
+}
+
+function defaultCatalogResponse() {
+  return apiResponse(200, syntheticModelEndpointDiscovery());
+}
+
+function workbenchGets(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([url, init]) =>
+    isWorkbenchUrl(url) && (init as RequestInit | undefined)?.method === 'GET');
+}
+
+/** Every GET to any URL: the "exactly these reads and no others" backstop. */
+function allGets(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET');
+}
+
+function catalogGets(fetchMock = vi.mocked(fetch)) {
+  return fetchMock.mock.calls.filter(([url]) => isCatalogUrl(url));
+}
+
+function mockFetchResponse(status: number, body: unknown) {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => (isCatalogUrl(url)
+    ? defaultCatalogResponse()
+    : {
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: status === 403 ? 'Forbidden' : status === 500 ? 'Internal Server Error' : 'OK',
+      json: vi.fn().mockResolvedValue(body),
+    })));
 }
 
 function modelNode(agentKey: AgentKey) {
@@ -176,10 +243,20 @@ function conflictWithServerEdits(
 function mockWorkbenchWithPuts(
   put: (agentKey: AgentKey, request: DraftSaveRequest, call: number) => Promise<object> | object,
   workbench: object = syntheticAgentDefinitionWorkbench,
+  catalog: (call: number) => Promise<object> | object = defaultCatalogResponse,
+  probe?: (agentKey: AgentKey, body: Record<string, unknown>, call: number) => Promise<object> | object,
 ) {
   let putCall = 0;
+  let catalogCall = 0;
+  let probeCall = 0;
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-    if (init?.method === 'GET') return apiResponse(200, workbench);
+    if (isCatalogUrl(url)) return catalog(catalogCall++);
+    if (isWorkbenchUrl(url)) return apiResponse(200, workbench);
+    if (isProbeUrl(url)) {
+      if (!probe) throw new Error('unexpected probe POST');
+      const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
+      return probe(agentKey, JSON.parse(String(init?.body)) as Record<string, unknown>, probeCall++);
+    }
     const agentKey = url.split('/').at(-1) as AgentKey;
     const request = JSON.parse(String(init?.body)) as DraftSaveRequest;
     const result = await put(agentKey, request, putCall++);
@@ -201,7 +278,7 @@ async function editArchitectFiveFields(assertNoPut?: () => void) {
   assertNoPut?.();
   fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
   assertNoPut?.();
-  fireEvent.change(screen.getByRole('textbox', { name: 'Endpoint' }), { target: { value: 'endpoint-a2' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Custom endpoint name' }), { target: { value: 'endpoint-a2' } });
   assertNoPut?.();
   fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.4' } });
   assertNoPut?.();
@@ -253,6 +330,7 @@ describe('the forbidden-action guard', () => {
       'Add custom block After environment constraints', 'Go to Assembly tab',
       'Go to Prompt tab', 'Delete custom block 1 at After authored prompt',
       'Move custom block 1 up', 'Move custom block 1 down', 'Discard retained values',
+      'Refresh models',
       ...NODE_ORDER,
     ]) {
       expect(forbidsActionName(name)).toBe(false);
@@ -318,7 +396,7 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.keyDown(promptTab, { key: 'ArrowRight' });
     expect(modelTab).toHaveAttribute('aria-selected', 'true');
     await waitFor(() => expect(modelTab).toHaveFocus());
-    expect(screen.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('databricks-claude-opus-4-6');
+    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('databricks-claude-opus-4-6');
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(60000);
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Output Schema' }));
@@ -406,6 +484,8 @@ describe('AgentDefinitionWorkbench', () => {
     await loadedNodeNavigation();
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(workbenchGets()).toHaveLength(1);
+    expect(catalogGets()).toHaveLength(0);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/admin\/agent-definitions\/workbench$/),
       expect.objectContaining({ method: 'GET' }),
@@ -462,7 +542,7 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-a2');
+    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-a2');
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
@@ -694,7 +774,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveAccessibleDescription('Prompt rejected.');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('textbox', { name: 'Endpoint' })).toHaveAccessibleDescription('Endpoint rejected.');
+    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveAccessibleDescription('Endpoint rejected.');
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveAccessibleDescription('Temperature rejected.');
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveAccessibleDescription('Maximum tokens rejected.');
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveAccessibleDescription('Top-p rejected.');
@@ -744,7 +824,7 @@ describe('AgentDefinitionWorkbench', () => {
     );
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('textbox', { name: 'Endpoint' })).toHaveValue('endpoint-a2');
+    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-a2');
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
@@ -803,7 +883,9 @@ describe('AgentDefinitionWorkbench', () => {
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect persisted');
     expect(within(screen.getByRole('navigation', { name: 'Graph nodes' }))
       .getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
-    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET')).toHaveLength(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(catalogGets(fetchMock)).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
 });
@@ -825,11 +907,18 @@ function mockWorkbenchApi(routes: {
   put?: RouteResponder;
   upgrade?: RouteResponder;
   source?: RouteResponder;
+  probe?: RouteResponder;
 }) {
-  const counts = { put: 0, upgrade: 0, source: 0 };
+  const counts = { put: 0, upgrade: 0, source: 0, probe: 0 };
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-    if (init?.method === 'GET') return apiResponse(200, syntheticAgentDefinitionWorkbench);
+    if (isCatalogUrl(url)) return defaultCatalogResponse();
+    if (isWorkbenchUrl(url)) return apiResponse(200, syntheticAgentDefinitionWorkbench);
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (isProbeUrl(url)) {
+      const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
+      if (!routes.probe) throw new Error('unexpected probe POST');
+      return routes.probe(agentKey, body, counts.probe++);
+    }
     if (url.endsWith(UPGRADE_SUFFIX)) {
       const agentKey = url.slice(0, -UPGRADE_SUFFIX.length).split('/').at(-1) as AgentKey;
       if (!routes.upgrade) throw new Error('unexpected upgrade POST');
@@ -1088,8 +1177,9 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     // No reload, save, retry, or second state check.
     expect(upgradeCalls(fetchMock)).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(0);
-    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET'))
-      .toHaveLength(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(catalogGets(fetchMock)).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(1);
     expect(promptPanel()).toBeVisible();
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect local edit');
     expect(screen.queryByRole('region', { name: 'Values retained for recovery' })).not.toBeInTheDocument();
@@ -1405,8 +1495,9 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     expect(screen.getByRole('tab', { name: 'Assembly' })).toHaveAttribute('aria-selected', 'true');
     expect(within(screen.getByRole('tabpanel', { name: 'Assembly' }))
       .getAllByRole('group', { name: /^Custom block \d at/ })).toHaveLength(1);
-    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET'))
-      .toHaveLength(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(catalogGets(fetchMock)).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(1);
     expect(upgradeCalls(fetchMock)).toHaveLength(1);
   });
 });
@@ -1426,6 +1517,8 @@ function GateHarness() {
     ['upgrade builder', () => editor.upgradeProtectedAssembly('builder')],
     ['recover data analyst', () => editor.restorePublishedV1Prompt('data_analyst')],
     ['schema upgrade architect', () => editor.upgradeSchemaContract('architect')],
+    ['probe architect', () => editor.probeStructuredOutput('architect')],
+    ['probe builder', () => editor.probeStructuredOutput('builder')],
   ];
   // Pairs fired inside one handler never see a re-render, so the hook's shared
   // in-flight ref is the only guard the second call can meet.
@@ -1454,6 +1547,22 @@ function GateHarness() {
       void editor.save('architect');
       void editor.upgradeSchemaContract('architect');
     }],
+    ['double probe architect', () => {
+      void editor.probeStructuredOutput('architect');
+      void editor.probeStructuredOutput('architect');
+    }],
+    ['probe then save architect', () => {
+      void editor.probeStructuredOutput('architect');
+      void editor.save('architect');
+    }],
+    ['save then probe architect', () => {
+      void editor.save('architect');
+      void editor.probeStructuredOutput('architect');
+    }],
+    ['probe then schema upgrade builder', () => {
+      void editor.probeStructuredOutput('architect');
+      void editor.upgradeSchemaContract('builder');
+    }],
   ];
   return (
     <>
@@ -1470,6 +1579,7 @@ function GateHarness() {
 describe('schema contract upgrade via useDraftEditor', () => {
   function mockForSchemaUpgrade(upgradeRespond: (key: string) => object) {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (isCatalogUrl(url)) return Promise.resolve(defaultCatalogResponse());
       if (typeof url === 'string' && url.includes('schema-contract-upgrade')) {
         const agentKey = url.split('/').at(-2) ?? 'architect';
         return Promise.resolve(apiResponse(200, upgradeRespond(agentKey)));
@@ -1587,6 +1697,16 @@ describe('useDraftEditor shared request gate', () => {
     ['save architect', 'schema upgrade architect'],
     ['schema upgrade architect', 'upgrade architect'],
     ['upgrade architect', 'schema upgrade architect'],
+    ['probe architect', 'save architect'],
+    ['save architect', 'probe architect'],
+    ['probe architect', 'upgrade architect'],
+    ['upgrade architect', 'probe builder'],
+    ['probe architect', 'schema upgrade architect'],
+    ['schema upgrade architect', 'probe builder'],
+    ['recover data analyst', 'probe architect'],
+    ['probe architect', 'recover data analyst'],
+    ['probe architect', 'probe builder'],
+    ['probe architect', 'probe architect'],
   ])('%s then %s issues only the first request', (first, second) => {
     const { fetchMock } = heldFetch();
     render(<GateHarness />);
@@ -1607,6 +1727,10 @@ describe('useDraftEditor shared request gate', () => {
     'recover then save builder',
     'schema upgrade then save architect',
     'save architect then schema upgrade',
+    'double probe architect',
+    'probe then save architect',
+    'save then probe architect',
+    'probe then schema upgrade builder',
   ])('%s inside one tick issues only the first request', (name) => {
     const { fetchMock } = heldFetch();
     render(<GateHarness />);
@@ -1648,13 +1772,15 @@ function workbenchWithArchitectSchemaV2(): AgentDefinitionWorkbenchResponse {
 describe('AgentDefinitionWorkbench Output Schema tab', () => {
   it('toggling the picker, typing guidance and navigating send zero requests', async () => {
     const body = workbenchWithArchitectSchemaV2();
-    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => (
-      init?.method === 'GET' ? apiResponse(200, body) : apiResponse(500, null)
-    ));
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (isCatalogUrl(url)) return defaultCatalogResponse();
+      return isWorkbenchUrl(url) ? apiResponse(200, body) : apiResponse(500, null);
+    });
     vi.stubGlobal('fetch', fetchMock);
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
     const requests = () => fetchMock.mock.calls.length;
 
     fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
@@ -1725,8 +1851,9 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
   });
 
   it('links a Schema Upgrade already_current 422 to the Output Schema tab', async () => {
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === 'GET') return apiResponse(200, syntheticAgentDefinitionWorkbench);
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (isCatalogUrl(url)) return defaultCatalogResponse();
+      if (isWorkbenchUrl(url)) return apiResponse(200, syntheticAgentDefinitionWorkbench);
       if (url.endsWith('/schema-contract-upgrade')) return apiResponse(422, SCHEMA_ALREADY_CURRENT_REJECTION);
       return apiResponse(500, null);
     });
@@ -1754,5 +1881,1049 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
     expect(result.current.state.byAgent.architect.fieldErrors).toEqual({
       'schema_overlay.field_overrides.intent.examples': 'Examples must be a JSON array.',
     });
+  });
+});
+
+// ============================================================
+// #266 Task 4 — typed discovery client and Model-tab endpoint controls
+// ============================================================
+
+const URL_NOT_ALLOWED = 'Endpoint must be a Databricks endpoint name, not a URL.';
+const EMPTY_DISCOVERY = 'No Databricks foundation-model endpoints are available to this identity.';
+const NO_SEARCH_MATCH = 'No discovered models match the search.';
+const SEED_NUMERICS = { temperature: 0.7, max_tokens: 60000, top_p: 0.95 };
+
+describe('getSystemModelEndpoints', () => {
+  function stubFetch(response: unknown) {
+    const fetchMock = vi.fn().mockResolvedValue(response);
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  async function rejection(promise: Promise<unknown>): Promise<unknown> {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+    throw new Error('expected a rejection');
+  }
+
+  it('reads the discovery list once with a bare GET and returns the exact items in server order', async () => {
+    const response = apiResponse(200, syntheticModelEndpointDiscovery());
+    const fetchMock = stubFetch(response);
+
+    await expect(getSystemModelEndpoints()).resolves.toEqual(syntheticSystemModelEndpoints);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/model-endpoints$/);
+    expect(init.method).toBe('GET');
+    expect(init.body).toBeUndefined();
+    expect(response.json).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns an empty list for an empty success', async () => {
+    stubFetch(apiResponse(200, { items: [] }));
+    await expect(getSystemModelEndpoints()).resolves.toEqual([]);
+  });
+
+  it('never caches or coalesces: every call makes its own GET', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => apiResponse(200, syntheticModelEndpointDiscovery()));
+    vi.stubGlobal('fetch', fetchMock);
+    await Promise.all([getSystemModelEndpoints(), getSystemModelEndpoints()]);
+    await getSystemModelEndpoints();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  class EndpointLike {
+    name = 'databricks-gpt-oss-120b';
+    display_name = null;
+    description = null;
+    docs = null;
+  }
+  class EnvelopeLike {
+    items = [];
+  }
+  const good = syntheticSystemModelEndpoints[1];
+
+  it.each([
+    ['a null body', null],
+    ['an array body', []],
+    ['a class-instance envelope', new EnvelopeLike()],
+    ['an extra top-level key', { items: [good], total: 1 }],
+    ['a missing items key', {}],
+    ['items that are not an array', { items: { 0: good } }],
+    ['an array item', { items: [[good.name]] }],
+    ['a class-instance item', { items: [new EndpointLike()] }],
+    ['an item missing docs', { items: [{ name: good.name, display_name: null, description: null }] }],
+    ['an item with a task field', { items: [{ ...good, task: 'llm/v1/chat' }] }],
+    ['a numeric name', { items: [{ ...good, name: 7 }] }],
+    ['an empty name', { items: [{ ...good, name: '' }] }],
+    ['a numeric display name', { items: [{ ...good, display_name: 4 }] }],
+    ['a boolean description', { items: [{ ...good, description: false }] }],
+    ['an object docs value', { items: [{ ...good, docs: { url: 'https://x.invalid' } }] }],
+    ['duplicate names', { items: [good, { ...good }] }],
+  ])('rejects a malformed 200 with %s as an invalid catalog response', async (_name, body) => {
+    stubFetch(apiResponse(200, body));
+    const error = await rejection(getSystemModelEndpoints());
+    expect(error).toBeInstanceOf(InvalidModelEndpointCatalogResponseError);
+    expect(error).not.toBeInstanceOf(ModelEndpointCatalogApiError);
+  });
+
+  it('rejects an unparseable 200 body as an invalid catalog response', async () => {
+    stubFetch({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: vi.fn().mockRejectedValue(new SyntaxError('not JSON')),
+    });
+    await expect(getSystemModelEndpoints()).rejects.toBeInstanceOf(InvalidModelEndpointCatalogResponseError);
+  });
+
+  it.each([
+    [403, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN],
+    [503, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE],
+  ] as const)('throws the typed catalog error for a valid %i envelope', async (status, envelope) => {
+    const response = apiResponse(status, envelope);
+    stubFetch(response);
+    const error = await rejection(getSystemModelEndpoints());
+
+    expect(error).toBeInstanceOf(ModelEndpointCatalogApiError);
+    const typed = error as ModelEndpointCatalogApiError;
+    expect(typed.status).toBe(status);
+    expect(typed.code).toBe(envelope.code);
+    expect(typed.retryable).toBe(envelope.retryable);
+    expect(typed.message).toBe(envelope.message);
+    expect(response.json).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['403 admin denial', 403, { detail: 'Admin access required' }],
+    ['403 with the unavailable code', 403, { ...MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE, retryable: false }],
+    ['503 that is not retryable', 503, { ...MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE, retryable: false }],
+    ['503 with an extra key', 503, { ...MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE, detail: 'x' }],
+    ['503 with a numeric message', 503, { ...MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE, message: 5 }],
+    ['500', 500, null],
+    ['200-range but not 200', 204, null],
+  ])('does not type a %s as a catalog envelope', async (_name, status, body) => {
+    stubFetch({ ...apiResponse(status, body), ok: status >= 200 && status < 300 });
+    const error = await rejection(getSystemModelEndpoints());
+    expect(error).not.toBeInstanceOf(ModelEndpointCatalogApiError);
+    expect(error).toBeInstanceOf(status === 204 ? InvalidModelEndpointCatalogResponseError : AgentDefinitionApiError);
+  });
+
+  it('propagates a network failure unchanged', async () => {
+    const failure = new TypeError('network failed');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(failure));
+    await expect(getSystemModelEndpoints()).rejects.toBe(failure);
+  });
+});
+
+describe('local endpoint-name policy in validateDraftForm', () => {
+  const form = (endpoint_name: string) => ({
+    prompt_text: 'prompt',
+    endpoint_name,
+    temperature: 0.2,
+    max_tokens: 10,
+    top_p: 0.8,
+    assembly_rules: null,
+  });
+
+  it.each(ENDPOINT_NAME_POLICY_CASES.rejected)('rejects URL- or path-shaped %j with the table message and no candidate', (name) => {
+    const result = validateDraftForm(form(name));
+    expect(result).toEqual({ ok: false, errors: { endpoint_name: URL_NOT_ALLOWED } });
+  });
+
+  it.each(ENDPOINT_NAME_POLICY_CASES.accepted)('accepts %j verbatim', (name) => {
+    const result = validateDraftForm(form(name));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.candidate.model.endpoint_name).toBe(name);
+  });
+
+  it('keeps the blank message for a blank name', () => {
+    expect(validateDraftForm(form('  '))).toEqual({
+      ok: false,
+      errors: { endpoint_name: 'Endpoint name must not be blank.' },
+    });
+  });
+});
+
+function modelPanel() {
+  return screen.getByRole('tabpanel', { name: 'Model' });
+}
+
+function openModelTab() {
+  fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+  return modelPanel();
+}
+
+function customEndpoint() {
+  return screen.getByRole('textbox', { name: 'Custom endpoint name' });
+}
+
+function discoveredNames() {
+  const group = within(modelPanel()).queryByRole('radiogroup', { name: 'Discovered models' });
+  if (!group) return [];
+  return within(group).getAllByRole('radio').map((radio) => radio.getAttribute('value'));
+}
+
+function catalogResponse(items = syntheticSystemModelEndpoints) {
+  return apiResponse(200, syntheticModelEndpointDiscovery(items));
+}
+
+function heldCatalog() {
+  const pending: Array<(response: object) => void> = [];
+  const responder = () => new Promise<object>((resolve) => { pending.push(resolve); });
+  return { pending, responder };
+}
+
+function architectStatus(navigation: HTMLElement) {
+  return within(navigation).getByRole('button', { name: /Architect/ });
+}
+
+describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
+  it('fetches the catalog once on the first Model-tab opening of any role and again only on Refresh models', async () => {
+    const fetchMock = mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    expect(catalogGets(fetchMock)).toHaveLength(0);
+    fireEvent.click(screen.getByRole('tab', { name: 'Assembly' }));
+    expect(catalogGets(fetchMock)).toHaveLength(0);
+
+    openModelTab();
+    await waitFor(() => expect(discoveredNames()).toEqual(syntheticSystemModelEndpoints.map((item) => item.name)));
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+    const [url, init] = catalogGets(fetchMock)[0] as [string, RequestInit];
+    expect(url).not.toContain('?');
+    expect(init.method).toBe('GET');
+    expect(init.body).toBeUndefined();
+
+    // Every other role's editor is mounted too; none of them reads the catalog again.
+    for (const role of ['Builder', 'Data Analyst', 'Deck Reviewer', 'Architect']) {
+      fireEvent.click(within(navigation).getByRole('button', { name: role }));
+      openModelTab();
+      fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
+      openModelTab();
+    }
+    expect(discoveredNames()).toEqual(syntheticSystemModelEndpoints.map((item) => item.name));
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+
+    fireEvent.click(within(modelPanel()).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(catalogGets(fetchMock)).toHaveLength(2));
+    fireEvent.click(within(modelPanel()).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(catalogGets(fetchMock)).toHaveLength(3));
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('exposes Refresh models, a labelled search, exact-name entries, and a separate custom endpoint field', async () => {
+    mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    expect(within(panel).getByRole('button', { name: 'Refresh models' })).toBeEnabled();
+    expect(within(panel).getByRole('searchbox', { name: 'Search discovered models' })).toHaveValue('');
+    const group = await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    for (const item of syntheticSystemModelEndpoints) {
+      // The accessible name of each entry is the exact endpoint name, never its display name.
+      expect(within(group).getByRole('radio', { name: item.name })).toHaveAttribute('value', item.name);
+    }
+    expect(within(group).getAllByRole('radio')).toHaveLength(syntheticSystemModelEndpoints.length);
+    expect(within(group).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
+    expect(within(panel).getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    // Display metadata is shown as description, not as the control's name.
+    expect(within(group).getByRole('radio', { name: 'databricks-gpt-oss-120b' }))
+      .toHaveAccessibleDescription(/GPT OSS 120B/);
+    expectNoForbiddenActionNames();
+  });
+
+  it('selection copies exactly the item name into the endpoint form value and nothing else', async () => {
+    const fetchMock = mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    const group = await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    for (const item of [syntheticSystemModelEndpoints[1], syntheticSystemModelEndpoints[2]]) {
+      fireEvent.click(within(group).getByRole('radio', { name: item.name }));
+      expect(customEndpoint()).toHaveValue(item.name);
+      expect(within(group).getByRole('radio', { name: item.name })).toBeChecked();
+      expect(within(group).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).not.toBeChecked();
+      expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(SEED_NUMERICS.temperature);
+      expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(SEED_NUMERICS.max_tokens);
+      expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(SEED_NUMERICS.top_p);
+    }
+    expect(architectStatus(navigation)).toHaveTextContent('Unsaved');
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+  });
+
+  it('selection never saves: no PUT after the selection settles, and Save stays an explicit action', async () => {
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request) =>
+      apiResponse(200, saveSuccess(agentKey, request.candidate, 1)));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    const group = await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(within(group).getByRole('radio', { name: 'databricks-gpt-oss-120b' }));
+    await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 0); }); });
+
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(architectStatus(navigation)).toHaveTextContent('Unsaved');
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+  });
+
+  it('searches locally and case-insensitively and reports no match without changing the selection', async () => {
+    const fetchMock = mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const search = within(panel).getByRole('searchbox', { name: 'Search discovered models' });
+
+    fireEvent.change(search, { target: { value: 'OPUS' } });
+    expect(discoveredNames()).toEqual([SEED_MODEL_ENDPOINT_NAME]);
+    fireEvent.change(search, { target: { value: 'gpt oss' } });
+    expect(discoveredNames()).toEqual(['databricks-gpt-oss-120b']);
+    fireEvent.change(search, { target: { value: 'OPEN-WEIGHT' } });
+    expect(discoveredNames()).toEqual(['databricks-gpt-oss-120b']);
+    fireEvent.change(search, { target: { value: 'team shared' } });
+    expect(discoveredNames()).toEqual(['Team Shared Endpoint (EU)']);
+    fireEvent.change(search, { target: { value: 'no-such-model' } });
+    expect(discoveredNames()).toEqual([]);
+    expect(panel).toHaveTextContent(NO_SEARCH_MATCH);
+
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(architectStatus(navigation)).not.toHaveTextContent('Unsaved');
+    fireEvent.change(search, { target: { value: '' } });
+    expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('says exactly when no foundation-model endpoint is available and keeps the saved endpoint', async () => {
+    mockWorkbenchWithPuts(() => apiResponse(500, null), syntheticAgentDefinitionWorkbench, () => catalogResponse([]));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    expect(await within(panel).findByText(EMPTY_DISCOVERY)).toBeVisible();
+    expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+  });
+
+  it.each([
+    [503, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE],
+    [403, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN.message, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN],
+    [500, 'Unable to load discovered models (500).', null],
+    // A workbench body answered on the catalog URL is exactly the misrouting c17 names.
+    [200, 'Model discovery returned an invalid response.', syntheticAgentDefinitionWorkbench],
+  ])('a %i failure is an alert that preserves the saved endpoint and recovers through Refresh models', async (status, message, failureBody) => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      (call) => (call === 0 ? apiResponse(status, failureBody) : catalogResponse()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    const alert = await within(panel).findByRole('alert');
+    expect(alert).toHaveTextContent(message);
+    expect(within(panel).queryByText(EMPTY_DISCOVERY)).not.toBeInTheDocument();
+    expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(architectStatus(navigation)).not.toHaveTextContent('Unsaved');
+    const refresh = within(panel).getByRole('button', { name: 'Refresh models' });
+    expect(refresh).toBeEnabled();
+
+    fireEvent.click(refresh);
+    await waitFor(() => expect(discoveredNames()).toEqual(syntheticSystemModelEndpoints.map((item) => item.name)));
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    expect(catalogGets(fetchMock)).toHaveLength(2);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it.each([
+    ['forbidden', 403, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN.message],
+    [
+      'unavailable',
+      503,
+      MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE,
+      `${MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message} Use Refresh models to try again.`,
+    ],
+  ])('a %s catalog alert offers a retry only when the failure is retryable', async (_label, status, failureBody, expected) => {
+    mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      () => apiResponse(status, failureBody),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    const alert = await within(panel).findByRole('alert');
+    expect(alert.textContent).toBe(expected);
+    if (!failureBody.retryable) expect(alert.textContent).not.toMatch(/try again/i);
+  });
+
+  it('a network failure is a retryable alert, not an empty catalog', async () => {
+    mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      (call) => (call === 0 ? Promise.reject(new TypeError('network failed')) : catalogResponse()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    expect(await within(panel).findByRole('alert'))
+      .toHaveTextContent('Unable to load discovered models. Check your connection and try again.');
+    expect(within(panel).queryByText(EMPTY_DISCOVERY)).not.toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(discoveredNames()).toHaveLength(syntheticSystemModelEndpoints.length));
+  });
+
+  it('refresh replaces the prior list only after a success and keeps it through loading and failure', async () => {
+    const held = heldCatalog();
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      (call) => (call === 0 ? catalogResponse() : held.responder()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    const original = syntheticSystemModelEndpoints.map((item) => item.name);
+    await waitFor(() => expect(discoveredNames()).toEqual(original));
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+    expect(panel).toHaveTextContent('Loading discovered models');
+    expect(discoveredNames()).toEqual(original);
+    await act(async () => { held.pending[0](apiResponse(503, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE)); });
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message);
+    expect(discoveredNames()).toEqual(original);
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(held.pending).toHaveLength(2));
+    const refreshed = [syntheticNewerModelEndpoint, syntheticSystemModelEndpoints[1]];
+    await act(async () => { held.pending[1](catalogResponse(refreshed)); });
+    await waitFor(() => expect(discoveredNames()).toEqual(refreshed.map((item) => item.name)));
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    expect(catalogGets(fetchMock)).toHaveLength(3);
+  });
+
+  it('an older refresh response never overwrites the newest one', async () => {
+    const held = heldCatalog();
+    mockWorkbenchWithPuts(() => apiResponse(500, null), syntheticAgentDefinitionWorkbench, held.responder);
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(held.pending).toHaveLength(2));
+
+    const newest = [syntheticNewerModelEndpoint];
+    await act(async () => { held.pending[1](catalogResponse(newest)); });
+    await waitFor(() => expect(discoveredNames()).toEqual([syntheticNewerModelEndpoint.name]));
+    await act(async () => { held.pending[0](catalogResponse()); });
+    await act(async () => { await Promise.resolve(); });
+    expect(discoveredNames()).toEqual([syntheticNewerModelEndpoint.name]);
+
+    // A stale failure cannot overwrite the newest success either.
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await waitFor(() => expect(held.pending).toHaveLength(4));
+    await act(async () => { held.pending[3](catalogResponse(syntheticSystemModelEndpoints)); });
+    await waitFor(() => expect(discoveredNames()).toHaveLength(syntheticSystemModelEndpoints.length));
+    await act(async () => { held.pending[2](apiResponse(503, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE)); });
+    await act(async () => { await Promise.resolve(); });
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('a newer discovered item never moves the seed until it is explicitly selected and saved', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      (agentKey, request) => apiResponse(200, saveSuccess(agentKey, request.candidate, 1)),
+      syntheticAgentDefinitionWorkbench,
+      (call) => (call === 0
+        ? catalogResponse()
+        : catalogResponse([syntheticNewerModelEndpoint, ...syntheticSystemModelEndpoints])),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const statusBefore = architectStatus(navigation).textContent;
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await within(panel).findByRole('radio', { name: syntheticNewerModelEndpoint.name });
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
+    expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
+    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name }));
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    expect(JSON.parse(String((putCalls(fetchMock)[0][1] as RequestInit).body))).toEqual({
+      lock_version: 0,
+      candidate: {
+        prompt_text: modelNode('architect').draft.prompt_text,
+        model: { endpoint_name: syntheticNewerModelEndpoint.name, ...SEED_NUMERICS },
+      },
+    });
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    expect(customEndpoint()).toHaveValue(syntheticNewerModelEndpoint.name);
+  });
+
+  it('keeps same-content Save enabled with the catalog loaded', async () => {
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request) =>
+      apiResponse(200, saveSuccess(agentKey, request.candidate, 1, false)));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    // Re-selecting the already-selected seed is not an edit.
+    fireEvent.click(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME }));
+
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    expect((JSON.parse(String((putCalls(fetchMock)[0][1] as RequestInit).body)) as DraftSaveRequest)
+      .candidate.model.endpoint_name).toBe(SEED_MODEL_ENDPOINT_NAME);
+  });
+
+  it.each([
+    'https://example.cloud.databricks.com/serving-endpoints/x/invocations',
+    'serving-endpoints/../secrets',
+    'x?token=abc',
+  ])('a URL- or path-shaped custom name %j shows the local table message and sends zero PUT', async (value) => {
+    const fetchMock = mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.change(customEndpoint(), { target: { value } });
+    expect(customEndpoint()).toHaveAccessibleDescription(URL_NOT_ALLOWED);
+    expect(within(panel).getByRole('alert')).toHaveTextContent(URL_NOT_ALLOWED);
+    expect(customEndpoint()).toHaveValue(value);
+    const save = screen.getByRole('button', { name: 'Save Draft' });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    await act(async () => { await Promise.resolve(); });
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(within(panel).queryByRole('radio', { checked: true })).not.toBeInTheDocument();
+
+    fireEvent.change(customEndpoint(), { target: { value: 'corrected-endpoint' } });
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    expect(save).toBeEnabled();
+  });
+
+  it('saves a manual exact name as only the lock plus the five editable leaves and retains it', async () => {
+    const manual = 'Team Exact Endpoint 9';
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request) =>
+      apiResponse(200, saveSuccess(agentKey, request.candidate, 1)));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    expect(discoveredNames()).not.toContain(manual);
+
+    fireEvent.change(customEndpoint(), { target: { value: manual } });
+    expect(within(panel).queryByRole('radio', { checked: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+
+    const raw = String((putCalls(fetchMock)[0][1] as RequestInit).body);
+    const body = JSON.parse(raw) as DraftSaveRequest;
+    expect(Object.keys(body).sort()).toEqual(['candidate', 'lock_version']);
+    expect(Object.keys(body.candidate).sort()).toEqual(['model', 'prompt_text']);
+    expect(Object.keys(body.candidate.model).sort()).toEqual(['endpoint_name', 'max_tokens', 'temperature', 'top_p']);
+    expect(body).toEqual({
+      lock_version: 0,
+      candidate: {
+        prompt_text: modelNode('architect').draft.prompt_text,
+        model: { endpoint_name: manual, ...SEED_NUMERICS },
+      },
+    });
+    expect(body.candidate.model.endpoint_name).toBe(manual);
+    for (const forbidden of [
+      '"display_name"', '"docs"', '"description"', '"items"', '"name"', '"host"', '"token"',
+      '"task"', '"provider"', '"url"', 'http', '://',
+      ...syntheticSystemModelEndpoints.flatMap((item) => [item.display_name, item.description, item.docs])
+        .filter((value): value is string => value !== null),
+    ]) {
+      expect(raw).not.toContain(forbidden);
+    }
+
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    expect(customEndpoint()).toHaveValue(manual);
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('binds a typed server endpoint issue to the custom field, keeps every unsaved value, and retries without remount', async () => {
+    const missing = 'Team Missing Endpoint';
+    const corrected = 'Team Found Endpoint';
+    const fetchMock = mockWorkbenchWithPuts((agentKey, request, call) => (call === 0
+      ? apiResponse(422, {
+        code: 'invalid_draft',
+        errors: [{
+          field: 'candidate.model.endpoint_name',
+          code: 'endpoint_unknown',
+          message: 'Endpoint name was not found.',
+        }],
+      })
+      : apiResponse(200, saveSuccess(agentKey, request.candidate, 1))));
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect unsaved prompt' } });
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const endpointInput = customEndpoint();
+    fireEvent.change(endpointInput, { target: { value: missing } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.3' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+
+    await waitFor(() => expect(customEndpoint()).toHaveAccessibleDescription('Endpoint name was not found.'));
+    const alerts = within(panel).getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveTextContent('Endpoint name was not found.');
+    expect(alerts[0].textContent).not.toContain(missing);
+    expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
+    expect(customEndpoint()).toBe(endpointInput);
+    expect(customEndpoint()).toHaveValue(missing);
+    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.3);
+    expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(SEED_NUMERICS.max_tokens);
+    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.5);
+    expect(architectStatus(navigation)).toHaveTextContent('Unsaved');
+    fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
+    expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect unsaved prompt');
+    openModelTab();
+
+    fireEvent.change(customEndpoint(), { target: { value: corrected } });
+    expect(customEndpoint()).not.toHaveAccessibleDescription('Endpoint name was not found.');
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+    const second = JSON.parse(String((putCalls(fetchMock)[1][1] as RequestInit).body)) as DraftSaveRequest;
+    expect(second).toEqual({
+      lock_version: 0,
+      candidate: {
+        prompt_text: 'Architect unsaved prompt',
+        model: { endpoint_name: corrected, temperature: 0.3, max_tokens: SEED_NUMERICS.max_tokens, top_p: 0.5 },
+      },
+    });
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    expect(customEndpoint()).toBe(endpointInput);
+    expect(customEndpoint()).toHaveValue(corrected);
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+  });
+
+  it('the catalog read stays outside the one pending gate in both directions', async () => {
+    const held = heldCatalog();
+    let releasePut!: (response: object) => void;
+    const heldPut = new Promise<object>((resolve) => { releasePut = resolve; });
+    const fetchMock = mockWorkbenchWithPuts(() => heldPut, syntheticAgentDefinitionWorkbench, held.responder);
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+
+    // A catalog load in flight does not block Save.
+    const save = screen.getByRole('button', { name: 'Save Draft' });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    expect(save).toBeDisabled();
+
+    // A pending Save does not block catalog recovery.
+    const refresh = within(panel).getByRole('button', { name: 'Refresh models' });
+    expect(refresh).toBeEnabled();
+    fireEvent.click(refresh);
+    await waitFor(() => expect(held.pending).toHaveLength(2));
+    await act(async () => { held.pending[1](catalogResponse()); });
+    await waitFor(() => expect(discoveredNames()).toHaveLength(syntheticSystemModelEndpoints.length));
+    expect(save).toBeDisabled();
+
+    releasePut(apiResponse(200, saveSuccess('architect', {
+      prompt_text: modelNode('architect').draft.prompt_text,
+      model: { endpoint_name: SEED_MODEL_ENDPOINT_NAME, ...SEED_NUMERICS },
+    }, 1)));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    expect(save).toBeEnabled();
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+});
+
+// ============================================================
+// #266 Task 6 — explicit structured-output probe of the saved candidate
+// ============================================================
+
+const PROBE_BUTTON = 'Test structured output';
+const PROBE_RETRY_BUTTON = 'Retry structured output test';
+const PROBE_RESULT_REGION = 'Structured output test result';
+const PROBE_SUCCEEDED_TEXT = 'Structured output test succeeded for the saved candidate.';
+const PROBE_UNSAVED_HINT = 'Save the endpoint before testing structured output.';
+const PROBE_NETWORK_MESSAGE = 'Unable to test structured output. Check your connection and try again.';
+const PROBE_IDENTITY_TEXT = (endpoint: string, hash: string, lock: number) =>
+  `Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
+
+function probeButton() {
+  return within(modelPanel()).getByRole('button', { name: PROBE_BUTTON });
+}
+
+function probeResult() {
+  return within(modelPanel()).queryByRole('region', { name: PROBE_RESULT_REGION });
+}
+
+function probeBody(fetchMock: ReturnType<typeof vi.fn>, index: number) {
+  return String((probeCalls(fetchMock)[index][1] as RequestInit).body);
+}
+
+function heldResponses() {
+  const pending: Array<(response: object) => void> = [];
+  const responder = () => new Promise<object>((resolve) => { pending.push(resolve); });
+  return { pending, responder };
+}
+
+describe('AgentDefinitionWorkbench structured-output probe', () => {
+  it('Test structured output sends one lock-only POST for the saved candidate and reports its exact identity without a write', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(200, syntheticProbeSuccess()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const statusBefore = architectStatus(navigation).textContent;
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    const [url, init] = probeCalls(fetchMock)[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/admin\/agent-definitions\/draft\/architect\/model-endpoint-probe$/);
+    expect(url).not.toContain('?');
+    expect(init.method).toBe('POST');
+    expect(probeBody(fetchMock, 0)).toBe('{"lock_version":0}');
+
+    const region = probeResult()!;
+    expect(region).toHaveTextContent(PROBE_SUCCEEDED_TEXT);
+    expect(region).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expect(within(region).queryByRole('alert')).not.toBeInTheDocument();
+    // Success approves nothing: no status, lock, form or write moves.
+    expect(region.textContent).not.toMatch(/approv|publish|release|ready|verified|passed/i);
+    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(catalogGets(fetchMock)).toHaveLength(1);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(within(region).queryByRole('button', { name: PROBE_RETRY_BUTTON })).not.toBeInTheDocument();
+    expectNoForbiddenActionNames();
+  });
+
+  it('probes the saved endpoint, never a newer discovered family member that was not selected and saved', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      (call) => (call === 0
+        ? catalogResponse()
+        : catalogResponse([syntheticNewerModelEndpoint, ...syntheticSystemModelEndpoints])),
+      () => apiResponse(200, syntheticProbeSuccess()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
+    await within(panel).findByRole('radio', { name: syntheticNewerModelEndpoint.name });
+
+    expect(probeButton()).toBeEnabled();
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+
+    expect(probeBody(fetchMock, 0)).toBe('{"lock_version":0}');
+    expect(probeBody(fetchMock, 0)).not.toContain(syntheticNewerModelEndpoint.name);
+    expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('is disabled while the local endpoint is unsaved, and probes the newly saved candidate once it is saved', async () => {
+    const newer = 'databricks-gpt-oss-120b';
+    const fetchMock = mockWorkbenchWithPuts(
+      (agentKey, request) => apiResponse(200, saveSuccess(agentKey, request.candidate, 1)),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(200, syntheticProbeSuccess({ endpoint_name: newer, candidate_hash: 'd'.repeat(64), lock_version: 1 })),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    // An unsaved non-endpoint edit does not block it: the probe reads the saved candidate.
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.5' } });
+    expect(probeButton()).toBeEnabled();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: String(SEED_NUMERICS.temperature) } });
+
+    fireEvent.click(within(panel).getByRole('radio', { name: newer }));
+    expect(probeButton()).toBeDisabled();
+    expect(panel).toHaveTextContent(PROBE_UNSAVED_HINT);
+    fireEvent.click(probeButton());
+    fireEvent.change(customEndpoint(), { target: { value: 'Team Manual Endpoint' } });
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    await act(async () => { await Promise.resolve(); });
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(within(panel).getByRole('radio', { name: newer }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    expect(probeButton()).toBeEnabled();
+    expect(panel).not.toHaveTextContent(PROBE_UNSAVED_HINT);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    expect(probeBody(fetchMock, 0)).toBe('{"lock_version":1}');
+    expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(newer, 'd'.repeat(64), 1));
+    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(putCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('clears an old result when the local endpoint changes, even back to the saved name', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(200, syntheticProbeSuccess()),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+
+    fireEvent.change(customEndpoint(), { target: { value: 'endpoint-b' } });
+    expect(probeResult()).not.toBeInTheDocument();
+    fireEvent.change(customEndpoint(), { target: { value: SEED_MODEL_ENDPOINT_NAME } });
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    expect(probeCalls(fetchMock)).toHaveLength(2);
+  });
+
+  it.each([
+    'unsupported_structured_output',
+    'endpoint_probe_forbidden',
+    'structured_output_probe_failed',
+  ] as const)('renders the sanitized %s result and offers Retry only when it is retryable', async (code) => {
+    const { status, message, retryable } = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      (_agentKey, _body, call) => (call === 0
+        ? apiResponse(status, syntheticProbeFailure(code))
+        : apiResponse(200, syntheticProbeSuccess())),
+    );
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    const statusBefore = architectStatus(navigation).textContent;
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    const region = probeResult()!;
+    const alert = within(region).getByRole('alert');
+    expect(alert).toHaveTextContent(message);
+    expect(region).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expect(region).not.toHaveTextContent(PROBE_SUCCEEDED_TEXT);
+    expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
+    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(probeButton()).toBeEnabled();
+    expectNoForbiddenActionNames();
+
+    const retry = within(region).queryByRole('button', { name: PROBE_RETRY_BUTTON });
+    if (!retryable) {
+      expect(retry).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+      expect(probeCalls(fetchMock)).toHaveLength(1);
+      return;
+    }
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry!);
+    await waitFor(() => expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT));
+    expect(probeCalls(fetchMock)).toHaveLength(2);
+    expect(probeBody(fetchMock, 1)).toBe('{"lock_version":0}');
+    expect(within(probeResult()!).queryByRole('alert')).not.toBeInTheDocument();
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('a pending probe holds the one gate on every role while the catalog read stays outside it', async () => {
+    const held = heldResponses();
+    const fetchMock = mockWorkbenchApi({
+      probe: held.responder,
+      put: (agentKey, body) => apiResponse(200, saveSuccess(agentKey, body.candidate as EditableModelDraft, 1)),
+      upgrade: () => apiResponse(500, null),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+    expect(probeButton()).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    expect(within(modelPanel()).getByRole('button', { name: 'Refresh models' })).toBeEnabled();
+    fireEvent.click(probeButton());
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /Data Analyst/ }));
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    const upgrade = within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' });
+    expect(upgrade).toBeDisabled();
+    fireEvent.click(upgrade);
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    await act(async () => { await Promise.resolve(); });
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(upgradeCalls(fetchMock)).toHaveLength(0);
+
+    await act(async () => { held.pending[0](apiResponse(200, syntheticProbeSuccess())); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
+    expect(probeButton()).toBeEnabled();
+    // The result belongs to Architect; Data Analyst shows none.
+    expect(probeResult()).not.toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    openModelTab();
+    expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT);
+  });
+
+  it('a pending Save disables Test structured output on every role', async () => {
+    let releasePut!: (response: object) => void;
+    const heldPut = new Promise<object>((resolve) => { releasePut = resolve; });
+    const fetchMock = mockWorkbenchApi({ put: () => heldPut, probe: () => apiResponse(200, syntheticProbeSuccess()) });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(putCalls(fetchMock)).toHaveLength(1);
+
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    releasePut(apiResponse(200, saveSuccess('architect', {
+      prompt_text: 'Architect A2',
+      model: structuredClone(modelNode('architect').draft.model),
+    }, 1)));
+    await waitFor(() => expect(probeButton()).toBeEnabled());
+  });
+
+  it('a probe 409 recovers all seven roles and the next explicit probe sends the adopted lock', async () => {
+    const fetchMock = mockWorkbenchApi({
+      probe: (_agentKey, _body, call) => (call === 0
+        ? apiResponse(409, syntheticNullCandidateConflict(0, 1))
+        : apiResponse(200, syntheticProbeSuccess({ lock_version: 1 }))),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    const conflict = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(conflict).toHaveTextContent('Expected lock 0; Current lock 1');
+    expect(within(conflict).queryByRole('group', { name: 'Submitted values' })).not.toBeInTheDocument();
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT));
+    expect(probeBody(fetchMock, 1)).toBe('{"lock_version":1}');
+    expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 1));
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+  });
+
+  it.each([
+    ['a network failure', () => Promise.reject(new TypeError('network failed')), PROBE_NETWORK_MESSAGE],
+    ['an untyped 500', () => apiResponse(500, { detail: 'Traceback: secret-host.example' }), 'Unable to test structured output (500).'],
+    ['a malformed 200', () => apiResponse(200, { code: 'structured_output_probe_succeeded' }), 'Unable to test structured output because the server response was invalid.'],
+  ])('%s is a contained alert with no result, no leak, and no automatic retry', async (_name, respond, message) => {
+    const fetchMock = mockWorkbenchApi({ probe: respond });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    const alert = await screen.findByText(message);
+    expect(alert).toHaveAttribute('role', 'alert');
+    expect(document.body).not.toHaveTextContent('secret-host.example');
+    expect(probeResult()).not.toBeInTheDocument();
+    expect(probeButton()).toBeEnabled();
+    await act(async () => { await Promise.resolve(); });
+    expect(probeCalls(fetchMock)).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('a hook probe with an unsaved endpoint allocates no request, and a saved one sends only the lock', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(apiResponse(200, syntheticProbeSuccess()));
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useDraftEditor(syntheticAgentDefinitionWorkbench));
+
+    act(() => result.current.edit('architect', 'endpoint_name', 'databricks-claude-opus-4-7'));
+    await act(() => result.current.probeStructuredOutput('architect'));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.state.pendingSave).toBeNull();
+
+    await act(() => result.current.probeStructuredOutput('builder'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/draft\/builder\/model-endpoint-probe$/);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe('{"lock_version":0}');
+    expect(result.current.state.byAgent.builder.probeResult).toEqual({
+      outcome: 'succeeded',
+      endpoint_name: SEED_MODEL_ENDPOINT_NAME,
+      candidate_hash: SEED_CANDIDATE_HASH,
+      lock_version: 0,
+    });
+    expect(result.current.state.draft.lock_version).toBe(0);
   });
 });

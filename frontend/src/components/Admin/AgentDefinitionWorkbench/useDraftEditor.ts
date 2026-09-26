@@ -1,7 +1,9 @@
 import { useReducer, useRef } from 'react';
 import {
   AgentDefinitionApiError,
+  probeDraftStructuredOutput,
   readDraftLegacyPromptSource,
+  StructuredOutputProbeApiError,
   saveDraftDefinition,
   upgradeDraftProtectedAssembly,
   upgradeDraftSchemaContract,
@@ -18,6 +20,8 @@ import {
   draftEditorReducer,
   draftSaveErrorMessage,
   isLegacyCompositeRole,
+  probeEndpointUnsaved,
+  probeErrorMessage,
   validateDraftForm,
   type EditableDraftField,
 } from './draftEditorState';
@@ -36,7 +40,7 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     dispatch({ type: 'edit', agentKey, field, value: editableValue(field, value) });
   };
 
-  /** The one aggregate gate shared by Save, Upgrade, and SourceRecovery. */
+  /** The one aggregate gate shared by Save, Upgrade, SourceRecovery, SchemaUpgrade and Probe. */
   const operationBlocked = () => inFlightRequestIdRef.current !== null || state.pendingSave !== null;
 
   const save = async (agentKey: AgentKey): Promise<void> => {
@@ -226,10 +230,62 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     }
   };
 
+  /**
+   * Explicitly probes the role's **saved** candidate for structured output (#266). It
+   * joins the one gate and request counter, sends only the current lock, and is refused
+   * without a request ID while the local endpoint differs from the saved one.
+   */
+  const probeStructuredOutput = async (agentKey: AgentKey): Promise<void> => {
+    if (operationBlocked()) return;
+    if (probeEndpointUnsaved(state.byAgent[agentKey])) return;
+
+    const requestId = nextRequestIdRef.current++;
+    const expectedLockVersion = state.draft.lock_version;
+    inFlightRequestIdRef.current = requestId;
+    dispatch({
+      type: 'probeStarted',
+      pending: {
+        operation: 'probe',
+        requestId,
+        agentKey,
+        expectedLockVersion,
+        submittedCandidate: null,
+      },
+    });
+
+    try {
+      const result = await probeDraftStructuredOutput(agentKey, {
+        lock_version: expectedLockVersion,
+      });
+      dispatch({ type: 'probeSucceeded', requestId, result });
+    } catch (error) {
+      if (error instanceof StructuredOutputProbeApiError) {
+        dispatch({ type: 'probeUnsuccessful', requestId, failure: error.failure });
+      } else if (error instanceof AgentDefinitionApiError && error.status === 422) {
+        dispatch({
+          type: 'probeRejected',
+          requestId,
+          error: error.payload as DraftValidationErrorResponse,
+        });
+      } else if (error instanceof AgentDefinitionApiError && error.status === 409) {
+        dispatch({
+          type: 'probeConflicted',
+          requestId,
+          conflict: error.payload as DraftSaveConflictResponse,
+        });
+      } else {
+        dispatch({ type: 'probeFailed', requestId, message: probeErrorMessage(error) });
+      }
+    } finally {
+      if (inFlightRequestIdRef.current === requestId) inFlightRequestIdRef.current = null;
+    }
+  };
+
   return {
     state,
     edit,
     save,
+    probeStructuredOutput,
     upgradeProtectedAssembly,
     upgradeSchemaContract,
     restorePublishedV1Prompt,

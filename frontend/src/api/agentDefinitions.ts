@@ -874,3 +874,260 @@ export async function readDraftLegacyPromptSource(
   }
   throw new AgentDefinitionApiError(status, payload, statusText, true);
 }
+
+// ============================================================
+// #266 model endpoint discovery: GET /api/admin/agent-definitions/model-endpoints
+// ============================================================
+
+const MODEL_ENDPOINTS_URL = `${API_BASE_URL}/api/admin/agent-definitions/model-endpoints`;
+
+/** One discovered Databricks foundation-model endpoint. Only `name` is ever saved. */
+export interface SystemModelEndpoint {
+  name: string;
+  display_name: string | null;
+  description: string | null;
+  docs: string | null;
+}
+
+export type ModelEndpointCatalogFailureCode = 'catalog_forbidden' | 'catalog_unavailable';
+
+/** A valid, typed 403 or 503 discovery envelope. The message is the server's own text. */
+export class ModelEndpointCatalogApiError extends Error {
+  readonly status: 403 | 503;
+  readonly code: ModelEndpointCatalogFailureCode;
+  readonly retryable: boolean;
+
+  constructor(
+    status: 403 | 503,
+    code: ModelEndpointCatalogFailureCode,
+    message: string,
+    retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'ModelEndpointCatalogApiError';
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+
+/** A 2xx discovery response that does not match the exact contract. */
+export class InvalidModelEndpointCatalogResponseError extends Error {
+  constructor() {
+    super('Model endpoint discovery response did not match the expected contract.');
+    this.name = 'InvalidModelEndpointCatalogResponseError';
+  }
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function isSystemModelEndpoint(value: unknown): value is SystemModelEndpoint {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['name', 'display_name', 'description', 'docs'])
+    && typeof value.name === 'string' && value.name.length > 0
+    && isNullableString(value.display_name)
+    && isNullableString(value.description)
+    && isNullableString(value.docs);
+}
+
+function parseSystemModelDiscovery(value: unknown): SystemModelEndpoint[] | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['items'])) return null;
+  const { items } = value;
+  if (!Array.isArray(items) || !items.every(isSystemModelEndpoint)) return null;
+  if (new Set(items.map((item) => item.name)).size !== items.length) return null;
+  return items.map((item) => ({
+    name: item.name,
+    display_name: item.display_name,
+    description: item.description,
+    docs: item.docs,
+  }));
+}
+
+const CATALOG_FAILURE_CONTRACT = {
+  403: { code: 'catalog_forbidden', retryable: false },
+  503: { code: 'catalog_unavailable', retryable: true },
+} as const;
+
+function parseModelEndpointCatalogFailure(
+  status: number,
+  value: unknown,
+): ModelEndpointCatalogApiError | null {
+  if (status !== 403 && status !== 503) return null;
+  const contract = CATALOG_FAILURE_CONTRACT[status];
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['code', 'message', 'retryable'])
+    || value.code !== contract.code
+    || value.retryable !== contract.retryable
+    || typeof value.message !== 'string') return null;
+  return new ModelEndpointCatalogApiError(status, contract.code, value.message, contract.retryable);
+}
+
+/**
+ * Reads the identity-scoped discovery list. Every call is its own GET: nothing is
+ * cached or coalesced, so each explicit Refresh reaches the server. The body is read
+ * once. A malformed 200 is `InvalidModelEndpointCatalogResponseError`; a valid 403/503
+ * envelope is `ModelEndpointCatalogApiError`; any other status is
+ * `AgentDefinitionApiError`; a transport failure propagates unchanged.
+ */
+export async function getSystemModelEndpoints(): Promise<SystemModelEndpoint[]> {
+  const response = await fetch(MODEL_ENDPOINTS_URL, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+  const payload: unknown = await response.json().catch(() => undefined);
+
+  if (response.status === 200) {
+    const items = parseSystemModelDiscovery(payload);
+    if (items === null) throw new InvalidModelEndpointCatalogResponseError();
+    return items;
+  }
+  if (response.ok) throw new InvalidModelEndpointCatalogResponseError();
+  const failure = parseModelEndpointCatalogFailure(response.status, payload);
+  if (failure !== null) throw failure;
+  throw new AgentDefinitionApiError(response.status, payload ?? null, response.statusText);
+}
+
+// ============================================================
+// #266 saved-candidate structured-output probe:
+// POST /api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe
+// ============================================================
+
+/** The exact saved candidate the server probed; it copies it before the model call. */
+export interface StructuredOutputProbeIdentity {
+  endpoint_name: string;
+  candidate_hash: string;
+  lock_version: number;
+}
+
+export interface StructuredOutputProbeSuccessResponse extends StructuredOutputProbeIdentity {
+  code: 'structured_output_probe_succeeded';
+}
+
+export type StructuredOutputProbeFailureCode =
+  | 'unsupported_structured_output'
+  | 'endpoint_probe_forbidden'
+  | 'structured_output_probe_failed';
+
+export interface StructuredOutputProbeFailureResponse extends StructuredOutputProbeIdentity {
+  code: StructuredOutputProbeFailureCode;
+  message: string;
+  retryable: boolean;
+}
+
+/**
+ * The route's exact status table (#266 Task 5 ruling): forbidden and unsupported are
+ * never retryable; only the ambiguous provider or transport failure is.
+ */
+const PROBE_FAILURE_CONTRACT = {
+  403: { code: 'endpoint_probe_forbidden', retryable: false },
+  422: { code: 'unsupported_structured_output', retryable: false },
+  503: { code: 'structured_output_probe_failed', retryable: true },
+} as const;
+
+/** A valid, typed probe failure. Its message is the server's code-owned, sanitized text. */
+export class StructuredOutputProbeApiError extends Error {
+  readonly status: 403 | 422 | 503;
+  readonly failure: StructuredOutputProbeFailureResponse;
+
+  constructor(status: 403 | 422 | 503, failure: StructuredOutputProbeFailureResponse) {
+    super(failure.message);
+    this.name = 'StructuredOutputProbeApiError';
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+function probeIdentityFrom(value: Record<string, unknown>): StructuredOutputProbeIdentity | null {
+  if (typeof value.endpoint_name !== 'string' || value.endpoint_name.length === 0) return null;
+  if (typeof value.candidate_hash !== 'string' || !/^[0-9a-f]{64}$/.test(value.candidate_hash)) return null;
+  if (!isNonnegativeInteger(value.lock_version)) return null;
+  return {
+    endpoint_name: value.endpoint_name,
+    candidate_hash: value.candidate_hash,
+    lock_version: value.lock_version,
+  };
+}
+
+export function parseStructuredOutputProbeSuccess(
+  value: unknown,
+): StructuredOutputProbeSuccessResponse | null {
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['code', 'endpoint_name', 'candidate_hash', 'lock_version'])
+    || value.code !== 'structured_output_probe_succeeded') return null;
+  const identity = probeIdentityFrom(value);
+  return identity === null ? null : { code: 'structured_output_probe_succeeded', ...identity };
+}
+
+export function parseStructuredOutputProbeFailure(
+  status: number,
+  value: unknown,
+): StructuredOutputProbeApiError | null {
+  if (status !== 403 && status !== 422 && status !== 503) return null;
+  const contract = PROBE_FAILURE_CONTRACT[status];
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, [
+      'code', 'message', 'retryable', 'endpoint_name', 'candidate_hash', 'lock_version',
+    ])
+    || value.code !== contract.code
+    || value.retryable !== contract.retryable
+    || typeof value.message !== 'string') return null;
+  const identity = probeIdentityFrom(value);
+  if (identity === null) return null;
+  return new StructuredOutputProbeApiError(status, {
+    code: contract.code,
+    message: value.message,
+    retryable: contract.retryable,
+    ...identity,
+  });
+}
+
+/**
+ * Probes the role's **saved** candidate once. The body is exactly `{ lock_version }`:
+ * the endpoint, sampling values, prompt and schema are all server-owned, and nothing
+ * here saves, approves or aliases anything.
+ *
+ * - 200: the exact success, or `InvalidDraftSaveResponseError`.
+ * - 403/503: the exact typed failure (`StructuredOutputProbeApiError`); any other body
+ *   at those statuses (an authorization or proxy error) is a plain
+ *   `AgentDefinitionApiError`, so it can never be offered as a typed retry.
+ * - 422: the typed unsupported failure, or the existing draft rejection envelope (the
+ *   saved-name policy re-check) as `AgentDefinitionApiError`; anything else is invalid.
+ * - 409: the existing null-candidate conflict as `AgentDefinitionApiError`.
+ * - Any other status is `AgentDefinitionApiError`; a transport failure propagates.
+ */
+export async function probeDraftStructuredOutput(
+  agentKey: AgentKey,
+  request: DraftLockRequest,
+): Promise<StructuredOutputProbeSuccessResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/admin/agent-definitions/draft/${agentKey}/model-endpoint-probe`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lock_version: request.lock_version }),
+    },
+  );
+  const payload: unknown = await response.json().catch(() => null);
+  const { status, statusText } = response;
+
+  if (status === 200) {
+    const parsed = parseStructuredOutputProbeSuccess(payload);
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    return parsed;
+  }
+  if (status === 409) {
+    const parsed = parseDraftSaveConflictResponse(payload, 'null');
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    throw new AgentDefinitionApiError(status, parsed, statusText);
+  }
+  const typed = parseStructuredOutputProbeFailure(status, payload);
+  if (typed !== null) throw typed;
+  if (status === 422) {
+    const parsed = parseDraftValidationErrorResponse(payload);
+    if (parsed === null) throw new InvalidDraftSaveResponseError();
+    throw new AgentDefinitionApiError(status, parsed, statusText);
+  }
+  throw new AgentDefinitionApiError(status, payload, statusText);
+}

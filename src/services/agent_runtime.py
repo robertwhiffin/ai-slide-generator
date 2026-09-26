@@ -63,6 +63,7 @@ from src.services.graph_configuration_content import GraphConfigurationIntegrity
 from src.services.graph_definition_manifest import (
     AssemblyRules,
     DefinitionContent,
+    ModelConfiguration,
     definition_content_hash,
     load_graph_v1_manifest,
     schema_contract_identity,
@@ -387,6 +388,49 @@ class CodeOwnedAgentDefinitionSource:
         )
 
 
+def saved_model_configuration(model: ModelConfiguration) -> AgentModelConfiguration:
+    """Convert one saved model record to the configuration a model is built with.
+
+    The runtime and the #266 saved-candidate probe both use this, so a probe
+    exercises exactly the sampling values a persisted invocation would.
+    """
+    return AgentModelConfiguration(
+        endpoint_name=model.endpoint_name,
+        temperature=float(model.temperature),
+        max_tokens=int(model.max_tokens),
+        top_p=float(model.top_p),
+    )
+
+
+def bind_structured_output_model(
+    *,
+    model_factory: Callable[..., Any],
+    workspace_client: Any,
+    configuration: AgentModelConfiguration,
+    schema: type[BaseModel],
+    transport_options: Mapping[str, Any] | None = None,
+) -> Any:
+    """The one structured-output binding seam; it returns the bound model.
+
+    Both ``DatabricksModelAdapter.invoke`` and the #266 saved-candidate probe
+    construct their model here, with the exact configured endpoint and the
+    caller's runtime-identity ``workspace_client``, then bind ``schema``.  It
+    catches nothing: each caller owns its own failure classification, so the
+    probe can still tell a permission denial from a transport failure while the
+    runtime keeps collapsing both.  ``transport_options`` is for the probe's
+    call bound only; the runtime passes none.
+    """
+    model = model_factory(
+        endpoint=configuration.endpoint_name,
+        temperature=configuration.temperature,
+        max_tokens=configuration.max_tokens,
+        top_p=configuration.top_p,
+        workspace_client=workspace_client,
+        **(transport_options or {}),
+    )
+    return model.with_structured_output(schema)
+
+
 class DatabricksModelAdapter:
     """Invoke one structured Databricks model without binding any tools."""
 
@@ -442,14 +486,12 @@ class DatabricksModelAdapter:
             OSError,
         )
         try:
-            model = self._model_factory(
-                endpoint=configuration.endpoint_name,
-                temperature=configuration.temperature,
-                max_tokens=configuration.max_tokens,
-                top_p=configuration.top_p,
+            structured_model = bind_structured_output_model(
+                model_factory=self._model_factory,
                 workspace_client=self._client_factory(),
+                configuration=configuration,
+                schema=schema,
             )
-            structured_model = model.with_structured_output(schema)
             return structured_model.invoke(prompt)
         except provider_errors as original_error:
             raise ModelProviderUnavailableError(
@@ -636,12 +678,7 @@ class AgentRuntime:
                 code="invalid_persisted_definition"
             ) from exc
 
-        configuration = AgentModelConfiguration(
-            endpoint_name=content.model.endpoint_name,
-            temperature=float(content.model.temperature),
-            max_tokens=int(content.model.max_tokens),
-            top_p=float(content.model.top_p),
-        )
+        configuration = saved_model_configuration(content.model)
         prompt = assembled.prompt
         identity = AgentInvocationIdentity(
             graph_version=definition.graph_version,

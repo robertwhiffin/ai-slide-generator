@@ -14,15 +14,18 @@ from src.services.graph_configuration_bootstrap import (
 )
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_configuration_draft import (
+    CatalogRemoteEndpointDraftValidator,
     DraftAggregateSnapshot,
     DraftCandidateValidator,
     DraftContentRejected,
     DraftLegacyPromptSource,
     DraftLegacyPromptSourceRecord,
+    DraftProbeCandidate,
     DraftSaveConflict,
     DraftSaveResult,
     DraftValidationIssue,
     EditableModelDraft,
+    RemoteEndpointDraftValidator,
     _GraphConfigurationDraft,
 )
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
@@ -49,6 +52,34 @@ class GraphConfiguration(
     """Read, edit, or atomically bootstrap the Graph Configuration aggregate."""
 
 
+def build_remote_endpoint_draft_validator() -> RemoteEndpointDraftValidator:
+    """Production remote endpoint validator for draft saves.
+
+    Each validation derives a bounded-retry client from the system client's own
+    configuration (no new credential source) and checks the exact candidate
+    endpoint.  Nothing is built until the first validation.  A system-client
+    failure is the typed ``endpoint_unavailable`` outcome, never a 500; its text
+    is not read.
+    """
+    from src.core import databricks_client
+    from src.services import model_endpoint_catalog
+
+    def _catalog() -> model_endpoint_catalog.ModelEndpointCatalog:
+        try:
+            system_client = databricks_client.get_system_client()
+        except databricks_client.DatabricksClientError as error:
+            raise model_endpoint_catalog.EndpointValidationFailure(
+                "endpoint_unavailable",
+                "Endpoint validation is temporarily unavailable. Retry the save.",
+                True,
+            ) from error
+        return model_endpoint_catalog.DatabricksModelEndpointCatalog(
+            model_endpoint_catalog.bounded_catalog_workspace_client(system_client)
+        )
+
+    return CatalogRemoteEndpointDraftValidator(_catalog)
+
+
 def bootstrap_graph_configuration(session_factory: sessionmaker) -> BootstrapResult:
     """Packaged-startup wrapper for the atomic bootstrap service."""
     return GraphConfiguration().bootstrap_v1(session_factory)
@@ -57,6 +88,7 @@ def bootstrap_graph_configuration(session_factory: sessionmaker) -> BootstrapRes
 __all__ = [
     "ActiveReleaseSnapshot",
     "BootstrapResult",
+    "CatalogRemoteEndpointDraftValidator",
     "DeterministicAgentNodeSnapshot",
     "DraftAggregateSnapshot",
     "DraftCandidateValidator",
@@ -65,6 +97,7 @@ __all__ = [
     "DraftLegacyPromptSource",
     "DraftLegacyPromptSourceRecord",
     "DraftMetadataSnapshot",
+    "DraftProbeCandidate",
     "DraftSaveConflict",
     "DraftSaveResult",
     "DraftValidationIssue",
@@ -75,5 +108,7 @@ __all__ = [
     "ModelAgentNodeSnapshot",
     "PublishedDefinitionSnapshot",
     "REQUIRED_SMOKE_PAYLOADS",
+    "RemoteEndpointDraftValidator",
     "bootstrap_graph_configuration",
+    "build_remote_endpoint_draft_validator",
 ]
