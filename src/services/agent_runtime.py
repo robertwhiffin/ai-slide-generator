@@ -19,6 +19,7 @@ import logging
 import textwrap
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Callable, Literal, Protocol, cast
@@ -424,6 +425,13 @@ def bind_structured_output_model(
     for the two admin-request callers only: the #266 probe, and the #267
     test-run adapter built by ``get_agent_test_runtime``.  The production
     runtime adapter passes none.
+
+    Only while a #267 test run's model call is in flight (its ``RunObservation``
+    is the observed run) is the bound model given a callback that records the
+    provider's reported token usage onto that observation.  The binding itself
+    is unchanged — no ``include_raw`` — so parsing and its errors are
+    production's; production ``run`` observes nothing and gets exactly
+    the plain structured-output binding of ``schema``.
     """
     model = model_factory(
         endpoint=configuration.endpoint_name,
@@ -433,7 +441,66 @@ def bind_structured_output_model(
         workspace_client=workspace_client,
         **(transport_options or {}),
     )
-    return model.with_structured_output(schema)
+    structured_model = model.with_structured_output(schema)
+    observation = _OBSERVED_TEST_RUN.get()
+    if observation is None:
+        return structured_model
+    return structured_model.with_config(callbacks=[_token_usage_callback(observation)])
+
+
+def _token_count(value: Any) -> int | None:
+    """A provider-reported count, or ``None``: only a non-negative ``int`` is a count."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _reported_token_usage(message: Any) -> tuple[int | None, int | None]:
+    """The (input, output) token counts one provider message reports, if any.
+
+    ``ChatDatabricks`` (databricks-langchain 0.9.0) leaves LangChain's standard
+    ``usage_metadata`` unset and reports the completion's ``usage`` in
+    ``response_metadata["usage"]`` (measured over a mock transport, #267 I-1);
+    the standard field is still read first, then the OpenAI-style mappings.
+    """
+    usage_metadata = getattr(message, "usage_metadata", None)
+    if isinstance(usage_metadata, Mapping):
+        return (
+            _token_count(usage_metadata.get("input_tokens")),
+            _token_count(usage_metadata.get("output_tokens")),
+        )
+    response_metadata = getattr(message, "response_metadata", None)
+    if isinstance(response_metadata, Mapping):
+        for key in ("usage", "token_usage"):
+            usage = response_metadata.get(key)
+            if isinstance(usage, Mapping):
+                return (
+                    _token_count(usage.get("prompt_tokens")),
+                    _token_count(usage.get("completion_tokens")),
+                )
+    return None, None
+
+
+def _token_usage_callback(observation: RunObservation) -> Any:
+    """A LangChain callback that copies the provider's reported usage onto ``observation``.
+
+    ``langchain_core`` is imported lazily, like the chat model that fires it.
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class _TokenUsageCallback(BaseCallbackHandler):
+        def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+            del kwargs
+            for generations in response.generations:
+                for generation in generations:
+                    input_tokens, output_tokens = _reported_token_usage(
+                        getattr(generation, "message", None)
+                    )
+                    if input_tokens is not None or output_tokens is not None:
+                        _record_token_usage(observation, input_tokens, output_tokens)
+                        return
+
+    return _TokenUsageCallback()
 
 
 class DatabricksModelAdapter:
@@ -610,14 +677,45 @@ class RunObservation:
     assembled prompt passed to the model adapter (``None`` when assembly failed
     before the call); ``raw_output`` is the JSON-safe top-level keys the provider
     supplied, observed before validation; ``model_latency_ms`` is the adapter
-    call's duration, recorded whether it returned or raised.  ``run`` never
-    takes one, so production behaviour is unchanged.
+    call's duration, recorded whether it returned or raised.
+    ``input_tokens``/``output_tokens`` are the provider's reported usage for
+    the call, each ``None`` when the provider reported none (#267 I-1, P9).
+    ``run`` never takes one, so production behaviour is unchanged.
     """
 
     def __init__(self) -> None:
         self.prompt: str | None = None
         self.raw_output: dict[str, Any] | None = None
         self.model_latency_ms: float | None = None
+        self.input_tokens: int | None = None
+        self.output_tokens: int | None = None
+
+
+#: The observation of the #267 test run whose model call is in flight, set only
+#: around that one adapter call by ``_run_resolved``; ``None`` everywhere else,
+#: including every production ``run``.
+_OBSERVED_TEST_RUN: ContextVar[RunObservation | None] = ContextVar(
+    "observed_test_run", default=None
+)
+
+
+def _record_token_usage(
+    observation: RunObservation, input_tokens: Any, output_tokens: Any
+) -> None:
+    observation.input_tokens = _token_count(input_tokens)
+    observation.output_tokens = _token_count(output_tokens)
+
+
+def report_model_token_usage(*, input_tokens: Any, output_tokens: Any) -> None:
+    """Record token usage for the test run whose model call is in flight.
+
+    The seam for a model adapter other than the Databricks one (a test double)
+    to report usage exactly as the binding helper's callback does.  Outside an
+    observed test-run call it does nothing, so production is unaffected.
+    """
+    observation = _OBSERVED_TEST_RUN.get()
+    if observation is not None:
+        _record_token_usage(observation, input_tokens, output_tokens)
 
 
 def _is_provider_parse_error(error: Exception) -> bool:
@@ -985,6 +1083,10 @@ class AgentRuntime:
             # duration, whether the adapter returns or raises (#267 Task 4).
             if _observation is not None:
                 _observation.prompt = prompt
+            # Only a test run's own call is observed for token usage (I-1).
+            usage_scope = (
+                _OBSERVED_TEST_RUN.set(_observation) if _observation is not None else None
+            )
             invoke_started = time.perf_counter()
             try:
                 provider_output = self._model_adapter.invoke(
@@ -1000,6 +1102,8 @@ class AgentRuntime:
                     agent_definition_revision_id=definition.agent_definition_revision_id,
                 ) from exc
             finally:
+                if usage_scope is not None:
+                    _OBSERVED_TEST_RUN.reset(usage_scope)
                 if _observation is not None:
                     _observation.model_latency_ms = (
                         time.perf_counter() - invoke_started

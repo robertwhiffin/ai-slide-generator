@@ -2088,3 +2088,107 @@ def test_the_default_executor_uses_the_bounded_test_runtime(factory, monkeypatch
 
     assert calls == ["get_agent_test_runtime"]
     assert len(runtime.candidate_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# #267 whole-branch fix I-1: token usage is persisted when the provider
+# reports it (AC5, spec §5.5), and stays NULL when it does not (P9).  The REAL
+# ``ChatDatabricks`` runs over an ``httpx.MockTransport`` through the bounded
+# test-runtime adapter, so the counts cross the real provider parsing.
+# ---------------------------------------------------------------------------
+
+
+def _real_provider_executor(factory: sessionmaker, usage):
+    from src.services.agent_runtime import (
+        TEST_RUN_MAX_RETRIES,
+        TEST_RUN_TIMEOUT_SECONDS,
+        DatabricksModelAdapter,
+    )
+    from tests.fixtures.mock_chat_completions import MockChatCompletionsWorkspace
+
+    workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
+    adapter = DatabricksModelAdapter(
+        client_factory=lambda: workspace,
+        transport_options={
+            "timeout": TEST_RUN_TIMEOUT_SECONDS,
+            "max_retries": TEST_RUN_MAX_RETRIES,
+        },
+    )
+    workbench, _runtime_, _adapter = _executor(factory, adapter)
+    return workbench, workspace
+
+
+def _persisted_tokens(factory: sessionmaker) -> list[tuple[str, int | None, int | None]]:
+    return [(row.run_kind, row.input_tokens, row.output_tokens) for row in _run_rows(factory)]
+
+
+def test_a_real_provider_candidate_and_baseline_run_persist_the_reported_tokens(factory):
+    from tests.fixtures.mock_chat_completions import (
+        MOCK_COMPLETION_TOKENS,
+        MOCK_PROMPT_TOKENS,
+        MOCK_USAGE,
+    )
+
+    workbench, workspace = _real_provider_executor(factory, MOCK_USAGE)
+
+    candidate = _run_candidate(factory, workbench)
+    baseline = _run_baseline(factory, workbench)
+
+    assert len(workspace.requests) == 2
+    for evidence in (candidate, baseline):
+        assert evidence.execution_status == "completed"
+        assert evidence.candidate_raw_output == fake_output("architect")
+        assert (evidence.input_tokens, evidence.output_tokens) == (
+            MOCK_PROMPT_TOKENS,
+            MOCK_COMPLETION_TOKENS,
+        )
+    assert _persisted_tokens(factory) == [
+        ("candidate", MOCK_PROMPT_TOKENS, MOCK_COMPLETION_TOKENS),
+        ("published_baseline", MOCK_PROMPT_TOKENS, MOCK_COMPLETION_TOKENS),
+    ]
+
+
+def test_a_real_provider_run_without_usage_persists_null_tokens(factory):
+    workbench, workspace = _real_provider_executor(factory, None)
+
+    candidate = _run_candidate(factory, workbench)
+    baseline = _run_baseline(factory, workbench)
+
+    assert len(workspace.requests) == 2
+    for evidence in (candidate, baseline):
+        assert evidence.execution_status == "completed"
+        assert (evidence.input_tokens, evidence.output_tokens) == (None, None)
+    assert _persisted_tokens(factory) == [
+        ("candidate", None, None),
+        ("published_baseline", None, None),
+    ]
+
+
+def test_a_fake_adapter_reporting_usage_persists_it_for_both_run_kinds(factory):
+    workbench, _runtime_, _adapter = _executor(
+        factory, DeterministicFakeModelAdapter(usage=(11, 7))
+    )
+
+    candidate = _run_candidate(factory, workbench)
+    baseline = _run_baseline(factory, workbench)
+
+    assert (candidate.input_tokens, candidate.output_tokens) == (11, 7)
+    assert (baseline.input_tokens, baseline.output_tokens) == (11, 7)
+    assert _persisted_tokens(factory) == [
+        ("candidate", 11, 7),
+        ("published_baseline", 11, 7),
+    ]
+
+
+def test_usage_reported_before_a_rejected_output_is_still_persisted(factory):
+    """The tokens were spent even when validation rejects the output (incomplete)."""
+    workbench, _runtime_, _adapter = _executor(
+        factory,
+        DeterministicFakeModelAdapter(mode="invalid_optional_field", usage=(5, None)),
+    )
+
+    evidence = _run_candidate(factory, workbench)
+
+    assert evidence.execution_status == "incomplete"
+    assert (evidence.input_tokens, evidence.output_tokens) == (5, None)
+    assert _persisted_tokens(factory) == [("candidate", 5, None)]

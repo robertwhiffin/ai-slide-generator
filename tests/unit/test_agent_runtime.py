@@ -1627,3 +1627,153 @@ def test_run_published_baseline_raises_loader_failures_as_run_does():
     assert caught.value.code == "lakebase_unavailable"
     with pytest.raises(UnknownAgentKeyError):
         runtime.run_published_baseline("foreman", 7, {}, AgentAssemblyContext(False))
+
+
+# ---------------------------------------------------------------------------
+# #267 whole-branch fix I-1: a test run records the provider's token usage.
+#
+# The REAL ``ChatDatabricks`` (databricks-langchain 0.9.0) is driven over an
+# ``httpx.MockTransport``.  Measured: it reports usage in the AIMessage's
+# ``response_metadata["usage"]`` (``prompt_tokens`` / ``completion_tokens``)
+# and leaves ``usage_metadata`` unset.  Only an observed test run reads it;
+# production ``run`` binds exactly as before.
+# ---------------------------------------------------------------------------
+
+
+def _real_chat_adapter(usage):
+    from tests.fixtures.mock_chat_completions import MockChatCompletionsWorkspace
+
+    workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
+    adapter = DatabricksModelAdapter(
+        client_factory=lambda: workspace,
+        transport_options={
+            "timeout": runtime_module.TEST_RUN_TIMEOUT_SECONDS,
+            "max_retries": runtime_module.TEST_RUN_MAX_RETRIES,
+        },
+    )
+    return adapter, workspace
+
+
+def _observed_real_runs(usage):
+    """One candidate run and one baseline rerun, each with its own observation."""
+    adapter, workspace = _real_chat_adapter(usage)
+    runtime, _ = _baseline_runtime(adapter)
+    content, candidate_hash = _candidate("architect")
+    candidate_observation = RunObservation()
+    baseline_observation = RunObservation()
+
+    candidate = runtime.run_candidate(
+        "architect",
+        content,
+        candidate_hash,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=candidate_observation,
+    )
+    baseline = runtime.run_published_baseline(
+        "architect",
+        7,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=baseline_observation,
+    )
+    assert len(workspace.requests) == 2
+    return (candidate, candidate_observation), (baseline, baseline_observation)
+
+
+def test_an_observed_real_provider_run_records_the_reported_token_usage():
+    """I-1: the counts an endpoint reports reach the observation, for both run kinds."""
+    from tests.fixtures.mock_chat_completions import (
+        MOCK_COMPLETION_TOKENS,
+        MOCK_PROMPT_TOKENS,
+        MOCK_USAGE,
+    )
+
+    for outcome, observation in _observed_real_runs(MOCK_USAGE):
+        assert outcome.status == "completed"
+        assert outcome.raw_output == fake_output("architect")
+        assert (observation.input_tokens, observation.output_tokens) == (
+            MOCK_PROMPT_TOKENS,
+            MOCK_COMPLETION_TOKENS,
+        )
+        assert type(observation.input_tokens) is int
+        assert type(observation.output_tokens) is int
+
+
+def test_an_observed_real_provider_run_without_usage_records_none():
+    """P9: an endpoint that reports no usage leaves both counts unset ("not reported")."""
+    for outcome, observation in _observed_real_runs(None):
+        assert outcome.status == "completed"
+        assert (observation.input_tokens, observation.output_tokens) == (None, None)
+
+
+def test_a_fresh_observation_has_no_token_usage():
+    observation = RunObservation()
+
+    assert (observation.input_tokens, observation.output_tokens) == (None, None)
+
+
+def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
+    """I-1 guard: usage capture never reaches production ``run``.
+
+    Production ``run`` over the real provider, whose endpoint DOES report usage:
+    the helper must return exactly what ``with_structured_output(schema)``
+    returned (no ``include_raw``, no callback wrapper), and the bound model must
+    be invoked with the prompt alone.
+    """
+    from databricks_langchain import ChatDatabricks
+
+    from tests.fixtures.mock_chat_completions import MOCK_USAGE
+
+    bindings: list[tuple[tuple, dict, Any]] = []
+    original_binding = ChatDatabricks.with_structured_output
+
+    def _recording_binding(self, *args, **kwargs):
+        bound = original_binding(self, *args, **kwargs)
+        bindings.append((args, kwargs, bound))
+        return bound
+
+    monkeypatch.setattr(ChatDatabricks, "with_structured_output", _recording_binding)
+    helper_returns: list[Any] = []
+    original_helper = runtime_module.bind_structured_output_model
+
+    def _recording_helper(**kwargs):
+        bound = original_helper(**kwargs)
+        helper_returns.append(bound)
+        return bound
+
+    monkeypatch.setattr(runtime_module, "bind_structured_output_model", _recording_helper)
+    adapter, workspace = _real_chat_adapter(MOCK_USAGE)
+    runtime, _ = _baseline_runtime(adapter)
+
+    result = runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))
+
+    assert result.output == OUTPUT_SCHEMAS["architect"].model_validate(fake_output("architect"))
+    assert len(workspace.requests) == 1
+    assert len(bindings) == 1
+    args, kwargs, bound = bindings[0]
+    assert kwargs == {}
+    assert len(args) == 1
+    assert helper_returns == [bound]
+    assert helper_returns[0] is bound
+
+
+def test_a_fake_adapter_reporting_usage_fills_only_an_observed_run():
+    """The fake reports usage through the runtime's one seam; ``run`` ignores it."""
+    adapter = DeterministicFakeModelAdapter(usage=(11, 7))
+    runtime, _ = _baseline_runtime(adapter)
+    content, candidate_hash = _candidate("architect")
+    observation = RunObservation()
+
+    production = runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))
+    outcome = runtime.run_candidate(
+        "architect",
+        content,
+        candidate_hash,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=observation,
+    )
+
+    assert production.output == outcome.result.output
+    assert (observation.input_tokens, observation.output_tokens) == (11, 7)

@@ -515,6 +515,8 @@ class _Execution:
     structured_output: dict[str, Any] | None
     assembled_prompt: str | None
     latency_ms: float | None
+    input_tokens: int | None
+    output_tokens: int | None
 
 
 def _structured_output(result: AgentInvocationResult) -> dict[str, Any]:
@@ -599,6 +601,9 @@ def _execution_from_outcome(
         latency_ms=(
             result.diagnostics.latency_ms if completed else observation.model_latency_ms
         ),
+        # The provider's reported usage; ``None`` when it reported none (P9).
+        input_tokens=observation.input_tokens,
+        output_tokens=observation.output_tokens,
     )
 
 
@@ -1262,8 +1267,8 @@ class AgentTestWorkbench:
                         execution_status=execution.status,
                         error_detail=execution.error_detail,
                         latency_ms=execution.latency_ms,
-                        input_tokens=None,
-                        output_tokens=None,
+                        input_tokens=execution.input_tokens,
+                        output_tokens=execution.output_tokens,
                         run_by=actor,
                     )
                     session.add(row)
