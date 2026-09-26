@@ -229,3 +229,80 @@
 **Guard:** `frontend/tests/fixtures/forbiddenActionNames.ts:42-43` holds `'Approve run'` and `'Reject run'`, so `ALLOWED_ACTION_NAMES` now has 7 entries. #269's C7 becomes 8, at `AgentDefinitionWorkbench.test.tsx:378` and `tests/e2e/agent-definition-workbench.spec.ts:1518`.
 
 **Join:** `tests/unit/test_draft_readiness_client_join.py`. Its text-read rules are in the module docstring.
+
+## Fix round 1 (review: 2 Important, 5 Minor, plus Task 4 M2)
+
+**Status: DONE.** The base is `6c489cbd8`; I left the controller's ledger commits alone.
+
+**Commits:**
+- `5c0a65c1b` fix: nav status beside the button, fixed candidate baseline label (#268)
+- `bc5a177cd` test: cleanup's no-runtime test reaches the DELETE (#268)
+- this report section, force-added on top
+
+### What changed
+- **I1: the status badge sits beside the nav button, not inside it.**
+  - In `AgentDefinitionWorkbench.tsx`, each role renders a `<div>` wrapper holding the `<button>` and a sibling `<span id="node-status-<agent_key>">`. The button's text is only the display name, and it points at the badge with `aria-describedby`.
+  - The guard, its stems and its text-content lane are untouched.
+  - **Vitest:** 42 nav status assertions moved from `toHaveTextContent` to `toHaveAccessibleDescription`. That is 41 found by regex plus 1 `new RegExp(...)` site. The 8 `.textContent` status-before/after comparisons now use a `navStatus()` helper, which reads the element named by `aria-describedby`.
+  - **E2E:** 15 nav `toContainText` status assertions became `toHaveAccessibleDescription`. `architectNavStatus` gained the companion `navStatusText()`, used by the probe test's before/after comparison.
+  - **New Vitest test:** "keeps every status out of the nav button: its text is the name, its description the status". With Architect Approved it asserts:
+    - the button's text is exactly `Architect`;
+    - `forbidsActionName(textContent)` is false for every nav button;
+    - the badge is not inside a `<button>`;
+    - Foreman, which has no status, has no `aria-describedby`.
+  - **E2E verdict spec:** it now asserts `toHaveText('Architect')` and that no nav button's text trips `forbidsActionName`. Its guard sweep is back to the whole Agent Definitions panel, text content included.
+- **I2: the candidate run's baseline column heading is fixed.**
+  - In `TestRunPanel.tsx`, the heading inside a candidate run always reads "Published baseline (not approved)". The baseline rerun's own heading is still verdict-aware.
+  - The label cases for M24 were flipped: for a null, approved or rejected candidate, the heading is always "(not approved)". The workbench test and the E2E were flipped the same way.
+  - New case: an approved candidate still shows "Published baseline (not approved)" while an approved baseline rerun shows "Published baseline rerun (approved)".
+- **m1:** `onRecordVerdict` and `recordVerdict` now return `Promise<boolean>`. The notes clear only when the result is `true`. New panel test: a refused verdict keeps the notes. The workbench refused-verdict test now also asserts that the typed notes survive.
+- **m2:** new workbench test, "Approve run on the published baseline replaces the baseline evidence and re-reads readiness". It checks:
+  - the POST goes to `/test-runs/899/verdict` with notes `null`;
+  - the baseline heading turns "(approved)";
+  - the candidate's evidence is untouched;
+  - readiness is read twice;
+  - the role stays "Awaiting review", because readiness ignores baseline runs.
+- **m3:** the two tests now wait for their readiness GETs to land. Those are "retains A3 typed while A2 is pending…" and "edits custom blocks locally…". The workbench `act` warning count is back to the base 6; the remaining ones are all in tests that already warned at base.
+- **m4:** a new exported `InvalidReadinessResponseError` (`agentDefinitions.ts:1808`) with the message "Draft readiness response did not match the expected contract." `getDraftReadiness` throws it for a malformed 200. The test asserts it is not an `InvalidTestRunResponseError`.
+- **m5:** `draftStatus` returns `Approved` only when `readiness.ready` is true, and `Needs test` otherwise. New test: empty `cases` with `ready: false` is Needs test, and all-approved cases with `ready: false` are too.
+- **Task 4 M2:** `test_cleanup_never_touches_a_runtime` now makes two runs and calls cleanup with `per_case_limit=1`. It asserts the result is `1`, the older run is deleted and the newer run survives.
+
+### Gates
+- Vitest: 726 passed across 16 files.
+- typecheck: clean.
+- ESLint on the touched files: clean.
+- Playwright `agent-definition-workbench.spec.ts`: 78 passed.
+- The Python join tests plus `test_agent_test_workbench.py`: 290 passed.
+- Full `tests/unit`: 6 failed, 6783 passed, 110 skipped, 136 warnings. These are exactly the baseline nodes and causes: autoscaling ×2, `_FakeSession.execute` ×3, "no active Graph Release" ×1.
+- `.venv` is absent and port 3000 is free.
+
+### Mutations
+Each mutation was applied, run, and restored from `bc5a177cd` with `git checkout`. Every one had a marker count of 1, restored clean, and went RED.
+
+| # | Fix | Mutation | RED |
+|---|---|---|---|
+| F1 | I1 | status `<span>` moved back inside the `<button>` | "keeps every status out of the nav button…" |
+| F2 | I2 | the candidate's baseline heading uses `verdictLabel(evidence)` again | 3 panel cases (approved and rejected candidate, the approved-vs-approved case) and the workbench Approve flow |
+| F3 | m1 | notes cleared unconditionally | the panel "keeps the typed notes…" test and the workbench refused-verdict test |
+| F4 | m4 | a malformed readiness 200 throws `InvalidTestRunResponseError` | the readiness-specific client test |
+| F5 | m5 | `return 'Approved'` whatever `ready` says | the `ready`-false `draftStatus` test |
+| F6 | Task 4 M2 | `self._runtime()` inserted before cleanup's DELETE | `test_cleanup_never_touches_a_runtime` (1 of 245). The pre-fix version of the test (from `6c489cbd8`) stays GREEN under the same mutation, which confirms M2. |
+
+F1 REDs only the new test. The `toHaveAccessibleDescription` assertions still pass when the badge is a child, since `aria-describedby` still resolves; the text-content test is the guard for that case.
+
+### Per finding
+
+| Finding | State |
+|---|---|
+| I1 | addressed |
+| I2 | addressed |
+| m1 | addressed |
+| m2 | addressed |
+| m3 | addressed |
+| m4 | addressed |
+| m5 | addressed |
+| Task 4 M2 | addressed |
+
+### Remaining notes
+- In the hook, `recordVerdict` returns `true` when the verdict request succeeds, even if the reducer then rejects the response as incoherent. In that case the notes clear while the panel shows the invalid-response alert.
+- The E2E still accepts one or more readiness reads on load, because the dev build runs under StrictMode.
