@@ -36,6 +36,10 @@ candidate (``execute_candidate_run``) or the active published definition
   ``TestRunUnavailable``.
 - **Baseline (C20).** The newest completed ``published_baseline`` run of this
   case row and revision is copied into a candidate row; no verdict is read.
+
+Verdicts (#268 Task 1): ``record_verdict`` locks only the run row (L3 ``FOR
+UPDATE``), writes exactly the four verdict columns, and lets any
+``IntegrityError`` propagate; the verdict columns are the audit trail.
 """
 
 from __future__ import annotations
@@ -47,7 +51,7 @@ from datetime import datetime
 from typing import Any, Literal, Mapping
 
 from pydantic_core import to_jsonable_python
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
@@ -479,6 +483,77 @@ class TestRunNotFound(LookupError):  # noqa: N818 - stable public domain name
     def __init__(self, run_id: int) -> None:
         self.run_id = run_id
         super().__init__(f"test run {run_id} does not exist")
+
+
+VerdictChoice = Literal["approved", "rejected"]
+IneligibleReason = Literal["not_completed", "checks_failed"]
+
+MAX_VERDICT_NOTES_LENGTH = 2000
+_VERDICT_CHOICES: tuple[str, ...] = ("approved", "rejected")
+
+
+class VerdictRejected(ValueError):  # noqa: N818 - stable public domain name
+    """One or more ordered argument issues; nothing was read or written (C4)."""
+
+    __test__ = False
+    issues: tuple[TestCaseIssue, ...]
+
+    def __init__(self, *issues: TestCaseIssue) -> None:
+        if not issues:
+            raise ValueError("VerdictRejected requires at least one issue")
+        self.issues = tuple(issues)
+        super().__init__("; ".join(issue.message for issue in self.issues))
+
+
+class IneligibleForApprovalError(ValueError):  # noqa: N818 - stable public domain name
+    """The run cannot carry the requested verdict (C5); nothing was written."""
+
+    def __init__(self, run_id: int, reason: IneligibleReason) -> None:
+        super().__init__(f"agent test run {run_id} is ineligible: {reason}")
+        self.run_id = run_id
+        self.reason = reason
+
+
+def _verdict_lock_statement(run_id: int) -> Select:
+    """L3 only (C6): the one run row ``FOR UPDATE``; no parent or case lock."""
+    return (
+        select(AgentTestRun)
+        .where(AgentTestRun.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _verdict_issues(verdict: object) -> list[TestCaseIssue]:
+    if type(verdict) is not str or verdict not in _VERDICT_CHOICES:
+        return [
+            TestCaseIssue(
+                "verdict", "invalid_choice", "Verdict must be 'approved' or 'rejected'."
+            )
+        ]
+    return []
+
+
+def _verdict_notes_issues(notes: object) -> list[TestCaseIssue]:
+    if notes is None:
+        return []
+    if not isinstance(notes, str):
+        return [TestCaseIssue("notes", "strict_type", "Verdict notes must be a string.")]
+    if not notes.strip():
+        return [
+            TestCaseIssue(
+                "notes", "blank", "Verdict notes must not be blank; send null to omit them."
+            )
+        ]
+    if len(notes) > MAX_VERDICT_NOTES_LENGTH:
+        return [
+            TestCaseIssue(
+                "notes",
+                "too_long",
+                f"Verdict notes must be at most {MAX_VERDICT_NOTES_LENGTH} characters.",
+            )
+        ]
+    return []
 
 
 @dataclass(frozen=True)
@@ -1133,6 +1208,69 @@ class AgentTestWorkbench:
             return [
                 _evidence_from_row(row, synthetic_payload=synthetic_payload) for row in rows
             ]
+
+    # --- verdicts (#268) --------------------------------------------------
+
+    def record_verdict(
+        self,
+        session: Session,
+        *,
+        run_id: int,
+        verdict: VerdictChoice,
+        reviewer: str,
+        notes: str | None,
+    ) -> TestRunEvidence:
+        """Record an approve or reject verdict on one stored run (#268 C4-C7).
+
+        ``reviewer`` is the authenticated principal; the four verdict columns are
+        the audit trail.  Only the run row is locked (L3 ``FOR UPDATE``), and no
+        model or runtime is touched (C27).  A run that did not complete takes no
+        verdict; an approval also needs passing checks.  An identical re-submit
+        writes nothing; any difference re-stamps all four columns, ``verdict_at``
+        from the database clock.  An ``IntegrityError`` (the DDL checks, or a
+        later linked-verdict trigger) propagates unchanged (C7).
+        """
+        issues = [
+            *_actor_issues(reviewer),
+            *_verdict_issues(verdict),
+            *_verdict_notes_issues(notes),
+        ]
+        if issues:
+            raise VerdictRejected(*issues)
+        self._require_no_transaction(session)
+        with session.begin():
+            row = session.scalar(_verdict_lock_statement(run_id))
+            if row is None:
+                raise TestRunNotFound(run_id)
+            if row.execution_status != "completed":
+                raise IneligibleForApprovalError(run_id, "not_completed")
+            if verdict == "approved" and not row.deterministic_checks_passed:
+                raise IneligibleForApprovalError(run_id, "checks_failed")
+            if (row.verdict, row.verdict_reviewer, row.verdict_notes) != (
+                verdict,
+                reviewer,
+                notes,
+            ):
+                # A Core UPDATE, so the SET list is always exactly the four
+                # verdict columns (the ORM would omit an unchanged value).
+                session.execute(
+                    update(AgentTestRun)
+                    .where(AgentTestRun.id == run_id)
+                    .values(
+                        verdict=verdict,
+                        verdict_reviewer=reviewer,
+                        verdict_at=func.now(),
+                        verdict_notes=notes,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                session.refresh(row)
+            synthetic_payload = session.scalar(
+                select(AgentTestCase.synthetic_payload).where(
+                    AgentTestCase.id == row.test_case_id
+                )
+            )
+            return _evidence_from_row(row, synthetic_payload=synthetic_payload)
 
     # --- test run internals ----------------------------------------------
 

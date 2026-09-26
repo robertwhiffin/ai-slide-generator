@@ -2192,3 +2192,518 @@ def test_usage_reported_before_a_rejected_output_is_still_persisted(factory):
     assert evidence.execution_status == "incomplete"
     assert (evidence.input_tokens, evidence.output_tokens) == (5, None)
     assert _persisted_tokens(factory) == [("candidate", 5, None)]
+
+
+# ===========================================================================
+# #268 Task 1: the verdict writer
+#
+# Binding corrections (#268 PLAN-CORRECTIONS): C4 (one principal, the method
+# owns its transaction, validation before it), C5 (not-found is
+# ``TestRunNotFound``; ``not_completed`` covers both verdicts; a real
+# ``.reason``), C6 (an L3-only ``FOR UPDATE`` on the run row, exactly the four
+# verdict columns, the database clock, an identical re-submit writes nothing),
+# C7 (an ``IntegrityError`` is never translated), C8 (the real SQLite fixture,
+# fixtures by executor or INSERT only, exact reasons), C9 (a baseline run may be
+# approved), C27 (no model or runtime is touched), rulings Q3 and Q7.
+# ===========================================================================
+
+import re  # noqa: E402
+from datetime import datetime  # noqa: E402
+
+from sqlalchemy.exc import IntegrityError  # noqa: E402
+
+from src.services.agent_test_workbench import (  # noqa: E402
+    IneligibleForApprovalError,
+    VerdictRejected,
+)
+from src.services.agent_test_workbench import (  # noqa: E402
+    _verdict_lock_statement as verdict_lock_statement,
+)
+
+REVIEWER = "reviewer@example.com"
+_VERDICT_COLUMNS = ("verdict", "verdict_reviewer", "verdict_at", "verdict_notes")
+_OLD_VERDICT_AT = datetime(2020, 1, 2, 3, 4, 5)
+
+
+def _record(factory, workbench=None, **overrides):
+    arguments: dict[str, object] = {
+        "verdict": "approved",
+        "reviewer": REVIEWER,
+        "notes": "Looks right.",
+    }
+    arguments.update(overrides)
+    workbench = workbench if workbench is not None else AgentTestWorkbench()
+    with factory() as session:
+        return workbench.record_verdict(session, **arguments)
+
+
+def _full_row(factory, run_id: int) -> dict[str, object]:
+    with factory() as session:
+        row = session.get(AgentTestRun, run_id)
+        return {
+            column.key: getattr(row, column.key) for column in AgentTestRun.__table__.columns
+        }
+
+
+def _evidence_columns(factory, run_id: int) -> dict[str, object]:
+    row = _full_row(factory, run_id)
+    for column in _VERDICT_COLUMNS:
+        del row[column]
+    return row
+
+
+def _verdict_of(factory, run_id: int) -> tuple[object, ...]:
+    row = _full_row(factory, run_id)
+    return tuple(row[column] for column in _VERDICT_COLUMNS)
+
+
+def _insert_run_like(factory, source_run_id: int, **overrides) -> int:
+    """An INSERT-only fixture (C8): a copy of a real run's columns, overridden.
+
+    Never an UPDATE: on PostgreSQL the C24 trigger rejects one with 23514.
+    """
+    values = _full_row(factory, source_run_id)
+    del values["id"]
+    values.update(overrides)
+    with factory() as session:
+        row = AgentTestRun(**values)
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+class _CapturedStatements:
+    """Every SQL statement the engine sends while installed (C6's proof)."""
+
+    def __init__(self, factory) -> None:
+        self.engine = factory.kw["bind"]
+        self.statements: list[tuple[str, object]] = []
+
+    def _capture(self, _conn, _cursor, statement, parameters, _context, _many) -> None:
+        self.statements.append((statement, parameters))
+
+    def __enter__(self) -> "_CapturedStatements":
+        event.listen(self.engine, "before_cursor_execute", self._capture)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        event.remove(self.engine, "before_cursor_execute", self._capture)
+
+    def updates(self) -> list[tuple[str, object]]:
+        return [
+            (statement, parameters)
+            for statement, parameters in self.statements
+            if statement.lstrip().upper().startswith("UPDATE")
+        ]
+
+
+_UPDATE_SHAPE = re.compile(
+    r"^\s*UPDATE agent_test_run SET (?P<set>.+?) WHERE (?P<where>.+?)\s*$", re.DOTALL
+)
+
+
+def _set_columns(statement: str) -> tuple[dict[str, str], str]:
+    match = _UPDATE_SHAPE.match(statement)
+    assert match is not None, statement
+    assignments = {}
+    for assignment in match.group("set").split(","):
+        column, _, value = assignment.partition("=")
+        assignments[column.strip()] = value.strip()
+    return assignments, match.group("where").strip()
+
+
+# --- the write --------------------------------------------------------------
+
+
+def test_an_approval_writes_the_four_verdict_columns_and_nothing_else(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+    before = _evidence_columns(factory, run.run_id)
+
+    evidence = _record(factory, run_id=run.run_id, notes="  Verbatim, with spaces.  ")
+
+    verdict, reviewer, verdict_at, notes = _verdict_of(factory, run.run_id)
+    assert (verdict, reviewer, notes) == ("approved", REVIEWER, "  Verbatim, with spaces.  ")
+    assert verdict_at is not None
+    assert _evidence_columns(factory, run.run_id) == before
+    with factory() as session:
+        read = workbench.get_test_run(session, run_id=run.run_id)
+    assert isinstance(evidence, TestRunEvidence)
+    assert dataclasses_asdict(evidence) == dataclasses_asdict(read)
+
+
+@pytest.mark.parametrize("second", ["none", "flip_same_reviewer_and_notes"])
+def test_the_verdict_update_sets_exactly_the_four_columns_by_run_id(factory, second):
+    """C6: the SET list is the four verdict columns every time, ``verdict_at``
+    from the database clock, and the one predicate is the run id."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+    if second != "none":
+        _record(factory, run_id=run.run_id, verdict="approved", notes=None)
+
+    with _CapturedStatements(factory) as captured:
+        _record(
+            factory,
+            run_id=run.run_id,
+            verdict="rejected" if second != "none" else "approved",
+            notes=None,
+        )
+
+    updates = captured.updates()
+    assert len(updates) == 1, updates
+    statement, parameters = updates[0]
+    assignments, where = _set_columns(statement)
+    assert set(assignments) == set(_VERDICT_COLUMNS)
+    assert assignments["verdict_at"] == "CURRENT_TIMESTAMP"  # the database clock
+    assert where == "agent_test_run.id = ?"
+    assert tuple(parameters)[-1] == run.run_id
+    assert REVIEWER in tuple(parameters)
+
+
+def test_the_verdict_writer_reads_no_parent_or_case_lock_statement(factory):
+    """C6/C28: L3 only.  On SQLite ``FOR UPDATE`` is not rendered, so the proof
+    here is that no parent table is read at all; PostgreSQL proves the lock."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    with _CapturedStatements(factory) as captured:
+        _record(factory, run_id=run.run_id)
+
+    first = captured.statements[0][0]
+    assert first.lstrip().upper().startswith("SELECT")
+    assert "FROM agent_test_run" in first
+    for statement, _parameters in captured.statements:
+        assert "graph_draft" not in statement
+        assert "graph_release" not in statement
+
+
+def test_the_verdict_lock_statement_is_for_update_of_the_run_row_only():
+    compiled = str(verdict_lock_statement(7).compile(dialect=postgresql.dialect()))
+
+    assert compiled.rstrip().endswith("FOR UPDATE"), compiled
+    assert " OF " not in compiled
+    assert "JOIN" not in compiled
+    assert "FROM agent_test_run" in compiled
+    assert "WHERE agent_test_run.id = %(id_1)s" in compiled
+    for table in ("graph_draft", "graph_release", "agent_test_case"):
+        assert table not in compiled
+
+
+def test_a_rejection_of_a_completed_passing_run_is_recorded(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    _record(factory, run_id=run.run_id, verdict="rejected", notes=None)
+
+    verdict, reviewer, verdict_at, notes = _verdict_of(factory, run.run_id)
+    assert (verdict, reviewer, notes) == ("rejected", REVIEWER, None)
+    assert verdict_at is not None
+
+
+def test_a_published_baseline_run_can_be_approved(factory):
+    """C9 / user decision P1."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    baseline = _run_baseline(factory, workbench)
+    assert baseline.run_kind == "published_baseline"
+
+    _record(factory, run_id=baseline.run_id)
+
+    assert _verdict_of(factory, baseline.run_id)[:2] == ("approved", REVIEWER)
+
+
+# --- eligibility (C5) -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "status"),
+    [("provider_unavailable", "model_error"), ("invalid_optional_field", "incomplete")],
+)
+@pytest.mark.parametrize("verdict", ["approved", "rejected"])
+def test_a_run_that_did_not_complete_is_not_completed_for_either_verdict(
+    factory, mode, status, verdict
+):
+    workbench, _runtime_, _adapter = _executor(factory, DeterministicFakeModelAdapter(mode=mode))
+    run = _run_candidate(factory, workbench)
+    assert run.execution_status == status
+
+    with _CapturedStatements(factory) as captured:
+        with pytest.raises(IneligibleForApprovalError) as caught:
+            _record(factory, run_id=run.run_id, verdict=verdict)
+
+    assert caught.value.reason == "not_completed"
+    assert caught.value.run_id == run.run_id
+    assert str(caught.value) == f"agent test run {run.run_id} is ineligible: not_completed"
+    assert captured.updates() == []
+    assert _verdict_of(factory, run.run_id) == (None, None, None, None)
+
+
+def test_an_approval_of_a_completed_run_with_failed_checks_is_checks_failed(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    source = _run_candidate(factory, workbench)
+    failing = _insert_run_like(factory, source.run_id, deterministic_checks_passed=False)
+
+    with pytest.raises(IneligibleForApprovalError) as caught:
+        _record(factory, run_id=failing)
+
+    assert caught.value.reason == "checks_failed"
+    assert caught.value.run_id == failing
+    assert _verdict_of(factory, failing) == (None, None, None, None)
+
+
+def test_a_rejection_of_a_completed_run_with_failed_checks_is_allowed(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    source = _run_candidate(factory, workbench)
+    failing = _insert_run_like(factory, source.run_id, deterministic_checks_passed=False)
+
+    _record(factory, run_id=failing, verdict="rejected")
+
+    assert _verdict_of(factory, failing)[:2] == ("rejected", REVIEWER)
+
+
+def test_the_ineligibility_error_is_a_value_error_with_a_reason():
+    error = IneligibleForApprovalError(3, "checks_failed")
+
+    assert isinstance(error, ValueError)
+    assert (error.run_id, error.reason) == (3, "checks_failed")
+
+
+@pytest.mark.parametrize("verdict", ["approved", "rejected"])
+def test_a_missing_run_is_the_existing_not_found(factory, verdict):
+    with pytest.raises(TestRunNotFound) as caught:
+        _record(factory, run_id=424242, verdict=verdict)
+
+    assert caught.value.run_id == 424242
+
+
+# --- re-submit and transitions (C6, Q7) --------------------------------------
+
+
+def test_an_identical_resubmit_writes_nothing_and_returns_the_stored_evidence(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    source = _run_candidate(factory, workbench)
+    run_id = _insert_run_like(
+        factory,
+        source.run_id,
+        verdict="approved",
+        verdict_reviewer=REVIEWER,
+        verdict_at=_OLD_VERDICT_AT,
+        verdict_notes="Looks right.",
+    )
+    before = _full_row(factory, run_id)
+
+    with _CapturedStatements(factory) as captured:
+        evidence = _record(factory, run_id=run_id, notes="Looks right.")
+
+    assert captured.updates() == []
+    assert _full_row(factory, run_id) == before
+    assert evidence.run_id == run_id
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"verdict": "rejected"},
+        {"reviewer": "second-reviewer@example.com"},
+        {"notes": "Revised note."},
+        {"notes": None},
+    ],
+)
+def test_any_changed_field_restamps_all_four_columns(factory, change):
+    workbench, _runtime_, _adapter = _executor(factory)
+    source = _run_candidate(factory, workbench)
+    run_id = _insert_run_like(
+        factory,
+        source.run_id,
+        verdict="approved",
+        verdict_reviewer=REVIEWER,
+        verdict_at=_OLD_VERDICT_AT,
+        verdict_notes="Looks right.",
+    )
+    submitted = {"verdict": "approved", "reviewer": REVIEWER, "notes": "Looks right."}
+    submitted.update(change)
+    before = _evidence_columns(factory, run_id)
+
+    _record(factory, run_id=run_id, **submitted)
+
+    verdict, reviewer, verdict_at, notes = _verdict_of(factory, run_id)
+    assert (verdict, reviewer, notes) == (
+        submitted["verdict"],
+        submitted["reviewer"],
+        submitted["notes"],
+    )
+    assert verdict_at is not None and verdict_at.replace(tzinfo=None) > _OLD_VERDICT_AT
+    assert _evidence_columns(factory, run_id) == before
+
+
+def test_an_approval_flips_to_a_rejection_and_back_while_eligible(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    _record(factory, run_id=run.run_id, verdict="approved")
+    _record(factory, run_id=run.run_id, verdict="rejected", reviewer="second@example.com")
+    assert _verdict_of(factory, run.run_id)[:2] == ("rejected", "second@example.com")
+    _record(factory, run_id=run.run_id, verdict="approved")
+    assert _verdict_of(factory, run.run_id)[:2] == ("approved", REVIEWER)
+
+
+def test_a_rejected_failing_run_cannot_flip_to_approved(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    source = _run_candidate(factory, workbench)
+    failing = _insert_run_like(factory, source.run_id, deterministic_checks_passed=False)
+    _record(factory, run_id=failing, verdict="rejected")
+    stored = _verdict_of(factory, failing)
+
+    with pytest.raises(IneligibleForApprovalError) as caught:
+        _record(factory, run_id=failing, verdict="approved")
+
+    assert caught.value.reason == "checks_failed"
+    assert _verdict_of(factory, failing) == stored
+
+
+# --- validation before the transaction (C4) ---------------------------------
+
+VERDICT_INVALID = TestCaseIssue(
+    "verdict", "invalid_choice", "Verdict must be 'approved' or 'rejected'."
+)
+NOTES_BLANK = TestCaseIssue(
+    "notes", "blank", "Verdict notes must not be blank; send null to omit them."
+)
+NOTES_TOO_LONG = TestCaseIssue(
+    "notes", "too_long", "Verdict notes must be at most 2000 characters."
+)
+NOTES_STRICT_TYPE = TestCaseIssue("notes", "strict_type", "Verdict notes must be a string.")
+ACTOR_BLANK = TestCaseIssue("actor", "blank", "Actor must not be blank.")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "issues"),
+    [
+        ({"verdict": None}, (VERDICT_INVALID,)),  # Q7: no withdrawal to "no verdict"
+        ({"verdict": "Approved"}, (VERDICT_INVALID,)),
+        ({"verdict": "withdrawn"}, (VERDICT_INVALID,)),
+        ({"verdict": 1}, (VERDICT_INVALID,)),
+        ({"notes": ""}, (NOTES_BLANK,)),
+        ({"notes": " \n\t "}, (NOTES_BLANK,)),
+        ({"notes": "x" * 2001}, (NOTES_TOO_LONG,)),
+        ({"notes": 12}, (NOTES_STRICT_TYPE,)),
+        ({"reviewer": ""}, (ACTOR_BLANK,)),
+        ({"reviewer": "   "}, (ACTOR_BLANK,)),
+        ({"reviewer": None}, (ACTOR_BLANK,)),
+        (
+            {"reviewer": " ", "verdict": "maybe", "notes": ""},
+            (ACTOR_BLANK, VERDICT_INVALID, NOTES_BLANK),
+        ),
+    ],
+)
+def test_invalid_arguments_are_refused_in_order_before_any_statement(
+    factory, overrides, issues
+):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    with _CapturedStatements(factory) as captured:
+        with pytest.raises(VerdictRejected) as caught:
+            _record(factory, run_id=run.run_id, **overrides)
+
+    assert caught.value.issues == issues
+    assert captured.statements == []
+    assert _verdict_of(factory, run.run_id) == (None, None, None, None)
+
+
+def test_notes_of_exactly_2000_code_points_are_stored_verbatim(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+    notes = "é" * 1999 + "☃"
+
+    _record(factory, run_id=run.run_id, notes=notes)
+
+    assert _verdict_of(factory, run.run_id)[3] == notes
+
+
+def test_the_verdict_writer_refuses_a_session_already_in_a_transaction(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    with factory() as session:
+        session.begin()
+        with pytest.raises(RuntimeError):
+            workbench.record_verdict(
+                session, run_id=run.run_id, verdict="approved", reviewer=REVIEWER, notes=None
+            )
+        session.rollback()
+
+    assert _verdict_of(factory, run.run_id) == (None, None, None, None)
+
+
+# --- Q3: stale or retired evidence may still be judged; the case never moves -
+
+
+def test_a_verdict_on_a_stale_candidate_run_is_recorded(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+    _saver("A later draft prompt.")(factory)
+
+    _record(factory, run_id=run.run_id)
+
+    assert _verdict_of(factory, run.run_id)[:2] == ("approved", REVIEWER)
+
+
+def test_a_verdict_on_a_retired_case_versions_run_never_changes_a_case(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    extra = _create(factory)
+    run = _run_candidate(factory, workbench, test_case_id=extra.id)
+    _deactivate(factory, extra.id)
+    cases_before = _rows(factory)
+
+    _record(factory, run_id=run.run_id, verdict="rejected")
+
+    assert _verdict_of(factory, run.run_id)[:2] == ("rejected", REVIEWER)
+    assert _rows(factory) == cases_before
+    row = _full_row(factory, run.run_id)
+    assert (row["test_case_id"], row["test_case_version"]) == (extra.id, extra.version)
+
+
+# --- C7: an IntegrityError is never translated ------------------------------
+
+
+def test_an_integrity_error_from_the_update_propagates_unchanged(factory):
+    """Stands in for #269's linked-verdict trigger: it must surface as itself."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+    engine = factory.kw["bind"]
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TRIGGER t268_verdict_refused BEFORE UPDATE OF verdict "
+            "ON agent_test_run BEGIN SELECT RAISE(ABORT, 'verdict refused'); END"
+        )
+
+    with pytest.raises(IntegrityError) as caught:
+        _record(factory, run_id=run.run_id)
+
+    assert not isinstance(caught.value, IneligibleForApprovalError)
+    assert "verdict refused" in str(caught.value.orig)
+    assert _verdict_of(factory, run.run_id) == (None, None, None, None)
+
+
+# --- C27: no model, adapter or runtime is touched ---------------------------
+
+
+class _ExplodingRuntime:
+    def __getattribute__(self, name):
+        raise AssertionError(f"record_verdict touched the runtime: {name}")
+
+
+def test_the_verdict_writer_never_touches_a_runtime(factory, monkeypatch):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    def _refuse():
+        raise AssertionError("record_verdict resolved the test runtime")
+
+    monkeypatch.setattr(workbench_module, "get_agent_test_runtime", _refuse)
+    isolated = AgentTestWorkbench(runtime=_ExplodingRuntime())  # type: ignore[arg-type]
+
+    _record(factory, workbench=isolated, run_id=run.run_id)
+
+    assert _verdict_of(factory, run.run_id)[:2] == ("approved", REVIEWER)
+    assert isinstance(_verdict_of(factory, run.run_id)[2], datetime)
