@@ -750,3 +750,11 @@ Permitted use: the 409 not-ready body and the preview, computed BEFORE any write
 CONTROLLER CORRECTION: #268's ledger recorded this as "carried to #269's ledger" before it was written; it is written here now.
 
 Cost if wrong: publication proceeds on stale readiness and links a run whose verdict changed.
+
+### Correction 33 — a correlated `NOT EXISTS` protection is not re-checked by a row-lock wait; lock first, re-check in a new statement — BLOCKING (every #269 DELETE/UPDATE/INSERT…SELECT guarded by a correlated predicate, incl. the gate re-verify)
+
+Source: #268 Task 4 (`3b0d2070a`), reproduced on PostgreSQL by `test_postgres_cleanup_*` ordering test with PID-observed blocking. A single DELETE whose outer `WHERE` repeated `NOT EXISTS(link)` / `NOT EXISTS(eligible approval)` on the target row still deleted a row approved by a writer it had waited on: PostgreSQL plans each `NOT EXISTS` as an anti-join, and READ COMMITTED's EvalPlanQual recheck re-runs that join against the rows originally fetched (none), so the now-protected row still qualifies. C19e's prescribed single-statement fix is therefore WRONG.
+
+Ruling for #269: any write whose safety depends on a correlated sub-predicate over rows another transaction may change must (1) lock the target rows `FOR UPDATE` (id order) in one statement, then (2) re-evaluate the predicate in a NEW statement (fresh READ COMMITTED snapshot) before or as part of the write. The C29 gate re-verify already follows (1)+(2) — keep it that way; do not collapse it into one statement. Each such site needs a PID-observed ordering test, or a ledgered argument that no concurrent writer can change the sub-predicate's rows.
+
+Cost if wrong: publication links, or cleanup deletes, a row whose protection committed during the wait.
