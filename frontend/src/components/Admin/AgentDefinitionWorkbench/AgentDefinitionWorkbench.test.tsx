@@ -358,6 +358,12 @@ describe('the forbidden-action guard', () => {
     expect(forbidsActionName('Run published baseline, then approve')).toBe(true);
     expect(forbidsActionName('Run isolated test')).toBe(true);
     expect(forbidsActionName('View run 12')).toBe(true);
+    // Exemptions match the whole name exactly, never as a substring (review m-5).
+    for (const near of ['Run test cases', 'Run test case now', 'run test case', 'Rerun: Run published baseline']) {
+      expect(forbidsActionName(near), near).toBe(true);
+    }
+    // Surrounding and repeated whitespace is not part of a name.
+    expect(forbidsActionName('  Run test case ')).toBe(false);
   });
 
   it('spares every other name the panel actually renders', () => {
