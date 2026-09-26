@@ -167,3 +167,7 @@ Ruling: I-1 — add an "Edit test case" supersede control (AC2 names "update" an
 Ruling: I-2 — one ungated, counted history read on case selection, showing the newest candidate run and newest completed baseline; freshness token drops stale reads. Cost if wrong: one extra GET per case selection.
 Ruling: fold in Minors m-5 (exemptions match exactly, not as substrings) and m-1 (late candidate run after a newer Save cannot clobber).
 Task 6: fix round 1/5 (2 Important + 2 Minor addressed, 0 open; commits `e1e85ff60..a15632587`). Implementer sabotage 6/6 RED (edit routed to create 4+1 PW; no-op branch 2; history read skipped 5+2 PW incl. reload; token not cleared 3; substring stripping 1+1 PW; older response accepted 2). Gates: Vitest 597; typecheck 0; ESLint 0; Playwright 76; Python joins 506; full unit 6 (baseline) / 6616 / 110.
+Task 6: scoped re-review (Sonnet): I-1, I-2, m-5, m-1 ADDRESSED, no new breakage; one reducer / one counter / one gate confirmed; own mutations — history read ignores its freshness token RED 2/489; edit bypasses the gate RED 4/489; typecheck 0, Playwright 76. 100-run history cap graded minor (disclosed; #268's history surface supersedes it).
+Task 6: minor (deferred): 100-run history cap; a failed history read shows an alert without auto-retry; the other Minors in task-6-review.md.
+Task 6: complete (commits `5bb5a8874..432522ca6`, review clean after 1 fix round).
+#267: all tasks 0-6 complete. Next: whole-branch review on `e91fcd856..HEAD`.
