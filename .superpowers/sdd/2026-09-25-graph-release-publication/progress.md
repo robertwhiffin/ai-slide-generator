@@ -68,3 +68,10 @@ Ruling (C48): ADOPT the proposed typed refusal — `record_verdict` re-checks th
 Ruling (C47): accepted as reasoned; Task 4's RED must record the observed cause.
 Concern 3 (builder approvability under the fake adapter): carried to Task 8's brief as a re-probe.
 Task 0: complete. GO for Task 1 (TASK_BASE `f1ec89d98`).
+
+## Task 1 — 2026-09-26
+Task 1: implementer DONE_WITH_CONCERNS at `3851c9aa4` (TASK_BASE `2322a4291`): `256f2233c` publication core (`src/services/graph_configuration_publication.py`, shared helpers extracted in draft/content/bootstrap, `_await_blocked_by` in `postgres_concurrency_helpers.py:215`, PG file enrolled in integration-graph). Gates: focused unit 937; full unit 6 (baseline nodes/causes) / 6819 / 110; PG publication 9, bootstrap 3, workbench 49, overlay 10, constraints 66 — zero skips; ruff clean (pre-existing I001 in test_ci_collects at base). 29 mutations: 26 RED, M12 equivalent, M13/M23 defensive-unreachable.
+Concern 1 (L0 statement's release-before-draft order is planner-determined, not text-determined; M25 left the behavioural test GREEN): to the reviewer — judge whether every L0 taker shares the one helper (then order agrees across callers) or the lock must split into two statements.
+Concern 3 (C8 M04 prediction partly wrong — PendingRollbackError): recorded; correction to C8's prediction text only.
+Deviation: `_await_blocked_by` created in Task 1 (C53 said Task 2) — ACCEPTED; Task 2 must reuse it.
+Task 1: controller sabotage (fresh; not in M01–M29) — stale-lock check skipped when no role changed (`CTRL269_1_ORDER`, anchor 1): unit file 34/34 GREEN, PG file 9/9 GREEN — SURVIVED. A stale `expected_lock_version` whose server draft now equals the published release returns `NothingToPublish`, not `PublicationConflict`; the precedence (stale before nothing-to-publish) is unpinned. FINDING for the fix round: add a test (another admin saves then reverts to published content → the stale publisher gets `PublicationConflict`). Restored from pinned HEAD, clean, marker 0.
