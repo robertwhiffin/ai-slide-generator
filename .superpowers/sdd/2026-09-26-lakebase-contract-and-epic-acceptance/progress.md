@@ -42,3 +42,72 @@ Ruling: OQ3 — a documented developer command to re-record the Playwright contr
 Ruling: OQ4 — the local merge of #271 may proceed with #266 m9 unverified; the epic is NOT reported shippable until the user authorises and the dev-workspace check passes. Surfaced to the user. Cost if wrong: none locally.
 Ruling: the planner's follow-up split is accepted — style-exclusivity ×4 in scope (Task 1); deploy-autoscaling ×2 out (pre-epic, needs an issue); #266 m7 out (needs an issue); `openai` declared (Task 5); typecheck gap and log needles in scope.
 Next: independent plan review before execution. Phase A (Tasks 0-A, 1, 5) is runnable at `a08389ec3`.
+
+## Plan review 1 — 2026-09-26
+
+**Verdict:** APPROVE WITH CORRECTIONS. **Counts:** 2 Critical, 9 Important, 12 Minor. Total: 23 corrections.
+
+**Corrections file:** `.superpowers/sdd/2026-09-26-lakebase-contract-and-epic-acceptance/PLAN-CORRECTIONS.md`
+
+**Correction numbers:**
+- C1 (Correction 1): Tasks 10/11 replay design
+- C2 (Correction 2): Task 6 S12 contributor/duplicate prerequisites
+- I1 (Correction 3): Task 4 tsconfig verbatimModuleSyntax and tsc invocation
+- I2 (Correction 4): Task 1 xdist worker isolation
+- I3 (Correction 5): Task 5 openai specifier and requirements.txt
+- I4 (Correction 6): AC1 tripwire (_SKILLS) and guard 2/4 widening
+- I5 (Correction 7): **REAL PRODUCTION DEFECT** — `resolve_engine_mode_or` fallback at `chat.py:490-491` and `:697-698` silently routes a pinned graph conversation to the legacy monolith on any DB error; violates spec §15; must be fixed in #271
+- I6 (Correction 8): Task 7 AC5 no-tools uses recording DatabricksModelAdapter
+- I7 (Correction 9): Task 11 mixed-release warning requires real deck mutations in Task 6
+- I8 (Correction 10): Task 3 reviewer sabotage changes one byte, not swaps the role
+- I9 (Correction 11): Playwright port-3000 lane; node_modules symlink; tsc --noEmit
+- M1 (Correction 12): Task 2 regex widened to `vars\(record`
+- M2 (Correction 13): Task 12 Step 2 RED count is guards 1–4, not 1 and 4
+- M3 (Correction 14): R7 extended; RecordingAgentInvocationIdentitySink kept as re-export
+- M4 (Correction 15): Three stale citations corrected
+- M5 (Correction 16): Sweep helper extracted to shared fixture; missing Files block entry
+- M6 (Correction 17): Style-fixture assertions confirmed by value, not text
+- M7 (Correction 18): Task 8 names existing cases; three setup details for new cases
+- M8 (Correction 19): S15 evidence asserted `== []`
+- M9 (Correction 20): OQ2 follow-up must keep two skills imports
+- M10 (Correction 21): model_validate_json for strict models in Task 10 join
+- M11 (Correction 22): Controller triage before routing any failure to predecessor
+- M12 (Correction 23): Scoped re-review of Task 0-B corrections before Task 2 dispatches
+
+**Blocking Phase A (before Task 1):**
+- Correction 4 (I2): xdist worker isolation
+
+**Blocking Phase A (before Task 5):**
+- Correction 5 (I3): openai no-cap specifier
+
+**Blocking Phase A (worktree setup):**
+- Correction 11 (I9): frontend/node_modules symlink
+
+**Blocking Phase B (before Task 2):**
+- Correction 23 (M12): scoped re-review after Task 0-B
+
+**Blocking Phase B (before Task 3):**
+- Correction 10 (I8): reviewer sabotage one-byte change
+
+**Blocking Phase B (before Task 4):**
+- Correction 3 (I1): drop verbatimModuleSyntax; re-measure; tsc --noEmit
+
+**Blocking Phase B (before Task 6):**
+- Correction 1 (C1): replay design
+- Correction 2 (C2): S12 prerequisites
+- Correction 6 (I4): tripwire _SKILLS and guard 2/4
+
+**Blocking Phase B (before Task 7):**
+- Correction 8 (I6): DatabricksModelAdapter for AC5
+- Correction 9 (I7): deck mutations and collab-history exchange
+
+**Blocking Phase B (before Task 8):**
+- Correction 7 (I5): production fallback fix (chat.py)
+
+**Blocking Phase B (before Task 10):**
+- Correction 11 (I9): lsof gate; tsc --noEmit
+
+**Blocking Phase B (before Task 12):**
+- Correction 6 (I4): (also) Task 12 sabotage re-aimed
+
+**I5 noted as real production defect:** `resolve_engine_mode_or` at `src/api/routes/chat.py:490-491` and `:697-698` silently falls through to the legacy monolith on any DB error when the session has a pinned graph release. Found at plan review. Added to the removal inventory and to Task 8 scope in PLAN-CORRECTIONS.md.
