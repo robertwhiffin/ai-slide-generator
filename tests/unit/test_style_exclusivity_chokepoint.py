@@ -51,41 +51,58 @@ def _authorities(persisted):
 
 
 def _capturing_db(captured):
-    """A stand-in DB session that records the row ``create_session`` adds.
+    """A real, bootstrapped DB session that records the row ``create_session`` adds.
 
-    ``create_session`` reads ``created_at`` back off the row after flushing, so the
-    fake populates it the way the real ``server_default`` would; otherwise the
-    method fails on a detail unrelated to what these tests measure.
+    ``create_session`` now projects the conversation's Graph Version (#261), which
+    needs an active Graph Release, so it runs on a real in-memory SQLite database
+    with Graph Version 1 bootstrapped -- the state every production database is in.
+
+    What is recorded is ``row.agent_config`` AS HANDED TO THE SESSION (captured on
+    attach, before any flush), not the stored bytes. That is deliberate: these
+    tests pin ``create_session``'s OWN normalisation. The column's
+    ``NormalizedAgentConfig`` bind hook would heal a both-set dict on the way to the
+    database, so reading the row back would stay green with ``create_session``'s
+    normalisation deleted. The stored-bytes guarantee is pinned separately, in
+    ``test_style_exclusivity_persistence_boundary.py``.
     """
-    from datetime import datetime
+    from contextlib import contextmanager
 
-    class _FakeSession:
-        def query(self, *args, **kwargs):
-            return self
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
 
-        def filter(self, *args, **kwargs):
-            return self
+    import src.database.models  # noqa: F401 - register every model with Base.metadata
+    from src.core.database import Base
+    from src.database.models.session import UserSession
+    from src.services.graph_configuration import GraphConfiguration
 
-        def first(self):
-            return None  # no existing session -> take the create branch
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    GraphConfiguration().bootstrap_v1(session_factory)
 
-        def add(self, row):
-            captured["agent_config"] = row.agent_config
-            captured["row"] = row
+    @contextmanager
+    def _ctx():
+        db = session_factory()
 
-        def flush(self):
-            row = captured.get("row")
-            if row is not None and getattr(row, "created_at", None) is None:
-                row.created_at = datetime(2026, 1, 1)
+        @event.listens_for(db, "before_attach")
+        def _record(_session, instance):
+            if isinstance(instance, UserSession):
+                captured["agent_config"] = instance.agent_config
+                captured["row"] = instance
 
-    class _FakeCtx:
-        def __enter__(self):
-            return _FakeSession()
+        try:
+            yield db
+            db.commit()
+        finally:
+            db.close()
+            engine.dispose()
 
-        def __exit__(self, *exc):
-            return False
-
-    return _FakeCtx()
+    return _ctx()
 
 
 class TestTheSerializerIsTheChokepoint:

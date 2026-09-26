@@ -16,6 +16,38 @@ from databricks.sdk import WorkspaceClient
 # This must happen before any app imports that read ENVIRONMENT at module level.
 os.environ.setdefault("ENVIRONMENT", "test")
 
+# Unit runs must never reach the operator's dev database (#271). With no
+# DATABASE_URL and no Lakebase environment, src/core/database.py resolves
+# postgresql://localhost/ai_slide_generator -- and its load_dotenv() would pick the
+# same database up from a developer's .env. Best-effort request/usage logging
+# writes to whatever that resolves to. So: refuse a URL that names the dev
+# database, and when none is set supply a throwaway SQLite file. CI leaves
+# DATABASE_URL unset on purpose (.github/workflows/test.yml, unit-tests job).
+#
+# One file per xdist worker AND per run: workers inherit the controller's
+# environment, so a worker that sees the controller's defaulted URL (flag set)
+# derives its own, keyed on PYTEST_XDIST_WORKER. mkdtemp keeps concurrent runs
+# (other worktrees) and stale files from earlier runs out of each other's way.
+if "ai_slide_generator" in os.environ.get("DATABASE_URL", ""):
+    raise pytest.UsageError(
+        "refusing to run tests against the ai_slide_generator dev database "
+        f"(DATABASE_URL={os.environ['DATABASE_URL']!r}); unset DATABASE_URL to use "
+        "a throwaway SQLite database, or point it at a disposable one"
+    )
+if (
+    "DATABASE_URL" not in os.environ
+    or os.environ.get("TELLR_TESTS_DATABASE_URL_DEFAULTED") == "1"
+):
+    import atexit
+    import shutil
+    import tempfile
+
+    _UNIT_DB_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    _UNIT_DB_DIR = tempfile.mkdtemp(prefix=f"tellr-tests-{_UNIT_DB_WORKER}-")
+    atexit.register(shutil.rmtree, _UNIT_DB_DIR, ignore_errors=True)
+    os.environ["DATABASE_URL"] = f"sqlite:///{_UNIT_DB_DIR}/tellr-tests.sqlite"
+    os.environ["TELLR_TESTS_DATABASE_URL_DEFAULTED"] = "1"
+
 from src.core.databricks_client import reset_client, reset_user_client
 
 
