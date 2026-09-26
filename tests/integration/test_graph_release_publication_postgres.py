@@ -22,6 +22,8 @@ from src.database.models.graph_configuration import (
     GraphRelease,
     GraphReleaseAgent,
 )
+from src.services import graph_configuration_workbench
+from src.services.agent_test_workbench import _PARENT_HANDOFF_DIAGNOSIS
 from src.services.conversation_pins import lock_active_graph_release
 from src.services.graph_configuration import (
     BootstrapResult,
@@ -29,6 +31,7 @@ from src.services.graph_configuration import (
     DraftSaveResult,
     EditableModelDraft,
     GraphConfiguration,
+    GraphConfigurationIntegrityError,
     PublicationConflict,
     PublishedRelease,
 )
@@ -587,9 +590,6 @@ def test_shared_parent_lock_names_release_before_draft(postgres_engine):
 # Task 2: the publication handoff, and writer / reader / publisher races
 # ---------------------------------------------------------------------------
 
-_PARENT_HANDOFF_DIAGNOSIS = "graph configuration parent snapshot is inconsistent"
-
-
 def _is_parent_lock(normalized: str) -> bool:
     return (
         "FOR UPDATE" in normalized
@@ -908,6 +908,36 @@ def test_two_publishers_one_winner_one_exact_stale_conflict(postgres_engine, win
     assert _revision_ids(factory) == revisions_before | {
         mapping.agent_definition_revision_id for mapping in result.mappings.values()
     }
+
+
+def test_a_double_handoff_keeps_the_diagnosis_267_retries_on(
+    postgres_engine, monkeypatch
+):
+    """C49: #267's ``_persist_run`` retries on this exact text; keep it byte-identical.
+
+    With the rescan disabled, a queued reader hits the handoff and must raise the
+    very string ``agent_test_workbench._PARENT_HANDOFF_DIAGNOSIS`` compares with.
+    """
+    factory = _factory(postgres_engine)
+    lock = _save_prompt(factory, "architect", "\n\nTune A.", lock=0).draft.lock_version
+    monkeypatch.setattr(graph_configuration_workbench, "_MAX_PARENT_LOCK_SCANS", 1)
+    service = _RaceObservedGraphConfiguration()
+
+    def _read():
+        with factory() as db:
+            return service.read_workbench(db)
+
+    published, read = _race(
+        postgres_engine,
+        service,
+        blocker=("publisher", _publish_as(service, factory, lock=lock)),
+        waiter=("reader", _read),
+    )
+
+    assert isinstance(published.result(), PublishedRelease)
+    error = read.exception()
+    assert type(error) is GraphConfigurationIntegrityError
+    assert str(error) == _PARENT_HANDOFF_DIAGNOSIS
 
 
 def test_sequential_retry_after_success_is_stale(postgres_engine):
