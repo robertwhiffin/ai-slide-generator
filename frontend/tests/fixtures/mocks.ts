@@ -5,11 +5,13 @@
 import type {
   AgentDefinitionWorkbenchResponse,
   AgentKey,
+  AgentReadiness,
   AssemblyRulesV1,
   AssemblyRulesV2,
   CanonicalFieldDescriptor,
   ContentIdentity,
   DraftDefinition,
+  DraftReadiness,
   DraftSaveConflictResponse,
   DraftSaveRequest,
   DraftSaveSuccessResponse,
@@ -20,6 +22,7 @@ import type {
   ProtectedStageView,
   SystemModelEndpoint,
   TestCaseListEntry,
+  TestCaseReadiness,
   TestRunEvidence,
 } from '../../src/api/agentDefinitions';
 
@@ -1687,7 +1690,7 @@ export function syntheticAgentTestCaseList(items: TestCaseListEntry[] = [synthet
 
 /**
  * One persisted run exactly as the execute routes serialize it: an execute response
- * carries boolean currency flags, and no verdict field exists (#268 adds verdicts).
+ * carries boolean currency flags, and the four verdict keys are present and null.
  */
 export function syntheticTestRunEvidence(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
   return {
@@ -1723,6 +1726,10 @@ export function syntheticTestRunEvidence(overrides: Partial<TestRunEvidence> = {
     output_tokens: null,
     run_by: 'admin@test.com',
     run_at: '2026-09-26T10:00:00Z',
+    verdict: null,
+    verdict_reviewer: null,
+    verdict_at: null,
+    verdict_notes: null,
     candidate_is_current: true,
     base_release_is_current: true,
     ...overrides,
@@ -1750,4 +1757,73 @@ export function syntheticStaleTestCase(testCaseId = 101) {
 /** The exact ordered 422 envelope for a refused case write or a role-mismatched run. */
 export function syntheticInvalidTestCase(issues: Array<{ field: string; code: string; message: string }>) {
   return { code: 'invalid_test_case' as const, issues };
+}
+
+// #268 verdicts and draft readiness
+// ============================================================
+// Appended last, and, like #267's block, every new name begins with no existing
+// exported name (the Python joins find blocks with `index("export ...")`).
+
+/** One active required case row of a role exactly as `GET /readiness` serializes it. */
+export function syntheticTestCaseReadiness(overrides: Partial<TestCaseReadiness> = {}): TestCaseReadiness {
+  return {
+    agent_key: 'architect',
+    test_case_id: 101,
+    test_case_name: 'Architect quarterly revenue outline',
+    test_case_version: 1,
+    status: 'needs_test',
+    blocking: false,
+    run_id: null,
+    run_verdict: null,
+    run_checks_passed: null,
+    ...overrides,
+  };
+}
+
+/** One role's readiness item: unchanged from the base, so never blocking. */
+export function syntheticAgentReadiness(
+  agentKey: AgentKey,
+  overrides: Partial<AgentReadiness> = {},
+): AgentReadiness {
+  return {
+    agent_key: agentKey,
+    candidate_hash: 'a'.repeat(64),
+    is_changed_from_base: false,
+    ready: true,
+    missing_required_case: false,
+    cases: [],
+    ...overrides,
+  };
+}
+
+/**
+ * The exact `GET /readiness` body for the synthetic workbench: every role unchanged, so
+ * nothing blocks, at the workbench's lock. `agents` may replace individual roles.
+ */
+export function syntheticDraftReadinessBody(
+  overrides: Omit<Partial<DraftReadiness>, 'agents'> & { agents?: Partial<Record<AgentKey, AgentReadiness>> } = {},
+): DraftReadiness {
+  const { agents = {}, ...rest } = overrides;
+  const roles: AgentKey[] = [
+    'architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer',
+  ];
+  return {
+    draft_lock_version: 0,
+    base_release_id: 41,
+    all_ready: true,
+    blocking_agents: [],
+    agents: roles.map((agentKey) => agents[agentKey] ?? syntheticAgentReadiness(agentKey)),
+    ...rest,
+  };
+}
+
+/** The route's exact 422 for a verdict the run cannot carry (nothing was written). */
+export function syntheticVerdictIneligible(reason: 'not_completed' | 'checks_failed' = 'checks_failed') {
+  return {
+    code: 'ineligible_for_approval' as const,
+    reason,
+    message: reason === 'not_completed'
+      ? 'Only a completed run can take a verdict.'
+      : 'A run whose deterministic checks failed cannot be approved.',
+  };
 }

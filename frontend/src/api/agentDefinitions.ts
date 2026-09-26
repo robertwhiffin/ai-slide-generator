@@ -1192,6 +1192,7 @@ export interface PublishedBaselineTestRunRequest {
 
 export type TestRunKind = 'candidate' | 'published_baseline';
 export type TestRunExecutionStatus = 'completed' | 'model_error' | 'assembly_error' | 'incomplete';
+export type TestRunVerdict = 'approved' | 'rejected';
 
 export interface DeterministicCheckIssue {
   code: string;
@@ -1207,7 +1208,9 @@ export interface DeterministicCheckResult {
 
 /**
  * One immutable run, as evidence. Execute responses carry boolean currency flags and
- * reads carry `null`. There are no verdict fields: #268 adds them.
+ * reads carry `null`. The four verdict fields are always present: all `null` until a
+ * verdict is recorded, then `verdict`, `verdict_reviewer` and `verdict_at` together,
+ * with `verdict_notes` optional (#268).
  */
 export interface TestRunEvidence {
   run_id: number;
@@ -1234,6 +1237,10 @@ export interface TestRunEvidence {
   output_tokens: number | null;
   run_by: string;
   run_at: string;
+  verdict: TestRunVerdict | null;
+  verdict_reviewer: string | null;
+  verdict_at: string | null;
+  verdict_notes: string | null;
   candidate_is_current: boolean | null;
   base_release_is_current: boolean | null;
 }
@@ -1284,6 +1291,7 @@ const TEST_RUN_KINDS: readonly TestRunKind[] = ['candidate', 'published_baseline
 const TEST_RUN_STATUSES: readonly TestRunExecutionStatus[] = [
   'completed', 'model_error', 'assembly_error', 'incomplete',
 ];
+const TEST_RUN_VERDICTS: readonly TestRunVerdict[] = ['approved', 'rejected'];
 const DETERMINISTIC_CHECK_NAMES: readonly DeterministicCheckResult['name'][] = ['output_contract', 'execution'];
 const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
 
@@ -1299,7 +1307,8 @@ const TEST_RUN_KEYS = [
   'assembled_prompt', 'execution_status', 'error_detail', 'deterministic_checks_passed',
   'deterministic_check_results', 'candidate_raw_output', 'candidate_structured_output',
   'baseline_raw_output', 'baseline_structured_output', 'latency_ms', 'input_tokens',
-  'output_tokens', 'run_by', 'run_at', 'candidate_is_current', 'base_release_is_current',
+  'output_tokens', 'run_by', 'run_at', 'verdict', 'verdict_reviewer', 'verdict_at',
+  'verdict_notes', 'candidate_is_current', 'base_release_is_current',
 ] as const;
 
 function isAgentKey(value: unknown): value is AgentKey {
@@ -1320,6 +1329,21 @@ function isNullableNonnegativeInteger(value: unknown): value is number | null {
 
 function isNullableBoolean(value: unknown): value is boolean | null {
   return value === null || typeof value === 'boolean';
+}
+
+/**
+ * The verdict fields' types and pairing: `verdict`, `verdict_reviewer` and `verdict_at`
+ * are all null or all set, and notes exist only beside a verdict.
+ */
+function isVerdictRecord(value: Record<string, unknown>): boolean {
+  if (value.verdict === null) {
+    return value.verdict_reviewer === null && value.verdict_at === null && value.verdict_notes === null;
+  }
+  return typeof value.verdict === 'string'
+    && (TEST_RUN_VERDICTS as readonly string[]).includes(value.verdict)
+    && typeof value.verdict_reviewer === 'string'
+    && typeof value.verdict_at === 'string'
+    && isNullableString(value.verdict_notes);
 }
 
 function isTestCaseListEntry(value: unknown): value is TestCaseListEntry {
@@ -1390,6 +1414,7 @@ export function parseTestRunEvidence(value: unknown): TestRunEvidence | null {
     && isNullableNonnegativeInteger(value.output_tokens)
     && typeof value.run_by === 'string'
     && typeof value.run_at === 'string'
+    && isVerdictRecord(value)
     && isNullableBoolean(value.candidate_is_current)
     && isNullableBoolean(value.base_release_is_current);
   return valid ? value as unknown as TestRunEvidence : null;
@@ -1629,4 +1654,234 @@ export async function listTestCaseRuns(testCaseId: number, limit?: number): Prom
     return items;
   }
   throw testCaseRefusal(status, payload, statusText);
+}
+
+// ============================================================
+// #268: verdicts and draft readiness (C16, C17, C22)
+// ============================================================
+// #269 consumes these names; it must not define a second readiness type (C22).
+
+/** `POST /test-runs/{run_id}/verdict`: exactly `{ verdict, notes }`; `notes` is always sent. */
+export interface TestRunVerdictRequest {
+  verdict: TestRunVerdict;
+  notes: string | null;
+}
+
+export type TestRunIneligibilityReason = 'not_completed' | 'checks_failed';
+
+/**
+ * The verdict route's typed refusals. Nothing was written for any of them; the reviewer
+ * is always the authenticated principal, so no refusal names one.
+ */
+export type TestRunVerdictFailure =
+  | { code: 'test_run_not_found' }
+  | { code: 'ineligible_for_approval'; reason: TestRunIneligibilityReason; message: string }
+  | { code: 'invalid_verdict'; errors: DraftFieldError[] }
+  | { code: 'verdict_forbidden'; detail: string };
+
+/** A valid, typed verdict refusal. */
+export class TestRunVerdictApiError extends Error {
+  readonly status: number;
+  readonly failure: TestRunVerdictFailure;
+
+  constructor(status: number, failure: TestRunVerdictFailure) {
+    super(failure.code);
+    this.name = 'TestRunVerdictApiError';
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+/** The route's exact 404 detail for an unknown (or cleaned-up) run id. */
+export const TEST_RUN_NOT_FOUND_DETAIL = 'Test run not found';
+
+const VERDICT_REQUEST_KEYS = ['verdict', 'notes'] as const;
+const INELIGIBILITY_REASONS: readonly TestRunIneligibilityReason[] = ['not_completed', 'checks_failed'];
+
+function parseTestRunVerdictFailure(status: number, payload: unknown): TestRunVerdictFailure | null {
+  if (!isPlainRecord(payload)) return null;
+  if (status === 404) {
+    return hasExactKeys(payload, ['detail']) && payload.detail === TEST_RUN_NOT_FOUND_DETAIL
+      ? { code: 'test_run_not_found' }
+      : null;
+  }
+  if (status === 403) {
+    return hasExactKeys(payload, ['detail']) && typeof payload.detail === 'string'
+      ? { code: 'verdict_forbidden', detail: payload.detail }
+      : null;
+  }
+  if (status !== 422) return null;
+  if (payload.code === 'ineligible_for_approval') {
+    return hasExactKeys(payload, ['code', 'reason', 'message'])
+      && typeof payload.reason === 'string'
+      && (INELIGIBILITY_REASONS as readonly string[]).includes(payload.reason)
+      && typeof payload.message === 'string'
+      ? { code: 'ineligible_for_approval', reason: payload.reason as TestRunIneligibilityReason, message: payload.message }
+      : null;
+  }
+  if (payload.code === 'invalid_verdict') {
+    return hasExactKeys(payload, ['code', 'errors'])
+      && Array.isArray(payload.errors)
+      && payload.errors.length > 0
+      && payload.errors.every(isDraftFieldError)
+      ? { code: 'invalid_verdict', errors: payload.errors }
+      : null;
+  }
+  return null;
+}
+
+/**
+ * Records an admin's verdict on one stored run (candidate or published baseline, C9).
+ * The body is exactly `{ verdict, notes }` with `notes` always present, null allowed:
+ * the server's body is exact-key (`extra="forbid"`). The 200 is the run's evidence
+ * with the verdict fields set, so the caller needs no separate run read (C26).
+ *
+ * Refusals: the exact 404, a typed 403, the `ineligible_for_approval` and
+ * `invalid_verdict` 422s are `TestRunVerdictApiError`; a malformed 200 or 422 is
+ * `InvalidTestRunResponseError`; anything else (a 500 from a linked-verdict trigger,
+ * C7) is a plain `AgentDefinitionApiError`.
+ */
+export async function recordTestRunVerdict(
+  runId: number,
+  request: TestRunVerdictRequest,
+): Promise<TestRunEvidence> {
+  // Exactly the joined keys, in order; `?? null` keeps `notes` present when a caller omits it.
+  const values = { verdict: request.verdict, notes: request.notes ?? null };
+  const body = Object.fromEntries(VERDICT_REQUEST_KEYS.map((key) => [key, values[key]]));
+  const { status, payload, statusText } = await agentTestRequest(`/test-runs/${runId}/verdict`, 'POST', body);
+  if (status === 200) {
+    const evidence = parseTestRunEvidence(payload);
+    if (evidence === null || evidence.run_id !== runId || evidence.verdict !== request.verdict) {
+      throw new InvalidTestRunResponseError();
+    }
+    return evidence;
+  }
+  const failure = parseTestRunVerdictFailure(status, payload);
+  if (failure !== null) throw new TestRunVerdictApiError(status, failure);
+  if (status === 422) throw new InvalidTestRunResponseError();
+  throw new AgentDefinitionApiError(status, payload, statusText);
+}
+
+/** A case's readiness code on the wire; the client owns the display labels (C17). */
+export type ReadinessStatus = 'needs_test' | 'test_failed' | 'awaiting_review' | 'approved';
+
+/** One active required case row of a role (C11). `blocking` is changed-and-not-approved. */
+export interface TestCaseReadiness {
+  agent_key: AgentKey;
+  test_case_id: number;
+  test_case_name: string;
+  test_case_version: number;
+  status: ReadinessStatus;
+  blocking: boolean;
+  /** The newest eligible approval when `approved`, else the newest candidate run. */
+  run_id: number | null;
+  run_verdict: TestRunVerdict | null;
+  run_checks_passed: boolean | null;
+}
+
+/** One editable role: its saved candidate hash and its active required cases. */
+export interface AgentReadiness {
+  agent_key: AgentKey;
+  candidate_hash: string;
+  is_changed_from_base: boolean;
+  ready: boolean;
+  /** A changed role with zero active required cases (#269 `no_required_case`). */
+  missing_required_case: boolean;
+  cases: TestCaseReadiness[];
+}
+
+/**
+ * `GET /readiness`: the draft's publication readiness at `draft_lock_version`.
+ * Informational only: #269's publication gate performs its own locked read.
+ */
+export interface DraftReadiness {
+  draft_lock_version: number;
+  base_release_id: number;
+  all_ready: boolean;
+  blocking_agents: AgentKey[];
+  agents: AgentReadiness[];
+}
+
+const READINESS_URL = `${AGENT_DEFINITIONS_URL}/readiness`;
+
+/** A readiness 200 whose body does not match the exact contract (#269 may catch it). */
+export class InvalidReadinessResponseError extends Error {
+  constructor() {
+    super('Draft readiness response did not match the expected contract.');
+    this.name = 'InvalidReadinessResponseError';
+  }
+}
+
+const READINESS_STATUSES: readonly ReadinessStatus[] = [
+  'needs_test', 'test_failed', 'awaiting_review', 'approved',
+];
+
+const DRAFT_READINESS_KEYS = [
+  'draft_lock_version', 'base_release_id', 'all_ready', 'blocking_agents', 'agents',
+] as const;
+
+const AGENT_READINESS_KEYS = [
+  'agent_key', 'candidate_hash', 'is_changed_from_base', 'ready', 'missing_required_case', 'cases',
+] as const;
+
+const TEST_CASE_READINESS_KEYS = [
+  'agent_key', 'test_case_id', 'test_case_name', 'test_case_version', 'status', 'blocking',
+  'run_id', 'run_verdict', 'run_checks_passed',
+] as const;
+
+function isTestCaseReadiness(value: unknown, agentKey: AgentKey): value is TestCaseReadiness {
+  return isPlainRecord(value)
+    && hasExactKeys(value, TEST_CASE_READINESS_KEYS)
+    && value.agent_key === agentKey
+    && isPositiveInteger(value.test_case_id)
+    && typeof value.test_case_name === 'string'
+    && isPositiveInteger(value.test_case_version)
+    && typeof value.status === 'string'
+    && (READINESS_STATUSES as readonly string[]).includes(value.status)
+    && typeof value.blocking === 'boolean'
+    && (value.run_id === null || isPositiveInteger(value.run_id))
+    && (value.run_verdict === null
+      || (typeof value.run_verdict === 'string' && (TEST_RUN_VERDICTS as readonly string[]).includes(value.run_verdict)))
+    && isNullableBoolean(value.run_checks_passed);
+}
+
+function isAgentReadiness(value: unknown): value is AgentReadiness {
+  return isPlainRecord(value)
+    && hasExactKeys(value, AGENT_READINESS_KEYS)
+    && isAgentKey(value.agent_key)
+    && typeof value.candidate_hash === 'string' && LOWERCASE_SHA256.test(value.candidate_hash)
+    && typeof value.is_changed_from_base === 'boolean'
+    && typeof value.ready === 'boolean'
+    && typeof value.missing_required_case === 'boolean'
+    && Array.isArray(value.cases)
+    && value.cases.every((item) => isTestCaseReadiness(item, value.agent_key as AgentKey));
+}
+
+/**
+ * The strict readiness parser: exact snake_case keys at every level, the four status
+ * codes (never labels), each case inside its own role, and each role at most once.
+ */
+export function parseDraftReadinessResponse(value: unknown): DraftReadiness | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, DRAFT_READINESS_KEYS)) return null;
+  const valid = isNonnegativeInteger(value.draft_lock_version)
+    && isPositiveInteger(value.base_release_id)
+    && typeof value.all_ready === 'boolean'
+    && Array.isArray(value.blocking_agents)
+    && value.blocking_agents.every(isAgentKey)
+    && Array.isArray(value.agents)
+    && value.agents.every(isAgentReadiness)
+    && new Set(value.agents.map((agent: AgentReadiness) => agent.agent_key)).size === value.agents.length;
+  return valid ? value as unknown as DraftReadiness : null;
+}
+
+/** Reads the draft's readiness. A malformed 200 is invalid; any other status is an API error. */
+export async function getDraftReadiness(): Promise<DraftReadiness> {
+  const response = await fetch(READINESS_URL, { method: 'GET', headers: { Accept: 'application/json' } });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    const readiness = parseDraftReadinessResponse(payload);
+    if (readiness === null) throw new InvalidReadinessResponseError();
+    return readiness;
+  }
+  throw new AgentDefinitionApiError(response.status, payload, response.statusText);
 }

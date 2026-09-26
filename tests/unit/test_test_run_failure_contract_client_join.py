@@ -9,7 +9,8 @@ typechecks against the server, and the fixtures Vitest and Playwright serve live
 Text-read rules for those lines (keep them, or this join cannot read them):
 
 * ``const TEST_CASE_KEYS = [``, ``const TEST_RUN_KEYS = [``, ``const TEST_RUN_KINDS``,
-  ``const TEST_RUN_STATUSES`` and ``const DETERMINISTIC_CHECK_NAMES`` each appear
+  ``const TEST_RUN_STATUSES``, ``const TEST_RUN_VERDICTS`` and
+  ``const DETERMINISTIC_CHECK_NAMES`` each appear
   exactly once and list single-quoted names up to the closing ``];``.
 * ``export const TEST_RUN_UNAVAILABLE = {`` is closed by ``} as const;`` with the
   exact lines ``  code: '<code>',``, ``  message: '<text>',`` and ``  retryable: true,``.
@@ -64,9 +65,21 @@ def test_the_client_run_keys_are_exactly_the_server_evidence_fields() -> None:
     client = _names(_read(_CLIENT_API), "\nconst TEST_RUN_KEYS = [")
     assert len(client) == len(set(client))
     assert set(client) == set(schemas.TestRunEvidenceResponse.model_fields)
-    # Phase A has no verdict: #268 adds those fields, and the strict parser must then
-    # be extended with them rather than silently accept them.
-    assert not any(key.startswith("verdict") for key in client)
+    # #268 C16: the four verdict keys are required on both sides of the wire.
+    assert {key for key in client if key.startswith("verdict")} == {
+        "verdict",
+        "verdict_reviewer",
+        "verdict_at",
+        "verdict_notes",
+    }
+
+
+def test_the_client_verdict_choices_are_the_servers() -> None:
+    source = _read(_CLIENT_API)
+    annotation = schemas.TestRunEvidenceResponse.model_fields["verdict"].annotation
+    server = {value for arg in get_args(annotation) for value in get_args(arg)}
+    assert server == {"approved", "rejected"}
+    assert set(_names(source, "\nconst TEST_RUN_VERDICTS: readonly TestRunVerdict[] = [")) == server
 
 
 def test_the_client_run_kinds_statuses_and_check_names_are_the_servers() -> None:
