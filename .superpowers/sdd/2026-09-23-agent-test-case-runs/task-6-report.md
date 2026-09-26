@@ -98,3 +98,80 @@ Environment: `test ! -e .venv` before and after; nothing installed; port 3000 em
 4. **Baseline rerun and case writes block Save** while in flight (rulings 2–3).
 5. **Candidate refusal is broader than the probe's** (any unsaved field, not just the endpoint). Deliberate; flagging because it differs from #266.
 6. `min-w-0` was added to the aside's class so `<pre>` blocks scroll inside the 260 px track; no grid or width changed.
+
+
+## Fix round 1
+
+- **Base:** `e1e85ff60e8b23471d3fa8e3c9f91f516e4517b2`, pinned. Sweep pin `e18dca769`.
+- **Commits:**
+  - `852e9b674` `feat: edit a test case as a new version from the workbench (#267)` (I-1)
+  - `0fca60658` `feat: show stored test run evidence after a reload (#267)` (I-2, plus m-1)
+  - `e18dca769` `fix: match forbidden-action exemptions exactly (#267)` (m-5)
+
+### I-1: edit a case as a new version (criterion 2)
+- **Client:** `updateTestCase(testCaseId, {name, synthetic_payload, assembly_context, is_required})` sends a `PUT /test-cases/{id}`. A 200 must be an active case; the refusals reuse `testCaseRefusal`.
+- **The one gate:** a new `testCaseUpdate` operation. `testCaseUpdated` handles two outcomes:
+  - A new id replaces the edited version in the list, and the panel selects the new version.
+  - The same id is the server's identical-content no-op. It sets the panel `notice` "No change: this content matches version N, so no new version was created." (not an alert).
+  - A different role, an inactive case or a renamed case is contained as an invalid response.
+- **Panel:** an "Edit test case" button opens the add form in edit mode.
+  - The name is shown as fixed text (`Name: …`).
+  - The payload, `Required test case` and `Design system active` are prefilled.
+  - The button is "Save new version".
+  - A 409 or 422 (including the exact last-required message) is shown, and the form is kept.
+- **Copy:** `EDIT_HINT` ("Edit test case saves a new version of the same case and keeps the old version as history.") sits next to P3's unchanged add-then-retire copy.
+- **Names:** "Edit test case" and "Save new version" are added to the guard's spared list and to `NAMES_267`. Both pass the #266 overlap pin, and neither trips the guard.
+- **RED:** `/tmp/t267-6/f1-red-edit.txt`, 13 failed / 470.
+
+### I-2: stored evidence survives a reload (criteria 6 and 9, P1)
+- **When it reads:** selecting a case makes one ungated history read, `GET /test-cases/{id}/runs?limit=100` (`listTestCaseRuns(id, 100)`).
+  - It reads again on a case switch.
+  - It does not reread a case whose history is already in the reducer, so switching roles and back reads nothing.
+- **What it shows:** the newest candidate run, and the newest `completed` published-baseline run, which is labelled "not approved". `getTestRun` was not needed.
+- **Freshness:** `historyRequestId` comes from the one counter, like the catalog token. A newer read, a case switch, or a run that completes meanwhile (`testRunSucceeded` clears it) drops the stale answer. Items for another case or role are contained as invalid.
+- **Backstops count the read exactly:**
+  - Vitest mount test: `allGets` 3, with the exact `…/test-cases/101/runs?limit=100` URL.
+  - The run test: 3.
+  - The Playwright add→run test: an exact five-request sequence including both history reads.
+  - Harnesses: every harness routes `listRuns` by URL and throws or aborts if it is unrouted.
+- **m-1:** `a late candidate-run response after a newer save has started never clobbers state (m-1)` mirrors the probe's test over `testRunSucceeded`, `testRunConflicted`, `testRunRejected` and `testOperationFailed`. It passed on first run, as the reviewer predicted (the gate plus the kind/ID match). F4 proves it bites.
+- **RED:** `/tmp/t267-6/f1-red-history.txt`, 9 failed / 480.
+
+### m-5: exact exemptions
+- **Rule:** `forbidsActionName` normalizes whitespace and spares only a whole-name match. Otherwise it tests the stems on the full name.
+- **New pins, both lanes:** `Run test cases`, `Run test case now`, `run test case` and `Rerun: Run published baseline` are forbidden.
+- **Browser sweeps:** both sweeps now check each name source (label, text, title) separately, instead of one concatenated string. With exact matching, a concatenated string would falsely flag a control that names itself twice.
+- **RED:** `/tmp/t267-6/f1-red-exact.txt`, `Run test cases: expected false to be true`.
+
+### Sabotage
+- **Driver:** `/tmp/t267-6/mutate-f1.py`.
+- **Log:** `/tmp/t267-6/mutations-f1.jsonl`.
+- **Scope:** Vitest = the whole `AgentDefinitionWorkbench/` directory (489); Playwright = the whole spec (76).
+- **Result:** 6/6 RED.
+
+| id | clause | file | anchor | marker `grep -c` | scope → RED (failing tests) | restore → marker / status |
+|---|---|---|---|---|---|---|
+| F3 | m-5: exemptions match exactly (mutation restores substring stripping) | `forbiddenActionNames.ts` | 1 | `MUT267_6_F3` = 1 | **vitest** 1 failed / 488 passed (489): the forbidden-action guard > spares the panel's legitimate restore controls without spared names shielding a stem<br>**playwright** 1 failed / 75 passed: the forbidden-action rule fires on every banned name and spares the legitimate restore controls | `git checkout e18dca769 -- frontend/tests/fixtures/forbiddenActionNames.ts` → 0 / clean |
+| F1 | I-1: the edit goes through the supersede PUT (mutation routes it to create) | `useDraftEditor.ts` | 1 | `MUT267_6_F1` = 1 | **vitest** 4 failed / 485 passed (489): AgentDefinitionWorkbench isolated testing > Edit test case supersedes the selected version through one PUT, selects the new version, and runs it; AgentDefinitionWorkbench isolated testing > an edit refused by a stale 409 is shown and keeps the form; AgentDefinitionWorkbench isolated testing > an edit refused by the last-required 422 is shown and keeps the form; AgentDefinitionWorkbench isolated testing > an identical-content edit returns the current version and says that no new version was created<br>**playwright** 1 failed / 75 passed: Agent Test Cases: Edit test case saves a new version of the same case, and the next run uses it | `git checkout e18dca769 -- frontend/src/components/Admin/AgentDefinitionWorkbench/useDraftEditor.ts` → 0 / clean |
+| F1b | I-1: an identical-content no-op says no new version was created | `draftEditorState.ts` | 1 | `MUT267_6_F1b` = 1 | **vitest** 2 failed / 487 passed (489): Agent Test Case and test run reducer > a supersede replaces the edited version in the list, and an identical-content no-op says so; AgentDefinitionWorkbench isolated testing > an identical-content edit returns the current version and says that no new version was created | `git checkout e18dca769 -- frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts` → 0 / clean |
+| F2 | I-2: selecting a case makes the history read (mutation skips it) | `TestRunPanel.tsx` | 1 | `MUT267_6_F2` = 1 | **vitest** 5 failed / 484 passed (489): AgentDefinitionWorkbench isolated testing > Run test case sends exactly the case and lock for the saved candidate and shows Input, Compare and Checks without a write; AgentDefinitionWorkbench isolated testing > a history read still in flight when a run completes is dropped, so the newer run stays; AgentDefinitionWorkbench isolated testing > after a reload, selecting a case shows its stored run and stored baseline, labelled not approved; AgentDefinitionWorkbench isolated testing > reads no Agent Test Case on mount, and Load reads exactly the selected role's active list; TestRunPanel > reads the selected case version's history once, again on a case switch, and not for a case already read<br>**playwright** 2 failed / 74 passed: Agent Test Cases: add a case, run it against the saved candidate, then read Compare and Checks; Agent Test Cases: after a page reload the stored run and stored baseline are shown again, labelled not approved | `git checkout e18dca769 -- frontend/src/components/Admin/AgentDefinitionWorkbench/TestRunPanel.tsx` → 0 / clean |
+| F2b | I-2: a completed run drops an in-flight history read (freshness token) | `draftEditorState.ts` | 1 | `MUT267_6_F2b` = 1 | **vitest** 3 failed / 486 passed (489): Agent Test Case and test run reducer > drops a stale history read: an older request, a case switch, or a run that completed meanwhile; AgentDefinitionWorkbench isolated testing > a history read still in flight when a run completes is dropped, so the newer run stays; AgentDefinitionWorkbench isolated testing > renders exactly the pinned #267 names once the panel shows a run | `git checkout e18dca769 -- frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts` → 0 / clean |
+| F4 | m-1: only the pending test operation's own kind and ID settle it (mutation accepts an older response) | `draftEditorState.ts` | 1 | `MUT267_6_F4` = 1 | **vitest** 2 failed / 487 passed (489): Agent Test Case and test run reducer > a late candidate-run response after a newer save has started never clobbers state (m-1); Agent Test Case and test run reducer > only the pending test operation's own request ID may settle it | `git checkout e18dca769 -- frontend/src/components/Admin/AgentDefinitionWorkbench/draftEditorState.ts` → 0 / clean |
+
+Playwright F2: `Agent Test Cases: add a case, run it against the saved candidate, then read Compare and Checks`; `Agent Test Cases: after a page reload the stored run and stored baseline are shown again, labelled not approved`.
+
+### Gates
+| Gate | Result |
+|---|---|
+| `npm run test:unit` | 15 files, **597 passed** |
+| `npm run typecheck` | exit 0 |
+| ESLint (#266 phase-B command + `forbiddenActionNames.ts`) | exit 0 |
+| Playwright workbench spec | **76 passed** (was 74; +edit→new version→run, +reload) |
+| Python joins (5 files) | 506 passed |
+| Full `tests/unit` (`DATABASE_URL=sqlite:////tmp/t267-6.sqlite`) | 6 failed / 6616 passed / 110 skipped — the six baseline nodes |
+
+Environment: `.venv` absent before and after; nothing installed; port 3000 empty after.
+
+### Remaining notes
+- The history read takes at most 100 runs. A newest completed baseline older than the last 100 runs of that version would not be shown.
+- A history read failure shows a contained alert, and the case stays marked as read. Selecting another case and coming back retries the read.
