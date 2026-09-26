@@ -1055,3 +1055,33 @@ def test_publication_during_boot_validation_waits_for_boot(postgres_engine):
     assert isinstance(result, PublishedRelease)
     assert result.release.version_number == 2
     assert result.previous_release_id == v1.id
+
+
+def test_boot_validation_takes_the_shared_parent_lock_first(postgres_engine):
+    """C2 takes ``FOR SHARE`` (never ``FOR UPDATE``) before any validation read."""
+    factory = _factory(postgres_engine)
+    statements: list[str] = []
+
+    @event.listens_for(postgres_engine, "after_cursor_execute")
+    def _record(_conn, _cursor, statement, _params, _context, _executemany):
+        if threading.current_thread().name == "boot":
+            statements.append(_normalized(statement))
+
+    try:
+        result = _run_named("boot", lambda: GraphConfiguration().bootstrap_v1(factory))
+    finally:
+        event.remove(postgres_engine, "after_cursor_execute", _record)
+
+    assert result == BootstrapResult(False, _release(factory, 1).id, 1)
+    locking = [
+        (index, s)
+        for index, s in enumerate(statements)
+        if " FOR SHARE" in s or " FOR UPDATE" in s
+    ]
+    assert len(locking) == 1, locking
+    lock_index, lock_statement = locking[0]
+    assert lock_statement.endswith("FOR SHARE OF GRAPH_RELEASE, GRAPH_DRAFT")
+    release_list = next(
+        index for index, s in enumerate(statements) if _BOOT_RELEASE_LIST in s
+    )
+    assert lock_index < release_list
