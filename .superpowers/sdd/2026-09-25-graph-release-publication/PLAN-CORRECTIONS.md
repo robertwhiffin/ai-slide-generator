@@ -734,3 +734,19 @@ Cost if wrong: an unapproved required case is published.
 ## Correction 31 — the release routes attach to the existing admin router
 
 Source: #270's plan review (Minor), and #267 C23's precedent. The plan puts the preview and publish handlers on a new `graph_releases.py` router. Replacement: the handlers may live in their own module, but they register on the EXISTING admin prefix `/api/admin/agent-definitions` with the same router-level `require_admin` and `require_draft_write_principal` dependencies; no second `APIRouter` with its own prefix, and no `main.py` change. Model-free routes still parse the body after authorisation. Cost if wrong: two admin routers whose auth dependencies can drift.
+
+## Correction 32 — BLOCKING (Phase B, Tasks 4-5): #268's readiness is informational inside publication, never the gate
+
+Source: #268 Task 2 review (`.worktrees/issue-268-plan/.superpowers/sdd/2026-09-23-test-evidence-readiness/task-2-review.md`, I1). #268 ships `AgentTestWorkbench.readiness_under_parent_lock(session)` as #269's Q4 binding: plain SELECTs, no row locks, safe to call inside #269's exclusive L0 and before or after the C29 case lock (no deadlock). It is a consistent snapshot that can be STALE.
+
+#269 must NOT:
+1. decide publication on its result (`all_ready`, `blocking_agents`, `missing_required_case`, `status`) — the evidence gate decides, with its own locks;
+2. link `cases[].run_id` from it — that run was read without an L3 lock, so its verdict can flip before the link is inserted;
+3. skip its own C29 sequence (unfiltered L2 case-row lock, re-select active required cases, L3 `FOR UPDATE` on runs, re-verify);
+4. call it after any publication write — after the draft rebase every role reads unchanged and `all_ready=True`.
+
+Permitted use: the 409 not-ready body and the preview, computed BEFORE any write. A body may show a case `approved` while the gate lists it as a gap (the safe direction only).
+
+CONTROLLER CORRECTION: #268's ledger recorded this as "carried to #269's ledger" before it was written; it is written here now.
+
+Cost if wrong: publication proceeds on stale readiness and links a run whose verdict changed.
