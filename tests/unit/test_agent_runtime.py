@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from src.services.agent_runtime import (
     CodeOwnedAgentDefinitionSource,
     DatabricksModelAdapter,
     ProtectedPromptIdentity,
+    RunObservation,
     UnknownAgentKeyError,
     _canonical_digest,
     _schema_contract_material,
@@ -1331,12 +1333,17 @@ def test_run_candidate_delegates_to_run_resolved_and_never_to_run():
     """Correction 12: one shared private path; no release resolution, no own binding."""
     import ast
 
+    # run_candidate -> _run_observed (the #267 Task 4 observation seam) -> _run_resolved.
     tree = _function_source(AgentRuntime.run_candidate)
     methods = [call.func.attr for call in _self_method_calls(tree)]
-    assert methods == ["_run_resolved"]
-    names = {
-        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
-    } | {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    assert methods == ["_run_observed"]
+    observed = _function_source(AgentRuntime._run_observed)
+    assert [call.func.attr for call in _self_method_calls(observed)] == ["_run_resolved"]
+    names = set()
+    for part in (tree, observed):
+        names |= {
+            node.id for node in ast.walk(part) if isinstance(node, ast.Name)
+        } | {node.attr for node in ast.walk(part) if isinstance(node, ast.Attribute)}
     for forbidden in (
         "run",
         "bind_structured_output_model",
@@ -1499,3 +1506,124 @@ def test_the_production_runtime_adapter_still_hands_no_transport_options():
         assert _drive_adapter_kwargs(get_agent_runtime()._model_adapter) == _SAVED_MODEL_KWARGS
     finally:
         get_agent_runtime.cache_clear()
+
+
+# --- #267 Task 4 fix round 1: the public observation hook (I-1) -------------
+
+
+def test_run_published_baseline_is_reachable_only_from_the_agent_test_workbench():
+    """Like ``run_candidate``: no production conversation can reach it (spec §7.1)."""
+    assert _modules_referencing("run_published_baseline") <= {
+        "src/services/agent_test_workbench.py"
+    }
+
+
+def test_no_module_outside_the_runtime_touches_its_model_adapter():
+    """I-1: nothing swaps or wraps a runtime's private adapter from outside."""
+    assert _modules_referencing("_model_adapter") == {"src/services/agent_runtime.py"}
+
+
+def test_no_module_imports_a_private_name_from_the_runtime():
+    import ast
+
+    root, files = _src_python_files()
+    offenders: set[tuple[str, str]] = set()
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "src.services.agent_runtime":
+                for alias in node.names:
+                    if alias.name.startswith("_"):
+                        offenders.add((path.relative_to(root).as_posix(), alias.name))
+    assert offenders == set()
+
+
+def test_run_published_baseline_resolves_exactly_as_run_does():
+    """The role check and the loader try/except are ``run``'s, statement for statement."""
+    import ast
+
+    def resolution(function) -> list[str]:
+        body = _function_source(function).body[0].body
+        statements = [stmt for stmt in body if isinstance(stmt, (ast.If, ast.Try))]
+        return [ast.dump(stmt) for stmt in statements]
+
+    assert resolution(AgentRuntime.run_published_baseline) == resolution(AgentRuntime.run)
+    assert len(resolution(AgentRuntime.run)) == 2
+
+
+def _baseline_runtime(adapter):
+    content = _manifest_content("architect")
+    loader = SimpleNamespace(
+        resolve=lambda graph_release_id, agent_key: ResolvedDefinition(
+            graph_version=3,
+            graph_release_id=graph_release_id,
+            agent_key=agent_key,
+            agent_definition_revision_id=41,
+            content_hash=definition_content_hash(content),
+            content=content,
+        )
+    )
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=loader, model_adapter=adapter, identity_sink=sink
+    )
+    return runtime, sink
+
+
+def test_run_published_baseline_hands_the_model_runs_prompt_and_records_the_real_identity():
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    run_adapter = DeterministicFakeModelAdapter()
+    run_runtime, _ = _baseline_runtime(run_adapter)
+    run_runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))
+
+    adapter = DeterministicFakeModelAdapter()
+    runtime, sink = _baseline_runtime(adapter)
+    observation = RunObservation()
+    outcome = runtime.run_published_baseline(
+        "architect", 7, {"message": "m"}, AgentAssemblyContext(False), observation=observation
+    )
+
+    assert outcome.status == "completed"
+    assert adapter.calls[0].prompt == run_adapter.calls[0].prompt
+    assert observation.prompt == adapter.calls[0].prompt
+    assert observation.raw_output == outcome.raw_output
+    assert observation.model_latency_ms is not None and observation.model_latency_ms >= 0
+    assert [(c.graph_release_id, c.agent_definition_revision_id) for c in sink.calls] == [
+        (7, 41)
+    ]
+
+
+def test_an_observation_keeps_the_prompt_and_duration_of_a_failed_model_call():
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    adapter = DeterministicFakeModelAdapter(mode="provider_unavailable")
+    runtime, _ = _baseline_runtime(adapter)
+    observation = RunObservation()
+
+    outcome = runtime.run_published_baseline(
+        "architect", 7, {"message": "m"}, AgentAssemblyContext(False), observation=observation
+    )
+
+    assert outcome.status == "model_error"
+    assert observation.prompt == adapter.calls[0].prompt
+    assert observation.model_latency_ms is not None
+    assert observation.raw_output is None
+
+
+def test_run_published_baseline_raises_loader_failures_as_run_does():
+    from sqlalchemy.exc import OperationalError
+
+    def _fail(graph_release_id, agent_key):
+        raise OperationalError("SELECT 1", {}, Exception("down"))
+
+    runtime = AgentRuntime(
+        persisted_release_loader=SimpleNamespace(resolve=_fail),
+        model_adapter=SimpleNamespace(),
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+    with pytest.raises(PersistedConfigurationUnavailableError) as caught:
+        runtime.run_published_baseline("architect", 7, {}, AgentAssemblyContext(False))
+    assert caught.value.code == "lakebase_unavailable"
+    with pytest.raises(UnknownAgentKeyError):
+        runtime.run_published_baseline("foreman", 7, {}, AgentAssemblyContext(False))
