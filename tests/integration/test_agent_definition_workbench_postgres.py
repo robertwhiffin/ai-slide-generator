@@ -2505,3 +2505,255 @@ def test_run_routes_over_postgres_serve_evidence_and_refuse_unstorable_ids(
         ("test_case_id", "out_of_range")
     ]
     assert len(adapter.calls) == 1
+
+
+# ===========================================================================
+# #268 Task 1: the verdict writer over real PostgreSQL (#268 PLAN-CORRECTIONS
+# C6 lock and write shape, C7 IntegrityError propagation, C8 test rules)
+# ===========================================================================
+
+from sqlalchemy.exc import IntegrityError  # noqa: E402
+
+from src.services.agent_test_workbench import IneligibleForApprovalError  # noqa: E402
+
+_PG_REVIEWER = "reviewer@example.com"
+_PG_VERDICT_COLUMNS = ("verdict", "verdict_reviewer", "verdict_at", "verdict_notes")
+_APPROVED_CHECK = "ck_agent_test_run_approved_only_if_completed_and_passing"
+
+
+def _pg_full_run_row(factory, run_id: int) -> dict[str, object]:
+    with factory() as session:
+        return dict(
+            session.execute(
+                select(AgentTestRun.__table__).where(AgentTestRun.__table__.c.id == run_id)
+            )
+            .mappings()
+            .one()
+        )
+
+
+def _pg_evidence_columns(factory, run_id: int) -> dict[str, object]:
+    row = _pg_full_run_row(factory, run_id)
+    for column in _PG_VERDICT_COLUMNS:
+        del row[column]
+    return row
+
+
+def _pg_verdict_of(factory, run_id: int) -> tuple[object, ...]:
+    row = _pg_full_run_row(factory, run_id)
+    return tuple(row[column] for column in _PG_VERDICT_COLUMNS)
+
+
+def _pg_run(factory, adapter=None) -> TestRunEvidence:
+    workbench = _pg_executor(factory, adapter or DeterministicFakeModelAdapter())
+    identity = _pg_run_identity(factory)
+    with factory() as session:
+        return workbench.execute_candidate_run(
+            session,
+            agent_key="architect",
+            test_case_id=_pg_seed_case_id(factory),
+            expected_lock_version=identity["lock_version"],
+            actor="runner@example.com",
+        )
+
+
+def _pg_insert_run_like(factory, source_run_id: int, **overrides) -> int:
+    """C8: an INSERT-only fixture; an UPDATE would hit the C24 trigger."""
+    values = _pg_full_run_row(factory, source_run_id)
+    del values["id"]
+    values.update(overrides)
+    with factory() as session:
+        row = AgentTestRun(**values)
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+def _pg_record(factory, run_id: int, **overrides):
+    arguments: dict[str, object] = {
+        "verdict": "approved",
+        "reviewer": _PG_REVIEWER,
+        "notes": "Looks right.",
+    }
+    arguments.update(overrides)
+    with factory() as session:
+        return AgentTestWorkbench().record_verdict(session, run_id=run_id, **arguments)
+
+
+def test_postgres_verdict_writes_the_four_columns_from_the_database_clock(
+    postgres_engine,
+) -> None:
+    """C8 identity test: the full row minus the four verdict columns is
+    unchanged, and ``verdict_at`` is the database's timezone-aware clock."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    run = _pg_run(factory)
+    before = _pg_evidence_columns(factory, run.run_id)
+    with postgres_engine.connect() as connection:
+        started = connection.scalar(text("SELECT clock_timestamp()"))
+
+    evidence = _pg_record(factory, run.run_id, notes="  Verbatim.  ")
+
+    with postgres_engine.connect() as connection:
+        finished = connection.scalar(text("SELECT clock_timestamp()"))
+    verdict, reviewer, verdict_at, notes = _pg_verdict_of(factory, run.run_id)
+    assert (verdict, reviewer, notes) == ("approved", _PG_REVIEWER, "  Verbatim.  ")
+    assert verdict_at.tzinfo is not None
+    assert started <= verdict_at <= finished
+    assert _pg_evidence_columns(factory, run.run_id) == before
+    with factory() as session:
+        read = AgentTestWorkbench().get_test_run(session, run_id=run.run_id)
+    assert dataclasses.asdict(evidence) == dataclasses.asdict(read)
+
+    # An identical re-submit writes nothing: the stamp does not move.
+    _pg_record(factory, run.run_id, notes="  Verbatim.  ")
+    assert _pg_verdict_of(factory, run.run_id)[2] == verdict_at
+    # A flip re-stamps all four columns and still leaves the evidence alone.
+    _pg_record(factory, run.run_id, verdict="rejected", reviewer="second@example.com", notes=None)
+    flipped = _pg_verdict_of(factory, run.run_id)
+    assert flipped[:2] == ("rejected", "second@example.com")
+    assert flipped[2] > verdict_at and flipped[3] is None
+    assert _pg_evidence_columns(factory, run.run_id) == before
+
+
+@pytest.mark.parametrize("failing", ["model_error", "completed_checks_failed"])
+def test_postgres_approved_check_refuses_a_direct_approval_of_an_ineligible_run(
+    postgres_engine, failing
+) -> None:
+    """C8: the direct UPDATE sets all three paired columns, so only the approval
+    check can fire; the constraint name proves it is not the C24 trigger."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    if failing == "model_error":
+        run_id = _pg_run(factory, DeterministicFakeModelAdapter(mode="provider_unavailable")).run_id
+    else:
+        run_id = _pg_insert_run_like(
+            factory, _pg_run(factory).run_id, deterministic_checks_passed=False
+        )
+
+    with pytest.raises(IntegrityError) as caught:
+        with postgres_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE agent_test_run SET verdict = 'approved', "
+                    "verdict_reviewer = :reviewer, verdict_at = now() WHERE id = :id"
+                ),
+                {"reviewer": _PG_REVIEWER, "id": run_id},
+            )
+
+    assert caught.value.orig.pgcode == "23514"
+    assert caught.value.orig.diag.constraint_name == _APPROVED_CHECK
+    assert _pg_verdict_of(factory, run_id) == (None, None, None, None)
+
+
+def test_postgres_verdict_takes_no_parent_or_case_lock(postgres_engine) -> None:
+    """C6: L3 only.  With release, draft and every case row held ``FOR UPDATE``
+    by another session, the verdict still commits."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    run = _pg_run(factory)
+
+    holder = factory()
+    try:
+        holder.begin()
+        GraphConfiguration()._lock_current_parents(holder, exclusive=True)
+        holder.execute(text("SELECT id FROM agent_test_case ORDER BY id FOR UPDATE"))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            recorded = pool.submit(_pg_record, factory, run.run_id)
+            try:
+                recorded.result(timeout=10)
+            finally:
+                holder.rollback()
+    finally:
+        holder.close()
+
+    assert _pg_verdict_of(factory, run.run_id)[:2] == ("approved", _PG_REVIEWER)
+
+
+def test_postgres_verdict_waits_on_the_run_row_lock_and_decides_on_the_fresh_row(
+    postgres_engine,
+) -> None:
+    """C6: the writer's first statement is the run row ``FOR UPDATE``.  It waits
+    behind a concurrent verdict and then sees that verdict: an identical
+    submission is a no-op that keeps the holder's stamp."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    run = _pg_run(factory)
+
+    holder = factory()
+    try:
+        holder.begin()
+        holder_pid = holder.scalar(text("SELECT pg_backend_pid()"))
+        holder.execute(
+            text(
+                "UPDATE agent_test_run SET verdict = 'approved', "
+                "verdict_reviewer = :reviewer, verdict_at = now(), "
+                "verdict_notes = 'Looks right.' WHERE id = :id"
+            ),
+            {"reviewer": _PG_REVIEWER, "id": run.run_id},
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            recorded = pool.submit(_pg_record, factory, run.run_id)
+            try:
+                deadline = time.monotonic() + 10
+                waiting = False
+                while time.monotonic() < deadline and not waiting:
+                    with postgres_engine.connect() as observer:
+                        waiting = bool(
+                            observer.scalar(
+                                text(
+                                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity"
+                                    " WHERE wait_event_type = 'Lock'"
+                                    " AND :holder = ANY(pg_blocking_pids(pid)))"
+                                ),
+                                {"holder": holder_pid},
+                            )
+                        )
+                    if not waiting:
+                        time.sleep(0.02)
+                assert waiting, "the verdict writer never waited on the run row"
+                assert not recorded.done()
+                holder.commit()
+                recorded.result(timeout=10)
+            finally:
+                holder.rollback()
+    finally:
+        holder.close()
+    with factory() as session:
+        holder_stamp = session.scalar(
+            select(AgentTestRun.verdict_at).where(AgentTestRun.id == run.run_id)
+        )
+
+    verdict = _pg_verdict_of(factory, run.run_id)
+    assert verdict == ("approved", _PG_REVIEWER, holder_stamp, "Looks right.")
+
+
+def test_postgres_a_verdict_trigger_error_surfaces_as_the_integrity_error(
+    postgres_engine,
+) -> None:
+    """C7: a stand-in for #269's linked-verdict trigger (23514 on a verdict
+    change) reaches the caller as itself, never as an ineligibility."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    run = _pg_run(factory)
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE FUNCTION t268_refuse_verdict() RETURNS trigger LANGUAGE plpgsql AS $$"
+                " BEGIN RAISE EXCEPTION 'verdict refused' USING ERRCODE = '23514'; END; $$"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TRIGGER t268_refuse_verdict BEFORE UPDATE OF verdict ON agent_test_run"
+                " FOR EACH ROW EXECUTE FUNCTION t268_refuse_verdict()"
+            )
+        )
+
+    with pytest.raises(IntegrityError) as caught:
+        _pg_record(factory, run.run_id)
+
+    assert not isinstance(caught.value, IneligibleForApprovalError)
+    assert caught.value.orig.pgcode == "23514"
+    assert "verdict refused" in str(caught.value.orig)
+    assert _pg_verdict_of(factory, run.run_id) == (None, None, None, None)
