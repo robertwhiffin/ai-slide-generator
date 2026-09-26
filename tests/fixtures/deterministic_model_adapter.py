@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from src.services.agent_runtime import (
     AgentModelConfiguration,
     ModelProviderUnavailableError,
+    report_model_token_usage,
 )
 
 #: One minimal valid output per model-driven role (moved verbatim from the
@@ -101,6 +102,11 @@ class DeterministicFakeModelAdapter:
 
     ``calls`` records ``(agent_key, schema, prompt, configuration)`` for every
     invocation, before any failure.
+
+    ``usage=(input_tokens, output_tokens)`` makes a call that reaches the
+    provider (every mode but ``provider_unavailable`` and
+    ``structured_output_unsupported``) report that usage through the runtime's
+    ``report_model_token_usage`` seam, as the real provider's callback does.
     """
 
     def __init__(
@@ -110,6 +116,7 @@ class DeterministicFakeModelAdapter:
         entered: threading.Event | None = None,
         release: threading.Event | None = None,
         pause_timeout: float = 10.0,
+        usage: tuple[int | None, int | None] | None = None,
     ) -> None:
         if mode == "pause" and (entered is None or release is None):
             raise ValueError("pause mode needs both an entered and a release event")
@@ -117,6 +124,7 @@ class DeterministicFakeModelAdapter:
         self.entered = entered
         self.release = release
         self.pause_timeout = pause_timeout
+        self.usage = usage
         self.calls: list[FakeModelCall] = []
 
     def invoke(
@@ -132,6 +140,8 @@ class DeterministicFakeModelAdapter:
             raise ModelProviderUnavailableError("pinned model provider unavailable")
         if self.mode == "structured_output_unsupported":
             raise NotImplementedError("structured output is not supported")
+        if self.usage is not None:
+            report_model_token_usage(input_tokens=self.usage[0], output_tokens=self.usage[1])
         if self.mode == "provider_parse_error":
             _ParseProbe.model_validate({"count": "not-an-int"})
         if self.mode == "invalid_optional_field":
