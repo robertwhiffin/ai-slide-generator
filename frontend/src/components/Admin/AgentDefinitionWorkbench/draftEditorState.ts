@@ -6,6 +6,7 @@ import {
   InvalidDraftSaveResponseError,
   InvalidTestRunResponseError,
   TEST_RUN_UNAVAILABLE,
+  TestRunVerdictApiError,
   parseDraftValidationErrorResponse,
   type AgentDefinitionWorkbenchResponse,
   type AgentKey,
@@ -27,9 +28,16 @@ import {
   type StructuredOutputProbeSuccessResponse,
   type TestCaseListEntry,
   type TestRunEvidence,
+  type AgentReadiness,
+  type DraftReadiness,
+  type TestRunVerdict,
 } from '../../../api/agentDefinitions';
 
-export type DraftStatus = 'Clean' | 'Unsaved' | 'Needs test';
+/**
+ * A role's status (#268 C25): `Unsaved` and `Clean` are local; the other four are derived
+ * only from the role's readiness item, never from locally cached run evidence.
+ */
+export type DraftStatus = 'Clean' | 'Unsaved' | 'Needs test' | 'Test failed' | 'Awaiting review' | 'Approved';
 export type DraftNumberInput = number | '';
 export type EditableDraftField =
   | 'prompt_text'
@@ -211,14 +219,16 @@ export interface DraftEditorEntry {
 }
 
 /**
- * #267's operations. Every one joins the one gate: a candidate run reads the saved draft
- * under the lock exactly as the probe does, and a baseline rerun and a case write are
- * the panel's other writes, so none needs a second in-flight flag.
+ * #267's operations, and #268's verdict. Every one joins the one gate: a candidate run
+ * reads the saved draft under the lock exactly as the probe does, and a baseline rerun,
+ * a case write and a verdict are the panel's other writes, so none needs a second
+ * in-flight flag (C24).
  */
-export type TestOperationKind = 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire' | 'testCaseUpdate';
+export type TestOperationKind =
+  | 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire' | 'testCaseUpdate' | 'verdict';
 
 export const TEST_OPERATIONS: readonly TestOperationKind[] = [
-  'testRun', 'baselineRun', 'testCaseCreate', 'testCaseRetire', 'testCaseUpdate',
+  'testRun', 'baselineRun', 'testCaseCreate', 'testCaseRetire', 'testCaseUpdate', 'verdict',
 ];
 
 export type DraftOperationKind =
@@ -242,12 +252,31 @@ export interface PendingDraftSave {
   submittedCandidate: EditableModelDraft | null;
   /** The case a test run or case retire names; absent for every draft operation. */
   testCaseId?: number;
+  /** A verdict's run and choice, so only its own evidence can settle it (#268). */
+  runId?: number;
+  verdict?: TestRunVerdict;
+}
+
+/**
+ * The one readiness slot (#268 C24). Readiness is an ungated read: its request ID comes
+ * from the one counter and only lets the reducer drop an answer that is not the latest,
+ * and an answer read at another lock than the saved one is dropped as `stale`.
+ * `refreshRequested` counts the settled writes that asked for a fresh read.
+ */
+export interface DraftReadinessState {
+  status: 'idle' | 'loading' | 'ready' | 'error' | 'stale';
+  /** The last answer accepted at the saved lock, or `null`. */
+  data: DraftReadiness | null;
+  /** The read whose answer may still land, or `null`. */
+  requestId: number | null;
+  refreshRequested: number;
 }
 
 export interface DraftEditorState {
   draft: DraftMetadata;
   byAgent: Record<AgentKey, DraftEditorEntry>;
   pendingSave: PendingDraftSave | null;
+  readiness: DraftReadinessState;
 }
 
 export type DraftEditorAction =
@@ -304,6 +333,10 @@ export type DraftEditorAction =
   | { type: 'testRunsLoaded'; agentKey: AgentKey; requestId: number; items: TestRunEvidence[] }
   | { type: 'testRunsLoadFailed'; agentKey: AgentKey; requestId: number; message: string }
   | { type: 'testOperationFailed'; requestId: number; message: string; issues: DraftFieldError[] }
+  | { type: 'testVerdictRecorded'; requestId: number; evidence: TestRunEvidence }
+  | { type: 'readinessLoadStarted'; requestId: number }
+  | { type: 'readinessLoaded'; requestId: number; readiness: DraftReadiness }
+  | { type: 'readinessLoadFailed'; requestId: number }
   | { type: 'schemaOverlayOptionalFieldToggled'; agentKey: AgentKey; fieldName: string }
   | { type: 'schemaOverlayFieldDescriptionChanged'; agentKey: AgentKey; fieldName: string; description: string }
   | { type: 'schemaOverlayFieldExamplesChanged'; agentKey: AgentKey; fieldName: string; examples: string }
@@ -640,13 +673,40 @@ export function createDraftEditorState(
       testing: emptyAgentTestingState(),
     };
   }
-  return { draft: structuredClone(workbench.draft), byAgent, pendingSave: null };
+  return {
+    draft: structuredClone(workbench.draft),
+    byAgent,
+    pendingSave: null,
+    readiness: { status: 'idle', data: null, requestId: null, refreshRequested: 0 },
+  };
 }
 
-export function draftStatus(entry: DraftEditorEntry): DraftStatus {
+/** One role's item from the last readiness answer accepted at the saved lock, or `null`. */
+export function agentReadinessFor(state: DraftEditorState, agentKey: AgentKey): AgentReadiness | null {
+  return state.readiness.data?.agents.find((agent) => agent.agent_key === agentKey) ?? null;
+}
+
+/**
+ * The role's status (C25). `Unsaved` and `Clean` come first. Then readiness decides,
+ * and only readiness for this saved candidate: no item, an item for another hash, or a
+ * changed role with no required case is `Needs test`, so stale data can never show
+ * `Approved`. Otherwise the cases aggregate worst-first (the Q2 default): any
+ * `test_failed`, then any `needs_test`, then any `awaiting_review`, else `Approved` when
+ * `readiness.ready`, and otherwise `Needs test`.
+ */
+export function draftStatus(entry: DraftEditorEntry, readiness: AgentReadiness | null): DraftStatus {
   if (!editableFormsEqual(entry.local, formFromDefinition(entry.saved))) return 'Unsaved';
   if (entry.saved.candidate_hash === entry.publishedHash) return 'Clean';
-  return 'Needs test';
+  if (readiness === null
+    || readiness.candidate_hash !== entry.saved.candidate_hash
+    || readiness.missing_required_case) return 'Needs test';
+  const statuses = readiness.cases.map((item) => item.status);
+  if (statuses.includes('test_failed')) return 'Test failed';
+  if (statuses.includes('needs_test')) return 'Needs test';
+  if (statuses.includes('awaiting_review')) return 'Awaiting review';
+  // Defensive: every listed case approved is not enough on its own (an empty list
+  // aggregates to nothing); the server must also call the role ready.
+  return readiness.ready ? 'Approved' : 'Needs test';
 }
 
 /** The server's exact `endpoint_url_not_allowed` table message (#266). */
@@ -760,8 +820,10 @@ export const TEST_RUN_HISTORY_INVALID_RESPONSE_MESSAGE =
   'Unable to load stored test runs because the server response was invalid.';
 export const TEST_CASE_INVALID_RESPONSE_MESSAGE =
   'Unable to update the test case because the server response was invalid.';
+export const VERDICT_INVALID_RESPONSE_MESSAGE =
+  'Unable to record the verdict because the server response was invalid.';
 
-export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load' | 'update' | 'history';
+export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load' | 'update' | 'history' | 'verdict';
 
 const TEST_OPERATION_SUBJECT: Record<TestOperationVerb, string> = {
   run: 'run the test case',
@@ -770,6 +832,7 @@ const TEST_OPERATION_SUBJECT: Record<TestOperationVerb, string> = {
   update: 'save the new test case version',
   history: 'load stored test runs',
   load: 'load Agent Test Cases',
+  verdict: 'record the verdict',
 };
 
 /**
@@ -782,6 +845,23 @@ export function testOperationFailure(
   verb: TestOperationVerb,
 ): { message: string; issues: DraftFieldError[] } {
   const subject = TEST_OPERATION_SUBJECT[verb];
+  if (error instanceof TestRunVerdictApiError) {
+    switch (error.failure.code) {
+      case 'test_run_not_found':
+        return { message: 'This test run no longer exists. Refresh test cases.', issues: [] };
+      case 'ineligible_for_approval':
+        return {
+          message: error.failure.reason === 'not_completed'
+            ? 'Only completed runs can be reviewed.'
+            : 'Deterministic checks did not pass, so this run cannot be approved.',
+          issues: [],
+        };
+      case 'invalid_verdict':
+        return { message: 'The verdict was refused.', issues: error.failure.errors };
+      case 'verdict_forbidden':
+        return { message: `Unable to ${subject} (${error.status}).`, issues: [] };
+    }
+  }
   if (error instanceof AgentTestApiError) {
     switch (error.failure.code) {
       case 'stale_test_case':
@@ -982,7 +1062,7 @@ function mergeConflict(
         : probeResultAfterAdoption(entry, adopted),
     };
   }
-  return { draft: conflict.server.draft, byAgent, pendingSave: null };
+  return { ...state, draft: conflict.server.draft, byAgent, pendingSave: null };
 }
 
 function succeedWrite(
@@ -1005,6 +1085,7 @@ function succeedWrite(
     reason: RETAINED_REASONS.version_adoption,
   });
   return {
+    ...state,
     draft: result.draft,
     pendingSave: null,
     byAgent: {
@@ -1177,7 +1258,44 @@ function settledTesting(testing: AgentTestingState): AgentTestingState {
   return { ...testing, error: null, issues: [], notice: null };
 }
 
+/** A verdict response must be evidence for exactly the run and choice the client sent. */
+function verdictEvidenceIsCoherent(pending: PendingDraftSave, evidence: TestRunEvidence): boolean {
+  return evidence.run_id === pending.runId
+    && evidence.agent_key === pending.agentKey
+    && evidence.verdict === pending.verdict;
+}
+
+/**
+ * The operations after whose settling readiness may have changed (C24): every draft
+ * write, and every #267/#268 test operation. A probe and a source-recovery read write
+ * nothing, so they ask for no read.
+ */
+const READINESS_REFRESH_OPERATIONS: readonly DraftOperationKind[] = [
+  'save', 'upgrade', 'schemaUpgrade', ...TEST_OPERATIONS,
+];
+
+/**
+ * The one reducer. It asks for a fresh readiness read (by counting it) when a pending
+ * operation of those kinds settled, whatever its outcome, or when any action adopted
+ * another lock; a dropped completion returns the state unchanged, so it asks for nothing.
+ */
 export function draftEditorReducer(
+  state: DraftEditorState,
+  action: DraftEditorAction,
+): DraftEditorState {
+  const next = reduceDraftEditor(state, action);
+  const settled = state.pendingSave;
+  const settledWrite = settled !== null && next.pendingSave === null
+    && READINESS_REFRESH_OPERATIONS.includes(settled.operation);
+  // A read's 409 (probe, source recovery) adopts another admin's lock: the readiness it
+  // holds was read at the old one, so it asks for a fresh read too (whole-branch m2).
+  if (settledWrite || next.draft.lock_version !== state.draft.lock_version) {
+    return { ...next, readiness: { ...next.readiness, refreshRequested: next.readiness.refreshRequested + 1 } };
+  }
+  return next;
+}
+
+function reduceDraftEditor(
   state: DraftEditorState,
   action: DraftEditorAction,
 ): DraftEditorState {
@@ -1484,6 +1602,42 @@ export function draftEditorReducer(
           action.testCase,
         ],
       }));
+    }
+    case 'testVerdictRecorded': {
+      const pending = matchingTestPending(state, action.requestId);
+      if (pending === null || pending.operation !== 'verdict') return state;
+      if (!verdictEvidenceIsCoherent(pending, action.evidence)) {
+        return settleTestOperation(state, pending, (testing) => ({
+          ...testing, error: VERDICT_INVALID_RESPONSE_MESSAGE, issues: [],
+        }));
+      }
+      // The response *is* the evidence (C26): it replaces the run it names, and a history
+      // read still in flight is dropped so an older answer cannot undo the verdict.
+      const evidence = action.evidence;
+      return settleTestOperation(state, pending, (testing) => ({
+        ...settledTesting(testing),
+        historyRequestId: null,
+        candidateEvidence: testing.candidateEvidence?.run_id === evidence.run_id ? evidence : testing.candidateEvidence,
+        baselineEvidence: testing.baselineEvidence?.run_id === evidence.run_id ? evidence : testing.baselineEvidence,
+      }));
+    }
+    case 'readinessLoadStarted':
+      return { ...state, readiness: { ...state.readiness, status: 'loading', requestId: action.requestId } };
+    case 'readinessLoaded': {
+      if (state.readiness.requestId !== action.requestId) return state;
+      // Read at another lock than the saved one: it describes a draft this client does
+      // not hold, so it is dropped and the last accepted answer stays.
+      if (action.readiness.draft_lock_version !== state.draft.lock_version) {
+        return { ...state, readiness: { ...state.readiness, status: 'stale', requestId: null } };
+      }
+      return {
+        ...state,
+        readiness: { ...state.readiness, status: 'ready', data: action.readiness, requestId: null },
+      };
+    }
+    case 'readinessLoadFailed': {
+      if (state.readiness.requestId !== action.requestId) return state;
+      return { ...state, readiness: { ...state.readiness, status: 'error', requestId: null } };
     }
     case 'testOperationFailed': {
       const pending = matchingTestPending(state, action.requestId);

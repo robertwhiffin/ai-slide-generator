@@ -629,9 +629,11 @@ class TestRunEvidenceResponse(BaseModel):
     Every field is the stored row, except ``synthetic_payload`` (the run's own
     immutable case version) and the two currency flags.  Those are computed
     when the run is written: an execute response carries booleans, and a later
-    read returns ``null`` because nothing recomputes them (C8.5).  The verdict
-    columns are #268's and are absent, not ``null``.  Release and revision ids
-    are ``ge=1`` so no ``-1`` sentinel can ever serialize (Task 3 M-1).
+    read returns ``null`` because nothing recomputes them (C8.5).  The four
+    verdict keys are required and ``null`` until a verdict is recorded (#268
+    C16): the client's parser is exact-key, so they are never omitted.  Release
+    and revision ids are ``ge=1`` so no ``-1`` sentinel can ever serialize
+    (Task 3 M-1).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -660,6 +662,10 @@ class TestRunEvidenceResponse(BaseModel):
     output_tokens: int | None
     run_by: str
     run_at: datetime
+    verdict: Literal["approved", "rejected"] | None
+    verdict_reviewer: str | None
+    verdict_at: datetime | None
+    verdict_notes: str | None
     candidate_is_current: bool | None
     base_release_is_current: bool | None
 
@@ -678,3 +684,80 @@ class TestRunUnavailableResponse(BaseModel):
     code: Literal["test_run_unavailable"]
     message: str
     retryable: Literal[True]
+
+
+# --- verdicts and readiness (#268 Task 3) ------------------------------------
+# The verdict body names only the admin's choice and an optional note.  The
+# reviewer is the authenticated principal and the time is the database clock,
+# so neither is a body field (C15).  Choice, blank and length rules are the
+# writer's (``record_verdict``), so they are reported in one ordered list.
+
+
+class VerdictRequest(_StrictDraftRequest):
+    """``POST /test-runs/{run_id}/verdict``: exactly ``{verdict, notes}``."""
+
+    verdict: str
+    notes: str | None
+
+
+class VerdictValidationErrorResponse(BaseModel):
+    """422: an invalid verdict body, in the ordered issue shape (C15)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["invalid_verdict"]
+    errors: list[DraftFieldErrorResponse]
+
+
+class IneligibleForApprovalResponse(BaseModel):
+    """422: the run cannot carry this verdict; nothing was written (C5, C15)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["ineligible_for_approval"]
+    reason: Literal["not_completed", "checks_failed"]
+    message: str
+
+
+class TestCaseReadinessResponse(BaseModel):
+    """One active required case row of a role (C11, C17): snake_case codes only;
+    the client owns the display labels."""
+
+    __test__ = False
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    agent_key: AgentKey
+    test_case_id: _RowId
+    test_case_name: str
+    test_case_version: Annotated[int, Field(ge=1)]
+    status: Literal["needs_test", "test_failed", "awaiting_review", "approved"]
+    blocking: bool
+    run_id: _RowId | None
+    run_verdict: Literal["approved", "rejected"] | None
+    run_checks_passed: bool | None
+
+
+class AgentReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    agent_key: AgentKey
+    candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
+    is_changed_from_base: bool
+    ready: bool
+    missing_required_case: bool
+    cases: list[TestCaseReadinessResponse]
+
+
+class DraftReadinessResponse(BaseModel):
+    """``GET /readiness``: the draft's publication readiness (C10, C11, C17).
+
+    Informational: #269's publication gate decides on its own locked read.
+    """
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    draft_lock_version: Annotated[int, Field(ge=0)]
+    base_release_id: _RowId
+    all_ready: bool
+    blocking_agents: list[AgentKey]
+    agents: list[AgentReadinessResponse]

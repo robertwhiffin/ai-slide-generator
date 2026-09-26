@@ -21,6 +21,7 @@ import {
   listTestCases,
   retireTestCase,
   updateTestCase,
+  type TestRunEvidence,
 } from '../../../api/agentDefinitions';
 import { emptyAgentTestingState, type AgentTestingState } from './draftEditorState';
 import { TestRunPanel, type TestRunPanelProps } from './TestRunPanel';
@@ -58,6 +59,7 @@ function renderPanel(overrides: Partial<TestRunPanelProps> = {}) {
     onRetireTestCase: vi.fn(),
     onUpdateTestCase: vi.fn().mockResolvedValue(null),
     onLoadTestRuns: vi.fn(),
+    onRecordVerdict: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
   return { props, ...render(<TestRunPanel {...props} />) };
@@ -465,6 +467,205 @@ describe('TestRunPanel', () => {
 });
 
 // ============================================================
+// #268 verdict controls (C26)
+// ============================================================
+
+const ONLY_COMPLETED = 'Only completed runs can be reviewed';
+const CHECKS_DID_NOT_PASS = 'Deterministic checks did not pass';
+
+function reviewed(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
+  return syntheticTestRunEvidence({
+    candidate_is_current: null,
+    base_release_is_current: null,
+    verdict: 'approved',
+    verdict_reviewer: 'reviewer@test.com',
+    verdict_at: '2026-09-26T10:05:00Z',
+    verdict_notes: 'Looks <b>right</b>.',
+    ...overrides,
+  });
+}
+
+function candidateVerdict() {
+  return within(openTab('Compare')).getByRole('region', { name: 'Candidate run verdict' });
+}
+
+describe('TestRunPanel verdict controls', () => {
+  it('offers Approve run and Reject run on a completed, passing, unreviewed candidate run', () => {
+    renderPanel({ testing: readyTesting({ candidateEvidence: syntheticTestRunEvidence() }) });
+
+    const region = candidateVerdict();
+    expect(region).toHaveTextContent('No verdict recorded');
+    expect(within(region).getByRole('button', { name: 'Approve run' })).toBeEnabled();
+    expect(within(region).getByRole('button', { name: 'Reject run' })).toBeEnabled();
+    expect(region).not.toHaveTextContent(CHECKS_DID_NOT_PASS);
+    expect(region).not.toHaveTextContent(ONLY_COMPLETED);
+  });
+
+  it('disables Approve run with visible reason text when the deterministic checks failed, and keeps Reject run', () => {
+    renderPanel({
+      testing: readyTesting({
+        candidateEvidence: syntheticTestRunEvidence({
+          deterministic_checks_passed: false,
+          deterministic_check_results: [
+            { name: 'execution', passed: true, message: null, issues: [] },
+            { name: 'output_contract', passed: false, message: 'Missing title.', issues: [] },
+          ],
+        }),
+      }),
+    });
+
+    const region = candidateVerdict();
+    const approve = within(region).getByRole('button', { name: 'Approve run' });
+    expect(approve).toBeDisabled();
+    expect(within(region).getByText(CHECKS_DID_NOT_PASS)).toBeVisible();
+    expect(approve).toHaveAccessibleDescription(CHECKS_DID_NOT_PASS);
+    expect(within(region).getByRole('button', { name: 'Reject run' })).toBeEnabled();
+  });
+
+  it.each(['model_error', 'assembly_error', 'incomplete'] as const)(
+    'disables both controls with visible reason text on a %s run',
+    (status) => {
+      renderPanel({
+        testing: readyTesting({
+          candidateEvidence: syntheticTestRunEvidence({ execution_status: status, deterministic_checks_passed: status === 'incomplete' }),
+        }),
+      });
+
+      const region = candidateVerdict();
+      expect(within(region).getByRole('button', { name: 'Approve run' })).toBeDisabled();
+      expect(within(region).getByRole('button', { name: 'Reject run' })).toBeDisabled();
+      expect(within(region).getByText(ONLY_COMPLETED)).toBeVisible();
+    },
+  );
+
+  it('disables both controls while the one gate is held', () => {
+    renderPanel({ testing: readyTesting({ candidateEvidence: syntheticTestRunEvidence() }), operationsDisabled: true });
+
+    const region = candidateVerdict();
+    expect(within(region).getByRole('button', { name: 'Approve run' })).toBeDisabled();
+    expect(within(region).getByRole('button', { name: 'Reject run' })).toBeDisabled();
+  });
+
+  it('sends the verdict with the optional notes, and null when the notes are blank', async () => {
+    const evidence = syntheticTestRunEvidence();
+    const onRecordVerdict = vi.fn().mockResolvedValue(true);
+    renderPanel({ testing: readyTesting({ candidateEvidence: evidence }), onRecordVerdict });
+
+    const region = candidateVerdict();
+    const notes = within(region).getByRole('textbox', { name: 'Candidate run verdict notes' });
+    expect(notes).toHaveAttribute('maxLength', '2000');
+    fireEvent.change(notes, { target: { value: 'Tone is right.' } });
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve run' })); });
+    expect(onRecordVerdict).toHaveBeenLastCalledWith('architect', evidence, 'approved', 'Tone is right.');
+    // The notes clear once the verdict settles.
+    expect(notes).toHaveValue('');
+
+    fireEvent.change(notes, { target: { value: '   ' } });
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Reject run' })); });
+    expect(onRecordVerdict).toHaveBeenLastCalledWith('architect', evidence, 'rejected', null);
+  });
+
+  it('keeps the typed notes when the verdict was refused, so the admin can retry without retyping', async () => {
+    const onRecordVerdict = vi.fn().mockResolvedValue(false);
+    renderPanel({ testing: readyTesting({ candidateEvidence: syntheticTestRunEvidence() }), onRecordVerdict });
+
+    const region = candidateVerdict();
+    const notes = within(region).getByRole('textbox', { name: 'Candidate run verdict notes' });
+    fireEvent.change(notes, { target: { value: 'Tone is right.' } });
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve run' })); });
+
+    expect(onRecordVerdict).toHaveBeenCalledTimes(1);
+    expect(notes).toHaveValue('Tone is right.');
+  });
+
+  it('an approved run shows its reviewer, time and notes as text only, and offers only Reject run', () => {
+    const { container } = renderPanel({ testing: readyTesting({ candidateEvidence: reviewed() }) });
+
+    const region = candidateVerdict();
+    expect(region).toHaveTextContent('Approved by reviewer@test.com at 2026-09-26T10:05:00Z');
+    expect(region).toHaveTextContent('Notes: Looks <b>right</b>.');
+    expect(container.querySelector('b')).toBeNull();
+    expect(within(region).queryByRole('button', { name: 'Approve run' })).not.toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: 'Reject run' })).toBeEnabled();
+  });
+
+  it('a rejected run offers Approve run when it is eligible, and not Reject run', () => {
+    renderPanel({ testing: readyTesting({ candidateEvidence: reviewed({ verdict: 'rejected', verdict_notes: null }) }) });
+
+    const region = candidateVerdict();
+    expect(region).toHaveTextContent('Rejected by reviewer@test.com at 2026-09-26T10:05:00Z');
+    expect(region).not.toHaveTextContent('Notes:');
+    expect(within(region).getByRole('button', { name: 'Approve run' })).toBeEnabled();
+    expect(within(region).queryByRole('button', { name: 'Reject run' })).not.toBeInTheDocument();
+  });
+
+  it('a rejected run whose checks failed keeps Approve run disabled with its reason', () => {
+    renderPanel({
+      testing: readyTesting({
+        candidateEvidence: reviewed({ verdict: 'rejected', verdict_notes: null, deterministic_checks_passed: false }),
+      }),
+    });
+
+    const region = candidateVerdict();
+    expect(within(region).getByRole('button', { name: 'Approve run' })).toBeDisabled();
+    expect(within(region).getByText(CHECKS_DID_NOT_PASS)).toBeVisible();
+  });
+
+  it.each([null, 'approved', 'rejected'] as const)(
+    'labels the baseline column inside a %s candidate run "(not approved)": the candidate\'s verdict is not the baseline\'s',
+    (verdict) => {
+      const evidence = verdict === null
+        ? syntheticTestRunEvidence({ baseline_structured_output: { title: 'Stored baseline' } })
+        : reviewed({ verdict, baseline_structured_output: { title: 'Stored baseline' } });
+      renderPanel({ testing: readyTesting({ candidateEvidence: evidence }) });
+
+      const region = within(openTab('Compare')).getByRole('region', { name: 'Test case evidence' });
+      expect(region).toHaveTextContent('Published baseline (not approved)');
+      expect(region).not.toHaveTextContent('Published baseline (approved)');
+      expect(region).not.toHaveTextContent('Published baseline (rejected)');
+    },
+  );
+
+  it('an approved candidate keeps its baseline column "(not approved)" while an approved baseline rerun reads "(approved)"', () => {
+    renderPanel({
+      testing: readyTesting({
+        candidateEvidence: reviewed({ baseline_structured_output: { title: 'Stored baseline' } }),
+        baselineEvidence: reviewed({ run_id: 777, run_kind: 'published_baseline' }),
+      }),
+    });
+
+    const compare = openTab('Compare');
+    expect(within(compare).getByRole('region', { name: 'Test case evidence' }))
+      .toHaveTextContent('Published baseline (not approved)');
+    expect(within(compare).getByRole('region', { name: 'Published baseline evidence' }))
+      .toHaveTextContent('Published baseline rerun (approved)');
+  });
+
+  it('offers the controls on the published baseline rerun too (P1), with a verdict-aware label', async () => {
+    const baseline = syntheticTestRunEvidence({ run_id: 777, run_kind: 'published_baseline' });
+    const onRecordVerdict = vi.fn().mockResolvedValue(true);
+    const { rerender, props } = renderPanel({ testing: readyTesting({ baselineEvidence: baseline }), onRecordVerdict });
+
+    const compare = openTab('Compare');
+    const section = within(compare).getByRole('region', { name: 'Published baseline evidence' });
+    expect(section).toHaveTextContent('Published baseline rerun (not approved)');
+    const region = within(section).getByRole('region', { name: 'Published baseline verdict' });
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve run' })); });
+    expect(onRecordVerdict).toHaveBeenCalledWith('architect', baseline, 'approved', null);
+
+    rerender(<TestRunPanel {...props} testing={readyTesting({ baselineEvidence: reviewed({ run_id: 777, run_kind: 'published_baseline' }) })} />);
+    expect(within(screen.getByRole('tabpanel', { name: 'Compare' })).getByRole('region', { name: 'Published baseline evidence' }))
+      .toHaveTextContent('Published baseline rerun (approved)');
+  });
+
+  it('says a verdict is being recorded while the verdict holds the gate', () => {
+    renderPanel({ testing: readyTesting({ candidateEvidence: syntheticTestRunEvidence() }), pendingOperation: 'verdict' });
+
+    expect(screen.getByText('Recording the verdict…')).toBeInTheDocument();
+  });
+});
+
+// ============================================================
 // The typed #267 clients
 // ============================================================
 
@@ -482,6 +683,19 @@ function stubFetch(status: number, body: unknown) {
 function onlyCall(fetchMock: ReturnType<typeof vi.fn>) {
   expect(fetchMock).toHaveBeenCalledTimes(1);
   return fetchMock.mock.calls[0] as [string, RequestInit];
+}
+
+/** A stored run carrying a recorded verdict (#268 C16): read back, so the flags are null. */
+function approvedEvidence(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
+  return syntheticTestRunEvidence({
+    candidate_is_current: null,
+    base_release_is_current: null,
+    verdict: 'approved',
+    verdict_reviewer: 'reviewer@test.com',
+    verdict_at: '2026-09-26T10:05:00Z',
+    verdict_notes: 'Looks right.',
+    ...overrides,
+  });
 }
 
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
@@ -534,7 +748,30 @@ describe('the test run client', () => {
   });
 
   it.each([
-    ['a verdict field #268 has not added', { ...syntheticTestRunEvidence(), verdict: 'approved' }],
+    ['an approval with notes', approvedEvidence()],
+    ['an approval without notes', approvedEvidence({ verdict_notes: null })],
+    ['a rejection', approvedEvidence({ verdict: 'rejected', verdict_notes: 'Wrong tone.' })],
+  ])('accepts stored evidence carrying %s', async (_label, body) => {
+    stubFetch(200, body);
+
+    await expect(getTestRun(501)).resolves.toEqual(body);
+  });
+
+  it.each([
+    ['an unknown key', { ...syntheticTestRunEvidence(), verdict_by: 'admin@test.com' }],
+    ['a missing verdict key', (() => {
+      const rest: Record<string, unknown> = { ...syntheticTestRunEvidence() };
+      delete rest.verdict_notes;
+      return rest;
+    })()],
+    ['an unknown verdict', { ...syntheticTestRunEvidence(), verdict: 'passed' }],
+    ['a verdict with no reviewer', { ...approvedEvidence(), verdict_reviewer: null }],
+    ['a verdict with no time', { ...approvedEvidence(), verdict_at: null }],
+    ['a reviewer with no verdict', syntheticTestRunEvidence({ verdict_reviewer: 'admin@test.com' })],
+    ['a time with no verdict', syntheticTestRunEvidence({ verdict_at: '2026-09-26T10:05:00Z' })],
+    ['notes with no verdict', syntheticTestRunEvidence({ verdict_notes: 'Orphan note.' })],
+    ['a non-string reviewer', { ...approvedEvidence(), verdict_reviewer: 7 }],
+    ['a non-string notes value', { ...approvedEvidence(), verdict_notes: 7 }],
     ['a missing field', (() => {
       const rest: Record<string, unknown> = { ...syntheticTestRunEvidence() };
       delete rest.run_by;
