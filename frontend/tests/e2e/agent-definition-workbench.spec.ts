@@ -1509,6 +1509,10 @@ test('the forbidden-action rule fires on every banned name and spares the legiti
   expect(forbidsActionName('Run test case and publish')).toBe(true);
   expect(forbidsActionName('Run published baseline, then approve')).toBe(true);
   expect(forbidsActionName('View run 12')).toBe(true);
+  // Exemptions match the whole name exactly, never as a substring (review m-5).
+  for (const near of ['Run test cases', 'Run test case now', 'run test case', 'Rerun: Run published baseline']) {
+    expect(forbidsActionName(near), near).toBe(true);
+  }
 });
 
 test('no control in the panel ever offers execution, review, publication, history, or rollback', async ({ page }) => {
@@ -1541,10 +1545,12 @@ test('no control in the panel ever offers execution, review, publication, histor
     .toBeVisible();
 
   const sweep = async () => {
+    // Each name source (aria-label, text, title) is checked on its own: exemptions are
+    // exact whole names (review m-5), so a control naming itself twice is not concatenated.
     const names = await panel.locator('button, a')
-      .evaluateAll((controls) => controls.map((control) => (
-        `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
-      )));
+      .evaluateAll((controls) => controls.flatMap((control) => [
+        control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
+      ].filter((source) => source.trim() !== '')));
     expect(names.length).toBeGreaterThan(0);
     for (const name of names) expect(forbidsActionName(name)).toBe(false);
     return names;
@@ -2744,9 +2750,9 @@ test('Agent Test Cases: every control stays inside the guard, and no #266 or #26
   await expect(page.getByRole('radiogroup', { name: 'Discovered models' })).toBeVisible();
 
   const panel = page.getByRole('tabpanel', { name: 'Agent Definitions' });
-  const names = await panel.locator('button, a').evaluateAll((controls) => controls.map((control) => (
-    `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
-  )));
+  const names = await panel.locator('button, a').evaluateAll((controls) => controls.flatMap((control) => [
+    control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
+  ].filter((source) => source.trim() !== '')));
   for (const name of [RUN_TEST_CASE, RUN_BASELINE, 'Confirm retire', 'Keep test case', 'Refresh test cases']) {
     expect(names.some((candidate) => candidate.includes(name))).toBe(true);
   }
