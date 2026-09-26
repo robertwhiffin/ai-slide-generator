@@ -760,3 +760,573 @@ Ruling for #269: any write whose safety depends on a correlated sub-predicate ov
 Cost if wrong: publication links, or cleanup deletes, a row whose protection committed during the wait.
 
 Addendum (from #268 Task 4 review): every multi-row L3 run lock in #269 (the gate re-verify, the linker) takes rows `FOR UPDATE` in `ORDER BY id`, matching #268 cleanup, so two L3 lockers never cross.
+
+---
+
+# Task 0 corrections pass (2026-09-26) — corrections 34–55
+
+- **Probed at:** `plan/publish-release-269` HEAD `cd63aa09b`, which is `16aa02b76` (Merge #268 on `feat/langgraph-core`) plus plan/ledger docs only. All four predecessors (#264, #266, #267, #268) are integrated, so Task 0 phases A and B ran together. Bases and heads: `TASK1_BASE`, `INTEGRATION_BASE`, `predecessor-heads.md`. Baselines: `reports/preflight.md`.
+- **Corrections 1–33 are not edited.** Where one is now wrong, an erratum correction below says so (35 → C31, 44 → C7, 36 → C17).
+- **"Reasoned"** marks a claim from code plus documented PostgreSQL semantics that was not run as a probe; the named task's RED must confirm it. Everything else was read from the code at the cited line or run.
+- **Q-answers:** Q2 → Correction 40, Q4 → 39, Q8 → 42, Q9 → 41. C19 outcome (a) → 43. Fake adapter → 38. #268 publication code: none (→ 38, row "publication").
+
+### Correction 34 — the "Verified code facts" table, re-anchored at `cd63aa09b`
+
+**Overrides:** plan lines 30–70 (every row's `file:line`), and every task "Files:" line that cites them (lines 335–338, 595, 769, 837–838, 888). **Evidence:** each row re-read at HEAD. **Ruling:** briefs cite the right-hand column. A row marked **CHANGED** changes the fact itself, not only the line, and has its own correction.
+
+| Plan row | Plan cite | Actual at `cd63aa09b` | Fact still true? |
+|---|---|---|---|
+| `AgentDefinitionRevision` + both uniques | `graph_configuration.py:152–183` | `src/database/models/graph_configuration.py:159–190` (`uq_…_agent_hash` :180–184, `uq_…_id_agent` :185–189) | yes |
+| `GraphRelease`, strict interval, `uq_graph_release_one_active` (PG + SQLite) | `:186–238`, `:231–237` | `:193–245`; `ck_graph_release_interval` :233–236; index :238–244 (`postgresql_where` + `sqlite_where`) | yes |
+| `GraphReleaseAgent` PK + composite FK RESTRICT | `:241–267` | `:248–274` (FK :264–269) | yes |
+| `GraphDraft` singleton, `base_release_id` FK, `lock_version >= 0` | `:270–297` | `:277–304` | yes |
+| `GraphDraftAgent` PK, `candidate_hash` | `:300–318` | `:307–325` | yes |
+| `AgentTestCase` + `uq_agent_test_case_agent_name_version` | `:321–363` | `:328–370` (unique :364–369) | yes; see C42 for versioning |
+| mutation guards | `src/core/database.py:935–1081` | `:935–1122`. Now also installs #267's `trg_agent_test_run_evidence_immutable` (:1076–1107; function compares `to_jsonb(NEW/OLD)` minus the four verdict columns). The deferred `trg_graph_release_exactly_one_active` is :1110–1122. | yes, plus #267's evidence trigger (C30 already notes coexistence) |
+| `read_workbench` (`FOR SHARE`) | `workbench.py:179–186` | `src/services/graph_configuration_workbench.py:179–186` | yes, unchanged |
+| `_lock_current_parents` (one statement; ≠1 rows raises; base check) | `:188–238`, `:210–227`, `:234–237` | `:188–238`; diagnosis :209–227; base check :234–237 | yes, unchanged |
+| `_snapshot_locked_workbench`, `changed` | `:240–361`, `:325` | `:240–361`, `:325` | yes |
+| `_read_workbench_for_draft_write` | `:363–408` | `:363–408` | yes |
+| `ActiveReleaseSnapshot`, `DraftMetadataSnapshot` | `:39–59` | `:39–59` (classes at :40, :53) | yes |
+| validator tuples | `draft.py:250–256` | `src/services/graph_configuration_draft.py:346–352` | **CHANGED** — the saves also run `_endpoint_name_policy_validator` through `_save_local_validators()` (:380–387) and a remote phase `_validate_remote_endpoint` (:389–397). See C37. |
+| `_run_candidate_validators` | `:258–268` | `:368–378` | yes |
+| `DraftValidationIssue`, `DraftContentRejected` | `:103–117` | `:154–168` | yes |
+| `_draft_aggregate_snapshot` | `:736–752` | `:973–989` | yes |
+| `_write_locked_content`; timestamp; audit | `:754–793`, `:767–773`, `:774–776` | `:991–1029`; timestamp :1003–1009; audit :1010–1012 | yes |
+| `_validate_common` (C17's `:547–582`, `:548–572`) | — | `:765–777` + `_lock_and_agent_key_issues` :787–817 | **CHANGED** shape — see C36 |
+| `_database_timestamp` | `bootstrap.py:84–93` | `src/services/graph_configuration_bootstrap.py:84–93` | yes |
+| bootstrap reuse-by-hash | `:215–241` | `:214–241` (lookup :218–224, insert :226–230, validate :231–240) | yes |
+| `_validate_current_graph`; mappings; base check | `:121–199`, `:129–157`, `:164–168` | `:121–198`; mappings :129–157; base check :165–168; required-case coverage :187–198 | yes |
+| content seam | `content.py:100–112`, `:128–146`, `:71–81` | `revision_from_definition` :100, `validate_definition_hash` :128, `definition_content_values` :71 | yes |
+| facade, `__all__` | `graph_configuration.py:44–49`, `:57–79` | class :47–52 (bases: Draft, Workbench, Bootstrap); `__all__` :88–114; also `build_remote_endpoint_draft_validator` :55–80 | yes |
+| `lock_active_graph_release`, `MAX_ACTIVE_RELEASE_LOCK_SCANS` | `conversation_pins.py:66–74`, `:55` | `:66–74`, `:55`; `_active_release_for_update` :58–63; `get_conversation_graph_version` :99–111 (Task 8's sabotage line is :108, the `is_older_than_active` term) | yes |
+| pin call sites | `session_manager.py:759`, `:897`, `:1245` | `:759`, `:897`, `:1245` | yes |
+| `PersistedGraphReleaseLoader` cache by id | `persisted_graph_release.py:91–139` | `:91–138` (cache :96, :104–106, :138); `_validate_complete_snapshot` :167 | yes |
+| `canonical_payload`; `temperature` | `graph_definition_manifest.py:281–290`, `:96` | `:281–290`, `:96` | yes |
+| admin router | `agent_definitions.py:51–55` | `src/api/routes/agent_definitions.py:102–107` | yes |
+| `require_draft_write_principal` | `:58–66` | `:110–118` | yes |
+| router registration | `main.py:23`, `:484` | `:23`, `:484` | yes; see C35 |
+| response models | `schemas/agent_definitions.py:301–319` | `ActiveReleaseResponse` :301, `DraftMetadataResponse` :313, `DraftFieldErrorResponse` :403 (C15) | yes |
+| PG helpers | `postgres_concurrency_helpers.py:32`, `:202–212` | `_WAIT_SECONDS` :32; `_await_lock_waiters` :202 | yes |
+| creator harness | `test_mixed_release_creation_postgres.py:26–34`, `:125–126`, `:129–172`, `:175–190` | `CREATORS` :27, `_seed` :71, `_backend_pid` :125, `_create` :129, `_creator_patches` :175; `before_cursor_execute` recipe :245; `INSERT INTO user_sessions` matcher :305 | yes |
+| workbench PG pattern | `test_agent_definition_workbench_postgres.py:164–190`, `:1280–1304` | PID override :174–176; pause listener :184; `real_route_stack` :1283–1310; `SELECT CURRENT_TIMESTAMP` capture :137–141 and assertion :282 | yes |
+| route unit fixture | `test_agent_definition_workbench_routes.py:117–135`, `:137–157` | `session_factory` :129–148; `_accepting_remote_endpoint_validator` :150; `_app_for` :155; `_force_admin` :202 | yes, lines moved |
+| forbidden-action rule | `forbiddenActionNames.ts`, `ALLOWED` = 3, `:1462` | stems :18–19; `ALLOWED_ACTION_NAMES` :36–44 = **7** entries; lengths `AgentDefinitionWorkbench.test.tsx:378` and `agent-definition-workbench.spec.ts:1518` | **CHANGED** — see C44 |
+| workbench header | `AgentDefinitionWorkbench.tsx:31–48`, `:139–144` | header `<header>` :112–130 (Graph Version :115, Draft base :121–122, Lock version :125) | yes, lines moved |
+| admin route gate | `App.tsx:27–33`, `:53` | `RequireAdmin` :27–33, `/admin` :53 | yes |
+| workbench client | `agentDefinitions.ts:328`, `:698–722` | `AgentDefinitionApiError` :328; settled memo :696–722 | yes |
+| CI job | `test.yml ~447–474` | `integration-graph` :410; `run:` block :447–473 | yes |
+
+**Cost if wrong:** a brief sends an implementer to the wrong line; the CHANGED rows ship a validator or a guard count that no longer matches the code.
+
+### Correction 35 — erratum to C31: a module that decorates the existing router after `include_router` registers nothing
+
+**Overrides:** C31 ("the handlers may live in their own module … no `main.py` change"), plan lines 180, 238, 239, 768–769, 801–816.
+
+**Evidence:**
+- `src/api/main.py:484` runs `app.include_router(agent_definitions.router)` once at import time.
+- Probe (`/tmp`, a plain FastAPI app): a route added to an `APIRouter` **after** `app.include_router(router)` is absent from `app.routes`. The output was `['/p/a']` with `/p/late` missing. FastAPI copies routes when `include_router` is called.
+- So a `graph_releases.py` that decorates `agent_definitions.router` registers nothing, unless it is imported before `main.py:484`. Importing it from `agent_definitions.py` would be circular, because it needs `router`, `require_draft_write_principal` and `get_agent_test_workbench` from there.
+- Precedent: #267 and #268 put their routes (test runs :1125–1203, verdict :1289, readiness :1347) directly in `agent_definitions.py`.
+
+**Ruling:**
+- Task 5 adds the two handlers `GET /release-preview` and `POST /releases` **in `src/api/routes/agent_definitions.py`**, on the existing `router`.
+- The wire models go in a new `src/api/schemas/graph_releases.py`, imported by the route module.
+- No `graph_releases.py` route module, and no `main.py` change.
+- `test_main_app_registers_release_routes` builds `src.api.main.app` and asserts each path exists exactly once, so it would catch a late registration.
+- Task 5's Files list changes accordingly. This touches a #267/#268-owned file, which plan line 238 said would not happen, but Task 5 is the only task that touches it.
+
+**Cost if wrong:** routes that exist in the module but return 404 in the app. Task 5's route tests build their own app with `include_router` after import, so they would pass while production is broken.
+
+### Correction 36 — erratum to C17: `_validate_common` has no separable actor+lock block any more
+
+**Overrides:** C17's "Extract `_actor_and_lock_issues(actor, lock_version)` from `_validate_common`'s first two blocks (`:548-572`)".
+
+**Evidence:**
+- The actor checks are inline at `graph_configuration_draft.py:765–777`.
+- The lock checks are fused with the agent-key check in `_lock_and_agent_key_issues(lock_version, agent_key)` (:787–817), which is shared with `_validate_lock_and_agent_key` (:779–785, used by the probe/test-run read at :700).
+
+**Ruling (Task 1):**
+- Extract two static helpers:
+  - `_actor_issues(actor) -> list[DraftValidationIssue]`, the body of :766–775;
+  - `_lock_version_issues(lock_version) -> list[DraftValidationIssue]`, the lock-version part of :787–809.
+- `_lock_and_agent_key_issues` becomes `_lock_version_issues(lock_version) + <the unchanged agent_key check>`.
+- `_validate_common` becomes `_actor_issues + _lock_and_agent_key_issues`, with byte-identical issues and order.
+- `_validate_publication_request` = `_actor_issues + _lock_version_issues + <one note issue>` (C17's note rules unchanged), raising `PublicationRejected`.
+- **Gate:** `tests/unit/test_graph_configuration_draft.py` and `test_agent_definition_workbench_routes.py` stay GREEN.
+
+**Sabotage (optional):** none new; C17 stands.
+
+**Binds:** Phase A (Task 1), blocking, because C17 is required before Task 1 review.
+
+**Cost if wrong:** an implementer passes a dummy `agent_key` to reuse the fused helper, or duplicates the lock rules, which then drift.
+
+### Correction 37 — publication runs #266's local endpoint-name policy, and never the remote endpoint check
+
+**Overrides:** plan line 23 ("the writer's `local_candidate_validators` / `post_stale_validators` tuples"), line 44, lines 502–514 (`_validate_changed_candidates`), and line 344.
+
+**Evidence:**
+- #266 made the saves run `self._save_local_validators()` = `local_candidate_validators + (_endpoint_name_policy_validator,)` (`graph_configuration_draft.py:380–387`, used at :449 and :508). Then comes `post_stale_validators`, then `_validate_remote_endpoint` (:389–397), a network call to the catalog.
+- The remote check runs **under L0 `FOR UPDATE`** in the saves, bounded to ~15 s (`model_endpoint_catalog.py:106–111`).
+- #267's candidate read re-runs only the local policy (:719–721).
+- Running only the two class tuples, as the plan does, would let a URL-shaped endpoint that bypassed the save (an ORM write, a future writer) be published.
+
+**Ruling (Task 1):**
+- `_validate_changed_candidates` runs `self._save_local_validators()`, then `self.post_stale_validators`, for each changed role, prefixing with `definitions.<key>.` as the plan says.
+- It **never** calls `_validate_remote_endpoint`:
+  - that would hold the release row `FOR UPDATE` across a network call, which blocks every conversation creation;
+  - every candidate already passed the remote check at its save.
+- **Tests (SQLite unit):**
+  - an ORM-written `endpoint_name = "https://x/y"` on builder's draft row (hash recomputed) → `PublicationRejected` with exactly `DraftValidationIssue("definitions.builder.candidate.model.endpoint_name", "endpoint_url_not_allowed", "Endpoint must be a Databricks endpoint name, not a URL.")`, nothing written, gate not called;
+  - a publish through `GraphConfiguration(remote_endpoint_validator=<spy>)` leaves the spy's call list empty.
+
+**Sabotage (reviewer, Task 1, an addition):** replace `self._save_local_validators()` with `self.local_candidate_validators`. Predicted RED: the endpoint test (it publishes v2).
+
+**Binds:** Phase A (Task 1), blocking.
+
+**Cost if wrong:** a URL-shaped endpoint ships in a release, or publication stalls conversation creation behind a network call.
+
+### Correction 38 — the "Consumed #267/#268 outputs" table, as built
+
+**Overrides:** plan lines 76–93 (every row is "assumed from the draft plan") and line 184.
+
+**Evidence:** code at HEAD. Every row was re-read; ORM columns were printed by the plan's Step 4 probe. **Ruling:** this table replaces the plan's.
+
+| Plan row | As built (file:line) | Differs from the plan? |
+|---|---|---|
+| `AgentTestRun` | `graph_configuration.py:373–490`. Columns: `id, test_case_id, test_case_version, agent_key, run_kind, candidate_hash, compared_release_id, compared_definition_revision_id, model_payload, assembled_prompt, candidate_raw_output, candidate_structured_output, baseline_raw_output, baseline_structured_output, deterministic_check_results, deterministic_checks_passed, execution_status, error_detail, latency_ms, input_tokens, output_tokens, run_by, run_at, verdict, verdict_reviewer, verdict_at, verdict_notes`. `execution_status IN ('completed','model_error','assembly_error','incomplete')` :460–463; `run_kind IN ('candidate','published_baseline')` :456–459. FKs RESTRICT to `agent_test_case` :429–434, `graph_release` (`compared_release_id`) :435–440, and the composite revision :441–446. Index `ix_agent_test_run_case_run_at` :489. | Adds `run_kind` (C30), `compared_*`, tokens. No `test_case_version` FK. |
+| `ck_agent_test_run_approved_only_if_completed_and_passing` | :476–480 | same name |
+| `GraphReleaseTestRun` | :493–537. PK `(graph_release_id, agent_test_run_id)`; `evidence_kind IN ('approval','historical_restore')` :526–529; `(evidence_kind='historical_restore') = (source_release_id IS NOT NULL)` :530–533; three FKs RESTRICT :508–525; `ix_graph_release_test_run_run` :536 | as assumed |
+| `DraftReadinessResult` etc. | `agent_test_workbench.py:579–625`: `TestCaseReadinessItem(agent_key, test_case_id, test_case_name, test_case_version, status, blocking, run_id, run_verdict, run_checks_passed)`, `AgentReadinessItem(agent_key, candidate_hash, is_changed_from_base, ready, missing_required_case, cases)`, `DraftReadinessResult(draft_lock_version, base_release_id, all_ready, blocking_agents, agents)`; `status ∈ {needs_test, test_failed, awaiting_review, approved}` :576 | adds `missing_required_case` |
+| readiness entry point | `AgentTestWorkbench.readiness_under_parent_lock(session)` :1543–1631 (C39). `draft_readiness` :1534–1541 owns its transaction and is **not** for #269. | see C39 |
+| readiness wire | `DraftReadinessResponse` `src/api/schemas/agent_definitions.py:751–763` (+ `AgentReadinessResponse` :740, `TestCaseReadinessResponse` :722); route `GET /api/admin/agent-definitions/readiness` `agent_definitions.py:1347–1365` | **path differs**: the plan's line 85 says `/api/admin/graph-draft/readiness` |
+| cleanup | `cleanup_unpublished_test_runs(session, *, per_case_limit=20) -> int` :1634–1666 (C40) | locks **both** parents, not the draft only |
+| verdict writer | `record_verdict(session, *, run_id, verdict, reviewer, notes)` :1471–1531. There is **no `actor` kwarg**; the reviewer is the principal. L3 only (C41). | signature differs from plan line 87 |
+| run route / verdict route | `POST /api/admin/agent-definitions/draft/{agent_key}/test-runs` (`agent_definitions.py:1125–1153`, 201); `POST /api/admin/agent-definitions/test-runs/{run_id}/verdict` (:1289–1344, 200) | verdict path per C30 |
+| fake adapter | `tests/fixtures/deterministic_model_adapter.py:85` `DeterministicFakeModelAdapter` (modes incl. `success`, `pause`). The route test recipe overrides `agent_definitions.get_agent_test_workbench` (:1022) with `AgentTestWorkbench(runtime=AgentRuntime(persisted_release_loader=…, model_adapter=adapter, identity_sink=…))`, per `_pg_executor` (`test_agent_definition_workbench_postgres.py:2141–2147`) and the override at :2465 | resolves the plan's ambiguity: `tests/fixtures/` |
+| frontend readiness client | `frontend/src/api/agentDefinitions.ts`: `getDraftReadiness()` :1878, `parseDraftReadinessResponse` :1864, `DraftReadiness` :1797, `AgentReadiness` :1783, `TestCaseReadiness` :1769, `ReadinessStatus` :1766, `InvalidReadinessResponseError` :1808, key lists :1819–1830; the comment at :1662 says "#269 consumes these names; it must not define a second readiness type". `DraftStatus` (6 values) `draftEditorState.ts:40`; `draftStatus()` :697 | names now known |
+| publication | none. `rg "def publish|publish_draft|Review & Publish|release-preview|publishRelease"` over `src frontend/src` finds only the forbidden-name *test* lists (`AgentDefinitionWorkbench.test.tsx:366`, `agent-definition-workbench.spec.ts:1509`, which ban `'Review & publish'`). No `graph_release_test_run` writer exists. `GraphReleaseTestRun` is read only by #268's `_linked_run` (:700–707). | Q1 held; no stop condition |
+
+**Instruction:**
+- Task 4's ORM fallback rows (C30) must set every NOT NULL column above.
+- A `completed` row also needs `candidate_structured_output` (`ck_agent_test_run_completed_has_output` :481–484).
+- `candidate_hash` must be 64 characters long (:485–488).
+
+**Binds:** Phase B, blocking Task 4 (all rows ruled).
+
+**Cost if wrong:** Task 4 or Task 5 codes against a shape that does not exist.
+
+### Correction 39 — Q4 answered: the one readiness binding is `AgentTestWorkbench().readiness_under_parent_lock`
+
+**Overrides:** plan lines 84, 178, 715–716, 805–807, 944 (Q4), and C21's "the route module's `_readiness_callable`".
+
+**Evidence:**
+- `readiness_under_parent_lock` (`agent_test_workbench.py:1543–1631`) never begins, commits or rolls back. It raises `RuntimeError` when `not session.in_transaction()` (:1570–1574), takes no row lock, and touches no runtime.
+- `AgentTestWorkbench.__init__` (:995–1004) resolves the runtime lazily, so `AgentTestWorkbench()` builds nothing.
+- The docstring (:1558–1568) restates C32.
+- `draft_readiness` (:1534–1541) begins its own transaction, which makes it unusable inside publication.
+
+**Ruling:**
+- **Route side (Task 5):**
+  - `_readiness_callable()` in `agent_definitions.py` returns `get_agent_test_workbench().readiness_under_parent_lock`. It goes through the route module's existing dependency function (:1022), so Task 8's single override of `get_agent_test_workbench` covers runs, verdicts and readiness alike.
+  - The wire value is `DraftReadinessResponse.model_validate(result, from_attributes=True)`, as at :1365.
+- **Call sites:**
+  - the gate calls it only on the not-ready path, before any write (C32);
+  - `preview_release` calls it after `_lock_current_parents(exclusive=False)`, inside its own `session.begin()`.
+- **Unit test (Task 4):** calling the gate's readiness outside a transaction raises that `RuntimeError`. This pins that the gate is only ever invoked inside `publish_draft`'s transaction.
+- C21 stands: monkeypatch `_readiness_callable`.
+
+**Binds:** Phase B, blocking Tasks 4–5.
+
+**Cost if wrong:** readiness opens a nested transaction inside publication (`InvalidRequestError`), or the route binds `draft_readiness` and every not-ready publish becomes a 500.
+
+### Correction 40 — Q2 answered: cleanup locks L0 (both parents, `FOR SHARE`), then L3 in id order, then deletes in a new statement
+
+**Overrides:** plan lines 86, 204 ("#268 cleanup (assumed): draft only `FOR SHARE`"), 207, 212, 700 ("paused after its `graph_draft FOR SHARE` statement"), and 942 (Q2).
+
+**Evidence:** `cleanup_unpublished_test_runs` (`agent_test_workbench.py:1634–1666`) runs in its own transaction:
+1. `self._graph_configuration._lock_current_parents(session, exclusive=False)` (:1660), the L0 statement `… FOR SHARE OF graph_release, graph_draft`.
+2. `_cleanup_targets_statement` (:741–759): ranks the deletable candidates (`run_kind='candidate'`, not linked, not a retained approval, :728–737) by `ROW_NUMBER() OVER (PARTITION BY test_case_id ORDER BY run_at DESC, id DESC)`, and locks those past the limit with `FOR UPDATE OF agent_test_run ORDER BY id`.
+3. `_cleanup_delete_statement` (:762–777): a new DELETE statement, re-checking `_deletable_candidate` (the C33 pattern).
+
+It takes no case lock. #268 gives it **no production caller** (#268 Q1 ruling).
+
+**Ruling (Task 4 ordering tests):**
+- **Pause matcher.** Cleanup is paused after the first statement on thread `cleanup` whose normalized text contains `FOR SHARE OF GRAPH_RELEASE, GRAPH_DRAFT`, not a draft-only statement.
+- **PID capture.** Construct `AgentTestWorkbench(graph_configuration=<subclass overriding _lock_current_parents to run SELECT pg_backend_pid() first>)`, precedent `_PidCapturingGraphConfiguration` (`test_agent_definition_workbench_postgres.py:3391`).
+- **Where they serialize.** Cleanup and publication meet at L0 (share against update), in both orders, never at L3. In `test_publication_first_then_cleanup`, cleanup is blocked on its L0 statement. Assert that through `pg_stat_activity.query` for the cleanup PID, as C6 does.
+- **Lock table.**
+  - Row L0 "other holders" becomes: "#268 cleanup, both parents `FOR SHARE`".
+  - Row L3 becomes: "#268 cleanup: `FOR UPDATE` in id order, only after its L0".
+  - The deadlock argument's "cleanup holds L0-draft" becomes "cleanup holds L0 (both)".
+- Every #269 multi-row L3 lock is `ORDER BY id` (C33 addendum), which matches cleanup.
+
+**Binds:** Phase B, blocking Task 4.
+
+**Cost if wrong:** a pause that never fires, which reads as a lock result; or a lock-table claim the whole-branch reviewer cannot re-derive.
+
+### Correction 41 — Q9 answered: neither the case writers nor the verdict writer takes L0
+
+**Overrides:** plan lines 206 ("#267 case writers (assumed; lock mode unspecified)"), 207, 212, and 949 (Q9).
+
+**Evidence:**
+- **Verdict writer.** `record_verdict` (:1471–1531) runs in its own transaction. Its only lock is `_verdict_lock_statement` (:531–538): `SELECT agent_test_run WHERE id=:id FOR UPDATE` with `populate_existing`. Then comes a Core `UPDATE` of exactly the four verdict columns (:1511–1524). No parent lock and no case lock (#268 C6).
+- **Case writers.** `create_test_case` (:1034–1093), `update_test_case` (:1095–1180) and `deactivate_test_case` (:1182–1205) each take L2 only: `_role_lock_statement` (:212–224), which is **every row of the role, unfiltered, `ORDER BY id`, `FOR UPDATE`**, followed by `_reread_role_rows` (:232–…). This is taken directly or through `_lock_role_of` (:1207–1224). No L0.
+
+**Ruling (lock table and argument):**
+- **L2** "other holders": "#267 case writers: `FOR UPDATE`, every row of one role, id order, then a new-statement re-read". The gate's L2 `FOR SHARE` (C29) conflicts with that, and neither side then takes an earlier lock, so there is no cycle.
+- **L3** "other holders": "#268 verdict writer: `FOR UPDATE` on one run row only".
+- **The implicit row gains one conflict.** Publication's `graph_release_test_run` INSERT takes FK `FOR KEY SHARE` on each linked run. That conflicts with the verdict writer's explicit `FOR UPDATE`. It is harmless, because publication already holds those rows `FOR UPDATE` (L3), but see C47.
+- **PID capture for the verdict thread (C5):** its first DB statement *is* the L3 lock, so use the `before_cursor_execute` thread-name recipe (`test_mixed_release_creation_postgres.py:245`).
+
+**Binds:** Phase B, blocking Task 4.
+
+**Cost if wrong:** the whole-branch reviewer cannot re-derive deadlock freedom from the plan's table.
+
+### Correction 42 — Q8 answered: a new test-case version is a new row with a new id
+
+**Overrides:** plan line 699 (`test_case_version_bump_after_approval_is_not_ready`, "per #267's versioning semantics recorded at Task 0-B"), lines 91 and 948 (Q8), and C20's final sentence.
+
+**Evidence:**
+- `update_test_case` (:1095–1180) locks the role (L2). It then sets `old.is_active = False`, flushes, and inserts `AgentTestCase(agent_key, name, version=old.version+1, is_active=True, …)`, a new row with a new `id`. Both happen in one transaction.
+- An identical-content update is a no-op, with no new row (:1144–1152).
+- A name change is refused (`name_immutable`, :1122–1131).
+- `uq_agent_test_case_agent_name_version` (`graph_configuration.py:364–369`) enforces the lineage.
+- A run snapshots `test_case_id` and `test_case_version` of the row it ran (#267; `AgentTestRun` :382–383). Readiness keys on both (`_current_candidate_evidence_clause` :627–637).
+
+**Ruling (Task 4):**
+- **Gate.** The gate keys on the locked case row's `(id, version)`. The version term is redundant with `id`, but keep it: there is no FK tying `test_case_version` to the row.
+- **`test_case_version_bump_after_approval_is_not_ready`:**
+  1. Approve a run of architect's required case (row X, version 1).
+  2. Call `AgentTestWorkbench().update_test_case(test_case_id=X, …)` with **changed** `synthetic_payload`, giving row Y with version 2.
+  3. Publish.
+  4. Assert exactly `PublicationNotReady(locked_gaps=(PublicationGap("architect", Y, "no_eligible_approval"),), …)`, zero writes, and that X's approved run is not linked.
+- **C29's two-required-case test** uses `update_test_case` as its concurrent supersede.
+
+**Binds:** Phase B, blocking Task 4.
+
+**Cost if wrong:** a version-bump test that is a no-op (identical content) and passes vacuously.
+
+### Correction 43 — C19 is outcome (a); and C1's no-required-case state is reachable only by a direct write
+
+**Overrides:** C19's "record at Task 0-B … pin one of" (it is now pinned), and C1 part 6's "using #267's case writer if the Task 0-B probe shows it allows this".
+
+**Evidence:**
+- **C19.** `_retained_approval` (`agent_test_workbench.py:710–725`) protects an approved, eligible candidate run of an active required case at the current draft hash. `_deletable_candidate` (:728–737) removes protected rows **before** ranking (:741–759), so they take no window slot (#268 C19d).
+- **C1.** #267's writers refuse to retire the last active required case of a role:
+  - `update_test_case` refuses `is_required → False` on the last one (:1133–1141);
+  - `deactivate_test_case` refuses deactivating it (:1197–1198), with `_last_required_issue`.
+  - A supersede keeps the role covered, because the new version is active.
+
+**Ruling:**
+- **C19 is outcome (a).** With C19's 25 runs: cleanup deletes exactly `{r2, r3, r4, r5}`; the retained set is `{r1, r6 … r25}`; the publisher links exactly `r1`. No #268 correction is needed.
+- **C1's test** `test_changed_role_without_active_required_case_is_not_ready` produces the state with a direct write, `UPDATE agent_test_case SET is_active = false WHERE id = <architect's only required case>`, because the service refuses it. The gate's `no_required_case` emission stays: it is defence in depth for a direct write.
+- **C1's carry-forward** ("#267's case writer must refuse to deactivate a role's last active required case") is **satisfied** by #267 as built. Close it.
+
+**Binds:** Phase B, non-blocking (recording).
+
+**Cost if wrong:** the cleanup-first test asserts outcome (b)'s impossible retained set, or C1's test calls a writer that refuses.
+
+### Correction 44 — erratum to C7: the allowed list is now 7 entries, the exemption is exact whole-name, and #269 makes it 8
+
+**Overrides:**
+- C7's evidence (3 entries, `toHaveLength(3)` at `AgentDefinitionWorkbench.test.tsx:243` and `agent-definition-workbench.spec.ts:1462`);
+- C7's constraint ("`forbidsActionName` removes allowed names with a case-sensitive `split` (`:34-39`)");
+- C7's extra assertion;
+- plan lines 67, 227, 887–888.
+
+**Evidence:**
+- `ALLOWED_ACTION_NAMES` (`frontend/tests/fixtures/forbiddenActionNames.ts:36–44`) has **7** entries. #267 added `Run test case` and `Run published baseline`; #268 added `Approve run` and `Reject run` (#268 C23; `task-6-report.md`).
+- `toHaveLength(7)` is at `AgentDefinitionWorkbench.test.tsx:378` and `agent-definition-workbench.spec.ts:1518`.
+- `forbidsActionName` (:53–57) exempts only an **exact whole name** after whitespace normalization (`includes`, case-sensitive), then tests the stems (`/…|review\s*&\s*publish|publish|…/i`, :18–19).
+- Both sweeps list `'Review & publish'` (lowercase p) as a name that must stay forbidden (`AgentDefinitionWorkbench.test.tsx:366`, `agent-definition-workbench.spec.ts:1509`).
+
+**Ruling (Task 6, as C7 placed it):**
+- Append exactly `'Review & Publish'`, with a doc-comment line in the #267/#268 style.
+- Set both lengths to `toHaveLength(8)` and add `toContain('Review & Publish')`.
+- Replace C7's extra assertion with exactly these three:
+  - `forbidsActionName('Review & Publish')` is `false`;
+  - `forbidsActionName('Review & Publish now')` is `true`;
+  - `forbidsActionName('Review & publish')` is `true`.
+
+**Sabotage:** Task 7's controller sabotage (label → `Publish draft`) is unchanged.
+
+**Binds:** Phase B, blocking Task 6.
+
+**Cost if wrong:** Task 6 sets the length to 4 and REDs, or an implementer adds a case-insensitive exemption that spares `'Review & publish'`.
+
+### Correction 45 — the gate's eligibility is the shared clause, term for term, and its lock reads refresh the identity map
+
+**Overrides:** plan lines 721–745 (the gate's run predicate), and extends C30's `run_kind` item.
+
+**Evidence:**
+- `eligible_approval_clause` (`agent_test_workbench.py:640–658`) is #268's one eligibility predicate, shared by readiness (:693) and cleanup (:723). Its terms are:
+  - `run_kind='candidate'`
+  - `test_case_id`
+  - `test_case_version`
+  - `run.agent_key = case.agent_key`
+  - `draft_agent.agent_key = case.agent_key`
+  - `candidate_hash = draft_agent.candidate_hash`
+  - `verdict='approved'`
+  - `execution_status='completed'`
+  - `deterministic_checks_passed`
+- The plan's gate predicate omits `run_kind`, so a third copy of eligibility would drift.
+- #267/#268 lock reads carry `populate_existing=True` (:226–229, :536–537).
+
+**Ruling (Task 4):**
+- Keep the plan's shape: a literal per-case predicate on `agent_test_run` columns only in the L3 `FOR UPDATE` statement, plus the Python re-verify on the locked rows.
+  - **Why not the correlated clause itself:** a correlated or joined predicate in a locking statement is exactly C33's EvalPlanQual hazard.
+- Add `run_kind == "candidate"` to both the query and the re-verify.
+- Add `.execution_options(populate_existing=True)` to the L2 and L3 lock statements and to the C29 re-select.
+- **Parity unit test (SQLite).** Parametrize over the nine terms above. For each, build one approved run that differs from an eligible one in exactly that term, and assert that both `readiness_under_parent_lock` and `ApprovalEvidenceGate.lock_and_verify` refuse it. The precedent is #268's `test_an_approval_that_differs_in_one_identity_term_is_never_found`.
+
+**Sabotage (reviewer, Task 4, an addition):** drop `run_kind` from both the query and the re-verify. Predicted RED: the `run_kind` parametrization, where a `published_baseline` approval is linked.
+
+**Binds:** Phase B, blocking Task 4.
+
+**Cost if wrong:** publication links a baseline approval, or an approval readiness would not count. Either way the page and the gate disagree in the unsafe direction.
+
+### Correction 46 — Task 5's publish handler runs the service off the event loop
+
+**Overrides:** plan lines 812–816 (`async def publish_release` calling `publish_draft` directly).
+
+**Evidence:**
+- Every async write route in `agent_definitions.py` calls its service through `await run_in_threadpool(...)` (:621, :802, :935, :966, :1081, :1316).
+- #268 pins this with `test_the_verdict_route_waits_on_the_run_row_lock_off_the_event_loop`.
+- `publish_draft` can wait on L0 behind a draft save's remote endpoint check, up to ~15 s (`model_endpoint_catalog.py:106–111`), which would stall every request in the worker.
+
+**Ruling (Task 5):**
+- The POST handler parses the body after both auth gates, then calls `await run_in_threadpool(GraphConfiguration().publish_draft, db, …)`.
+- The GET preview may be a plain `def`, which FastAPI already runs in the threadpool, as the readiness route does at :1347.
+- **Route test:** the POST is observed waiting on a held lock while another request on the same app is served. Use the #268 test's pattern.
+
+**Binds:** Phase B, non-blocking but required before Task 5 review.
+
+**Cost if wrong:** one publish blocks a whole uvicorn worker for as long as its lock wait.
+
+### Correction 47 — re-aim Task 4's reviewer sabotage: without the L3 lock the publisher still waits, at the evidence INSERT
+
+**Overrides:** plan line 758, reviewer sabotage ("remove `.with_for_update()` from the run query → … publisher not observed waiting"), also cited in C11.
+
+**Evidence (reasoned from the documented PostgreSQL row-lock conflict table; Task 4's RED must confirm):**
+- In `test_verdict_rejection_first_then_publication`, the verdict writer holds the run `FOR UPDATE` (`agent_test_workbench.py:531–538`).
+- With the gate's `FOR UPDATE` removed, the gate's plain SELECT reads the committed `approved` row and does not wait.
+- But `link_release_evidence`'s INSERT into `graph_release_test_run` runs the FK check `SELECT 1 FROM agent_test_run … FOR KEY SHARE` on that run. `FOR KEY SHARE` conflicts with `FOR UPDATE`, so the publisher **is** observed blocked by the verdict PID, at its INSERT.
+- After the verdict commits, the FK check passes and a run that is now `rejected` is linked. The C14 trigger fires only on `agent_test_run` UPDATE, so it does not catch this.
+
+**Ruling (Task 4):**
+- In the two verdict-ordering tests, after `_await_blocked_by`, assert that the waiter's `pg_stat_activity.query`, normalized, contains `FROM AGENT_TEST_RUN` and `FOR UPDATE`. That is, the publisher waits on its L3 statement, not on a later write (the C6 technique).
+- **Revised prediction for the reviewer sabotage.** RED at that query-text assertion (the observed query is `INSERT INTO graph_release_test_run …`). If the assertion were absent, it would be RED at the outcome assertion instead (`PublishedRelease` linking a `rejected` run, where `PublicationNotReady` was expected).
+
+**Binds:** Phase B, blocking Task 4.
+
+**Cost if wrong:** a sabotage logged as "not RED for the predicted reason", or a lock claim the test never checks.
+
+### Correction 48 — Q3's trigger turns a verdict change on a published run into an HTTP 500 at #268's verdict route (controller ruling needed)
+
+**Overrides:** C10's Q3 bullet ("the verdict writer fails with the trigger's `IntegrityError`"), and plan line 238 ("`agent_definitions.py`, schemas: **no change**").
+
+**Evidence:**
+- `record_verdict` propagates `IntegrityError` unchanged (docstring :1488–1489; #268 C7).
+- The verdict route maps only `VerdictRejected`, `TestRunNotFound` and `IneligibleForApprovalError` (`agent_definitions.py:1314–1344`). The comment at :1245–1247 says: "#269's linked-verdict trigger … propagates as a 500 and #269 owns any friendlier mapping".
+- #268's ledger (Task 3) records the same carry-forward: "any new ineligibility reason must be added to the route's message table and response literal, or it becomes a 500 (pinned)".
+- It is reachable in normal use. After a publish, the workbench still shows the linked run's `VerdictControls` (`TestRunPanel.tsx:132–195`), and "Reject run" is enabled on an approved run.
+
+**Proposed ruling (default; the controller may override):**
+- Task 4 adds a typed refusal as the first check after the L3 lock in `record_verdict`, as a **new statement** (C33): `EXISTS graph_release_test_run WHERE agent_test_run_id = :id` → `IneligibleForApprovalError(run_id, "linked_to_release")`.
+  - A publication that linked the run holds it `FOR UPDATE` until commit, so the verdict writer's lock wait ends after the link is visible to a new statement.
+- Extend:
+  - `IneligibleReason` (`agent_test_workbench.py:503`);
+  - `IneligibleForApprovalResponse.reason` (`schemas/agent_definitions.py:712–719`);
+  - `_INELIGIBLE_MESSAGES` (`agent_definitions.py:1249–1252`), with "This run is evidence for a published Graph Version; its verdict cannot change.";
+  - the TS `INELIGIBILITY_REASONS` (`agentDefinitions.ts:1699`) and `TestRunIneligibilityReason`. The TS side belongs to Task 6, and `tests/unit/test_draft_readiness_client_join.py` pins the parity.
+- The C14 trigger stays as the backstop for direct writes.
+- `test_publication_first_then_verdict_change` then expects `IneligibleForApprovalError(reason="linked_to_release")`, with the run still `approved` and the link in place. A separate direct-UPDATE test proves the trigger's 23514 (C14).
+- **Alternative:** accept the 500 and file a follow-up. That costs nothing now, but every attempt ends in an unexplained 500.
+
+**Sabotage (controller, Task 4, an addition):** delete the pre-check. Predicted RED: `test_publication_first_then_verdict_change`, which observes an `IntegrityError` (23514) where the typed refusal was expected.
+
+**Binds:** Phase B, blocking Task 4, since it decides that test's expectation. It needs a controller ruling before Task 4 dispatches.
+
+**Cost if wrong:** an admin who clicks Reject on published evidence gets an unexplained 500. Or, the other way, #269 edits three #268 files it would otherwise leave alone.
+
+### Correction 49 — Task 2's handoff retry has more consumers than the seam table lists; keep the diagnosis string byte-identical
+
+**Overrides:** plan line 223 (the handoff-retry consumers), and Task 2 Step 4 (the GREEN list).
+
+**Evidence:** `_lock_current_parents` is also called by:
+- #267 `_persist_run` transaction 2 (`agent_test_workbench.py:1767–1771`). It retries **itself** once when the error text equals `_PARENT_HANDOFF_DIAGNOSIS = "graph configuration parent snapshot is inconsistent"` (:388–390, :1802–1804).
+- #268 `draft_readiness` (:1540), whose route maps the handoff to a 500 (`agent_definitions.py:1358–1364`).
+- #268 `cleanup_unpublished_test_runs` (:1660).
+- C2's bootstrap.
+
+**Ruling (Task 2):**
+- Keep the diagnosis text and exception type unchanged (plan Step 3 already says "diagnosis unchanged"). #267's outer retry then only ever sees a double handoff.
+- **Consumers.** Add these to the seam table: #267 `_persist_run`, #268 `draft_readiness`, `readiness_under_parent_lock` callers, `cleanup_unpublished_test_runs`, and bootstrap (C2).
+- **Step 4 GREEN also runs:**
+  - `tests/unit/test_agent_test_workbench.py`, which includes `test_a_handoff_race_in_transaction_two_is_retried_once` :1545 and `test_a_second_handoff_race_or_another_integrity_failure_is_unavailable` :1562;
+  - the PG tests `test_candidate_run_insert_waits_behind_an_exclusive_parent_holder_without_deadlock` (`test_agent_definition_workbench_postgres.py:2373`), `test_postgres_readiness_waits_behind_an_exclusive_parent_holder_and_reads_its_hash` (:2868) and `test_postgres_cleanup_waits_behind_a_draft_save_and_uses_its_new_hash` (:3466). These are inside the workbench PG file already in Step 4.
+
+**Binds:** Phase A (Task 2), non-blocking.
+
+**Cost if wrong:** a retry refactor rewords the diagnosis, and #267's run persist silently stops retrying.
+
+### Correction 50 — C13's Task 0-B re-probe is closed by an existing GREEN test
+
+**Overrides:** C13 instruction 1 (the Task 0 Step 4 probe with the fake adapter paused).
+
+**Evidence:**
+- `test_candidate_run_holds_no_lock_while_the_model_call_is_in_flight` (`test_agent_definition_workbench_postgres.py:2272–2360`) pauses `DeterministicFakeModelAdapter(mode="pause")` inside the model call and asserts:
+  - `pg_locks` count 0 overall and 0 on the run tables;
+  - `pg_stat_activity.state != 'idle in transaction'`;
+  - a concurrent save commits unblocked.
+- It is GREEN at baseline (the file ran 49 passed, 0 skipped; `reports/preflight.md`).
+- In code, `execute_candidate_run` raises if `session.in_transaction()` before the call (:1274–1275).
+- Transaction 2's lock statement is `_lock_current_parents(exclusive=False)`, i.e. `SELECT … FROM graph_release JOIN graph_draft ON true WHERE graph_release.effective_to IS NULL FOR SHARE OF graph_release, graph_draft` (:1767–1771).
+- Its FK `KEY SHARE` on `compared_release_id` comes after its own `FOR SHARE` on the active release, or lands on an already-closed release when a publication intervened. That is release before anything, so there is no cycle (reasoned).
+
+**Ruling:**
+- C13 instruction 1 is satisfied: record it in the ledger, no new probe.
+- C13 instruction 3 (Task 4's run-insert-vs-publication test, both orders) stands. Its run-first order pauses #267 after the T2 statement above.
+
+**Binds:** Phase B, closed.
+
+**Cost if wrong:** negligible; the Task 4 test re-proves it.
+
+### Correction 51 — the lock-order table gains #266's remote check under L0
+
+**Overrides:** plan line 204, L0 "other holders".
+
+**Evidence:** both saves run `_validate_remote_endpoint` while holding L0 `FOR UPDATE` (`graph_configuration_draft.py:452`, :511). It is bounded to ~15 s (`model_endpoint_catalog.py:106–111`).
+
+**Ruling:**
+- Add to L0: "draft writer, including #266's remote endpoint check (≤ ~15 s)". Publication and every creator can wait that long behind a save.
+- The Task 2/3 ordering tests use fake validators (`_accepting_remote_endpoint_validator`, `real_route_stack`), so `_WAIT_SECONDS = 30` (`postgres_concurrency_helpers.py:32`) is ample.
+- #269 adds no remote call under L0 (C37).
+
+**Binds:** Phase A, non-blocking (the table and the whole-branch review).
+
+**Cost if wrong:** the whole-branch reviewer misses the longest L0 hold in the system.
+
+### Correction 52 — the test matrices name the #266/#267/#268 files
+
+**Overrides:** plan line 757 ("#267/#268's PostgreSQL files recorded at Task 0-B"), line 929 ("every #267/#268 unit file recorded at Task 0-B"), and line 932.
+
+**Evidence:**
+- #267 and #268 added **no new PostgreSQL files**. Their PG tests live in `tests/integration/test_agent_definition_workbench_postgres.py` (49 tests at baseline) and `test_graph_configuration_constraints_postgres.py` (66).
+- Their unit files are `tests/unit/test_agent_test_workbench.py`, `test_draft_readiness_client_join.py` and `test_test_run_failure_contract_client_join.py`.
+- #266 added `test_endpoint_name_policy_client_join.py`, `test_model_endpoint_catalog.py` and `test_model_endpoint_probe.py`.
+
+**Ruling:**
+- Task 4 Step 5, Task 9 backend and Task 9 PG matrices include:
+  - those four client-join and workbench unit files;
+  - the workbench and constraints PG files (already named).
+- Tasks 1, 2, 4 and 5 add `tests/unit/test_agent_test_workbench.py` to their unit GREEN gate:
+  - Task 1 changes `_validate_common`'s internals (C36);
+  - Task 2 changes the lock #267/#268 call;
+  - Tasks 4 and 5 edit #268's writer and routes (C48, C35).
+- Task 6 adds `tests/unit/test_draft_readiness_client_join.py` when it edits the TS reasons (C48).
+
+**Binds:** Phase A (Task 1 gate) and Phase B, non-blocking.
+
+**Cost if wrong:** a #267/#268 regression is noticed only in CI.
+
+### Correction 53 — harness anchors for Tasks 5 and 8, and no second `_await_blocked_by`
+
+**Overrides:** plan lines 797 ("SQLite fixture copied from `:106–157`"), 908 (`real_route_stack` recipe) and 603–623.
+
+**Evidence:**
+- `session_factory` is at `test_agent_definition_workbench_routes.py:129–148` and `_force_admin` at :202.
+- `real_route_stack` (`test_agent_definition_workbench_postgres.py:1283–1310`) overrides only `get_db` and the remote endpoint validator.
+- A near-duplicate `_pg_wait_blocked_by` exists at :3375–3389. It lacks `wait_event_type = 'Lock'` and is private to that test module.
+
+**Ruling:**
+- **Task 8** also overrides `agent_definitions.get_agent_test_workbench` with the `_pg_executor` recipe (C38 fake-adapter row). Readiness then comes from the same workbench (C39).
+- **Task 5** copies the fixture from :129–207.
+- **Task 2** writes `_await_blocked_by` in `postgres_concurrency_helpers.py` as the plan says. No #269 file imports from `test_agent_definition_workbench_postgres.py`, because underscore helpers in a test module would re-collect its tests.
+
+**Binds:** Phase A (Task 2) and Phase B (Tasks 5, 8), non-blocking.
+
+**Cost if wrong:** Task 8 calls the real bounded runtime, or re-collects 49 tests into a new file.
+
+### Correction 54 — the Review & Publish page needs a case-status label map; none is exported
+
+**Overrides:** plan line 844 ("each required case's readiness status text from #268 (`Needs test`, …)") and line 841.
+
+**Evidence:**
+- #268 exports the snake_case `ReadinessStatus` (`agentDefinitions.ts:1766`) and a *role*-level `draftStatus()` (`draftEditorState.ts:697–709`), which maps the case codes inline.
+- There is no exported case-code → label function. `rg "awaiting_review" frontend/src --glob '!*.test.*'` finds only :1766, :1816 and `draftEditorState.ts:694`/`:706`.
+
+**Ruling (Task 6):**
+- Add `readinessStatusLabel(status: ReadinessStatus)` in `frontend/src/components/Admin/GraphRelease/reviewAndPublishState.ts`, mapping `needs_test→'Needs test'`, `test_failed→'Test failed'`, `awaiting_review→'Awaiting review'`, `approved→'Approved'`.
+- Do not modify `draftStatus`.
+- A Vitest case asserts that the labels equal the corresponding `DraftStatus` members (a type-level `satisfies DraftStatus` on each value).
+- Parse the 409 `readiness` with `parseDraftReadinessResponse`. Never define a second readiness type (the comment at `agentDefinitions.ts:1662`).
+- Place the header link inside the `<header>` at `AgentDefinitionWorkbench.tsx:112–130`, not `:31–48`. Its text must stay outside any nav button, which is #268's I1 lesson for the text-content guard.
+
+**Binds:** Phase B, non-blocking.
+
+**Cost if wrong:** the page shows raw `awaiting_review` codes, or duplicates the readiness type.
+
+### Correction 55 — the Task 0 phase split collapses: both bases are one commit
+
+**Overrides:** plan lines 16 (distinct bases; rebase Phase A above `INTEGRATION_BASE`), 312 (rebase Tasks 1–3 and prove `INTEGRATION_BASE..HEAD`), 678, and 935 ("rebased Tasks 1–3 plus Tasks 4–8").
+
+**Evidence:** `predecessor-heads.md`. `TASK1_BASE` = `INTEGRATION_BASE` = `cd63aa09b`, both written once and read-only.
+
+**Ruling:**
+- No Phase A rebase will happen, and Task 0 Step 4's rebase proof is vacuous.
+- Task 9's whole-branch diff is `INTEGRATION_BASE..HEAD` = Tasks 1–8 exactly.
+- Every Phase B correction (1, 7, 8 part 2, 10–14, 29, 30, 32, 33, 38–48) is known now. It must be in the brief of the task it binds. "Before Task 4" stays the gate for 38–48, but nothing is pending on outside work.
+
+**Binds:** Phase A, recording.
+
+**Cost if wrong:** a controller waits for a rebase that cannot happen, or a reviewer demands a two-segment diff proof.
+
+---
+
+## Per-task self-consistency (Tasks 1–9) at `cd63aa09b`, with Corrections 1–55 applied
+
+"Tests vs code" asks whether each test the task specifies can go RED against the code the task writes, and GREEN after it. "Creates vs later touches" asks whether every file a task creates or modifies is the one later tasks expect.
+
+| Task | Tests specified vs code specified | Files created vs files later touched | Open mismatches |
+|---|---|---|---|
+| 1 | The SQLite happy path needs C3 (aware compare) and C37 (endpoint policy). The invalid-candidate test monkeypatches `local_candidate_validators`, which `_save_local_validators()` still concatenates, so it stays valid. The blank-note test needs C36's helpers. `_save_prompt` builds `EditableModelDraft(prompt_text, endpoint_name, temperature, max_tokens, top_p)`; the class accepts exactly these plus optional `assembly_rules`/`schema_overlay` (`draft.py:51–61`), and `GraphConfiguration()` has no remote validator, so the saves skip the network. The PG tests need C8 (stages) and C13-2 (release-before-draft pin). | **Creates** `graph_configuration_publication.py`, `tests/unit/test_graph_release_publication.py`, `tests/integration/test_graph_release_publication_postgres.py` (with C24's helpers). **Modifies** content, bootstrap (`:84–93`, `:208`, `:214–241`), draft (`:765–817` per C36, `:991–1029`), facade (`:47–52`, `:88–114`), `test.yml`. Task 2 modifies bootstrap again (C2) and the PG file; Task 4 modifies the publication module. | none after C36/C37 |
+| 2 | The waiter RED cause is confirmed by probe (plan review 1). The two-publisher RED is per C18. The v3 test is per C9. The reader-first test is per C26. The boot tests are per C2, using `_lock_current_parents(exclusive=False)` as the first statement of `_validate_current_graph` (`bootstrap.py:121`). The GREEN list gains the #267/#268 consumers (C49). | **Modifies** `graph_configuration_workbench.py:188–238`, `bootstrap.py:121–198` (C2), the Task 1 PG file, and `postgres_concurrency_helpers.py` (appends `_await_blocked_by`). Task 3 imports the helper. Task 4 uses it. | none |
+| 3 | The creator harness names resolve (C34 row). The publisher pause and assertions are per C6. The partial-release variant is per C8-3. No production code. | **Creates** `test_graph_release_session_ordering_postgres.py`. **Modifies** `test.yml`. It imports `_NoEvidenceGate`/`_save_prompt` from Task 1's PG module (C24) and `_await_blocked_by` from the helpers (Task 2). | none |
+| 4 | The gate is C1 + C29 + C33 + C45. The tests use the as-built shapes (C38), the cleanup order (C40), the writer locks (C41), versioning (C42), C19 (a) and the C1 direct write (C43). The trigger is C14 (a column-only `WHEN`, the function body checks the link). The verdict outcome is C48. Sabotage targets: controller C11/C1 + C14 + C48; reviewer C47 (re-aimed) + C45. | **Creates** `graph_release_evidence.py`, `tests/unit/test_graph_release_evidence.py`, `tests/integration/test_graph_release_evidence_postgres.py`. **Modifies** the publication module (`_link_evidence`), `src/core/database.py` (after :1107, C14), `test.yml`, and `test_graph_configuration_constraints_postgres.py:327` (C14 idempotence). **If C48 is ruled as proposed:** also `agent_test_workbench.py` (`record_verdict`, `IneligibleReason`), `schemas/agent_definitions.py:712–719`, and `routes/agent_definitions.py:1249–1252`. Task 5 later also edits `routes/agent_definitions.py`; the two touch disjoint regions and run sequentially. | **C48 needs a controller ruling** |
+| 5 | The route tests are C21 + C35 (handlers on the existing router) + C46 (threadpool) + C39 (binding). The preview is per C22. The diffs are per plan: `DefinitionContent` fields = `agent_key, definition_version, prompt_text, model, schema_overlay, assembly_rules, protected_assembly, schema_contract`, so `_DIFF_FIELDS` covers all but the identity-constant `agent_key`. | **Modifies** the publication module (preview) and `routes/agent_definitions.py` (C35). **Creates** `schemas/graph_releases.py`, `tests/unit/test_graph_release_preview.py`, `tests/unit/test_graph_release_routes.py`. **No** `routes/graph_releases.py`, **no** `main.py` edit (C35). | none after C35 |
+| 6 | The reducer, parser, `lineDiff` and page tests are per plan + C1 + C10 + C22 + C54. The forbidden-list edits are per C44 (7→8). | **Modifies** `api/agentDefinitions.ts` (append release types; plus the reasons if C48 lands), `App.tsx:53`, `AgentDefinitionWorkbench.tsx:112–130`, `forbiddenActionNames.ts`, `AgentDefinitionWorkbench.test.tsx:378`, `agent-definition-workbench.spec.ts:1518`, and `tests/unit/test_draft_readiness_client_join.py` (if C48). **Creates** the `GraphRelease/` module (7 files). | none (C48 conditional) |
+| 7 | Playwright (a)–(f), with the 409 bodies per C1 and status 200 per C10. It no longer edits `forbiddenActionNames.ts` (C7/C44). | **Creates** `tests/e2e/graph-release-review.spec.ts`. **Modifies** `admin-route-gate.spec.ts`. The spec reads Task 6's `data-testid`s. | none |
+| 8 | The flow is per plan + C12 + C30 (verdict path) + C53 (workbench override). Builder's required case must complete **with passing checks** under the fake adapter to be approvable. `test_every_role_model_sees_exactly_the_projected_seed_keys[builder]` (`test_agent_test_workbench.py:1949`) proves only `completed` — reasoned, re-probe at Task 8 RED. | **Creates** `test_graph_release_publication_acceptance_postgres.py`. **Modifies** `test.yml`. | builder-checks re-probe (non-blocking) |
+| 9 | The matrices are per C27 + C52. The diff is per C55. The final sabotage is per plan. | none | none |
+
+## Producer/consumer table (every task pair that shares a file or interface)
+
+| Producer → Consumer | Shared file / interface | Contract the consumer relies on | Hazard |
+|---|---|---|---|
+| 1 → 2 | `test_graph_release_publication_postgres.py`; `publish_draft`; `_NoEvidenceGate`, `_save_prompt` (C24) | Task 2 appends tests and reuses the helpers unchanged | Task 2 must not redefine the helpers |
+| 1 → 2 | `graph_configuration_bootstrap.py` (Task 1 swaps in the helpers; Task 2 adds C2's lock line) | bootstrap suites byte-identical after Task 1 | a sequential edit of one function region; Task 2 rebases nothing |
+| 1 → 3 | `publish_draft`, `PublishedRelease.release.release_id`; helpers imported by underscore name | the exact field names in "Stable interfaces" | an import that re-collects tests (C24/C53) |
+| 2 → 3, 4 | `_await_blocked_by(engine, *, waiter_pid, blocker_pid)` in `postgres_concurrency_helpers.py` | the signature is fixed at Task 2 | — |
+| 2 → 4, 5, 8, #267/#268 | the `_lock_current_parents` retry | same statement, same diagnosis text (C49) | rewording breaks #267's own retry |
+| 1 → 4 | `PublicationEvidenceGate` protocol; `PublicationNotReady` / `PublicationGap` (C1); `EvidenceLink`; `_link_evidence` hook | Task 4 replaces only the `_link_evidence` body | C1's type must be final at Task 1 |
+| 1 → 4, 5 | `_validate_publication_request`, `PublicationRejected` issue triples (C17/C36/C10) | Task 5 maps them to 422 `invalid_publication` verbatim | — |
+| 1, 4 → 5 | `publish_draft(..., evidence_gate=ApprovalEvidenceGate(readiness=...))` | the route constructs the production gate (C21) | — |
+| 4 → 5, 8 | `ApprovalEvidenceGate(readiness=Callable[[Session], object])`; readiness = `readiness_under_parent_lock` (C39) | called only in-transaction and before writes (C32) | — |
+| 4 → 6 (conditional) | `IneligibleReason` + `IneligibleForApprovalResponse.reason` → TS `INELIGIBILITY_REASONS` (C48) | a Python/TS join test pins the parity | a Task 4-only change leaves the TS parser rejecting the new 422 (it becomes `InvalidTestRunResponseError`) |
+| 4 → 5 | `routes/agent_definitions.py` (Task 4 only if C48; Task 5 always, C35) | disjoint regions, sequential | — |
+| 5 → 6 | the HTTP wire (preview, publish; status 200 per C10; gaps per C1; readiness verbatim) | the strict TS parsers mirror the Pydantic models | — |
+| 5 → 8 | the same routes on the real app/router | Task 8 extends, never rewrites (#271) | — |
+| 6 → 7 | `data-testid`s, `/admin/agent-definitions/review` route, `forbiddenActionNames.ts` (7→8, C44) | Task 7 edits no fixture | — |
+| 1, 3, 4, 8 → CI | `.github/workflows/test.yml` `integration-graph` `run:` block (:447–473) | one appended file per task; `tests/unit/test_ci_collects_integration_tests.py` GREEN after each | sequential edits of one block |
+| #268 → 4, 5, 6 | `eligible_approval_clause` (C45), `DraftReadinessResponse`, `parseDraftReadinessResponse` / `DraftReadiness` (C38, C54) | no second readiness type; eligibility parity test | — |
+
+## Blocking summary for corrections 34–55
+
+- **Before Task 1:** 36 (the C17 erratum), 37 (endpoint policy). 34 and 55 are recording.
+- **Before Task 2:** 49 (the GREEN list; non-blocking).
+- **Before Task 4:** 38, 39, 40, 41, 42, 45, 47, and **48, which needs a controller ruling**. 43 and 50 are recorded and closed.
+- **Before Task 5:** 35 (the C31 erratum), 39, 46.
+- **Before Task 6:** 44 (the C7 erratum), 54. Also 48's TS half, if ruled as proposed.
+- **Non-blocking:** 51, 52, 53.
