@@ -58,7 +58,7 @@ from datetime import datetime
 from typing import Any, Literal, Mapping
 
 from pydantic_core import to_jsonable_python
-from sqlalchemy import and_, func, select, true, update
+from sqlalchemy import and_, delete, exists, func, select, true, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql import Select
@@ -70,6 +70,7 @@ from src.database.models.graph_configuration import (
     GraphDraft,
     GraphDraftAgent,
     GraphReleaseAgent,
+    GraphReleaseTestRun,
 )
 from src.services.agent_model_payload import model_payload_for
 from src.services.agent_runtime import (
@@ -693,6 +694,87 @@ def _readiness_statement() -> Select:
         .outerjoin(newest, newest.id == _newest_run_id(_current_candidate_evidence_clause))
         .where(AgentTestCase.is_active.is_(true()), AgentTestCase.is_required.is_(true()))
         .order_by(AgentTestCase.id)
+    )
+
+
+def _linked_run(run: Any) -> Any:
+    """``run`` is linked to a release (C19f); served by ``ix_graph_release_test_run_run``."""
+    return exists(
+        select(1)
+        .select_from(GraphReleaseTestRun)
+        .where(GraphReleaseTestRun.agent_test_run_id == run.id)
+    )
+
+
+def _retained_approval(run: Any) -> Any:
+    """``run`` is an eligible approval for an active REQUIRED case of the current
+    draft (C19c): THE shared eligibility clause plus ``is_active`` and
+    ``is_required``, correlated on ``run``."""
+    case = aliased(AgentTestCase)
+    draft_agent = aliased(GraphDraftAgent)
+    return exists(
+        select(1)
+        .select_from(case)
+        .join(draft_agent, draft_agent.agent_key == case.agent_key)
+        .where(
+            case.id == run.test_case_id,
+            case.is_active.is_(true()),
+            case.is_required.is_(true()),
+            eligible_approval_clause(run, case, draft_agent),
+        )
+    )
+
+
+def _deletable_candidate(run: Any) -> Any:
+    """A candidate run (C19a) that is neither linked nor a retained approval."""
+    return and_(
+        run.run_kind == "candidate",
+        ~_linked_run(run),
+        ~_retained_approval(run),
+    )
+
+
+def _cleanup_targets_statement(per_case_limit: int) -> Select:
+    """C19: rank the deletable candidates of each case ROW by ``run_at DESC,
+    id DESC`` and lock (``FOR UPDATE``, in id order) those past the limit.
+    Protected rows are removed before ranking, so they take no slot (19d)."""
+    ranked_run = aliased(AgentTestRun, name="ranked_run")
+    ranked = (
+        select(
+            ranked_run.id.label("id"),
+            func.row_number()
+            .over(
+                partition_by=ranked_run.test_case_id,
+                order_by=(ranked_run.run_at.desc(), ranked_run.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(_deletable_candidate(ranked_run))
+        .subquery("ranked")
+    )
+    return (
+        select(AgentTestRun.id)
+        .where(AgentTestRun.id.in_(select(ranked.c.id).where(ranked.c.rn > per_case_limit)))
+        .order_by(AgentTestRun.id)
+        .with_for_update(of=AgentTestRun)
+    )
+
+
+def _cleanup_delete_statement(target_ids: list[int]) -> Any:
+    """The DELETE of the locked targets, re-checking the whole deletable
+    predicate on each target row (C19e).
+
+    It is a NEW statement, taken after the targets are locked, so its snapshot
+    includes any verdict that committed while the lock waited.  Repeating the
+    predicate inside the ranking statement is not enough: PostgreSQL plans the
+    ``NOT EXISTS`` as an anti-join, and READ COMMITTED's EvalPlanQual recheck
+    re-runs it against the rows originally joined (none), so a row approved
+    during the wait still qualifies.  The PostgreSQL ordering test pins this.
+    """
+    return (
+        delete(AgentTestRun)
+        .where(AgentTestRun.id.in_(target_ids), _deletable_candidate(AgentTestRun))
+        .execution_options(synchronize_session=False)
     )
 
 
@@ -1546,6 +1628,40 @@ class AgentTestWorkbench:
             blocking_agents=blocking_agents,
             agents=tuple(agents),
         )
+
+    # --- retention cleanup (#268) -----------------------------------------
+
+    def cleanup_unpublished_test_runs(
+        self, session: Session, *, per_case_limit: int = 20
+    ) -> int:
+        """Delete candidate runs beyond the newest ``per_case_limit`` per case
+        row, and return how many were deleted (C18, C19).
+
+        Never deleted: a ``published_baseline`` run, a run linked in
+        ``graph_release_test_run``, or an approved run still eligible for an
+        active required case of the current draft (the shared eligibility
+        clause).  Protected rows take no window slot.  The first statement is
+        the shared L0 parent lock (release then draft ``FOR SHARE``), so no
+        draft save or publication can change a hash under the DELETE.  The
+        targets are then locked ``FOR UPDATE`` in id order (L3), and a second
+        statement deletes them, re-checking every protection on each row
+        (C19e): a verdict that committed while the lock waited is seen.  No
+        case lock (C19g), and no model or runtime is touched (C27).  #268 gives
+        this no caller (C21).
+        """
+        if (
+            isinstance(per_case_limit, bool)
+            or not isinstance(per_case_limit, int)
+            or per_case_limit < 1
+        ):
+            raise ValueError("per_case_limit must be an int of at least 1")
+        self._require_no_transaction(session)
+        with session.begin():
+            self._graph_configuration._lock_current_parents(session, exclusive=False)
+            target_ids = list(session.scalars(_cleanup_targets_statement(per_case_limit)))
+            if not target_ids:
+                return 0
+            return session.execute(_cleanup_delete_statement(target_ids)).rowcount
 
     # --- test run internals ----------------------------------------------
 

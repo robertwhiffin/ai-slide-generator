@@ -3038,3 +3038,451 @@ def test_postgres_readiness_statements_lock_only_the_parents_and_write_nothing(
     assert len(run_reads) == 1
     assert "agent_test_case" in run_reads[0]
     assert " FOR " not in run_reads[0].upper().replace("\n", " ")
+
+
+# ===========================================================================
+# #268 Task 4: bounded cleanup of unpublished candidate runs (#268
+# PLAN-CORRECTIONS C18 signature and the shared L0 lock first, C19 candidate
+# only, ``run_at DESC, id DESC``, the shared eligibility clause plus
+# ``is_active``/``is_required``, the target-row recheck (19e), the linked
+# exclusion; C20 the plan's five exact-id tests plus six more; fixtures set
+# ``run_at`` and any verdict at INSERT, links by raw SQL, never an UPDATE)
+# ===========================================================================
+
+from datetime import timedelta  # noqa: E402
+
+_CLEANUP_LIMIT = 20
+
+
+def _pg_cleanup(factory, workbench=None, **kwargs) -> int:
+    workbench = workbench if workbench is not None else AgentTestWorkbench()
+    with factory() as session:
+        return workbench.cleanup_unpublished_test_runs(session, **kwargs)
+
+
+def _pg_run_ids_of_case(factory, test_case_id: int) -> list[int]:
+    """Every run of one case row, oldest first (``run_at, id``)."""
+    with factory() as session:
+        return list(
+            session.scalars(
+                select(AgentTestRun.id)
+                .where(AgentTestRun.test_case_id == test_case_id)
+                .order_by(AgentTestRun.run_at, AgentTestRun.id)
+            )
+        )
+
+
+def _pg_history(factory, count: int, *, source_run_id: int, overrides=None) -> list[int]:
+    """``count`` runs of the source run's case, oldest first.  The source run is
+    the newest; ``count - 1`` INSERT-only copies are one minute apart before it.
+    ``overrides`` maps an index (0 is the oldest) to columns set at INSERT."""
+    overrides = overrides or {}
+    assert count - 1 not in overrides, "the newest run is the unmodified source"
+    newest_at = _pg_full_run_row(factory, source_run_id)["run_at"]
+    ids = [
+        _pg_insert_run_like(
+            factory,
+            source_run_id,
+            run_at=newest_at - timedelta(minutes=count - 1 - index),
+            **overrides.get(index, {}),
+        )
+        for index in range(count - 1)
+    ]
+    ids.append(source_run_id)
+    return ids
+
+
+def _pg_link(factory, run_id: int) -> None:
+    """#267 C21 pattern: #268 has no linker, so the link row is raw SQL."""
+    with factory() as session:
+        release_id = session.scalar(
+            select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
+        )
+        session.execute(
+            text(
+                "INSERT INTO graph_release_test_run "
+                "(graph_release_id, agent_test_run_id, evidence_kind, source_release_id) "
+                "VALUES (:release_id, :run_id, 'approval', NULL)"
+            ),
+            {"release_id": release_id, "run_id": run_id},
+        )
+        session.commit()
+
+
+def _pg_cleanup_setup(postgres_engine):
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    return factory, _pg_run(factory)
+
+
+def test_postgres_cleanup_deletes_exactly_the_oldest_runs_beyond_the_limit(
+    postgres_engine,
+) -> None:
+    """Plan Step 1: 25 unprotected runs; the five oldest go, the newest 20 stay."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(factory, 25, source_run_id=source.run_id)
+    case_id = _pg_seed_case_id(factory)
+
+    assert _pg_cleanup(factory) == 5
+
+    assert _pg_run_ids_of_case(factory, case_id) == ids[5:]
+
+
+def test_postgres_cleanup_always_retains_a_linked_run(postgres_engine) -> None:
+    """Plan Step 1 / C19f: the oldest run is linked; four go, not five."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(factory, 25, source_run_id=source.run_id)
+    _pg_link(factory, ids[0])
+
+    assert _pg_cleanup(factory) == 4
+
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == [ids[0], *ids[5:]]
+
+
+def test_postgres_cleanup_retains_an_eligible_approval_outside_the_window(
+    postgres_engine,
+) -> None:
+    """Plan Step 1 / C19c-d: the oldest run is the current draft's eligible
+    approval on the active required case; four go, not five."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={0: _pg_approved_overrides(factory)},
+    )
+
+    assert _pg_cleanup(factory) == 4
+
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == [ids[0], *ids[5:]]
+
+
+def test_postgres_cleanup_retains_both_protections_together(postgres_engine) -> None:
+    """Plan Step 1: a linked run and an eligible approval; three go."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={1: _pg_approved_overrides(factory)},
+    )
+    _pg_link(factory, ids[0])
+
+    assert _pg_cleanup(factory) == 3
+
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == [
+        ids[0],
+        ids[1],
+        *ids[5:],
+    ]
+
+
+def test_postgres_a_second_cleanup_deletes_nothing(postgres_engine) -> None:
+    """Plan Step 1: idempotent once the window is met."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={1: _pg_approved_overrides(factory)},
+    )
+    _pg_link(factory, ids[0])
+    assert _pg_cleanup(factory) == 3
+    retained = _pg_run_ids_of_case(factory, _pg_seed_case_id(factory))
+
+    assert _pg_cleanup(factory) == 0
+
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == retained
+
+
+def test_postgres_cleanup_deletes_a_stale_case_version_approval(postgres_engine) -> None:
+    """C20.1: v1 approved outside the window, then superseded to v2.  The v1
+    row is retired, so its approval is no longer eligible and goes."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    seed = _pg_seed_case_id(factory)
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={0: _pg_approved_overrides(factory)},
+    )
+    # Before the supersede the approval is the case's eligible evidence.
+    (before,) = _pg_case_items(_pg_readiness(factory))
+    assert (before.test_case_id, before.status, before.run_id) == (seed, "approved", ids[0])
+    with factory() as session:
+        successor = AgentTestWorkbench().update_test_case(
+            session,
+            test_case_id=seed,
+            synthetic_payload={"message": "A superseding input."},
+            assembly_context={"design_system_active": False},
+            is_required=True,
+            actor="author@example.com",
+        )
+    assert (successor.id != seed, successor.version) == (True, 2)
+
+    assert _pg_cleanup(factory) == 5
+
+    assert _pg_run_ids_of_case(factory, seed) == ids[5:]
+
+
+def test_postgres_cleanup_deletes_a_stale_hash_approval_after_a_real_save(
+    postgres_engine,
+) -> None:
+    """C20.2: approved on the old draft hash, then a real draft save; the old
+    approval is no longer eligible and goes."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={0: _pg_approved_overrides(factory)},
+    )
+    (before,) = _pg_case_items(_pg_readiness(factory))
+    assert (before.status, before.run_id) == ("approved", ids[0])
+    _pg_save_architect(factory, "Cleanup stale hash.")
+
+    assert _pg_cleanup(factory) == 5
+
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == ids[5:]
+
+
+def test_postgres_cleanup_never_deletes_or_ranks_baseline_runs(postgres_engine) -> None:
+    """C20.3 / C19a: 25 approved and unreviewed ``published_baseline`` runs on one
+    case all stay; being newer, they take no window slot from the candidates."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    case_id = _pg_seed_case_id(factory)
+    newest_at = _pg_full_run_row(factory, source.run_id)["run_at"]
+    candidates = [
+        _pg_insert_run_like(
+            factory, source.run_id, run_at=newest_at - timedelta(minutes=10 + index)
+        )
+        for index in range(4)
+    ]
+    baselines = [
+        _pg_insert_run_like(
+            factory,
+            source.run_id,
+            run_kind="published_baseline",
+            run_at=newest_at + timedelta(minutes=1 + index),
+            **(_pg_approved_overrides(factory) if index % 2 else {}),
+        )
+        for index in range(25)
+    ]
+    before = _pg_run_ids_of_case(factory, case_id)
+    assert set(before) == {source.run_id, *candidates, *baselines}
+
+    assert _pg_cleanup(factory) == 0
+
+    assert _pg_run_ids_of_case(factory, case_id) == before
+
+
+def test_postgres_cleanup_deletes_an_approval_on_an_optional_case(postgres_engine) -> None:
+    """C20.4 / C19c: eligibility for retention needs an active REQUIRED case."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    with factory() as session:
+        optional = AgentTestWorkbench().create_test_case(
+            session,
+            agent_key="architect",
+            name="architect_optional_smoke",
+            synthetic_payload={"message": "An optional input."},
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="author@example.com",
+        )
+    with factory() as session:
+        source = _pg_executor(factory, DeterministicFakeModelAdapter()).execute_candidate_run(
+            session,
+            agent_key="architect",
+            test_case_id=optional.id,
+            expected_lock_version=_pg_run_identity(factory)["lock_version"],
+            actor="runner@example.com",
+        )
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={0: _pg_approved_overrides(factory)},
+    )
+    assert _pg_verdict_of(factory, ids[0])[0] == "approved"
+
+    assert _pg_cleanup(factory) == 5
+
+    assert _pg_run_ids_of_case(factory, optional.id) == ids[5:]
+
+
+def test_postgres_cleanup_breaks_tied_run_at_by_id(postgres_engine) -> None:
+    """C19b / S4c: 21 runs inserted in one transaction tie on ``run_at``; the
+    lowest id is the oldest and is the one deleted."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    values = _pg_full_run_row(factory, source.run_id)
+    for column in ("id", "run_at"):
+        del values[column]
+    with factory() as session:
+        rows = [AgentTestRun(**values) for _ in range(21)]
+        session.add_all(rows)
+        session.commit()
+        tied = sorted(row.id for row in rows)
+    with factory() as session:
+        stamps = set(
+            session.scalars(select(AgentTestRun.run_at).where(AgentTestRun.id.in_(tied)))
+        )
+    assert len(stamps) == 1
+    newest_at = _pg_full_run_row(factory, source.run_id)["run_at"]
+    assert newest_at < next(iter(stamps))  # the source run is the oldest of 22
+
+    assert _pg_cleanup(factory) == 2
+
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == tied[1:]
+
+
+def _pg_wait_blocked_by(engine, waiter_pid: int, holder_pid: int, timeout: float = 10.0) -> bool:
+    """True once ``pg_blocking_pids(waiter)`` names the holder (#269 C5)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with engine.connect() as observer:
+            blocked = bool(
+                observer.scalar(
+                    text("SELECT :holder = ANY(pg_blocking_pids(:waiter))"),
+                    {"holder": holder_pid, "waiter": waiter_pid},
+                )
+            )
+        if blocked:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+class _PidCapturingGraphConfiguration(GraphConfiguration):
+    """Captures the caller's backend PID before its first (parent lock)
+    statement, so a later blocked statement can be observed by PID."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pids: list[int] = []
+        self.attempted = threading.Event()
+
+    def _lock_current_parents(self, session, *, exclusive):
+        self.pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+        self.attempted.set()
+        return super()._lock_current_parents(session, exclusive=exclusive)
+
+
+def test_postgres_cleanup_rechecks_a_target_approved_while_it_waits(postgres_engine) -> None:
+    """C20.5 / C19e: the verdict writer approves X (the oldest, rank 21+) and
+    pauses before commit.  Cleanup's ranked snapshot sees X unapproved, so its
+    DELETE waits on X, observed by PID.  After the writer commits, the target
+    row's own recheck keeps X, and the count excludes it."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(factory, 25, source_run_id=source.run_id)
+    target = ids[0]
+    writer_paused = threading.Event()
+    release_writer = threading.Event()
+    writer_pid: list[int] = []
+
+    def _pause_writer(conn, cursor, statement, _params, _context, _many) -> None:
+        if threading.current_thread().name != "t268-verdict-writer":
+            return
+        if statement.lstrip().upper().startswith("UPDATE AGENT_TEST_RUN"):
+            probe = cursor.connection.cursor()
+            probe.execute("SELECT pg_backend_pid()")
+            writer_pid.append(probe.fetchone()[0])
+            probe.close()
+            writer_paused.set()
+            assert release_writer.wait(timeout=20), "the test never released the writer"
+
+    observed = _PidCapturingGraphConfiguration()
+    event.listen(postgres_engine, "after_cursor_execute", _pause_writer)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as w:
+
+            def _approve():
+                threading.current_thread().name = "t268-verdict-writer"
+                return _pg_record(factory, target)
+
+            approving = w.submit(_approve)
+            with ThreadPoolExecutor(max_workers=1) as c:
+                cleaning = None
+                try:
+                    assert writer_paused.wait(timeout=10), "the verdict writer never paused"
+                    cleaning = c.submit(
+                        _pg_cleanup, factory, AgentTestWorkbench(graph_configuration=observed)
+                    )
+                    assert observed.attempted.wait(timeout=10)
+                    assert _pg_wait_blocked_by(
+                        postgres_engine, observed.pids[0], writer_pid[0]
+                    ), "cleanup never waited on the verdict writer"
+                    assert not cleaning.done()
+                finally:
+                    release_writer.set()
+                approving.result(timeout=10)
+                deleted = cleaning.result(timeout=10)
+    finally:
+        release_writer.set()
+        event.remove(postgres_engine, "after_cursor_execute", _pause_writer)
+
+    assert _pg_verdict_of(factory, target)[:2] == ("approved", _PG_REVIEWER)
+    assert deleted == 4
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == [target, *ids[5:]]
+
+
+def test_postgres_cleanup_waits_behind_a_draft_save_and_uses_its_new_hash(
+    postgres_engine,
+) -> None:
+    """C20.6 / C18: a real draft save holding L0 ``FOR UPDATE`` blocks cleanup's
+    shared parent lock, observed by PID.  Once the save commits, the old-hash
+    approval outside the window is no longer eligible and is deleted."""
+    factory, source = _pg_cleanup_setup(postgres_engine)
+    ids = _pg_history(
+        factory,
+        25,
+        source_run_id=source.run_id,
+        overrides={0: _pg_approved_overrides(factory)},
+    )
+    saver_paused = threading.Event()
+    release_saver = threading.Event()
+    saver_pid: list[int] = []
+
+    def _pause_saver(conn, cursor, statement, _params, _context, _many) -> None:
+        if threading.current_thread().name != "t268-draft-saver":
+            return
+        normalized = " ".join(statement.upper().split())
+        if "FOR UPDATE" in normalized and "GRAPH_RELEASE" in normalized and not saver_pid:
+            probe = cursor.connection.cursor()
+            probe.execute("SELECT pg_backend_pid()")
+            saver_pid.append(probe.fetchone()[0])
+            probe.close()
+            saver_paused.set()
+            assert release_saver.wait(timeout=20), "the test never released the saver"
+
+    observed = _PidCapturingGraphConfiguration()
+    event.listen(postgres_engine, "after_cursor_execute", _pause_saver)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as s, ThreadPoolExecutor(max_workers=1) as c:
+
+            def _save():
+                threading.current_thread().name = "t268-draft-saver"
+                _pg_save_architect(factory, "Cleanup waits behind this save.")
+
+            saving = s.submit(_save)
+            cleaning = None
+            try:
+                assert saver_paused.wait(timeout=10), "the draft save never paused"
+                cleaning = c.submit(
+                    _pg_cleanup, factory, AgentTestWorkbench(graph_configuration=observed)
+                )
+                assert observed.attempted.wait(timeout=10)
+                assert _pg_wait_blocked_by(
+                    postgres_engine, observed.pids[0], saver_pid[0]
+                ), "cleanup never waited on the draft save"
+                assert not cleaning.done()
+            finally:
+                release_saver.set()
+            saving.result(timeout=10)
+            deleted = cleaning.result(timeout=10)
+    finally:
+        release_saver.set()
+        event.remove(postgres_engine, "after_cursor_execute", _pause_saver)
+
+    assert deleted == 5
+    assert _pg_run_ids_of_case(factory, _pg_seed_case_id(factory)) == ids[5:]

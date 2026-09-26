@@ -3371,3 +3371,144 @@ def test_both_run_lookups_break_run_at_ties_by_id_and_cases_are_in_id_order():
     assert len(orders) == 2, compiled
     assert all(run_at == run_id for run_at, run_id in orders)
     assert compiled.rstrip().endswith("ORDER BY agent_test_case.id")
+
+
+# ===========================================================================
+# #268 Task 4: bounded cleanup — argument validation, the owned transaction
+# and C27 only (C20: the behaviour is proved over PostgreSQL in
+# tests/integration/test_agent_definition_workbench_postgres.py)
+# ===========================================================================
+
+
+def _cleanup(factory, workbench=None, **kwargs):
+    workbench = workbench if workbench is not None else AgentTestWorkbench()
+    with factory() as session:
+        return workbench.cleanup_unpublished_test_runs(session, **kwargs)
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, 1.0, 20.0, "20", None])
+def test_cleanup_refuses_a_limit_that_is_not_a_strict_positive_int(factory, limit):
+    """C18: a strict ``int`` >= 1; a ``bool`` is refused with ``ValueError``."""
+    with pytest.raises(ValueError, match="per_case_limit"):
+        _cleanup(factory, per_case_limit=limit)
+
+
+def test_cleanup_validates_the_limit_before_touching_the_session(factory):
+    class _Untouchable:
+        def __getattribute__(self, name):
+            raise AssertionError(f"cleanup touched the session: {name}")
+
+    with pytest.raises(ValueError, match="per_case_limit"):
+        AgentTestWorkbench().cleanup_unpublished_test_runs(
+            _Untouchable(), per_case_limit=0  # type: ignore[arg-type]
+        )
+
+
+def test_cleanup_owns_its_transaction(factory):
+    with factory() as session:
+        session.begin()
+        with pytest.raises(RuntimeError, match="no transaction open"):
+            AgentTestWorkbench().cleanup_unpublished_test_runs(session)
+
+
+def test_cleanup_accepts_a_limit_of_one_and_the_default(factory):
+    assert _cleanup(factory) == 0
+    assert _cleanup(factory, per_case_limit=1) == 0
+
+
+def test_cleanup_locks_the_parents_then_the_targets_then_deletes(factory):
+    """C18/C19e: ``_lock_current_parents(exclusive=False)`` first; then one
+    SELECT of the targets; then one DELETE, a separate statement.  Nothing
+    else is written."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    older = _run_candidate(factory, workbench)
+    newer = _run_candidate(factory, workbench)
+    calls: list[object] = []
+
+    class _Recording(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            calls.append(exclusive)
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    statements: list[str] = []
+    engine = factory.kw["bind"]
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        deleted = _cleanup(
+            factory, AgentTestWorkbench(graph_configuration=_Recording()), per_case_limit=1
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert deleted == 1
+    with factory() as session:
+        assert session.scalars(select(AgentTestRun.id)).all() == [newer.run_id]
+    assert older.run_id != newer.run_id
+    assert calls == [False]
+    assert len(statements) == 3, statements
+    assert statements[0].startswith("SELECT graph_release.")
+    assert "graph_draft" in statements[0]
+    assert statements[1].startswith("SELECT agent_test_run.id FROM agent_test_run")
+    assert "row_number() OVER" in statements[1]
+    assert statements[2].startswith("DELETE FROM agent_test_run")
+    assert "row_number" not in statements[2]
+
+
+def test_the_cleanup_statements_carry_every_protection_on_both_sides():
+    """C19: the ranked set and the DELETE's target-row recheck each carry the
+    candidate term, the linked exclusion and the shared eligibility clause
+    plus ``is_active``/``is_required``; the window breaks ``run_at`` ties by
+    id; the targets are locked FOR UPDATE in id order."""
+    dialect = postgresql.dialect()
+    targets = str(workbench_module._cleanup_targets_statement(20).compile(dialect=dialect))
+    deleting = str(workbench_module._cleanup_delete_statement([1]).compile(dialect=dialect))
+    clause = str(
+        workbench_module.eligible_approval_clause(
+            AgentTestRun, AgentTestCase, GraphDraftAgent
+        ).compile(dialect=dialect)
+    )
+    eligible_terms = len(clause.split(" AND "))
+
+    for compiled, run in ((targets, "ranked_run"), (deleting, "agent_test_run")):
+        assert f"{run}.run_kind = %(run_kind_1)s AND NOT (EXISTS (SELECT 1" in compiled
+        assert f"graph_release_test_run.agent_test_run_id = {run}.id" in compiled
+        assert re.search(
+            rf"agent_test_case_\d+\.id = {run}\.test_case_id AND "
+            rf"agent_test_case_\d+\.is_active IS true AND "
+            rf"agent_test_case_\d+\.is_required IS true AND {run}\.run_kind",
+            compiled,
+        ), compiled
+        assert compiled.count(f"{run}.verdict = %(verdict_") == 1
+        assert compiled.count(f"{run}.candidate_hash = graph_draft_agent_") == 1
+        assert compiled.count(f"{run}.test_case_version = agent_test_case_") == 1
+        assert compiled.count(f"{run}.deterministic_checks_passed IS true") == 1
+        assert compiled.count(f"{run}.execution_status = %(execution_status_") == 1
+    assert eligible_terms == 9
+    assert (
+        "row_number() OVER (PARTITION BY ranked_run.test_case_id "
+        "ORDER BY ranked_run.run_at DESC, ranked_run.id DESC)" in targets
+    )
+    assert "WHERE ranked.rn > %(rn_1)s" in targets
+    assert targets.rstrip().endswith("ORDER BY agent_test_run.id FOR UPDATE OF agent_test_run")
+    assert deleting.startswith("DELETE FROM agent_test_run WHERE agent_test_run.id IN (")
+
+
+def test_cleanup_never_touches_a_runtime(factory, monkeypatch):
+    """C27: cleanup resolves no runtime and touches no adapter."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+
+    def _refuse():
+        raise AssertionError("cleanup resolved the test runtime")
+
+    monkeypatch.setattr(workbench_module, "get_agent_test_runtime", _refuse)
+    isolated = AgentTestWorkbench(runtime=_ExplodingRuntime())  # type: ignore[arg-type]
+    monkeypatch.setattr(isolated, "_runtime", _refuse)
+
+    assert _cleanup(factory, isolated, per_case_limit=1) == 0
+    with factory() as session:
+        assert session.get(AgentTestRun, run.run_id) is not None
