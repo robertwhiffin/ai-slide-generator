@@ -45,6 +45,8 @@ import {
   syntheticSchemaV2DraftDefinition,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
+  syntheticAgentTestCase,
+  syntheticTestRunEvidence,
 } from '../../../../tests/fixtures/mocks';
 import {
   createDraftEditorState,
@@ -2585,5 +2587,193 @@ describe('structured-output probe in the one draft gate', () => {
     expect(failed.byAgent.architect.requestError).toBe('Unable to test structured output (500).');
     expect(failed.byAgent.architect.local).toBe(state.byAgent.architect.local);
     expect(failed.byAgent.builder).toBe(state.byAgent.builder);
+  });
+});
+
+// ============================================================
+// #267 Agent Test Cases and test runs share the one reducer and the one gate
+// ============================================================
+
+function testPending(
+  operation: 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire',
+  agentKey: AgentKey = 'architect',
+  requestId = 1,
+  testCaseId = 101,
+): PendingDraftSave {
+  return { operation, requestId, agentKey, expectedLockVersion: 0, submittedCandidate: null, testCaseId };
+}
+
+function loadedCases(state: DraftEditorState, agentKey: AgentKey = 'architect', requestId = 50): DraftEditorState {
+  const started = draftEditorReducer(state, { type: 'testCasesLoadStarted', agentKey, requestId });
+  return draftEditorReducer(started, {
+    type: 'testCasesLoaded', agentKey, requestId, items: [syntheticAgentTestCase({ agent_key: agentKey })],
+  });
+}
+
+describe('Agent Test Case and test run reducer', () => {
+  it('starts every role with an unloaded, empty testing state', () => {
+    const state = createDraftEditorState(workbench());
+    for (const agentKey of AGENT_KEYS) {
+      expect(state.byAgent[agentKey].testing).toEqual({
+        casesStatus: 'idle',
+        cases: [],
+        casesRequestId: null,
+        candidateEvidence: null,
+        baselineEvidence: null,
+        error: null,
+        issues: [],
+      });
+    }
+  });
+
+  it('refuses to start a candidate run while the role has any unsaved field, but not a baseline rerun', () => {
+    for (const [field, value] of [['prompt_text', 'Architect edit'], ['temperature', 0.1]] as const) {
+      let state = createDraftEditorState(workbench());
+      state = draftEditorReducer(state, { type: 'edit', agentKey: 'architect', field, value });
+      expect(draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun') })).toBe(state);
+      expect(draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('baselineRun') }).pendingSave)
+        .toEqual(testPending('baselineRun'));
+    }
+    // Another role's unsaved edit does not block this role's run.
+    let other = createDraftEditorState(workbench());
+    other = draftEditorReducer(other, { type: 'edit', agentKey: 'builder', field: 'prompt_text', value: 'Builder edit' });
+    expect(draftEditorReducer(other, { type: 'testOperationStarted', pending: testPending('testRun') }).pendingSave)
+      .toEqual(testPending('testRun'));
+  });
+
+  it('a test operation cannot start while any operation holds the one gate, and holds it against every other', () => {
+    const base = createDraftEditorState(workbench());
+    const probing = draftEditorReducer(base, { type: 'probeStarted', pending: probePending('builder') });
+    for (const operation of ['testRun', 'baselineRun', 'testCaseCreate', 'testCaseRetire'] as const) {
+      expect(draftEditorReducer(probing, { type: 'testOperationStarted', pending: testPending(operation, 'architect', 2) }))
+        .toBe(probing);
+      const testing = draftEditorReducer(base, { type: 'testOperationStarted', pending: testPending(operation) });
+      expect(testing.pendingSave?.operation).toBe(operation);
+      expect(draftEditorReducer(testing, { type: 'probeStarted', pending: probePending('builder', 2) })).toBe(testing);
+    }
+  });
+
+  it('a coherent candidate run stores its evidence and moves no lock, saved entry, form or status', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun') });
+    const before = state;
+
+    const next = draftEditorReducer(state, { type: 'testRunSucceeded', requestId: 1, evidence: syntheticTestRunEvidence() });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft).toBe(before.draft);
+    expect(next.byAgent.architect.saved).toBe(before.byAgent.architect.saved);
+    expect(next.byAgent.architect.local).toBe(before.byAgent.architect.local);
+    expect(draftStatus(next.byAgent.architect)).toBe(draftStatus(before.byAgent.architect));
+    expect(next.byAgent.architect.testing.candidateEvidence).toEqual(syntheticTestRunEvidence());
+    expect(next.byAgent.architect.testing.baselineEvidence).toBeNull();
+    for (const agentKey of AGENT_KEYS) {
+      if (agentKey !== 'architect') expect(next.byAgent[agentKey]).toBe(before.byAgent[agentKey]);
+    }
+  });
+
+  it('a baseline rerun stores its evidence as the published baseline, never as the candidate', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('baselineRun') });
+    const evidence = syntheticTestRunEvidence({ run_kind: 'published_baseline', candidate_hash: 'f'.repeat(64) });
+
+    const next = draftEditorReducer(state, { type: 'testRunSucceeded', requestId: 1, evidence });
+
+    expect(next.byAgent.architect.testing.baselineEvidence).toEqual(evidence);
+    expect(next.byAgent.architect.testing.candidateEvidence).toBeNull();
+  });
+
+  it.each([
+    ['another role', { agent_key: 'builder' as const }],
+    ['another case', { test_case_id: 999 }],
+    ['the wrong run kind', { run_kind: 'published_baseline' as const }],
+    ['another saved candidate', { candidate_hash: 'e'.repeat(64) }],
+  ])('contains a candidate run answered for %s and stores no evidence', (_label, overrides) => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun') });
+
+    const next = draftEditorReducer(state, {
+      type: 'testRunSucceeded', requestId: 1, evidence: syntheticTestRunEvidence(overrides),
+    });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.byAgent.architect.testing.candidateEvidence).toBeNull();
+    expect(next.byAgent.architect.testing.error)
+      .toBe('Unable to run the test case because the server response was invalid.');
+    expect(next.byAgent.builder.testing.candidateEvidence).toBeNull();
+  });
+
+  it('only the pending test operation\'s own request ID may settle it', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun', 'architect', 7) });
+
+    expect(draftEditorReducer(state, { type: 'testRunSucceeded', requestId: 8, evidence: syntheticTestRunEvidence() }))
+      .toBe(state);
+    expect(draftEditorReducer(state, { type: 'probeSucceeded', requestId: 7, result: syntheticProbeSuccess() }))
+      .toBe(state);
+    expect(draftEditorReducer(state, { type: 'testOperationFailed', requestId: 8, message: 'x', issues: [] }))
+      .toBe(state);
+    const probing = draftEditorReducer(createDraftEditorState(workbench()), { type: 'probeStarted', pending: probePending('architect', 7) });
+    expect(draftEditorReducer(probing, { type: 'testRunSucceeded', requestId: 7, evidence: syntheticTestRunEvidence() }))
+      .toBe(probing);
+  });
+
+  it('a stale_draft run conflict adopts the server draft like the probe and explains the rerun in the panel', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun') });
+
+    const next = draftEditorReducer(state, {
+      type: 'testRunConflicted', requestId: 1, conflict: syntheticNullCandidateConflict(0, 1),
+    });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.draft.lock_version).toBe(1);
+    expect(next.byAgent.architect.conflict?.current_lock_version).toBe(1);
+    expect(next.byAgent.architect.testing.error)
+      .toBe('The draft changed on the server. Review the change, then run the test case again.');
+  });
+
+  it('drops an out-of-order case list, and a case write settles the list without waiting for a read', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testCasesLoadStarted', agentKey: 'architect', requestId: 3 });
+    expect(state.byAgent.architect.testing.casesStatus).toBe('loading');
+    expect(draftEditorReducer(state, {
+      type: 'testCasesLoaded', agentKey: 'architect', requestId: 2, items: [syntheticAgentTestCase()],
+    })).toBe(state);
+
+    state = loadedCases(createDraftEditorState(workbench()));
+    state = draftEditorReducer(state, { type: 'testCasesLoadStarted', agentKey: 'architect', requestId: 60 });
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testCaseCreate', 'architect', 61) });
+    const created = syntheticAgentTestCase({ id: 202, name: 'Created' });
+    state = draftEditorReducer(state, { type: 'testCaseCreated', requestId: 61, testCase: created });
+    expect(state.pendingSave).toBeNull();
+    expect(state.byAgent.architect.testing.cases.map((item) => item.id)).toEqual([101, 202]);
+    expect(state.byAgent.architect.testing.casesStatus).toBe('ready');
+    // The read that started before the write can no longer overwrite it.
+    expect(draftEditorReducer(state, {
+      type: 'testCasesLoaded', agentKey: 'architect', requestId: 60, items: [syntheticAgentTestCase()],
+    })).toBe(state);
+
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testCaseRetire', 'architect', 62, 101) });
+    state = draftEditorReducer(state, {
+      type: 'testCaseRetired', requestId: 62, testCase: syntheticAgentTestCase({ is_active: false }),
+    });
+    expect(state.byAgent.architect.testing.cases.map((item) => item.id)).toEqual([202]);
+  });
+
+  it('a failed test operation keeps the role\'s draft editor state and records only the panel error', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'saveInvalid', agentKey: 'architect', errors: { prompt_text: 'x' } });
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testCaseCreate') });
+    expect(state.byAgent.architect.fieldErrors).toEqual({ prompt_text: 'x' });
+
+    const issues = [{ field: 'name', code: 'duplicate_name', message: 'Taken.' }];
+    const next = draftEditorReducer(state, { type: 'testOperationFailed', requestId: 1, message: 'The test case was refused.', issues });
+
+    expect(next.pendingSave).toBeNull();
+    expect(next.byAgent.architect.fieldErrors).toEqual({ prompt_text: 'x' });
+    expect(next.byAgent.architect.requestError).toBeNull();
+    expect(next.byAgent.architect.testing.error).toBe('The test case was refused.');
+    expect(next.byAgent.architect.testing.issues).toEqual(issues);
   });
 });

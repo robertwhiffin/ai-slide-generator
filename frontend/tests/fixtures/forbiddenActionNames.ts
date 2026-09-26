@@ -24,11 +24,17 @@ export const FORBIDDEN_ACTION_STEMS =
  * They are exempted by name rather than by loosening a stem, and each is removed from
  * the name before the stems are applied — so an exempt name cannot be used as a shield:
  * `Restore saved prompt and publish` still trips the guard.
+ *
+ * #267 adds exactly its two run controls (C25/C38). The `run` stem stays, so every
+ * other run control (`Run isolated test`, `View run 12`) is still banned, and
+ * `Run published baseline` needs its exemption for `publish` as well.
  */
 export const ALLOWED_ACTION_NAMES = [
   'Restore published Graph Version 1 prompt',
   'Restore saved prompt',
   'Restore retained values',
+  'Run test case',
+  'Run published baseline',
 ] as const;
 
 /** True when `name` offers one of the actions this panel must never offer. */
