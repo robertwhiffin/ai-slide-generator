@@ -42,6 +42,8 @@ export interface ModelEndpointCatalogView {
   status: 'idle' | 'loading' | 'ready' | 'empty' | 'error';
   items: readonly SystemModelEndpoint[];
   errorMessage: string | null;
+  /** Whether the failure is worth retrying; only then does the alert say "try again". */
+  errorRetryable: boolean;
 }
 
 export const EMPTY_MODEL_DISCOVERY_MESSAGE =
@@ -481,7 +483,9 @@ export function DefinitionEditor({
           <p aria-live="polite" className="text-xs text-gray-600">{modelCatalogStatus}</p>
           {modelCatalog.status === 'error' && modelCatalog.errorMessage !== null && (
             <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
-              {modelCatalog.errorMessage} Use Refresh models to try again.
+              {modelCatalog.errorRetryable
+                ? `${modelCatalog.errorMessage} Use Refresh models to try again.`
+                : modelCatalog.errorMessage}
             </div>
           )}
           {visibleModels.length > 0 && (

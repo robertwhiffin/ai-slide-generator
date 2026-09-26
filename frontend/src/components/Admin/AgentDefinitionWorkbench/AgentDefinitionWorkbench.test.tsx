@@ -2250,6 +2250,29 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
 
+  it.each([
+    ['forbidden', 403, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN.message],
+    [
+      'unavailable',
+      503,
+      MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE,
+      `${MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message} Use Refresh models to try again.`,
+    ],
+  ])('a %s catalog alert offers a retry only when the failure is retryable', async (_label, status, failureBody, expected) => {
+    mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      () => apiResponse(status, failureBody),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    const alert = await within(panel).findByRole('alert');
+    expect(alert.textContent).toBe(expected);
+    if (!failureBody.retryable) expect(alert.textContent).not.toMatch(/try again/i);
+  });
+
   it('a network failure is a retryable alert, not an empty catalog', async () => {
     mockWorkbenchWithPuts(
       () => apiResponse(500, null),

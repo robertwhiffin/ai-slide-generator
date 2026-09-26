@@ -28,6 +28,11 @@ function modelCatalogErrorMessage(error: unknown): string {
   return 'Unable to load discovered models. Check your connection and try again.';
 }
 
+/** Only a typed failure the server marks non-retryable (a forbidden identity) is final. */
+function modelCatalogErrorRetryable(error: unknown): boolean {
+  return !(error instanceof ModelEndpointCatalogApiError) || error.retryable;
+}
+
 /**
  * The one identity-scoped discovery catalog for the whole workbench (#266 correction
  * 16): every role editor is mounted at once, so the state lives here, not per editor.
@@ -41,17 +46,18 @@ function useModelEndpointCatalog() {
     status: 'idle',
     items: [],
     errorMessage: null,
+    errorRetryable: false,
   });
   const catalogRequestTokenRef = useRef(0);
 
   const refresh = () => {
     const token = catalogRequestTokenRef.current + 1;
     catalogRequestTokenRef.current = token;
-    setCatalog((current) => ({ ...current, status: 'loading', errorMessage: null }));
+    setCatalog((current) => ({ ...current, status: 'loading', errorMessage: null, errorRetryable: false }));
     getSystemModelEndpoints().then(
       (items) => {
         if (catalogRequestTokenRef.current !== token) return;
-        setCatalog({ status: items.length > 0 ? 'ready' : 'empty', items, errorMessage: null });
+        setCatalog({ status: items.length > 0 ? 'ready' : 'empty', items, errorMessage: null, errorRetryable: false });
       },
       (error: unknown) => {
         if (catalogRequestTokenRef.current !== token) return;
@@ -59,6 +65,7 @@ function useModelEndpointCatalog() {
           status: 'error',
           items: current.items,
           errorMessage: modelCatalogErrorMessage(error),
+          errorRetryable: modelCatalogErrorRetryable(error),
         }));
       },
     );
