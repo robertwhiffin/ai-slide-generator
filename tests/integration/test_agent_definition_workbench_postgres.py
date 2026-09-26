@@ -2757,3 +2757,284 @@ def test_postgres_a_verdict_trigger_error_surfaces_as_the_integrity_error(
     assert caught.value.orig.pgcode == "23514"
     assert "verdict refused" in str(caught.value.orig)
     assert _pg_verdict_of(factory, run.run_id) == (None, None, None, None)
+
+
+# ===========================================================================
+# #268 Task 2: readiness over real PostgreSQL (#268 PLAN-CORRECTIONS C10 two
+# entry points and the shared L0 lock, C11 any-approval and the one-statement
+# snapshot with no case lock, C12 candidate only, C13 fixture rules: real draft
+# saves, supersedes, ``run_at`` at INSERT, never an UPDATE of a run)
+# ===========================================================================
+
+def _pg_readiness(factory, graph_configuration=None):
+    workbench = AgentTestWorkbench(graph_configuration=graph_configuration)
+    with factory() as session:
+        return workbench.draft_readiness(session)
+
+
+def _pg_case_items(result, agent_key: str = "architect"):
+    (agent,) = [item for item in result.agents if item.agent_key == agent_key]
+    return agent.cases
+
+
+def _pg_save_architect(factory, prompt_text: str) -> None:
+    content, _hash, _revision = _published_revision(factory, "architect")
+    with factory() as session:
+        lock_version = session.scalar(select(GraphDraft.lock_version))
+    with factory() as session:
+        outcome = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=lock_version,
+            candidate=_editable_candidate(content, prompt_text=prompt_text),
+            actor="saver@example.com",
+        )
+    assert isinstance(outcome, DraftSaveResult), outcome
+
+
+def _pg_approved_overrides(factory) -> dict[str, object]:
+    with factory() as session:
+        stamp = session.scalar(text("SELECT now()"))
+    return {
+        "verdict": "approved",
+        "verdict_reviewer": _PG_REVIEWER,
+        "verdict_at": stamp,
+        "verdict_notes": None,
+    }
+
+
+def test_postgres_readiness_ignores_old_hash_approvals_after_a_real_save(
+    postgres_engine,
+) -> None:
+    """Plan Step 3 (C13): two approvals of hash A, then a real draft save to
+    hash B, is ``needs_test``; an approval of hash B is ``approved``."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    _pg_save_architect(factory, "Readiness hash A.")
+    first = _pg_run(factory)
+    _pg_record(factory, first.run_id)
+    second = _pg_insert_run_like(factory, first.run_id)  # an approved copy, same hash A
+    assert _pg_verdict_of(factory, second)[0] == "approved"
+
+    ready_a = _pg_readiness(factory)
+    (case_a,) = _pg_case_items(ready_a)
+    assert (case_a.status, case_a.run_id) == ("approved", second)
+
+    _pg_save_architect(factory, "Readiness hash B.")
+    stale = _pg_readiness(factory)
+    (case_b,) = _pg_case_items(stale)
+    assert (case_b.status, case_b.blocking, case_b.run_id) == ("needs_test", True, None)
+    assert stale.blocking_agents == ("architect",)
+    assert stale.draft_lock_version == ready_a.draft_lock_version + 1
+
+    fresh = _pg_run(factory)
+    _pg_record(factory, fresh.run_id)
+    ready_b = _pg_readiness(factory)
+    (case_fresh,) = _pg_case_items(ready_b)
+    assert (case_fresh.status, case_fresh.blocking, case_fresh.run_id) == (
+        "approved",
+        False,
+        fresh.run_id,
+    )
+    assert (ready_b.all_ready, ready_b.blocking_agents) == (True, ())
+
+
+def test_postgres_readiness_orders_tied_run_at_approvals_by_id(postgres_engine) -> None:
+    """C13: ``now()`` is the transaction start, so two runs inserted in one
+    transaction tie on ``run_at``; the higher id is the newest approval."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    _pg_save_architect(factory, "Readiness tie.")
+    source = _pg_run(factory)
+    values = _pg_full_run_row(factory, source.run_id)
+    for column in ("id", "run_at"):
+        del values[column]
+    values.update(_pg_approved_overrides(factory))
+    with factory() as session:
+        rows = [AgentTestRun(**values), AgentTestRun(**values)]
+        session.add_all(rows)
+        session.commit()
+        ids = sorted(row.id for row in rows)
+    with factory() as session:
+        stamps = set(
+            session.scalars(select(AgentTestRun.run_at).where(AgentTestRun.id.in_(ids)))
+        )
+    assert len(stamps) == 1
+
+    (case,) = _pg_case_items(_pg_readiness(factory))
+    assert (case.status, case.run_id) == ("approved", ids[-1])
+
+
+def test_postgres_readiness_waits_behind_an_exclusive_parent_holder_and_reads_its_hash(
+    postgres_engine,
+) -> None:
+    """C10/C28: ``draft_readiness`` takes release then draft ``FOR SHARE``, so it
+    waits behind an L0 ``FOR UPDATE`` holder that is changing a hash, and then
+    reads the committed hash and lock version, never the old ones."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    pids: list[int] = []
+    attempted = threading.Event()
+
+    class ObservedGraphConfiguration(GraphConfiguration):
+        def _lock_current_parents(self, session, *, exclusive):
+            pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+            attempted.set()
+            return super()._lock_current_parents(session, exclusive=exclusive)
+
+    holder = factory()
+    try:
+        holder.begin()
+        _release, draft = GraphConfiguration()._lock_current_parents(holder, exclusive=True)
+        row = holder.scalar(
+            select(GraphDraftAgent).where(GraphDraftAgent.agent_key == "architect")
+        )
+        content = definition_content_from_row(row).model_copy(
+            update={"prompt_text": "Changed while readiness waits."}
+        )
+        for column, value in definition_content_values(content).items():
+            setattr(row, column, value)
+        row.candidate_hash = new_hash = definition_content_hash(content)
+        draft.lock_version += 1
+        new_lock = draft.lock_version
+        holder.flush()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reading = pool.submit(_pg_readiness, factory, ObservedGraphConfiguration())
+            try:
+                assert attempted.wait(timeout=10)
+                assert _observe_lock_waiter(postgres_engine, pids[0])
+                assert not reading.done()
+                holder.commit()
+                result = reading.result(timeout=10)
+            finally:
+                holder.rollback()
+    finally:
+        holder.close()
+
+    (architect,) = [agent for agent in result.agents if agent.agent_key == "architect"]
+    assert (architect.candidate_hash, architect.is_changed_from_base) == (new_hash, True)
+    assert result.draft_lock_version == new_lock
+    assert result.blocking_agents == ("architect",)
+
+
+def test_postgres_readiness_sees_an_in_flight_supersede_whole_or_not_at_all(
+    postgres_engine,
+) -> None:
+    """C11 / #269 C29: readiness takes NO case lock, so it neither waits behind a
+    case writer's supersede nor has a locking re-check drop the retired row.  Its
+    one statement sees the committed snapshot: both old versions while the
+    supersede is in flight, and the new version (unapproved) once it commits."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    _pg_save_architect(factory, "Readiness supersede.")
+    seed = _pg_seed_case_id(factory)
+    with factory() as session:
+        second = AgentTestWorkbench().create_test_case(
+            session,
+            agent_key="architect",
+            name="architect_second_required",
+            synthetic_payload={"message": "Second required input."},
+            assembly_context={"design_system_active": False},
+            is_required=True,
+            actor="author@example.com",
+        )
+    workbench = _pg_executor(factory, DeterministicFakeModelAdapter())
+    for case_id in (seed, second.id):
+        with factory() as session:
+            run = workbench.execute_candidate_run(
+                session,
+                agent_key="architect",
+                test_case_id=case_id,
+                expected_lock_version=_pg_run_identity(factory)["lock_version"],
+                actor="runner@example.com",
+            )
+        _pg_record(factory, run.run_id)
+    assert _pg_readiness(factory).all_ready is True
+
+    writer = factory()
+    try:
+        writer.begin()
+        # #267's writer shape: the role's rows FOR UPDATE, unfiltered, in id
+        # order; retire version 1; insert version 2 — uncommitted.
+        writer.execute(
+            text(
+                "SELECT id FROM agent_test_case WHERE agent_key = 'architect' "
+                "ORDER BY id FOR UPDATE"
+            )
+        )
+        old = writer.get(AgentTestCase, second.id)
+        old.is_active = False
+        writer.flush()
+        successor = AgentTestCase(
+            agent_key="architect",
+            name=old.name,
+            version=old.version + 1,
+            is_active=True,
+            is_required=True,
+            synthetic_payload={"message": "Superseded input."},
+            assembly_context=old.assembly_context,
+            created_by="author@example.com",
+            updated_by="author@example.com",
+        )
+        writer.add(successor)
+        writer.flush()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reading = pool.submit(_pg_readiness, factory)
+            try:
+                during = reading.result(timeout=10)  # never waits on the writer
+            finally:
+                writer.commit()
+    finally:
+        writer.close()
+
+    assert [(case.test_case_id, case.status) for case in _pg_case_items(during)] == [
+        (seed, "approved"),
+        (second.id, "approved"),
+    ]
+    after = _pg_readiness(factory)
+    assert [
+        (case.test_case_id, case.test_case_version, case.status)
+        for case in _pg_case_items(after)
+    ] == [
+        (seed, 1, "approved"),
+        (successor.id, 2, "needs_test"),
+    ]
+    assert after.blocking_agents == ("architect",)
+
+
+def test_postgres_readiness_statements_lock_only_the_parents_and_write_nothing(
+    postgres_engine,
+) -> None:
+    """C11/C28: one ``FOR SHARE`` statement over release and draft; the one
+    case-and-run statement carries no row lock; nothing is written."""
+    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(factory)
+    _pg_save_architect(factory, "Readiness statements.")
+    run = _pg_run(factory)
+    _pg_record(factory, run.run_id)
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+        statements.append(statement)
+
+    event.listen(postgres_engine, "before_cursor_execute", _capture)
+    try:
+        _pg_readiness(factory)
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", _capture)
+
+    selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+    others = [
+        s
+        for s in statements
+        if not s.lstrip().upper().startswith("SELECT")
+        and s.strip().upper() not in {"BEGIN", "COMMIT", "ROLLBACK"}
+    ]
+    assert others == [], others
+    locks = [s for s in selects if " FOR " in s.upper().replace("\n", " ")]
+    assert len(locks) == 1, locks
+    assert "FOR SHARE OF graph_release, graph_draft" in locks[0]
+    run_reads = [s for s in selects if "agent_test_run" in s]
+    assert len(run_reads) == 1
+    assert "agent_test_case" in run_reads[0]
+    assert " FOR " not in run_reads[0].upper().replace("\n", " ")
