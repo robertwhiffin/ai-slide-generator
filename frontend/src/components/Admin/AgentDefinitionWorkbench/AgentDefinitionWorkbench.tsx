@@ -12,11 +12,15 @@ import type {
 } from '../../../api/agentDefinitions';
 import { DefinitionEditor, type ModelEndpointCatalogView } from './DefinitionEditor';
 import {
+  TEST_OPERATIONS,
   definitionFormatVersion,
   draftStatus,
   isLegacyCompositeRole,
+  testRunCandidateUnsaved,
   validateDraftForm,
+  type TestOperationKind,
 } from './draftEditorState';
+import { TestRunPanel } from './TestRunPanel';
 import { useDraftEditor } from './useDraftEditor';
 
 function modelCatalogErrorMessage(error: unknown): string {
@@ -88,6 +92,12 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
   if (!selectedNode) return <div role="alert">The Graph contains no nodes.</div>;
 
   const selectNode = (node: AgentNode) => setSelectedKey(node.agent_key);
+  const pending = editor.state.pendingSave;
+  const selectedTestOperation: TestOperationKind | null = pending !== null
+    && pending.agentKey === selectedNode.agent_key
+    && (TEST_OPERATIONS as readonly string[]).includes(pending.operation)
+    ? pending.operation as TestOperationKind
+    : null;
 
   return (
     <>
@@ -157,7 +167,6 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
             {workbench.nodes.filter((node) => node.execution_kind === 'model').map((node) => {
               if (node.execution_kind !== 'model') return null;
               const entry = editor.state.byAgent[node.agent_key];
-              const pending = editor.state.pendingSave;
               // Every Save, Upgrade, SourceRecovery, SchemaUpgrade and Probe button reads
               // the same aggregate pending slot; there is no second gate.
               const operationsDisabled = pending !== null;
@@ -207,11 +216,30 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
             })}
           </section>
 
-          <aside className="rounded-lg border border-gray-200 bg-white p-5" aria-label="Isolated testing">
+          <aside className="min-w-0 rounded-lg border border-gray-200 bg-white p-5" aria-label="Isolated testing">
             <h3 className="text-base font-semibold text-gray-900">Isolated testing</h3>
-            <p className="mt-3 text-sm leading-6 text-gray-600">
-              Isolated testing is not available in this release.
-            </p>
+            {selectedNode.execution_kind === 'model' ? (
+              // One panel for the selected role; its evidence and cases live in the one
+              // reducer, so switching roles loses only view state.
+              <TestRunPanel
+                key={selectedNode.agent_key}
+                agentKey={selectedNode.agent_key}
+                testing={editor.state.byAgent[selectedNode.agent_key].testing}
+                savedCandidateHash={editor.state.byAgent[selectedNode.agent_key].saved.candidate_hash}
+                candidateUnsaved={testRunCandidateUnsaved(editor.state.byAgent[selectedNode.agent_key])}
+                operationsDisabled={pending !== null}
+                pendingOperation={selectedTestOperation}
+                onLoadTestCases={editor.loadTestCases}
+                onRunTestCase={editor.runTestCase}
+                onRunPublishedBaseline={editor.runPublishedBaseline}
+                onCreateTestCase={editor.createAgentTestCase}
+                onRetireTestCase={editor.retireAgentTestCase}
+              />
+            ) : (
+              <p className="mt-3 text-sm leading-6 text-gray-600">
+                {`${selectedNode.display_name} is deterministic and has no Agent Test Cases.`}
+              </p>
+            )}
           </aside>
         </div>
       </div>

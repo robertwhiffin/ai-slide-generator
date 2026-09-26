@@ -14,6 +14,12 @@ import {
   STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
+  syntheticAgentTestCase,
+  syntheticAgentTestCaseList,
+  syntheticInvalidTestCase,
+  syntheticStaleTestCase,
+  syntheticTestRunEvidence,
+  syntheticTestRunUnavailable,
   syntheticDraftDefinitions,
   syntheticLegacyPromptSource,
   syntheticModelEndpointDiscovery,
@@ -139,6 +145,22 @@ function isProbeUrl(url: unknown) {
   return String(url).endsWith(PROBE_SUFFIX);
 }
 
+/**
+ * #267's routes are routed by URL too (C38): a candidate run, a published-baseline
+ * rerun, the case list, a case create and a case retire. Harnesses that do not answer
+ * them throw, like the unrouted-probe tripwire, so none can be answered as a PUT.
+ */
+const CANDIDATE_RUN_URL = /\/api\/admin\/agent-definitions\/draft\/([a-z_]+)\/test-runs$/;
+const BASELINE_RUN_URL = /\/api\/admin\/agent-definitions\/published\/([a-z_]+)\/test-runs$/;
+const TEST_CASES_URL = /\/api\/admin\/agent-definitions\/test-cases(?:\?agent_key=([a-z_]+))?$/;
+const TEST_CASE_URL = /\/api\/admin\/agent-definitions\/test-cases\/(\d+)$/;
+
+function isAgentTestUrl(url: unknown) {
+  const text = String(url);
+  // Singular stems, so a mistyped path cannot fall through to the PUT route either.
+  return text.includes('/test-run') || text.includes('/test-case');
+}
+
 function probeCalls(fetchMock = vi.mocked(fetch)) {
   return fetchMock.mock.calls.filter(([url]) => isProbeUrl(url));
 }
@@ -162,14 +184,21 @@ function catalogGets(fetchMock = vi.mocked(fetch)) {
 }
 
 function mockFetchResponse(status: number, body: unknown) {
-  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => (isCatalogUrl(url)
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
+    if (isAgentTestUrl(url)) throw new Error(`unexpected Agent Test request ${url}`);
+    return mockedResponse(url, status, body);
+  }));
+}
+
+function mockedResponse(url: string, status: number, body: unknown) {
+  return (isCatalogUrl(url)
     ? defaultCatalogResponse()
     : {
       ok: status >= 200 && status < 300,
       status,
       statusText: status === 403 ? 'Forbidden' : status === 500 ? 'Internal Server Error' : 'OK',
       json: vi.fn().mockResolvedValue(body),
-    })));
+    });
 }
 
 function modelNode(agentKey: AgentKey) {
@@ -257,6 +286,7 @@ function mockWorkbenchWithPuts(
       const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
       return probe(agentKey, JSON.parse(String(init?.body)) as Record<string, unknown>, probeCall++);
     }
+    if (isAgentTestUrl(url)) throw new Error(`unexpected Agent Test request ${init?.method} ${url}`);
     const agentKey = url.split('/').at(-1) as AgentKey;
     const request = JSON.parse(String(init?.body)) as DraftSaveRequest;
     const result = await put(agentKey, request, putCall++);
@@ -317,10 +347,16 @@ describe('the forbidden-action guard', () => {
 
   it('spares the panel\'s legitimate restore controls without spared names shielding a stem', () => {
     for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
-    expect(ALLOWED_ACTION_NAMES).toHaveLength(3);
+    expect(ALLOWED_ACTION_NAMES).toHaveLength(5);
     // An exempt name is removed, not treated as a licence for the rest of the string.
     expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
     expect(forbidsActionName('Restore retained values, then approve')).toBe(true);
+    // #267's two run controls are exempt by exact name only (C25/C38): the `run` stem
+    // still bans every other run control, and neither name shields a banned suffix.
+    expect(forbidsActionName('Run test case and publish')).toBe(true);
+    expect(forbidsActionName('Run published baseline, then approve')).toBe(true);
+    expect(forbidsActionName('Run isolated test')).toBe(true);
+    expect(forbidsActionName('View run 12')).toBe(true);
   });
 
   it('spares every other name the panel actually renders', () => {
@@ -331,6 +367,8 @@ describe('the forbidden-action guard', () => {
       'Go to Prompt tab', 'Delete custom block 1 at After authored prompt',
       'Move custom block 1 up', 'Move custom block 1 down', 'Discard retained values',
       'Refresh models',
+      'Load Agent Test Cases', 'Refresh test cases', 'Add test case', 'Save test case',
+      'Cancel', 'Retire test case', 'Confirm retire', 'Keep test case',
       ...NODE_ORDER,
     ]) {
       expect(forbidsActionName(name)).toBe(false);
@@ -452,7 +490,11 @@ describe('AgentDefinitionWorkbench', () => {
 
     expectNoForbiddenActionNames();
     expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
-    expect(screen.getByText('Isolated testing is not available in this release.')).toBeVisible();
+    // #267 replaced the "not available" notice with the Agent Test Case panel, which
+    // reads nothing until the admin asks for the role's cases.
+    const aside = screen.getByRole('complementary', { name: 'Isolated testing' });
+    expect(within(aside).getByRole('button', { name: 'Load Agent Test Cases' })).toBeEnabled();
+    expect(screen.queryByText('Isolated testing is not available in this release.')).not.toBeInTheDocument();
   });
 
   it.each([
@@ -903,17 +945,54 @@ type RouteResponder = (
   call: number,
 ) => Promise<object> | object;
 
+type TestCaseListResponder = (agentKey: AgentKey, call: number) => Promise<object> | object;
+type TestCaseRetireResponder = (testCaseId: number, call: number) => Promise<object> | object;
+
 function mockWorkbenchApi(routes: {
   put?: RouteResponder;
   upgrade?: RouteResponder;
   source?: RouteResponder;
   probe?: RouteResponder;
+  candidateRun?: RouteResponder;
+  baselineRun?: RouteResponder;
+  listCases?: TestCaseListResponder;
+  createCase?: RouteResponder;
+  retireCase?: TestCaseRetireResponder;
 }) {
-  const counts = { put: 0, upgrade: 0, source: 0, probe: 0 };
+  const counts = {
+    put: 0, upgrade: 0, source: 0, probe: 0,
+    candidateRun: 0, baselineRun: 0, listCases: 0, createCase: 0, retireCase: 0,
+  };
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (isCatalogUrl(url)) return defaultCatalogResponse();
     if (isWorkbenchUrl(url)) return apiResponse(200, syntheticAgentDefinitionWorkbench);
+    // #267's bodyless GET and DELETE are routed before any body is parsed.
+    const listMatch = TEST_CASES_URL.exec(url);
+    if (listMatch && init?.method === 'GET') {
+      if (!routes.listCases) throw new Error('unexpected test case list GET');
+      return routes.listCases(listMatch[1] as AgentKey, counts.listCases++);
+    }
+    const retireMatch = TEST_CASE_URL.exec(url);
+    if (retireMatch && init?.method === 'DELETE') {
+      if (!routes.retireCase) throw new Error('unexpected test case DELETE');
+      return routes.retireCase(Number(retireMatch[1]), counts.retireCase++);
+    }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const candidateMatch = CANDIDATE_RUN_URL.exec(url);
+    if (candidateMatch && init?.method === 'POST') {
+      if (!routes.candidateRun) throw new Error('unexpected candidate test run POST');
+      return routes.candidateRun(candidateMatch[1] as AgentKey, body, counts.candidateRun++);
+    }
+    const baselineMatch = BASELINE_RUN_URL.exec(url);
+    if (baselineMatch && init?.method === 'POST') {
+      if (!routes.baselineRun) throw new Error('unexpected published baseline test run POST');
+      return routes.baselineRun(baselineMatch[1] as AgentKey, body, counts.baselineRun++);
+    }
+    if (listMatch && init?.method === 'POST') {
+      if (!routes.createCase) throw new Error('unexpected test case POST');
+      return routes.createCase(body.agent_key as AgentKey, body, counts.createCase++);
+    }
+    if (isAgentTestUrl(url)) throw new Error(`unrouted Agent Test request ${init?.method} ${url}`);
     if (isProbeUrl(url)) {
       const agentKey = url.slice(0, -PROBE_SUFFIX.length).split('/').at(-1) as AgentKey;
       if (!routes.probe) throw new Error('unexpected probe POST');
@@ -2925,5 +3004,544 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
       lock_version: 0,
     });
     expect(result.current.state.draft.lock_version).toBe(0);
+  });
+});
+
+// ============================================================
+// #267 Task 6 — Agent Test Cases, test runs, and the Input/Compare/Checks views
+// ============================================================
+
+const RUN_BUTTON = 'Run test case';
+const BASELINE_BUTTON = 'Run published baseline';
+const TEST_RUN_UNSAVED_HINT = "Save this role's edits before running a test case.";
+
+function testingAside() {
+  return screen.getByRole('complementary', { name: 'Isolated testing' });
+}
+
+async function loadTestCasesForSelectedRole() {
+  fireEvent.click(within(testingAside()).getByRole('button', { name: 'Load Agent Test Cases' }));
+  return within(testingAside()).findByRole('combobox', { name: 'Agent Test Cases' });
+}
+
+function asideButton(name: string) {
+  return within(testingAside()).getByRole('button', { name });
+}
+
+function asideTab(name: 'Input' | 'Compare' | 'Checks') {
+  fireEvent.click(within(testingAside()).getByRole('tab', { name }));
+  return within(testingAside()).getByRole('tabpanel', { name });
+}
+
+function callsMatching(fetchMock: ReturnType<typeof vi.fn>, pattern: RegExp, method: string) {
+  return fetchMock.mock.calls.filter(([url, init]) =>
+    pattern.test(String(url)) && (init as RequestInit | undefined)?.method === method);
+}
+
+function candidateRunBodies(fetchMock: ReturnType<typeof vi.fn>) {
+  return callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST').map(([, init]) => String((init as RequestInit).body));
+}
+
+function caseList(items = [syntheticAgentTestCase()]) {
+  return () => apiResponse(200, syntheticAgentTestCaseList(items));
+}
+
+/** #266's accessible names that Playwright resolves by case-insensitive substring (C38). */
+const NAMES_266 = [
+  'Test structured output', 'Retry structured output test', 'Structured output test result',
+  'Refresh models', 'Search discovered models', 'Discovered models', 'Custom endpoint name',
+  'Schema Upgrade', 'Description override',
+];
+
+/** Every accessible name #267 renders: controls, regions, the selector, fields and views. */
+const NAMES_267 = [
+  RUN_BUTTON, BASELINE_BUTTON, 'Load Agent Test Cases', 'Refresh test cases', 'Add test case',
+  'Save test case', 'Retire test case', 'Confirm retire', 'Keep test case', 'Agent Test Cases',
+  'Test case name', 'Synthetic payload (JSON)', 'Required test case', 'Design system active',
+  'Test run views', 'Input', 'Compare', 'Checks', 'Synthetic payload', 'Assembled prompt',
+  'Model payload sent', 'Test case evidence', 'Published baseline evidence', 'Test case issues',
+];
+
+describe('AgentDefinitionWorkbench isolated testing', () => {
+  it('no #267 accessible name contains, or is contained in, a #266 name (C38)', () => {
+    for (const ours of NAMES_267) {
+      for (const theirs of NAMES_266) {
+        const [a, b] = [ours.toLowerCase(), theirs.toLowerCase()];
+        expect(a.includes(b) || b.includes(a), `${ours} / ${theirs}`).toBe(false);
+      }
+      expect(ours.toLowerCase()).not.toMatch(/structured output|test result|retry/);
+    }
+  });
+
+  it('renders exactly the pinned #267 names once the panel shows a run', async () => {
+    mockWorkbenchApi({ listCases: caseList(), candidateRun: () => apiResponse(201, syntheticTestRunEvidence()) });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
+    const aside = testingAside();
+    const rendered = [
+      ...within(aside).getAllByRole('button').map((element) => element.textContent ?? ''),
+      ...within(aside).getAllByRole('tab').map((element) => element.textContent ?? ''),
+      ...within(aside).getAllByRole('region').map((element) => element.getAttribute('aria-label') ?? ''),
+    ];
+    for (const name of rendered) expect(NAMES_267).toContain(name);
+  });
+
+  it('reads no Agent Test Case on mount, and Load reads exactly the selected role\'s active list', async () => {
+    const fetchMock = mockWorkbenchApi({ listCases: caseList() });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await act(async () => { await Promise.resolve(); });
+    expect(allGets(fetchMock)).toHaveLength(1);
+
+    const select = await loadTestCasesForSelectedRole();
+    expect(select).toHaveValue('101');
+    const lists = callsMatching(fetchMock, TEST_CASES_URL, 'GET');
+    expect(lists).toHaveLength(1);
+    expect(String(lists[0][0])).toMatch(/\/api\/admin\/agent-definitions\/test-cases\?agent_key=architect$/);
+    expect(workbenchGets(fetchMock)).toHaveLength(1);
+    expect(allGets(fetchMock)).toHaveLength(2);
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    expect(asideButton('Load Agent Test Cases')).toBeEnabled();
+    expect(allGets(fetchMock)).toHaveLength(2);
+    fireEvent.click(within(navigation).getByRole('button', { name: 'Foreman' }));
+    expect(testingAside()).toHaveTextContent('Foreman is deterministic and has no Agent Test Cases.');
+    expect(within(testingAside()).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('Run test case sends exactly the case and lock for the saved candidate and shows Input, Compare and Checks without a write', async () => {
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      candidateRun: () => apiResponse(201, syntheticTestRunEvidence()),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    const statusBefore = architectStatus(navigation).textContent;
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
+
+    const runs = callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST');
+    expect(runs).toHaveLength(1);
+    expect(String(runs[0][0])).toMatch(/\/api\/admin\/agent-definitions\/draft\/architect\/test-runs$/);
+    expect(candidateRunBodies(fetchMock)).toEqual(['{"test_case_id":101,"lock_version":0}']);
+    expect(asideTab('Compare')).toHaveTextContent('Baseline not recorded');
+    expect(asideTab('Input')).toHaveTextContent('Synthetic assembled Architect prompt for the saved candidate.');
+    const checks = asideTab('Checks');
+    expect(within(checks).getAllByRole('row')).toHaveLength(3);
+    expect(checks).toHaveTextContent('Deterministic checks passed');
+    // A run is evidence only: no lock, status, form or write moves.
+    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(callsMatching(fetchMock, BASELINE_RUN_URL, 'POST')).toHaveLength(0);
+    expect(allGets(fetchMock)).toHaveLength(2);
+    expectNoForbiddenActionNames();
+    expect(asideButton(RUN_BUTTON)).toBeEnabled();
+    expect(asideButton(BASELINE_BUTTON)).toBeEnabled();
+  });
+
+  it('a pending run holds the one gate: Save, the probe, case writes and a second run are refused until it settles', async () => {
+    const held = heldResponses();
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      candidateRun: held.responder,
+      put: () => apiResponse(500, null),
+      probe: () => apiResponse(200, syntheticProbeSuccess()),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+    expect(testingAside()).toHaveTextContent('Running the test case against the saved candidate…');
+    for (const name of [RUN_BUTTON, BASELINE_BUTTON, 'Add test case', 'Retire test case']) {
+      expect(asideButton(name)).toBeDisabled();
+    }
+    fireEvent.click(asideButton(RUN_BUTTON));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    openModelTab();
+    expect(probeButton()).toBeDisabled();
+    fireEvent.click(probeButton());
+    await act(async () => { await Promise.resolve(); });
+    expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(1);
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(probeCalls(fetchMock)).toHaveLength(0);
+
+    await act(async () => { held.pending[0](apiResponse(201, syntheticTestRunEvidence())); });
+    await waitFor(() => expect(probeButton()).toBeEnabled());
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
+    expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title');
+  });
+
+  it('a pending Save refuses both runs on every role', async () => {
+    let releasePut!: (response: object) => void;
+    const heldPut = new Promise<object>((resolve) => { releasePut = resolve; });
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      put: () => heldPut,
+      candidateRun: () => apiResponse(201, syntheticTestRunEvidence()),
+      baselineRun: () => apiResponse(201, syntheticTestRunEvidence({ run_kind: 'published_baseline' })),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Builder B2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    expect(putCalls(fetchMock)).toHaveLength(1);
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
+    await loadTestCasesForSelectedRole();
+    expect(asideButton(RUN_BUTTON)).toBeDisabled();
+    expect(asideButton(BASELINE_BUTTON)).toBeDisabled();
+    fireEvent.click(asideButton(RUN_BUTTON));
+    fireEvent.click(asideButton(BASELINE_BUTTON));
+    expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(0);
+    expect(callsMatching(fetchMock, BASELINE_RUN_URL, 'POST')).toHaveLength(0);
+
+    releasePut(apiResponse(200, saveSuccess('builder', {
+      prompt_text: 'Builder B2',
+      model: structuredClone(modelNode('builder').draft.model),
+    }, 1)));
+    await waitFor(() => expect(asideButton(RUN_BUTTON)).toBeEnabled());
+  });
+
+  it('an unsaved role refuses the candidate run without a request, and the hook allocates nothing', async () => {
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      baselineRun: () => apiResponse(201, syntheticTestRunEvidence({ run_kind: 'published_baseline' })),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.2' } });
+
+    expect(asideButton(RUN_BUTTON)).toBeDisabled();
+    expect(within(testingAside()).getByText(TEST_RUN_UNSAVED_HINT)).toBeInTheDocument();
+    fireEvent.click(asideButton(RUN_BUTTON));
+    // The published baseline reads no draft, so it is still offered.
+    fireEvent.click(asideButton(BASELINE_BUTTON));
+    await waitFor(() => expect(callsMatching(fetchMock, BASELINE_RUN_URL, 'POST')).toHaveLength(1));
+    expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(0);
+
+    const hookFetch = vi.fn().mockResolvedValue(apiResponse(201, syntheticTestRunEvidence()));
+    vi.stubGlobal('fetch', hookFetch);
+    const { result } = renderHook(() => useDraftEditor(syntheticAgentDefinitionWorkbench));
+    act(() => result.current.edit('architect', 'prompt_text', 'Architect unsaved'));
+    await act(() => result.current.runTestCase('architect', 101));
+    expect(hookFetch).not.toHaveBeenCalled();
+    expect(result.current.state.pendingSave).toBeNull();
+
+    await act(() => result.current.runTestCase('builder', 301));
+    expect(hookFetch).toHaveBeenCalledTimes(1);
+    expect(String(hookFetch.mock.calls[0][0])).toMatch(/\/draft\/builder\/test-runs$/);
+    expect((hookFetch.mock.calls[0][1] as RequestInit).body).toBe('{"test_case_id":301,"lock_version":0}');
+  });
+
+  it('a stale_draft 409 adopts the server draft; Reload server, then an explicit run, sends the adopted lock', async () => {
+    const conflict = syntheticNullCandidateConflict(0, 1);
+    conflict.server.definitions.architect = {
+      ...conflict.server.definitions.architect,
+      prompt_text: 'Architect changed on the server',
+      candidate_hash: 'd'.repeat(64),
+    };
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      candidateRun: (_agentKey, _body, call) => (call === 0
+        ? apiResponse(409, conflict)
+        : apiResponse(201, syntheticTestRunEvidence({ candidate_hash: 'd'.repeat(64) }))),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    const region = await screen.findByRole('region', { name: 'Draft changed on the server' });
+    expect(region).toHaveTextContent('Expected lock 0; Current lock 1');
+    expect(within(testingAside()).getByRole('alert'))
+      .toHaveTextContent('The draft changed on the server. Review the change, then run the test case again.');
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
+    // The run adopted the server's saved candidate but kept the local form, so the
+    // role is now unsaved and the next run is refused until the admin reconciles.
+    expect(asideButton(RUN_BUTTON)).toBeDisabled();
+    expect(asideTab('Compare')).toHaveTextContent('No run yet');
+
+    fireEvent.click(within(region).getByRole('button', { name: 'Reload server' }));
+    expect(asideButton(RUN_BUTTON)).toBeEnabled();
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
+    expect(candidateRunBodies(fetchMock)).toEqual([
+      '{"test_case_id":101,"lock_version":0}',
+      '{"test_case_id":101,"lock_version":1}',
+    ]);
+    expect(within(testingAside()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('a 503 test_run_unavailable is a contained retryable alert, and only an explicit retry runs again', async () => {
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      candidateRun: (_agentKey, _body, call) => (call === 0
+        ? apiResponse(503, syntheticTestRunUnavailable())
+        : apiResponse(201, syntheticTestRunEvidence())),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    const alert = await within(testingAside()).findByRole('alert');
+    expect(alert).toHaveTextContent('Test run storage is temporarily unavailable. Retry the request.');
+    await act(async () => { await Promise.resolve(); });
+    expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(1);
+    expect(asideButton(RUN_BUTTON)).toBeEnabled();
+    expect(asideTab('Compare')).toHaveTextContent('No run yet');
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
+    expect(within(testingAside()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(candidateRunBodies(fetchMock)).toHaveLength(2);
+  });
+
+  it.each([
+    ['a network failure', () => Promise.reject(new TypeError('network failed')),
+      'Unable to run the test case. Check your connection and try again.'],
+    ['an untyped 500', () => apiResponse(500, { detail: 'Traceback: secret-host.example' }),
+      'Unable to run the test case (500).'],
+    ['a malformed 201', () => apiResponse(201, { run_id: 1 }),
+      'Unable to run the test case because the server response was invalid.'],
+    ['a 201 for another case', () => apiResponse(201, syntheticTestRunEvidence({ test_case_id: 999 })),
+      'Unable to run the test case because the server response was invalid.'],
+    ['a 201 for another role', () => apiResponse(201, syntheticTestRunEvidence({ agent_key: 'builder' })),
+      'Unable to run the test case because the server response was invalid.'],
+    ['a 201 baseline answering a candidate run', () => apiResponse(201, syntheticTestRunEvidence({ run_kind: 'published_baseline' })),
+      'Unable to run the test case because the server response was invalid.'],
+    ['a 201 for another saved candidate', () => apiResponse(201, syntheticTestRunEvidence({ candidate_hash: 'e'.repeat(64) })),
+      'Unable to run the test case because the server response was invalid.'],
+  ])('%s is contained with no evidence, no leak, and no automatic retry', async (_name, respond, message) => {
+    const fetchMock = mockWorkbenchApi({ listCases: caseList(), candidateRun: respond });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    const alert = await within(testingAside()).findByRole('alert');
+    expect(alert).toHaveTextContent(message);
+    expect(document.body).not.toHaveTextContent('secret-host.example');
+    expect(asideTab('Compare')).toHaveTextContent('No run yet');
+    await act(async () => { await Promise.resolve(); });
+    expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(1);
+    expect(asideButton(RUN_BUTTON)).toBeEnabled();
+  });
+
+  it('a stale_test_case 409 asks for a refresh, and the refreshed active version is what runs next (P5)', async () => {
+    const version2 = syntheticAgentTestCase({ id: 111, version: 2 });
+    const fetchMock = mockWorkbenchApi({
+      listCases: (_agentKey, call) => apiResponse(200, syntheticAgentTestCaseList(
+        call === 0 ? [syntheticAgentTestCase()] : [version2],
+      )),
+      candidateRun: (_agentKey, body) => (body.test_case_id === 101
+        ? apiResponse(409, syntheticStaleTestCase(101))
+        : apiResponse(201, syntheticTestRunEvidence({ test_case_id: 111, test_case_version: 2 }))),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    expect(await within(testingAside()).findByRole('alert')).toHaveTextContent(
+      'This test case version is no longer active. Refresh test cases and run its current version.',
+    );
+    fireEvent.click(asideButton('Refresh test cases'));
+    await waitFor(() => expect(within(testingAside()).getByRole('combobox', { name: 'Agent Test Cases' }))
+      .toHaveValue('111'));
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
+    expect(candidateRunBodies(fetchMock)).toEqual([
+      '{"test_case_id":101,"lock_version":0}',
+      '{"test_case_id":111,"lock_version":0}',
+    ]);
+    expect(callsMatching(fetchMock, TEST_CASES_URL, 'GET')).toHaveLength(2);
+  });
+
+  it('Run published baseline sends exactly the case with no lock and shows the rerun as not-approved evidence', async () => {
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      baselineRun: () => apiResponse(201, syntheticTestRunEvidence({
+        run_id: 777,
+        run_kind: 'published_baseline',
+        candidate_structured_output: { title: 'Published rerun title' },
+      })),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton(BASELINE_BUTTON));
+    const compare = asideTab('Compare');
+    const region = await within(compare).findByRole('region', { name: 'Published baseline evidence' });
+    expect(region).toHaveTextContent('Published rerun title');
+    expect(region).toHaveTextContent('not approved');
+    const runs = callsMatching(fetchMock, BASELINE_RUN_URL, 'POST');
+    expect(runs).toHaveLength(1);
+    expect(String(runs[0][0])).toMatch(/\/api\/admin\/agent-definitions\/published\/architect\/test-runs$/);
+    expect(String((runs[0][1] as RequestInit).body)).toBe('{"test_case_id":101}');
+    expect(callsMatching(fetchMock, CANDIDATE_RUN_URL, 'POST')).toHaveLength(0);
+    // The candidate view still has no run of its own.
+    expect(within(compare).getByRole('region', { name: 'Test case evidence' })).toHaveTextContent('No run yet');
+    expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+    expect(architectStatus(navigation)).toHaveTextContent('Clean');
+    expectNoForbiddenActionNames();
+  });
+
+  it('Add test case posts exactly the typed case, keeps the form on an ordered 422, then selects the created case', async () => {
+    const created = syntheticAgentTestCase({ id: 202, name: 'Architect board summary', is_required: false });
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      createCase: (_agentKey, _body, call) => (call === 0
+        ? apiResponse(422, syntheticInvalidTestCase([
+          { field: 'name', code: 'duplicate_name', message: 'A test case with this name already exists for the role.' },
+        ]))
+        : apiResponse(201, created)),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton('Add test case'));
+    fireEvent.change(within(testingAside()).getByRole('textbox', { name: 'Test case name' }), {
+      target: { value: 'Architect board summary' },
+    });
+    fireEvent.change(within(testingAside()).getByRole('textbox', { name: 'Synthetic payload (JSON)' }), {
+      target: { value: '{"user_request": "Summarise a fictional board meeting."}' },
+    });
+    fireEvent.click(asideButton('Save test case'));
+    const issues = await within(testingAside()).findByRole('list', { name: 'Test case issues' });
+    expect(issues).toHaveTextContent('name: A test case with this name already exists for the role.');
+    expect(within(testingAside()).getByRole('textbox', { name: 'Test case name' })).toHaveValue('Architect board summary');
+
+    fireEvent.click(asideButton('Save test case'));
+    await waitFor(() => expect(within(testingAside()).getByRole('combobox', { name: 'Agent Test Cases' }))
+      .toHaveValue('202'));
+    const posts = callsMatching(fetchMock, TEST_CASES_URL, 'POST');
+    expect(posts).toHaveLength(2);
+    for (const [url, init] of posts) {
+      expect(String(url)).toMatch(/\/api\/admin\/agent-definitions\/test-cases$/);
+      expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+        agent_key: 'architect',
+        name: 'Architect board summary',
+        synthetic_payload: { user_request: 'Summarise a fictional board meeting.' },
+        assembly_context: { design_system_active: false },
+        is_required: false,
+      });
+    }
+    expect(within(testingAside()).queryByRole('textbox', { name: 'Test case name' })).not.toBeInTheDocument();
+    expect(within(testingAside()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(putCalls(fetchMock)).toHaveLength(0);
+    expect(callsMatching(fetchMock, TEST_CASES_URL, 'GET')).toHaveLength(1);
+  });
+
+  it('Retire test case sends one bodyless DELETE after confirmation, and a last-required 422 keeps the case listed', async () => {
+    const optional = syntheticAgentTestCase({ id: 102, name: 'Architect optional case', is_required: false });
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList([syntheticAgentTestCase(), optional]),
+      retireCase: (testCaseId) => (testCaseId === 101
+        ? apiResponse(422, syntheticInvalidTestCase([{
+          field: 'is_active', code: 'last_required_case', message: 'A role must keep one active required test case.',
+        }]))
+        : apiResponse(200, { ...optional, is_active: false })),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const select = await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton('Retire test case'));
+    expect(callsMatching(fetchMock, TEST_CASE_URL, 'DELETE')).toHaveLength(0);
+    fireEvent.click(asideButton('Confirm retire'));
+    const issues = await within(testingAside()).findByRole('list', { name: 'Test case issues' });
+    expect(issues).toHaveTextContent('is_active: A role must keep one active required test case.');
+    expect(within(select).getAllByRole('option')).toHaveLength(2);
+
+    fireEvent.change(select, { target: { value: '102' } });
+    fireEvent.click(asideButton('Retire test case'));
+    fireEvent.click(asideButton('Confirm retire'));
+    await waitFor(() => expect(within(select).getAllByRole('option')).toHaveLength(1));
+    expect(select).toHaveValue('101');
+    const deletes = callsMatching(fetchMock, TEST_CASE_URL, 'DELETE');
+    expect(deletes.map(([url]) => String(url).split('/').at(-1))).toEqual(['101', '102']);
+    for (const [, init] of deletes) expect((init as RequestInit).body).toBeUndefined();
+  });
+
+  it('the hook refuses every test operation while another operation holds the gate, without a request', async () => {
+    let releasePut!: (response: object) => void;
+    const heldPut = new Promise<object>((resolve) => { releasePut = resolve; });
+    const hookFetch = vi.fn().mockImplementation(async (url: string) => (isAgentTestUrl(url)
+      ? apiResponse(201, syntheticTestRunEvidence())
+      : heldPut));
+    vi.stubGlobal('fetch', hookFetch);
+    const { result } = renderHook(() => useDraftEditor(syntheticAgentDefinitionWorkbench));
+    act(() => result.current.edit('builder', 'prompt_text', 'Builder B2'));
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.save('builder'); });
+    expect(result.current.state.pendingSave?.operation).toBe('save');
+
+    await act(() => result.current.runTestCase('architect', 101));
+    await act(() => result.current.runPublishedBaseline('architect', 101));
+    await act(async () => {
+      await result.current.createAgentTestCase('architect', {
+        agent_key: 'architect',
+        name: 'Blocked',
+        synthetic_payload: {},
+        assembly_context: { design_system_active: false },
+        is_required: false,
+      });
+    });
+    await act(() => result.current.retireAgentTestCase('architect', 101));
+    expect(hookFetch.mock.calls.filter(([url]) => isAgentTestUrl(url))).toHaveLength(0);
+    expect(result.current.state.pendingSave?.operation).toBe('save');
+
+    await act(async () => {
+      releasePut(apiResponse(200, saveSuccess('builder', {
+        prompt_text: 'Builder B2',
+        model: structuredClone(modelNode('builder').draft.model),
+      }, 1)));
+      await saving;
+    });
+    await act(() => result.current.runPublishedBaseline('architect', 101));
+    expect(hookFetch.mock.calls.filter(([url]) => isAgentTestUrl(url))).toHaveLength(1);
+  });
+
+  it('a pending case write holds the one gate', async () => {
+    const held = heldResponses();
+    const fetchMock = mockWorkbenchApi({ listCases: caseList(), createCase: held.responder });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    fireEvent.click(asideButton('Add test case'));
+    fireEvent.change(within(testingAside()).getByRole('textbox', { name: 'Test case name' }), {
+      target: { value: 'Held case' },
+    });
+    fireEvent.click(asideButton('Save test case'));
+    await waitFor(() => expect(held.pending).toHaveLength(1));
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
+    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
+    expect(asideButton(RUN_BUTTON)).toBeDisabled();
+    expect(asideButton('Save test case')).toBeDisabled();
+    fireEvent.click(asideButton('Save test case'));
+    expect(callsMatching(fetchMock, TEST_CASES_URL, 'POST')).toHaveLength(1);
+
+    await act(async () => { held.pending[0](apiResponse(201, syntheticAgentTestCase({ id: 203, name: 'Held case' }))); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled());
   });
 });

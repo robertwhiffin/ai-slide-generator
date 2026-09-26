@@ -1,8 +1,12 @@
 import {
   AGENT_KEYS,
   AgentDefinitionApiError,
+  AgentTestApiError,
   CUSTOM_ANCHORS,
   InvalidDraftSaveResponseError,
+  InvalidTestRunResponseError,
+  TEST_RUN_UNAVAILABLE,
+  parseDraftValidationErrorResponse,
   type AgentDefinitionWorkbenchResponse,
   type AgentKey,
   type AssemblyCondition,
@@ -21,6 +25,8 @@ import {
   type StructuredOutputProbeFailureResponse,
   type StructuredOutputProbeIdentity,
   type StructuredOutputProbeSuccessResponse,
+  type TestCaseListEntry,
+  type TestRunEvidence,
 } from '../../../api/agentDefinitions';
 
 export type DraftStatus = 'Clean' | 'Unsaved' | 'Needs test';
@@ -139,6 +145,40 @@ export type DraftProbeResult = StructuredOutputProbeIdentity & (
   }
 );
 
+/**
+ * One role's Agent Test Case panel state (#267). The case list is a read, never a
+ * draft operation, so loading it takes no gate; its request ID comes from the one
+ * counter and only drops out-of-order answers. Runs and case writes are operations on
+ * the one gate (see `TestOperationKind`). Evidence is kept per role, and the panel shows
+ * it only for the case it names.
+ */
+export interface AgentTestingState {
+  casesStatus: 'idle' | 'loading' | 'ready' | 'error';
+  cases: TestCaseListEntry[];
+  /** The case-list read whose answer may still land, or `null`. */
+  casesRequestId: number | null;
+  /** The last candidate run of this role's saved draft in this session. */
+  candidateEvidence: TestRunEvidence | null;
+  /** The last published-baseline rerun of this role in this session. */
+  baselineEvidence: TestRunEvidence | null;
+  /** The contained message of the last failed test operation or case read. */
+  error: string | null;
+  /** The exact ordered server issues of the last refused test operation. */
+  issues: DraftFieldError[];
+}
+
+export function emptyAgentTestingState(): AgentTestingState {
+  return {
+    casesStatus: 'idle',
+    cases: [],
+    casesRequestId: null,
+    candidateEvidence: null,
+    baselineEvidence: null,
+    error: null,
+    issues: [],
+  };
+}
+
 export interface DraftEditorEntry {
   publishedHash: string;
   saved: DraftDefinition;
@@ -153,9 +193,28 @@ export interface DraftEditorEntry {
   requestError: string | null;
   /** The last probe result for the saved candidate still on screen, or `null`. */
   probeResult: DraftProbeResult | null;
+  /** The role's Agent Test Case panel (#267). */
+  testing: AgentTestingState;
 }
 
-export type DraftOperationKind = 'save' | 'upgrade' | 'sourceRecovery' | 'schemaUpgrade' | 'probe';
+/**
+ * #267's operations. Every one joins the one gate: a candidate run reads the saved draft
+ * under the lock exactly as the probe does, and a baseline rerun and a case write are
+ * the panel's other writes, so none needs a second in-flight flag.
+ */
+export type TestOperationKind = 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire';
+
+export const TEST_OPERATIONS: readonly TestOperationKind[] = [
+  'testRun', 'baselineRun', 'testCaseCreate', 'testCaseRetire',
+];
+
+export type DraftOperationKind =
+  | 'save'
+  | 'upgrade'
+  | 'sourceRecovery'
+  | 'schemaUpgrade'
+  | 'probe'
+  | TestOperationKind;
 
 /**
  * The one aggregate pending slot, now discriminated by operation. Save, Upgrade,
@@ -168,6 +227,8 @@ export interface PendingDraftSave {
   agentKey: AgentKey;
   expectedLockVersion: number;
   submittedCandidate: EditableModelDraft | null;
+  /** The case a test run or case retire names; absent for every draft operation. */
+  testCaseId?: number;
 }
 
 export interface DraftEditorState {
@@ -216,6 +277,16 @@ export type DraftEditorAction =
   | { type: 'probeRejected'; requestId: number; error: DraftValidationErrorResponse }
   | { type: 'probeConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
   | { type: 'probeFailed'; requestId: number; message: string }
+  | { type: 'testCasesLoadStarted'; agentKey: AgentKey; requestId: number }
+  | { type: 'testCasesLoaded'; agentKey: AgentKey; requestId: number; items: TestCaseListEntry[] }
+  | { type: 'testCasesLoadFailed'; agentKey: AgentKey; requestId: number; message: string }
+  | { type: 'testOperationStarted'; pending: PendingDraftSave }
+  | { type: 'testRunSucceeded'; requestId: number; evidence: TestRunEvidence }
+  | { type: 'testRunRejected'; requestId: number; error: DraftValidationErrorResponse }
+  | { type: 'testRunConflicted'; requestId: number; conflict: DraftSaveConflictResponse }
+  | { type: 'testCaseCreated'; requestId: number; testCase: TestCaseListEntry }
+  | { type: 'testCaseRetired'; requestId: number; testCase: TestCaseListEntry }
+  | { type: 'testOperationFailed'; requestId: number; message: string; issues: DraftFieldError[] }
   | { type: 'schemaOverlayOptionalFieldToggled'; agentKey: AgentKey; fieldName: string }
   | { type: 'schemaOverlayFieldDescriptionChanged'; agentKey: AgentKey; fieldName: string; description: string }
   | { type: 'schemaOverlayFieldExamplesChanged'; agentKey: AgentKey; fieldName: string; examples: string }
@@ -549,6 +620,7 @@ export function createDraftEditorState(
       responseIssues: [],
       requestError: null,
       probeResult: null,
+      testing: emptyAgentTestingState(),
     };
   }
   return { draft: structuredClone(workbench.draft), byAgent, pendingSave: null };
@@ -662,6 +734,67 @@ export function probeErrorMessage(error: unknown): string {
   return 'Unable to test structured output. Check your connection and try again.';
 }
 
+export const TEST_RUN_INVALID_RESPONSE_MESSAGE =
+  'Unable to run the test case because the server response was invalid.';
+export const TEST_RUN_STALE_DRAFT_MESSAGE =
+  'The draft changed on the server. Review the change, then run the test case again.';
+export const TEST_RUN_REJECTED_MESSAGE = 'The saved candidate was refused.';
+export const TEST_CASE_INVALID_RESPONSE_MESSAGE =
+  'Unable to update the test case because the server response was invalid.';
+
+export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load';
+
+const TEST_OPERATION_SUBJECT: Record<TestOperationVerb, string> = {
+  run: 'run the test case',
+  create: 'save the test case',
+  retire: 'retire the test case',
+  load: 'load Agent Test Cases',
+};
+
+/**
+ * The contained panel message (and any ordered server issues) for a failed test
+ * operation. Typed refusals map to fixed client copy; an untyped error body is never
+ * read, so server or proxy text cannot leak into the panel.
+ */
+export function testOperationFailure(
+  error: unknown,
+  verb: TestOperationVerb,
+): { message: string; issues: DraftFieldError[] } {
+  const subject = TEST_OPERATION_SUBJECT[verb];
+  if (error instanceof AgentTestApiError) {
+    switch (error.failure.code) {
+      case 'stale_test_case':
+        return {
+          message: 'This test case version is no longer active. Refresh test cases and run its current version.',
+          issues: [],
+        };
+      case 'invalid_test_case':
+        return { message: 'The test case was refused.', issues: error.failure.issues };
+      case 'test_case_not_found':
+        return { message: 'This test case no longer exists. Refresh test cases.', issues: [] };
+      case 'test_run_unavailable':
+        return { message: TEST_RUN_UNAVAILABLE.message, issues: [] };
+    }
+  }
+  if (error instanceof InvalidTestRunResponseError) {
+    return { message: `Unable to ${subject} because the server response was invalid.`, issues: [] };
+  }
+  if (error instanceof AgentDefinitionApiError) {
+    const rejection = error.status === 422 ? parseDraftValidationErrorResponse(error.payload) : null;
+    if (rejection !== null) return { message: 'The published definition was refused.', issues: rejection.errors };
+    return { message: `Unable to ${subject} (${error.status}).`, issues: [] };
+  }
+  return { message: `Unable to ${subject}. Check your connection and try again.`, issues: [] };
+}
+
+/**
+ * A candidate run tests the role's **saved** candidate, so it is refused while any
+ * field of that role differs locally: the run would not test what is on screen.
+ */
+export function testRunCandidateUnsaved(entry: DraftEditorEntry): boolean {
+  return !editableFormsEqual(entry.local, formFromDefinition(entry.saved));
+}
+
 /** A probe may only test the saved endpoint: it is refused while the local one differs. */
 export function probeEndpointUnsaved(entry: DraftEditorEntry): boolean {
   return entry.local.endpoint_name !== entry.saved.model.endpoint_name;
@@ -767,7 +900,7 @@ function rejectOperation(
         ...entry,
         // A probe's only draft rejection is the saved-name policy re-check, which is
         // owned by the endpoint field exactly as a save's is.
-        fieldErrors: operation === 'save' || operation === 'probe'
+        fieldErrors: operation === 'save' || operation === 'probe' || operation === 'testRun'
           ? fieldErrorsFromResponse(error)
           : entry.fieldErrors,
         responseIssues: nonInlineIssues(error),
@@ -972,6 +1105,57 @@ function quarantinePromptChange(
   ));
 }
 
+function isTestOperation(operation: DraftOperationKind): operation is TestOperationKind {
+  return (TEST_OPERATIONS as readonly DraftOperationKind[]).includes(operation);
+}
+
+/** The pending test operation this request ID started, of any #267 kind, or `null`. */
+function matchingTestPending(state: DraftEditorState, requestId: number): PendingDraftSave | null {
+  const pending = state.pendingSave;
+  if (pending === null || !isTestOperation(pending.operation) || pending.requestId !== requestId) return null;
+  return pending;
+}
+
+function withTesting(
+  state: DraftEditorState,
+  agentKey: AgentKey,
+  update: (testing: AgentTestingState) => AgentTestingState,
+): DraftEditorState {
+  const entry = state.byAgent[agentKey];
+  return replaceEntry(state, agentKey, { ...entry, testing: update(entry.testing) });
+}
+
+/** Settles the pending test operation, changing nothing but the pending slot and its panel. */
+function settleTestOperation(
+  state: DraftEditorState,
+  pending: PendingDraftSave,
+  update: (testing: AgentTestingState) => AgentTestingState,
+): DraftEditorState {
+  return { ...withTesting(state, pending.agentKey, update), pendingSave: null };
+}
+
+/**
+ * A run response must be evidence for exactly the run the client started: this role,
+ * this case, this kind, and for a candidate the saved candidate this client holds at
+ * the lock it sent. Anything else is contained as an invalid response.
+ */
+function runEvidenceIsCoherent(
+  state: DraftEditorState,
+  pending: PendingDraftSave,
+  evidence: TestRunEvidence,
+): boolean {
+  if (evidence.agent_key !== pending.agentKey || evidence.test_case_id !== pending.testCaseId) return false;
+  if (pending.operation === 'baselineRun') return evidence.run_kind === 'published_baseline';
+  return pending.operation === 'testRun'
+    && evidence.run_kind === 'candidate'
+    && state.draft.lock_version === pending.expectedLockVersion
+    && evidence.candidate_hash === state.byAgent[pending.agentKey].saved.candidate_hash;
+}
+
+function settledTesting(testing: AgentTestingState): AgentTestingState {
+  return { ...testing, error: null, issues: [] };
+}
+
 export function draftEditorReducer(
   state: DraftEditorState,
   action: DraftEditorAction,
@@ -1116,6 +1300,117 @@ export function draftEditorReducer(
         retryable: action.failure.retryable,
         ...identity,
       }));
+    case 'testCasesLoadStarted':
+      return withTesting(state, action.agentKey, (testing) => ({
+        ...testing,
+        casesStatus: 'loading',
+        casesRequestId: action.requestId,
+        error: null,
+        issues: [],
+      }));
+    case 'testCasesLoaded': {
+      if (state.byAgent[action.agentKey].testing.casesRequestId !== action.requestId) return state;
+      return withTesting(state, action.agentKey, (testing) => ({
+        ...testing,
+        casesStatus: 'ready',
+        cases: action.items,
+        casesRequestId: null,
+      }));
+    }
+    case 'testCasesLoadFailed': {
+      if (state.byAgent[action.agentKey].testing.casesRequestId !== action.requestId) return state;
+      return withTesting(state, action.agentKey, (testing) => ({
+        ...testing,
+        casesStatus: testing.cases.length > 0 ? 'ready' : 'error',
+        casesRequestId: null,
+        error: action.message,
+        issues: [],
+      }));
+    }
+    case 'testOperationStarted': {
+      if (state.pendingSave !== null) return state;
+      if (!isTestOperation(action.pending.operation)) return state;
+      const entry = state.byAgent[action.pending.agentKey];
+      // Reducer backstop: only the saved candidate may be run.
+      if (action.pending.operation === 'testRun' && testRunCandidateUnsaved(entry)) return state;
+      // A test operation never touches the draft editor's own field errors or messages.
+      return {
+        ...replaceEntry(state, action.pending.agentKey, { ...entry, testing: settledTesting(entry.testing) }),
+        pendingSave: action.pending,
+      };
+    }
+    case 'testRunSucceeded': {
+      const pending = matchingTestPending(state, action.requestId);
+      if (pending === null || (pending.operation !== 'testRun' && pending.operation !== 'baselineRun')) return state;
+      if (!runEvidenceIsCoherent(state, pending, action.evidence)) {
+        return settleTestOperation(state, pending, (testing) => ({
+          ...testing,
+          error: TEST_RUN_INVALID_RESPONSE_MESSAGE,
+          issues: [],
+        }));
+      }
+      return settleTestOperation(state, pending, (testing) => (pending.operation === 'testRun'
+        ? { ...settledTesting(testing), candidateEvidence: action.evidence }
+        : { ...settledTesting(testing), baselineEvidence: action.evidence }));
+    }
+    case 'testRunRejected': {
+      const pending = matchingPending(state, 'testRun', action.requestId);
+      if (pending === null) return state;
+      return withTesting(rejectOperation(state, 'testRun', action.requestId, action.error), pending.agentKey, (testing) => ({
+        ...testing,
+        error: TEST_RUN_REJECTED_MESSAGE,
+        issues: action.error.errors,
+      }));
+    }
+    case 'testRunConflicted': {
+      const pending = matchingPending(state, 'testRun', action.requestId);
+      if (pending === null) return state;
+      return withTesting(mergeConflict(state, 'testRun', action.requestId, action.conflict), pending.agentKey, (testing) => ({
+        ...testing,
+        error: TEST_RUN_STALE_DRAFT_MESSAGE,
+        issues: [],
+      }));
+    }
+    case 'testCaseCreated': {
+      const pending = matchingTestPending(state, action.requestId);
+      if (pending === null || pending.operation !== 'testCaseCreate') return state;
+      if (action.testCase.agent_key !== pending.agentKey || !action.testCase.is_active) {
+        return settleTestOperation(state, pending, (testing) => ({
+          ...testing, error: TEST_CASE_INVALID_RESPONSE_MESSAGE, issues: [],
+        }));
+      }
+      // The write settles the list; a read that started before it can no longer land.
+      return settleTestOperation(state, pending, (testing) => ({
+        ...settledTesting(testing),
+        casesStatus: 'ready',
+        casesRequestId: null,
+        cases: [...testing.cases.filter((item) => item.id !== action.testCase.id), action.testCase],
+      }));
+    }
+    case 'testCaseRetired': {
+      const pending = matchingTestPending(state, action.requestId);
+      if (pending === null || pending.operation !== 'testCaseRetire') return state;
+      if (action.testCase.id !== pending.testCaseId || action.testCase.agent_key !== pending.agentKey) {
+        return settleTestOperation(state, pending, (testing) => ({
+          ...testing, error: TEST_CASE_INVALID_RESPONSE_MESSAGE, issues: [],
+        }));
+      }
+      return settleTestOperation(state, pending, (testing) => ({
+        ...settledTesting(testing),
+        casesStatus: 'ready',
+        casesRequestId: null,
+        cases: testing.cases.filter((item) => item.id !== action.testCase.id),
+      }));
+    }
+    case 'testOperationFailed': {
+      const pending = matchingTestPending(state, action.requestId);
+      if (pending === null) return state;
+      return settleTestOperation(state, pending, (testing) => ({
+        ...testing,
+        error: action.message,
+        issues: action.issues,
+      }));
+    }
     case 'probeRejected':
       return rejectOperation(state, 'probe', action.requestId, action.error);
     case 'probeConflicted':
