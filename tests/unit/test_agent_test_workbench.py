@@ -2742,3 +2742,577 @@ def test_the_verdict_writer_never_touches_a_runtime(factory, monkeypatch):
 
     assert _verdict_of(factory, run.run_id)[:2] == ("approved", REVIEWER)
     assert isinstance(_verdict_of(factory, run.run_id)[2], datetime)
+
+
+# ===========================================================================
+# #268 Task 2: the readiness query service
+#
+# Binding corrections (#268 PLAN-CORRECTIONS): C10 (two entry points:
+# ``draft_readiness`` owns its transaction and takes the shared L0 parent lock;
+# ``readiness_under_parent_lock`` never begins one and is #269's Q4 binding),
+# C11 (active required cases by row id; ANY eligible approval makes a case
+# ready and the newest one is reported; otherwise the newest candidate run of
+# the current hash decides; only CHANGED roles block; a changed role with no
+# required case is ``missing_required_case``; one SQL statement reads cases and
+# runs; no case lock), C12 (``run_kind = 'candidate'``), C13 (fixture rules:
+# real draft saves, supersedes for stale versions, ``run_at`` set at INSERT,
+# ``run_at DESC, id DESC``, never an UPDATE of a run), C14 (types), C27 (no
+# model or runtime), rulings Q2 and Q3.
+# ===========================================================================
+
+from datetime import timedelta  # noqa: E402
+
+_READY_T0 = datetime(2030, 1, 1, 0, 0, 0)
+_UNREVIEWED = {
+    "verdict": None,
+    "verdict_reviewer": None,
+    "verdict_at": None,
+    "verdict_notes": None,
+}
+_APPROVED = {
+    "verdict": "approved",
+    "verdict_reviewer": REVIEWER,
+    "verdict_at": _OLD_VERDICT_AT,
+    "verdict_notes": None,
+}
+_REJECTED = {**_APPROVED, "verdict": "rejected"}
+_MODEL_ERROR = {
+    **_UNREVIEWED,
+    "execution_status": "model_error",
+    "deterministic_checks_passed": False,
+}
+_change_architect = _saver("A changed architect prompt for readiness.")
+_change_architect_again = _saver("A second changed architect prompt.")
+
+
+def _at(seconds: int) -> datetime:
+    """Strictly increasing ``run_at`` values, set at INSERT (C13)."""
+    return _READY_T0 + timedelta(seconds=seconds)
+
+
+def _readiness(factory, workbench=None):
+    workbench = workbench if workbench is not None else AgentTestWorkbench()
+    with factory() as session:
+        return workbench.draft_readiness(session)
+
+
+def _agent_item(result, agent_key: str = "architect"):
+    (item,) = [agent for agent in result.agents if agent.agent_key == agent_key]
+    return item
+
+
+def _only_case(result, agent_key: str = "architect"):
+    (case,) = _agent_item(result, agent_key).cases
+    return case
+
+
+def _status(result, agent_key: str = "architect") -> tuple[object, ...]:
+    case = _only_case(result, agent_key)
+    return (case.status, case.blocking, case.run_id, case.run_verdict, case.run_checks_passed)
+
+
+def _changed_run(factory) -> tuple[AgentTestWorkbench, int]:
+    """Architect changed by a real draft save, then one completed passing
+    unreviewed candidate run of the new hash (the executor's own row)."""
+    _change_architect(factory)
+    workbench, _runtime_, _adapter = _executor(factory)
+    return workbench, _run_candidate(factory, workbench).run_id
+
+
+# --- the status map (plan Step 1, C11) --------------------------------------
+
+
+def test_a_changed_role_with_no_run_needs_a_test_and_blocks(factory):
+    _change_architect(factory)
+
+    result = _readiness(factory)
+
+    case = _only_case(result)
+    assert case.test_case_id == _seed_case_id(factory)
+    assert _status(result) == ("needs_test", True, None, None, None)
+    agent = _agent_item(result)
+    assert (agent.is_changed_from_base, agent.ready, agent.missing_required_case) == (
+        True,
+        False,
+        False,
+    )
+    assert result.blocking_agents == ("architect",)
+    assert result.all_ready is False
+
+
+def test_a_completed_passing_unreviewed_run_is_awaiting_review_and_blocks(factory):
+    _workbench, run_id = _changed_run(factory)
+
+    assert _status(_readiness(factory)) == ("awaiting_review", True, run_id, None, True)
+
+
+def test_a_rejected_run_is_test_failed_and_blocks(factory):
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id, verdict="rejected")
+
+    assert _status(_readiness(factory)) == ("test_failed", True, run_id, "rejected", True)
+
+
+def test_an_approval_on_the_current_hash_and_version_is_approved_and_ready(factory):
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+
+    result = _readiness(factory)
+
+    assert _status(result) == ("approved", False, run_id, "approved", True)
+    assert _agent_item(result).ready is True
+    assert result.blocking_agents == ()
+    assert result.all_ready is True
+
+
+def test_an_approval_on_a_stale_hash_needs_a_test(factory):
+    """AC5 and ruling Q3: a real draft save moves the hash; the approval of the
+    old hash is never found, so the case reads ``needs_test``."""
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+    _change_architect_again(factory)
+
+    result = _readiness(factory)
+
+    assert _status(result) == ("needs_test", True, None, None, None)
+    assert _agent_item(result).candidate_hash == _identity(factory)["draft_hash"]
+    assert result.all_ready is False
+
+
+def test_approving_v1_then_superseding_it_needs_a_test_for_v2(factory):
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+    seed = _seed_case_id(factory)
+    successor = _update(factory, seed)
+
+    result = _readiness(factory)
+
+    case = _only_case(result)
+    assert (case.test_case_id, case.test_case_version) == (successor.id, 2)
+    assert case.test_case_id != seed
+    assert _status(result) == ("needs_test", True, None, None, None)
+
+
+@pytest.mark.parametrize(
+    "newer",
+    [
+        pytest.param(_UNREVIEWED, id="unreviewed"),
+        pytest.param(_REJECTED, id="rejected"),
+        pytest.param(_MODEL_ERROR, id="model_error"),
+    ],
+)
+def test_an_older_approval_beats_a_newer_rerun_of_the_same_hash(factory, newer):
+    """C11/C13: ANY eligible approval makes the case ready, and ``run_id`` is
+    that approval, not the newer rerun (#269's gate links the approval)."""
+    _workbench, source = _changed_run(factory)
+    approval = _insert_run_like(factory, source, run_at=_at(1), **_APPROVED)
+    _insert_run_like(factory, source, run_at=_at(2), **newer)
+
+    assert _status(_readiness(factory)) == ("approved", False, approval, "approved", True)
+
+
+def test_the_newest_eligible_approval_is_reported_by_run_at_then_id(factory):
+    _workbench, source = _changed_run(factory)
+    # Inserted newest-first, so the id order disagrees with the run_at order.
+    newest = _insert_run_like(factory, source, run_at=_at(5), **_APPROVED)
+    _insert_run_like(factory, source, run_at=_at(4), **_APPROVED)
+
+    assert _only_case(_readiness(factory)).run_id == newest
+
+
+def test_a_tied_run_at_reports_the_higher_id_approval(factory):
+    _workbench, source = _changed_run(factory)
+    _insert_run_like(factory, source, run_at=_at(3), **_APPROVED)
+    higher = _insert_run_like(factory, source, run_at=_at(3), **_APPROVED)
+
+    assert _only_case(_readiness(factory)).run_id == higher
+
+
+@pytest.mark.parametrize(
+    ("older", "newer", "expected"),
+    [
+        pytest.param(
+            _REJECTED, _UNREVIEWED, ("awaiting_review", None, True), id="rerun-after-reject"
+        ),
+        pytest.param(
+            _UNREVIEWED, _REJECTED, ("test_failed", "rejected", True), id="reject-after-run"
+        ),
+        pytest.param(_UNREVIEWED, _MODEL_ERROR, ("test_failed", None, False), id="model-error"),
+        pytest.param(
+            _UNREVIEWED,
+            {**_UNREVIEWED, "deterministic_checks_passed": False},
+            ("test_failed", None, False),
+            id="checks-failed",
+        ),
+        pytest.param(
+            _UNREVIEWED,
+            {**_UNREVIEWED, "execution_status": "incomplete", "deterministic_checks_passed": False},
+            ("test_failed", None, False),
+            id="incomplete",
+        ),
+    ],
+)
+def test_without_an_approval_the_newest_candidate_run_decides(factory, older, newer, expected):
+    _workbench, source = _changed_run(factory)
+    _insert_run_like(factory, source, run_at=_at(1), **older)
+    newest = _insert_run_like(factory, source, run_at=_at(2), **newer)
+
+    status, verdict, passed = expected
+    assert _status(_readiness(factory)) == (status, True, newest, verdict, passed)
+
+
+def test_without_an_approval_a_tied_run_at_is_decided_by_the_higher_id(factory):
+    _workbench, source = _changed_run(factory)
+    _insert_run_like(factory, source, run_at=_at(1), **_UNREVIEWED)
+    higher = _insert_run_like(factory, source, run_at=_at(1), **_REJECTED)
+
+    assert _status(_readiness(factory)) == ("test_failed", True, higher, "rejected", True)
+
+
+def test_without_an_approval_run_at_outranks_a_higher_id(factory):
+    _workbench, source = _changed_run(factory)
+    newest = _insert_run_like(factory, source, run_at=_at(2), **_REJECTED)
+    _insert_run_like(factory, source, run_at=_at(1), **_UNREVIEWED)
+
+    assert _status(_readiness(factory)) == ("test_failed", True, newest, "rejected", True)
+
+
+def _other_role_revision(factory) -> dict[str, object]:
+    identity = _identity(factory, "builder")
+    return {"agent_key": "builder", "compared_definition_revision_id": identity["revision_id"]}
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        pytest.param({"candidate_hash": "f" * 64}, id="stale-hash"),
+        pytest.param({"test_case_version": 99}, id="other-case-version"),
+        pytest.param({"run_kind": "published_baseline"}, id="baseline-kind"),
+        pytest.param("other-role", id="other-role"),
+    ],
+)
+def test_an_approval_that_differs_in_one_identity_term_is_never_found(factory, mismatch):
+    """Each term of the shared eligibility predicate, alone (C11/C12): an
+    approval that differs in it is neither eligible nor the newest run."""
+    _workbench, source = _changed_run(factory)
+    overrides = _other_role_revision(factory) if mismatch == "other-role" else mismatch
+    _insert_run_like(factory, source, run_at=_at(1), **_APPROVED, **overrides)
+    # The executor's own run stays the newest matching run, unreviewed.
+    result = _readiness(factory)
+
+    assert _status(result) == ("awaiting_review", True, source, None, True)
+
+
+def test_a_run_of_another_case_does_not_count(factory):
+    _workbench, source = _changed_run(factory)
+    extra = _create(factory, is_required=False)
+    _insert_run_like(factory, source, run_at=_at(1), test_case_id=extra.id, **_APPROVED)
+
+    assert _status(_readiness(factory)) == ("awaiting_review", True, source, None, True)
+
+
+# --- changed-only blocking, and the missing required case (C11, C12) --------
+
+
+def test_an_unchanged_role_is_listed_but_never_blocks(factory):
+    result = _readiness(factory)
+
+    agent = _agent_item(result)
+    assert (agent.is_changed_from_base, agent.ready, agent.missing_required_case) == (
+        False,
+        True,
+        False,
+    )
+    assert _status(result) == ("needs_test", False, None, None, None)
+    assert result.blocking_agents == ()
+    assert result.all_ready is True
+
+
+def test_nothing_changed_is_all_ready_with_every_role_listed_unchanged(factory):
+    result = _readiness(factory)
+
+    assert tuple(agent.agent_key for agent in result.agents) == GRAPH_V1_AGENT_KEYS
+    for agent in result.agents:
+        assert agent.is_changed_from_base is False
+        assert agent.ready is True
+        assert [case.test_case_id for case in agent.cases] == [
+            _seed_case_id(factory, agent.agent_key)
+        ]
+        assert all(case.blocking is False for case in agent.cases)
+    assert (result.all_ready, result.blocking_agents) == (True, ())
+
+
+def test_an_approved_baseline_on_an_unchanged_role_is_not_candidate_evidence(factory):
+    """C12: the baseline's hash is the published hash, which equals the draft
+    hash of an unchanged role, so only ``run_kind`` keeps it out."""
+    workbench, _runtime_, _adapter = _executor(factory)
+    baseline = _run_baseline(factory, workbench)
+    _record(factory, run_id=baseline.run_id)
+    assert baseline.candidate_hash == _identity(factory)["draft_hash"]
+
+    result = _readiness(factory)
+
+    assert _status(result) == ("needs_test", False, None, None, None)
+    assert _agent_item(result).ready is True
+
+
+def test_an_unchanged_roles_approved_candidate_is_reported_without_blocking(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+    run = _run_candidate(factory, workbench)
+    _record(factory, run_id=run.run_id)
+
+    assert _status(_readiness(factory)) == ("approved", False, run.run_id, "approved", True)
+
+
+def test_one_blocking_changed_role_makes_the_draft_not_ready(factory):
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+    _saver("A changed builder prompt.")(factory, "builder")
+
+    result = _readiness(factory)
+
+    assert _agent_item(result).ready is True
+    assert _agent_item(result, "builder").ready is False
+    assert result.blocking_agents == ("builder",)
+    assert result.all_ready is False
+
+
+def _orm_retire(factory, test_case_id: int) -> None:
+    """An ORM write past #267's last-required refusal (C11)."""
+    with factory() as session:
+        session.execute(
+            update(AgentTestCase)
+            .where(AgentTestCase.id == test_case_id)
+            .values(is_active=False)
+        )
+        session.commit()
+
+
+def test_a_changed_role_whose_required_case_was_retired_is_missing_a_required_case(
+    factory,
+):
+    _change_architect(factory)
+    _orm_retire(factory, _seed_case_id(factory))
+
+    result = _readiness(factory)
+
+    agent = _agent_item(result)
+    assert agent.cases == ()
+    assert (agent.ready, agent.missing_required_case) == (False, True)
+    assert result.blocking_agents == ("architect",)
+    assert result.all_ready is False
+
+
+def test_an_unchanged_role_with_no_required_case_does_not_block(factory):
+    _orm_retire(factory, _seed_case_id(factory))
+
+    result = _readiness(factory)
+
+    agent = _agent_item(result)
+    assert (agent.cases, agent.ready, agent.missing_required_case) == ((), True, False)
+    assert result.all_ready is True
+
+
+def test_only_active_required_cases_are_listed_in_id_order(factory):
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+    _create(factory, name="architect_optional", is_required=False)
+    retired = _create(factory, name="architect_retired", is_required=True)
+    _deactivate(factory, retired.id)
+    second = _create(factory, name="architect_second", is_required=True)
+
+    result = _readiness(factory)
+
+    cases = _agent_item(result).cases
+    assert [case.test_case_id for case in cases] == [_seed_case_id(factory), second.id]
+    assert [case.test_case_name for case in cases] == [
+        "architect_required_smoke_v1",
+        "architect_second",
+    ]
+    assert [(case.status, case.blocking) for case in cases] == [
+        ("approved", False),
+        ("needs_test", True),
+    ]
+    assert all(case.agent_key == "architect" for case in cases)
+    assert _agent_item(result).ready is False
+    assert result.blocking_agents == ("architect",)
+
+
+# --- the result's identity (C11, C14) ---------------------------------------
+
+
+def test_the_result_carries_the_draft_lock_base_release_and_role_hashes(factory):
+    _change_architect(factory)
+
+    result = _readiness(factory)
+
+    assert result.draft_lock_version == _lock_version(factory)
+    assert result.base_release_id == _identity(factory)["release_id"]
+    for agent in result.agents:
+        assert agent.candidate_hash == _identity(factory, agent.agent_key)["draft_hash"]
+
+
+def test_changed_is_the_workbench_snapshots_own_predicate(factory):
+    _change_architect(factory)
+    _saver("A changed fixer prompt.")(factory, "fixer")
+
+    result = _readiness(factory)
+
+    with factory() as session, session.begin():
+        snapshot = GraphConfiguration().read_workbench(session)
+    changed = {
+        node.agent_key: node.changed for node in snapshot.nodes if node.agent_key != "foreman"
+    }
+    assert {agent.agent_key: agent.is_changed_from_base for agent in result.agents} == changed
+    assert {key for key, value in changed.items() if value} == {"architect", "fixer"}
+
+
+def test_the_readiness_types_are_frozen_tuples_and_not_collected():
+    module = workbench_module
+    assert module.TestCaseReadinessItem.__test__ is False
+    for cls in (
+        module.TestCaseReadinessItem,
+        module.AgentReadinessItem,
+        module.DraftReadinessResult,
+    ):
+        assert cls.__dataclass_params__.frozen is True
+
+
+def test_the_result_collections_are_tuples(factory):
+    _change_architect(factory)
+
+    result = _readiness(factory)
+
+    assert isinstance(result.agents, tuple)
+    assert isinstance(result.blocking_agents, tuple)
+    assert all(isinstance(agent.cases, tuple) for agent in result.agents)
+
+
+# --- the two entry points (C10) ---------------------------------------------
+
+
+class _RecordingParents(GraphConfiguration):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock_calls: list[bool] = []
+
+    def _lock_current_parents(self, session, *, exclusive):
+        self.lock_calls.append(exclusive)
+        return super()._lock_current_parents(session, exclusive=exclusive)
+
+
+def test_draft_readiness_takes_the_shared_parent_lock_once(factory):
+    parents = _RecordingParents()
+
+    _readiness(factory, AgentTestWorkbench(graph_configuration=parents))
+
+    assert parents.lock_calls == [False]
+
+
+def test_draft_readiness_refuses_a_session_already_in_a_transaction(factory):
+    with factory() as session:
+        session.begin()
+        with pytest.raises(RuntimeError):
+            AgentTestWorkbench().draft_readiness(session)
+        session.rollback()
+
+
+def test_the_locked_entry_point_refuses_a_session_with_no_transaction(factory):
+    with factory() as session:
+        with pytest.raises(RuntimeError):
+            AgentTestWorkbench().readiness_under_parent_lock(session)
+        assert session.in_transaction() is False
+
+
+def test_the_locked_entry_point_runs_inside_the_callers_exclusive_lock(factory):
+    """#269's binding (C10): the caller holds L0 exclusively; readiness takes
+    no lock of its own and neither begins nor ends the caller's transaction."""
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+    parents = _RecordingParents()
+    workbench = AgentTestWorkbench(graph_configuration=parents)
+
+    with factory() as session:
+        transaction = session.begin()
+        parents._lock_current_parents(session, exclusive=True)
+        locked = workbench.readiness_under_parent_lock(session)
+        assert session.in_transaction() is True
+        assert session.get_transaction() is transaction
+        transaction.rollback()
+
+    assert parents.lock_calls == [True]
+    assert locked == _readiness(factory)
+    assert _status(locked) == ("approved", False, run_id, "approved", True)
+
+
+def test_readiness_writes_nothing_and_reads_cases_and_runs_in_one_statement(factory):
+    """C11's one snapshot: exactly one statement reads ``agent_test_run``, and
+    it is the same statement that reads ``agent_test_case``."""
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+    before = _full_row(factory, run_id)
+    cases_before = _rows(factory)
+
+    with _CapturedStatements(factory) as captured:
+        _readiness(factory)
+
+    statements = [statement for statement, _parameters in captured.statements]
+    for statement in statements:
+        assert statement.lstrip().upper().startswith("SELECT"), statement
+    run_reads = [statement for statement in statements if "agent_test_run" in statement]
+    case_reads = [statement for statement in statements if "agent_test_case" in statement]
+    assert len(run_reads) == 1, run_reads
+    assert case_reads == run_reads
+    assert _full_row(factory, run_id) == before
+    assert _rows(factory) == cases_before
+
+
+# --- the one eligibility predicate (C11, C19c) ------------------------------
+
+
+def test_the_shared_eligibility_clause_selects_exactly_the_eligible_approvals(factory):
+    """The helper Task 4's cleanup reuses: correlated on a run, a case row and
+    that role's draft agent, it is true only for an eligible approval."""
+    _workbench, source = _changed_run(factory)
+    eligible = _insert_run_like(factory, source, run_at=_at(1), **_APPROVED)
+    _insert_run_like(factory, source, run_at=_at(2), **_REJECTED)
+    _insert_run_like(factory, source, run_at=_at(3), candidate_hash="e" * 64, **_APPROVED)
+    _insert_run_like(factory, source, run_at=_at(4), run_kind="published_baseline", **_APPROVED)
+
+    clause = workbench_module.eligible_approval_clause
+    with factory() as session:
+        ids = session.scalars(
+            select(AgentTestRun.id)
+            .join(AgentTestCase, AgentTestCase.id == AgentTestRun.test_case_id)
+            .join(GraphDraftAgent, GraphDraftAgent.agent_key == AgentTestCase.agent_key)
+            .where(clause(AgentTestRun, AgentTestCase, GraphDraftAgent))
+            .order_by(AgentTestRun.id)
+        ).all()
+
+    assert ids == [eligible]
+
+
+# --- C27: no model, adapter or runtime is touched ---------------------------
+
+
+@pytest.mark.parametrize("entry", ["draft_readiness", "readiness_under_parent_lock"])
+def test_readiness_never_touches_a_runtime(factory, monkeypatch, entry):
+    _workbench, run_id = _changed_run(factory)
+    _record(factory, run_id=run_id)
+
+    def _refuse():
+        raise AssertionError("readiness resolved the test runtime")
+
+    monkeypatch.setattr(workbench_module, "get_agent_test_runtime", _refuse)
+    isolated = AgentTestWorkbench(runtime=_ExplodingRuntime())  # type: ignore[arg-type]
+    monkeypatch.setattr(isolated, "_runtime", _refuse)
+
+    with factory() as session:
+        if entry == "draft_readiness":
+            result = isolated.draft_readiness(session)
+        else:
+            with session.begin():
+                isolated._graph_configuration._lock_current_parents(session, exclusive=False)
+                result = isolated.readiness_under_parent_lock(session)
+
+    assert _status(result) == ("approved", False, run_id, "approved", True)

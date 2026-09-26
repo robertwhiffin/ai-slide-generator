@@ -40,6 +40,13 @@ candidate (``execute_candidate_run``) or the active published definition
 Verdicts (#268 Task 1): ``record_verdict`` locks only the run row (L3 ``FOR
 UPDATE``), writes exactly the four verdict columns, and lets any
 ``IntegrityError`` propagate; the verdict columns are the audit trail.
+
+Readiness (#268 Task 2): ``draft_readiness`` takes the shared L0 parent lock in
+its own transaction; ``readiness_under_parent_lock`` runs inside a caller that
+already holds L0 (#269's publication binding).  A case is ready iff ANY run
+satisfies ``eligible_approval_clause``, the one eligibility predicate that
+cleanup reuses; only changed roles block.  Cases and runs are read in one
+statement with no case lock.  Readiness writes nothing and calls no model.
 """
 
 from __future__ import annotations
@@ -51,12 +58,13 @@ from datetime import datetime
 from typing import Any, Literal, Mapping
 
 from pydantic_core import to_jsonable_python
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, select, true, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql import Select
 
 from src.database.models.graph_configuration import (
+    AgentDefinitionRevision,
     AgentTestCase,
     AgentTestRun,
     GraphDraft,
@@ -554,6 +562,164 @@ def _verdict_notes_issues(notes: object) -> list[TestCaseIssue]:
             )
         ]
     return []
+
+
+# --- readiness (#268 Task 2) -------------------------------------------------
+
+ReadinessStatus = Literal["needs_test", "test_failed", "awaiting_review", "approved"]
+
+
+@dataclass(frozen=True)
+class TestCaseReadinessItem:
+    """One active required case row of a role, and the evidence that decides it.
+
+    ``run_id`` is the newest eligible approval when the status is ``approved``
+    (the run #269 links); otherwise the newest candidate run of this case row and
+    the role's current draft hash, or ``None`` when there is none (C11).
+    """
+
+    __test__ = False
+
+    agent_key: str
+    test_case_id: int
+    test_case_name: str
+    test_case_version: int
+    status: ReadinessStatus
+    blocking: bool
+    run_id: int | None
+    run_verdict: str | None
+    run_checks_passed: bool | None
+
+
+@dataclass(frozen=True)
+class AgentReadinessItem:
+    """One editable role.  Only a changed role can block (C11).
+
+    ``missing_required_case`` is set only on a changed role that has no active
+    required case: that role blocks with no case listed (#269 ``no_required_case``).
+    """
+
+    agent_key: str
+    candidate_hash: str
+    is_changed_from_base: bool
+    ready: bool
+    missing_required_case: bool
+    cases: tuple[TestCaseReadinessItem, ...]
+
+
+@dataclass(frozen=True)
+class DraftReadinessResult:
+    """The draft's publication readiness, read under one held L0 parent lock."""
+
+    draft_lock_version: int
+    base_release_id: int
+    all_ready: bool
+    blocking_agents: tuple[str, ...]
+    agents: tuple[AgentReadinessItem, ...]
+
+
+def _current_candidate_evidence_clause(run: Any, case: Any, draft_agent: Any) -> Any:
+    """A candidate run of exactly this case row and version, by this role, of the
+    role's current draft hash (C11, C12).  It carries no verdict term."""
+    return and_(
+        run.run_kind == "candidate",
+        run.test_case_id == case.id,
+        run.test_case_version == case.version,
+        run.agent_key == case.agent_key,
+        draft_agent.agent_key == case.agent_key,
+        run.candidate_hash == draft_agent.candidate_hash,
+    )
+
+
+def eligible_approval_clause(run: Any, case: Any, draft_agent: Any) -> Any:
+    """THE eligibility predicate (C11), shared by readiness and cleanup (C19c).
+
+    ``run``, ``case`` and ``draft_agent`` are the ``AgentTestRun``,
+    ``AgentTestCase`` and ``GraphDraftAgent`` entities (or aliases) the caller's
+    statement correlates.  True for an approved, completed, passing candidate run
+    of this case row and version and the role's current draft hash.  It does not
+    test the case's ``is_active`` / ``is_required``; the caller selects the cases.
+    """
+    return and_(
+        _current_candidate_evidence_clause(run, case, draft_agent),
+        run.verdict == "approved",
+        run.execution_status == "completed",
+        run.deterministic_checks_passed.is_(true()),
+    )
+
+
+def _newest_run_id(clause: Any) -> Any:
+    """The id of the newest run satisfying ``clause(run, case, draft_agent)``,
+    correlated on the outer case row and draft agent (``run_at DESC, id DESC``)."""
+    probe = aliased(AgentTestRun)
+    return (
+        select(probe.id)
+        .where(clause(probe, AgentTestCase, GraphDraftAgent))
+        .order_by(probe.run_at.desc(), probe.id.desc())
+        .limit(1)
+        .correlate(AgentTestCase, GraphDraftAgent)
+        .scalar_subquery()
+    )
+
+
+def _readiness_statement() -> Select:
+    """C11's one snapshot: every active required case row with its newest eligible
+    approval and its newest current candidate run, in one statement and with no
+    row lock, so a concurrent supersede is seen whole or not at all."""
+    eligible = aliased(AgentTestRun)
+    newest = aliased(AgentTestRun)
+    return (
+        select(
+            AgentTestCase.agent_key.label("agent_key"),
+            AgentTestCase.id.label("test_case_id"),
+            AgentTestCase.name.label("test_case_name"),
+            AgentTestCase.version.label("test_case_version"),
+            eligible.id.label("eligible_id"),
+            eligible.verdict.label("eligible_verdict"),
+            eligible.deterministic_checks_passed.label("eligible_checks_passed"),
+            newest.id.label("newest_id"),
+            newest.verdict.label("newest_verdict"),
+            newest.execution_status.label("newest_execution_status"),
+            newest.deterministic_checks_passed.label("newest_checks_passed"),
+        )
+        .select_from(AgentTestCase)
+        .join(GraphDraftAgent, GraphDraftAgent.agent_key == AgentTestCase.agent_key)
+        .outerjoin(eligible, eligible.id == _newest_run_id(eligible_approval_clause))
+        .outerjoin(newest, newest.id == _newest_run_id(_current_candidate_evidence_clause))
+        .where(AgentTestCase.is_active.is_(true()), AgentTestCase.is_required.is_(true()))
+        .order_by(AgentTestCase.id)
+    )
+
+
+def _case_readiness(row: Any, *, changed: bool) -> TestCaseReadinessItem:
+    if row.eligible_id is not None:
+        status: ReadinessStatus = "approved"
+        run = (row.eligible_id, row.eligible_verdict, row.eligible_checks_passed)
+    else:
+        run = (row.newest_id, row.newest_verdict, row.newest_checks_passed)
+        if row.newest_id is None:
+            status = "needs_test"
+        elif row.newest_verdict == "rejected":
+            status = "test_failed"
+        elif (
+            row.newest_verdict is None
+            and row.newest_execution_status == "completed"
+            and row.newest_checks_passed
+        ):
+            status = "awaiting_review"
+        else:
+            status = "test_failed"
+    return TestCaseReadinessItem(
+        agent_key=row.agent_key,
+        test_case_id=row.test_case_id,
+        test_case_name=row.test_case_name,
+        test_case_version=row.test_case_version,
+        status=status,
+        blocking=changed and status != "approved",
+        run_id=run[0],
+        run_verdict=run[1],
+        run_checks_passed=None if run[2] is None else bool(run[2]),
+    )
 
 
 @dataclass(frozen=True)
@@ -1271,6 +1437,88 @@ class AgentTestWorkbench:
                 )
             )
             return _evidence_from_row(row, synthetic_payload=synthetic_payload)
+
+    # --- readiness (#268) -------------------------------------------------
+
+    def draft_readiness(self, session: Session) -> DraftReadinessResult:
+        """The route's entry point (C10): its own transaction, the shared L0
+        parent lock (release then draft ``FOR SHARE``, as ``read_workbench``),
+        then the locked read.  It writes nothing and touches no runtime (C27)."""
+        self._require_no_transaction(session)
+        with session.begin():
+            self._graph_configuration._lock_current_parents(session, exclusive=False)
+            return self.readiness_under_parent_lock(session)
+
+    def readiness_under_parent_lock(self, session: Session) -> DraftReadinessResult:
+        """Readiness inside the CALLER's transaction; #269's binding (C10, Q4).
+
+        The caller must already hold L0 (``_lock_current_parents``, shared or
+        exclusive), so the draft row and every draft hash are fixed.  This never
+        begins, commits or rolls back, takes no lock (no case lock: C11), writes
+        nothing, and touches no runtime (C27).  Cases and runs are read in one
+        statement (``_readiness_statement``).
+        """
+        if not session.in_transaction():
+            raise RuntimeError(
+                "readiness_under_parent_lock needs the caller's open transaction "
+                "holding the graph configuration parent lock"
+            )
+        lock_version, base_release_id = session.execute(
+            select(GraphDraft.lock_version, GraphDraft.base_release_id)
+        ).one()
+        candidate_hashes: dict[str, str] = {
+            key: value
+            for key, value in session.execute(
+                select(GraphDraftAgent.agent_key, GraphDraftAgent.candidate_hash)
+            )
+        }
+        published_hashes: dict[str, str] = {
+            key: value
+            for key, value in session.execute(
+                select(GraphReleaseAgent.agent_key, AgentDefinitionRevision.content_hash)
+                .join(
+                    AgentDefinitionRevision,
+                    AgentDefinitionRevision.id
+                    == GraphReleaseAgent.agent_definition_revision_id,
+                )
+                .where(GraphReleaseAgent.graph_release_id == base_release_id)
+            )
+        }
+        expected = set(GRAPH_V1_AGENT_KEYS)
+        if set(candidate_hashes) != expected or set(published_hashes) != expected:
+            raise GraphConfigurationIntegrityError(
+                "readiness needs the exact role set in the draft and its base release"
+            )
+        rows_by_role: dict[str, list[Any]] = {key: [] for key in GRAPH_V1_AGENT_KEYS}
+        for row in session.execute(_readiness_statement()):
+            rows_by_role[row.agent_key].append(row)
+
+        agents: list[AgentReadinessItem] = []
+        for agent_key in GRAPH_V1_AGENT_KEYS:
+            # The workbench snapshot's own ``changed`` predicate (C11).
+            changed = candidate_hashes[agent_key] != published_hashes[agent_key]
+            cases = tuple(
+                _case_readiness(row, changed=changed) for row in rows_by_role[agent_key]
+            )
+            missing = changed and not cases
+            agents.append(
+                AgentReadinessItem(
+                    agent_key=agent_key,
+                    candidate_hash=candidate_hashes[agent_key],
+                    is_changed_from_base=changed,
+                    ready=not missing and not any(case.blocking for case in cases),
+                    missing_required_case=missing,
+                    cases=cases,
+                )
+            )
+        blocking_agents = tuple(agent.agent_key for agent in agents if not agent.ready)
+        return DraftReadinessResult(
+            draft_lock_version=lock_version,
+            base_release_id=base_release_id,
+            all_ready=not blocking_agents,
+            blocking_agents=blocking_agents,
+            agents=tuple(agents),
+        )
 
     # --- test run internals ----------------------------------------------
 
