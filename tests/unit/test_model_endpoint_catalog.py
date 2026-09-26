@@ -92,6 +92,49 @@ def test_list_system_models_selects_foundation_endpoints_once_and_sorts_exact_na
     assert serving_endpoints.list_calls == 1
 
 
+def test_list_system_models_includes_an_endpoint_whose_foundation_entity_is_not_first():
+    """Catches discovery that classifies an endpoint by its first served entity only."""
+    mixed = SimpleNamespace(
+        name="mixed-entities",
+        task=None,
+        config=SimpleNamespace(
+            served_entities=[
+                SimpleNamespace(
+                    foundation_model=None,
+                    external_model=SimpleNamespace(name="external-first"),
+                ),
+                SimpleNamespace(
+                    foundation_model=foundation_model(
+                        display_name="Second entity", description="found", docs="d"
+                    )
+                ),
+            ]
+        ),
+    )
+    external_only = SimpleNamespace(
+        name="external-only",
+        task="llm/v1/chat",
+        config=SimpleNamespace(
+            served_entities=[
+                SimpleNamespace(
+                    foundation_model=None,
+                    external_model=SimpleNamespace(name="external"),
+                )
+            ]
+        ),
+    )
+    serving_endpoints = RecordingServingEndpoints(listed=[external_only, mixed])
+
+    discovery = catalog_for(serving_endpoints).list_system_models()
+
+    assert discovery == SystemModelDiscovery(
+        endpoints=(
+            SystemModelEndpoint("mixed-entities", "Second entity", "found", "d"),
+        )
+    )
+    assert serving_endpoints.list_calls == 1
+
+
 def test_list_system_models_returns_empty_success_and_never_fabricates_missing_name():
     empty = catalog_for(RecordingServingEndpoints(listed=[])).list_system_models()
     assert empty == SystemModelDiscovery(endpoints=())
