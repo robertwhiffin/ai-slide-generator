@@ -368,7 +368,8 @@ describe('the forbidden-action guard', () => {
       'Move custom block 1 up', 'Move custom block 1 down', 'Discard retained values',
       'Refresh models',
       'Load Agent Test Cases', 'Refresh test cases', 'Add test case', 'Save test case',
-      'Cancel', 'Retire test case', 'Confirm retire', 'Keep test case',
+      'Cancel', 'Retire test case', 'Confirm retire', 'Keep test case', 'Edit test case',
+      'Save new version',
       ...NODE_ORDER,
     ]) {
       expect(forbidsActionName(name)).toBe(false);
@@ -958,10 +959,11 @@ function mockWorkbenchApi(routes: {
   listCases?: TestCaseListResponder;
   createCase?: RouteResponder;
   retireCase?: TestCaseRetireResponder;
+  updateCase?: (testCaseId: number, body: Record<string, unknown>, call: number) => Promise<object> | object;
 }) {
   const counts = {
     put: 0, upgrade: 0, source: 0, probe: 0,
-    candidateRun: 0, baselineRun: 0, listCases: 0, createCase: 0, retireCase: 0,
+    candidateRun: 0, baselineRun: 0, listCases: 0, createCase: 0, retireCase: 0, updateCase: 0,
   };
   const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (isCatalogUrl(url)) return defaultCatalogResponse();
@@ -987,6 +989,11 @@ function mockWorkbenchApi(routes: {
     if (baselineMatch && init?.method === 'POST') {
       if (!routes.baselineRun) throw new Error('unexpected published baseline test run POST');
       return routes.baselineRun(baselineMatch[1] as AgentKey, body, counts.baselineRun++);
+    }
+    const updateMatch = TEST_CASE_URL.exec(url);
+    if (updateMatch && init?.method === 'PUT') {
+      if (!routes.updateCase) throw new Error('unexpected test case PUT');
+      return routes.updateCase(Number(updateMatch[1]), body, counts.updateCase++);
     }
     if (listMatch && init?.method === 'POST') {
       if (!routes.createCase) throw new Error('unexpected test case POST');
@@ -3057,6 +3064,7 @@ const NAMES_266 = [
 const NAMES_267 = [
   RUN_BUTTON, BASELINE_BUTTON, 'Load Agent Test Cases', 'Refresh test cases', 'Add test case',
   'Save test case', 'Retire test case', 'Confirm retire', 'Keep test case', 'Agent Test Cases',
+  'Edit test case', 'Save new version',
   'Test case name', 'Synthetic payload (JSON)', 'Required test case', 'Design system active',
   'Test run views', 'Input', 'Compare', 'Checks', 'Synthetic payload', 'Assembled prompt',
   'Model payload sent', 'Test case evidence', 'Published baseline evidence', 'Test case issues',
@@ -3519,6 +3527,80 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     });
     await act(() => result.current.runPublishedBaseline('architect', 101));
     expect(hookFetch.mock.calls.filter(([url]) => isAgentTestUrl(url))).toHaveLength(1);
+  });
+
+  it('Edit test case supersedes the selected version through one PUT, selects the new version, and runs it', async () => {
+    const version2 = syntheticAgentTestCase({ id: 111, version: 2, synthetic_payload: { user_request: 'Revised ask' } });
+    const fetchMock = mockWorkbenchApi({
+      listCases: caseList(),
+      updateCase: () => apiResponse(200, version2),
+      candidateRun: () => apiResponse(201, syntheticTestRunEvidence({ test_case_id: 111, test_case_version: 2 })),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const select = await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton('Edit test case'));
+    fireEvent.change(within(testingAside()).getByRole('textbox', { name: 'Synthetic payload (JSON)' }), {
+      target: { value: '{"user_request": "Revised ask"}' },
+    });
+    fireEvent.click(asideButton('Save new version'));
+    await waitFor(() => expect(select).toHaveValue('111'));
+    expect(within(select).getAllByRole('option').map((option) => option.textContent))
+      .toEqual(['Architect quarterly revenue outline · v2 · required']);
+    const puts = callsMatching(fetchMock, TEST_CASE_URL, 'PUT');
+    expect(puts).toHaveLength(1);
+    expect(String(puts[0][0])).toMatch(/\/api\/admin\/agent-definitions\/test-cases\/101$/);
+    expect(JSON.parse(String((puts[0][1] as RequestInit).body))).toEqual({
+      name: 'Architect quarterly revenue outline',
+      synthetic_payload: { user_request: 'Revised ask' },
+      assembly_context: { design_system_active: false },
+      is_required: true,
+    });
+    expect(callsMatching(fetchMock, TEST_CASES_URL, 'POST')).toHaveLength(0);
+    expect(putCalls(fetchMock).filter(([url]) => !TEST_CASE_URL.test(String(url)))).toHaveLength(0);
+
+    fireEvent.click(asideButton(RUN_BUTTON));
+    await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
+    expect(candidateRunBodies(fetchMock)).toEqual(['{"test_case_id":111,"lock_version":0}']);
+  });
+
+  it('an identical-content edit returns the current version and says that no new version was created', async () => {
+    const fetchMock = mockWorkbenchApi({ listCases: caseList(), updateCase: () => apiResponse(200, syntheticAgentTestCase()) });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const select = await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton('Edit test case'));
+    fireEvent.click(asideButton('Save new version'));
+    expect(await within(testingAside()).findByText(
+      'No change: this content matches version 1, so no new version was created.',
+    )).toBeInTheDocument();
+    expect(select).toHaveValue('101');
+    expect(callsMatching(fetchMock, TEST_CASE_URL, 'PUT')).toHaveLength(1);
+    expect(within(testingAside()).queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['the last-required 422', () => apiResponse(422, syntheticInvalidTestCase([{
+      field: 'is_required',
+      code: 'last_required_case',
+      message: 'A role must keep at least one active required test case. Add its replacement before retiring this one.',
+    }])), 'is_required: A role must keep at least one active required test case. Add its replacement before retiring this one.'],
+    ['a stale 409', () => apiResponse(409, syntheticStaleTestCase(101)),
+      'This test case version is no longer active. Refresh test cases and run its current version.'],
+  ])('an edit refused by %s is shown and keeps the form', async (_label, respond, text) => {
+    mockWorkbenchApi({ listCases: caseList(), updateCase: respond });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+
+    fireEvent.click(asideButton('Edit test case'));
+    fireEvent.click(within(testingAside()).getByRole('checkbox', { name: 'Required test case' }));
+    fireEvent.click(asideButton('Save new version'));
+    await waitFor(() => expect(testingAside()).toHaveTextContent(text));
+    expect(asideButton('Save new version')).toBeEnabled();
+    expect(within(testingAside()).getByRole('checkbox', { name: 'Required test case' })).not.toBeChecked();
   });
 
   it('a pending case write holds the one gate', async () => {

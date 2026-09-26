@@ -7,7 +7,9 @@ import {
   listTestCases,
   probeDraftStructuredOutput,
   retireTestCase,
+  updateTestCase,
   type CreateTestCaseRequest,
+  type UpdateTestCaseRequest,
   type TestCaseListEntry,
   readDraftLegacyPromptSource,
   StructuredOutputProbeApiError,
@@ -418,10 +420,36 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     }
   };
 
+  /**
+   * Supersedes one active case version on the one gate. Returns the version the server
+   * returned (the new one, or the current one for an identical-content no-op), or `null`
+   * when it was refused.
+   */
+  const updateAgentTestCase = async (
+    agentKey: AgentKey,
+    testCaseId: number,
+    request: UpdateTestCaseRequest,
+  ): Promise<TestCaseListEntry | null> => {
+    const started = startTestOperation('testCaseUpdate', agentKey, testCaseId);
+    if (started === null) return null;
+    const { requestId } = started;
+    try {
+      const testCase = await updateTestCase(testCaseId, request);
+      dispatch({ type: 'testCaseUpdated', requestId, testCase });
+      return testCase;
+    } catch (error) {
+      dispatch({ type: 'testOperationFailed', requestId, ...testOperationFailure(error, 'update') });
+      return null;
+    } finally {
+      finishTestOperation(requestId);
+    }
+  };
+
   return {
     state,
     edit,
     save,
+    updateAgentTestCase,
     probeStructuredOutput,
     loadTestCases,
     runTestCase,

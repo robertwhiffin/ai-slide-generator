@@ -5,6 +5,7 @@ import type {
   JsonValue,
   TestCaseListEntry,
   TestRunEvidence,
+  UpdateTestCaseRequest,
 } from '../../../api/agentDefinitions';
 import type { AgentTestingState, TestOperationKind } from './draftEditorState';
 
@@ -15,6 +16,9 @@ export const SYNTHETIC_DATA_WARNING =
 export const REPLACE_ORDER_HINT =
   'To replace a test case, add the new case first and then retire the old one: '
   + 'a role cannot lose its last required case.';
+/** I-1: an edit keeps the case and versions it; P3's copy is for replacing it with another. */
+export const EDIT_HINT =
+  'Edit test case saves a new version of the same case and keeps the old version as history.';
 export const TEST_RUN_UNSAVED_HINT = "Save this role's edits before running a test case.";
 const NO_RUN_YET = 'No run yet';
 const BASELINE_NOT_RECORDED = 'Baseline not recorded';
@@ -27,6 +31,7 @@ const PENDING_TEXT: Record<TestOperationKind, string> = {
   baselineRun: 'Running the published baseline…',
   testCaseCreate: 'Saving the test case…',
   testCaseRetire: 'Retiring the test case…',
+  testCaseUpdate: 'Saving the new test case version…',
 };
 
 const VIEWS = ['Input', 'Compare', 'Checks'] as const;
@@ -49,6 +54,11 @@ export interface TestRunPanelProps {
   onRunPublishedBaseline(agentKey: AgentKey, testCaseId: number): void | Promise<void>;
   onCreateTestCase(agentKey: AgentKey, request: CreateTestCaseRequest): Promise<TestCaseListEntry | null>;
   onRetireTestCase(agentKey: AgentKey, testCaseId: number): void | Promise<void>;
+  onUpdateTestCase(
+    agentKey: AgentKey,
+    testCaseId: number,
+    request: UpdateTestCaseRequest,
+  ): Promise<TestCaseListEntry | null>;
 }
 
 /** Server evidence is only ever rendered as text: React escapes it, and nothing here parses markup. */
@@ -184,17 +194,24 @@ function parsePayload(text: string): Record<string, JsonValue> | null {
   }
 }
 
-function AddTestCaseForm({ agentKey, disabled, onCreate, onClose }: {
+/**
+ * The add form, and the edit form for a new version of an existing case (`editing`):
+ * an edit keeps the case's immutable name and prefills its current content.
+ */
+function TestCaseForm({ agentKey, disabled, editing, onCreate, onClose }: {
   agentKey: AgentKey;
   disabled: boolean;
+  editing: TestCaseListEntry | null;
   onCreate(request: CreateTestCaseRequest): Promise<TestCaseListEntry | null>;
   onClose(created: TestCaseListEntry | null): void;
 }) {
   const id = useId();
-  const [name, setName] = useState('');
-  const [payloadText, setPayloadText] = useState('{}');
-  const [isRequired, setIsRequired] = useState(false);
-  const [designSystemActive, setDesignSystemActive] = useState(false);
+  const [name, setName] = useState(editing?.name ?? '');
+  const [payloadText, setPayloadText] = useState(editing ? jsonText(editing.synthetic_payload) : '{}');
+  const [isRequired, setIsRequired] = useState(editing?.is_required ?? false);
+  const [designSystemActive, setDesignSystemActive] = useState(
+    editing?.assembly_context.design_system_active ?? false,
+  );
   const [formError, setFormError] = useState<string | null>(null);
 
   const submit = async () => {
@@ -221,16 +238,20 @@ function AddTestCaseForm({ agentKey, disabled, onCreate, onClose }: {
 
   return (
     <div className="space-y-2 rounded-md border border-gray-200 p-3">
-      <div>
-        <label htmlFor={`${id}-name`} className="block text-xs font-medium text-gray-700">Test case name</label>
-        <input
-          id={`${id}-name`}
-          type="text"
-          value={name}
-          onChange={(event) => setName(event.currentTarget.value)}
-          className="mt-1 block w-full rounded-md border border-gray-300 p-1 text-xs"
-        />
-      </div>
+      {editing ? (
+        <p className="text-xs text-gray-700">{`Name: ${editing.name}`}</p>
+      ) : (
+        <div>
+          <label htmlFor={`${id}-name`} className="block text-xs font-medium text-gray-700">Test case name</label>
+          <input
+            id={`${id}-name`}
+            type="text"
+            value={name}
+            onChange={(event) => setName(event.currentTarget.value)}
+            className="mt-1 block w-full rounded-md border border-gray-300 p-1 text-xs"
+          />
+        </div>
+      )}
       <div>
         <label htmlFor={`${id}-payload`} className="block text-xs font-medium text-gray-700">
           Synthetic payload (JSON)
@@ -260,7 +281,7 @@ function AddTestCaseForm({ agentKey, disabled, onCreate, onClose }: {
       {formError && <p id={`${id}-error`} role="alert" className="text-xs text-red-700">{formError}</p>}
       <div className="flex gap-2">
         <button type="button" disabled={disabled} onClick={() => { void submit(); }} className="rounded-md border border-gray-300 px-2 py-1 text-xs disabled:text-gray-400">
-          Save test case
+          {editing ? 'Save new version' : 'Save test case'}
         </button>
         <button type="button" onClick={() => onClose(null)} className="rounded-md px-2 py-1 text-xs">
           Cancel
@@ -288,11 +309,13 @@ export function TestRunPanel({
   onRunPublishedBaseline,
   onCreateTestCase,
   onRetireTestCase,
+  onUpdateTestCase,
 }: TestRunPanelProps) {
   const id = useId();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [view, setView] = useState<View>('Input');
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [confirmingRetire, setConfirmingRetire] = useState(false);
 
   const selected = testing.cases.find((item) => item.id === selectedId) ?? testing.cases[0] ?? null;
@@ -328,6 +351,7 @@ export function TestRunPanel({
           ))}
         </ul>
       )}
+      {testing.notice && <p aria-live="polite" className="text-xs text-gray-700">{testing.notice}</p>}
       {pendingOperation !== null && (
         <p aria-live="polite" className="text-xs text-gray-600">{PENDING_TEXT[pendingOperation]}</p>
       )}
@@ -360,6 +384,7 @@ export function TestRunPanel({
                   onChange={(event) => {
                     setSelectedId(Number(event.currentTarget.value));
                     setConfirmingRetire(false);
+                    setEditingId(null);
                   }}
                   className="mt-1 block w-full rounded-md border border-gray-300 p-1 text-xs"
                 >
@@ -409,13 +434,31 @@ export function TestRunPanel({
           )}
 
           <div className="space-y-2">
+            <p className="text-xs text-gray-600">{EDIT_HINT}</p>
             <p className="text-xs text-gray-600">{REPLACE_ORDER_HINT}</p>
             <div className="flex flex-wrap gap-2">
+              {selected !== null && editingId !== selected.id && (
+                <button
+                  type="button"
+                  disabled={operationsDisabled}
+                  onClick={() => {
+                    setEditingId(selected.id);
+                    setAdding(false);
+                    setConfirmingRetire(false);
+                  }}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-xs disabled:text-gray-400"
+                >
+                  Edit test case
+                </button>
+              )}
               {!adding && (
                 <button
                   type="button"
                   disabled={operationsDisabled}
-                  onClick={() => setAdding(true)}
+                  onClick={() => {
+                    setAdding(true);
+                    setEditingId(null);
+                  }}
                   className="rounded-md border border-gray-300 px-2 py-1 text-xs disabled:text-gray-400"
                 >
                   Add test case
@@ -453,10 +496,29 @@ export function TestRunPanel({
                 </div>
               </div>
             )}
-            {adding && (
-              <AddTestCaseForm
+            {selected !== null && editingId === selected.id && (
+              <TestCaseForm
+                key={`edit-${selected.id}`}
                 agentKey={agentKey}
                 disabled={operationsDisabled}
+                editing={selected}
+                onCreate={(request) => onUpdateTestCase(agentKey, selected.id, {
+                  name: selected.name,
+                  synthetic_payload: request.synthetic_payload,
+                  assembly_context: request.assembly_context,
+                  is_required: request.is_required,
+                })}
+                onClose={(updated) => {
+                  setEditingId(null);
+                  if (updated !== null) setSelectedId(updated.id);
+                }}
+              />
+            )}
+            {adding && (
+              <TestCaseForm
+                agentKey={agentKey}
+                disabled={operationsDisabled}
+                editing={null}
                 onCreate={(request) => onCreateTestCase(agentKey, request)}
                 onClose={(created) => {
                   setAdding(false);

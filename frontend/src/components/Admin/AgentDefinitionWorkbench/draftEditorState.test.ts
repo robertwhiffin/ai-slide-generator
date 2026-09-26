@@ -2595,7 +2595,7 @@ describe('structured-output probe in the one draft gate', () => {
 // ============================================================
 
 function testPending(
-  operation: 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire',
+  operation: 'testRun' | 'baselineRun' | 'testCaseCreate' | 'testCaseRetire' | 'testCaseUpdate',
   agentKey: AgentKey = 'architect',
   requestId = 1,
   testCaseId = 101,
@@ -2622,6 +2622,7 @@ describe('Agent Test Case and test run reducer', () => {
         baselineEvidence: null,
         error: null,
         issues: [],
+        notice: null,
       });
     }
   });
@@ -2759,6 +2760,28 @@ describe('Agent Test Case and test run reducer', () => {
       type: 'testCaseRetired', requestId: 62, testCase: syntheticAgentTestCase({ is_active: false }),
     });
     expect(state.byAgent.architect.testing.cases.map((item) => item.id)).toEqual([202]);
+  });
+
+  it('a supersede replaces the edited version in the list, and an identical-content no-op says so', () => {
+    let state = loadedCases(createDraftEditorState(workbench()));
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testCaseUpdate', 'architect', 70, 101) });
+    const next = syntheticAgentTestCase({ id: 111, version: 2 });
+    const superseded = draftEditorReducer(state, { type: 'testCaseUpdated', requestId: 70, testCase: next });
+    expect(superseded.pendingSave).toBeNull();
+    expect(superseded.byAgent.architect.testing.cases).toEqual([next]);
+    expect(superseded.byAgent.architect.testing.notice).toBeNull();
+
+    const noOp = draftEditorReducer(state, { type: 'testCaseUpdated', requestId: 70, testCase: syntheticAgentTestCase() });
+    expect(noOp.byAgent.architect.testing.cases).toEqual([syntheticAgentTestCase()]);
+    expect(noOp.byAgent.architect.testing.notice)
+      .toBe('No change: this content matches version 1, so no new version was created.');
+
+    const wrongRole = draftEditorReducer(state, {
+      type: 'testCaseUpdated', requestId: 70, testCase: syntheticAgentTestCase({ id: 111, agent_key: 'builder' }),
+    });
+    expect(wrongRole.byAgent.architect.testing.cases).toEqual([syntheticAgentTestCase()]);
+    expect(wrongRole.byAgent.architect.testing.error)
+      .toBe('Unable to update the test case because the server response was invalid.');
   });
 
   it('a failed test operation keeps the role\'s draft editor state and records only the panel error', () => {

@@ -1171,6 +1171,14 @@ export interface CreateTestCaseRequest {
   is_required: boolean;
 }
 
+/** `PUT /test-cases/{id}`: supersede an active version. `name` is echoed, never changed. */
+export interface UpdateTestCaseRequest {
+  name: string;
+  synthetic_payload: Record<string, JsonValue>;
+  assembly_context: TestCaseAssemblyContext;
+  is_required: boolean;
+}
+
 /** `POST /draft/{agent_key}/test-runs`: the case and the lock of the saved candidate. */
 export interface CandidateTestRunRequest {
   test_case_id: number;
@@ -1497,6 +1505,33 @@ export async function createTestCase(request: CreateTestCaseRequest): Promise<Te
     return payload;
   }
   throw testCaseRefusal(status, payload, statusText);
+}
+
+/**
+ * Supersedes one **active** version: the server retires it and returns `version + 1`
+ * with the same name, or returns the current version unchanged when the content is
+ * identical. The old row is kept as history.
+ */
+export async function updateTestCase(
+  testCaseId: number,
+  request: UpdateTestCaseRequest,
+): Promise<TestCaseListEntry> {
+  const response = await fetch(`${AGENT_DEFINITIONS_URL}/test-cases/${testCaseId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: request.name,
+      synthetic_payload: request.synthetic_payload,
+      assembly_context: { design_system_active: request.assembly_context.design_system_active },
+      is_required: request.is_required,
+    }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    if (!isTestCaseListEntry(payload) || !payload.is_active) throw new InvalidTestRunResponseError();
+    return payload;
+  }
+  throw testCaseRefusal(response.status, payload, response.statusText);
 }
 
 /** Retires one case version with a bodyless DELETE; the row is kept as history. */
