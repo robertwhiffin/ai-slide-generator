@@ -60,3 +60,11 @@ Corrections 34-55 appended (22 new; errata to C7, C17, C31 as C44, C36, C35). Pr
 Baseline by cause (`reports/preflight.md`): focused unit 1009/0/0; PG 11 files all green, zero skips; full unit 6 failed / 6784 / 110 = the known six by node and first line; Vitest workbench 622; typecheck clean.
 OPEN FOR CONTROLLER: C48 (Q3 trigger makes #268's verdict route 500 on a published run; proposed typed `linked_to_release` refusal) must be ruled before Task 4.
 Gate: Task 1 GO once its brief carries C2-C6, C8-C9, C17+C36, C23-C25, C37 (and C1/C10 Phase A parts).
+
+## Task 0 — 2026-09-26
+Task 0 (phases A+B together; Opus) DONE at `f1ec89d98`: TASK1_BASE = INTEGRATION_BASE = `cd63aa09b` (C55: all predecessors merged before any Phase A work); `predecessor-heads.md` (#264 `c040dbde0`/`e3aa3650c`, #266 `e91fcd856`/`3189ad5ad`, #267 `a08389ec3`/`adbc6fef7`, #268 `16aa02b76`/`dd129b832`, ancestry proven); corrections 34–55 + per-task self-consistency + producer/consumer tables. Baseline: focused unit 1009/0/0; 11 PG files zero skips all green; full unit 6 (baseline nodes/causes) / 6784 / 110; workbench Vitest 622; typecheck 0.
+Q2/Q4/Q8/Q9 answered from code (C39–C42). C19 = outcome (a) (C43).
+Ruling (C48): ADOPT the proposed typed refusal — `record_verdict` re-checks the link in a NEW statement after the L3 lock (C33) → `IneligibleForApprovalError(reason="linked_to_release")` → 422 `ineligible_for_approval` with the stated message; Python literal + schema + message table in Task 4, TS reasons in Task 6 (parity pinned by the #268 join test). The C14 trigger stays the backstop. — an unexplained 500 on a normal UI action is worse than editing three merged #268 files. — cost if wrong: small, three files.
+Ruling (C47): accepted as reasoned; Task 4's RED must record the observed cause.
+Concern 3 (builder approvability under the fake adapter): carried to Task 8's brief as a re-probe.
+Task 0: complete. GO for Task 1 (TASK_BASE `f1ec89d98`).
