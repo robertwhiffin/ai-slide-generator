@@ -857,3 +857,20 @@ def test_postgres_agent_test_run_verdict_columns_stay_writable(postgres_engine) 
     for column_name in AgentTestRun.__table__.columns.keys():
         if column_name not in verdict_columns:
             assert getattr(after, column_name) == getattr(before, column_name)
+
+
+def test_postgres_rejects_null_evidence_kind_on_a_release_link(postgres_engine) -> None:
+    with postgres_engine.begin() as conn:
+        parents = _seed_run_parents(conn)
+        run_id = _insert_run(conn, parents)
+    error = _expect_sqlstate(
+        postgres_engine,
+        GraphReleaseTestRun.__table__.insert().values(
+            graph_release_id=parents["release_id"],
+            agent_test_run_id=run_id,
+            evidence_kind=None,
+        ),
+        "23502",
+        None,
+    )
+    assert error.orig.diag.column_name == "evidence_kind"
