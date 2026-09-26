@@ -583,10 +583,13 @@ async def save_agent_definition_draft(
         assembly_rules=assembly_rules,
         schema_overlay=schema_overlay,
     )
+    # The save holds the draft row locks while it makes the remote endpoint check,
+    # so it runs off the event loop, exactly as the structured-output probe does.
     try:
-        outcome = GraphConfiguration(
-            remote_endpoint_validator=remote_endpoint_validator
-        ).save_editable_model_draft(
+        outcome = await run_in_threadpool(
+            GraphConfiguration(
+                remote_endpoint_validator=remote_endpoint_validator
+            ).save_editable_model_draft,
             db,
             agent_key=cast(AgentKey, agent_key),
             expected_lock_version=save_request.lock_version,

@@ -4428,6 +4428,41 @@ def test_model_endpoint_probe_route_calls_the_model_off_the_event_loop(
     assert loop_running == [False]
 
 
+def test_draft_save_route_runs_remote_endpoint_validation_off_the_event_loop(
+    session_factory, monkeypatch
+):
+    """Catches the save PUT's lock-held remote endpoint check blocking the event loop."""
+    import asyncio
+
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+    validated: list[str] = []
+
+    class _LoopObservingRemoteValidator:
+        def validate(self, content) -> None:
+            validated.append(content.model.endpoint_name)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop_running.append(False)
+            else:
+                loop_running.append(True)
+
+    with _app_for(
+        session_factory, remote_endpoint_validator=_LoopObservingRemoteValidator()
+    ) as client:
+        before = _workbench(client)
+        response = client.put(
+            _draft_save_url(), json=_endpoint_save_body(before, _CUSTOM_ENDPOINT)
+        )
+
+    assert response.status_code == 200
+    assert validated == [_CUSTOM_ENDPOINT]
+    assert loop_running == [False], (
+        f"remote endpoint validation ran on the event loop: {loop_running}"
+    )
+
+
 def test_model_endpoint_probe_route_later_save_cannot_change_the_reported_identity(
     session_factory, monkeypatch
 ):
