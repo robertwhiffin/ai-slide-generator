@@ -18,6 +18,7 @@ import type {
   LegacyPromptSourceResponse,
   ModelAgentNode,
   ProtectedStageView,
+  SystemModelEndpoint,
 } from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
@@ -1486,3 +1487,164 @@ export const ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
     },
   ],
 };
+
+// ============================================================
+// #266 model endpoint discovery (GET /api/admin/agent-definitions/model-endpoints)
+// ============================================================
+
+/** The exact seed endpoint every packaged role starts on. */
+export const SEED_MODEL_ENDPOINT_NAME = 'databricks-claude-opus-4-6';
+
+/**
+ * A populated discovery list in backend order. The second item's display name differs
+ * from its exact name, and the third keeps an exotic spelling with spaces, so a client
+ * that selects anything but `name` byte-for-byte is observable.
+ */
+export const syntheticSystemModelEndpoints: SystemModelEndpoint[] = [
+  {
+    name: 'databricks-claude-opus-4-6',
+    display_name: 'Claude Opus 4.6',
+    description: 'Synthetic frontier chat model.',
+    docs: 'https://docs.example.invalid/claude-opus-4-6',
+  },
+  {
+    name: 'databricks-gpt-oss-120b',
+    display_name: 'GPT OSS 120B',
+    description: 'Synthetic open-weight chat model.',
+    docs: null,
+  },
+  {
+    name: 'Team Shared Endpoint (EU)',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
+];
+
+/** A newer family member that a refresh may expose; it must never move the seed. */
+export const syntheticNewerModelEndpoint: SystemModelEndpoint = {
+  name: 'databricks-claude-opus-4-7',
+  display_name: 'Claude Opus 4.7',
+  description: 'Synthetic newer frontier chat model.',
+  docs: 'https://docs.example.invalid/claude-opus-4-7',
+};
+
+export function syntheticModelEndpointDiscovery(
+  items: SystemModelEndpoint[] = syntheticSystemModelEndpoints,
+): { items: SystemModelEndpoint[] } {
+  return { items: structuredClone(items) };
+}
+
+/** The exact 403 envelope the discovery route returns for a forbidden identity. */
+export const MODEL_ENDPOINT_DISCOVERY_FORBIDDEN = {
+  code: 'catalog_forbidden',
+  message: 'Model endpoint discovery is not permitted with this workspace identity.',
+  retryable: false,
+} as const;
+
+/** The exact 503 envelope the discovery route returns when the catalog is unavailable. */
+export const MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE = {
+  code: 'catalog_unavailable',
+  message: 'Model endpoint discovery is temporarily unavailable. Retry the request.',
+  retryable: true,
+} as const;
+
+/**
+ * The one endpoint-name policy case table (#266). The client policy table in
+ * `AgentDefinitionWorkbench.test.tsx` drives `validateDraftForm` with it, and
+ * `tests/unit/test_endpoint_name_policy_client_join.py` reads this block as text and
+ * drives the server's `validate_endpoint_name_policy` with the same cases. Keep the
+ * body strict JSON (double quotes, no trailing commas, no comments).
+ */
+export const ENDPOINT_NAME_POLICY_CASES: Record<'rejected' | 'accepted', string[]> = {
+  "rejected": [
+    "https://example.cloud.databricks.com/serving-endpoints/x/invocations",
+    "  http://example.invalid",
+    "//example.invalid/x",
+    "ftp://example.invalid",
+    "a/b",
+    "a\\b",
+    "x?y=1",
+    "x#frag",
+    "a%2Fb",
+    ".",
+    "..",
+    "tab\tname",
+    "nul\u0000name",
+    "unit\u001fsep",
+    "del\u007fname"
+  ],
+  "accepted": [
+    "databricks-claude-opus-4-6",
+    "Team Shared Endpoint (EU)",
+    " leading and trailing ",
+    "a.b",
+    "...",
+    "mailto:x",
+    "ünïcode-endpoint"
+  ]
+};
+
+// ============================================================
+// #266 saved-candidate structured-output probe
+// (POST /api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe)
+// ============================================================
+
+/** The exact seed identity every packaged role's saved candidate starts on. */
+export const SEED_CANDIDATE_HASH = 'a'.repeat(64);
+
+/**
+ * The server's code-owned probe failure table, verbatim from
+ * `src/services/model_endpoint_probe.py` and the route's status map (#266 Task 5
+ * ruling): forbidden 403 and unsupported 422 are not retryable; only the ambiguous
+ * 503 is.
+ */
+export const STRUCTURED_OUTPUT_PROBE_FAILURES = {
+  unsupported_structured_output: {
+    status: 422,
+    message: 'The endpoint rejected the structured-output test request.',
+    retryable: false,
+  },
+  endpoint_probe_forbidden: {
+    status: 403,
+    message: 'The app is not permitted to query this endpoint.',
+    retryable: false,
+  },
+  structured_output_probe_failed: {
+    status: 503,
+    message: 'The structured output probe could not complete. Retry the probe.',
+    retryable: true,
+  },
+} as const;
+
+export type StructuredOutputProbeFailureFixtureCode = keyof typeof STRUCTURED_OUTPUT_PROBE_FAILURES;
+
+export interface StructuredOutputProbeIdentityFixture {
+  endpoint_name: string;
+  candidate_hash: string;
+  lock_version: number;
+}
+
+function probeIdentity(
+  identity: Partial<StructuredOutputProbeIdentityFixture>,
+): StructuredOutputProbeIdentityFixture {
+  return {
+    endpoint_name: identity.endpoint_name ?? SEED_MODEL_ENDPOINT_NAME,
+    candidate_hash: identity.candidate_hash ?? SEED_CANDIDATE_HASH,
+    lock_version: identity.lock_version ?? 0,
+  };
+}
+
+/** The exact 200 body: the identity of the saved candidate the probe ran against. */
+export function syntheticProbeSuccess(identity: Partial<StructuredOutputProbeIdentityFixture> = {}) {
+  return { code: 'structured_output_probe_succeeded' as const, ...probeIdentity(identity) };
+}
+
+/** The exact typed failure body for one code; its status is `STRUCTURED_OUTPUT_PROBE_FAILURES[code].status`. */
+export function syntheticProbeFailure(
+  code: StructuredOutputProbeFailureFixtureCode,
+  identity: Partial<StructuredOutputProbeIdentityFixture> = {},
+) {
+  const failure = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+  return { code, message: failure.message, retryable: failure.retryable, ...probeIdentity(identity) };
+}

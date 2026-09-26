@@ -1,13 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AgentDefinitionApiError,
+  InvalidModelEndpointCatalogResponseError,
+  ModelEndpointCatalogApiError,
   getAgentDefinitionWorkbench,
+  getSystemModelEndpoints,
 } from '../../../api/agentDefinitions';
 import type {
   AgentDefinitionWorkbenchResponse,
   AgentNode,
 } from '../../../api/agentDefinitions';
-import { DefinitionEditor } from './DefinitionEditor';
+import { DefinitionEditor, type ModelEndpointCatalogView } from './DefinitionEditor';
 import {
   definitionFormatVersion,
   draftStatus,
@@ -16,9 +19,69 @@ import {
 } from './draftEditorState';
 import { useDraftEditor } from './useDraftEditor';
 
+function modelCatalogErrorMessage(error: unknown): string {
+  if (error instanceof ModelEndpointCatalogApiError) return error.message;
+  if (error instanceof InvalidModelEndpointCatalogResponseError) {
+    return 'Model discovery returned an invalid response.';
+  }
+  if (error instanceof AgentDefinitionApiError) return `Unable to load discovered models (${error.status}).`;
+  return 'Unable to load discovered models. Check your connection and try again.';
+}
+
+/** Only a typed failure the server marks non-retryable (a forbidden identity) is final. */
+function modelCatalogErrorRetryable(error: unknown): boolean {
+  return !(error instanceof ModelEndpointCatalogApiError) || error.retryable;
+}
+
+/**
+ * The one identity-scoped discovery catalog for the whole workbench (#266 correction
+ * 16): every role editor is mounted at once, so the state lives here, not per editor.
+ * The first Model-tab opening of any role reads it once; only Refresh models reads it
+ * again. It is a read, never a draft operation, so it neither enters nor consults the
+ * editor's pending gate (correction 15). `catalogRequestTokenRef` only drops
+ * out-of-order responses; it controls no operation.
+ */
+function useModelEndpointCatalog() {
+  const [catalog, setCatalog] = useState<ModelEndpointCatalogView>({
+    status: 'idle',
+    items: [],
+    errorMessage: null,
+    errorRetryable: false,
+  });
+  const catalogRequestTokenRef = useRef(0);
+
+  const refresh = () => {
+    const token = catalogRequestTokenRef.current + 1;
+    catalogRequestTokenRef.current = token;
+    setCatalog((current) => ({ ...current, status: 'loading', errorMessage: null, errorRetryable: false }));
+    getSystemModelEndpoints().then(
+      (items) => {
+        if (catalogRequestTokenRef.current !== token) return;
+        setCatalog({ status: items.length > 0 ? 'ready' : 'empty', items, errorMessage: null, errorRetryable: false });
+      },
+      (error: unknown) => {
+        if (catalogRequestTokenRef.current !== token) return;
+        setCatalog((current) => ({
+          status: 'error',
+          items: current.items,
+          errorMessage: modelCatalogErrorMessage(error),
+          errorRetryable: modelCatalogErrorRetryable(error),
+        }));
+      },
+    );
+  };
+
+  const open = () => {
+    if (catalogRequestTokenRef.current === 0) refresh();
+  };
+
+  return { catalog, open, refresh };
+}
+
 function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchResponse }) {
   const [selectedKey, setSelectedKey] = useState(workbench.nodes[0]?.agent_key);
   const editor = useDraftEditor(workbench);
+  const modelCatalog = useModelEndpointCatalog();
   const selectedNode = workbench.nodes.find((node) => node.agent_key === selectedKey)
     ?? workbench.nodes[0];
 
@@ -95,9 +158,12 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
               if (node.execution_kind !== 'model') return null;
               const entry = editor.state.byAgent[node.agent_key];
               const pending = editor.state.pendingSave;
-              // Every Save, Upgrade, and SourceRecovery button reads the same
-              // aggregate pending slot; there is no second gate.
+              // Every Save, Upgrade, SourceRecovery, SchemaUpgrade and Probe button reads
+              // the same aggregate pending slot; there is no second gate.
               const operationsDisabled = pending !== null;
+              const probePending = pending !== null
+                && pending.operation === 'probe'
+                && pending.agentKey === node.agent_key;
               const promptDisabled = pending !== null
                 && pending.operation === 'upgrade'
                 && pending.agentKey === node.agent_key
@@ -111,9 +177,11 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                     entry={entry}
                     saveDisabled={operationsDisabled || !validateDraftForm(entry.local).ok}
                     operationsDisabled={operationsDisabled}
+                    probePending={probePending}
                     promptDisabled={promptDisabled}
                     onEdit={editor.edit}
                     onSave={editor.save}
+                    onProbeStructuredOutput={editor.probeStructuredOutput}
                     onUpgradeProtectedAssembly={editor.upgradeProtectedAssembly}
                     onUpgradeSchemaContract={editor.upgradeSchemaContract}
                     onToggleSchemaOverlayOptionalField={editor.toggleSchemaOverlayOptionalField}
@@ -130,6 +198,9 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                     onRestoreSavedPrompt={editor.restoreSavedPrompt}
                     onRestoreRetained={editor.restoreRetained}
                     onDiscardRetained={editor.discardRetained}
+                    modelCatalog={modelCatalog.catalog}
+                    onOpenModelTab={modelCatalog.open}
+                    onRefreshModels={modelCatalog.refresh}
                   />
                 </div>
               );

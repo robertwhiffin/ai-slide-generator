@@ -3130,3 +3130,688 @@ def test_the_schema_upgrade_revalidates_its_target_before_writing(
     assert _stored_content(session_factory) == (current, current_hash)
     assert _draft_audit(session_factory) == before_audit
     assert _database_snapshot(session_factory) == before_db
+
+
+# ===========================================================================
+# #266 Task 2 — exact endpoint validation composed into the two save paths.
+#
+# Local phase: the pure endpoint-name policy joins the ordered pre-stale
+# aggregate of both saves (never the class tuples, so upgrades do no endpoint
+# work).  Remote phase: the injected validator runs once, only for a current
+# locked candidate, immediately before the one writer.  Expected codes and
+# messages are literals from the plan's table, not imports.
+# ===========================================================================
+
+ENDPOINT_FIELD = "candidate.model.endpoint_name"
+ENDPOINT_URL_TUPLE = (
+    (
+        ENDPOINT_FIELD,
+        "endpoint_url_not_allowed",
+        "Endpoint must be a Databricks endpoint name, not a URL.",
+    ),
+)
+CUSTOM_ENDPOINT = "custom endpoint name"
+SAVE_PATHS = ("editable", "trusted")
+
+
+class _RecordingRemoteEndpointValidator:
+    """Deterministic remote phase: records each complete candidate it sees."""
+
+    def __init__(self, log: list[str] | None = None, outcome: Exception | None = None):
+        self.contents: list[DefinitionContent] = []
+        self._log = log
+        self._outcome = outcome
+
+    def validate(self, content: DefinitionContent) -> None:
+        self.contents.append(content)
+        if self._log is not None:
+            self._log.append(f"remote:{content.model.endpoint_name}")
+        if self._outcome is not None:
+            raise self._outcome
+
+
+class _RecordingServingEndpoints:
+    """Fake SDK surface for the production catalog; no SDK mock library."""
+
+    def __init__(self, *, detail=None, error: Exception | None = None):
+        self.detail = detail
+        self.error = error
+        self.get_calls: list[str] = []
+
+    def get(self, name: str):
+        self.get_calls.append(name)
+        if self.error is not None:
+            raise self.error
+        return self.detail
+
+
+def _endpoint_candidate(
+    current: DefinitionContent,
+    path: str,
+    *,
+    endpoint_name: str,
+    prompt_text: str | None = None,
+    schema_overlay: SchemaOverlay | None = None,
+):
+    prompt = current.prompt_text if prompt_text is None else prompt_text
+    if path == "editable":
+        return _editable(
+            current,
+            prompt_text=prompt,
+            endpoint_name=endpoint_name,
+            schema_overlay=schema_overlay,
+        )
+    update: dict[str, object] = {
+        "prompt_text": prompt,
+        "model": current.model.model_copy(update={"endpoint_name": endpoint_name}),
+    }
+    if schema_overlay is not None:
+        update["schema_overlay"] = schema_overlay
+    return current.model_copy(update=update)
+
+
+def _save_endpoint_candidate(
+    session: Session,
+    service: GraphConfiguration,
+    path: str,
+    candidate,
+    *,
+    lock_version: int,
+    actor: str,
+):
+    if path == "editable":
+        return service.save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=lock_version,
+            candidate=candidate,
+            actor=actor,
+        )
+    return service.save_draft_content(
+        session,
+        agent_key="architect",
+        expected_lock_version=lock_version,
+        content=candidate,
+        actor=actor,
+    )
+
+
+def _advance_lock(factory: sessionmaker) -> None:
+    current, _ = _stored_content(factory)
+    with factory() as session:
+        result = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, prompt_text="advance the shared lock"),
+            actor="test:advance",
+        )
+    assert isinstance(result, DraftSaveResult)
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+@pytest.mark.parametrize(
+    "endpoint_name",
+    ["https://workspace.example/serving-endpoints/x", "../../2.0/secrets/scopes/list"],
+)
+def test_endpoint_url_plus_stale_lock_is_ordered_422_with_zero_remote_calls(
+    session_factory, monkeypatch, path, endpoint_name
+) -> None:
+    """Catches the endpoint policy running after the stale comparison (a 409)."""
+    _advance_lock(session_factory)
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    remote = _RecordingRemoteEndpointValidator(write_log)
+    candidate = _endpoint_candidate(
+        seeded, path, endpoint_name=endpoint_name, prompt_text="url and stale"
+    )
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        _save_endpoint_candidate(
+            session,
+            GraphConfiguration(remote_endpoint_validator=remote),
+            path,
+            candidate,
+            lock_version=0,
+            actor="test:endpoint-url-stale",
+        )
+
+    assert _issue_tuples(caught) == ENDPOINT_URL_TUPLE
+    assert remote.contents == []
+    assert write_log == []
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _draft_audit(session_factory) == before_audit
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_locally_valid_endpoint_plus_stale_lock_is_seven_role_409_with_zero_remote_calls(
+    session_factory, monkeypatch, path
+) -> None:
+    """Catches the remote endpoint check running before the stale return."""
+    _advance_lock(session_factory)
+    seeded, seeded_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    remote = _RecordingRemoteEndpointValidator(write_log)
+    candidate = _endpoint_candidate(
+        seeded, path, endpoint_name=CUSTOM_ENDPOINT, prompt_text="valid but stale"
+    )
+
+    with session_factory() as session:
+        result = _save_endpoint_candidate(
+            session,
+            GraphConfiguration(remote_endpoint_validator=remote),
+            path,
+            candidate,
+            lock_version=0,
+            actor="test:endpoint-valid-stale",
+        )
+
+    assert isinstance(result, DraftSaveConflict)
+    assert result.expected_lock_version == 0
+    assert result.current_lock_version == 1
+    assert set(result.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
+    assert len(result.server.definitions) == 7
+    assert result.server.draft.lock_version == 1
+    assert remote.contents == []
+    assert write_log == []
+    assert _stored_content(session_factory) == (seeded, seeded_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_endpoint_policy_issue_follows_the_overlay_issue_in_one_ordered_422(
+    session_factory, monkeypatch, path
+) -> None:
+    """Catches the endpoint policy leaving the ordered local aggregate."""
+    current, _ = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    remote = _RecordingRemoteEndpointValidator(write_log)
+    candidate = _endpoint_candidate(
+        current,
+        path,
+        endpoint_name="https://workspace.example/x",
+        schema_overlay=_select_notes(),
+    )
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        _save_endpoint_candidate(
+            session,
+            GraphConfiguration(remote_endpoint_validator=remote),
+            path,
+            candidate,
+            lock_version=7,
+            actor="test:endpoint-aggregate",
+        )
+
+    assert _issue_tuples(caught) == OVERLAY_INELIGIBLE_TUPLE + ENDPOINT_URL_TUPLE
+    assert remote.contents == []
+    assert write_log == []
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_editable_command_checks_precede_the_endpoint_phases(session_factory) -> None:
+    """Catches the endpoint policy or remote check running before #263's command checks."""
+    current, _ = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    remote = _RecordingRemoteEndpointValidator()
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration(remote_endpoint_validator=remote).save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, endpoint_name="https://workspace.example/x"),
+            actor="  ",
+        )
+
+    assert _issue_tuples(caught) == (("actor", "blank", "Actor must not be blank."),)
+    assert remote.contents == []
+    assert _database_snapshot(session_factory) == before_db
+
+
+def test_trusted_immutable_checks_precede_the_endpoint_phases(session_factory) -> None:
+    """Catches the endpoint policy outranking #263's round-trip/immutable checks."""
+    current, _ = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    remote = _RecordingRemoteEndpointValidator()
+    proposed = _endpoint_candidate(
+        current, "trusted", endpoint_name="https://workspace.example/x"
+    ).model_copy(update={"definition_version": current.definition_version + 1})
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        GraphConfiguration(remote_endpoint_validator=remote).save_draft_content(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            content=proposed,
+            actor="test:endpoint-immutable",
+        )
+
+    assert _issue_tuples(caught) == (
+        (
+            "definition_version",
+            "immutable_field",
+            "Definition version is immutable in a draft save.",
+        ),
+    )
+    assert remote.contents == []
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_current_endpoint_candidate_is_remotely_validated_once_immediately_before_the_writer(
+    session_factory, monkeypatch, path
+) -> None:
+    """Catches a skipped, repeated, partial, or post-write remote endpoint check."""
+    current, _ = _stored_content(session_factory)
+    log: list[str] = []
+    monkeypatch.setattr(
+        GraphConfiguration,
+        "post_stale_validators",
+        (_recording_validator(log, "post-1"),),
+    )
+    _install_write_spy(monkeypatch, log)
+    remote = _RecordingRemoteEndpointValidator(log)
+    candidate = _endpoint_candidate(
+        current, path, endpoint_name=CUSTOM_ENDPOINT, prompt_text="current edit"
+    )
+
+    with session_factory() as session:
+        result = _save_endpoint_candidate(
+            session,
+            GraphConfiguration(remote_endpoint_validator=remote),
+            path,
+            candidate,
+            lock_version=0,
+            actor="test:endpoint-current",
+        )
+
+    persisted, persisted_hash = _stored_content(session_factory)
+    assert isinstance(result, DraftSaveResult)
+    assert result.changed is True
+    assert log == ["post-1", f"remote:{CUSTOM_ENDPOINT}", "write"]
+    assert len(remote.contents) == 1
+    assert isinstance(remote.contents[0], DefinitionContent)
+    # The complete reconstructed candidate, not a fragment, reaches the remote
+    # phase: it hashes to exactly what the one writer then persisted.
+    assert definition_content_hash(remote.contents[0]) == persisted_hash
+    assert persisted.model.endpoint_name == CUSTOM_ENDPOINT
+    assert persisted_hash == definition_content_hash(persisted)
+    assert _draft_audit(session_factory)[:2] == (1, "test:endpoint-current")
+
+
+def _catalog_remote_validator(serving_endpoints: _RecordingServingEndpoints):
+    from types import SimpleNamespace
+
+    from src.services.graph_configuration import CatalogRemoteEndpointDraftValidator
+    from src.services.model_endpoint_catalog import DatabricksModelEndpointCatalog
+
+    catalog = DatabricksModelEndpointCatalog(
+        SimpleNamespace(serving_endpoints=serving_endpoints)
+    )
+    return CatalogRemoteEndpointDraftValidator(lambda: catalog)
+
+
+def _endpoint_detail(name: str, *, ready: str = "READY", update: str = "NOT_UPDATING"):
+    from types import SimpleNamespace
+
+    from databricks.sdk.service.serving import (
+        EndpointStateConfigUpdate,
+        EndpointStateReady,
+    )
+
+    return SimpleNamespace(
+        name=name,
+        state=SimpleNamespace(
+            ready=EndpointStateReady[ready],
+            config_update=EndpointStateConfigUpdate[update],
+        ),
+    )
+
+
+def _remote_table_cases():
+    from databricks.sdk.errors import (
+        DatabricksError,
+        PermissionDenied,
+        ResourceDoesNotExist,
+    )
+
+    return [
+        pytest.param(
+            {"error": ResourceDoesNotExist("missing")},
+            "endpoint_unknown",
+            "Endpoint name was not found.",
+            id="unknown",
+        ),
+        pytest.param(
+            {"error": PermissionDenied("denied")},
+            "endpoint_forbidden",
+            "Endpoint cannot be validated with this workspace identity.",
+            id="forbidden",
+        ),
+        pytest.param(
+            {"error": DatabricksError("unavailable")},
+            "endpoint_unavailable",
+            "Endpoint validation is temporarily unavailable. Retry the save.",
+            id="unavailable",
+        ),
+        pytest.param(
+            {"error": TimeoutError("Timed out after 0:00:05")},
+            "endpoint_unavailable",
+            "Endpoint validation is temporarily unavailable. Retry the save.",
+            id="transport-timeout",
+        ),
+        pytest.param(
+            {"detail": _endpoint_detail("alias")},
+            "endpoint_name_mismatch",
+            "Endpoint validation did not return the exact requested name.",
+            id="name-mismatch",
+        ),
+        pytest.param(
+            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, ready="NOT_READY")},
+            "endpoint_not_ready",
+            "Endpoint is not ready for invocation.",
+            id="not-ready",
+        ),
+        pytest.param(
+            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, update="IN_PROGRESS")},
+            "endpoint_update_in_progress",
+            "Endpoint configuration update is in progress.",
+            id="update-in-progress",
+        ),
+        pytest.param(
+            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, update="UPDATE_FAILED")},
+            "endpoint_update_failed",
+            "Endpoint configuration update failed.",
+            id="update-failed",
+        ),
+        pytest.param(
+            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, update="UPDATE_CANCELED")},
+            "endpoint_update_canceled",
+            "Endpoint configuration update was canceled.",
+            id="update-canceled",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+@pytest.mark.parametrize(("outcome", "code", "message"), _remote_table_cases())
+def test_every_remote_endpoint_failure_is_one_ordered_issue_with_no_mutation(
+    session_factory, monkeypatch, path, outcome, code, message
+) -> None:
+    """Catches a bypassed, mistranslated, or partially written remote rejection."""
+    current, current_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    before_audit = _draft_audit(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    serving_endpoints = _RecordingServingEndpoints(**outcome)
+    candidate = _endpoint_candidate(
+        current, path, endpoint_name=CUSTOM_ENDPOINT, prompt_text="remote rejected"
+    )
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        _save_endpoint_candidate(
+            session,
+            GraphConfiguration(
+                remote_endpoint_validator=_catalog_remote_validator(serving_endpoints)
+            ),
+            path,
+            candidate,
+            lock_version=0,
+            actor="test:endpoint-remote-rejected",
+        )
+
+    assert _issue_tuples(caught) == ((ENDPOINT_FIELD, code, message),)
+    # Exactly one exact-name lookup; the stored text is never rewritten.
+    assert serving_endpoints.get_calls == [CUSTOM_ENDPOINT]
+    assert write_log == []
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory) == before_audit
+    # Revisions, releases (with their effective interval), mappings and draft rows.
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_valid_same_content_endpoint_save_validates_and_advances_audit_unchanged(
+    session_factory, path
+) -> None:
+    """Catches a same-content save that skips remote validation or its audit."""
+    current, current_hash = _stored_content(session_factory)
+    serving_endpoints = _RecordingServingEndpoints(
+        detail=_endpoint_detail(current.model.endpoint_name)
+    )
+    candidate = _endpoint_candidate(
+        current, path, endpoint_name=current.model.endpoint_name
+    )
+
+    with session_factory() as session:
+        result = _save_endpoint_candidate(
+            session,
+            GraphConfiguration(
+                remote_endpoint_validator=_catalog_remote_validator(serving_endpoints)
+            ),
+            path,
+            candidate,
+            lock_version=0,
+            actor="test:endpoint-same-content",
+        )
+
+    assert isinstance(result, DraftSaveResult)
+    assert result.changed is False
+    assert result.draft.lock_version == 1
+    assert serving_endpoints.get_calls == [current.model.endpoint_name]
+    assert _stored_content(session_factory) == (current, current_hash)
+    assert _draft_audit(session_factory)[:2] == (1, "test:endpoint-same-content")
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_flush_failure_after_endpoint_validation_rolls_back_from_a_fresh_session(
+    session_factory, path
+) -> None:
+    """Catches remote validation that commits anything before the flush succeeds."""
+    current, _ = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    remote = _RecordingRemoteEndpointValidator()
+    candidate = _endpoint_candidate(
+        current, path, endpoint_name=CUSTOM_ENDPOINT, prompt_text="must roll back"
+    )
+
+    with session_factory() as session:
+        def _fail_flush(_session: Session, _context, _instances) -> None:
+            raise RuntimeError("forced flush failure")
+
+        event.listen(session, "before_flush", _fail_flush, once=True)
+        with pytest.raises(RuntimeError, match="forced flush failure"):
+            _save_endpoint_candidate(
+                session,
+                GraphConfiguration(remote_endpoint_validator=remote),
+                path,
+                candidate,
+                lock_version=0,
+                actor="test:endpoint-rollback",
+            )
+
+    assert [content.model.endpoint_name for content in remote.contents] == [
+        CUSTOM_ENDPOINT
+    ]
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("upgrade", ["protected_assembly", "schema_contract"])
+def test_endpoint_checks_are_composed_only_into_the_two_save_paths(
+    session_factory, upgrade
+) -> None:
+    """Catches endpoint checks registered class-wide, where both upgrades run them.
+
+    A legacy row whose stored endpoint fails today's policy must still upgrade,
+    and neither upgrade may perform remote endpoint I/O (correction 6).
+    """
+    current, _ = _stored_content(session_factory)
+    legacy_endpoint = "https://legacy.example/serving-endpoints/x"
+    _overwrite_draft_row(
+        session_factory,
+        "architect",
+        current.model_copy(
+            update={
+                "model": current.model.model_copy(
+                    update={"endpoint_name": legacy_endpoint}
+                )
+            }
+        ),
+    )
+    remote = _RecordingRemoteEndpointValidator()
+    service = GraphConfiguration(remote_endpoint_validator=remote)
+
+    with session_factory() as session:
+        operation = getattr(service, f"upgrade_draft_{upgrade}")
+        result = operation(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            actor="test:endpoint-upgrade",
+        )
+
+    assert isinstance(result, DraftSaveResult)
+    assert result.definition.content.model.endpoint_name == legacy_endpoint
+    assert remote.contents == []
+    assert GraphConfiguration.local_candidate_validators == (
+        draft_module._assembly_candidate_validator,
+        draft_module._schema_overlay_candidate_validator,
+    )
+    assert GraphConfiguration.post_stale_validators == ()
+
+
+def test_default_facade_has_no_remote_endpoint_validator_and_injection_is_keyword_only(
+    session_factory,
+) -> None:
+    """Catches a production-default remote validator or a positional injection seam."""
+    remote = _RecordingRemoteEndpointValidator()
+    with pytest.raises(TypeError):
+        GraphConfiguration(remote)  # type: ignore[misc]
+    current, _ = _stored_content(session_factory)
+
+    with session_factory() as session:
+        result = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, endpoint_name=CUSTOM_ENDPOINT),
+            actor="test:endpoint-default",
+        )
+
+    assert isinstance(result, DraftSaveResult)
+    assert result.definition.content.model.endpoint_name == CUSTOM_ENDPOINT
+    assert remote.contents == []
+
+
+def test_catalog_remote_endpoint_validator_delegates_the_exact_unchanged_name() -> None:
+    """Catches trimming, aliasing, or a second lookup in the production adapter."""
+    from src.services.graph_configuration import CatalogRemoteEndpointDraftValidator
+    from src.services.model_endpoint_catalog import FakeModelEndpointCatalog
+
+    content = load_graph_v1_manifest().definitions[0]
+    exact = "  exact endpoint name  "
+    content = content.model_copy(
+        update={"model": content.model.model_copy(update={"endpoint_name": exact})}
+    )
+    fake = FakeModelEndpointCatalog()
+    built: list[int] = []
+
+    def _catalog():
+        built.append(1)
+        return fake
+
+    validator = CatalogRemoteEndpointDraftValidator(_catalog)
+    assert built == []  # construction does no catalog/client work
+    validator.validate(content)
+
+    assert fake.validated_names == [exact]
+    assert fake.list_calls == 0
+    assert built == [1]
+
+
+def test_production_remote_endpoint_validator_uses_a_bounded_system_client(
+    monkeypatch,
+) -> None:
+    """Catches the production factory using the unbounded system client or eager I/O."""
+    import src.core.databricks_client as databricks_client
+    from src.services import graph_configuration
+    from src.services import model_endpoint_catalog as catalog_module
+
+    system_client = object()
+    bounded_client = object()
+    calls: list[tuple[str, object]] = []
+
+    def _get_system_client():
+        calls.append(("system", None))
+        return system_client
+
+    def _bounded(client):
+        calls.append(("bounded", client))
+        return bounded_client
+
+    class _RecordingCatalog:
+        def __init__(self, workspace_client):
+            calls.append(("catalog", workspace_client))
+
+        def validate_custom_endpoint_remote(self, name):
+            calls.append(("validate", name))
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _get_system_client)
+    monkeypatch.setattr(catalog_module, "bounded_catalog_workspace_client", _bounded)
+    monkeypatch.setattr(catalog_module, "DatabricksModelEndpointCatalog", _RecordingCatalog)
+
+    validator = graph_configuration.build_remote_endpoint_draft_validator()
+    assert calls == []
+
+    content = load_graph_v1_manifest().definitions[0]
+    validator.validate(content)
+
+    assert calls == [
+        ("system", None),
+        ("bounded", system_client),
+        ("catalog", bounded_client),
+        ("validate", content.model.endpoint_name),
+    ]
+
+
+def test_production_remote_endpoint_validator_maps_a_system_client_failure_to_unavailable(
+    monkeypatch,
+) -> None:
+    """Catches a system-client construction failure escaping the save as a 500."""
+    import src.core.databricks_client as databricks_client
+    from src.services import graph_configuration
+    from src.services import model_endpoint_catalog as catalog_module
+
+    built: list[object] = []
+
+    def _failing_system_client():
+        raise databricks_client.DatabricksClientError("SECRET_TOKEN_266")
+
+    monkeypatch.setattr(databricks_client, "get_system_client", _failing_system_client)
+    monkeypatch.setattr(
+        catalog_module, "DatabricksModelEndpointCatalog", lambda client: built.append(client)
+    )
+
+    validator = graph_configuration.build_remote_endpoint_draft_validator()
+    content = load_graph_v1_manifest().definitions[0]
+    with pytest.raises(catalog_module.EndpointValidationFailure) as raised:
+        validator.validate(content)
+
+    assert raised.value.code == "endpoint_unavailable"
+    assert raised.value.message == (
+        "Endpoint validation is temporarily unavailable. Retry the save."
+    )
+    assert raised.value.retryable is True
+    assert "SECRET_TOKEN_266" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, databricks_client.DatabricksClientError)
+    assert built == []
