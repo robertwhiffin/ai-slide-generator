@@ -64,7 +64,7 @@ class StructuredOutputProbeFailure(RuntimeError):  # noqa: N818 - stable public 
 
 _UNSUPPORTED = (
     "unsupported_structured_output",
-    "This endpoint does not support structured output.",
+    "The endpoint rejected the structured-output test request.",
     False,
 )
 _FORBIDDEN = (
@@ -104,7 +104,9 @@ PROBE_MAX_RETRIES = 0
 #: client, so these are the types a real provider rejection arrives as (measured over
 #: ``databricks-langchain`` 0.9.0; fix round 1).  An authorization rejection is
 #: forbidden; a request rejection (400, 404, 422) means the endpoint refused the
-#: structured request, so it is unsupported and not worth retrying.  Rate
+#: structured request, so it is unsupported and not worth retrying.  The copy
+#: says only that the request was rejected: a deleted endpoint (404) or a saved
+#: ``max_tokens`` the model refuses (400) arrives here too.  Rate
 #: limits, 5xx, connection errors and timeouts stay the ambiguous retryable
 #: failure.
 _OPENAI_FORBIDDEN: tuple[type[BaseException], ...] = (
