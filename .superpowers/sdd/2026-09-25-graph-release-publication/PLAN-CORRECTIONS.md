@@ -730,3 +730,7 @@ Cost if wrong: an unapproved required case is published.
 - #269's C14 trigger coexists with #267's `trg_agent_test_run_evidence_immutable`; the idempotence test expects both.
 - Verdict columns: `verdict`, `verdict_reviewer`, `verdict_at`, `verdict_notes`. ORM fallbacks must supply `run_kind`, `model_payload`, both `compared_*` and `deterministic_check_results`.
 - The fake adapter lives at `tests/fixtures/deterministic_model_adapter.py`.
+
+## Correction 31 — the release routes attach to the existing admin router
+
+Source: #270's plan review (Minor), and #267 C23's precedent. The plan puts the preview and publish handlers on a new `graph_releases.py` router. Replacement: the handlers may live in their own module, but they register on the EXISTING admin prefix `/api/admin/agent-definitions` with the same router-level `require_admin` and `require_draft_write_principal` dependencies; no second `APIRouter` with its own prefix, and no `main.py` change. Model-free routes still parse the body after authorisation. Cost if wrong: two admin routers whose auth dependencies can drift.
