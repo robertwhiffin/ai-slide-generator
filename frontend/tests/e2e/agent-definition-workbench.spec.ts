@@ -2487,6 +2487,7 @@ async function installAgentTestMock(
     createCase?: (route: Route, call: number) => Promise<void> | void;
     retireCase?: (route: Route, call: number) => Promise<void> | void;
     updateCase?: (route: Route, call: number) => Promise<void> | void;
+    listRuns?: (route: Route, call: number) => Promise<void> | void;
     candidateRun?: (route: Route, call: number) => Promise<void> | void;
     baselineRun?: (route: Route, call: number) => Promise<void> | void;
   },
@@ -2502,6 +2503,7 @@ async function installAgentTestMock(
       : method === 'POST' && /\/test-cases$/.test(url.pathname) ? 'createCase'
         : method === 'DELETE' && /\/test-cases\/\d+$/.test(url.pathname) ? 'retireCase'
           : method === 'PUT' && /\/test-cases\/\d+$/.test(url.pathname) ? 'updateCase'
+            : method === 'GET' && /\/test-cases\/\d+\/runs$/.test(url.pathname) && url.search === '?limit=100' ? 'listRuns'
           : method === 'POST' && /\/draft\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'candidateRun'
             : method === 'POST' && /\/published\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'baselineRun'
               : null;
@@ -2532,6 +2534,11 @@ async function openTestView(page: Page, name: 'Input' | 'Compare' | 'Checks') {
   return testingAside(page).getByRole('tabpanel', { name, exact: true });
 }
 
+function historyReads(requests: CapturedAgentTestRequest[]) {
+  return requests.filter((request) => request.method === 'GET' && request.path.includes('/runs'))
+    .map((request) => request.path);
+}
+
 function runBodies(requests: CapturedAgentTestRequest[], kind: 'draft' | 'published') {
   return requests
     .filter((request) => request.method === 'POST' && request.path.includes(`/${kind}/`))
@@ -2544,6 +2551,7 @@ test('Agent Test Cases: add a case, run it against the saved candidate, then rea
   const created = syntheticAgentTestCase({ id: 202, name: 'Architect board summary', is_required: false });
   const requests = await installAgentTestMock(page, {
     listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
     createCase: (route) => fulfillJson(route, 201, created),
     candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({
       test_case_id: 202,
@@ -2590,10 +2598,12 @@ test('Agent Test Cases: add a case, run it against the saved candidate, then rea
 
   expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
     'GET /api/admin/agent-definitions/test-cases?agent_key=architect',
+    'GET /api/admin/agent-definitions/test-cases/101/runs?limit=100',
     'POST /api/admin/agent-definitions/test-cases',
+    'GET /api/admin/agent-definitions/test-cases/202/runs?limit=100',
     'POST /api/admin/agent-definitions/draft/architect/test-runs',
   ]);
-  expect(JSON.parse(requests[1].raw ?? '')).toEqual({
+  expect(JSON.parse(requests[2].raw ?? '')).toEqual({
     agent_key: 'architect',
     name: 'Architect board summary',
     synthetic_payload: { user_request: 'Summarise a fictional board meeting.' },
@@ -2611,6 +2621,7 @@ test('Agent Test Cases: a published-baseline rerun is shown not approved, and th
   await installWorkbenchMock(page);
   const requests = await installAgentTestMock(page, {
     listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
     baselineRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({
       run_id: 777,
       run_kind: 'published_baseline',
@@ -2654,6 +2665,7 @@ test('Agent Test Cases: a stale_draft 409 reconciles through Reload server, and 
   await installWorkbenchMock(page);
   const requests = await installAgentTestMock(page, {
     listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
     candidateRun: (route, call) => (call === 0
       ? fulfillJson(route, 409, conflict)
       : fulfillJson(route, 201, syntheticTestRunEvidence({ candidate_hash: 'd'.repeat(64) }))),
@@ -2688,6 +2700,7 @@ test('Agent Test Cases: a 503 test_run_unavailable is a contained retryable aler
   await installWorkbenchMock(page);
   const requests = await installAgentTestMock(page, {
     listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
     candidateRun: (route, call) => (call === 0
       ? fulfillJson(route, 503, syntheticTestRunUnavailable())
       : fulfillJson(route, 201, syntheticTestRunEvidence())),
@@ -2717,6 +2730,7 @@ test('Agent Test Cases: every control stays inside the guard, and no #266 or #26
   await installWorkbenchMock(page);
   await installAgentTestMock(page, {
     listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
     candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence()),
   });
   await openWorkbench(page);
@@ -2754,6 +2768,7 @@ test('Agent Test Cases: Edit test case saves a new version of the same case, and
   const version2 = syntheticAgentTestCase({ id: 111, version: 2, synthetic_payload: { user_request: 'Revised ask' } });
   const requests = await installAgentTestMock(page, {
     listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
     updateCase: (route) => fulfillJson(route, 200, version2),
     candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({ test_case_id: 111, test_case_version: 2 })),
   });
@@ -2783,4 +2798,55 @@ test('Agent Test Cases: Edit test case saves a new version of the same case, and
   });
   expect(runBodies(requests, 'draft')).toEqual(['{"test_case_id":111,"lock_version":0}']);
   expect(saves).toHaveLength(0);
+});
+
+test('Agent Test Cases: after a page reload the stored run and stored baseline are shown again, labelled not approved', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const stored: unknown[] = [];
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: stored }),
+    baselineRun: (route) => {
+      const baseline = syntheticTestRunEvidence({
+        run_id: 801, run_kind: 'published_baseline', candidate_structured_output: { title: 'Stored published rerun' },
+      });
+      stored.unshift({ ...baseline, candidate_is_current: null, base_release_is_current: null });
+      return fulfillJson(route, 201, baseline);
+    },
+    candidateRun: (route) => {
+      const run = syntheticTestRunEvidence({
+        run_id: 802,
+        baseline_raw_output: { title: 'Stored published rerun' },
+        baseline_structured_output: { title: 'Stored published rerun' },
+      });
+      stored.unshift({ ...run, candidate_is_current: null, base_release_is_current: null });
+      return fulfillJson(route, 201, run);
+    },
+  });
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+  await aside.getByRole('button', { name: RUN_BASELINE }).click();
+  await expect((await openTestView(page, 'Compare')).getByRole('region', { name: 'Published baseline evidence' }))
+    .toContainText('Stored published rerun');
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  await expect(aside.getByRole('region', { name: 'Test case evidence' })).toContainText('Run 802');
+
+  await page.reload();
+  await page.getByRole('tab', { name: 'Agent Definitions' }).click();
+  await loadAgentTestCases(page);
+  const compare = await openTestView(page, 'Compare');
+  const evidence = compare.getByRole('region', { name: 'Test case evidence' });
+  await expect(evidence).toContainText('Run 802');
+  await expect(evidence).toContainText('Published baseline (not approved)');
+  await expect(evidence).toContainText('Stored published rerun');
+  const baseline = compare.getByRole('region', { name: 'Published baseline evidence' });
+  await expect(baseline).toContainText('Run 801');
+  await expect(baseline).toContainText('not approved');
+  await expect((await openTestView(page, 'Input'))).toContainText('Synthetic assembled Architect prompt for the saved candidate.');
+  expect(historyReads(requests)).toEqual([
+    '/api/admin/agent-definitions/test-cases/101/runs?limit=100',
+    '/api/admin/agent-definitions/test-cases/101/runs?limit=100',
+  ]);
 });

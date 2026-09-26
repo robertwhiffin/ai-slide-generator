@@ -4,6 +4,7 @@ import {
   createTestCase,
   executeCandidateTestRun,
   executePublishedBaselineTestRun,
+  listTestCaseRuns,
   listTestCases,
   probeDraftStructuredOutput,
   retireTestCase,
@@ -312,6 +313,22 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     }
   };
 
+  /**
+   * Reads one case version's stored runs so evidence survives a reload (I-2). Like the
+   * case list it is an ungated read; its ID from the one counter is only the freshness
+   * token the reducer uses to drop a stale answer.
+   */
+  const loadTestRuns = async (agentKey: AgentKey, testCaseId: number): Promise<void> => {
+    const requestId = nextRequestIdRef.current++;
+    dispatch({ type: 'testRunsLoadStarted', agentKey, testCaseId, requestId });
+    try {
+      const items = await listTestCaseRuns(testCaseId, 100);
+      dispatch({ type: 'testRunsLoaded', agentKey, requestId, items });
+    } catch (error) {
+      dispatch({ type: 'testRunsLoadFailed', agentKey, requestId, message: testOperationFailure(error, 'history').message });
+    }
+  };
+
   /** Starts one #267 operation on the one gate, or returns `null` when it is held. */
   const startTestOperation = (
     operation: TestOperationKind,
@@ -450,6 +467,7 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     edit,
     save,
     updateAgentTestCase,
+    loadTestRuns,
     probeStructuredOutput,
     loadTestCases,
     runTestCase,

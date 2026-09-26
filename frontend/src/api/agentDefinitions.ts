@@ -1619,9 +1619,10 @@ export async function getTestRun(runId: number): Promise<TestRunEvidence> {
   throw new AgentDefinitionApiError(status, payload, statusText);
 }
 
-/** Reads one case version's own runs, newest first. */
-export async function listTestCaseRuns(testCaseId: number): Promise<TestRunEvidence[]> {
-  const { status, payload, statusText } = await agentTestRequest(`/test-cases/${testCaseId}/runs`, 'GET');
+/** Reads one case version's own runs, newest first, at most `limit` (the server's 1-100). */
+export async function listTestCaseRuns(testCaseId: number, limit?: number): Promise<TestRunEvidence[]> {
+  const query = limit === undefined ? '' : `?limit=${limit}`;
+  const { status, payload, statusText } = await agentTestRequest(`/test-cases/${testCaseId}/runs${query}`, 'GET');
   if (status === 200) {
     const items = parseTestRunList(payload);
     if (items === null) throw new InvalidTestRunResponseError();

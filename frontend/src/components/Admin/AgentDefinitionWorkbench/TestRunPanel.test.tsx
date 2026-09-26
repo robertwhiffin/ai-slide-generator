@@ -57,6 +57,7 @@ function renderPanel(overrides: Partial<TestRunPanelProps> = {}) {
     onCreateTestCase: vi.fn().mockResolvedValue(null),
     onRetireTestCase: vi.fn(),
     onUpdateTestCase: vi.fn().mockResolvedValue(null),
+    onLoadTestRuns: vi.fn(),
     ...overrides,
   };
   return { props, ...render(<TestRunPanel {...props} />) };
@@ -417,6 +418,24 @@ describe('TestRunPanel', () => {
     expect(screen.getByRole('button', { name: 'Save new version' })).toBeInTheDocument();
   });
 
+  it('reads the selected case version\'s history once, again on a case switch, and not for a case already read', () => {
+    const cases = [syntheticAgentTestCase(), syntheticAgentTestCase({ id: 102, name: 'Architect second case' })];
+    const { props } = renderPanel({ testing: readyTesting({ cases }) });
+    expect(props.onLoadTestRuns).toHaveBeenCalledTimes(1);
+    expect(props.onLoadTestRuns).toHaveBeenCalledWith('architect', 101);
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Agent Test Cases' }), { target: { value: '102' } });
+    expect(props.onLoadTestRuns).toHaveBeenLastCalledWith('architect', 102);
+
+    const onLoadTestRuns = vi.fn();
+    renderPanel({ onLoadTestRuns, testing: readyTesting({ cases, historyCaseId: 101 }) });
+    expect(onLoadTestRuns).not.toHaveBeenCalled();
+    // No read before the case list is loaded.
+    const idle = vi.fn();
+    renderPanel({ onLoadTestRuns: idle, testing: emptyAgentTestingState() });
+    expect(idle).not.toHaveBeenCalled();
+  });
+
   it('shows the panel notice without an alert', () => {
     renderPanel({ testing: readyTesting({ notice: 'No change: this content matches version 1, so no new version was created.' }) });
 
@@ -636,6 +655,10 @@ describe('the test run client', () => {
     await expect(listTestCaseRuns(101)).resolves.toEqual([stored]);
     const [listUrl] = onlyCall(listFetch);
     expect(listUrl).toMatch(/\/api\/admin\/agent-definitions\/test-cases\/101\/runs$/);
+
+    const limitedFetch = stubFetch(200, { items: [stored] });
+    await expect(listTestCaseRuns(101, 100)).resolves.toEqual([stored]);
+    expect(onlyCall(limitedFetch)[0]).toMatch(/\/test-cases\/101\/runs\?limit=100$/);
   });
 });
 
