@@ -1012,14 +1012,12 @@ class AgentTestWorkbench:
                     compared_definition_revision_id=node.published.revision_id,
                 )
                 endpoint_name = node.published.content.model.endpoint_name
-                case = self._load_active_case(
-                    session, agent_key=agent_key, test_case_id=test_case_id
-                )
         except SQLAlchemyError as error:
             raise _unavailable("read_published", agent_key, error) from error
         # Defence in depth (C32's probe rule, for published content too): a URL-
         # or path-shaped stored name never reaches a provider.  The catalog-owned
-        # code and message are reported; the stored name is never echoed.
+        # code and message are reported; the stored name is never echoed.  It is
+        # refused before the case is read, in the candidate run's order.
         try:
             validate_endpoint_name_policy(endpoint_name)
         except EndpointValidationFailure as failure:
@@ -1028,6 +1026,15 @@ class AgentTestWorkbench:
                     _PUBLISHED_ENDPOINT_FIELD, failure.code, failure.message
                 )
             ) from failure
+        # The case version is immutable apart from ``is_active``, which
+        # transaction 2 re-reads, so a second short read is safe (C32).
+        try:
+            with session.begin():
+                case = self._load_active_case(
+                    session, agent_key=agent_key, test_case_id=test_case_id
+                )
+        except SQLAlchemyError as error:
+            raise _unavailable("read_case", agent_key, error) from error
         model_payload = model_payload_for(agent_key, case.synthetic_payload)
         observation = RunObservation()
 

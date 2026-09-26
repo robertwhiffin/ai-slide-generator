@@ -6094,6 +6094,81 @@ def test_a_url_shaped_published_endpoint_is_the_422_with_no_model_call(
     assert _test_run_rows(session_factory) == []
 
 
+@pytest.mark.parametrize("case_state", ["missing", "other_role", "inactive"])
+def test_a_baseline_rerun_refuses_the_published_endpoint_before_the_case(
+    session_factory, monkeypatch, case_state
+):
+    """Catches the two run routes refusing in different orders (fix round 1, I-1)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    original = test_workbench_module.validate_endpoint_name_policy
+    monkeypatch.setattr(
+        test_workbench_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _run_app(session_factory, adapter) as client:
+        if case_state == "missing":
+            test_case_id = 424242
+        elif case_state == "other_role":
+            test_case_id = _seed_test_case_id(session_factory, "builder")
+        else:
+            test_case_id = _seed_test_case_id(session_factory)
+            assert client.put(_test_case_url(test_case_id), json=_update_body()).status_code == 200
+        response = client.post(_baseline_run_url(), json={"test_case_id": test_case_id})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "published.model.endpoint_name",
+                "code": "endpoint_url_not_allowed",
+                "message": "Endpoint must be a Databricks endpoint name, not a URL.",
+            }
+        ],
+    }
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("case_state", ["missing", "other_role", "inactive"])
+def test_a_candidate_run_refuses_the_saved_endpoint_before_the_case(
+    session_factory, monkeypatch, case_state
+):
+    """The candidate twin of the baseline ordering test: endpoint 422 before the case."""
+    import src.services.graph_configuration_draft as draft_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    original = draft_module.validate_endpoint_name_policy
+    monkeypatch.setattr(
+        draft_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _run_app(session_factory, adapter) as client:
+        if case_state == "missing":
+            test_case_id = 424242
+        elif case_state == "other_role":
+            test_case_id = _seed_test_case_id(session_factory, "builder")
+        else:
+            test_case_id = _seed_test_case_id(session_factory)
+            assert client.put(_test_case_url(test_case_id), json=_update_body()).status_code == 200
+        response = client.post(
+            _candidate_run_url(),
+            json={
+                "test_case_id": test_case_id,
+                "lock_version": _draft_lock_version(session_factory),
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["field"] == "candidate.model.endpoint_name"
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
 @pytest.mark.parametrize("route", ["candidate", "baseline"])
 def test_a_run_of_an_unknown_case_is_404_with_no_model_call(session_factory, monkeypatch, route):
     _force_admin(monkeypatch, is_admin=True)
