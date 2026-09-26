@@ -2413,25 +2413,30 @@ def test_candidate_run_insert_waits_behind_an_exclusive_parent_holder_without_de
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             running = pool.submit(_run)
-            assert in_flight.wait(timeout=10)
-            holder.begin()
-            GraphConfiguration()._lock_current_parents(holder, exclusive=True)
-            release_model.set()
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
+            try:
+                assert in_flight.wait(timeout=10)
+                holder.begin()
+                GraphConfiguration()._lock_current_parents(holder, exclusive=True)
+                release_model.set()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    with guard:
+                        if len(pids) == 2:
+                            break
+                    time.sleep(0.02)
                 with guard:
-                    if len(pids) == 2:
-                        break
-                time.sleep(0.02)
-            with guard:
-                assert len(pids) == 2, "transaction 2 never reached its parent lock"
-                insert_pid = pids[1]
-            assert _observe_lock_waiter(postgres_engine, insert_pid)
-            assert not running.done()
-            holder.commit()
-            running.result(timeout=20)
+                    assert len(pids) == 2, "transaction 2 never reached its parent lock"
+                    insert_pid = pids[1]
+                assert _observe_lock_waiter(postgres_engine, insert_pid)
+                assert not running.done()
+                holder.commit()
+                running.result(timeout=20)
+            finally:
+                # Never leave the run blocked behind the holder on a failure,
+                # or the pool's shutdown would wait on it forever.
+                release_model.set()
+                holder.rollback()
     finally:
-        release_model.set()
         holder.close()
 
     run = outcomes["run"]
