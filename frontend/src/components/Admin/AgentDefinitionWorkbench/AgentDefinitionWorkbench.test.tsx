@@ -633,7 +633,7 @@ describe('AgentDefinitionWorkbench', () => {
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
   });
 
   it('saves exactly the five-field candidate with the global lock and preserves another local draft', async () => {
@@ -659,10 +659,10 @@ describe('AgentDefinitionWorkbench', () => {
     await waitFor(() => expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1'));
     expect(screen.getByRole('heading', { name: 'Graph Version 1' })).toBeVisible();
     expect(screen.getByText('Draft base').parentElement).toHaveTextContent('Graph Version 1');
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Needs test');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Needs test');
     fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder B2');
-    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveAccessibleDescription('Unsaved');
   });
 
   it('allows explicit same-content save and adopts its incremented lock without claiming Clean', async () => {
@@ -672,14 +672,14 @@ describe('AgentDefinitionWorkbench', () => {
     const navigation = await loadedNodeNavigation();
     fireEvent.change(await screen.findByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect A2' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
-    await waitFor(() => expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Needs test'));
+    await waitFor(() => expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Needs test'));
 
     expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
     await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
     expect(JSON.parse(String((putCalls(fetchMock)[1][1] as RequestInit).body))).toMatchObject({ lock_version: 1 });
     await waitFor(() => expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version2'));
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Needs test');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Needs test');
   });
 
   it('retains A3 typed while A2 is pending and globally locks saves until it settles', async () => {
@@ -710,7 +710,11 @@ describe('AgentDefinitionWorkbench', () => {
     expect(JSON.parse(String((putCalls(fetchMock)[1][1] as RequestInit).body))).toMatchObject({ lock_version: 1 });
     fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A3');
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
+    // Let #268's readiness reads (on load and after each settled save) land inside the
+    // test, so none resolves after it as an unwrapped update.
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(3));
+    await act(async () => { await Promise.resolve(); });
   });
 
   it('renders a conflict comparison and reconciles every clean role from the exact-seven response', async () => {
@@ -741,7 +745,7 @@ describe('AgentDefinitionWorkbench', () => {
     expect(within(conflict).getByRole('button', { name: 'Reload server' })).toBeEnabled();
     expect(within(conflict).getByRole('button', { name: 'Keep local' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
 
     for (const [buttonName, promptText] of [
       ['Data Analyst', 'Data Analyst server D1'],
@@ -753,7 +757,7 @@ describe('AgentDefinitionWorkbench', () => {
     ]) {
       fireEvent.click(within(navigation).getByRole('button', { name: new RegExp(buttonName) }));
       expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(promptText);
-      expect(within(navigation).getByRole('button', { name: new RegExp(buttonName) })).toHaveTextContent('Needs test');
+      expect(within(navigation).getByRole('button', { name: new RegExp(buttonName) })).toHaveAccessibleDescription('Needs test');
     }
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
@@ -774,7 +778,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder local B2');
-    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveAccessibleDescription('Unsaved');
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
 
@@ -962,14 +966,14 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Agent Definitions' }));
     const navigation = await loadedNodeNavigation();
     fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect persisted' } });
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
     fireEvent.click(screen.getByRole('tab', { name: 'Usage' }));
     expect(putCalls(fetchMock)).toHaveLength(0);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent Definitions' }));
 
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect persisted');
     expect(within(screen.getByRole('navigation', { name: 'Graph nodes' }))
-      .getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+      .getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(0);
     // The workbench GET and the one on-load readiness GET (#268 C24); the tab switch
@@ -1453,7 +1457,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     fireEvent.change(within(blocks[1]).getByRole('combobox', { name: 'Condition' }), {
       target: { value: 'payload_has_deck_brief' },
     });
-    expect(within(navigation).getByRole('button', { name: /Build Reviewer/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Build Reviewer/ })).toHaveAccessibleDescription('Unsaved');
     // Editing, reordering, and deleting never write.
     expect(putCalls(fetchMock)).toHaveLength(0);
 
@@ -1486,6 +1490,10 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
       .getByRole('group', { name: 'Custom blocks: After deck-brief re-review' }))
       .getAllByRole('group', { name: /^Custom block \d at/ })).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(1);
+    // Let #268's readiness reads (on load, after the Upgrade and after the Save) land
+    // inside the test, so none resolves after it as an unwrapped update.
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(3));
+    await act(async () => { await Promise.resolve(); });
   });
 
   it('renders the authoritative block-id and cross-anchor 422 issues in exact server order', async () => {
@@ -1973,7 +1981,7 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
     // The edits were local and persisted across tab and role navigation.
     expect(screen.getByRole('checkbox', { name: 'Select diagnostic_notes' })).toBeChecked();
     expect(screen.getByRole('textbox', { name: 'Description guidance for intent' })).toHaveValue('Intent guidance');
-    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveTextContent('Unsaved');
+    expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
     expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit | undefined)?.method === 'GET')).toBe(true);
   });
 
@@ -2242,6 +2250,15 @@ function architectStatus(navigation: HTMLElement) {
   return within(navigation).getByRole('button', { name: /Architect/ });
 }
 
+/**
+ * A role's status badge sits beside its nav button and is its accessible description
+ * (#268 fix round 1, I1), so the button's own text is only the display name.
+ */
+function navStatus(button: HTMLElement) {
+  const id = button.getAttribute('aria-describedby');
+  return id === null ? null : document.getElementById(id)?.textContent ?? null;
+}
+
 describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
   it('fetches the catalog once on the first Model-tab opening of any role and again only on Refresh models', async () => {
     const fetchMock = mockWorkbenchWithPuts(() => apiResponse(500, null));
@@ -2316,7 +2333,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
       expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(SEED_NUMERICS.max_tokens);
       expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(SEED_NUMERICS.top_p);
     }
-    expect(architectStatus(navigation)).toHaveTextContent('Unsaved');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Unsaved');
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(catalogGets(fetchMock)).toHaveLength(1);
   });
@@ -2333,7 +2350,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 0); }); });
 
     expect(putCalls(fetchMock)).toHaveLength(0);
-    expect(architectStatus(navigation)).toHaveTextContent('Unsaved');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Unsaved');
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
     expect(screen.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
   });
@@ -2359,7 +2376,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(panel).toHaveTextContent(NO_SEARCH_MATCH);
 
     expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
-    expect(architectStatus(navigation)).not.toHaveTextContent('Unsaved');
+    expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Unsaved');
     fireEvent.change(search, { target: { value: '' } });
     expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
     expect(catalogGets(fetchMock)).toHaveLength(1);
@@ -2399,7 +2416,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(within(panel).queryByText(EMPTY_DISCOVERY)).not.toBeInTheDocument();
     expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
     expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
-    expect(architectStatus(navigation)).not.toHaveTextContent('Unsaved');
+    expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Unsaved');
     const refresh = within(panel).getByRole('button', { name: 'Refresh models' });
     expect(refresh).toBeEnabled();
 
@@ -2519,14 +2536,14 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     const navigation = await loadedNodeNavigation();
     const panel = openModelTab();
     await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
-    const statusBefore = architectStatus(navigation).textContent;
+    const statusBefore = navStatus(architectStatus(navigation));
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
     await within(panel).findByRole('radio', { name: syntheticNewerModelEndpoint.name });
     expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
     expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
     expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
-    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
     expect(putCalls(fetchMock)).toHaveLength(0);
 
     fireEvent.click(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name }));
@@ -2540,7 +2557,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
         model: { endpoint_name: syntheticNewerModelEndpoint.name, ...SEED_NUMERICS },
       },
     });
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
     expect(customEndpoint()).toHaveValue(syntheticNewerModelEndpoint.name);
   });
 
@@ -2625,7 +2642,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
       expect(raw).not.toContain(forbidden);
     }
 
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
     expect(customEndpoint()).toHaveValue(manual);
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
     expect(putCalls(fetchMock)).toHaveLength(1);
@@ -2667,7 +2684,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.3);
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(SEED_NUMERICS.max_tokens);
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.5);
-    expect(architectStatus(navigation)).toHaveTextContent('Unsaved');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Unsaved');
     fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect unsaved prompt');
     openModelTab();
@@ -2684,7 +2701,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
         model: { endpoint_name: corrected, temperature: 0.3, max_tokens: SEED_NUMERICS.max_tokens, top_p: 0.5 },
       },
     });
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
     expect(customEndpoint()).toBe(endpointInput);
     expect(customEndpoint()).toHaveValue(corrected);
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
@@ -2722,7 +2739,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
       prompt_text: modelNode('architect').draft.prompt_text,
       model: { endpoint_name: SEED_MODEL_ENDPOINT_NAME, ...SEED_NUMERICS },
     }, 1)));
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
     expect(save).toBeEnabled();
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
@@ -2771,7 +2788,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     const navigation = await loadedNodeNavigation();
     const panel = openModelTab();
     await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
-    const statusBefore = architectStatus(navigation).textContent;
+    const statusBefore = navStatus(architectStatus(navigation));
     expect(probeResult()).not.toBeInTheDocument();
     expect(probeCalls(fetchMock)).toHaveLength(0);
 
@@ -2791,7 +2808,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(within(region).queryByRole('alert')).not.toBeInTheDocument();
     // Success approves nothing: no status, lock, form or write moves.
     expect(region.textContent).not.toMatch(/approv|publish|release|ready|verified|passed/i);
-    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
     expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
     expect(putCalls(fetchMock)).toHaveLength(0);
@@ -2859,7 +2876,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
 
     fireEvent.click(within(panel).getByRole('radio', { name: newer }));
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Needs test'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
     expect(probeButton()).toBeEnabled();
     expect(panel).not.toHaveTextContent(PROBE_UNSAVED_HINT);
 
@@ -2867,7 +2884,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     await waitFor(() => expect(probeResult()).toBeInTheDocument());
     expect(probeBody(fetchMock, 0)).toBe('{"lock_version":1}');
     expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(newer, 'd'.repeat(64), 1));
-    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test');
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
 
@@ -2914,7 +2931,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     const navigation = await loadedNodeNavigation();
     const panel = openModelTab();
     await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
-    const statusBefore = architectStatus(navigation).textContent;
+    const statusBefore = navStatus(architectStatus(navigation));
 
     fireEvent.click(probeButton());
     await waitFor(() => expect(probeResult()).toBeInTheDocument());
@@ -2924,7 +2941,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(region).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
     expect(region).not.toHaveTextContent(PROBE_SUCCEEDED_TEXT);
     expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
-    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
     expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(probeButton()).toBeEnabled();
@@ -3217,7 +3234,7 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     await loadTestCasesForSelectedRole();
-    const statusBefore = architectStatus(navigation).textContent;
+    const statusBefore = navStatus(architectStatus(navigation));
 
     fireEvent.click(asideButton(RUN_BUTTON));
     await waitFor(() => expect(asideTab('Compare')).toHaveTextContent('Synthetic candidate structured title'));
@@ -3232,7 +3249,7 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     expect(within(checks).getAllByRole('row')).toHaveLength(3);
     expect(checks).toHaveTextContent('Deterministic checks passed');
     // A run is evidence only: no lock, status, form or write moves.
-    expect(architectStatus(navigation).textContent).toBe(statusBefore);
+    expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(callsMatching(fetchMock, BASELINE_RUN_URL, 'POST')).toHaveLength(0);
@@ -3504,7 +3521,7 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     // The candidate view still has no run of its own.
     expect(within(compare).getByRole('region', { name: 'Test case evidence' })).toHaveTextContent('No run yet');
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
-    expect(architectStatus(navigation)).toHaveTextContent('Clean');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Clean');
     expectNoForbiddenActionNames();
   });
 
@@ -3869,15 +3886,38 @@ describe('AgentDefinitionWorkbench readiness-derived status (#268)', () => {
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
 
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent(label));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription(label));
     // The same derivation labels the editor's own status badge.
     const badges = screen.getAllByRole('status').map((element) => element.textContent);
     expect(badges).toContain(label);
     // Unchanged roles stay Clean whatever readiness says.
-    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveTextContent('Clean');
+    expect(within(navigation).getByRole('button', { name: /Builder/ })).toHaveAccessibleDescription('Clean');
     expect(readinessGets(fetchMock)).toHaveLength(1);
     // Codes stay on the wire; the labels are the client's own.
     expect(document.body).not.toHaveTextContent(status);
+  });
+
+  it('keeps every status out of the nav button: its text is the name, its description the status', async () => {
+    mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      readiness: () => apiResponse(200, architectReadiness('approved')),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    const button = architectStatus(navigation);
+    await waitFor(() => expect(button).toHaveAccessibleDescription('Approved'));
+
+    // The browser guard reads text content too (#260): an Approved role must not put the
+    // `approve` stem inside a control, so the badge is a sibling, not a child.
+    expect(button).toHaveTextContent(/^Architect$/);
+    expect(button).toHaveAccessibleName('Architect');
+    expect(forbidsActionName(button.textContent ?? '')).toBe(false);
+    for (const control of within(navigation).getAllByRole('button')) {
+      expect(forbidsActionName(control.textContent ?? '')).toBe(false);
+    }
+    const badge = document.getElementById(button.getAttribute('aria-describedby') ?? '');
+    expect(badge?.closest('button')).toBeNull();
+    expect(within(navigation).getByRole('button', { name: 'Foreman' })).not.toHaveAttribute('aria-describedby');
   });
 
   it('drops a readiness answer read at another lock, so it cannot paint Approved', async () => {
@@ -3890,8 +3930,8 @@ describe('AgentDefinitionWorkbench readiness-derived status (#268)', () => {
     await waitFor(() => expect(readinessGets()).toHaveLength(1));
     await act(async () => { await Promise.resolve(); });
 
-    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
-    expect(architectStatus(navigation)).not.toHaveTextContent('Approved');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test');
+    expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Approved');
   });
 
   it('never shows Approved for readiness of another saved candidate', async () => {
@@ -3904,7 +3944,7 @@ describe('AgentDefinitionWorkbench readiness-derived status (#268)', () => {
     await waitFor(() => expect(readinessGets()).toHaveLength(1));
     await act(async () => { await Promise.resolve(); });
 
-    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test');
   });
 
   it('a malformed or failed readiness read is contained: the role reads Needs test', async () => {
@@ -3917,7 +3957,7 @@ describe('AgentDefinitionWorkbench readiness-derived status (#268)', () => {
     await waitFor(() => expect(readinessGets()).toHaveLength(1));
     await act(async () => { await Promise.resolve(); });
 
-    expect(architectStatus(navigation)).toHaveTextContent('Needs test');
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -3955,7 +3995,7 @@ describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
     });
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Awaiting review'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Awaiting review'));
     await loadTestCasesForSelectedRole();
     const compare = asideTab('Compare');
     const region = await within(compare).findByRole('region', { name: 'Candidate run verdict' });
@@ -3990,8 +4030,8 @@ describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
     expect(within(settled).queryByRole('button', { name: 'Approve run' })).not.toBeInTheDocument();
     expect(within(settled).getByRole('button', { name: 'Reject run' })).toBeEnabled();
     expect(within(asideTab('Compare')).getByRole('region', { name: 'Test case evidence' }))
-      .toHaveTextContent('Published baseline (approved)');
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Approved'));
+      .toHaveTextContent('Published baseline (not approved)');
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Approved'));
 
     expect(verdictBodies(fetchMock)).toEqual([['501', '{"verdict":"approved","notes":"Ship it."}']]);
     // The response is the evidence: no run read follows, and no draft write happened.
@@ -4022,7 +4062,7 @@ describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
 
     fireEvent.click(within(region).getByRole('button', { name: 'Reject run' }));
 
-    await waitFor(() => expect(architectStatus(navigation)).toHaveTextContent('Test failed'));
+    await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Test failed'));
     const settled = within(asideTab('Compare')).getByRole('region', { name: 'Candidate run verdict' });
     expect(settled).toHaveTextContent('Rejected by admin@test.com');
     expect(within(settled).getByRole('button', { name: 'Approve run' })).toBeEnabled();
@@ -4041,6 +4081,9 @@ describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
     await loadedNodeNavigation();
     await loadTestCasesForSelectedRole();
     const region = await within(asideTab('Compare')).findByRole('region', { name: 'Candidate run verdict' });
+    fireEvent.change(within(region).getByRole('textbox', { name: 'Candidate run verdict notes' }), {
+      target: { value: 'Keep these notes.' },
+    });
 
     fireEvent.click(within(region).getByRole('button', { name: 'Approve run' }));
 
@@ -4051,6 +4094,49 @@ describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
       .toHaveTextContent('No verdict recorded');
     await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
     expect(within(asideTab('Compare')).getByRole('button', { name: 'Approve run' })).toBeEnabled();
+    // m1: a refused verdict keeps the admin's notes for the retry.
+    expect(within(asideTab('Compare')).getByRole('textbox', { name: 'Candidate run verdict notes' }))
+      .toHaveValue('Keep these notes.');
+  });
+
+  it('Approve run on the published baseline replaces the baseline evidence and re-reads readiness (C9)', async () => {
+    const baseline = storedChangedRun({
+      run_id: 899, run_kind: 'published_baseline', candidate_hash: 'a'.repeat(64),
+      candidate_structured_output: { title: 'Stored published rerun' },
+    });
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      listCases: caseList(),
+      listRuns: () => apiResponse(200, { items: [storedChangedRun(), baseline] }),
+      readiness: () => apiResponse(200, architectReadiness('awaiting_review')),
+      verdict: () => apiResponse(200, {
+        ...baseline,
+        verdict: 'approved', verdict_reviewer: 'admin@test.com', verdict_at: '2026-09-26T10:07:00Z', verdict_notes: null,
+      }),
+    });
+    render(<AgentDefinitionWorkbench />);
+    const navigation = await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    const section = await within(asideTab('Compare')).findByRole('region', { name: 'Published baseline evidence' });
+    expect(section).toHaveTextContent('Published baseline rerun (not approved)');
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(1));
+
+    fireEvent.click(within(within(section).getByRole('region', { name: 'Published baseline verdict' }))
+      .getByRole('button', { name: 'Approve run' }));
+
+    const compare = asideTab('Compare');
+    await waitFor(() => expect(within(compare).getByRole('region', { name: 'Published baseline evidence' }))
+      .toHaveTextContent('Published baseline rerun (approved)'));
+    expect(within(compare).getByRole('region', { name: 'Published baseline verdict' }))
+      .toHaveTextContent('Approved by admin@test.com at 2026-09-26T10:07:00Z');
+    // The candidate run is untouched, and its baseline column keeps its fixed label (I2).
+    const candidate = within(compare).getByRole('region', { name: 'Candidate run verdict' });
+    expect(candidate).toHaveTextContent('No verdict recorded');
+    expect(within(compare).getByRole('region', { name: 'Test case evidence' })).not.toHaveTextContent('(approved)');
+    expect(verdictBodies(fetchMock)).toEqual([['899', '{"verdict":"approved","notes":null}']]);
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+    // A baseline verdict never makes the role Approved: readiness ignores baseline runs (C12).
+    expect(architectStatus(navigation)).toHaveAccessibleDescription('Awaiting review');
   });
 
   it('a run whose checks failed offers no enabled Approve run, and names why', async () => {

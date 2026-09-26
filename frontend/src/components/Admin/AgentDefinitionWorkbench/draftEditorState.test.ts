@@ -2952,6 +2952,12 @@ describe('draftStatus from the role\'s readiness item (C25)', () => {
       .toBe('Needs test');
   });
 
+  it('is Approved only when the server also says the role is ready: empty cases with ready false are Needs test', () => {
+    expect(draftStatus(changedEntry(), readinessWith([], { ready: false }))).toBe('Needs test');
+    expect(draftStatus(changedEntry(), readinessWith(['approved'], { ready: false }))).toBe('Needs test');
+    expect(draftStatus(changedEntry(), readinessWith(['approved'], { ready: true }))).toBe('Approved');
+  });
+
   it('aggregates worst-first: Test failed, then Needs test, then Awaiting review (Q2 default)', () => {
     expect(draftStatus(changedEntry(), readinessWith(['approved', 'needs_test', 'test_failed', 'awaiting_review'])))
       .toBe('Test failed');

@@ -496,15 +496,17 @@ export function useDraftEditor(workbench: AgentDefinitionWorkbenchResponse) {
     evidence: TestRunEvidence,
     verdict: TestRunVerdict,
     notes: string | null,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const started = startTestOperation('verdict', agentKey, evidence.test_case_id, { runId: evidence.run_id, verdict });
-    if (started === null) return;
+    if (started === null) return false;
     const { requestId } = started;
     try {
       const recorded = await recordTestRunVerdict(evidence.run_id, { verdict, notes });
       dispatch({ type: 'testVerdictRecorded', requestId, evidence: recorded });
+      return true;
     } catch (error) {
       dispatch({ type: 'testOperationFailed', requestId, ...testOperationFailure(error, 'verdict') });
+      return false;
     } finally {
       finishTestOperation(requestId);
     }

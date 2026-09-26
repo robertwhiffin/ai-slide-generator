@@ -691,7 +691,8 @@ export function agentReadinessFor(state: DraftEditorState, agentKey: AgentKey): 
  * and only readiness for this saved candidate: no item, an item for another hash, or a
  * changed role with no required case is `Needs test`, so stale data can never show
  * `Approved`. Otherwise the cases aggregate worst-first (the Q2 default): any
- * `test_failed`, then any `needs_test`, then any `awaiting_review`, else `Approved`.
+ * `test_failed`, then any `needs_test`, then any `awaiting_review`, else `Approved` when
+ * `readiness.ready`, and otherwise `Needs test`.
  */
 export function draftStatus(entry: DraftEditorEntry, readiness: AgentReadiness | null): DraftStatus {
   if (!editableFormsEqual(entry.local, formFromDefinition(entry.saved))) return 'Unsaved';
@@ -703,7 +704,9 @@ export function draftStatus(entry: DraftEditorEntry, readiness: AgentReadiness |
   if (statuses.includes('test_failed')) return 'Test failed';
   if (statuses.includes('needs_test')) return 'Needs test';
   if (statuses.includes('awaiting_review')) return 'Awaiting review';
-  return 'Approved';
+  // Defensive: every listed case approved is not enough on its own (an empty list
+  // aggregates to nothing); the server must also call the role ready.
+  return readiness.ready ? 'Approved' : 'Needs test';
 }
 
 /** The server's exact `endpoint_url_not_allowed` table message (#266). */

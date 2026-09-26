@@ -69,13 +69,16 @@ export interface TestRunPanelProps {
   ): Promise<TestCaseListEntry | null>;
   /** Reads one case version's stored runs; called when a case is selected. */
   onLoadTestRuns(agentKey: AgentKey, testCaseId: number): void | Promise<void>;
-  /** Records an admin's verdict on one shown run (candidate or published baseline). */
+  /**
+   * Records an admin's verdict on one shown run (candidate or published baseline).
+   * Resolves `true` only when the verdict was recorded; a refusal keeps the notes.
+   */
   onRecordVerdict(
     agentKey: AgentKey,
     evidence: TestRunEvidence,
     verdict: TestRunVerdict,
     notes: string | null,
-  ): void | Promise<void>;
+  ): Promise<boolean>;
 }
 
 /** The P1 label is verdict-aware (C26): a run is "not approved" until it is approved. */
@@ -130,7 +133,7 @@ function VerdictControls({ evidence, label, disabled, onRecord }: {
   evidence: TestRunEvidence;
   label: string;
   disabled: boolean;
-  onRecord(verdict: TestRunVerdict, notes: string | null): void | Promise<void>;
+  onRecord(verdict: TestRunVerdict, notes: string | null): Promise<boolean>;
 }) {
   const id = useId();
   const [notes, setNotes] = useState('');
@@ -144,8 +147,8 @@ function VerdictControls({ evidence, label, disabled, onRecord }: {
   const reason = offersApprove ? approveReason : rejectReason;
 
   const submit = async (verdict: TestRunVerdict) => {
-    await onRecord(verdict, notes.trim() === '' ? null : notes);
-    setNotes('');
+    // Only a recorded verdict clears the notes; a refused one keeps them for a retry.
+    if (await onRecord(verdict, notes.trim() === '' ? null : notes)) setNotes('');
   };
 
   return (
@@ -202,7 +205,7 @@ function CandidateEvidence({ evidence, savedCandidateHash, verdictDisabled, onRe
   evidence: TestRunEvidence | null;
   savedCandidateHash: string;
   verdictDisabled: boolean;
-  onRecordVerdict(evidence: TestRunEvidence, verdict: TestRunVerdict, notes: string | null): void | Promise<void>;
+  onRecordVerdict(evidence: TestRunEvidence, verdict: TestRunVerdict, notes: string | null): Promise<boolean>;
 }) {
   if (evidence === null) return <p className="text-gray-600">{NO_RUN_YET}</p>;
   const candidateRecorded = evidence.candidate_raw_output !== null || evidence.candidate_structured_output !== null;
@@ -227,8 +230,10 @@ function CandidateEvidence({ evidence, savedCandidateHash, verdictDisabled, onRe
           ) : <p className="text-gray-600">No candidate output recorded.</p>}
         </div>
         <div>
+          {/* The baseline output recorded inside a candidate run has no verdict of its
+              own: the candidate's verdict never labels it (#268 fix round 1, I2). */}
           <h5 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-            {`Published baseline (${verdictLabel(evidence)})`}
+            Published baseline (not approved)
           </h5>
           {baselineRecorded ? (
             <>

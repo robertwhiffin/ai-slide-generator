@@ -1804,6 +1804,14 @@ export interface DraftReadiness {
 
 const READINESS_URL = `${AGENT_DEFINITIONS_URL}/readiness`;
 
+/** A readiness 200 whose body does not match the exact contract (#269 may catch it). */
+export class InvalidReadinessResponseError extends Error {
+  constructor() {
+    super('Draft readiness response did not match the expected contract.');
+    this.name = 'InvalidReadinessResponseError';
+  }
+}
+
 const READINESS_STATUSES: readonly ReadinessStatus[] = [
   'needs_test', 'test_failed', 'awaiting_review', 'approved',
 ];
@@ -1872,7 +1880,7 @@ export async function getDraftReadiness(): Promise<DraftReadiness> {
   const payload: unknown = await response.json().catch(() => null);
   if (response.status === 200) {
     const readiness = parseDraftReadinessResponse(payload);
-    if (readiness === null) throw new InvalidTestRunResponseError();
+    if (readiness === null) throw new InvalidReadinessResponseError();
     return readiness;
   }
   throw new AgentDefinitionApiError(response.status, payload, response.statusText);

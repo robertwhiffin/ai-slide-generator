@@ -141,20 +141,31 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
                 const status = node.execution_kind === 'model'
                   ? draftStatus(editor.state.byAgent[node.agent_key], agentReadinessFor(editor.state, node.agent_key))
                   : null;
+                // The status badge is the button's description, never its content: the
+                // guard reads each control's text (#260), and "Approved" must not sit
+                // inside a control (#268 fix round 1, I1).
+                const statusId = `node-status-${node.agent_key}`;
                 return (
-                  <button
+                  <div
                     key={node.agent_key}
-                    type="button"
-                    aria-label={node.display_name}
-                    aria-current={selected ? 'true' : undefined}
-                    onClick={() => selectNode(node)}
-                    className={`w-full rounded-md px-3 py-2 text-left text-sm ${
-                      selected ? 'bg-blue-50 font-medium text-blue-800' : 'text-gray-700 hover:bg-gray-50'
-                    }`}
+                    className={`rounded-md ${selected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                   >
-                    <span>{node.display_name}</span>
-                    {status && <span className="mt-1 block text-xs font-normal text-gray-500">{status}</span>}
-                  </button>
+                    <button
+                      type="button"
+                      aria-label={node.display_name}
+                      aria-current={selected ? 'true' : undefined}
+                      aria-describedby={status ? statusId : undefined}
+                      onClick={() => selectNode(node)}
+                      className={`w-full px-3 pt-2 text-left text-sm ${status ? 'pb-0' : 'pb-2'} ${
+                        selected ? 'font-medium text-blue-800' : 'text-gray-700'
+                      }`}
+                    >
+                      {node.display_name}
+                    </button>
+                    {status && (
+                      <span id={statusId} className="block px-3 pb-2 text-xs font-normal text-gray-500">{status}</span>
+                    )}
+                  </div>
                 );
               })}
             </div>
