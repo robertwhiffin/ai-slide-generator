@@ -20,6 +20,8 @@ import {
   STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
+  syntheticAgentTestCase,
+  syntheticAgentTestCaseList,
   syntheticDraftDefinitions,
   syntheticDraftSaveConflict,
   syntheticDraftSaveSuccess,
@@ -32,6 +34,8 @@ import {
   syntheticSchemaUpgradeSuccess,
   syntheticSchemaV2DraftDefinition,
   syntheticSystemModelEndpoints,
+  syntheticTestRunEvidence,
+  syntheticTestRunUnavailable,
   syntheticUpgradeSuccess,
   syntheticV2DraftDefinition,
   v2ProtectedStageView,
@@ -69,8 +73,29 @@ async function installExactIdentityMock(page: Page) {
   }));
 }
 
+/**
+ * #267 tripwire (C38; #266's deferred m2): every Agent Test Case or test run request a
+ * test did not route itself lands here, is aborted, and fails the test in `afterEach`,
+ * so no unrouted run can reach a real server or be answered as another route.
+ */
+const unroutedAgentTestRequests: string[] = [];
+
+function isAgentTestPath(url: URL) {
+  return url.pathname.includes('/api/admin/agent-definitions/')
+    && (url.pathname.includes('/test-case') || url.pathname.includes('/test-run'));
+}
+
+test.afterEach(() => {
+  const unrouted = unroutedAgentTestRequests.splice(0);
+  expect(unrouted).toEqual([]);
+});
+
 async function installWorkbenchMock(page: Page, status = 200, body: unknown = syntheticAgentDefinitionWorkbench) {
   let requestCount = 0;
+  await page.route(isAgentTestPath, (route) => {
+    unroutedAgentTestRequests.push(`${route.request().method()} ${route.request().url()}`);
+    return route.abort();
+  });
   // The one shared default discovery answer (#266 correction 17): the first Model-tab
   // opening reads the catalog, and there is no catch-all route to absorb it. A test
   // that needs another catalog answer registers its own route later, which wins.
@@ -1477,9 +1502,17 @@ test('the forbidden-action rule fires on every banned name and spares the legiti
     expect(forbidsActionName(forbidden)).toBe(true);
   }
   for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
-  expect(ALLOWED_ACTION_NAMES).toHaveLength(3);
+  expect(ALLOWED_ACTION_NAMES).toHaveLength(5);
   // An exempt name is removed from the string, not read as a licence for the rest of it.
   expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
+  // #267's two run controls are exempt by exact name only (C25/C38).
+  expect(forbidsActionName('Run test case and publish')).toBe(true);
+  expect(forbidsActionName('Run published baseline, then approve')).toBe(true);
+  expect(forbidsActionName('View run 12')).toBe(true);
+  // Exemptions match the whole name exactly, never as a substring (review m-5).
+  for (const near of ['Run test cases', 'Run test case now', 'run test case', 'Rerun: Run published baseline']) {
+    expect(forbidsActionName(near), near).toBe(true);
+  }
 });
 
 test('no control in the panel ever offers execution, review, publication, history, or rollback', async ({ page }) => {
@@ -1497,7 +1530,10 @@ test('no control in the panel ever offers execution, review, publication, histor
   await openWorkbench(page);
   const panel = page.getByRole('tabpanel', { name: 'Agent Definitions' });
   await expect(panel.getByRole('button', { name: 'Save Draft' })).toBeEnabled();
-  await expect(panel).toContainText('Isolated testing is not available in this release.');
+  // #267 replaced the "not available" notice with the Agent Test Case panel.
+  await expect(page.getByRole('complementary', { name: 'Isolated testing' })
+    .getByRole('button', { name: 'Load Agent Test Cases' })).toBeEnabled();
+  await expect(panel).not.toContainText('Isolated testing is not available in this release.');
 
   // Put the legitimate `Restore published Graph Version 1 prompt` control on screen,
   // so the sweep below is exercised in the state that used to be one away from a
@@ -1509,10 +1545,12 @@ test('no control in the panel ever offers execution, review, publication, histor
     .toBeVisible();
 
   const sweep = async () => {
+    // Each name source (aria-label, text, title) is checked on its own: exemptions are
+    // exact whole names (review m-5), so a control naming itself twice is not concatenated.
     const names = await panel.locator('button, a')
-      .evaluateAll((controls) => controls.map((control) => (
-        `${control.getAttribute('aria-label') ?? ''} ${control.textContent ?? ''} ${control.getAttribute('title') ?? ''}`
-      )));
+      .evaluateAll((controls) => controls.flatMap((control) => [
+        control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
+      ].filter((source) => source.trim() !== '')));
     expect(names.length).toBeGreaterThan(0);
     for (const name of names) expect(forbidsActionName(name)).toBe(false);
     return names;
@@ -2429,4 +2467,392 @@ test('model endpoint catalogue 503 is an alert that recovers through Refresh mod
   expectBareCatalogReads(reads);
   expect(saves).toHaveLength(0);
   await expect.poll(workbenchRequestCount).toBe(1);
+});
+
+// ============================================================
+// #267 Task 6 — Agent Test Cases, test runs, and the Input/Compare/Checks views
+// ============================================================
+
+const RUN_TEST_CASE = 'Run test case';
+const RUN_BASELINE = 'Run published baseline';
+
+interface CapturedAgentTestRequest {
+  method: string;
+  path: string;
+  raw: string | null;
+}
+
+/**
+ * Routes every #267 request by URL and method (C38), registered after the tripwire so
+ * it wins. A request no responder answers is recorded as unrouted and aborted.
+ */
+async function installAgentTestMock(
+  page: Page,
+  responders: {
+    listCases?: (route: Route, call: number) => Promise<void> | void;
+    createCase?: (route: Route, call: number) => Promise<void> | void;
+    retireCase?: (route: Route, call: number) => Promise<void> | void;
+    updateCase?: (route: Route, call: number) => Promise<void> | void;
+    listRuns?: (route: Route, call: number) => Promise<void> | void;
+    candidateRun?: (route: Route, call: number) => Promise<void> | void;
+    baselineRun?: (route: Route, call: number) => Promise<void> | void;
+  },
+) {
+  const requests: CapturedAgentTestRequest[] = [];
+  const counts: Record<string, number> = {};
+  await page.route(isAgentTestPath, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    requests.push({ method, path: `${url.pathname}${url.search}`, raw: request.postData() });
+    const key = method === 'GET' && /\/test-cases$/.test(url.pathname) ? 'listCases'
+      : method === 'POST' && /\/test-cases$/.test(url.pathname) ? 'createCase'
+        : method === 'DELETE' && /\/test-cases\/\d+$/.test(url.pathname) ? 'retireCase'
+          : method === 'PUT' && /\/test-cases\/\d+$/.test(url.pathname) ? 'updateCase'
+            : method === 'GET' && /\/test-cases\/\d+\/runs$/.test(url.pathname) && url.search === '?limit=100' ? 'listRuns'
+          : method === 'POST' && /\/draft\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'candidateRun'
+            : method === 'POST' && /\/published\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'baselineRun'
+              : null;
+    const respond = key === null ? undefined : responders[key as keyof typeof responders];
+    if (!respond || key === null) {
+      unroutedAgentTestRequests.push(`${method} ${request.url()}`);
+      await route.abort();
+      return;
+    }
+    const call = counts[key] ?? 0;
+    counts[key] = call + 1;
+    await respond(route, call);
+  });
+  return requests;
+}
+
+function testingAside(page: Page) {
+  return page.getByRole('complementary', { name: 'Isolated testing' });
+}
+
+async function loadAgentTestCases(page: Page) {
+  await testingAside(page).getByRole('button', { name: 'Load Agent Test Cases' }).click();
+  await expect(testingAside(page).getByRole('combobox', { name: 'Agent Test Cases' })).toBeVisible();
+}
+
+async function openTestView(page: Page, name: 'Input' | 'Compare' | 'Checks') {
+  await testingAside(page).getByRole('tab', { name, exact: true }).click();
+  return testingAside(page).getByRole('tabpanel', { name, exact: true });
+}
+
+function historyReads(requests: CapturedAgentTestRequest[]) {
+  return requests.filter((request) => request.method === 'GET' && request.path.includes('/runs'))
+    .map((request) => request.path);
+}
+
+function runBodies(requests: CapturedAgentTestRequest[], kind: 'draft' | 'published') {
+  return requests
+    .filter((request) => request.method === 'POST' && request.path.includes(`/${kind}/`))
+    .map((request) => request.raw);
+}
+
+test('Agent Test Cases: add a case, run it against the saved candidate, then read Compare and Checks', async ({ page }) => {
+  await installExactIdentityMock(page);
+  const workbenchRequests = await installWorkbenchMock(page);
+  const created = syntheticAgentTestCase({ id: 202, name: 'Architect board summary', is_required: false });
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
+    createCase: (route) => fulfillJson(route, 201, created),
+    candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({
+      test_case_id: 202,
+      assembled_prompt: 'Assembled <b>prompt</b> for the board summary.',
+      execution_status: 'incomplete',
+      deterministic_checks_passed: false,
+      deterministic_check_results: [
+        { name: 'execution', passed: true, message: null, issues: [] },
+        { name: 'output_contract', passed: false, message: 'The output omitted a required field.', issues: [{ code: 'missing', field: 'title' }] },
+      ],
+    })),
+  });
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  await openWorkbench(page);
+  await expect(page.getByRole('heading', { name: 'Graph Version 1' })).toBeVisible();
+  // Mounting reads nothing for Agent Test Cases.
+  expect(requests).toHaveLength(0);
+
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+  await expect(aside).toContainText('Synthetic data only: never enter real customer, personal or confidential data.');
+  await expect(aside).toContainText('add the new case first and then retire the old one');
+  await aside.getByRole('button', { name: 'Add test case' }).click();
+  await aside.getByRole('textbox', { name: 'Test case name' }).fill('Architect board summary');
+  await aside.getByRole('textbox', { name: 'Synthetic payload (JSON)' })
+    .fill('{"user_request": "Summarise a fictional board meeting."}');
+  await aside.getByRole('button', { name: 'Save test case' }).click();
+  await expect(aside.getByRole('combobox', { name: 'Agent Test Cases' })).toHaveValue('202');
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  const compare = await openTestView(page, 'Compare');
+  const evidence = compare.getByRole('region', { name: 'Test case evidence' });
+  await expect(evidence).toContainText('Synthetic candidate structured title');
+  await expect(evidence).toContainText('Baseline not recorded');
+  await expect(evidence).toContainText('Input tokens: not reported');
+  const input = await openTestView(page, 'Input');
+  await expect(input).toContainText('Assembled <b>prompt</b> for the board summary.');
+  await expect(input.locator('b')).toHaveCount(0);
+  await expect(input.getByRole('region', { name: 'Model payload sent' })).not.toContainText('synthetic-session-0001');
+  const checks = await openTestView(page, 'Checks');
+  await expect(checks).toContainText('Deterministic checks failed');
+  await expect(checks.locator('tr[data-check-state="failed"]')).toContainText('output_contract');
+  await expect(checks.locator('tr[data-check-state="failed"]')).toContainText('Failed');
+
+  expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+    'GET /api/admin/agent-definitions/test-cases?agent_key=architect',
+    'GET /api/admin/agent-definitions/test-cases/101/runs?limit=100',
+    'POST /api/admin/agent-definitions/test-cases',
+    'GET /api/admin/agent-definitions/test-cases/202/runs?limit=100',
+    'POST /api/admin/agent-definitions/draft/architect/test-runs',
+  ]);
+  expect(JSON.parse(requests[2].raw ?? '')).toEqual({
+    agent_key: 'architect',
+    name: 'Architect board summary',
+    synthetic_payload: { user_request: 'Summarise a fictional board meeting.' },
+    assembly_context: { design_system_active: false },
+    is_required: false,
+  });
+  expect(runBodies(requests, 'draft')).toEqual(['{"test_case_id":202,"lock_version":0}']);
+  expect(saves).toHaveLength(0);
+  await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version0');
+  await expect.poll(workbenchRequests).toBe(1);
+});
+
+test('Agent Test Cases: a published-baseline rerun is shown not approved, and the next candidate run compares against it', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
+    baselineRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({
+      run_id: 777,
+      run_kind: 'published_baseline',
+      candidate_structured_output: { title: 'Published rerun title' },
+    })),
+    candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({
+      run_id: 778,
+      baseline_raw_output: { title: 'Published rerun raw title' },
+      baseline_structured_output: { title: 'Published rerun title' },
+    })),
+  });
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+
+  await aside.getByRole('button', { name: RUN_BASELINE }).click();
+  const compare = await openTestView(page, 'Compare');
+  const baseline = compare.getByRole('region', { name: 'Published baseline evidence' });
+  await expect(baseline).toContainText('Published rerun title');
+  await expect(baseline).toContainText('not approved');
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('No run yet');
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  const evidence = compare.getByRole('region', { name: 'Test case evidence' });
+  await expect(evidence).toContainText('Run 778');
+  await expect(evidence).toContainText('Published baseline (not approved)');
+  await expect(evidence).toContainText('Published rerun raw title');
+  await expect(evidence).not.toContainText('Baseline not recorded');
+  expect(runBodies(requests, 'published')).toEqual(['{"test_case_id":101}']);
+  expect(runBodies(requests, 'draft')).toEqual(['{"test_case_id":101,"lock_version":0}']);
+});
+
+test('Agent Test Cases: a stale_draft 409 reconciles through Reload server, and the explicit rerun sends the adopted lock', async ({ page }) => {
+  const conflict = syntheticNullCandidateConflict(0, 1);
+  conflict.server.definitions.architect = {
+    ...conflict.server.definitions.architect,
+    prompt_text: 'Architect changed on the server',
+    candidate_hash: 'd'.repeat(64),
+  };
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
+    candidateRun: (route, call) => (call === 0
+      ? fulfillJson(route, 409, conflict)
+      : fulfillJson(route, 201, syntheticTestRunEvidence({ candidate_hash: 'd'.repeat(64) }))),
+  });
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  const region = page.getByRole('region', { name: 'Draft changed on the server' });
+  await expect(region).toContainText('Expected lock 0; Current lock 1');
+  await expect(aside.getByRole('alert')).toContainText('The draft changed on the server.');
+  await expect(aside.getByRole('button', { name: RUN_TEST_CASE })).toBeDisabled();
+  await expect(aside).toContainText("Save this role's edits before running a test case.");
+
+  await region.getByRole('button', { name: 'Reload server' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect changed on the server');
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  const compare = await openTestView(page, 'Compare');
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Synthetic candidate structured title');
+  await expect(aside.getByRole('alert')).toHaveCount(0);
+  expect(runBodies(requests, 'draft')).toEqual([
+    '{"test_case_id":101,"lock_version":0}',
+    '{"test_case_id":101,"lock_version":1}',
+  ]);
+  expect(saves).toHaveLength(0);
+});
+
+test('Agent Test Cases: a 503 test_run_unavailable is a contained retryable alert that recovers only through an explicit retry', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
+    candidateRun: (route, call) => (call === 0
+      ? fulfillJson(route, 503, syntheticTestRunUnavailable())
+      : fulfillJson(route, 201, syntheticTestRunEvidence())),
+  });
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  await expect(aside.getByRole('alert')).toContainText('Test run storage is temporarily unavailable. Retry the request.');
+  await expect(aside.getByRole('button', { name: RUN_TEST_CASE })).toBeEnabled();
+  const compare = await openTestView(page, 'Compare');
+  await expect(compare).toContainText('No run yet');
+  expect(runBodies(requests, 'draft')).toHaveLength(1);
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Synthetic candidate structured title');
+  await expect(aside.getByRole('alert')).toHaveCount(0);
+  expect(runBodies(requests, 'draft')).toEqual([
+    '{"test_case_id":101,"lock_version":0}',
+    '{"test_case_id":101,"lock_version":0}',
+  ]);
+});
+
+test('Agent Test Cases: every control stays inside the guard, and no #266 or #267 locator resolves two controls', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
+    candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence()),
+  });
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  await openTestView(page, 'Compare');
+  await expect(aside.getByRole('region', { name: 'Test case evidence' })).toContainText('Synthetic candidate structured title');
+  await aside.getByRole('button', { name: 'Retire test case' }).click();
+  await page.getByRole('tab', { name: 'Model' }).click();
+  await expect(page.getByRole('radiogroup', { name: 'Discovered models' })).toBeVisible();
+
+  const panel = page.getByRole('tabpanel', { name: 'Agent Definitions' });
+  const names = await panel.locator('button, a').evaluateAll((controls) => controls.flatMap((control) => [
+    control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
+  ].filter((source) => source.trim() !== '')));
+  for (const name of [RUN_TEST_CASE, RUN_BASELINE, 'Confirm retire', 'Keep test case', 'Refresh test cases']) {
+    expect(names.some((candidate) => candidate.includes(name))).toBe(true);
+  }
+  for (const name of names) expect(forbidsActionName(name)).toBe(false);
+
+  // Playwright names are case-insensitive substrings: each must still resolve one control.
+  for (const name of [PROBE_BUTTON, 'Refresh models', RUN_TEST_CASE, RUN_BASELINE, 'Refresh test cases', 'Add test case']) {
+    await expect(page.getByRole('button', { name })).toHaveCount(1);
+  }
+  await expect(page.getByRole('searchbox', { name: 'Search discovered models' })).toHaveCount(1);
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveCount(1);
+  await expect(page.getByRole('region', { name: 'Test case evidence' })).toHaveCount(1);
+  await expect(page.getByRole('region', { name: PROBE_RESULT_REGION })).toHaveCount(0);
+});
+
+test('Agent Test Cases: Edit test case saves a new version of the same case, and the next run uses it', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const version2 = syntheticAgentTestCase({ id: 111, version: 2, synthetic_payload: { user_request: 'Revised ask' } });
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [] }),
+    updateCase: (route) => fulfillJson(route, 200, version2),
+    candidateRun: (route) => fulfillJson(route, 201, syntheticTestRunEvidence({ test_case_id: 111, test_case_version: 2 })),
+  });
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+  await expect(aside).toContainText('saves a new version of the same case');
+
+  await aside.getByRole('button', { name: 'Edit test case' }).click();
+  await expect(aside).toContainText('Name: Architect quarterly revenue outline');
+  await aside.getByRole('textbox', { name: 'Synthetic payload (JSON)' }).fill('{"user_request": "Revised ask"}');
+  await aside.getByRole('button', { name: 'Save new version' }).click();
+  await expect(aside.getByRole('combobox', { name: 'Agent Test Cases' })).toHaveValue('111');
+  await expect(aside.getByRole('combobox', { name: 'Agent Test Cases' })).toContainText('v2');
+
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  const compare = await openTestView(page, 'Compare');
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Case version 2');
+  const put = requests.filter((request) => request.method === 'PUT');
+  expect(put.map((request) => request.path)).toEqual(['/api/admin/agent-definitions/test-cases/101']);
+  expect(JSON.parse(put[0].raw ?? '')).toEqual({
+    name: 'Architect quarterly revenue outline',
+    synthetic_payload: { user_request: 'Revised ask' },
+    assembly_context: { design_system_active: false },
+    is_required: true,
+  });
+  expect(runBodies(requests, 'draft')).toEqual(['{"test_case_id":111,"lock_version":0}']);
+  expect(saves).toHaveLength(0);
+});
+
+test('Agent Test Cases: after a page reload the stored run and stored baseline are shown again, labelled not approved', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page);
+  const stored: unknown[] = [];
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: stored }),
+    baselineRun: (route) => {
+      const baseline = syntheticTestRunEvidence({
+        run_id: 801, run_kind: 'published_baseline', candidate_structured_output: { title: 'Stored published rerun' },
+      });
+      stored.unshift({ ...baseline, candidate_is_current: null, base_release_is_current: null });
+      return fulfillJson(route, 201, baseline);
+    },
+    candidateRun: (route) => {
+      const run = syntheticTestRunEvidence({
+        run_id: 802,
+        baseline_raw_output: { title: 'Stored published rerun' },
+        baseline_structured_output: { title: 'Stored published rerun' },
+      });
+      stored.unshift({ ...run, candidate_is_current: null, base_release_is_current: null });
+      return fulfillJson(route, 201, run);
+    },
+  });
+  await openWorkbench(page);
+  await loadAgentTestCases(page);
+  const aside = testingAside(page);
+  await aside.getByRole('button', { name: RUN_BASELINE }).click();
+  await expect((await openTestView(page, 'Compare')).getByRole('region', { name: 'Published baseline evidence' }))
+    .toContainText('Stored published rerun');
+  await aside.getByRole('button', { name: RUN_TEST_CASE }).click();
+  await expect(aside.getByRole('region', { name: 'Test case evidence' })).toContainText('Run 802');
+
+  await page.reload();
+  await page.getByRole('tab', { name: 'Agent Definitions' }).click();
+  await loadAgentTestCases(page);
+  const compare = await openTestView(page, 'Compare');
+  const evidence = compare.getByRole('region', { name: 'Test case evidence' });
+  await expect(evidence).toContainText('Run 802');
+  await expect(evidence).toContainText('Published baseline (not approved)');
+  await expect(evidence).toContainText('Stored published rerun');
+  const baseline = compare.getByRole('region', { name: 'Published baseline evidence' });
+  await expect(baseline).toContainText('Run 801');
+  await expect(baseline).toContainText('not approved');
+  await expect((await openTestView(page, 'Input'))).toContainText('Synthetic assembled Architect prompt for the saved candidate.');
+  expect(historyReads(requests)).toEqual([
+    '/api/admin/agent-definitions/test-cases/101/runs?limit=100',
+    '/api/admin/agent-definitions/test-cases/101/runs?limit=100',
+  ]);
 });

@@ -19,9 +19,10 @@ import logging
 import textwrap
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Callable, Literal, Protocol, cast
 
 import httpx
 import openai
@@ -37,6 +38,7 @@ from databricks.sdk.errors import (
     Unauthenticated,
 )
 from pydantic import BaseModel, ValidationError
+from pydantic_core import to_jsonable_python
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.databricks_client import DatabricksClientError
@@ -50,6 +52,7 @@ from src.services.agent_runtime_identity import (
     RecordingAgentInvocationIdentitySink,
 )
 from src.services.agent_schema_registry import (
+    AgentOutputValidationError,
     AgentSchemaRegistry,
     SchemaOverlayValidationError,
 )
@@ -93,6 +96,7 @@ MODEL_DRIVEN_AGENT_KEYS = (
     "deck_reviewer",
 )
 _MODEL_DRIVEN_AGENT_KEY_SET = frozenset(MODEL_DRIVEN_AGENT_KEYS)
+logger = logging.getLogger(__name__)
 _PROTECTED_PROMPT_VERSION = 1
 _PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -417,8 +421,17 @@ def bind_structured_output_model(
     caller's runtime-identity ``workspace_client``, then bind ``schema``.  It
     catches nothing: each caller owns its own failure classification, so the
     probe can still tell a permission denial from a transport failure while the
-    runtime keeps collapsing both.  ``transport_options`` is for the probe's
-    call bound only; the runtime passes none.
+    runtime keeps collapsing both.  ``transport_options`` is a request bound
+    for the two admin-request callers only: the #266 probe, and the #267
+    test-run adapter built by ``get_agent_test_runtime``.  The production
+    runtime adapter passes none.
+
+    Only while a #267 test run's model call is in flight (its ``RunObservation``
+    is the observed run) is the bound model given a callback that records the
+    provider's reported token usage onto that observation.  The binding itself
+    is unchanged — no ``include_raw`` — so parsing and its errors are
+    production's; production ``run`` observes nothing and gets exactly
+    the plain structured-output binding of ``schema``.
     """
     model = model_factory(
         endpoint=configuration.endpoint_name,
@@ -428,7 +441,66 @@ def bind_structured_output_model(
         workspace_client=workspace_client,
         **(transport_options or {}),
     )
-    return model.with_structured_output(schema)
+    structured_model = model.with_structured_output(schema)
+    observation = _OBSERVED_TEST_RUN.get()
+    if observation is None:
+        return structured_model
+    return structured_model.with_config(callbacks=[_token_usage_callback(observation)])
+
+
+def _token_count(value: Any) -> int | None:
+    """A provider-reported count, or ``None``: only a non-negative ``int`` is a count."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _reported_token_usage(message: Any) -> tuple[int | None, int | None]:
+    """The (input, output) token counts one provider message reports, if any.
+
+    ``ChatDatabricks`` (databricks-langchain 0.9.0) leaves LangChain's standard
+    ``usage_metadata`` unset and reports the completion's ``usage`` in
+    ``response_metadata["usage"]`` (measured over a mock transport, #267 I-1);
+    the standard field is still read first, then the OpenAI-style mappings.
+    """
+    usage_metadata = getattr(message, "usage_metadata", None)
+    if isinstance(usage_metadata, Mapping):
+        return (
+            _token_count(usage_metadata.get("input_tokens")),
+            _token_count(usage_metadata.get("output_tokens")),
+        )
+    response_metadata = getattr(message, "response_metadata", None)
+    if isinstance(response_metadata, Mapping):
+        for key in ("usage", "token_usage"):
+            usage = response_metadata.get(key)
+            if isinstance(usage, Mapping):
+                return (
+                    _token_count(usage.get("prompt_tokens")),
+                    _token_count(usage.get("completion_tokens")),
+                )
+    return None, None
+
+
+def _token_usage_callback(observation: RunObservation) -> Any:
+    """A LangChain callback that copies the provider's reported usage onto ``observation``.
+
+    ``langchain_core`` is imported lazily, like the chat model that fires it.
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class _TokenUsageCallback(BaseCallbackHandler):
+        def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+            del kwargs
+            for generations in response.generations:
+                for generation in generations:
+                    input_tokens, output_tokens = _reported_token_usage(
+                        getattr(generation, "message", None)
+                    )
+                    if input_tokens is not None or output_tokens is not None:
+                        _record_token_usage(observation, input_tokens, output_tokens)
+                        return
+
+    return _TokenUsageCallback()
 
 
 class DatabricksModelAdapter:
@@ -439,9 +511,15 @@ class DatabricksModelAdapter:
         *,
         model_factory: Callable[..., Any] | None = None,
         client_factory: Callable[[], Any] | None = None,
+        transport_options: Mapping[str, Any] | None = None,
     ) -> None:
         self._model_factory = model_factory or self._default_model_factory
         self._client_factory = client_factory or self._default_client_factory
+        # ``None`` (production) hands the model factory exactly the kwargs it
+        # always had; only ``get_agent_test_runtime`` bounds the call (#267 C33).
+        self._transport_options = (
+            dict(transport_options) if transport_options is not None else None
+        )
 
     @staticmethod
     def _default_model_factory(**kwargs: Any) -> Any:
@@ -491,6 +569,7 @@ class DatabricksModelAdapter:
                 workspace_client=self._client_factory(),
                 configuration=configuration,
                 schema=schema,
+                transport_options=self._transport_options,
             )
             return structured_model.invoke(prompt)
         except provider_errors as original_error:
@@ -552,6 +631,163 @@ def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:
     crosses.
     """
     return provider_output.model_dump(mode="python", exclude_unset=True)
+
+
+#: The identity of a #267 candidate run: a saved DRAFT is no Graph Release and
+#: no Agent Definition Revision, so none is claimed.  ``-1`` can never be a real
+#: SERIAL id, so a log record or a ``PinnedInvocationEndpointError`` carrying it
+#: is unmistakably a candidate run (Correction 27).  These are runtime identity,
+#: not loader state, and ``run(-1, ...)`` still fails as an absent release.
+CANDIDATE_RUN_GRAPH_VERSION = -1
+CANDIDATE_RUN_GRAPH_RELEASE_ID = -1
+CANDIDATE_RUN_REVISION_ID = -1
+
+CandidateRunStatus = Literal["completed", "assembly_error", "model_error", "incomplete"]
+
+
+@dataclass(frozen=True)
+class CandidateRunOutcome:
+    """What one candidate run produced, with every failure classified.
+
+    ``run_candidate`` raises only for a caller contract violation (an unknown
+    role, content for another role, a hash that does not match, a session
+    identity).  Everything that happens once the run starts is returned here, so
+    a failed run is still evidence rather than an unhandled 500 (#267 C15/C16).
+
+    * ``result`` is set only when ``status == "completed"``.
+    * ``raw_output`` is the JSON-safe top-level keys the provider actually
+      supplied, observed before ``validate_output``; ``None`` when the provider
+      returned nothing (an assembly, provider or parse failure).
+    * ``error_detail`` is a code or ``<code>:<endpoint>`` / ``<code>:<Class>``,
+      never exception text or provider payload.
+    """
+
+    status: CandidateRunStatus
+    result: AgentInvocationResult | None
+    raw_output: Mapping[str, Any] | None
+    error: Exception | None
+    error_detail: str | None
+
+
+class RunObservation:
+    """What one #267 test run handed the model, and what came back.
+
+    A public, test-run-only recorder: ``run_candidate`` and
+    ``run_published_baseline`` fill it when given one.  ``prompt`` is the exact
+    assembled prompt passed to the model adapter (``None`` when assembly failed
+    before the call); ``raw_output`` is the JSON-safe top-level keys the provider
+    supplied, observed before validation; ``model_latency_ms`` is the adapter
+    call's duration, recorded whether it returned or raised.
+    ``input_tokens``/``output_tokens`` are the provider's reported usage for
+    the call, each ``None`` when the provider reported none (#267 I-1, P9).
+    ``run`` never takes one, so production behaviour is unchanged.
+    """
+
+    def __init__(self) -> None:
+        self.prompt: str | None = None
+        self.raw_output: dict[str, Any] | None = None
+        self.model_latency_ms: float | None = None
+        self.input_tokens: int | None = None
+        self.output_tokens: int | None = None
+
+
+#: The observation of the #267 test run whose model call is in flight, set only
+#: around that one adapter call by ``_run_resolved``; ``None`` everywhere else,
+#: including every production ``run``.
+_OBSERVED_TEST_RUN: ContextVar[RunObservation | None] = ContextVar(
+    "observed_test_run", default=None
+)
+
+
+def _record_token_usage(
+    observation: RunObservation, input_tokens: Any, output_tokens: Any
+) -> None:
+    observation.input_tokens = _token_count(input_tokens)
+    observation.output_tokens = _token_count(output_tokens)
+
+
+def report_model_token_usage(*, input_tokens: Any, output_tokens: Any) -> None:
+    """Record token usage for the test run whose model call is in flight.
+
+    The seam for a model adapter other than the Databricks one (a test double)
+    to report usage exactly as the binding helper's callback does.  Outside an
+    observed test-run call it does nothing, so production is unaffected.
+    """
+    observation = _OBSERVED_TEST_RUN.get()
+    if observation is not None:
+        _record_token_usage(observation, input_tokens, output_tokens)
+
+
+def _is_provider_parse_error(error: Exception) -> bool:
+    """A structured-output parser rejected the provider's response.
+
+    ``langchain_core`` is imported lazily: the runtime module stays import-light,
+    and the chat model that raises this type is itself imported lazily.
+    """
+    if isinstance(error, ValidationError):
+        return True
+    try:
+        from langchain_core.exceptions import OutputParserException
+    except ImportError:  # pragma: no cover - the provider stack is always installed
+        return False
+    return isinstance(error, OutputParserException)
+
+
+def classify_test_run_failure(
+    error: Exception, *, endpoint_name: str
+) -> tuple[CandidateRunStatus, str]:
+    """Map one failure out of ``_run_resolved`` to (status, detail) — #267 C16/C33.
+
+    Pre-invocation failures reach here already converted by ``_run_resolved``
+    into ``PersistedConfigurationUnavailableError``, so a bare ``ValidationError``
+    can only have come from the provider call.
+    """
+    if isinstance(error, PersistedConfigurationUnavailableError):
+        return "assembly_error", error.code
+    if isinstance(error, PinnedInvocationEndpointError):
+        return "model_error", f"endpoint_unavailable:{endpoint_name}"
+    if isinstance(error, NotImplementedError):
+        return "model_error", f"structured_output_unsupported:{endpoint_name}"
+    if isinstance(error, AgentOutputValidationError) or _is_provider_parse_error(error):
+        return "incomplete", f"invalid_output:{type(error).__name__}"
+    return "model_error", f"unexpected_error:{type(error).__name__}"
+
+
+class _PassThroughIdentitySink:
+    """Run the callback and record nothing: the sink for a candidate run."""
+
+    def invoke(
+        self,
+        identity: AgentInvocationIdentity,
+        callback: Callable[[], ValidatedAgentOutput],
+    ) -> ValidatedAgentOutput:
+        del identity
+        return callback()
+
+
+_PASS_THROUGH_IDENTITY_SINK = _PassThroughIdentitySink()
+
+#: The one log record a candidate run writes, and its EXACT fields: the role,
+#: the outcome status, the code part of ``error_detail`` and the exception class
+#: name.  No release/revision id (a draft has none), no endpoint, payload, prompt,
+#: output or exception text — the #266 probe's standard.
+CANDIDATE_RUN_LOG_MESSAGE = "agent_candidate_run"
+
+
+def _log_candidate_run(agent_key: str, outcome: CandidateRunOutcome) -> None:
+    logger.info(
+        CANDIDATE_RUN_LOG_MESSAGE,
+        extra={
+            "agent_key": agent_key,
+            "status": outcome.status,
+            "error_code": (
+                outcome.error_detail.split(":", 1)[0] if outcome.error_detail else None
+            ),
+            "error_class": (
+                type(outcome.error).__name__ if outcome.error is not None else None
+            ),
+        },
+    )
 
 
 class AgentRuntime:
@@ -618,11 +854,159 @@ class AgentRuntime:
             ) from exc
         return self._run_resolved(definition, payload, assembly_context)
 
+    def run_candidate(
+        self,
+        agent_key: str,
+        candidate_content: DefinitionContent,
+        candidate_hash: str,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+        *,
+        observation: RunObservation | None = None,
+    ) -> CandidateRunOutcome:
+        """Run one saved DRAFT candidate through ``run``'s own private path.
+
+        This is not ``run``: a draft is no release, so nothing is resolved and
+        the loader is never touched.  After the caller-contract checks (role,
+        then the content's role, then the hash) the candidate is wrapped in the
+        sentinel identity and handed to the same ``_run_resolved`` production
+        uses — the same revalidation, assembly, schema composition and adapter
+        — so its prompt bytes equal production's for the same content.  The
+        production identity log is bypassed: the run writes one
+        ``agent_candidate_run`` record of its own, carrying the role, status,
+        error code and error class only.  Only the #267 test workbench may call
+        this (spec §7.1).
+        """
+        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
+            raise UnknownAgentKeyError(
+                f"Unknown model-driven agent key {agent_key!r}; "
+                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
+            )
+        if candidate_content.agent_key != agent_key:
+            raise ValueError("candidate_content.agent_key does not match agent_key")
+        if definition_content_hash(candidate_content) != candidate_hash:
+            raise ValueError("candidate_hash does not match candidate_content")
+        if assembly_context.root_session_id or assembly_context.actor_session_id:
+            # A test run belongs to no conversation: the identity sink must not
+            # be handed a session it could attribute the run to.
+            raise ValueError("candidate runs carry no session identity")
+
+        resolved = ResolvedDefinition(
+            graph_version=CANDIDATE_RUN_GRAPH_VERSION,
+            graph_release_id=CANDIDATE_RUN_GRAPH_RELEASE_ID,
+            agent_key=agent_key,
+            agent_definition_revision_id=CANDIDATE_RUN_REVISION_ID,
+            content_hash=candidate_hash,
+            content=candidate_content,
+        )
+        outcome = self._run_observed(
+            resolved,
+            payload,
+            assembly_context,
+            observation=observation,
+            # A draft has no release or revision identity, so the runtime's
+            # identity sink (the production invocation log) never sees a
+            # candidate run (Task 3 ruling R1).  The pass-through sink keeps
+            # nothing, so the lru_cached test runtime cannot grow.
+            identity_sink=_PASS_THROUGH_IDENTITY_SINK,
+        )
+        _log_candidate_run(agent_key, outcome)
+        return outcome
+
+    def run_published_baseline(
+        self,
+        agent_key: str,
+        graph_release_id: int,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+        *,
+        observation: RunObservation | None = None,
+    ) -> CandidateRunOutcome:
+        """Rerun a published definition for a #267 baseline: ``run``, observed.
+
+        Resolution mirrors ``run`` exactly (the role check, the loader and its
+        error mapping, pinned equal to ``run``'s by an AST test), so a loader
+        failure raises just as it does from ``run``.  From there it is the same
+        ``_run_resolved`` with the production identity sink — a baseline is a
+        genuine invocation of published content — and every run failure is
+        classified into the outcome instead of raised.  Only the #267 test
+        workbench may call this.
+        """
+        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
+            raise UnknownAgentKeyError(
+                f"Unknown model-driven agent key {agent_key!r}; "
+                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
+            )
+        try:
+            definition = self._persisted_release_loader.resolve(graph_release_id, agent_key)
+        except PersistedRuntimeError:
+            raise
+        except SQLAlchemyError as exc:
+            raise PersistedConfigurationUnavailableError(code="lakebase_unavailable") from exc
+        except (GraphConfigurationIntegrityError, ValidationError, TypeError) as exc:
+            raise PersistedConfigurationUnavailableError(
+                code="invalid_persisted_definition"
+            ) from exc
+        return self._run_observed(
+            definition,
+            payload,
+            assembly_context,
+            observation=observation,
+            identity_sink=None,
+        )
+
+    def _run_observed(
+        self,
+        definition: ResolvedDefinition,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+        *,
+        observation: RunObservation | None,
+        identity_sink: AgentInvocationIdentitySink | None,
+    ) -> CandidateRunOutcome:
+        """``_run_resolved`` with the raw output observed and failures classified."""
+        record = observation if observation is not None else RunObservation()
+
+        def observe(raw: Mapping[str, Any]) -> None:
+            record.raw_output = to_jsonable_python(dict(raw), fallback=str)
+
+        try:
+            result = self._run_resolved(
+                definition,
+                payload,
+                assembly_context,
+                _raw_output_observer=observe,
+                _identity_sink=identity_sink,
+                _observation=record,
+            )
+        except Exception as error:  # noqa: BLE001 - every run failure is evidence
+            status, detail = classify_test_run_failure(
+                error, endpoint_name=definition.content.model.endpoint_name
+            )
+            return CandidateRunOutcome(
+                status=status,
+                result=None,
+                raw_output=record.raw_output,
+                error=error,
+                error_detail=detail,
+            )
+        return CandidateRunOutcome(
+            status="completed",
+            result=result,
+            raw_output=record.raw_output,
+            error=None,
+            error_detail=None,
+        )
+
     def _run_resolved(
         self,
         definition: ResolvedDefinition,
         payload: dict[str, Any],
         assembly_context: AgentAssemblyContext,
+        *,
+        _raw_output_observer: Callable[[Mapping[str, Any]], None] | None = None,
+        _identity_sink: AgentInvocationIdentitySink | None = None,
+        _observation: RunObservation | None = None,
     ) -> AgentInvocationResult:
         try:
             content = DefinitionContent.model_validate(definition.content.model_dump(mode="python"))
@@ -694,6 +1078,16 @@ class AgentRuntime:
         )
 
         def callback() -> ValidatedAgentOutput:
+            # Private and keyword-only, like the raw observer: ``run`` passes
+            # none.  A test run records the exact prompt sent and the call's
+            # duration, whether the adapter returns or raises (#267 Task 4).
+            if _observation is not None:
+                _observation.prompt = prompt
+            # Only a test run's own call is observed for token usage (I-1).
+            usage_scope = (
+                _OBSERVED_TEST_RUN.set(_observation) if _observation is not None else None
+            )
+            invoke_started = time.perf_counter()
             try:
                 provider_output = self._model_adapter.invoke(
                     agent_key=definition.agent_key,
@@ -707,12 +1101,24 @@ class AgentRuntime:
                     graph_release_id=definition.graph_release_id,
                     agent_definition_revision_id=definition.agent_definition_revision_id,
                 ) from exc
-            return self._schema_registry.validate_output(
-                composed, _supplied_output_keys(provider_output)
-            )
+            finally:
+                if usage_scope is not None:
+                    _OBSERVED_TEST_RUN.reset(usage_scope)
+                if _observation is not None:
+                    _observation.model_latency_ms = (
+                        time.perf_counter() - invoke_started
+                    ) * 1000
+            supplied = _supplied_output_keys(provider_output)
+            # Private and keyword-only: ``run`` passes none, so production
+            # behaviour and error types are unchanged.  A candidate run records
+            # the raw keys here, before validation can reject them (#267 C15).
+            if _raw_output_observer is not None:
+                _raw_output_observer(supplied)
+            return self._schema_registry.validate_output(composed, supplied)
 
         started = time.perf_counter()
-        validated = self._identity_sink.invoke(identity, callback)
+        sink = _identity_sink if _identity_sink is not None else self._identity_sink
+        validated = sink.invoke(identity, callback)
         latency_ms = (time.perf_counter() - started) * 1000
 
         return AgentInvocationResult(
@@ -739,5 +1145,33 @@ def get_agent_runtime() -> AgentRuntime:
     return AgentRuntime(
         persisted_release_loader=PersistedGraphReleaseLoader(session_factory=get_session_local()),
         model_adapter=DatabricksModelAdapter(),
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=logging.getLogger(__name__)),
+    )
+
+
+TEST_RUN_TIMEOUT_SECONDS = 120.0
+TEST_RUN_MAX_RETRIES = 0
+
+
+@lru_cache(maxsize=1)
+def get_agent_test_runtime() -> AgentRuntime:
+    """Return the runtime for #267 test runs: production's, with a bounded call.
+
+    A test run's model call happens inside one admin HTTP request, so it must
+    not inherit the provider client's default window of minutes per attempt
+    with retries (the defect #266 closed for its probe).  Only the transport is
+    bounded; loader, sink, sampling values, prompt and schema are production's.
+    It is referenced only by the test workbench and its route (#267 C33).
+    """
+    from src.core.database import get_session_local
+
+    return AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=get_session_local()),
+        model_adapter=DatabricksModelAdapter(
+            transport_options={
+                "timeout": TEST_RUN_TIMEOUT_SECONDS,
+                "max_retries": TEST_RUN_MAX_RETRIES,
+            }
+        ),
         identity_sink=LoggingAgentInvocationIdentitySink(logger=logging.getLogger(__name__)),
     )

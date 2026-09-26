@@ -632,13 +632,21 @@ def test_main_app_registers_the_dedicated_workbench_route():
         },
         "/api/admin/agent-definitions/draft/{agent_key}/legacy-prompt-source": {"POST"},
         "/api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe": {"POST"},
+        "/api/admin/agent-definitions/test-cases": {"GET", "POST"},
+        "/api/admin/agent-definitions/test-cases/{test_case_id}": {"PUT", "DELETE"},
+        "/api/admin/agent-definitions/draft/{agent_key}/test-runs": {"POST"},
+        "/api/admin/agent-definitions/published/{agent_key}/test-runs": {"POST"},
+        "/api/admin/agent-definitions/test-runs/{run_id}": {"GET"},
+        "/api/admin/agent-definitions/test-cases/{test_case_id}/runs": {"GET"},
     }
     for path, methods in expected_methods.items():
         matches = [
             route for route in app.routes if getattr(route, "path", None) == path
         ]
-        assert len(matches) == 1, path
-        assert matches[0].methods == methods, path
+        # One route object per method: a path serving two methods has two.
+        assert len(matches) == len(methods), path
+        assert all(len(route.methods) == 1 for route in matches), path
+        assert set().union(*(route.methods for route in matches)) == methods, path
     assert (
         len(
             [
@@ -649,7 +657,7 @@ def test_main_app_registers_the_dedicated_workbench_route():
                 )
             ]
         )
-        == len(expected_methods)
+        == sum(len(methods) for methods in expected_methods.values())
     )
 
 
@@ -4657,3 +4665,1742 @@ def test_model_endpoint_probe_route_maps_real_provider_errors(
     assert "leak.example" not in response.text
     assert MOCK_HOST not in response.text
     assert "unit-test-dummy-key" not in response.text
+
+
+# ===========================================================================
+# #267 Task 2: Agent Test Case CRUD routes on the one admin router (C9, C22, C23)
+# ===========================================================================
+
+from src.database.models.graph_configuration import AgentTestCase  # noqa: E402
+from src.services.agent_test_workbench import AgentTestWorkbench  # noqa: E402
+
+_TEST_CASES_URL = "/api/admin/agent-definitions/test-cases"
+_TEST_CASE_KEYS = {
+    "id",
+    "agent_key",
+    "name",
+    "version",
+    "is_active",
+    "is_required",
+    "synthetic_payload",
+    "assembly_context",
+    "created_by",
+    "created_at",
+    "updated_by",
+    "updated_at",
+    "is_synthetic_data_warning",
+}
+_LAST_REQUIRED_MESSAGE = (
+    "A role must keep at least one active required test case. "
+    "Add its replacement before retiring this one."
+)
+
+
+def _test_case_url(test_case_id: int) -> str:
+    return f"{_TEST_CASES_URL}/{test_case_id}"
+
+
+def _seed_test_case_id(session_factory: sessionmaker, agent_key: str = "architect") -> int:
+    with session_factory() as session:
+        return session.scalar(
+            select(AgentTestCase.id).where(
+                AgentTestCase.agent_key == agent_key,
+                AgentTestCase.name == f"{agent_key}_required_smoke_v1",
+            )
+        )
+
+
+def _test_case_rows(session_factory: sessionmaker) -> list[tuple[object, ...]]:
+    with session_factory() as session:
+        return [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    AgentTestCase.id,
+                    AgentTestCase.agent_key,
+                    AgentTestCase.name,
+                    AgentTestCase.version,
+                    AgentTestCase.is_active,
+                    AgentTestCase.is_required,
+                    AgentTestCase.synthetic_payload,
+                    AgentTestCase.assembly_context,
+                    AgentTestCase.created_by,
+                    AgentTestCase.updated_by,
+                    AgentTestCase.updated_at,
+                ).order_by(AgentTestCase.id)
+            )
+        ]
+
+
+def _create_body(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "agent_key": "architect",
+        "name": "architect_extra",
+        "synthetic_payload": {"message": "Synthetic smoke input."},
+        "assembly_context": {"design_system_active": False},
+        "is_required": False,
+    }
+    body.update(overrides)
+    return body
+
+
+def _update_body(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "synthetic_payload": {"message": "revised"},
+        "assembly_context": {"design_system_active": True},
+        "is_required": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def _without_timestamps(body: dict[str, object]) -> dict[str, object]:
+    assert set(body) == _TEST_CASE_KEYS
+    assert isinstance(body["created_at"], str) and body["created_at"]
+    assert isinstance(body["updated_at"], str) and body["updated_at"]
+    return {key: value for key, value in body.items() if not key.endswith("_at")}
+
+
+def _invalid_test_case(*issues: tuple[str, str, str]) -> dict[str, object]:
+    return {
+        "code": "invalid_test_case",
+        "issues": [
+            {"field": field, "code": code, "message": message}
+            for field, code, message in issues
+        ],
+    }
+
+
+_TEST_CASE_ROUTES = [
+    ("POST", lambda _id: _TEST_CASES_URL),
+    ("GET", lambda _id: _TEST_CASES_URL),
+    ("PUT", _test_case_url),
+    ("DELETE", _test_case_url),
+]
+_TEST_CASE_WRITE_ROUTES = [route for route in _TEST_CASE_ROUTES if route[0] != "GET"]
+
+
+def _forbid_test_case_service(monkeypatch, calls: list[str]) -> None:
+    def _must_not_reach(*_args, **_kwargs):
+        calls.append("service")
+        raise AssertionError("authorization reached the test-case service")
+
+    for method in (
+        "list_test_cases",
+        "create_test_case",
+        "update_test_case",
+        "deactivate_test_case",
+    ):
+        monkeypatch.setattr(AgentTestWorkbench, method, _must_not_reach)
+
+
+@pytest.mark.parametrize(("method", "url_for"), _TEST_CASE_ROUTES, ids=lambda v: str(v))
+def test_test_case_routes_deny_non_admins_before_body_or_service(
+    session_factory, monkeypatch, method, url_for
+):
+    """Catches a test-case route outside the admin router or parsing before auth (C23)."""
+    _force_admin(monkeypatch, is_admin=False)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("authorization parsed the raw request body")
+
+    _forbid_test_case_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    seed_id = _seed_test_case_id(session_factory)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory, raise_server_exceptions=False) as client:
+        response = client.request(
+            method,
+            url_for(seed_id),
+            content=b'{not json; "name": "SUPER_SECRET_CASE"}',
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Admin access required"}
+    assert "SUPER_SECRET_CASE" not in response.text
+    assert _test_case_rows(session_factory) == before
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for"), _TEST_CASE_WRITE_ROUTES, ids=lambda v: str(v)
+)
+@pytest.mark.parametrize("principal", [None, " \t "])
+def test_test_case_writes_require_a_trusted_principal_before_body_or_service(
+    session_factory, monkeypatch, method, url_for, principal
+):
+    _force_admin(monkeypatch, is_admin=True)
+    set_current_user(principal)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("a missing principal parsed the body")
+
+    _forbid_test_case_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    seed_id = _seed_test_case_id(session_factory)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[agent_definition_routes.require_admin] = lambda: None
+
+    def _override_db() -> Iterator[Session]:
+        with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_db
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.request(
+            method,
+            url_for(seed_id),
+            content=b"{not json; should not be parsed}",
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Authenticated principal required"}
+
+
+def test_post_test_case_returns_201_with_the_exact_snapshot(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.post(_TEST_CASES_URL, json=_create_body(name="  architect_extra "))
+
+    assert response.status_code == 201
+    body = response.json()
+    assert isinstance(body["id"], int)
+    assert _without_timestamps(body) == {
+        "id": body["id"],
+        "agent_key": "architect",
+        "name": "architect_extra",
+        "version": 1,
+        "is_active": True,
+        "is_required": False,
+        "synthetic_payload": {"message": "Synthetic smoke input."},
+        "assembly_context": {"design_system_active": False},
+        "created_by": "task4-user@example.com",
+        "updated_by": "task4-user@example.com",
+        "is_synthetic_data_warning": True,
+    }
+
+
+def test_post_test_case_projects_the_ordered_domain_rejection(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.post(
+            _TEST_CASES_URL,
+            json=_create_body(name="  ", synthetic_payload={"k": "x" * 70_000}),
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("name", "blank", "Test case name must not be blank."),
+        (
+            "synthetic_payload",
+            "too_large",
+            "Synthetic payload must be at most 65536 bytes as JSON.",
+        ),
+    )
+    assert _test_case_rows(session_factory) == before
+
+
+@pytest.mark.parametrize("agent_key", ["unknown", "foreman"])
+def test_post_test_case_rejects_an_unknown_or_deterministic_role(
+    session_factory, monkeypatch, agent_key
+):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.post(_TEST_CASES_URL, json=_create_body(agent_key=agent_key))
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("agent_key", "unknown_agent", "Agent key must identify an editable model role.")
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            _create_body(sentinel="x"),
+            [("sentinel", "extra_forbidden", "Extra inputs are not permitted")],
+        ),
+        (
+            _create_body(is_active=False),
+            [("is_active", "extra_forbidden", "Extra inputs are not permitted")],
+        ),
+        (
+            _create_body(assembly_context={"design_system_active": False, "x": 1}),
+            [("assembly_context.x", "extra_forbidden", "Extra inputs are not permitted")],
+        ),
+        (
+            _create_body(is_required="yes"),
+            [("is_required", "strict_type", "Input should be a valid boolean")],
+        ),
+        (
+            {"agent_key": "architect"},
+            [
+                ("name", "strict_type", "Field required"),
+                ("synthetic_payload", "strict_type", "Field required"),
+                ("assembly_context", "strict_type", "Field required"),
+                ("is_required", "strict_type", "Field required"),
+            ],
+        ),
+    ],
+    ids=["unknown-field", "is-active", "context-extra", "required-type", "missing"],
+)
+def test_post_test_case_accepts_only_the_strict_create_body(
+    session_factory, monkeypatch, body, expected
+):
+    _force_admin(monkeypatch, is_admin=True)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.post(_TEST_CASES_URL, json=body)
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(*expected)
+    assert _test_case_rows(session_factory) == before
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for"), [("POST", lambda _id: _TEST_CASES_URL), ("PUT", _test_case_url)]
+)
+def test_test_case_body_routes_reject_malformed_json(
+    session_factory, monkeypatch, method, url_for
+):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.request(
+            method,
+            url_for(_seed_test_case_id(session_factory)),
+            content=b"{not json",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("$", "invalid_json", "Request body must be valid JSON.")
+    )
+
+
+def test_put_test_case_returns_the_new_version_and_retires_the_old(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.put(_test_case_url(seed_id), json=_update_body())
+        listed = client.get(
+            _TEST_CASES_URL, params={"agent_key": "architect", "include_inactive": True}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] != seed_id
+    assert _without_timestamps(body) == {
+        "id": body["id"],
+        "agent_key": "architect",
+        "name": "architect_required_smoke_v1",
+        "version": 2,
+        "is_active": True,
+        "is_required": True,
+        "synthetic_payload": {"message": "revised"},
+        "assembly_context": {"design_system_active": True},
+        "created_by": "task4-user@example.com",
+        "updated_by": "task4-user@example.com",
+        "is_synthetic_data_warning": True,
+    }
+    assert listed.status_code == 200
+    assert [
+        (item["id"], item["version"], item["is_active"]) for item in listed.json()["items"]
+    ] == [(seed_id, 1, False), (body["id"], 2, True)]
+
+
+def test_put_test_case_rename_and_last_required_are_one_ordered_422(
+    session_factory, monkeypatch
+):
+    """Catches a rename or an un-require of the last required case slipping through (C9, C22)."""
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.put(
+            _test_case_url(seed_id), json=_update_body(name="renamed", is_required=False)
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("name", "name_immutable", "A test case name cannot be changed."),
+        ("is_required", "last_required_case", _LAST_REQUIRED_MESSAGE),
+    )
+    assert _test_case_rows(session_factory) == before
+
+
+def test_put_test_case_unrequiring_the_last_required_case_is_the_exact_422(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.put(_test_case_url(seed_id), json=_update_body(is_required=False))
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("is_required", "last_required_case", _LAST_REQUIRED_MESSAGE)
+    )
+    assert _test_case_rows(session_factory) == before
+    assert GraphConfiguration().bootstrap_v1(session_factory).created is False
+
+
+def test_put_test_case_on_a_superseded_version_is_409_stale(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    with _app_for(session_factory) as client:
+        assert client.put(_test_case_url(seed_id), json=_update_body()).status_code == 200
+        before = _test_case_rows(session_factory)
+        response = client.put(_test_case_url(seed_id), json=_update_body())
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "stale_test_case",
+        "test_case_id": seed_id,
+        "message": "This test case version is no longer active. Reload and retry.",
+    }
+    assert _test_case_rows(session_factory) == before
+
+
+def test_put_test_case_rejects_an_unknown_field_before_the_service(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    calls: list[str] = []
+    _forbid_test_case_service(monkeypatch, calls)
+    with _app_for(session_factory) as client:
+        response = client.put(
+            _test_case_url(_seed_test_case_id(session_factory)),
+            json=_update_body(agent_key="builder"),
+        )
+
+    assert calls == []
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("agent_key", "extra_forbidden", "Extra inputs are not permitted")
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "body"), [("PUT", _update_body()), ("DELETE", None)]
+)
+def test_test_case_writes_on_an_unknown_id_are_404(session_factory, monkeypatch, method, body):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.request(method, _test_case_url(999_999), json=body)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Test case not found"}
+
+
+def test_delete_test_case_deactivates_and_returns_the_snapshot(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        created = client.post(_TEST_CASES_URL, json=_create_body()).json()
+        response = client.delete(_test_case_url(created["id"]))
+        again = client.delete(_test_case_url(created["id"]))
+
+    assert response.status_code == 200
+    expected = {**_without_timestamps(created), "is_active": False}
+    assert _without_timestamps(response.json()) == expected
+    assert again.status_code == 200
+    assert again.json() == response.json()
+    with session_factory() as session:
+        assert session.get(AgentTestCase, created["id"]) is not None
+
+
+def test_delete_test_case_of_the_last_required_case_is_the_exact_422(
+    session_factory, monkeypatch
+):
+    """Catches the one admin click that makes the next boot exit (C9)."""
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory, "deck_reviewer")
+    before = _test_case_rows(session_factory)
+    with _app_for(session_factory) as client:
+        response = client.delete(_test_case_url(seed_id))
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("is_active", "last_required_case", _LAST_REQUIRED_MESSAGE)
+    )
+    assert _test_case_rows(session_factory) == before
+    assert GraphConfiguration().bootstrap_v1(session_factory).created is False
+
+
+def test_get_test_cases_lists_active_versions_with_the_exact_item_shape(
+    session_factory, monkeypatch
+):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.get(_TEST_CASES_URL)
+        builder_only = client.get(_TEST_CASES_URL, params={"agent_key": "builder"})
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"items"}
+    items = response.json()["items"]
+    assert [item["agent_key"] for item in items] == list(
+        ("architect", "data_analyst", "builder", "build_reviewer", "fixer", "fix_reviewer",
+         "deck_reviewer")
+    )
+    assert all(_without_timestamps(item)["is_synthetic_data_warning"] is True for item in items)
+    assert [item["name"] for item in builder_only.json()["items"]] == [
+        "builder_required_smoke_v1"
+    ]
+
+
+@pytest.mark.parametrize("agent_key", ["unknown", "foreman"])
+def test_get_test_cases_rejects_an_unknown_role_filter(session_factory, monkeypatch, agent_key):
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        response = client.get(_TEST_CASES_URL, params={"agent_key": agent_key})
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("agent_key", "unknown_agent", "Agent key must identify an editable model role.")
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for", "body", "service_method"),
+    [
+        ("POST", lambda _id: _TEST_CASES_URL, _create_body(), "create_test_case"),
+        ("PUT", _test_case_url, _update_body(), "update_test_case"),
+        ("DELETE", _test_case_url, None, "deactivate_test_case"),
+        ("GET", lambda _id: _TEST_CASES_URL, None, "list_test_cases"),
+    ],
+    ids=["POST", "PUT", "DELETE", "GET"],
+)
+def test_test_case_routes_run_the_locking_writer_off_the_event_loop(
+    session_factory, monkeypatch, method, url_for, body, service_method
+):
+    """Catches a case write that can wait on the L2 row lock on the event loop."""
+    import asyncio
+
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+    original = getattr(AgentTestWorkbench, service_method)
+
+    def _observing(self, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop_running.append(False)
+        else:
+            loop_running.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentTestWorkbench, service_method, _observing)
+    with _app_for(session_factory) as client:
+        if method == "DELETE":
+            created = client.post(_TEST_CASES_URL, json=_create_body(name="to_retire"))
+            target = created.json()["id"]
+        else:
+            target = _seed_test_case_id(session_factory)
+        loop_running.clear()
+        response = client.request(method, url_for(target), json=body)
+
+    assert response.status_code in {200, 201}
+    assert loop_running == [False]
+
+
+def test_put_identical_content_to_a_superseded_version_is_409_stale(
+    session_factory, monkeypatch
+):
+    """Catches an identical PUT to a superseded id returning 200 (fix round 2)."""
+    _force_admin(monkeypatch, is_admin=True)
+    seed_id = _seed_test_case_id(session_factory)
+    with _app_for(session_factory) as client:
+        listed = client.get(_TEST_CASES_URL, params={"agent_key": "architect"}).json()
+        seed = next(item for item in listed["items"] if item["id"] == seed_id)
+        identical = {
+            "name": seed["name"],
+            "synthetic_payload": seed["synthetic_payload"],
+            "assembly_context": seed["assembly_context"],
+            "is_required": seed["is_required"],
+        }
+        assert client.put(_test_case_url(seed_id), json=_update_body()).status_code == 200
+        before = _test_case_rows(session_factory)
+        response = client.put(_test_case_url(seed_id), json=identical)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "stale_test_case",
+        "test_case_id": seed_id,
+        "message": "This test case version is no longer active. Reload and retry.",
+    }
+    assert _test_case_rows(session_factory) == before
+
+
+# ===========================================================================
+# #267 Task 5: test-run execute and read routes on the one admin router
+# (C16, C23, C32, C36, C38)
+# ===========================================================================
+
+import asyncio  # noqa: E402
+import dataclasses  # noqa: E402
+
+from sqlalchemy.exc import OperationalError  # noqa: E402
+
+import src.services.agent_test_workbench as test_workbench_module  # noqa: E402
+from src.database.models.graph_configuration import AgentTestRun  # noqa: E402
+from src.services.agent_model_payload import model_payload_for  # noqa: E402
+from src.services.agent_runtime import AgentRuntime  # noqa: E402
+from src.services.agent_runtime_identity import (  # noqa: E402
+    RecordingAgentInvocationIdentitySink,
+)
+from src.services.agent_test_workbench import TestRunUnavailable  # noqa: E402
+from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS  # noqa: E402
+from src.services.graph_definition_manifest import (  # noqa: E402
+    GRAPH_V1_AGENT_KEYS as _GRAPH_V1_AGENT_KEYS,
+)
+from src.services.persisted_graph_release import (  # noqa: E402
+    PersistedGraphReleaseLoader,
+)
+from tests.fixtures.deterministic_model_adapter import (  # noqa: E402
+    DeterministicFakeModelAdapter,
+    fake_output,
+)
+
+_TEST_RUN_PREFIX = "/api/admin/agent-definitions"
+_TEST_RUN_KEYS = {
+    "run_id",
+    "run_kind",
+    "test_case_id",
+    "test_case_version",
+    "agent_key",
+    "candidate_hash",
+    "compared_release_id",
+    "compared_definition_revision_id",
+    "synthetic_payload",
+    "model_payload",
+    "assembled_prompt",
+    "execution_status",
+    "error_detail",
+    "deterministic_checks_passed",
+    "deterministic_check_results",
+    "candidate_raw_output",
+    "candidate_structured_output",
+    "baseline_raw_output",
+    "baseline_structured_output",
+    "latency_ms",
+    "input_tokens",
+    "output_tokens",
+    "run_by",
+    "run_at",
+    "candidate_is_current",
+    "base_release_is_current",
+}
+_ROW_COLUMNS = (
+    "test_case_id",
+    "test_case_version",
+    "agent_key",
+    "run_kind",
+    "candidate_hash",
+    "compared_release_id",
+    "compared_definition_revision_id",
+    "model_payload",
+    "assembled_prompt",
+    "execution_status",
+    "error_detail",
+    "deterministic_checks_passed",
+    "deterministic_check_results",
+    "candidate_raw_output",
+    "candidate_structured_output",
+    "baseline_raw_output",
+    "baseline_structured_output",
+    "latency_ms",
+    "input_tokens",
+    "output_tokens",
+    "run_by",
+)
+_ROUTE_ACTOR = "task4-user@example.com"  # what ``_force_admin`` authenticates
+_SEEDED_SESSION_IDENTIFIERS = (
+    "synthetic-architect",
+    "synthetic-data-analyst",
+    "synthetic-builder",
+    "synthetic-turn",
+    "system:bootstrap",
+    "synthetic-deck-reviewer",
+)
+_TEST_RUN_UNAVAILABLE = {
+    "code": "test_run_unavailable",
+    "message": "Test run storage is temporarily unavailable. Retry the request.",
+    "retryable": True,
+}
+_INT32_MAX = 2**31 - 1
+
+
+def _candidate_run_url(agent_key: str = "architect") -> str:
+    return f"{_TEST_RUN_PREFIX}/draft/{agent_key}/test-runs"
+
+
+def _baseline_run_url(agent_key: str = "architect") -> str:
+    return f"{_TEST_RUN_PREFIX}/published/{agent_key}/test-runs"
+
+
+def _run_url(run_id: int) -> str:
+    return f"{_TEST_RUN_PREFIX}/test-runs/{run_id}"
+
+
+def _case_runs_url(test_case_id: int) -> str:
+    return f"{_TEST_RUN_PREFIX}/test-cases/{test_case_id}/runs"
+
+
+def _draft_lock_version(session_factory: sessionmaker) -> int:
+    with session_factory() as session:
+        return session.scalar(select(GraphDraft.lock_version))
+
+
+def _candidate_body(session_factory, agent_key="architect", **overrides) -> dict[str, object]:
+    body: dict[str, object] = {
+        "test_case_id": _seed_test_case_id(session_factory, agent_key),
+        "lock_version": _draft_lock_version(session_factory),
+    }
+    body.update(overrides)
+    return body
+
+
+def _baseline_body(session_factory, agent_key="architect", **overrides) -> dict[str, object]:
+    body: dict[str, object] = {"test_case_id": _seed_test_case_id(session_factory, agent_key)}
+    body.update(overrides)
+    return body
+
+
+def _test_run_rows(session_factory: sessionmaker) -> list[AgentTestRun]:
+    with session_factory() as session:
+        return list(session.scalars(select(AgentTestRun).order_by(AgentTestRun.id)))
+
+
+def _test_workbench(session_factory, adapter) -> AgentTestWorkbench:
+    return AgentTestWorkbench(
+        runtime=AgentRuntime(
+            persisted_release_loader=PersistedGraphReleaseLoader(
+                session_factory=session_factory
+            ),
+            model_adapter=adapter,
+            identity_sink=RecordingAgentInvocationIdentitySink(),
+        )
+    )
+
+
+def _run_app(
+    session_factory: sessionmaker,
+    adapter: object | None = None,
+    *,
+    raise_server_exceptions: bool = True,
+) -> TestClient:
+    """The admin router with the executor on a fake model adapter (never Databricks)."""
+    adapter = adapter if adapter is not None else DeterministicFakeModelAdapter()
+    client = _app_for(session_factory, raise_server_exceptions=raise_server_exceptions)
+    workbench = _test_workbench(session_factory, adapter)
+    client.app.dependency_overrides[agent_definition_routes.get_agent_test_workbench] = (
+        lambda: workbench
+    )
+    return client
+
+
+def _identity_row(session_factory: sessionmaker, agent_key: str = "architect") -> dict:
+    with session_factory() as session:
+        release_id = session.scalar(
+            select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
+        )
+        revision_id = session.scalar(
+            select(GraphReleaseAgent.agent_definition_revision_id).where(
+                GraphReleaseAgent.graph_release_id == release_id,
+                GraphReleaseAgent.agent_key == agent_key,
+            )
+        )
+        revision_hash = session.scalar(
+            select(AgentDefinitionRevision.content_hash).where(
+                AgentDefinitionRevision.id == revision_id
+            )
+        )
+        draft = session.scalar(
+            select(GraphDraftAgent).where(GraphDraftAgent.agent_key == agent_key)
+        )
+        return {
+            "release_id": release_id,
+            "revision_id": revision_id,
+            "revision_hash": revision_hash,
+            "draft_hash": draft.candidate_hash,
+            "endpoint_name": definition_content_from_row(draft).model.endpoint_name,
+        }
+
+
+def _assert_body_is_the_row(body: dict[str, object], row: AgentTestRun) -> None:
+    """The response serializes the immutable evidence row, and nothing else."""
+    assert set(body) == _TEST_RUN_KEYS
+    for column in _ROW_COLUMNS:
+        assert body[column] == getattr(row, column), column
+    assert body["run_id"] == row.id
+    assert isinstance(body["run_at"], str) and body["run_at"]
+
+
+def _integers_in(document: object) -> list[int]:
+    if isinstance(document, bool):
+        return []
+    if isinstance(document, int):
+        return [document]
+    if isinstance(document, dict):
+        return [value for item in document.values() for value in _integers_in(item)]
+    if isinstance(document, list):
+        return [value for item in document for value in _integers_in(item)]
+    return []
+
+
+_TEST_RUN_ROUTES = [
+    ("POST", lambda case_id, run_id: _candidate_run_url()),
+    ("POST", lambda case_id, run_id: _baseline_run_url()),
+    ("GET", lambda case_id, run_id: _run_url(run_id)),
+    ("GET", lambda case_id, run_id: _case_runs_url(case_id)),
+]
+_TEST_RUN_ROUTE_IDS = ["candidate", "baseline", "get_run", "list_runs"]
+_TEST_RUN_SERVICE_METHODS = (
+    "execute_candidate_run",
+    "execute_baseline_rerun",
+    "get_test_run",
+    "list_test_runs",
+)
+
+
+def _forbid_test_run_service(monkeypatch, calls: list[str]) -> None:
+    def _must_not_reach(*_args, **_kwargs):
+        calls.append("service")
+        raise AssertionError("authorization reached the test-run service")
+
+    for method in _TEST_RUN_SERVICE_METHODS:
+        monkeypatch.setattr(AgentTestWorkbench, method, _must_not_reach)
+
+
+@pytest.mark.parametrize(("method", "url_for"), _TEST_RUN_ROUTES, ids=_TEST_RUN_ROUTE_IDS)
+def test_test_run_routes_deny_non_admins_before_body_or_service(
+    session_factory, monkeypatch, method, url_for
+):
+    """Catches a test-run route outside the admin router or parsing before auth (C23)."""
+    _force_admin(monkeypatch, is_admin=False)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("authorization parsed the raw request body")
+
+    _forbid_test_run_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    adapter = DeterministicFakeModelAdapter()
+    seed_id = _seed_test_case_id(session_factory)
+    before = _all_table_rows(session_factory)
+    with _run_app(session_factory, adapter, raise_server_exceptions=False) as client:
+        response = client.request(
+            method,
+            url_for(seed_id, 1),
+            content=b'{not json; "test_case_id": "SUPER_SECRET_RUN"}',
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert adapter.calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Admin access required"}
+    assert "SUPER_SECRET_RUN" not in response.text
+    assert _all_table_rows(session_factory) == before
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for"), _TEST_RUN_ROUTES[:2], ids=_TEST_RUN_ROUTE_IDS[:2]
+)
+@pytest.mark.parametrize("principal", [None, " \t "])
+def test_test_run_executes_require_a_trusted_principal_before_body_or_service(
+    session_factory, monkeypatch, method, url_for, principal
+):
+    """Catches a run that reaches the model with no audit actor for ``run_by``."""
+    _force_admin(monkeypatch, is_admin=True)
+    set_current_user(principal)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("a missing principal parsed the body")
+
+    _forbid_test_run_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    adapter = DeterministicFakeModelAdapter()
+    with _run_app(session_factory, adapter, raise_server_exceptions=False) as client:
+        client.app.dependency_overrides[agent_definition_routes.require_admin] = lambda: None
+        response = client.request(
+            method,
+            url_for(1, 1),
+            content=b"{not json; should not be parsed}",
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert adapter.calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Authenticated principal required"}
+
+
+def test_candidate_run_returns_201_with_the_exact_evidence_row(session_factory, monkeypatch):
+    """Catches a route that reshapes, drops or invents evidence, or returns verdicts."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    identity = _identity_row(session_factory)
+    case_id = _seed_test_case_id(session_factory)
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+
+    assert response.status_code == 201
+    body = response.json()
+    rows = _test_run_rows(session_factory)
+    assert len(rows) == 1
+    _assert_body_is_the_row(body, rows[0])
+    for verdict_field in ("verdict", "verdict_reviewer", "verdict_at", "verdict_notes"):
+        assert verdict_field not in body
+    assert body["run_kind"] == "candidate"
+    assert (body["test_case_id"], body["test_case_version"]) == (case_id, 1)
+    assert body["agent_key"] == "architect"
+    assert body["candidate_hash"] == identity["draft_hash"]
+    assert body["compared_release_id"] == identity["release_id"]
+    assert body["compared_definition_revision_id"] == identity["revision_id"]
+    assert body["synthetic_payload"] == REQUIRED_SMOKE_PAYLOADS["architect"]
+    assert body["model_payload"] == model_payload_for(
+        "architect", REQUIRED_SMOKE_PAYLOADS["architect"]
+    )
+    assert body["assembled_prompt"] == adapter.calls[0].prompt
+    assert body["execution_status"] == "completed"
+    assert body["error_detail"] is None
+    assert body["deterministic_checks_passed"] is True
+    assert body["deterministic_check_results"] == [
+        {"name": "output_contract", "passed": True, "message": None, "issues": []}
+    ]
+    assert body["candidate_raw_output"] == fake_output("architect")
+    assert body["candidate_structured_output"]["message"] == "an answer"
+    assert (body["baseline_raw_output"], body["baseline_structured_output"]) == (None, None)
+    assert (body["input_tokens"], body["output_tokens"]) == (None, None)
+    assert body["run_by"] == _ROUTE_ACTOR
+    assert (body["candidate_is_current"], body["base_release_is_current"]) == (True, True)
+
+
+def test_baseline_rerun_returns_201_with_published_identity(session_factory, monkeypatch):
+    """Catches the baseline route running the draft, or recording the draft's identity."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    identity = _identity_row(session_factory)
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert response.status_code == 201
+    body = response.json()
+    rows = _test_run_rows(session_factory)
+    assert len(rows) == 1
+    _assert_body_is_the_row(body, rows[0])
+    assert body["run_kind"] == "published_baseline"
+    assert body["candidate_hash"] == identity["revision_hash"]
+    assert body["compared_release_id"] == identity["release_id"]
+    assert body["compared_definition_revision_id"] == identity["revision_id"]
+    assert body["execution_status"] == "completed"
+    assert body["assembled_prompt"] == adapter.calls[0].prompt
+    assert (body["baseline_raw_output"], body["baseline_structured_output"]) == (None, None)
+    assert (body["candidate_is_current"], body["base_release_is_current"]) == (True, True)
+
+
+def test_a_candidate_run_after_a_baseline_carries_the_stored_baseline(
+    session_factory, monkeypatch
+):
+    """Catches the Compare view's baseline columns not reaching the response."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        baseline = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+        candidate = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+
+    assert (baseline.status_code, candidate.status_code) == (201, 201)
+    body = candidate.json()
+    assert body["baseline_raw_output"] == baseline.json()["candidate_raw_output"]
+    assert body["baseline_structured_output"] == baseline.json()["candidate_structured_output"]
+    assert body["baseline_raw_output"] is not None
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_a_model_failure_is_201_evidence_with_a_code_and_no_provider_text(
+    session_factory, monkeypatch, route
+):
+    """Catches a provider failure mapped to an HTTP error, or its text in the body (C33)."""
+    _force_admin(monkeypatch, is_admin=True)
+    identity = _identity_row(session_factory)
+    adapter = DeterministicFakeModelAdapter(mode="provider_unavailable")
+    with _run_app(session_factory, adapter) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory)
+            )
+        else:
+            response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["execution_status"] == "model_error"
+    assert body["error_detail"] == f"endpoint_unavailable:{identity['endpoint_name']}"
+    assert body["deterministic_checks_passed"] is False
+    assert body["deterministic_check_results"] == [
+        {
+            "name": "execution",
+            "passed": False,
+            "message": "The run produced no model output to check.",
+            "issues": [],
+        }
+    ]
+    assert "pinned model provider unavailable" not in response.text
+    assert "Traceback" not in response.text
+    _assert_body_is_the_row(body, _test_run_rows(session_factory)[0])
+
+
+def test_an_incomplete_run_serializes_its_check_issues(session_factory, monkeypatch):
+    """Catches the Checks view losing the issue list of a failed output contract."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter(mode="invalid_optional_field")
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["execution_status"] == "incomplete"
+    [check] = body["deterministic_check_results"]
+    assert check["name"] == "output_contract"
+    assert check["passed"] is False
+    assert check["issues"] and set(check["issues"][0]) == {"code", "field"}
+    assert body["candidate_structured_output"] is None
+    assert body["candidate_raw_output"] is not None
+    _assert_body_is_the_row(body, _test_run_rows(session_factory)[0])
+
+
+def test_a_run_body_carries_no_sentinel_session_or_extra_user_identifier(
+    session_factory, monkeypatch
+):
+    """Catches a ``-1`` sentinel, a seeded session id, or the actor leaking (M-1, P6)."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        for agent_key in ("architect", "data_analyst", "builder", "deck_reviewer"):
+            response = client.post(
+                _candidate_run_url(agent_key),
+                json=_candidate_body(session_factory, agent_key),
+            )
+            assert response.status_code == 201
+            body = response.json()
+            assert all(value >= 0 for value in _integers_in(body)), body
+            # Prompt and output text may legitimately say "-1"; identity may not.
+            identity = {
+                key: body[key]
+                for key in (
+                    "run_id",
+                    "test_case_id",
+                    "test_case_version",
+                    "compared_release_id",
+                    "compared_definition_revision_id",
+                    "error_detail",
+                    "candidate_hash",
+                )
+            }
+            assert "-1" not in json.dumps(identity)
+            sent = json.dumps([body["model_payload"], body["assembled_prompt"]])
+            for identifier in _SEEDED_SESSION_IDENTIFIERS:
+                assert identifier not in sent, (agent_key, identifier)
+            without_actor = {key: value for key, value in body.items() if key != "run_by"}
+            assert _ROUTE_ACTOR not in json.dumps(without_actor)
+
+
+def test_a_sentinel_identity_never_serializes(session_factory, monkeypatch):
+    """Catches a response schema that would pass a ``-1`` revision id to the client."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        real = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+        evidence = AgentTestWorkbench().get_test_run(
+            session_factory(), run_id=real.json()["run_id"]
+        )
+        forged = dataclasses.replace(
+            evidence, compared_release_id=-1, compared_definition_revision_id=-1
+        )
+        monkeypatch.setattr(
+            AgentTestWorkbench, "get_test_run", lambda self, session, *, run_id: forged
+        )
+        response = client.get(_run_url(real.json()["run_id"]))
+
+    assert response.status_code == 500
+    assert "-1" not in response.text
+
+
+def test_get_test_run_returns_the_stored_evidence_with_null_currency(
+    session_factory, monkeypatch
+):
+    """Catches a read that recomputes or fabricates the write-time currency flags."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        created = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+        response = client.get(_run_url(created.json()["run_id"]))
+
+    assert response.status_code == 200
+    expected = dict(created.json())
+    expected.update(candidate_is_current=None, base_release_is_current=None)
+    assert response.json() == expected
+
+
+@pytest.mark.parametrize("run_id", [424242, 0, -3, _INT32_MAX + 1, 2**63])
+def test_get_test_run_of_an_unknown_or_unstorable_id_is_404(
+    session_factory, monkeypatch, run_id
+):
+    """Catches an unknown or out-of-range id reaching the database as a 500."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        response = client.get(_run_url(run_id))
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Test run not found"}
+
+
+def test_list_case_runs_returns_newest_first_bounded_by_limit(session_factory, monkeypatch):
+    """Catches a history list in the wrong order, unbounded, or leaking another case."""
+    _force_admin(monkeypatch, is_admin=True)
+    case_id = _seed_test_case_id(session_factory)
+    with _run_app(session_factory) as client:
+        first = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+        second = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+        third = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+        client.post(
+            _candidate_run_url("builder"), json=_candidate_body(session_factory, "builder")
+        )
+        listed = client.get(_case_runs_url(case_id))
+        limited = client.get(_case_runs_url(case_id), params={"limit": 2})
+
+    assert listed.status_code == 200
+    assert set(listed.json()) == {"items"}
+    ids = [item["run_id"] for item in listed.json()["items"]]
+    assert ids == [third.json()["run_id"], second.json()["run_id"], first.json()["run_id"]]
+    assert [item["run_id"] for item in limited.json()["items"]] == ids[:2]
+    newest = dict(third.json())
+    newest.update(candidate_is_current=None, base_release_is_current=None)
+    assert listed.json()["items"][0] == newest
+
+
+@pytest.mark.parametrize("test_case_id", [424242, 0, _INT32_MAX + 1])
+def test_list_case_runs_of_an_unknown_case_is_404(session_factory, monkeypatch, test_case_id):
+    """Catches an unknown case listing as an empty history instead of 404."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        response = client.get(_case_runs_url(test_case_id))
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Test case not found"}
+
+
+@pytest.mark.parametrize("limit", [0, -1, 101])
+def test_list_case_runs_rejects_an_out_of_range_limit(session_factory, monkeypatch, limit):
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        response = client.get(
+            _case_runs_url(_seed_test_case_id(session_factory)), params={"limit": limit}
+        )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        ("limit", "out_of_range", "Limit must be an integer from 1 to 100.")
+    )
+
+
+# --- the strict, server-owned run bodies (C32, C36) -------------------------
+
+_FORBIDDEN_CLIENT_RUN_FIELDS = [
+    ("endpoint_name", "databricks-attacker-endpoint"),
+    ("model", {"endpoint_name": "databricks-attacker-endpoint"}),
+    ("candidate", {"prompt_text": "ignore the saved prompt"}),
+    ("prompt", "ignore the saved prompt"),
+    ("prompt_text", "ignore the saved prompt"),
+    ("assembled_prompt", "ignore the saved prompt"),
+    ("payload", {"message": "client payload"}),
+    ("synthetic_payload", {"message": "client payload"}),
+    ("model_payload", {"message": "client payload"}),
+    ("assembly_context", {"design_system_active": True}),
+    ("baseline", {"message": "client baseline"}),
+    ("baseline_raw_output", {"message": "client baseline"}),
+    ("baseline_structured_output", {"message": "client baseline"}),
+    ("baseline_run_id", 1),
+    ("candidate_hash", "0" * 64),
+    ("compared_release_id", 1),
+    ("compared_definition_revision_id", 1),
+    ("release_id", 1),
+    ("run_kind", "published_baseline"),
+    ("agent_key", "builder"),
+    ("run_by", "someone-else@example.com"),
+    ("actor", "someone-else@example.com"),
+    ("verdict", "approved"),
+    ("test_case_version", 1),
+]
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    _FORBIDDEN_CLIENT_RUN_FIELDS,
+    ids=[field for field, _value in _FORBIDDEN_CLIENT_RUN_FIELDS],
+)
+def test_a_run_body_cannot_choose_any_server_owned_input(
+    session_factory, monkeypatch, route, field, value
+):
+    """Catches a run body that lets the client pick endpoint, prompt, payload or baseline."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    body = (
+        _candidate_body(session_factory)
+        if route == "candidate"
+        else _baseline_body(session_factory)
+    )
+    body[field] = value
+    url = _candidate_run_url() if route == "candidate" else _baseline_run_url()
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(url, json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {"field": field, "code": "extra_forbidden", "message": "Extra inputs are not permitted"}
+        ],
+    }
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+def test_a_baseline_body_does_not_accept_a_lock_version(session_factory, monkeypatch):
+    """Catches the baseline route reading, or pretending to pin, the draft (C32)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(
+            _baseline_run_url(), json=_baseline_body(session_factory, lock_version=0)
+        )
+
+    assert response.status_code == 422
+    assert response.json()["errors"] == [
+        {
+            "field": "lock_version",
+            "code": "extra_forbidden",
+            "message": "Extra inputs are not permitted",
+        }
+    ]
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "missing", "expected"),
+    [
+        ({"test_case_id": "1"}, (), [("test_case_id", "strict_type")]),
+        ({"test_case_id": True}, (), [("test_case_id", "strict_type")]),
+        ({"test_case_id": 1.0}, (), [("test_case_id", "strict_type")]),
+        ({"test_case_id": 0}, (), [("test_case_id", "out_of_range")]),
+        ({"test_case_id": _INT32_MAX + 1}, (), [("test_case_id", "out_of_range")]),
+        ({"lock_version": -1}, (), [("lock_version", "out_of_range")]),
+        ({"lock_version": "0"}, (), [("lock_version", "strict_type")]),
+        ({}, ("test_case_id",), [("test_case_id", "strict_type")]),
+        ({}, ("lock_version",), [("lock_version", "strict_type")]),
+    ],
+    ids=[
+        "id-string",
+        "id-bool",
+        "id-float",
+        "id-zero",
+        "id-over-int32",
+        "lock-negative",
+        "lock-string",
+        "id-missing",
+        "lock-missing",
+    ],
+)
+def test_a_candidate_body_is_strictly_typed(
+    session_factory, monkeypatch, overrides, missing, expected
+):
+    """Catches a coerced id or lock reaching the executor or the database."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    body = _candidate_body(session_factory, **overrides)
+    for field in missing:
+        del body[field]
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(_candidate_run_url(), json=body)
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "invalid_draft"
+    assert [(error["field"], error["code"]) for error in payload["errors"]] == expected
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_a_run_body_must_be_valid_json_and_a_json_object(session_factory, monkeypatch, route):
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    url = _candidate_run_url() if route == "candidate" else _baseline_run_url()
+    with _run_app(session_factory, adapter) as client:
+        malformed = client.post(
+            url, content=b"{not json", headers={"content-type": "application/json"}
+        )
+        not_an_object = client.post(url, json=[1, 2])
+
+    assert malformed.status_code == 422
+    assert malformed.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {"field": "$", "code": "invalid_json", "message": "Request body must be valid JSON."}
+        ],
+    }
+    assert not_an_object.status_code == 422
+    assert not_an_object.json()["code"] == "invalid_draft"
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+@pytest.mark.parametrize("agent_key", ["foreman", "nope"])
+def test_a_run_of_an_unknown_or_deterministic_role_is_the_unknown_agent_422(
+    session_factory, monkeypatch, route, agent_key
+):
+    """Catches a run of a role with no Agent Definition reaching the service."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    url = _candidate_run_url(agent_key) if route == "candidate" else _baseline_run_url(agent_key)
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(url, json={"unexpected": True})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "agent_key",
+                "code": "unknown_agent",
+                "message": "Agent key must identify an editable model role.",
+            }
+        ],
+    }
+    assert adapter.calls == []
+
+
+# --- refusals, in the executor's order ------------------------------------
+
+
+def test_a_stale_lock_is_the_probes_409_with_no_model_call_or_row(session_factory, monkeypatch):
+    """Catches a run of a candidate other than the one on the admin's screen (C32)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    current = _draft_lock_version(session_factory)
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(
+            _candidate_run_url(), json=_candidate_body(session_factory, lock_version=current + 1)
+        )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "stale_draft"
+    assert body["expected_lock_version"] == current + 1
+    assert body["current_lock_version"] == current
+    assert body["client_candidate"] is None
+    assert set(body["server"]["definitions"]) == set(_GRAPH_V1_AGENT_KEYS)
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+def test_a_stale_lock_is_refused_before_an_unknown_case(session_factory, monkeypatch):
+    """Catches the refusal order moving the case lookup ahead of the lock (Task 4 order)."""
+    _force_admin(monkeypatch, is_admin=True)
+    current = _draft_lock_version(session_factory)
+    with _run_app(session_factory) as client:
+        response = client.post(
+            _candidate_run_url(),
+            json={"test_case_id": 424242, "lock_version": current + 1},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "stale_draft"
+
+
+def test_a_url_shaped_saved_endpoint_is_the_422_with_no_model_call(
+    session_factory, monkeypatch
+):
+    """Catches a URL-shaped stored endpoint name reaching the provider via a run."""
+    import src.services.graph_configuration_draft as draft_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    original = draft_module.validate_endpoint_name_policy
+    monkeypatch.setattr(
+        draft_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "candidate.model.endpoint_name",
+                "code": "endpoint_url_not_allowed",
+                "message": "Endpoint must be a Databricks endpoint name, not a URL.",
+            }
+        ],
+    }
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+def test_a_url_shaped_published_endpoint_is_the_422_with_no_model_call(
+    session_factory, monkeypatch
+):
+    """Catches a baseline rerun sending a URL-shaped published endpoint name."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    original = test_workbench_module.validate_endpoint_name_policy
+    monkeypatch.setattr(
+        test_workbench_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _run_app(session_factory, adapter) as client:
+        response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "published.model.endpoint_name",
+                "code": "endpoint_url_not_allowed",
+                "message": "Endpoint must be a Databricks endpoint name, not a URL.",
+            }
+        ],
+    }
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("case_state", ["missing", "other_role", "inactive"])
+def test_a_baseline_rerun_refuses_the_published_endpoint_before_the_case(
+    session_factory, monkeypatch, case_state
+):
+    """Catches the two run routes refusing in different orders (fix round 1, I-1)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    original = test_workbench_module.validate_endpoint_name_policy
+    monkeypatch.setattr(
+        test_workbench_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _run_app(session_factory, adapter) as client:
+        if case_state == "missing":
+            test_case_id = 424242
+        elif case_state == "other_role":
+            test_case_id = _seed_test_case_id(session_factory, "builder")
+        else:
+            test_case_id = _seed_test_case_id(session_factory)
+            assert client.put(_test_case_url(test_case_id), json=_update_body()).status_code == 200
+        response = client.post(_baseline_run_url(), json={"test_case_id": test_case_id})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_draft",
+        "errors": [
+            {
+                "field": "published.model.endpoint_name",
+                "code": "endpoint_url_not_allowed",
+                "message": "Endpoint must be a Databricks endpoint name, not a URL.",
+            }
+        ],
+    }
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("case_state", ["missing", "other_role", "inactive"])
+def test_a_candidate_run_refuses_the_saved_endpoint_before_the_case(
+    session_factory, monkeypatch, case_state
+):
+    """The candidate twin of the baseline ordering test: endpoint 422 before the case."""
+    import src.services.graph_configuration_draft as draft_module
+
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    original = draft_module.validate_endpoint_name_policy
+    monkeypatch.setattr(
+        draft_module,
+        "validate_endpoint_name_policy",
+        lambda name: original("https://" + name),
+    )
+    with _run_app(session_factory, adapter) as client:
+        if case_state == "missing":
+            test_case_id = 424242
+        elif case_state == "other_role":
+            test_case_id = _seed_test_case_id(session_factory, "builder")
+        else:
+            test_case_id = _seed_test_case_id(session_factory)
+            assert client.put(_test_case_url(test_case_id), json=_update_body()).status_code == 200
+        response = client.post(
+            _candidate_run_url(),
+            json={
+                "test_case_id": test_case_id,
+                "lock_version": _draft_lock_version(session_factory),
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["field"] == "candidate.model.endpoint_name"
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_a_run_of_an_unknown_case_is_404_with_no_model_call(session_factory, monkeypatch, route):
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    with _run_app(session_factory, adapter) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory, test_case_id=424242)
+            )
+        else:
+            response = client.post(
+                _baseline_run_url(), json=_baseline_body(session_factory, test_case_id=424242)
+            )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Test case not found"}
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_a_run_of_another_roles_case_is_the_ordered_case_422(session_factory, monkeypatch, route):
+    """Catches a builder case run through the architect's definition."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    builder_case = _seed_test_case_id(session_factory, "builder")
+    with _run_app(session_factory, adapter) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(),
+                json=_candidate_body(session_factory, test_case_id=builder_case),
+            )
+        else:
+            response = client.post(
+                _baseline_run_url(),
+                json=_baseline_body(session_factory, test_case_id=builder_case),
+            )
+
+    assert response.status_code == 422
+    assert response.json() == _invalid_test_case(
+        (
+            "test_case_id",
+            "agent_key_mismatch",
+            "This test case belongs to another agent role.",
+        )
+    )
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_a_run_of_a_superseded_case_version_is_409_stale(session_factory, monkeypatch, route):
+    """Catches a run of a historical case version (ruling P5)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+    seed_id = _seed_test_case_id(session_factory)
+    with _run_app(session_factory, adapter) as client:
+        assert client.put(_test_case_url(seed_id), json=_update_body()).status_code == 200
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory, test_case_id=seed_id)
+            )
+        else:
+            response = client.post(
+                _baseline_run_url(), json=_baseline_body(session_factory, test_case_id=seed_id)
+            )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "stale_test_case",
+        "test_case_id": seed_id,
+        "message": "This test case version is no longer active. Reload and retry.",
+    }
+    assert adapter.calls == []
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_a_database_failure_after_the_model_call_is_503_with_no_row(
+    session_factory, monkeypatch, route
+):
+    """Catches a persistence outage surfacing as a 500 or with driver text (C16)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter()
+
+    original = GraphConfiguration._lock_current_parents
+
+    def _outage_after_the_model_call(self, session, *, exclusive):
+        if not adapter.calls:  # transaction 1's reads still succeed
+            return original(self, session, exclusive=exclusive)
+        raise OperationalError("SELECT secret", {}, Exception("SECRET_DRIVER_TEXT"))
+
+    monkeypatch.setattr(
+        GraphConfiguration, "_lock_current_parents", _outage_after_the_model_call
+    )
+    with _run_app(session_factory, adapter, raise_server_exceptions=False) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory)
+            )
+        else:
+            response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert len(adapter.calls) == 1
+    assert response.status_code == 503
+    assert response.json() == _TEST_RUN_UNAVAILABLE
+    assert "SECRET" not in response.text
+    assert _test_run_rows(session_factory) == []
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_test_run_unavailable_from_any_phase_is_the_503(session_factory, monkeypatch, route):
+    _force_admin(monkeypatch, is_admin=True)
+    method = "execute_candidate_run" if route == "candidate" else "execute_baseline_rerun"
+
+    def _unavailable(self, session, **_kwargs):
+        raise TestRunUnavailable("read_case")
+
+    monkeypatch.setattr(AgentTestWorkbench, method, _unavailable)
+    with _run_app(session_factory) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory)
+            )
+        else:
+            response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert response.status_code == 503
+    assert response.json() == _TEST_RUN_UNAVAILABLE
+    assert "read_case" not in response.text
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_an_incomplete_persisted_configuration_is_the_existing_500(
+    session_factory, monkeypatch, route
+):
+    _force_admin(monkeypatch, is_admin=True)
+    method = "execute_candidate_run" if route == "candidate" else "execute_baseline_rerun"
+
+    def _incomplete(self, session, **_kwargs):
+        raise GraphConfigurationIntegrityError("SECRET_INTEGRITY_TEXT")
+
+    monkeypatch.setattr(AgentTestWorkbench, method, _incomplete)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory)
+            )
+        else:
+            response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Graph configuration is incomplete"}
+    assert "SECRET" not in response.text
+
+
+# --- off the event loop (C36) and the production dependency (C33) ----------
+
+
+@pytest.mark.parametrize("route", ["candidate", "baseline"])
+def test_test_run_routes_call_the_model_off_the_event_loop(session_factory, monkeypatch, route):
+    """Catches a live model call blocking the server's event loop (C36)."""
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+
+    class _LoopObservingAdapter(DeterministicFakeModelAdapter):
+        def invoke(self, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop_running.append(False)
+            else:
+                loop_running.append(True)
+            return super().invoke(**kwargs)
+
+    with _run_app(session_factory, _LoopObservingAdapter()) as client:
+        if route == "candidate":
+            response = client.post(
+                _candidate_run_url(), json=_candidate_body(session_factory)
+            )
+        else:
+            response = client.post(_baseline_run_url(), json=_baseline_body(session_factory))
+
+    assert response.status_code == 201
+    assert loop_running == [False]
+
+
+def test_the_production_workbench_dependency_uses_the_bounded_test_runtime(
+    session_factory, monkeypatch
+):
+    """Catches the run routes binding the unbounded production runtime (C33)."""
+    adapter = DeterministicFakeModelAdapter()
+    runtime = AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=session_factory),
+        model_adapter=adapter,
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+    calls: list[str] = []
+
+    def _bounded() -> AgentRuntime:
+        calls.append("bounded")
+        return runtime
+
+    monkeypatch.setattr(test_workbench_module, "get_agent_test_runtime", _bounded)
+    _force_admin(monkeypatch, is_admin=True)
+    workbench = agent_definition_routes.get_agent_test_workbench()
+    assert isinstance(workbench, AgentTestWorkbench)
+    assert calls == [], "building the dependency must not build a runtime"
+
+    with _app_for(session_factory) as client:
+        response = client.post(_candidate_run_url(), json=_candidate_body(session_factory))
+
+    assert response.status_code == 201
+    assert calls == ["bounded"]
+    assert len(adapter.calls) == 1
+
+
+def test_test_run_paths_do_not_collide_with_existing_admin_routes():
+    """Catches a #267 path shadowing #266's discovery, probe or the case routes (C38)."""
+    pairs = [
+        (method, route.path)
+        for route in router.routes
+        for method in sorted(getattr(route, "methods", set()))
+    ]
+    assert len(pairs) == len(set(pairs)), "two handlers share one method and path"
+    new_routes = {
+        ("POST", "/api/admin/agent-definitions/draft/{agent_key}/test-runs"),
+        ("POST", "/api/admin/agent-definitions/published/{agent_key}/test-runs"),
+        ("GET", "/api/admin/agent-definitions/test-runs/{run_id}"),
+        ("GET", "/api/admin/agent-definitions/test-cases/{test_case_id}/runs"),
+    }
+    assert new_routes <= set(pairs)
+    for _method, path in new_routes:
+        for reserved in ("model-endpoints", "model-endpoint-probe", "structured"):
+            assert reserved not in path

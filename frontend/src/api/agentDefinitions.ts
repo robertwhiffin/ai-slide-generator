@@ -1131,3 +1131,502 @@ export async function probeDraftStructuredOutput(
   }
   throw new AgentDefinitionApiError(status, payload, statusText);
 }
+
+// ============================================================
+// #267 Agent Test Cases: /api/admin/agent-definitions/test-cases
+// #267 Agent Test Runs: /api/admin/agent-definitions/{draft|published}/{agent_key}/test-runs
+// ============================================================
+
+const AGENT_DEFINITIONS_URL = `${API_BASE_URL}/api/admin/agent-definitions`;
+
+/** Exactly the one field the server's assembler reads for a case (#267 C22). */
+export interface TestCaseAssemblyContext {
+  design_system_active: boolean;
+}
+
+/** One Agent Test Case version exactly as the case routes serialize it. */
+export interface TestCaseListEntry {
+  id: number;
+  agent_key: AgentKey;
+  name: string;
+  version: number;
+  is_active: boolean;
+  is_required: boolean;
+  synthetic_payload: Record<string, JsonValue>;
+  assembly_context: TestCaseAssemblyContext;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+  /** Display-only reminder that payloads must be synthetic (P7); always `true`. */
+  is_synthetic_data_warning: true;
+}
+
+/** `POST /test-cases`: a new case lineage at version 1. */
+export interface CreateTestCaseRequest {
+  agent_key: AgentKey;
+  name: string;
+  synthetic_payload: Record<string, JsonValue>;
+  assembly_context: TestCaseAssemblyContext;
+  is_required: boolean;
+}
+
+/** `PUT /test-cases/{id}`: supersede an active version. `name` is echoed, never changed. */
+export interface UpdateTestCaseRequest {
+  name: string;
+  synthetic_payload: Record<string, JsonValue>;
+  assembly_context: TestCaseAssemblyContext;
+  is_required: boolean;
+}
+
+/** `POST /draft/{agent_key}/test-runs`: the case and the lock of the saved candidate. */
+export interface CandidateTestRunRequest {
+  test_case_id: number;
+  lock_version: number;
+}
+
+/** `POST /published/{agent_key}/test-runs`: the case only; no draft is read. */
+export interface PublishedBaselineTestRunRequest {
+  test_case_id: number;
+}
+
+export type TestRunKind = 'candidate' | 'published_baseline';
+export type TestRunExecutionStatus = 'completed' | 'model_error' | 'assembly_error' | 'incomplete';
+
+export interface DeterministicCheckIssue {
+  code: string;
+  field: string | null;
+}
+
+export interface DeterministicCheckResult {
+  name: 'output_contract' | 'execution';
+  passed: boolean;
+  message: string | null;
+  issues: DeterministicCheckIssue[];
+}
+
+/**
+ * One immutable run, as evidence. Execute responses carry boolean currency flags and
+ * reads carry `null`. There are no verdict fields: #268 adds them.
+ */
+export interface TestRunEvidence {
+  run_id: number;
+  run_kind: TestRunKind;
+  test_case_id: number;
+  test_case_version: number;
+  agent_key: AgentKey;
+  candidate_hash: string;
+  compared_release_id: number;
+  compared_definition_revision_id: number;
+  synthetic_payload: Record<string, JsonValue>;
+  model_payload: Record<string, JsonValue>;
+  assembled_prompt: string | null;
+  execution_status: TestRunExecutionStatus;
+  error_detail: string | null;
+  deterministic_checks_passed: boolean;
+  deterministic_check_results: DeterministicCheckResult[];
+  candidate_raw_output: Record<string, JsonValue> | null;
+  candidate_structured_output: Record<string, JsonValue> | null;
+  baseline_raw_output: Record<string, JsonValue> | null;
+  baseline_structured_output: Record<string, JsonValue> | null;
+  latency_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  run_by: string;
+  run_at: string;
+  candidate_is_current: boolean | null;
+  base_release_is_current: boolean | null;
+}
+
+/**
+ * The typed refusals of the case and run routes that are not draft refusals. A
+ * `stale_draft` 409 and an `invalid_draft` 422 stay the existing draft envelopes on
+ * `AgentDefinitionApiError`, so the reducer reconciles them exactly as it does a probe.
+ */
+export type AgentTestFailure =
+  | { code: 'stale_test_case'; test_case_id: number; message: string }
+  | { code: 'invalid_test_case'; issues: DraftFieldError[] }
+  | { code: 'test_case_not_found' }
+  | { code: 'test_run_unavailable'; message: string; retryable: true };
+
+/** A valid, typed case or run refusal. */
+export class AgentTestApiError extends Error {
+  readonly status: number;
+  readonly failure: AgentTestFailure;
+
+  constructor(status: number, failure: AgentTestFailure) {
+    super(failure.code);
+    this.name = 'AgentTestApiError';
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+/** A case or run response body that does not match the exact contract. */
+export class InvalidTestRunResponseError extends Error {
+  constructor() {
+    super('Agent test response did not match the expected contract.');
+    this.name = 'InvalidTestRunResponseError';
+  }
+}
+
+/** The route's exact 404 detail for an unknown case id. */
+export const TEST_CASE_NOT_FOUND_DETAIL = 'Test case not found';
+
+/** The route's exact 503 body: no row was written and the request may be retried. */
+export const TEST_RUN_UNAVAILABLE = {
+  code: 'test_run_unavailable',
+  message: 'Test run storage is temporarily unavailable. Retry the request.',
+  retryable: true,
+} as const;
+
+const TEST_RUN_KINDS: readonly TestRunKind[] = ['candidate', 'published_baseline'];
+const TEST_RUN_STATUSES: readonly TestRunExecutionStatus[] = [
+  'completed', 'model_error', 'assembly_error', 'incomplete',
+];
+const DETERMINISTIC_CHECK_NAMES: readonly DeterministicCheckResult['name'][] = ['output_contract', 'execution'];
+const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
+
+const TEST_CASE_KEYS = [
+  'id', 'agent_key', 'name', 'version', 'is_active', 'is_required', 'synthetic_payload',
+  'assembly_context', 'created_by', 'created_at', 'updated_by', 'updated_at',
+  'is_synthetic_data_warning',
+] as const;
+
+const TEST_RUN_KEYS = [
+  'run_id', 'run_kind', 'test_case_id', 'test_case_version', 'agent_key', 'candidate_hash',
+  'compared_release_id', 'compared_definition_revision_id', 'synthetic_payload', 'model_payload',
+  'assembled_prompt', 'execution_status', 'error_detail', 'deterministic_checks_passed',
+  'deterministic_check_results', 'candidate_raw_output', 'candidate_structured_output',
+  'baseline_raw_output', 'baseline_structured_output', 'latency_ms', 'input_tokens',
+  'output_tokens', 'run_by', 'run_at', 'candidate_is_current', 'base_release_is_current',
+] as const;
+
+function isAgentKey(value: unknown): value is AgentKey {
+  return typeof value === 'string' && (AGENT_KEYS as readonly string[]).includes(value);
+}
+
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
+  return isPlainRecord(value) && isJsonValue(value);
+}
+
+function isNullableJsonObject(value: unknown): value is Record<string, JsonValue> | null {
+  return value === null || isJsonObject(value);
+}
+
+function isNullableNonnegativeInteger(value: unknown): value is number | null {
+  return value === null || isNonnegativeInteger(value);
+}
+
+function isNullableBoolean(value: unknown): value is boolean | null {
+  return value === null || typeof value === 'boolean';
+}
+
+function isTestCaseListEntry(value: unknown): value is TestCaseListEntry {
+  return isPlainRecord(value)
+    && hasExactKeys(value, TEST_CASE_KEYS)
+    && isPositiveInteger(value.id)
+    && isAgentKey(value.agent_key)
+    && typeof value.name === 'string' && value.name.length > 0
+    && isPositiveInteger(value.version)
+    && typeof value.is_active === 'boolean'
+    && typeof value.is_required === 'boolean'
+    && isJsonObject(value.synthetic_payload)
+    && isPlainRecord(value.assembly_context)
+    && hasExactKeys(value.assembly_context, ['design_system_active'])
+    && typeof value.assembly_context.design_system_active === 'boolean'
+    && typeof value.created_by === 'string'
+    && typeof value.created_at === 'string'
+    && typeof value.updated_by === 'string'
+    && typeof value.updated_at === 'string'
+    && value.is_synthetic_data_warning === true;
+}
+
+function isDeterministicCheckIssue(value: unknown): value is DeterministicCheckIssue {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['code', 'field'])
+    && typeof value.code === 'string'
+    && isNullableString(value.field);
+}
+
+function isDeterministicCheckResult(value: unknown): value is DeterministicCheckResult {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['name', 'passed', 'message', 'issues'])
+    && typeof value.name === 'string'
+    && (DETERMINISTIC_CHECK_NAMES as readonly string[]).includes(value.name)
+    && typeof value.passed === 'boolean'
+    && isNullableString(value.message)
+    && Array.isArray(value.issues)
+    && value.issues.every(isDeterministicCheckIssue);
+}
+
+/** The strict evidence parser: every field, exact keys, and no `-1` sentinel id. */
+export function parseTestRunEvidence(value: unknown): TestRunEvidence | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, TEST_RUN_KEYS)) return null;
+  const valid = isPositiveInteger(value.run_id)
+    && typeof value.run_kind === 'string'
+    && (TEST_RUN_KINDS as readonly string[]).includes(value.run_kind)
+    && isPositiveInteger(value.test_case_id)
+    && isPositiveInteger(value.test_case_version)
+    && isAgentKey(value.agent_key)
+    && typeof value.candidate_hash === 'string' && LOWERCASE_SHA256.test(value.candidate_hash)
+    && isPositiveInteger(value.compared_release_id)
+    && isPositiveInteger(value.compared_definition_revision_id)
+    && isJsonObject(value.synthetic_payload)
+    && isJsonObject(value.model_payload)
+    && isNullableString(value.assembled_prompt)
+    && typeof value.execution_status === 'string'
+    && (TEST_RUN_STATUSES as readonly string[]).includes(value.execution_status)
+    && isNullableString(value.error_detail)
+    && typeof value.deterministic_checks_passed === 'boolean'
+    && Array.isArray(value.deterministic_check_results)
+    && value.deterministic_check_results.every(isDeterministicCheckResult)
+    && isNullableJsonObject(value.candidate_raw_output)
+    && isNullableJsonObject(value.candidate_structured_output)
+    && isNullableJsonObject(value.baseline_raw_output)
+    && isNullableJsonObject(value.baseline_structured_output)
+    && (value.latency_ms === null || (isFiniteNumber(value.latency_ms) && value.latency_ms >= 0))
+    && isNullableNonnegativeInteger(value.input_tokens)
+    && isNullableNonnegativeInteger(value.output_tokens)
+    && typeof value.run_by === 'string'
+    && typeof value.run_at === 'string'
+    && isNullableBoolean(value.candidate_is_current)
+    && isNullableBoolean(value.base_release_is_current);
+  return valid ? value as unknown as TestRunEvidence : null;
+}
+
+function parseTestCaseList(value: unknown): TestCaseListEntry[] | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['items'])) return null;
+  const { items } = value;
+  if (!Array.isArray(items) || !items.every(isTestCaseListEntry)) return null;
+  return items;
+}
+
+function parseTestRunList(value: unknown): TestRunEvidence[] | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['items']) || !Array.isArray(value.items)) return null;
+  const parsed = value.items.map(parseTestRunEvidence);
+  return parsed.every((item): item is TestRunEvidence => item !== null) ? parsed : null;
+}
+
+function parseStaleTestCase(value: unknown): AgentTestFailure | null {
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['code', 'test_case_id', 'message'])
+    || value.code !== 'stale_test_case'
+    || !isPositiveInteger(value.test_case_id)
+    || typeof value.message !== 'string') return null;
+  return { code: 'stale_test_case', test_case_id: value.test_case_id, message: value.message };
+}
+
+function parseInvalidTestCase(value: unknown): AgentTestFailure | null {
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['code', 'issues'])
+    || value.code !== 'invalid_test_case'
+    || !Array.isArray(value.issues)
+    || value.issues.length === 0
+    || !value.issues.every(isDraftFieldError)) return null;
+  return { code: 'invalid_test_case', issues: value.issues };
+}
+
+function isTestCaseNotFound(value: unknown): boolean {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['detail'])
+    && value.detail === TEST_CASE_NOT_FOUND_DETAIL;
+}
+
+function isTestRunUnavailable(value: unknown): boolean {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['code', 'message', 'retryable'])
+    && value.code === TEST_RUN_UNAVAILABLE.code
+    && value.message === TEST_RUN_UNAVAILABLE.message
+    && value.retryable === TEST_RUN_UNAVAILABLE.retryable;
+}
+
+async function agentTestRequest(
+  path: string,
+  method: 'GET' | 'POST' | 'DELETE',
+  body?: object,
+): Promise<{ status: number; payload: unknown; statusText: string }> {
+  const response = await fetch(`${AGENT_DEFINITIONS_URL}${path}`, {
+    method,
+    headers: body === undefined ? { Accept: 'application/json' } : { 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  return { status: response.status, payload, statusText: response.statusText };
+}
+
+/**
+ * The case routes' refusals: an ordered `invalid_test_case` 422, a `stale_test_case`
+ * 409 and the exact 404. A malformed 422 or 409 is invalid; any other status is a plain
+ * `AgentDefinitionApiError`.
+ */
+function testCaseRefusal(status: number, payload: unknown, statusText: string): Error {
+  if (status === 422) {
+    const failure = parseInvalidTestCase(payload);
+    return failure === null ? new InvalidTestRunResponseError() : new AgentTestApiError(status, failure);
+  }
+  if (status === 409) {
+    const failure = parseStaleTestCase(payload);
+    return failure === null ? new InvalidTestRunResponseError() : new AgentTestApiError(status, failure);
+  }
+  if (status === 404 && isTestCaseNotFound(payload)) {
+    return new AgentTestApiError(status, { code: 'test_case_not_found' });
+  }
+  return new AgentDefinitionApiError(status, payload, statusText);
+}
+
+/** Lists one role's **active** case versions (P5: only active versions can be run). */
+export async function listTestCases(agentKey: AgentKey): Promise<TestCaseListEntry[]> {
+  const { status, payload, statusText } = await agentTestRequest(
+    `/test-cases?agent_key=${encodeURIComponent(agentKey)}`,
+    'GET',
+  );
+  if (status === 200) {
+    const items = parseTestCaseList(payload);
+    if (items === null || items.some((item) => item.agent_key !== agentKey || !item.is_active)) {
+      throw new InvalidTestRunResponseError();
+    }
+    return items;
+  }
+  throw testCaseRefusal(status, payload, statusText);
+}
+
+/** Adds a new case lineage. The body is exactly the five typed fields. */
+export async function createTestCase(request: CreateTestCaseRequest): Promise<TestCaseListEntry> {
+  const { status, payload, statusText } = await agentTestRequest('/test-cases', 'POST', {
+    agent_key: request.agent_key,
+    name: request.name,
+    synthetic_payload: request.synthetic_payload,
+    assembly_context: { design_system_active: request.assembly_context.design_system_active },
+    is_required: request.is_required,
+  });
+  if (status === 201) {
+    if (!isTestCaseListEntry(payload)) throw new InvalidTestRunResponseError();
+    return payload;
+  }
+  throw testCaseRefusal(status, payload, statusText);
+}
+
+/**
+ * Supersedes one **active** version: the server retires it and returns `version + 1`
+ * with the same name, or returns the current version unchanged when the content is
+ * identical. The old row is kept as history.
+ */
+export async function updateTestCase(
+  testCaseId: number,
+  request: UpdateTestCaseRequest,
+): Promise<TestCaseListEntry> {
+  const response = await fetch(`${AGENT_DEFINITIONS_URL}/test-cases/${testCaseId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: request.name,
+      synthetic_payload: request.synthetic_payload,
+      assembly_context: { design_system_active: request.assembly_context.design_system_active },
+      is_required: request.is_required,
+    }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    if (!isTestCaseListEntry(payload) || !payload.is_active) throw new InvalidTestRunResponseError();
+    return payload;
+  }
+  throw testCaseRefusal(response.status, payload, response.statusText);
+}
+
+/** Retires one case version with a bodyless DELETE; the row is kept as history. */
+export async function retireTestCase(testCaseId: number): Promise<TestCaseListEntry> {
+  const { status, payload, statusText } = await agentTestRequest(`/test-cases/${testCaseId}`, 'DELETE');
+  if (status === 200) {
+    if (!isTestCaseListEntry(payload) || payload.is_active) throw new InvalidTestRunResponseError();
+    return payload;
+  }
+  throw testCaseRefusal(status, payload, statusText);
+}
+
+/**
+ * The two execute routes' refusals, in the server's order:
+ * - 201 is evidence, including a persisted `model_error` run; a malformed 201 is invalid.
+ * - 409 is the probe-style null-candidate `stale_draft` conflict on
+ *   `AgentDefinitionApiError`, or a typed `stale_test_case`; anything else is invalid.
+ * - 422 is the `invalid_draft` rejection on `AgentDefinitionApiError`, or a typed
+ *   `invalid_test_case`; anything else is invalid.
+ * - The exact 404 and the exact retryable 503 are typed; any other body at those
+ *   statuses (a proxy or router error) is a plain `AgentDefinitionApiError`.
+ */
+function testRunRefusal(status: number, payload: unknown, statusText: string): Error {
+  if (status === 409) {
+    if (isPlainRecord(payload) && payload.code === 'stale_draft') {
+      const conflict = parseDraftSaveConflictResponse(payload, 'null');
+      return conflict === null ? new InvalidTestRunResponseError() : new AgentDefinitionApiError(status, conflict, statusText);
+    }
+    return testCaseRefusal(status, payload, statusText);
+  }
+  if (status === 422) {
+    if (isPlainRecord(payload) && payload.code === 'invalid_draft') {
+      const rejection = parseDraftValidationErrorResponse(payload);
+      return rejection === null ? new InvalidTestRunResponseError() : new AgentDefinitionApiError(status, rejection, statusText);
+    }
+    return testCaseRefusal(status, payload, statusText);
+  }
+  if (status === 503 && isTestRunUnavailable(payload)) {
+    return new AgentTestApiError(status, { ...TEST_RUN_UNAVAILABLE });
+  }
+  return testCaseRefusal(status, payload, statusText);
+}
+
+async function executeTestRun(path: string, body: object): Promise<TestRunEvidence> {
+  const { status, payload, statusText } = await agentTestRequest(path, 'POST', body);
+  if (status === 201) {
+    const evidence = parseTestRunEvidence(payload);
+    if (evidence === null) throw new InvalidTestRunResponseError();
+    return evidence;
+  }
+  throw testRunRefusal(status, payload, statusText);
+}
+
+/**
+ * Runs one active case version against the role's **saved** draft candidate. The body
+ * is exactly `{ test_case_id, lock_version }`; the prompt, payload, endpoint, sampling
+ * values and baseline are all server-owned.
+ */
+export function executeCandidateTestRun(
+  agentKey: AgentKey,
+  request: CandidateTestRunRequest,
+): Promise<TestRunEvidence> {
+  return executeTestRun(`/draft/${agentKey}/test-runs`, {
+    test_case_id: request.test_case_id,
+    lock_version: request.lock_version,
+  });
+}
+
+/** Reruns one active case version against the active published definition. No lock. */
+export function executePublishedBaselineTestRun(
+  agentKey: AgentKey,
+  request: PublishedBaselineTestRunRequest,
+): Promise<TestRunEvidence> {
+  return executeTestRun(`/published/${agentKey}/test-runs`, { test_case_id: request.test_case_id });
+}
+
+/** Reads one stored run. Its currency flags are `null`: nothing recomputes them. */
+export async function getTestRun(runId: number): Promise<TestRunEvidence> {
+  const { status, payload, statusText } = await agentTestRequest(`/test-runs/${runId}`, 'GET');
+  if (status === 200) {
+    const evidence = parseTestRunEvidence(payload);
+    if (evidence === null) throw new InvalidTestRunResponseError();
+    return evidence;
+  }
+  throw new AgentDefinitionApiError(status, payload, statusText);
+}
+
+/** Reads one case version's own runs, newest first, at most `limit` (the server's 1-100). */
+export async function listTestCaseRuns(testCaseId: number, limit?: number): Promise<TestRunEvidence[]> {
+  const query = limit === undefined ? '' : `?limit=${limit}`;
+  const { status, payload, statusText } = await agentTestRequest(`/test-cases/${testCaseId}/runs${query}`, 'GET');
+  if (status === 200) {
+    const items = parseTestRunList(payload);
+    if (items === null) throw new InvalidTestRunResponseError();
+    return items;
+  }
+  throw testCaseRefusal(status, payload, statusText);
+}

@@ -1,9 +1,10 @@
 """Admin-only Agent Definition workbench routes."""
 
+import dataclasses
 import json
 import logging
 from collections.abc import Mapping
-from typing import Annotated, Protocol, cast
+from typing import Annotated, Protocol, TypeVar, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -13,6 +14,10 @@ from sqlalchemy.orm import Session
 
 from src.api.routes._authz import require_admin
 from src.api.schemas.agent_definitions import (
+    MAX_ROW_ID,
+    BaselineTestRunRequest,
+    CandidateTestRunRequest,
+    CreateTestCaseRequest,
     CustomTextBlockRequest,
     DraftDefinitionResponse,
     DraftFieldErrorResponse,
@@ -33,12 +38,33 @@ from src.api.schemas.agent_definitions import (
     StructuredOutputProbeSuccessResponse,
     SystemModelDiscoveryResponse,
     SystemModelEndpointResponse,
+    TestCaseConflictResponse,
+    TestCaseListResponse,
+    TestCaseResponse,
+    TestCaseValidationErrorResponse,
+    TestRunEvidenceResponse,
+    TestRunListResponse,
+    TestRunUnavailableResponse,
+    UpdateTestCaseRequest,
 )
 from src.core import databricks_client
 from src.core.database import get_db
 from src.core.user_context import get_current_user
 from src.services import model_endpoint_catalog
 from src.services.agent_schema_types import SchemaOverlay
+from src.services.agent_test_workbench import (
+    MAX_RUN_LIST_LIMIT,
+    AgentTestWorkbench,
+    TestCaseNotFound,
+    TestCaseRejected,
+    TestCaseStale,
+    TestCaseVersion,
+    TestRunCaseInactive,
+    TestRunCaseRoleMismatch,
+    TestRunEvidence,
+    TestRunNotFound,
+    TestRunUnavailable,
+)
 from src.services.graph_configuration import (
     DraftContentRejected,
     DraftLegacyPromptSource,
@@ -789,3 +815,416 @@ async def probe_agent_definition_model_endpoint(
         return _probe_result_response(outcome)
 
     raise AssertionError(f"Unexpected probe outcome: {type(outcome)!r}")
+
+
+# --- Agent Test Cases (#267 Task 2) ------------------------------------------
+# On this one admin router (C23): every route inherits ``require_admin``, and a
+# write takes its actor from ``require_draft_write_principal``; bodies are read
+# only after both succeed.  The case writer waits on the role's L2 row lock, so
+# it never runs on the event loop: the body routes hand it to the threadpool,
+# and the body-less routes are plain ``def`` handlers, which FastAPI runs there.
+
+
+def _test_case_validation_response(
+    errors: list[DraftFieldErrorResponse],
+) -> JSONResponse:
+    response = TestCaseValidationErrorResponse(code="invalid_test_case", issues=errors)
+    return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
+
+
+def _test_case_rejection_response(exc: TestCaseRejected) -> JSONResponse:
+    """Copy every ordered domain issue verbatim into the case envelope."""
+    return _test_case_validation_response(
+        [
+            DraftFieldErrorResponse(field=issue.field, code=issue.code, message=issue.message)
+            for issue in exc.issues
+        ]
+    )
+
+
+def _test_case_stale_response(exc: TestCaseStale) -> JSONResponse:
+    response = TestCaseConflictResponse(
+        code="stale_test_case",
+        test_case_id=exc.test_case_id,
+        message="This test case version is no longer active. Reload and retry.",
+    )
+    return JSONResponse(status_code=409, content=response.model_dump(mode="json"))
+
+
+def _test_case_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Test case not found")
+
+
+def _test_case_response(version: TestCaseVersion) -> TestCaseResponse:
+    return TestCaseResponse.model_validate(dataclasses.asdict(version))
+
+
+_TestCaseBodyT = TypeVar("_TestCaseBodyT", CreateTestCaseRequest, UpdateTestCaseRequest)
+
+
+async def _read_test_case_body(
+    request: Request, request_model: type[_TestCaseBodyT]
+) -> _TestCaseBodyT | JSONResponse:
+    try:
+        raw_body = await request.json()
+    except json.JSONDecodeError:
+        return _test_case_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field="$",
+                    code="invalid_json",
+                    message="Request body must be valid JSON.",
+                )
+            ]
+        )
+    try:
+        return request_model.model_validate(raw_body)
+    except ValidationError as exc:
+        return _test_case_validation_response(_request_validation_errors(exc))
+
+
+_TEST_CASE_WRITE_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {"description": "Test case not found"},
+    409: {"model": TestCaseConflictResponse},
+    422: {"model": TestCaseValidationErrorResponse},
+}
+
+
+@router.get(
+    "/test-cases",
+    response_model=TestCaseListResponse,
+    responses={422: {"model": TestCaseValidationErrorResponse}},
+)
+def list_agent_test_cases(
+    agent_key: str | None = None,
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+) -> TestCaseListResponse | JSONResponse:
+    """Active case versions in role order; ``include_inactive`` adds history."""
+    try:
+        cases = AgentTestWorkbench().list_test_cases(
+            db, agent_key=agent_key, include_inactive=include_inactive
+        )
+    except TestCaseRejected as exc:
+        return _test_case_rejection_response(exc)
+    return TestCaseListResponse(items=[_test_case_response(case) for case in cases])
+
+
+@router.post(
+    "/test-cases",
+    status_code=201,
+    response_model=TestCaseResponse,
+    responses={422: {"model": TestCaseValidationErrorResponse}},
+)
+async def create_agent_test_case(
+    request: Request,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    db: Session = Depends(get_db),
+) -> TestCaseResponse | JSONResponse:
+    """Add a new case lineage at version 1."""
+    parsed = await _read_test_case_body(request, CreateTestCaseRequest)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    try:
+        version = await run_in_threadpool(
+            AgentTestWorkbench().create_test_case,
+            db,
+            agent_key=parsed.agent_key,
+            name=parsed.name,
+            synthetic_payload=parsed.synthetic_payload,
+            assembly_context=parsed.assembly_context.model_dump(),
+            is_required=parsed.is_required,
+            actor=actor,
+        )
+    except TestCaseRejected as exc:
+        return _test_case_rejection_response(exc)
+    return _test_case_response(version)
+
+
+@router.put(
+    "/test-cases/{test_case_id}",
+    response_model=TestCaseResponse,
+    responses=_TEST_CASE_WRITE_RESPONSES,
+)
+async def update_agent_test_case(
+    request: Request,
+    test_case_id: int,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    db: Session = Depends(get_db),
+) -> TestCaseResponse | JSONResponse:
+    """Supersede the active version: retire it and return ``version + 1``."""
+    parsed = await _read_test_case_body(request, UpdateTestCaseRequest)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    try:
+        version = await run_in_threadpool(
+            AgentTestWorkbench().update_test_case,
+            db,
+            test_case_id=test_case_id,
+            name=parsed.name,
+            synthetic_payload=parsed.synthetic_payload,
+            assembly_context=parsed.assembly_context.model_dump(),
+            is_required=parsed.is_required,
+            actor=actor,
+        )
+    except TestCaseRejected as exc:
+        return _test_case_rejection_response(exc)
+    except TestCaseStale as exc:
+        return _test_case_stale_response(exc)
+    except TestCaseNotFound as exc:
+        raise _test_case_not_found() from exc
+    return _test_case_response(version)
+
+
+@router.delete(
+    "/test-cases/{test_case_id}",
+    response_model=TestCaseResponse,
+    responses={
+        404: {"description": "Test case not found"},
+        422: {"model": TestCaseValidationErrorResponse},
+    },
+)
+def deactivate_agent_test_case(
+    test_case_id: int,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    db: Session = Depends(get_db),
+) -> TestCaseResponse | JSONResponse:
+    """Retire one version (never a row delete); retiring it again is a no-op."""
+    try:
+        version = AgentTestWorkbench().deactivate_test_case(
+            db, test_case_id=test_case_id, actor=actor
+        )
+    except TestCaseRejected as exc:
+        return _test_case_rejection_response(exc)
+    except TestCaseNotFound as exc:
+        raise _test_case_not_found() from exc
+    return _test_case_response(version)
+
+
+# --- Agent Test Runs (#267 Task 5) ------------------------------------------
+# Still the one admin router (C23): ``/draft/{agent_key}/test-runs`` runs the
+# saved candidate, ``/published/{agent_key}/test-runs`` reruns the published
+# definition, and ``/test-runs/{run_id}`` is the one run (#268 adds
+# ``/test-runs/{run_id}/verdict`` beside it).  The two executes reach a model,
+# so they are ``async``, read the body only after both auth gates, and run the
+# executor in the threadpool (C36).  Refusals map in the executor's order:
+# lock/role 422 -> stale lock 409 -> endpoint policy 422 -> case 404 -> role
+# mismatch 422 -> inactive case 409.  A model failure is not a refusal: it is
+# a persisted run, returned 201 like any other evidence (C33).
+
+
+def get_agent_test_workbench() -> AgentTestWorkbench:
+    """The run routes' executor, resolved after the router's admin gate.
+
+    Construction builds nothing; the first run resolves the bounded
+    ``get_agent_test_runtime()`` (C33), never the production runtime.
+    """
+    return AgentTestWorkbench()
+
+
+_TEST_RUN_UNAVAILABLE_MESSAGE = (
+    "Test run storage is temporarily unavailable. Retry the request."
+)
+_ROLE_MISMATCH_MESSAGE = "This test case belongs to another agent role."
+
+_RunRequestT = TypeVar("_RunRequestT", CandidateTestRunRequest, BaselineTestRunRequest)
+
+
+async def _parse_test_run_request(
+    request: Request, agent_key: str, request_model: type[_RunRequestT]
+) -> _RunRequestT | JSONResponse:
+    """``_parse_lock_request``'s order: malformed JSON, unknown role, strict body."""
+    try:
+        raw_body = await request.json()
+    except json.JSONDecodeError:
+        return _malformed_json_response()
+    if agent_key not in GRAPH_V1_AGENT_KEYS:
+        return _draft_validation_response([_UNKNOWN_AGENT_ERROR])
+    try:
+        return request_model.model_validate(raw_body)
+    except ValidationError as exc:
+        return _draft_validation_response(_request_validation_errors(exc))
+
+
+def _test_run_response(evidence: TestRunEvidence) -> TestRunEvidenceResponse:
+    return TestRunEvidenceResponse.model_validate(dataclasses.asdict(evidence))
+
+
+def _test_run_unavailable_response() -> JSONResponse:
+    response = TestRunUnavailableResponse(
+        code="test_run_unavailable",
+        message=_TEST_RUN_UNAVAILABLE_MESSAGE,
+        retryable=True,
+    )
+    return JSONResponse(status_code=503, content=response.model_dump(mode="json"))
+
+
+def _test_run_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Test run not found")
+
+
+def _is_storable_row_id(value: int) -> bool:
+    return 1 <= value <= MAX_ROW_ID
+
+
+async def _execute_test_run(
+    call, db: Session, **arguments
+) -> TestRunEvidenceResponse | JSONResponse:
+    """Run one executor off the event loop and map its refusals (C16, C36)."""
+    try:
+        outcome = await run_in_threadpool(call, db, **arguments)
+    except DraftContentRejected as exc:
+        return _rejection_response(exc)
+    except TestCaseRejected as exc:
+        return _test_case_rejection_response(exc)
+    except TestCaseNotFound as exc:
+        raise _test_case_not_found() from exc
+    except TestRunCaseRoleMismatch:
+        return _test_case_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field="test_case_id",
+                    code="agent_key_mismatch",
+                    message=_ROLE_MISMATCH_MESSAGE,
+                )
+            ]
+        )
+    except TestRunCaseInactive as exc:
+        return _test_case_stale_response(TestCaseStale(exc.test_case_id))
+    except TestRunUnavailable:
+        # The executor already logged the phase and the error class only.
+        return _test_run_unavailable_response()
+    except GraphConfigurationIntegrityError as exc:
+        logger.exception("Persisted Graph Configuration is incomplete")
+        raise HTTPException(
+            status_code=500,
+            detail="Graph configuration is incomplete",
+        ) from exc
+
+    if isinstance(outcome, DraftSaveConflict):
+        return _conflict_response(outcome, client_candidate=None)
+    if isinstance(outcome, TestRunEvidence):
+        return _test_run_response(outcome)
+    raise AssertionError(f"Unexpected test run outcome: {type(outcome)!r}")
+
+
+_TEST_RUN_EXECUTE_RESPONSES: dict[int | str, dict[str, object]] = {
+    404: {"description": "Test case not found"},
+    409: {"model": DraftSaveConflictResponse | TestCaseConflictResponse},
+    422: {"model": DraftValidationErrorResponse | TestCaseValidationErrorResponse},
+    503: {"model": TestRunUnavailableResponse},
+}
+
+
+@router.post(
+    "/draft/{agent_key}/test-runs",
+    status_code=201,
+    response_model=TestRunEvidenceResponse,
+    responses=_TEST_RUN_EXECUTE_RESPONSES,
+)
+async def execute_agent_candidate_test_run(
+    request: Request,
+    agent_key: str,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> TestRunEvidenceResponse | JSONResponse:
+    """Run one active case version against the role's saved draft candidate.
+
+    The body is exactly ``{"test_case_id": n, "lock_version": n}``; the lock
+    pins the saved candidate the admin is looking at (C32).
+    """
+    parsed = await _parse_test_run_request(request, agent_key, CandidateTestRunRequest)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    return await _execute_test_run(
+        workbench.execute_candidate_run,
+        db,
+        agent_key=agent_key,
+        test_case_id=parsed.test_case_id,
+        expected_lock_version=parsed.lock_version,
+        actor=actor,
+    )
+
+
+@router.post(
+    "/published/{agent_key}/test-runs",
+    status_code=201,
+    response_model=TestRunEvidenceResponse,
+    responses=_TEST_RUN_EXECUTE_RESPONSES,
+)
+async def execute_agent_published_baseline_test_run(
+    request: Request,
+    agent_key: str,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> TestRunEvidenceResponse | JSONResponse:
+    """Rerun one active case version against the active published definition.
+
+    The body is exactly ``{"test_case_id": n}``: no draft is read or pinned.
+    """
+    parsed = await _parse_test_run_request(request, agent_key, BaselineTestRunRequest)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    return await _execute_test_run(
+        workbench.execute_baseline_rerun,
+        db,
+        agent_key=agent_key,
+        test_case_id=parsed.test_case_id,
+        actor=actor,
+    )
+
+
+@router.get(
+    "/test-runs/{run_id}",
+    response_model=TestRunEvidenceResponse,
+    responses={404: {"description": "Test run not found"}},
+)
+def get_agent_test_run(
+    run_id: int,
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> TestRunEvidenceResponse:
+    """One stored run; the write-time currency flags read back as ``null``."""
+    if not _is_storable_row_id(run_id):
+        raise _test_run_not_found()
+    try:
+        evidence = workbench.get_test_run(db, run_id=run_id)
+    except TestRunNotFound as exc:
+        raise _test_run_not_found() from exc
+    return _test_run_response(evidence)
+
+
+@router.get(
+    "/test-cases/{test_case_id}/runs",
+    response_model=TestRunListResponse,
+    responses={
+        404: {"description": "Test case not found"},
+        422: {"model": TestCaseValidationErrorResponse},
+    },
+)
+def list_agent_test_case_runs(
+    test_case_id: int,
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> TestRunListResponse | JSONResponse:
+    """One case version's runs, newest first, at most ``limit`` (1-100)."""
+    if not 1 <= limit <= MAX_RUN_LIST_LIMIT:
+        return _test_case_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field="limit",
+                    code="out_of_range",
+                    message=f"Limit must be an integer from 1 to {MAX_RUN_LIST_LIMIT}.",
+                )
+            ]
+        )
+    if not _is_storable_row_id(test_case_id):
+        raise _test_case_not_found()
+    try:
+        runs = workbench.list_test_runs(db, test_case_id=test_case_id, limit=limit)
+    except TestCaseNotFound as exc:
+        raise _test_case_not_found() from exc
+    return TestRunListResponse(items=[_test_run_response(run) for run in runs])

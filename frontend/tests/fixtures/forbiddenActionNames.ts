@@ -21,21 +21,31 @@ export const FORBIDDEN_ACTION_STEMS =
 /**
  * The only control names this panel legitimately renders that carry a banned stem.
  *
- * They are exempted by name rather than by loosening a stem, and each is removed from
- * the name before the stems are applied — so an exempt name cannot be used as a shield:
- * `Restore saved prompt and publish` still trips the guard.
+ * They are exempted by exact whole name rather than by loosening a stem, so an exempt
+ * name cannot be used as a shield: `Restore saved prompt and publish` still trips the
+ * guard.
+ *
+ * #267 adds exactly its two run controls (C25/C38). The `run` stem stays, so every
+ * other run control (`Run isolated test`, `View run 12`) is still banned, and
+ * `Run published baseline` needs its exemption for `publish` as well.
  */
 export const ALLOWED_ACTION_NAMES = [
   'Restore published Graph Version 1 prompt',
   'Restore saved prompt',
   'Restore retained values',
+  'Run test case',
+  'Run published baseline',
 ] as const;
 
-/** True when `name` offers one of the actions this panel must never offer. */
+/**
+ * True when `name` offers one of the actions this panel must never offer.
+ *
+ * An exempt name is spared only when it is the **whole** name (whitespace normalized),
+ * never as a substring: `Run test cases` and `Run test case now` still trip the guard
+ * (#267 review m-5), and so does any exempt name with a banned suffix.
+ */
 export function forbidsActionName(name: string): boolean {
-  const withoutAllowed = ALLOWED_ACTION_NAMES.reduce(
-    (text, allowed) => text.split(allowed).join(' '),
-    name,
-  );
-  return FORBIDDEN_ACTION_STEMS.test(withoutAllowed);
+  const normalized = name.trim().replace(/\s+/g, ' ');
+  if ((ALLOWED_ACTION_NAMES as readonly string[]).includes(normalized)) return false;
+  return FORBIDDEN_ACTION_STEMS.test(normalized);
 }

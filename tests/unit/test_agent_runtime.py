@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, field_validator
 
+import src.services.agent_runtime as runtime_module
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
 from src.core.skills import load_skill
 from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
@@ -27,13 +29,40 @@ from src.services.agent_runtime import (
     CodeOwnedAgentDefinitionSource,
     DatabricksModelAdapter,
     ProtectedPromptIdentity,
+    RunObservation,
     UnknownAgentKeyError,
     _canonical_digest,
     _schema_contract_material,
 )
+from src.services.agent_runtime_identity import (
+    RecordingAgentInvocationIdentitySink,
+)
+from src.services.agent_schema_registry import (
+    AgentOutputValidationError,
+    AgentSchemaRegistry,
+)
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
-from src.services.graph_definition_manifest import AssemblyRulesV1
-from src.services.persisted_graph_release import PersistedConfigurationUnavailableError
+from src.services.graph_definition_manifest import (
+    AssemblyRulesV1,
+    AssemblyRulesV2,
+    ContentIdentity,
+    CustomTextBlock,
+    DefinitionContent,
+    definition_content_hash,
+    load_graph_v1_manifest,
+)
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+    PinnedInvocationEndpointError,
+    ResolvedDefinition,
+)
+from src.services.prompt_assembler import V2_PROTECTED_ASSEMBLY_IDENTITY
+from tests.fixtures.deterministic_model_adapter import (
+    FAKE_OUTPUTS,
+    INVALID_OPTIONAL_FIELD,
+    DeterministicFakeModelAdapter,
+    fake_output,
+)
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -88,19 +117,8 @@ class StaticDefinitionSource:
         return self.definition
 
 
-VALID_OUTPUT_VALUES: dict[str, dict[str, Any]] = {
-    "architect": {"intent": "discuss", "message": "an answer"},
-    "data_analyst": {
-        "outcome": "success",
-        "synthesis": "a finding",
-        "sources": ["warehouse.sales"],
-    },
-    "builder": {"position": 3, "html": "<section></section>"},
-    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
-    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
-    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
-    "deck_reviewer": {},
-}
+#: The one shared table (#267 Correction 26), not a local copy that could drift.
+VALID_OUTPUT_VALUES = FAKE_OUTPUTS
 
 
 def _output_for(agent_key: str) -> dict[str, Any]:
@@ -830,3 +848,932 @@ def test_structured_output_runtime_adapter_still_collapses_permission_denied():
             schema=OUTPUT_SCHEMAS["architect"],
             prompt="p",
         )
+
+
+# ---------------------------------------------------------------------------
+# #267 Task 3: ``AgentRuntime.run_candidate`` runs a saved DRAFT candidate
+# through the same private ``_run_resolved`` path as ``run`` (Corrections 12,
+# 13, 14, 15, 27, 31, 33, 34).  New names are read off the module, so each test
+# fails on its own while the feature is absent rather than collapsing the file.
+# ---------------------------------------------------------------------------
+
+_CANDIDATE_ENDPOINT = "databricks-claude-opus-4-6"
+
+
+def _manifest_content(agent_key: str) -> DefinitionContent:
+    return next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
+    )
+
+
+def _candidate(agent_key: str, *, v2_assembly: bool = False, v2_schema: bool = False):
+    """A saved-draft-shaped candidate: validated content that is no release's."""
+    data = _manifest_content(agent_key).model_dump(mode="python")
+    data["prompt_text"] = f"{agent_key} draft candidate prompt"
+    if v2_assembly:
+        data["protected_assembly"] = V2_PROTECTED_ASSEMBLY_IDENTITY.model_dump()
+        data["assembly_rules"] = AssemblyRulesV2(
+            format_version=2,
+            custom_blocks=(
+                CustomTextBlock.model_validate(
+                    {
+                        "kind": "custom_text",
+                        "block_id": "00000000-0000-0000-0000-000000000267",
+                        "anchor": "after_authored_prompt",
+                        "condition": "always",
+                        "text": f"{agent_key} candidate custom block",
+                    }
+                ),
+            ),
+        ).model_dump(mode="python")
+    if v2_schema:
+        data["schema_contract"] = {
+            "version": 2,
+            "digest": AgentSchemaRegistry().identity_for(agent_key, 2).digest,
+        }
+        data["schema_overlay"] = {
+            "field_overrides": {},
+            "additional_optional_fields": ["diagnostic_notes"],
+        }
+    content = DefinitionContent.model_validate(data)
+    return content, definition_content_hash(content)
+
+
+class _LoaderMustNotResolve:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str]] = []
+
+    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+        self.calls.append((graph_release_id, agent_key))
+        raise AssertionError("a candidate run must never resolve a release")
+
+
+class _StaticLoader:
+    def __init__(self, definition: ResolvedDefinition) -> None:
+        self.definition = definition
+        self.calls: list[tuple[int, str]] = []
+
+    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+        self.calls.append((graph_release_id, agent_key))
+        return self.definition
+
+
+def _candidate_runtime(adapter: Any = None):
+    adapter = adapter if adapter is not None else DeterministicFakeModelAdapter()
+    sink = RecordingAgentInvocationIdentitySink()
+    loader = _LoaderMustNotResolve()
+    runtime = AgentRuntime(
+        persisted_release_loader=loader,
+        model_adapter=adapter,
+        identity_sink=sink,
+    )
+    return runtime, adapter, sink, loader
+
+
+def test_candidate_run_sentinels_are_negative_runtime_identity_constants():
+    """Correction 27: ``-1`` never collides with a SERIAL id; they live in the runtime."""
+    import src.services.persisted_graph_release as persisted_graph_release
+
+    assert runtime_module.CANDIDATE_RUN_GRAPH_VERSION == -1
+    assert runtime_module.CANDIDATE_RUN_GRAPH_RELEASE_ID == -1
+    assert runtime_module.CANDIDATE_RUN_REVISION_ID == -1
+    assert not hasattr(persisted_graph_release, "CANDIDATE_RUN_GRAPH_RELEASE_ID")
+
+
+@pytest.mark.parametrize("agent_key", MODEL_DRIVEN_AGENT_KEYS)
+def test_run_candidate_runs_every_role_through_the_fake_and_bypasses_the_identity_sink(
+    agent_key,
+):
+    runtime, adapter, sink, loader = _candidate_runtime()
+    content, candidate_hash = _candidate(agent_key)
+    payload = {"z": 2, "a": 1}
+
+    outcome = runtime.run_candidate(
+        agent_key, content, candidate_hash, payload, AgentAssemblyContext(False)
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.error is None
+    assert outcome.error_detail is None
+    assert type(outcome.result.output) is OUTPUT_SCHEMAS[agent_key]
+    assert outcome.result.output == OUTPUT_SCHEMAS[agent_key].model_validate(
+        fake_output(agent_key)
+    )
+    # The raw keys the provider actually supplied, observed before validation.
+    assert outcome.raw_output == fake_output(agent_key)
+    assert len(adapter.calls) == 1
+    call = adapter.calls[0]
+    assert call.agent_key == agent_key
+    assert f"{agent_key} draft candidate prompt" in call.prompt
+    _assert_composed_schema(call.schema, agent_key, 1)
+    assert outcome.result.diagnostics.assembled_prompt == call.prompt
+    # The runtime's own identity sink is never handed a candidate run: a draft
+    # has no release or revision identity to record (Task 3 ruling R1).
+    assert sink.calls == []
+    assert sink.successes == []
+    assert loader.calls == []
+
+
+@pytest.mark.parametrize("agent_key", ["foreman", "nope", "Architect"])
+def test_run_candidate_rejects_an_unknown_or_deterministic_role_first(agent_key):
+    """Correction 14: the same typed error as ``run``, before any other check."""
+    runtime, adapter, sink, loader = _candidate_runtime()
+    content, _ = _candidate("architect")
+
+    with pytest.raises(UnknownAgentKeyError, match=agent_key):
+        # A mismatched role AND a wrong hash: the role check must win.
+        runtime.run_candidate(
+            agent_key, content, "0" * 64, {}, AgentAssemblyContext(False)
+        )
+
+    assert adapter.calls == []
+    assert sink.calls == []
+    assert loader.calls == []
+
+
+def test_run_candidate_rejects_content_for_another_role_before_the_hash():
+    runtime, adapter, sink, _ = _candidate_runtime()
+    content, _ = _candidate("builder")
+
+    with pytest.raises(ValueError, match="candidate_content.agent_key does not match"):
+        runtime.run_candidate("architect", content, "0" * 64, {}, AgentAssemblyContext(False))
+
+    assert adapter.calls == []
+    assert sink.calls == []
+
+
+def test_run_candidate_rejects_a_hash_that_does_not_match_the_content():
+    runtime, adapter, sink, _ = _candidate_runtime()
+    content, candidate_hash = _candidate("architect")
+    other, other_hash = _candidate("architect", v2_assembly=True)
+    assert other_hash != candidate_hash
+
+    with pytest.raises(ValueError, match="^candidate_hash does not match candidate_content$"):
+        runtime.run_candidate("architect", content, other_hash, {}, AgentAssemblyContext(False))
+
+    assert adapter.calls == []
+    assert sink.calls == []
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        AgentAssemblyContext(False, "owner-session", ""),
+        AgentAssemblyContext(False, "", "actor-session"),
+    ],
+)
+def test_run_candidate_refuses_a_session_identity(context):
+    """A test run has no session: none reaches the identity sink or the model."""
+    runtime, adapter, sink, _ = _candidate_runtime()
+    content, candidate_hash = _candidate("architect")
+
+    with pytest.raises(ValueError, match="candidate runs carry no session identity"):
+        runtime.run_candidate("architect", content, candidate_hash, {}, context)
+
+    assert adapter.calls == []
+    assert sink.calls == []
+
+
+@pytest.mark.parametrize("agent_key", MODEL_DRIVEN_AGENT_KEYS)
+@pytest.mark.parametrize("design_system_active", [False, True])
+@pytest.mark.parametrize("v2_assembly", [False, True])
+def test_candidate_prompt_schema_and_configuration_equal_the_production_path(
+    agent_key, design_system_active, v2_assembly
+):
+    """The same content gives the same prompt bytes through ``run`` and ``run_candidate``."""
+    content, candidate_hash = _candidate(agent_key, v2_assembly=v2_assembly)
+    payload = {"position": 2, "deck_brief": {"argument": "Revenue compounds"}, "a": [1]}
+    context = AgentAssemblyContext(design_system_active)
+
+    production_adapter = DeterministicFakeModelAdapter()
+    production = AgentRuntime(
+        persisted_release_loader=_StaticLoader(
+            ResolvedDefinition(
+                graph_version=5,
+                graph_release_id=9,
+                agent_key=agent_key,
+                agent_definition_revision_id=11,
+                content_hash=candidate_hash,
+                content=content,
+            )
+        ),
+        model_adapter=production_adapter,
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+    production_result = production.run(agent_key, 9, dict(payload), context)
+    runtime, candidate_adapter, _, _ = _candidate_runtime()
+    outcome = runtime.run_candidate(agent_key, content, candidate_hash, dict(payload), context)
+
+    assert outcome.status == "completed"
+    produced, candidate = production_adapter.calls[0], candidate_adapter.calls[0]
+    assert candidate.prompt == produced.prompt
+    assert candidate.prompt.encode("utf-8") == produced.prompt.encode("utf-8")
+    assert candidate.configuration == produced.configuration
+    assert candidate.schema.model_json_schema() == produced.schema.model_json_schema()
+    diagnostics = outcome.result.diagnostics
+    assert diagnostics.assembly_stages == production_result.diagnostics.assembly_stages
+    assert diagnostics.schema_contract == production_result.diagnostics.schema_contract
+    assert diagnostics.protected_prompt == production_result.diagnostics.protected_prompt
+
+
+def test_a_v2_overlay_candidate_binds_the_composed_schema_now():
+    """Correction 13: v2 overlays are reachable today; there is no Phase B."""
+    runtime, adapter, sink, _ = _candidate_runtime()
+    content, candidate_hash = _candidate("architect", v2_schema=True)
+
+    outcome = runtime.run_candidate(
+        "architect", content, candidate_hash, {"x": 1}, AgentAssemblyContext(False)
+    )
+
+    assert outcome.status == "completed"
+    _assert_composed_schema(adapter.calls[0].schema, "architect", 2)
+    assert outcome.result.diagnostics.schema_contract.version == 2
+    assert sink.calls == []
+
+
+def test_a_v1_candidate_with_an_overlay_is_an_assembly_error_before_the_model():
+    """Correction 13: the v1-scoped overlay guard is live and stays."""
+    runtime, adapter, sink, _ = _candidate_runtime()
+    v2_content, _ = _candidate("architect", v2_schema=True)
+    content = v2_content.model_copy(
+        update={
+            "schema_contract": ContentIdentity(
+                version=1, digest=EXPECTED_SCHEMA_DIGESTS["architect"]
+            )
+        }
+    )
+
+    outcome = runtime.run_candidate(
+        "architect",
+        content,
+        definition_content_hash(content),
+        {"x": 1},
+        AgentAssemblyContext(False),
+    )
+
+    assert outcome.status == "assembly_error"
+    assert outcome.error_detail == "schema_contract_unavailable"
+    assert isinstance(outcome.error, PersistedConfigurationUnavailableError)
+    assert outcome.result is None
+    assert outcome.raw_output is None
+    assert adapter.calls == []
+    assert sink.calls == []
+
+
+def test_an_unavailable_protected_bundle_is_an_assembly_error_before_the_model():
+    runtime, adapter, sink, _ = _candidate_runtime()
+    content = _manifest_content("architect").model_copy(
+        update={"protected_assembly": ContentIdentity(version=999, digest="0" * 64)}
+    )
+
+    outcome = runtime.run_candidate(
+        "architect",
+        content,
+        definition_content_hash(content),
+        {},
+        AgentAssemblyContext(False),
+    )
+
+    assert (outcome.status, outcome.error_detail) == (
+        "assembly_error",
+        "protected_bundle_unavailable",
+    )
+    assert adapter.calls == []
+    assert sink.calls == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "detail", "error_type"),
+    [
+        (
+            "provider_unavailable",
+            "model_error",
+            f"endpoint_unavailable:{_CANDIDATE_ENDPOINT}",
+            PinnedInvocationEndpointError,
+        ),
+        (
+            "structured_output_unsupported",
+            "model_error",
+            f"structured_output_unsupported:{_CANDIDATE_ENDPOINT}",
+            NotImplementedError,
+        ),
+        (
+            "provider_parse_error",
+            "incomplete",
+            "invalid_output:ValidationError",
+            Exception,
+        ),
+    ],
+)
+def test_a_failing_model_call_is_classified_and_does_not_escape(
+    mode, status, detail, error_type
+):
+    """Correction 15/33/34: parse errors and ``NotImplementedError`` are outcomes."""
+    runtime, adapter, sink, _ = _candidate_runtime(DeterministicFakeModelAdapter(mode=mode))
+    content, candidate_hash = _candidate("architect")
+
+    outcome = runtime.run_candidate(
+        "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+    )
+
+    assert (outcome.status, outcome.error_detail) == (status, detail)
+    assert isinstance(outcome.error, error_type)
+    assert outcome.result is None
+    assert outcome.raw_output is None
+    assert len(adapter.calls) == 1
+    assert sink.calls == []
+
+
+def test_a_provider_endpoint_error_names_the_sentinel_release_not_a_real_one():
+    runtime, _, _, _ = _candidate_runtime(
+        DeterministicFakeModelAdapter(mode="provider_unavailable")
+    )
+    content, candidate_hash = _candidate("architect")
+
+    outcome = runtime.run_candidate(
+        "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+    )
+
+    assert outcome.error.graph_release_id == -1
+    assert outcome.error.agent_definition_revision_id == -1
+
+
+def test_an_output_parser_exception_is_incomplete():
+    from langchain_core.exceptions import OutputParserException
+
+    class _Parser:
+        def invoke(self, **_kwargs):
+            raise OutputParserException("unparseable provider text")
+
+    runtime, _, _, _ = _candidate_runtime(_Parser())
+    content, candidate_hash = _candidate("architect")
+
+    outcome = runtime.run_candidate(
+        "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+    )
+
+    assert (outcome.status, outcome.error_detail) == (
+        "incomplete",
+        "invalid_output:OutputParserException",
+    )
+
+
+def test_classification_reads_the_exception_type_never_its_text():
+    """Provider prose must not steer the evidence status (I-4).
+
+    A parser exception with bland text is still ``incomplete``, and an ordinary
+    exception whose text *reads* like a parse failure is still unexpected.
+    """
+    from langchain_core.exceptions import OutputParserException
+
+    class _Raises:
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+
+        def invoke(self, **_kwargs):
+            raise self.error
+
+    content, candidate_hash = _candidate("architect")
+    outcomes = {}
+    for label, error in (
+        ("bland_parser", OutputParserException("x")),
+        ("parse_sounding", RuntimeError("could not parse output: 1 validation error")),
+    ):
+        runtime, _, _, _ = _candidate_runtime(_Raises(error))
+        outcome = runtime.run_candidate(
+            "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+        )
+        outcomes[label] = (outcome.status, outcome.error_detail)
+
+    assert outcomes == {
+        "bland_parser": ("incomplete", "invalid_output:OutputParserException"),
+        "parse_sounding": ("model_error", "unexpected_error:RuntimeError"),
+    }
+
+
+def test_an_unexpected_failure_is_a_model_error_carrying_only_its_class_name():
+    class _Boom:
+        def invoke(self, **_kwargs):
+            raise RuntimeError("provider text https://secret-host/token=abc")
+
+    runtime, _, _, _ = _candidate_runtime(_Boom())
+    content, candidate_hash = _candidate("architect")
+
+    outcome = runtime.run_candidate(
+        "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+    )
+
+    assert (outcome.status, outcome.error_detail) == (
+        "model_error",
+        "unexpected_error:RuntimeError",
+    )
+    assert isinstance(outcome.error, RuntimeError)
+
+
+@pytest.mark.parametrize("v2_schema", [False, True])
+def test_an_invalid_output_keeps_its_raw_keys_and_is_incomplete(v2_schema):
+    """Correction 15: the observer sees the raw keys before ``validate_output`` rejects them."""
+    runtime, adapter, sink, _ = _candidate_runtime(
+        DeterministicFakeModelAdapter(mode="invalid_optional_field")
+    )
+    content, candidate_hash = _candidate("architect", v2_schema=v2_schema)
+
+    outcome = runtime.run_candidate(
+        "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+    )
+
+    assert outcome.status == "incomplete"
+    assert outcome.error_detail == "invalid_output:AgentOutputValidationError"
+    assert isinstance(outcome.error, AgentOutputValidationError)
+    assert [issue.code for issue in outcome.error.issues] == [
+        "output_invalid_optional_field" if v2_schema else "output_undeclared_top_level_field"
+    ]
+    assert outcome.result is None
+    assert outcome.raw_output == fake_output("architect", **INVALID_OPTIONAL_FIELD)
+    assert sink.calls == []
+
+
+def test_run_still_raises_the_validation_error_it_always_raised():
+    """``run`` passes no observer and classifies nothing: its errors are unchanged."""
+    content, candidate_hash = _candidate("architect", v2_schema=True)
+    runtime = AgentRuntime(
+        persisted_release_loader=_StaticLoader(
+            ResolvedDefinition(5, 9, "architect", 11, candidate_hash, content)
+        ),
+        model_adapter=DeterministicFakeModelAdapter(mode="invalid_optional_field"),
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+
+    with pytest.raises(AgentOutputValidationError):
+        runtime.run("architect", 9, {}, AgentAssemblyContext(False))
+
+
+def _function_source(function) -> Any:
+    import ast
+    import inspect
+    import textwrap
+
+    return ast.parse(textwrap.dedent(inspect.getsource(function)))
+
+
+def _self_method_calls(tree) -> list[Any]:
+    import ast
+
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    ]
+
+
+def test_run_candidate_delegates_to_run_resolved_and_never_to_run():
+    """Correction 12: one shared private path; no release resolution, no own binding."""
+    import ast
+
+    # run_candidate -> _run_observed (the #267 Task 4 observation seam) -> _run_resolved.
+    tree = _function_source(AgentRuntime.run_candidate)
+    methods = [call.func.attr for call in _self_method_calls(tree)]
+    assert methods == ["_run_observed"]
+    observed = _function_source(AgentRuntime._run_observed)
+    assert [call.func.attr for call in _self_method_calls(observed)] == ["_run_resolved"]
+    names = set()
+    for part in (tree, observed):
+        names |= {
+            node.id for node in ast.walk(part) if isinstance(node, ast.Name)
+        } | {node.attr for node in ast.walk(part) if isinstance(node, ast.Attribute)}
+    for forbidden in (
+        "run",
+        "bind_structured_output_model",
+        "saved_model_configuration",
+        "with_structured_output",
+        "_write_locked_content",
+        "_persisted_release_loader",
+    ):
+        assert forbidden not in names
+
+
+def test_production_run_passes_no_raw_output_observer():
+    """Correction 15: ``run`` hands ``_run_resolved`` its three arguments and nothing else."""
+    calls = [
+        call
+        for call in _self_method_calls(_function_source(AgentRuntime.run))
+        if call.func.attr == "_run_resolved"
+    ]
+    assert len(calls) == 1
+    assert len(calls[0].args) == 3
+    assert calls[0].keywords == []
+
+
+def _src_python_files():
+    from pathlib import Path
+
+    root = Path(runtime_module.__file__).resolve().parents[2]
+    return root, sorted((root / "src").rglob("*.py"))
+
+
+def _modules_referencing(name: str) -> set[str]:
+    import ast
+
+    root, files = _src_python_files()
+    found: set[str] = set()
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr == name) or (
+                isinstance(node, ast.Name) and node.id == name
+            ) or (isinstance(node, ast.alias) and node.name == name):
+                found.add(path.relative_to(root).as_posix())
+                break
+    return found
+
+
+def test_run_candidate_is_reachable_only_from_the_agent_test_workbench():
+    """Spec §7.1: a candidate run cannot be used by a production conversation."""
+    assert _modules_referencing("run_candidate") <= {"src/services/agent_test_workbench.py"}
+
+
+def test_the_bounded_test_runtime_is_reachable_only_from_the_workbench_and_its_route():
+    """Correction 33: no graph node can pick up the test runtime's transport bound."""
+    assert _modules_referencing("get_agent_test_runtime") - {
+        "src/services/agent_runtime.py"
+    } <= {
+        "src/services/agent_test_workbench.py",
+        "src/api/routes/agent_definitions.py",
+    }
+
+
+def test_no_module_binds_a_structured_model_outside_the_one_helper():
+    """Correction 12/31: one ``with_structured_output(`` in ``src``, two helper callers."""
+    import ast
+
+    root, files = _src_python_files()
+    bindings: dict[str, int] = {}
+    helper_callers: set[str] = set()
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        module = path.relative_to(root).as_posix()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == "with_structured_output":
+                bindings[module] = bindings.get(module, 0) + 1
+            if name == "bind_structured_output_model":
+                helper_callers.add(module)
+    assert bindings == {"src/services/agent_runtime.py": 1}
+    assert helper_callers == {
+        "src/services/agent_runtime.py",
+        "src/services/model_endpoint_probe.py",
+    }
+
+    workbench = (root / "src/services/agent_test_workbench.py").read_text(encoding="utf-8")
+    for forbidden in ("with_structured_output", "bind_structured_output_model(", "ChatDatabricks"):
+        assert forbidden not in workbench
+
+
+def _drive_adapter_kwargs(adapter: DatabricksModelAdapter) -> dict[str, Any]:
+    output = _output_for("architect")
+    events, runtime_client, model_factory, client_factory = _recording_factories(output)
+    adapter._model_factory = model_factory
+    adapter._client_factory = client_factory
+    adapter.invoke(
+        agent_key="architect",
+        configuration=_SAVED_CONFIGURATION,
+        schema=OUTPUT_SCHEMAS["architect"],
+        prompt="p",
+    )
+    kwargs = next(value for name, value in events if name == "model_factory")
+    assert kwargs.pop("workspace_client") is runtime_client
+    return kwargs
+
+
+_SAVED_MODEL_KWARGS = {
+    "endpoint": "saved exact endpoint-name",
+    "temperature": 0.25,
+    "max_tokens": 321,
+    "top_p": 0.75,
+}
+
+
+def test_databricks_model_adapter_forwards_transport_options_to_the_one_binding():
+    adapter = DatabricksModelAdapter(transport_options={"timeout": 1.5, "max_retries": 0})
+
+    assert _drive_adapter_kwargs(adapter) == {
+        **_SAVED_MODEL_KWARGS,
+        "timeout": 1.5,
+        "max_retries": 0,
+    }
+
+
+def test_the_agent_test_runtime_bounds_its_model_call_to_120_seconds_and_no_retry():
+    from src.services.agent_runtime import (
+        LoggingAgentInvocationIdentitySink,
+        get_agent_runtime,
+    )
+    from src.services.persisted_graph_release import PersistedGraphReleaseLoader
+
+    get_agent_test_runtime = runtime_module.get_agent_test_runtime
+    get_agent_test_runtime.cache_clear()
+    get_agent_runtime.cache_clear()
+    try:
+        runtime = get_agent_test_runtime()
+        assert runtime is get_agent_test_runtime()
+        assert runtime is not get_agent_runtime()
+        assert runtime_module.TEST_RUN_TIMEOUT_SECONDS == 120.0
+        assert runtime_module.TEST_RUN_MAX_RETRIES == 0
+        assert isinstance(runtime._persisted_release_loader, PersistedGraphReleaseLoader)
+        assert isinstance(runtime._identity_sink, LoggingAgentInvocationIdentitySink)
+        assert type(runtime._model_adapter) is DatabricksModelAdapter
+        assert _drive_adapter_kwargs(runtime._model_adapter) == {
+            **_SAVED_MODEL_KWARGS,
+            "timeout": 120.0,
+            "max_retries": 0,
+        }
+    finally:
+        get_agent_test_runtime.cache_clear()
+        get_agent_runtime.cache_clear()
+
+
+def test_the_production_runtime_adapter_still_hands_no_transport_options():
+    from src.services.agent_runtime import get_agent_runtime
+
+    get_agent_runtime.cache_clear()
+    try:
+        assert _drive_adapter_kwargs(get_agent_runtime()._model_adapter) == _SAVED_MODEL_KWARGS
+    finally:
+        get_agent_runtime.cache_clear()
+
+
+# --- #267 Task 4 fix round 1: the public observation hook (I-1) -------------
+
+
+def test_run_published_baseline_is_reachable_only_from_the_agent_test_workbench():
+    """Like ``run_candidate``: no production conversation can reach it (spec §7.1)."""
+    assert _modules_referencing("run_published_baseline") <= {
+        "src/services/agent_test_workbench.py"
+    }
+
+
+def test_no_module_outside_the_runtime_touches_its_model_adapter():
+    """I-1: nothing swaps or wraps a runtime's private adapter from outside."""
+    assert _modules_referencing("_model_adapter") == {"src/services/agent_runtime.py"}
+
+
+def test_no_module_imports_a_private_name_from_the_runtime():
+    import ast
+
+    root, files = _src_python_files()
+    offenders: set[tuple[str, str]] = set()
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "src.services.agent_runtime":
+                for alias in node.names:
+                    if alias.name.startswith("_"):
+                        offenders.add((path.relative_to(root).as_posix(), alias.name))
+    assert offenders == set()
+
+
+def test_run_published_baseline_resolves_exactly_as_run_does():
+    """The role check and the loader try/except are ``run``'s, statement for statement."""
+    import ast
+
+    def resolution(function) -> list[str]:
+        body = _function_source(function).body[0].body
+        statements = [stmt for stmt in body if isinstance(stmt, (ast.If, ast.Try))]
+        return [ast.dump(stmt) for stmt in statements]
+
+    assert resolution(AgentRuntime.run_published_baseline) == resolution(AgentRuntime.run)
+    assert len(resolution(AgentRuntime.run)) == 2
+
+
+def _baseline_runtime(adapter):
+    content = _manifest_content("architect")
+    loader = SimpleNamespace(
+        resolve=lambda graph_release_id, agent_key: ResolvedDefinition(
+            graph_version=3,
+            graph_release_id=graph_release_id,
+            agent_key=agent_key,
+            agent_definition_revision_id=41,
+            content_hash=definition_content_hash(content),
+            content=content,
+        )
+    )
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=loader, model_adapter=adapter, identity_sink=sink
+    )
+    return runtime, sink
+
+
+def test_run_published_baseline_hands_the_model_runs_prompt_and_records_the_real_identity():
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    run_adapter = DeterministicFakeModelAdapter()
+    run_runtime, _ = _baseline_runtime(run_adapter)
+    run_runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))
+
+    adapter = DeterministicFakeModelAdapter()
+    runtime, sink = _baseline_runtime(adapter)
+    observation = RunObservation()
+    outcome = runtime.run_published_baseline(
+        "architect", 7, {"message": "m"}, AgentAssemblyContext(False), observation=observation
+    )
+
+    assert outcome.status == "completed"
+    assert adapter.calls[0].prompt == run_adapter.calls[0].prompt
+    assert observation.prompt == adapter.calls[0].prompt
+    assert observation.raw_output == outcome.raw_output
+    assert observation.model_latency_ms is not None and observation.model_latency_ms >= 0
+    assert [(c.graph_release_id, c.agent_definition_revision_id) for c in sink.calls] == [
+        (7, 41)
+    ]
+
+
+def test_an_observation_keeps_the_prompt_and_duration_of_a_failed_model_call():
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    adapter = DeterministicFakeModelAdapter(mode="provider_unavailable")
+    runtime, _ = _baseline_runtime(adapter)
+    observation = RunObservation()
+
+    outcome = runtime.run_published_baseline(
+        "architect", 7, {"message": "m"}, AgentAssemblyContext(False), observation=observation
+    )
+
+    assert outcome.status == "model_error"
+    assert observation.prompt == adapter.calls[0].prompt
+    assert observation.model_latency_ms is not None
+    assert observation.raw_output is None
+
+
+def test_run_published_baseline_raises_loader_failures_as_run_does():
+    from sqlalchemy.exc import OperationalError
+
+    def _fail(graph_release_id, agent_key):
+        raise OperationalError("SELECT 1", {}, Exception("down"))
+
+    runtime = AgentRuntime(
+        persisted_release_loader=SimpleNamespace(resolve=_fail),
+        model_adapter=SimpleNamespace(),
+        identity_sink=RecordingAgentInvocationIdentitySink(),
+    )
+    with pytest.raises(PersistedConfigurationUnavailableError) as caught:
+        runtime.run_published_baseline("architect", 7, {}, AgentAssemblyContext(False))
+    assert caught.value.code == "lakebase_unavailable"
+    with pytest.raises(UnknownAgentKeyError):
+        runtime.run_published_baseline("foreman", 7, {}, AgentAssemblyContext(False))
+
+
+# ---------------------------------------------------------------------------
+# #267 whole-branch fix I-1: a test run records the provider's token usage.
+#
+# The REAL ``ChatDatabricks`` (databricks-langchain 0.9.0) is driven over an
+# ``httpx.MockTransport``.  Measured: it reports usage in the AIMessage's
+# ``response_metadata["usage"]`` (``prompt_tokens`` / ``completion_tokens``)
+# and leaves ``usage_metadata`` unset.  Only an observed test run reads it;
+# production ``run`` binds exactly as before.
+# ---------------------------------------------------------------------------
+
+
+def _real_chat_adapter(usage):
+    from tests.fixtures.mock_chat_completions import MockChatCompletionsWorkspace
+
+    workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
+    adapter = DatabricksModelAdapter(
+        client_factory=lambda: workspace,
+        transport_options={
+            "timeout": runtime_module.TEST_RUN_TIMEOUT_SECONDS,
+            "max_retries": runtime_module.TEST_RUN_MAX_RETRIES,
+        },
+    )
+    return adapter, workspace
+
+
+def _observed_real_runs(usage):
+    """One candidate run and one baseline rerun, each with its own observation."""
+    adapter, workspace = _real_chat_adapter(usage)
+    runtime, _ = _baseline_runtime(adapter)
+    content, candidate_hash = _candidate("architect")
+    candidate_observation = RunObservation()
+    baseline_observation = RunObservation()
+
+    candidate = runtime.run_candidate(
+        "architect",
+        content,
+        candidate_hash,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=candidate_observation,
+    )
+    baseline = runtime.run_published_baseline(
+        "architect",
+        7,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=baseline_observation,
+    )
+    assert len(workspace.requests) == 2
+    return (candidate, candidate_observation), (baseline, baseline_observation)
+
+
+def test_an_observed_real_provider_run_records_the_reported_token_usage():
+    """I-1: the counts an endpoint reports reach the observation, for both run kinds."""
+    from tests.fixtures.mock_chat_completions import (
+        MOCK_COMPLETION_TOKENS,
+        MOCK_PROMPT_TOKENS,
+        MOCK_USAGE,
+    )
+
+    for outcome, observation in _observed_real_runs(MOCK_USAGE):
+        assert outcome.status == "completed"
+        assert outcome.raw_output == fake_output("architect")
+        assert (observation.input_tokens, observation.output_tokens) == (
+            MOCK_PROMPT_TOKENS,
+            MOCK_COMPLETION_TOKENS,
+        )
+        assert type(observation.input_tokens) is int
+        assert type(observation.output_tokens) is int
+
+
+def test_an_observed_real_provider_run_without_usage_records_none():
+    """P9: an endpoint that reports no usage leaves both counts unset ("not reported")."""
+    for outcome, observation in _observed_real_runs(None):
+        assert outcome.status == "completed"
+        assert (observation.input_tokens, observation.output_tokens) == (None, None)
+
+
+def test_a_fresh_observation_has_no_token_usage():
+    observation = RunObservation()
+
+    assert (observation.input_tokens, observation.output_tokens) == (None, None)
+
+
+def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
+    """I-1 guard: usage capture never reaches production ``run``.
+
+    Production ``run`` over the real provider, whose endpoint DOES report usage:
+    the helper must return exactly what ``with_structured_output(schema)``
+    returned (no ``include_raw``, no callback wrapper), and the bound model must
+    be invoked with the prompt alone.
+    """
+    from databricks_langchain import ChatDatabricks
+
+    from tests.fixtures.mock_chat_completions import MOCK_USAGE
+
+    bindings: list[tuple[tuple, dict, Any]] = []
+    original_binding = ChatDatabricks.with_structured_output
+
+    def _recording_binding(self, *args, **kwargs):
+        bound = original_binding(self, *args, **kwargs)
+        bindings.append((args, kwargs, bound))
+        return bound
+
+    monkeypatch.setattr(ChatDatabricks, "with_structured_output", _recording_binding)
+    helper_returns: list[Any] = []
+    original_helper = runtime_module.bind_structured_output_model
+
+    def _recording_helper(**kwargs):
+        bound = original_helper(**kwargs)
+        helper_returns.append(bound)
+        return bound
+
+    monkeypatch.setattr(runtime_module, "bind_structured_output_model", _recording_helper)
+    adapter, workspace = _real_chat_adapter(MOCK_USAGE)
+    runtime, _ = _baseline_runtime(adapter)
+
+    result = runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))
+
+    assert result.output == OUTPUT_SCHEMAS["architect"].model_validate(fake_output("architect"))
+    assert len(workspace.requests) == 1
+    assert len(bindings) == 1
+    args, kwargs, bound = bindings[0]
+    assert kwargs == {}
+    assert len(args) == 1
+    assert helper_returns == [bound]
+    assert helper_returns[0] is bound
+
+
+def test_a_fake_adapter_reporting_usage_fills_only_an_observed_run():
+    """The fake reports usage through the runtime's one seam; ``run`` ignores it."""
+    adapter = DeterministicFakeModelAdapter(usage=(11, 7))
+    runtime, _ = _baseline_runtime(adapter)
+    content, candidate_hash = _candidate("architect")
+    observation = RunObservation()
+
+    production = runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))
+    outcome = runtime.run_candidate(
+        "architect",
+        content,
+        candidate_hash,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=observation,
+    )
+
+    assert production.output == outcome.result.output
+    assert (observation.input_tokens, observation.output_tokens) == (11, 7)
