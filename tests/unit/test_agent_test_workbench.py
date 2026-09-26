@@ -1680,6 +1680,30 @@ def test_a_url_shaped_published_endpoint_is_refused_before_a_baseline_call(facto
     assert _run_rows(factory) == []
 
 
+@pytest.mark.parametrize("case_state", ["missing", "other_role", "inactive"])
+def test_a_baseline_refuses_the_published_endpoint_before_the_case(factory, case_state):
+    """Fix round 1 (I-1): endpoint 422 precedes case 404 / 422 / 409, as for a candidate."""
+    _rewrite_published(factory, "architect", "https://example.com/serving-endpoints/x")
+    workbench, runtime, adapter = _executor(factory)
+    if case_state == "missing":
+        test_case_id = 424242
+    elif case_state == "other_role":
+        test_case_id = _seed_case_id(factory, "builder")
+    else:
+        test_case_id = _seed_case_id(factory)
+        _update(factory, test_case_id)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _run_baseline(factory, workbench, test_case_id=test_case_id)
+
+    assert [(issue.field, issue.code) for issue in caught.value.issues] == [
+        ("published.model.endpoint_name", "endpoint_url_not_allowed")
+    ]
+    assert adapter.calls == []
+    assert runtime.baseline_calls == []
+    assert _run_rows(factory) == []
+
+
 # --- the case: found, same role, active (C22) -------------------------------
 
 
