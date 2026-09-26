@@ -2443,3 +2443,65 @@ def test_candidate_run_insert_waits_behind_an_exclusive_parent_holder_without_de
     assert isinstance(run, TestRunEvidence)
     assert run.compared_release_id == identity["release_id"]
     assert (run.candidate_is_current, run.base_release_is_current) == (True, True)
+
+
+# --- #267 Task 5: the run routes over real PostgreSQL ------------------------
+
+
+def test_run_routes_over_postgres_serve_evidence_and_refuse_unstorable_ids(
+    real_route_stack,
+) -> None:
+    """The run routes end to end over PostgreSQL: execute, read back, history.
+
+    Also pins the observable contract for ids past ``Integer`` on PostgreSQL:
+    404 for a path id and the ordered 422 for a body id.  PostgreSQL compares
+    an out-of-range literal against an ``integer`` column without error, so
+    the route-level bound is defence in depth here (disabling it leaves this
+    test GREEN); the body bound is what turns the POST into a 422.
+    """
+    factory, client = real_route_stack
+    adapter = DeterministicFakeModelAdapter()
+    workbench = _pg_executor(factory, adapter)
+    client.app.dependency_overrides[agent_definition_routes.get_agent_test_workbench] = (
+        lambda: workbench
+    )
+    case_id = _pg_seed_case_id(factory)
+    with factory() as session:
+        lock_version = session.scalar(select(GraphDraft.lock_version))
+    prefix = "/api/admin/agent-definitions"
+    too_large = 2**31
+
+    created = client.post(
+        f"{prefix}/draft/architect/test-runs",
+        json={"test_case_id": case_id, "lock_version": lock_version},
+    )
+    assert created.status_code == 201
+    run_id = created.json()["run_id"]
+    read = client.get(f"{prefix}/test-runs/{run_id}")
+    listed = client.get(f"{prefix}/test-cases/{case_id}/runs")
+    unknown_run = client.get(f"{prefix}/test-runs/{too_large}")
+    unknown_case = client.get(f"{prefix}/test-cases/{too_large}/runs")
+    unstorable_body = client.post(
+        f"{prefix}/published/architect/test-runs", json={"test_case_id": too_large}
+    )
+
+    assert read.status_code == 200
+    assert read.json()["run_id"] == run_id
+    assert (read.json()["candidate_is_current"], read.json()["base_release_is_current"]) == (
+        None,
+        None,
+    )
+    assert [item["run_id"] for item in listed.json()["items"]] == [run_id]
+    assert (unknown_run.status_code, unknown_run.json()) == (
+        404,
+        {"detail": "Test run not found"},
+    )
+    assert (unknown_case.status_code, unknown_case.json()) == (
+        404,
+        {"detail": "Test case not found"},
+    )
+    assert unstorable_body.status_code == 422
+    assert [(e["field"], e["code"]) for e in unstorable_body.json()["errors"]] == [
+        ("test_case_id", "out_of_range")
+    ]
+    assert len(adapter.calls) == 1
