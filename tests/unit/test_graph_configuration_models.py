@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, event, inspect, select, text
+from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateIndex
 
@@ -13,10 +13,12 @@ from src.core.database import Base, _run_migrations
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     AgentTestCase,
+    AgentTestRun,
     GraphDraft,
     GraphDraftAgent,
     GraphRelease,
     GraphReleaseAgent,
+    GraphReleaseTestRun,
 )
 from src.services.graph_definition_manifest import (
     DefinitionContent,
@@ -31,12 +33,15 @@ EXPECTED_TABLES = {
     "graph_draft",
     "graph_draft_agent",
     "agent_test_case",
+    "agent_test_run",
+    "graph_release_test_run",
 }
 ROLE_TABLES = {
     "agent_definition_revision",
     "graph_release_agent",
     "graph_draft_agent",
     "agent_test_case",
+    "agent_test_run",
 }
 ROLE_CHECK_SQL = (
     "agent_key IN ('architect', 'data_analyst', 'builder', 'build_reviewer', "
@@ -91,6 +96,82 @@ EXPECTED_CHECKS = {
         "ck_agent_test_case_updated_by_nonblank",
         "ck_agent_test_case_version_positive",
     },
+    "agent_test_run": {
+        "ck_agent_test_run_agent_key",
+        "ck_agent_test_run_approved_only_if_completed_and_passing",
+        "ck_agent_test_run_candidate_hash_len",
+        "ck_agent_test_run_case_version_positive",
+        "ck_agent_test_run_completed_has_output",
+        "ck_agent_test_run_execution_status",
+        "ck_agent_test_run_run_by_nonblank",
+        "ck_agent_test_run_run_kind",
+        "ck_agent_test_run_verdict_at_paired",
+        "ck_agent_test_run_verdict_enum",
+        "ck_agent_test_run_verdict_reviewer_paired",
+    },
+    "graph_release_test_run": {
+        "ck_graph_release_test_run_evidence_kind",
+        "ck_graph_release_test_run_source_paired",
+    },
+}
+
+# Column name -> nullable, exactly (C19). Verdict columns are #268's to write.
+AGENT_TEST_RUN_COLUMNS = {
+    "id": False,
+    "test_case_id": False,
+    "test_case_version": False,
+    "agent_key": False,
+    "run_kind": False,
+    "candidate_hash": False,
+    "compared_release_id": False,
+    "compared_definition_revision_id": False,
+    "model_payload": False,
+    "assembled_prompt": True,
+    "candidate_raw_output": True,
+    "candidate_structured_output": True,
+    "baseline_raw_output": True,
+    "baseline_structured_output": True,
+    "deterministic_check_results": False,
+    "deterministic_checks_passed": False,
+    "execution_status": False,
+    "error_detail": True,
+    "latency_ms": True,
+    "input_tokens": True,
+    "output_tokens": True,
+    "run_by": False,
+    "run_at": False,
+    "verdict": True,
+    "verdict_reviewer": True,
+    "verdict_at": True,
+    "verdict_notes": True,
+}
+AGENT_TEST_RUN_JSON_COLUMNS = (
+    "model_payload",
+    "candidate_raw_output",
+    "candidate_structured_output",
+    "baseline_raw_output",
+    "baseline_structured_output",
+    "deterministic_check_results",
+)
+GRAPH_RELEASE_TEST_RUN_COLUMNS = {
+    "graph_release_id": False,
+    "agent_test_run_id": False,
+    "evidence_kind": False,
+    "source_release_id": True,
+}
+# FK name -> (local columns, referenced columns).
+AGENT_TEST_RUN_FKS = {
+    "fk_agent_test_run_test_case": (("test_case_id",), ("agent_test_case.id",)),
+    "fk_agent_test_run_release": (("compared_release_id",), ("graph_release.id",)),
+    "fk_agent_test_run_compatible_revision": (
+        ("compared_definition_revision_id", "agent_key"),
+        ("agent_definition_revision.id", "agent_definition_revision.agent_key"),
+    ),
+}
+GRAPH_RELEASE_TEST_RUN_FKS = {
+    "fk_graph_release_test_run_release": (("graph_release_id",), ("graph_release.id",)),
+    "fk_graph_release_test_run_run": (("agent_test_run_id",), ("agent_test_run.id",)),
+    "fk_graph_release_test_run_source": (("source_release_id",), ("graph_release.id",)),
 }
 
 
@@ -155,6 +236,8 @@ def test_graph_configuration_tables_and_public_models_are_registered() -> None:
         "GraphDraft",
         "GraphDraftAgent",
         "AgentTestCase",
+        "AgentTestRun",
+        "GraphReleaseTestRun",
     ):
         assert name in src.database.models.__all__
         assert getattr(src.database.models, name) is not None
@@ -190,13 +273,25 @@ def test_semantic_columns_use_json_variants_numeric_decimals_and_database_timest
         "graph_release": ("published_at", "effective_from", "effective_to"),
         "graph_draft": ("updated_at",),
         "agent_test_case": ("created_at", "updated_at"),
+        "agent_test_run": ("run_at", "verdict_at"),
     }.items():
         table = Base.metadata.tables[table_name]
         for column_name in timestamp_names:
             column = table.c[column_name]
             assert column.type.timezone is True
-            if column_name != "effective_to":
+            if column_name in ("effective_to", "verdict_at"):
+                assert column.server_default is None
+            else:
                 assert column.server_default is not None
+
+    run_table = Base.metadata.tables["agent_test_run"]
+    for column_name in AGENT_TEST_RUN_JSON_COLUMNS:
+        column_type = run_table.c[column_name].type
+        assert column_type._variant_mapping["postgresql"].__class__.__name__ == "JSONB"
+        # Python None must bind as SQL NULL on both dialects, never JSON 'null'.
+        assert column_type.none_as_null is True
+        assert column_type._variant_mapping["postgresql"].none_as_null is True
+    assert run_table.c.deterministic_check_results.server_default is None
 
 
 def test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cascades() -> None:
@@ -207,7 +302,7 @@ def test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cas
             foreign_keys.append((table_name, constraint))
             assert constraint.name
             assert constraint.ondelete == "RESTRICT"
-    assert len(foreign_keys) == 6
+    assert len(foreign_keys) == 12
 
     compatible = next(
         constraint
@@ -230,6 +325,8 @@ def test_every_graph_foreign_key_is_named_and_restrictive_without_orm_delete_cas
         GraphDraft,
         GraphDraftAgent,
         AgentTestCase,
+        AgentTestRun,
+        GraphReleaseTestRun,
     ):
         for relationship in inspect(mapper).relationships:
             assert "delete" not in relationship.cascade
@@ -331,5 +428,292 @@ def test_agent_test_case_raw_insert_receives_true_database_defaults() -> None:
             assert stored["is_required"] is True
             assert stored["created_at"] is not None
             assert stored["updated_at"] is not None
+    finally:
+        engine.dispose()
+
+
+def _foreign_keys(table) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    return {
+        constraint.name: (
+            tuple(constraint.column_keys),
+            tuple(element.target_fullname for element in constraint.elements),
+        )
+        for constraint in table.foreign_key_constraints
+    }
+
+
+def _indexes(table) -> dict[str, tuple[str, ...]]:
+    return {index.name: tuple(column.name for column in index.columns) for index in table.indexes}
+
+
+def test_agent_test_run_model_exists() -> None:
+    table = AgentTestRun.__table__
+    assert table.name == "agent_test_run"
+    assert {column.name: column.nullable for column in table.columns} == AGENT_TEST_RUN_COLUMNS
+    assert tuple(column.name for column in table.primary_key.columns) == ("id",)
+    assert _foreign_keys(table) == AGENT_TEST_RUN_FKS
+    assert all(fk.ondelete == "RESTRICT" for fk in table.foreign_key_constraints)
+    assert _indexes(table) == {"ix_agent_test_run_case_run_at": ("test_case_id", "run_at")}
+    assert not any(column.index for column in table.columns)
+    assert table.c.latency_ms.type.__class__.__name__ == "Float"
+    assert str(table.c.run_kind.type) == "VARCHAR(24)"
+
+
+def test_graph_release_test_run_model_exists() -> None:
+    table = GraphReleaseTestRun.__table__
+    assert table.name == "graph_release_test_run"
+    assert {
+        column.name: column.nullable for column in table.columns
+    } == GRAPH_RELEASE_TEST_RUN_COLUMNS
+    assert tuple(column.name for column in table.primary_key.columns) == (
+        "graph_release_id",
+        "agent_test_run_id",
+    )
+    assert _foreign_keys(table) == GRAPH_RELEASE_TEST_RUN_FKS
+    assert all(fk.ondelete == "RESTRICT" for fk in table.foreign_key_constraints)
+    assert _indexes(table) == {"ix_graph_release_test_run_run": ("agent_test_run_id",)}
+    assert not any(column.index for column in table.columns)
+
+
+def _seed_run_parents(conn) -> dict[str, int]:
+    """One revision, one active release and one case: the parents a run references."""
+    definition = load_graph_v1_manifest().definitions[0]
+    payload = definition.model_dump(mode="json")
+    revision_id = conn.execute(
+        AgentDefinitionRevision.__table__.insert()
+        .values(
+            agent_key=payload["agent_key"],
+            definition_version=payload["definition_version"],
+            content_hash=definition_content_hash(definition),
+            prompt_text=payload["prompt_text"],
+            endpoint_name=payload["model"]["endpoint_name"],
+            temperature=payload["model"]["temperature"],
+            max_tokens=payload["model"]["max_tokens"],
+            top_p=payload["model"]["top_p"],
+            schema_overlay=payload["schema_overlay"],
+            assembly_rules=payload["assembly_rules"],
+            protected_assembly_version=payload["protected_assembly"]["version"],
+            protected_assembly_digest=payload["protected_assembly"]["digest"],
+            schema_contract_version=payload["schema_contract"]["version"],
+            schema_contract_digest=payload["schema_contract"]["digest"],
+            created_by="test:unit",
+        )
+        .returning(AgentDefinitionRevision.id)
+    ).scalar_one()
+    release_id = conn.execute(
+        GraphRelease.__table__.insert()
+        .values(**_release_values(1, active=True))
+        .returning(GraphRelease.id)
+    ).scalar_one()
+    case_id = conn.execute(
+        AgentTestCase.__table__.insert()
+        .values(
+            agent_key=payload["agent_key"],
+            name="required smoke",
+            version=1,
+            synthetic_payload={},
+            assembly_context={"design_system_active": False},
+            created_by="test:unit",
+            updated_by="test:unit",
+        )
+        .returning(AgentTestCase.id)
+    ).scalar_one()
+    return {
+        "agent_key": payload["agent_key"],
+        "revision_id": revision_id,
+        "release_id": release_id,
+        "case_id": case_id,
+    }
+
+
+def _run_values(parents: dict[str, object], **overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "test_case_id": parents["case_id"],
+        "test_case_version": 1,
+        "agent_key": parents["agent_key"],
+        "run_kind": "candidate",
+        "candidate_hash": "d" * 64,
+        "compared_release_id": parents["release_id"],
+        "compared_definition_revision_id": parents["revision_id"],
+        "model_payload": {"user_request": "synthetic"},
+        "assembled_prompt": "assembled",
+        "candidate_raw_output": {"reply": "ok"},
+        "candidate_structured_output": {"reply": "ok"},
+        "deterministic_check_results": [{"name": "output_contract", "passed": True}],
+        "deterministic_checks_passed": True,
+        "execution_status": "completed",
+        "run_by": "admin@example.com",
+    }
+    values.update(overrides)
+    return values
+
+
+# Each row violates exactly one named check on an otherwise well-formed run.
+AGENT_TEST_RUN_CHECK_VIOLATIONS = [
+    ("ck_agent_test_run_agent_key", {"agent_key": "foreman"}),
+    ("ck_agent_test_run_case_version_positive", {"test_case_version": 0}),
+    ("ck_agent_test_run_run_kind", {"run_kind": "rerun"}),
+    ("ck_agent_test_run_execution_status", {"execution_status": "timeout"}),
+    (
+        "ck_agent_test_run_verdict_enum",
+        {"verdict": "maybe", "verdict_reviewer": "r", "verdict_at": datetime.now(timezone.utc)},
+    ),
+    (
+        "ck_agent_test_run_verdict_reviewer_paired",
+        {"verdict": "rejected", "verdict_at": datetime.now(timezone.utc)},
+    ),
+    ("ck_agent_test_run_verdict_at_paired", {"verdict": "rejected", "verdict_reviewer": "r"}),
+    (
+        "ck_agent_test_run_approved_only_if_completed_and_passing",
+        {
+            "deterministic_checks_passed": False,
+            "verdict": "approved",
+            "verdict_reviewer": "r",
+            "verdict_at": datetime.now(timezone.utc),
+        },
+    ),
+    (
+        "ck_agent_test_run_approved_only_if_completed_and_passing",
+        {
+            "execution_status": "incomplete",
+            "candidate_structured_output": None,
+            "deterministic_checks_passed": False,
+            "verdict": "approved",
+            "verdict_reviewer": "r",
+            "verdict_at": datetime.now(timezone.utc),
+        },
+    ),
+    ("ck_agent_test_run_completed_has_output", {"candidate_structured_output": None}),
+    ("ck_agent_test_run_candidate_hash_len", {"candidate_hash": "d" * 63}),
+    ("ck_agent_test_run_run_by_nonblank", {"run_by": "   "}),
+]
+
+
+def test_sqlite_accepts_well_formed_run_and_release_link_rows() -> None:
+    engine = _sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            parents = _seed_run_parents(conn)
+            run_id = conn.execute(
+                AgentTestRun.__table__.insert()
+                .values(**_run_values(parents))
+                .returning(AgentTestRun.id)
+            ).scalar_one()
+            approved_id = conn.execute(
+                AgentTestRun.__table__.insert()
+                .values(
+                    **_run_values(
+                        parents,
+                        verdict="approved",
+                        verdict_reviewer="reviewer@example.com",
+                        verdict_at=datetime.now(timezone.utc),
+                    )
+                )
+                .returning(AgentTestRun.id)
+            ).scalar_one()
+            conn.execute(
+                GraphReleaseTestRun.__table__.insert().values(
+                    graph_release_id=parents["release_id"],
+                    agent_test_run_id=approved_id,
+                    evidence_kind="approval",
+                    source_release_id=None,
+                )
+            )
+            stored = conn.execute(
+                select(AgentTestRun).where(AgentTestRun.id == run_id)
+            ).one()._mapping
+            assert stored["run_at"] is not None
+            assert stored["verdict"] is None
+            assert stored["model_payload"] == {"user_request": "synthetic"}
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "overrides"),
+    AGENT_TEST_RUN_CHECK_VIOLATIONS,
+    ids=[f"{name}-{index}" for index, (name, _) in enumerate(AGENT_TEST_RUN_CHECK_VIOLATIONS)],
+)
+def test_sqlite_rejects_each_agent_test_run_check_violation(
+    constraint_name: str, overrides: dict[str, object]
+) -> None:
+    engine = _sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            parents = _seed_run_parents(conn)
+        with pytest.raises(IntegrityError, match=constraint_name):
+            with engine.begin() as conn:
+                conn.execute(
+                    AgentTestRun.__table__.insert().values(**_run_values(parents, **overrides))
+                )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "evidence_kind", "use_source"),
+    [
+        ("ck_graph_release_test_run_evidence_kind", "rollback", False),
+        ("ck_graph_release_test_run_source_paired", "historical_restore", False),
+        ("ck_graph_release_test_run_source_paired", "approval", True),
+    ],
+)
+def test_sqlite_rejects_each_release_link_check_violation(
+    constraint_name: str, evidence_kind: str, use_source: bool
+) -> None:
+    engine = _sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            parents = _seed_run_parents(conn)
+            run_id = conn.execute(
+                AgentTestRun.__table__.insert()
+                .values(**_run_values(parents))
+                .returning(AgentTestRun.id)
+            ).scalar_one()
+        with pytest.raises(IntegrityError, match=constraint_name):
+            with engine.begin() as conn:
+                conn.execute(
+                    GraphReleaseTestRun.__table__.insert().values(
+                        graph_release_id=parents["release_id"],
+                        agent_test_run_id=run_id,
+                        evidence_kind=evidence_kind,
+                        source_release_id=parents["release_id"] if use_source else None,
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
+def test_sqlite_restricts_deleting_a_case_or_run_that_evidence_references() -> None:
+    engine = _sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            parents = _seed_run_parents(conn)
+            run_id = conn.execute(
+                AgentTestRun.__table__.insert()
+                .values(**_run_values(parents))
+                .returning(AgentTestRun.id)
+            ).scalar_one()
+            conn.execute(
+                GraphReleaseTestRun.__table__.insert().values(
+                    graph_release_id=parents["release_id"],
+                    agent_test_run_id=run_id,
+                    evidence_kind="approval",
+                )
+            )
+        with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+            with engine.begin() as conn:
+                conn.execute(
+                    AgentTestCase.__table__.delete().where(
+                        AgentTestCase.id == parents["case_id"]
+                    )
+                )
+        with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+            with engine.begin() as conn:
+                conn.execute(AgentTestRun.__table__.delete().where(AgentTestRun.id == run_id))
+        with engine.connect() as conn:
+            assert conn.scalar(select(func.count()).select_from(AgentTestRun)) == 1
+            assert conn.scalar(select(func.count()).select_from(AgentTestCase)) == 1
+            assert conn.scalar(select(func.count()).select_from(GraphReleaseTestRun)) == 1
     finally:
         engine.dispose()
