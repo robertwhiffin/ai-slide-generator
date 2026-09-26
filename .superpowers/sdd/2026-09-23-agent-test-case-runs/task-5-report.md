@@ -156,3 +156,37 @@ Rules:
 4. **The run history is per case version,** not per lineage. A superseded id still lists its own runs and is not a 404, because those runs are evidence for that version.
 5. **The GET routes do not catch `SQLAlchemyError`.** A database outage on a read is a 500, as on Task 2's list route.
 6. **The plan's review question says stale is a 404.** I followed the brief's order instead: an inactive version is a 409 `stale_test_case`, and a missing one is a 404.
+
+## Fix round 1
+
+- **Base:** `4f97a5dde88c1f2521ba60bb9cfc62c853719720`, pinned.
+- **Fix commit:** `57726294d`, `fix: refuse a baseline rerun's endpoint before its case, like a candidate run (#267)`.
+
+**I-1 (addressed).** `execute_baseline_rerun` now refuses in the same order as a candidate run: endpoint policy 422 → case 404 → role mismatch 422 → inactive 409. The steps are:
+1. One short transaction reads the published node: its identity and its endpoint name.
+2. The endpoint name is checked against the policy. A refusal raises `DraftContentRejected` (`published.model.endpoint_name`), with no model call and no row.
+3. A second short transaction, `with session.begin()`, loads and checks the case. A `SQLAlchemyError` there is `TestRunUnavailable("read_case")`, the candidate path's phase.
+
+The split is safe for the same reason as C32's 1a/1b: the case version is immutable apart from `is_active`, and transaction 2 re-reads that.
+
+**Tests.** A URL-shaped endpoint combined with each case state (missing, another role's, inactive/superseded) must return the endpoint 422, with zero adapter calls and zero rows. The new tests are:
+- **Route:** `test_a_baseline_rerun_refuses_the_published_endpoint_before_the_case[missing|other_role|inactive]`.
+- **Service:** `test_a_baseline_refuses_the_published_endpoint_before_the_case[missing|other_role|inactive]`.
+- **Candidate twin, route:** `test_a_candidate_run_refuses_the_saved_endpoint_before_the_case[×3]`. It was already GREEN, and pins the candidate order it copies. The existing candidate ordering tests are unchanged.
+
+**RED against the old order** (the pinned-base service file, full two-file scope): 6 failed, 526 passed. The 6 are exactly the three route and three service baseline-ordering cases; the candidate twins stayed GREEN. Output: `/tmp/t267-5/fix1-red.txt`.
+
+**Sabotage (restore the old order).**
+- **Mutation:** load and check the case in its own transaction before `validate_endpoint_name_policy`.
+- **Anchor and marker:** anchor 1, marker `MUT267_5_F1` count 1.
+- **Result:** RED 6/532, the same six tests.
+- **Restore:** `git checkout 57726294d… -- src/services/agent_test_workbench.py`. Marker count 0, status clean, GREEN 532.
+
+**Gates.**
+- **Two unit files at full-file scope:** 532 passed.
+- **Full `tests/unit`** (`DATABASE_URL=sqlite:////tmp/t267-5.sqlite`): 6 failed, 6609 passed, 110 skipped. These are the six baseline nodes with the same causes.
+- **PostgreSQL workbench:** 25 passed, zero skips.
+- **ruff:** the same as base.
+- **Environment:** `.venv` absent.
+
+**Advisory noted.** #268's corrections move its verdict route to `/api/admin/agent-definitions/test-runs/{run_id}/verdict`.
