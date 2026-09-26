@@ -65,6 +65,7 @@ from src.services.prompt_assembler import (
     V2_PROTECTED_ASSEMBLY_IDENTITY,
     ResolvedPromptStage,
 )
+from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -108,19 +109,8 @@ class _Loader:
         return self.definition
 
 
-VALID_OUTPUT_VALUES: dict[str, dict[str, object]] = {
-    "architect": {"intent": "discuss", "message": "an answer"},
-    "data_analyst": {
-        "outcome": "success",
-        "synthesis": "a finding",
-        "sources": ["warehouse.sales"],
-    },
-    "builder": {"position": 3, "html": "<section></section>"},
-    "build_reviewer": {"slide_index": 2, "verdict": "clean"},
-    "fixer": {"position": 3, "html": "<section></section>", "changed": False},
-    "fix_reviewer": {"slide_index": 2, "verdict": "clean"},
-    "deck_reviewer": {},
-}
+#: The one shared table (#267 Correction 26), not a local copy that could drift.
+VALID_OUTPUT_VALUES = FAKE_OUTPUTS
 
 
 def _output_values(agent_key: str, **extra: object) -> dict[str, object]:
@@ -1905,3 +1895,100 @@ def test_no_canonical_schema_carries_a_dump_mode_divergent_field_type() -> None:
     assert findings == []
     # Aim check: the walker really does reach the nested models, not just the roots.
     assert len(walked) >= 13
+
+
+# ---------------------------------------------------------------------------
+# #267 Task 3: a candidate run logs through the SAME production sink, with the
+# SAME exact field sets.  Its identity is the ``-1`` sentinel identity (Correction
+# 27): no release, revision or session is claimed, and nothing new is logged.
+# ---------------------------------------------------------------------------
+
+
+def _candidate_content(agent_key: str = "architect") -> tuple[DefinitionContent, str]:
+    data = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
+    ).model_dump(mode="python")
+    data["prompt_text"] = "draft candidate prompt"
+    content = DefinitionContent.model_validate(data)
+    return content, definition_content_hash(content)
+
+
+def _logging_candidate_runtime(adapter: object, logger: logging.Logger) -> AgentRuntime:
+    class _NoRelease:
+        def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
+            raise AssertionError("a candidate run must never resolve a release")
+
+    return AgentRuntime(
+        persisted_release_loader=_NoRelease(),
+        model_adapter=adapter,  # type: ignore[arg-type]
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=logger),
+    )
+
+
+def test_a_candidate_run_success_record_is_the_exact_success_set_with_sentinels(caplog):
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    logger = logging.getLogger("test.persisted.runtime.candidate.success")
+    runtime = _logging_candidate_runtime(DeterministicFakeModelAdapter(), logger)
+    content, candidate_hash = _candidate_content()
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        outcome = runtime.run_candidate(
+            "architect",
+            content,
+            candidate_hash,
+            {"secret": "never-log-this-payload"},
+            AgentAssemblyContext(False),
+        )
+
+    assert outcome.status == "completed"
+    records = [record for record in caplog.records if record.msg == EXPECTED_LOG_MESSAGE]
+    assert len(records) == 1
+    record = records[0]
+    assert emitted_fields(record) == SUCCESS_LOG_FIELDS
+    assert record.args in (None, ())
+    assert (
+        record.graph_version,
+        record.graph_release_id,
+        record.agent_key,
+        record.agent_definition_revision_id,
+        record.content_hash,
+        record.outcome,
+        record.error_class,
+        record.additional_field_names,
+    ) == (-1, -1, "architect", -1, candidate_hash, "success", None, [])
+    rendered = str(vars(record))
+    assert "never-log-this-payload" not in rendered
+    assert "draft candidate prompt" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("mode", "error_class"),
+    [
+        ("provider_unavailable", "PinnedInvocationEndpointError"),
+        ("invalid_optional_field", "AgentOutputValidationError"),
+        ("structured_output_unsupported", "NotImplementedError"),
+    ],
+)
+def test_a_candidate_run_error_record_is_the_exact_error_set_with_sentinels(
+    mode, error_class, caplog
+):
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    logger = logging.getLogger(f"test.persisted.runtime.candidate.{mode}")
+    runtime = _logging_candidate_runtime(DeterministicFakeModelAdapter(mode=mode), logger)
+    content, candidate_hash = _candidate_content()
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        outcome = runtime.run_candidate(
+            "architect", content, candidate_hash, {}, AgentAssemblyContext(False)
+        )
+
+    assert outcome.status != "completed"
+    records = [record for record in caplog.records if record.msg == EXPECTED_LOG_MESSAGE]
+    assert len(records) == 1
+    record = records[0]
+    assert emitted_fields(record) == PERMITTED_LOG_FIELDS
+    assert (record.graph_release_id, record.graph_version) == (-1, -1)
+    assert record.agent_definition_revision_id == -1
+    assert (record.outcome, record.error_class) == ("error", error_class)
