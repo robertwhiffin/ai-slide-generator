@@ -186,6 +186,6 @@ def test_the_manifests_declare_openai_within_the_transitive_bounds(
     bound, not that the wheel resolves to 1.105.0.
     """
     expected = Requirement("openai>=1.99.9").specifier
-    assert Requirement(f"openai{app_deps['openai']}").specifier == expected
-    assert Requirement(f"openai{root_deps['openai']}").specifier == expected
+    assert Requirement(app_deps["openai"]).specifier == expected
+    assert Requirement(root_deps["openai"]).specifier == expected
     assert Requirement(req_deps["openai"]).specifier == expected
