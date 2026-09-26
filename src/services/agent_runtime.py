@@ -21,7 +21,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Callable, Literal, Protocol, cast
 
 import httpx
 import openai
@@ -37,6 +37,7 @@ from databricks.sdk.errors import (
     Unauthenticated,
 )
 from pydantic import BaseModel, ValidationError
+from pydantic_core import to_jsonable_python
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.databricks_client import DatabricksClientError
@@ -50,6 +51,7 @@ from src.services.agent_runtime_identity import (
     RecordingAgentInvocationIdentitySink,
 )
 from src.services.agent_schema_registry import (
+    AgentOutputValidationError,
     AgentSchemaRegistry,
     SchemaOverlayValidationError,
 )
@@ -93,6 +95,7 @@ MODEL_DRIVEN_AGENT_KEYS = (
     "deck_reviewer",
 )
 _MODEL_DRIVEN_AGENT_KEY_SET = frozenset(MODEL_DRIVEN_AGENT_KEYS)
+logger = logging.getLogger(__name__)
 _PROTECTED_PROMPT_VERSION = 1
 _PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -417,8 +420,10 @@ def bind_structured_output_model(
     caller's runtime-identity ``workspace_client``, then bind ``schema``.  It
     catches nothing: each caller owns its own failure classification, so the
     probe can still tell a permission denial from a transport failure while the
-    runtime keeps collapsing both.  ``transport_options`` is for the probe's
-    call bound only; the runtime passes none.
+    runtime keeps collapsing both.  ``transport_options`` is a request bound
+    for the two admin-request callers only: the #266 probe, and the #267
+    test-run adapter built by ``get_agent_test_runtime``.  The production
+    runtime adapter passes none.
     """
     model = model_factory(
         endpoint=configuration.endpoint_name,
@@ -439,9 +444,15 @@ class DatabricksModelAdapter:
         *,
         model_factory: Callable[..., Any] | None = None,
         client_factory: Callable[[], Any] | None = None,
+        transport_options: Mapping[str, Any] | None = None,
     ) -> None:
         self._model_factory = model_factory or self._default_model_factory
         self._client_factory = client_factory or self._default_client_factory
+        # ``None`` (production) hands the model factory exactly the kwargs it
+        # always had; only ``get_agent_test_runtime`` bounds the call (#267 C33).
+        self._transport_options = (
+            dict(transport_options) if transport_options is not None else None
+        )
 
     @staticmethod
     def _default_model_factory(**kwargs: Any) -> Any:
@@ -491,6 +502,7 @@ class DatabricksModelAdapter:
                 workspace_client=self._client_factory(),
                 configuration=configuration,
                 schema=schema,
+                transport_options=self._transport_options,
             )
             return structured_model.invoke(prompt)
         except provider_errors as original_error:
@@ -552,6 +564,77 @@ def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:
     crosses.
     """
     return provider_output.model_dump(mode="python", exclude_unset=True)
+
+
+#: The identity of a #267 candidate run: a saved DRAFT is no Graph Release and
+#: no Agent Definition Revision, so none is claimed.  ``-1`` can never be a real
+#: SERIAL id, so a log record or a ``PinnedInvocationEndpointError`` carrying it
+#: is unmistakably a candidate run (Correction 27).  These are runtime identity,
+#: not loader state, and ``run(-1, ...)`` still fails as an absent release.
+CANDIDATE_RUN_GRAPH_VERSION = -1
+CANDIDATE_RUN_GRAPH_RELEASE_ID = -1
+CANDIDATE_RUN_REVISION_ID = -1
+
+CandidateRunStatus = Literal["completed", "assembly_error", "model_error", "incomplete"]
+
+
+@dataclass(frozen=True)
+class CandidateRunOutcome:
+    """What one candidate run produced, with every failure classified.
+
+    ``run_candidate`` raises only for a caller contract violation (an unknown
+    role, content for another role, a hash that does not match, a session
+    identity).  Everything that happens once the run starts is returned here, so
+    a failed run is still evidence rather than an unhandled 500 (#267 C15/C16).
+
+    * ``result`` is set only when ``status == "completed"``.
+    * ``raw_output`` is the JSON-safe top-level keys the provider actually
+      supplied, observed before ``validate_output``; ``None`` when the provider
+      returned nothing (an assembly, provider or parse failure).
+    * ``error_detail`` is a code or ``<code>:<endpoint>`` / ``<code>:<Class>``,
+      never exception text or provider payload.
+    """
+
+    status: CandidateRunStatus
+    result: AgentInvocationResult | None
+    raw_output: Mapping[str, Any] | None
+    error: Exception | None
+    error_detail: str | None
+
+
+def _is_provider_parse_error(error: Exception) -> bool:
+    """A structured-output parser rejected the provider's response.
+
+    ``langchain_core`` is imported lazily: the runtime module stays import-light,
+    and the chat model that raises this type is itself imported lazily.
+    """
+    if isinstance(error, ValidationError):
+        return True
+    try:
+        from langchain_core.exceptions import OutputParserException
+    except ImportError:  # pragma: no cover - the provider stack is always installed
+        return False
+    return isinstance(error, OutputParserException)
+
+
+def _classify_candidate_failure(
+    error: Exception, *, endpoint_name: str
+) -> tuple[CandidateRunStatus, str]:
+    """Map one failure out of ``_run_resolved`` to (status, detail) — #267 C16/C33.
+
+    Pre-invocation failures reach here already converted by ``_run_resolved``
+    into ``PersistedConfigurationUnavailableError``, so a bare ``ValidationError``
+    can only have come from the provider call.
+    """
+    if isinstance(error, PersistedConfigurationUnavailableError):
+        return "assembly_error", error.code
+    if isinstance(error, PinnedInvocationEndpointError):
+        return "model_error", f"endpoint_unavailable:{endpoint_name}"
+    if isinstance(error, NotImplementedError):
+        return "model_error", f"structured_output_unsupported:{endpoint_name}"
+    if isinstance(error, AgentOutputValidationError) or _is_provider_parse_error(error):
+        return "incomplete", f"invalid_output:{type(error).__name__}"
+    return "model_error", f"unexpected_error:{type(error).__name__}"
 
 
 class AgentRuntime:
@@ -618,11 +701,87 @@ class AgentRuntime:
             ) from exc
         return self._run_resolved(definition, payload, assembly_context)
 
+    def run_candidate(
+        self,
+        agent_key: str,
+        candidate_content: DefinitionContent,
+        candidate_hash: str,
+        payload: dict[str, Any],
+        assembly_context: AgentAssemblyContext,
+    ) -> CandidateRunOutcome:
+        """Run one saved DRAFT candidate through ``run``'s own private path.
+
+        This is not ``run``: a draft is no release, so nothing is resolved and
+        the loader is never touched.  After the caller-contract checks (role,
+        then the content's role, then the hash) the candidate is wrapped in the
+        sentinel identity and handed to the same ``_run_resolved`` production
+        uses — the same revalidation, assembly, schema composition, adapter and
+        identity sink — so its prompt bytes equal production's for the same
+        content.  Only the #267 test workbench may call this (spec §7.1).
+        """
+        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
+            raise UnknownAgentKeyError(
+                f"Unknown model-driven agent key {agent_key!r}; "
+                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
+            )
+        if candidate_content.agent_key != agent_key:
+            raise ValueError("candidate_content.agent_key does not match agent_key")
+        if definition_content_hash(candidate_content) != candidate_hash:
+            raise ValueError("candidate_hash does not match candidate_content")
+        if assembly_context.root_session_id or assembly_context.actor_session_id:
+            # A test run belongs to no conversation: the identity sink must not
+            # be handed a session it could attribute the run to.
+            raise ValueError("candidate runs carry no session identity")
+
+        resolved = ResolvedDefinition(
+            graph_version=CANDIDATE_RUN_GRAPH_VERSION,
+            graph_release_id=CANDIDATE_RUN_GRAPH_RELEASE_ID,
+            agent_key=agent_key,
+            agent_definition_revision_id=CANDIDATE_RUN_REVISION_ID,
+            content_hash=candidate_hash,
+            content=candidate_content,
+        )
+        observed: list[Mapping[str, Any]] = []
+
+        def observe(raw: Mapping[str, Any]) -> None:
+            observed.append(to_jsonable_python(dict(raw), fallback=str))
+
+        try:
+            result = self._run_resolved(
+                resolved, payload, assembly_context, _raw_output_observer=observe
+            )
+        except Exception as error:  # noqa: BLE001 - every run failure is evidence
+            status, detail = _classify_candidate_failure(
+                error, endpoint_name=candidate_content.model.endpoint_name
+            )
+            if detail.startswith("unexpected_error:"):
+                logger.error(
+                    "candidate run failed unexpectedly (%s)",
+                    type(error).__name__,
+                    exc_info=error,
+                )
+            return CandidateRunOutcome(
+                status=status,
+                result=None,
+                raw_output=observed[0] if observed else None,
+                error=error,
+                error_detail=detail,
+            )
+        return CandidateRunOutcome(
+            status="completed",
+            result=result,
+            raw_output=observed[0] if observed else None,
+            error=None,
+            error_detail=None,
+        )
+
     def _run_resolved(
         self,
         definition: ResolvedDefinition,
         payload: dict[str, Any],
         assembly_context: AgentAssemblyContext,
+        *,
+        _raw_output_observer: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> AgentInvocationResult:
         try:
             content = DefinitionContent.model_validate(definition.content.model_dump(mode="python"))
@@ -707,9 +866,13 @@ class AgentRuntime:
                     graph_release_id=definition.graph_release_id,
                     agent_definition_revision_id=definition.agent_definition_revision_id,
                 ) from exc
-            return self._schema_registry.validate_output(
-                composed, _supplied_output_keys(provider_output)
-            )
+            supplied = _supplied_output_keys(provider_output)
+            # Private and keyword-only: ``run`` passes none, so production
+            # behaviour and error types are unchanged.  A candidate run records
+            # the raw keys here, before validation can reject them (#267 C15).
+            if _raw_output_observer is not None:
+                _raw_output_observer(supplied)
+            return self._schema_registry.validate_output(composed, supplied)
 
         started = time.perf_counter()
         validated = self._identity_sink.invoke(identity, callback)
@@ -739,5 +902,33 @@ def get_agent_runtime() -> AgentRuntime:
     return AgentRuntime(
         persisted_release_loader=PersistedGraphReleaseLoader(session_factory=get_session_local()),
         model_adapter=DatabricksModelAdapter(),
+        identity_sink=LoggingAgentInvocationIdentitySink(logger=logging.getLogger(__name__)),
+    )
+
+
+TEST_RUN_TIMEOUT_SECONDS = 120.0
+TEST_RUN_MAX_RETRIES = 0
+
+
+@lru_cache(maxsize=1)
+def get_agent_test_runtime() -> AgentRuntime:
+    """Return the runtime for #267 test runs: production's, with a bounded call.
+
+    A test run's model call happens inside one admin HTTP request, so it must
+    not inherit the provider client's default window of minutes per attempt
+    with retries (the defect #266 closed for its probe).  Only the transport is
+    bounded; loader, sink, sampling values, prompt and schema are production's.
+    It is referenced only by the test workbench and its route (#267 C33).
+    """
+    from src.core.database import get_session_local
+
+    return AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=get_session_local()),
+        model_adapter=DatabricksModelAdapter(
+            transport_options={
+                "timeout": TEST_RUN_TIMEOUT_SECONDS,
+                "max_retries": TEST_RUN_MAX_RETRIES,
+            }
+        ),
         identity_sink=LoggingAgentInvocationIdentitySink(logger=logging.getLogger(__name__)),
     )

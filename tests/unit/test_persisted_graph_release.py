@@ -477,3 +477,28 @@ def test_configuration_errors_are_frozen_redacted_and_preserve_only_identity():
     assert "payload" not in str(endpoint).lower()
     assert "prompt" not in repr(endpoint.args).lower()
     assert "payload" not in repr(endpoint.args).lower()
+
+
+def test_the_candidate_sentinel_release_id_never_resolves_through_run(
+    session_factory, v1_release_id
+):
+    """#267 Correction 27: ``-1`` names no release, so ``run(-1, …)`` still fails."""
+    from src.services.agent_runtime import CANDIDATE_RUN_GRAPH_RELEASE_ID
+    from tests.fixtures.deterministic_model_adapter import DeterministicFakeModelAdapter
+
+    adapter = DeterministicFakeModelAdapter()
+    sink = RecordingAgentInvocationIdentitySink()
+    runtime = AgentRuntime(
+        persisted_release_loader=PersistedGraphReleaseLoader(session_factory=session_factory),
+        model_adapter=adapter,
+        identity_sink=sink,
+    )
+    assert v1_release_id > 0
+
+    with pytest.raises(GraphReleaseNotFoundError):
+        runtime.run(
+            "architect", CANDIDATE_RUN_GRAPH_RELEASE_ID, {}, AgentAssemblyContext(False)
+        )
+
+    assert adapter.calls == []
+    assert sink.calls == []
