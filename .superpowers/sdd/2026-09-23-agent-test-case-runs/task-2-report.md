@@ -138,3 +138,49 @@
 3. The 404 uses FastAPI's standard `{"detail": ...}` rather than a typed envelope, to avoid inventing one.
 4. Query-parameter type errors on GET, such as `include_inactive=maybe`, get FastAPI's default 422 envelope, not `invalid_test_case`. A non-integer `{test_case_id}` path segment behaves the same way. Authorization still comes first.
 5. Existing async routes in this file (the upgrade routes and legacy-source) still run their locking facade on the event loop. This is pre-existing, and Task 2 did not touch it. It may be worth a whole-branch note given my C36 ruling.
+
+## Fix round 1 (review `task-2-review.md`: I1–I3; base pinned `78badbcd1`)
+**Commits:**
+- `fd4e9cb59` fix: make identical test case saves a no-op and pin the atomic supersede (#267)
+- `191ff54d6` test: pin that a failed retirement leaves no committed successor (#267). This is an extra I2 pin. The sweep showed the insert-then-retire split, with a driver-level commit, stayed GREEN under the commit counter.
+
+### I1: an identical save is a no-op
+- **Where the check sits:** inside the lock, after the 422 issues (name included) and the inactive-row 409.
+- **Rule:** if `is_required` matches and the payload and context are canonically identical, the current version is returned. There is no retire, no new row, and no approval is orphaned.
+- **Comparison:** `_canonical_json` uses `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False)`, never `==`.
+- **Pins:**
+  - identical content with a different key order gives the same id and version, and the rows are unchanged;
+  - five type-only changes are real new versions: `1→True`, `1→1.0`, `True→1`, `0→False`, `1.0→1`;
+  - a change to any single field is a new version;
+  - PostgreSQL `test_postgres_identical_save_is_a_no_op_but_a_type_change_is_a_new_version` checks the JSONB round-trip.
+- **RED before the fix:** with the service file at base, `test_an_identical_update_is_a_no_op_returning_the_current_version` failed (1 failed, 64 passed).
+
+### I2: the supersede is atomic
+Three pins cover it:
+- `test_an_update_commits_exactly_once` counts the session's `after_commit` events.
+- `test_a_failed_successor_insert_leaves_the_old_version_active` injects a failure into the successor `INSERT`. It then checks that the rows are unchanged, the old row is still active and required, and bootstrap passes.
+- `test_a_failed_retirement_leaves_no_successor_behind` injects a failure into the retiring `UPDATE`. It then checks that no successor exists and v1 is the only active version.
+
+### I3: optional rows present
+- The two-session PostgreSQL test now includes an active optional architect case, and asserts that case is untouched afterwards.
+- A new unit test covers the update path: `test_an_active_optional_case_does_not_stop_the_unrequire_refusal`.
+
+### Sabotage (driver `/tmp/t267-2/fix1-mutate.py`, GREEN pinned `191ff54d6`)
+- Each row had anchor count 1 and marker `grep -c` of 1, and was restored by `git checkout` with a clean diff.
+- The final GREEN was 338 unit and 21 PostgreSQL passed, with an empty status.
+
+| ID | Mutation | Unit RED | PG RED |
+|---|---|---|---|
+| I1-EQ | no-op payload comparison uses `==` | 5: `test_a_type_only_payload_change_is_a_real_new_version[int-to-bool, int-to-float, bool-to-int, zero-to-false, float-to-int]` | 1: `test_postgres_identical_save_is_a_no_op_but_a_type_change_is_a_new_version` |
+| I2-RETIRE-COMMIT-THEN-INSERT | retire flushed, then a DBAPI commit, then the insert | 1: `test_a_failed_successor_insert_leaves_the_old_version_active` | 0 (unit is the pin) |
+| I2-INSERT-COMMIT-THEN-RETIRE | insert flushed, then a DBAPI commit, then the retire | 1: `test_a_failed_retirement_leaves_no_successor_behind` | 0 (unit is the pin) |
+| I3-COUNT-IGNORES-REQUIRED | `_active_required_count` counts `is_active` only | 2: `test_an_active_optional_case_does_not_stop_the_unrequire_refusal`, `test_optional_and_inactive_rows_do_not_count_as_required_coverage` | 2: `test_two_sessions_retiring_…_one_is_refused[seed]`, `[second]` |
+
+- **Commit-counter note:** `test_an_update_commits_exactly_once` catches a split made with a *session-level* commit. An earlier variant called `session.commit()` inside the `with session.begin()` block, and the counter test was among the failures. That run was noisy, though: other tests failed for an unrelated reason (`InvalidRequestError: Can't operate on closed transaction inside context manager`). So the clean proofs for splits are the two injected-failure tests. A raw driver-level commit is invisible to any SQLAlchemy commit event.
+
+### Gates
+- **Focused** (`test_agent_test_workbench`, `test_agent_definition_workbench_routes`, `test_graph_configuration_bootstrap`): 365 passed.
+- **Full `tests/unit`** (`DATABASE_URL=sqlite:////tmp/t267-2.sqlite`): 6 failed, 6305 passed, 110 skipped, 136 warnings. The failures are exactly the baseline six nodes and causes. Passed rose by 13: 12 unit tests from `fd4e9cb59` and 1 from `191ff54d6`.
+- **PostgreSQL workbench:** 21 passed, zero skips.
+- **Ruff:** clean on the changed files.
+- **Environment:** `test ! -e .venv` held before and after.
