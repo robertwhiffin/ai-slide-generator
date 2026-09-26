@@ -222,6 +222,7 @@ def test_publication_is_exact_and_contiguous_on_postgresql(postgres_engine):
     assert isinstance(result, PublishedRelease)
     assert result.release.version_number == 2
     assert result.previous_release_id == v1.id
+    assert result.release.previous_release_id == v1.id
     assert result.changed_agent_keys == ("architect", "builder")
     assert gate.calls == [("architect", "builder")]
     assert result.evidence == ()
@@ -254,6 +255,8 @@ def test_publication_is_exact_and_contiguous_on_postgresql(postgres_engine):
     assert v1_row.effective_to == v2.effective_from == v2.published_at == draft.updated_at
     assert result.release.effective_from == v2.effective_from
     assert v2.effective_to is None
+    assert v2.previous_release_id == v1.id
+    assert v2.restored_from_release_id is None
     assert (draft.base_release_id, draft.lock_version, draft.updated_by) == (
         v2.id,
         3,
@@ -473,7 +476,12 @@ def test_published_history_rejects_reopen_and_second_close(postgres_engine):
 
 
 def test_parent_lock_statement_takes_release_before_draft(postgres_engine):
-    """Correction 13 sub-item 2: the L0 statement holds the release while it waits."""
+    """Correction 13 sub-item 2: the L0 statement holds the release while it waits.
+
+    Bounded on failure: the holder is released inside the executor block (so an
+    assertion never leaves the publisher waiting on it forever), and the
+    publisher's transaction carries ``lock_timeout``.
+    """
     factory = _factory(postgres_engine)
     _save_prompt(factory, "architect", "\n\nTune A.", lock=0)
     v1 = _release(factory, 1)
@@ -482,6 +490,7 @@ def test_parent_lock_statement_takes_release_before_draft(postgres_engine):
 
     class ObservedGraphConfiguration(GraphConfiguration):
         def _lock_current_parents(self, session, *, exclusive):
+            session.execute(text(f"SET LOCAL lock_timeout = '{int(_WAIT_SECONDS)}s'"))
             pids[threading.current_thread().name] = session.scalar(
                 text("SELECT pg_backend_pid()")
             )
@@ -502,22 +511,33 @@ def test_parent_lock_statement_takes_release_before_draft(postgres_engine):
                 return _publish(factory, lock=1, service=ObservedGraphConfiguration())
 
             future = pool.submit(_publisher)
-            assert attempted.wait(timeout=_WAIT_SECONDS), "publisher never reached L0"
-            assert _await_blocked_by(
-                postgres_engine, waiter_pid=pids["publisher"], blocker_pid=holder_pid
-            )
-            with postgres_engine.connect() as third:
-                skipped = third.execute(
-                    text(
-                        "SELECT id FROM graph_release WHERE effective_to IS NULL "
-                        "FOR UPDATE SKIP LOCKED"
-                    )
-                ).all()
-                third.rollback()
-            assert skipped == [], "the waiting L0 statement must already hold the release"
-            assert not future.done()
-            holder_transaction.commit()
-            result = future.result(timeout=_WAIT_SECONDS)
+            try:
+                assert attempted.wait(timeout=_WAIT_SECONDS), (
+                    "publisher never reached L0"
+                )
+                assert _await_blocked_by(
+                    postgres_engine,
+                    waiter_pid=pids["publisher"],
+                    blocker_pid=holder_pid,
+                )
+                with postgres_engine.connect() as third:
+                    skipped = third.execute(
+                        text(
+                            "SELECT id FROM graph_release WHERE effective_to IS NULL "
+                            "FOR UPDATE SKIP LOCKED"
+                        )
+                    ).all()
+                    third.rollback()
+                assert skipped == [], (
+                    "the waiting L0 statement must already hold the release"
+                )
+                assert not future.done()
+                holder_transaction.commit()
+            finally:
+                # Release the holder before the executor joins the publisher.
+                if holder_transaction.is_active:
+                    holder_transaction.rollback()
+            result = future.result(timeout=_WAIT_SECONDS * 2)
     finally:
         if holder_transaction.is_active:
             holder_transaction.rollback()
@@ -526,3 +546,35 @@ def test_parent_lock_statement_takes_release_before_draft(postgres_engine):
     assert isinstance(result, PublishedRelease)
     assert result.release.version_number == 2
     assert result.previous_release_id == v1.id
+
+
+def test_shared_parent_lock_names_release_before_draft(postgres_engine):
+    """Concern-1 ruling (a): PostgreSQL takes L0 row locks in ``OF`` list order.
+
+    The ``FOR SHARE`` path (``read_workbench``, bootstrap, #267/#268 readers) must
+    render ``OF graph_release, graph_draft`` in that order, like the exclusive one.
+    """
+    factory = _factory(postgres_engine)
+    statements: list[str] = []
+
+    @event.listens_for(postgres_engine, "after_cursor_execute")
+    def _record(_conn, _cursor, statement, _params, _context, _executemany):
+        if threading.current_thread().name == "reader":
+            statements.append(_normalized(statement))
+
+    def _read():
+        with factory() as db:
+            snapshot = GraphConfiguration().read_workbench(db)
+            db.rollback()
+            return snapshot
+
+    try:
+        snapshot = _run_named("reader", _read)
+    finally:
+        event.remove(postgres_engine, "after_cursor_execute", _record)
+
+    assert snapshot.active_release.version_number == 1
+    locking = [s for s in statements if " FOR SHARE" in s or " FOR UPDATE" in s]
+    assert len(locking) == 1, locking
+    assert statements[0] == locking[0], "the shared parent lock is the first statement"
+    assert locking[0].endswith("FOR SHARE OF GRAPH_RELEASE, GRAPH_DRAFT")

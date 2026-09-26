@@ -438,6 +438,37 @@ def test_nothing_changed_returns_nothing_to_publish(factory):
     assert gate.calls == []
 
 
+def test_stale_lock_with_nothing_changed_is_a_conflict_not_nothing_to_publish(factory):
+    """m1: stale is checked before nothing-to-publish.
+
+    Admin B saves and then reverts to the published content (lock 0 -> 2), so no
+    role differs from v1.  A publisher still holding lock 0 never previewed that
+    draft history and must get the stale conflict.
+    """
+    v1 = _v1(factory)
+    with factory() as db:
+        published_prompt = next(
+            n for n in GraphConfiguration().read_workbench(db).nodes
+            if n.agent_key == "architect"
+        ).published.content.prompt_text
+        db.rollback()
+    _save_prompt(factory, "architect", "\n\nTune A.", lock=0)
+    _save_prompt(factory, "architect", "", lock=1, prompt_text=published_prompt)
+    with factory() as db:
+        current = GraphConfiguration().read_workbench(db)
+        db.rollback()
+    assert all(node.changed is False for node in current.nodes)
+    assert current.draft.lock_version == 2
+    before = _artifacts(factory)
+    gate = _NoEvidenceGate()
+
+    result = _publish(factory, lock=0, gate=gate)
+
+    assert result == PublicationConflict(0, 2, v1.id, 1, current.draft)
+    assert _artifacts(factory) == before
+    assert gate.calls == []
+
+
 _ACTOR_BLANK = DraftValidationIssue("actor", "blank", "Actor must not be blank.")
 _LOCK_RANGE = DraftValidationIssue(
     "lock_version", "out_of_range", "Lock version must be greater than or equal to 0."
