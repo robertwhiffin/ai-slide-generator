@@ -28,6 +28,10 @@ export const FORBIDDEN_ACTION_STEMS =
  * #267 adds exactly its two run controls (C25/C38). The `run` stem stays, so every
  * other run control (`Run isolated test`, `View run 12`) is still banned, and
  * `Run published baseline` needs its exemption for `publish` as well.
+ *
+ * #268 appends exactly its two verdict controls (C23). The `approve` and `reject`
+ * stems stay, so `Approve all`, `Approve draft` and `Approve run and publish` are still
+ * banned; only the whole names below are spared.
  */
 export const ALLOWED_ACTION_NAMES = [
   'Restore published Graph Version 1 prompt',
@@ -35,6 +39,8 @@ export const ALLOWED_ACTION_NAMES = [
   'Restore retained values',
   'Run test case',
   'Run published baseline',
+  'Approve run',
+  'Reject run',
 ] as const;
 
 /**

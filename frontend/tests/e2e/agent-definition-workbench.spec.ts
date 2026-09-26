@@ -1502,7 +1502,13 @@ test('the forbidden-action rule fires on every banned name and spares the legiti
     expect(forbidsActionName(forbidden)).toBe(true);
   }
   for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
-  expect(ALLOWED_ACTION_NAMES).toHaveLength(5);
+  expect(ALLOWED_ACTION_NAMES).toHaveLength(7);
+  // #268's two verdict controls are exempt by exact name only (C23).
+  expect(ALLOWED_ACTION_NAMES).toContain('Approve run');
+  expect(ALLOWED_ACTION_NAMES).toContain('Reject run');
+  expect(forbidsActionName('Approve run and publish')).toBe(true);
+  expect(forbidsActionName('Approve all')).toBe(true);
+  expect(forbidsActionName('Reject all')).toBe(true);
   // An exempt name is removed from the string, not read as a licence for the rest of it.
   expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
   // #267's two run controls are exempt by exact name only (C25/C38).

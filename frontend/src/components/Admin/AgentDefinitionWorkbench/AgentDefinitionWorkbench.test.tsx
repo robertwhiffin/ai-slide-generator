@@ -348,7 +348,15 @@ describe('the forbidden-action guard', () => {
 
   it('spares the panel\'s legitimate restore controls without spared names shielding a stem', () => {
     for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
-    expect(ALLOWED_ACTION_NAMES).toHaveLength(5);
+    expect(ALLOWED_ACTION_NAMES).toHaveLength(7);
+    // #268's two verdict controls are exempt by exact name only (C23): the `approve` and
+    // `reject` stems still ban every other review control, and neither name is a shield.
+    expect(ALLOWED_ACTION_NAMES).toContain('Approve run');
+    expect(ALLOWED_ACTION_NAMES).toContain('Reject run');
+    expect(forbidsActionName('Approve run and publish')).toBe(true);
+    expect(forbidsActionName('Approve all')).toBe(true);
+    expect(forbidsActionName('Reject all')).toBe(true);
+    expect(forbidsActionName('Approve runs')).toBe(true);
     // An exempt name is removed, not treated as a licence for the rest of the string.
     expect(forbidsActionName('Restore saved prompt and publish')).toBe(true);
     expect(forbidsActionName('Restore retained values, then approve')).toBe(true);
