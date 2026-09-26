@@ -732,6 +732,35 @@ def test_a_failed_successor_insert_leaves_the_old_version_active(factory):
     _bootstrap_ok(factory)
 
 
+def test_a_failed_retirement_leaves_no_successor_behind(factory):
+    """Catches a successor committed before the old version is retired (I2)."""
+    seed_id = _seed_case_id(factory)
+    before = _rows(factory)
+    engine = factory.kw["bind"]
+
+    def _fail_retirement(_conn, _cursor, statement, _params, _context, _many):
+        if " ".join(statement.upper().split()).startswith("UPDATE AGENT_TEST_CASE"):
+            raise RuntimeError("injected retirement failure")
+
+    event.listen(engine, "before_cursor_execute", _fail_retirement)
+    try:
+        with pytest.raises(RuntimeError, match="injected retirement failure"):
+            _update(factory, seed_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", _fail_retirement)
+
+    assert _rows(factory) == before
+    with factory() as session:
+        assert session.scalars(
+            select(AgentTestCase.version).where(
+                AgentTestCase.agent_key == "architect",
+                AgentTestCase.name == "architect_required_smoke_v1",
+                AgentTestCase.is_active.is_(True),
+            )
+        ).all() == [1]
+    _bootstrap_ok(factory)
+
+
 def test_an_active_optional_case_does_not_stop_the_unrequire_refusal(factory):
     """Catches a last-required count that ignores is_required on the update path (I3)."""
     seed_id = _seed_case_id(factory)
