@@ -306,3 +306,39 @@ F1 REDs only the new test. The `toHaveAccessibleDescription` assertions still pa
 ### Remaining notes
 - In the hook, `recordVerdict` returns `true` when the verdict request succeeds, even if the reducer then rejects the response as incoherent. In that case the notes clear while the panel shows the invalid-response alert.
 - The E2E still accepts one or more readiness reads on load, because the dev build runs under StrictMode.
+
+## Whole-branch fix wave (N1, m2)
+
+**Status: DONE.** The branch was rebased onto `82309f48d`, and this wave starts from HEAD `b7941b52a`.
+
+**Commits:**
+- `2c008c97e` fix: verdict notes survive a role-mismatched 200; lock adoption re-reads readiness (#268)
+- this report section, force-added on top of it
+
+### Changes
+- **N1.** In `useDraftEditor.ts`, `recordVerdict` now returns `recorded.agent_key === agentKey`. This matches the one term of `verdictEvidenceIsCoherent` that the client does not already check itself; the client already checks `run_id` and `verdict`.
+  - A 200 that names another role now keeps the admin's typed notes, and the invalid-response alert still shows.
+  - New workbench test: "a verdict 200 naming another role is contained: the alert shows and the typed notes survive (N1)".
+- **m2.** In `draftEditorState.ts`, `draftEditorReducer` also counts one readiness refresh whenever `next.draft.lock_version !== state.draft.lock_version`.
+  - It uses the same `refreshRequested` counter. There is no new gate and no new counter.
+  - A save that settles still counts exactly once, because a single `if` covers both conditions.
+  - This now covers a `probeConflicted` or `sourceRecoveryConflicted` 409 that adopts another admin's lock.
+  - New tests:
+    - a reducer `it.each` for probe 409 and source-recovery 409: each moves the lock to 1 and adds exactly one refresh;
+    - a workbench test: a probe 409 issues exactly one more readiness GET, and the successful probe after it issues none.
+  - No existing GET-count assertion changed. No existing test drives a probe or source-recovery 409 while counting all GETs.
+
+### Gates
+- Vitest: 730 passed across 16 files.
+- typecheck: clean.
+- ESLint on the touched files: clean.
+- Playwright `agent-definition-workbench.spec.ts`: 78 passed.
+- Full `tests/unit`: 6 failed, 6784 passed, 110 skipped, 136 warnings. The 6 failures are the baseline nodes with the same causes: autoscaling ×2, `_FakeSession.execute` ×3, "no active Graph Release" ×1.
+
+### Mutations
+Each mutation was restored from `2c008c97e`, and `git diff --quiet` was clean afterwards.
+
+| # | Fix | Mutation (marker count 1) | RED |
+|---|---|---|---|
+| W1 | N1 | `recordVerdict` returns `true` | 1 of 223: the N1 workbench test |
+| W2 | m2 | the refresh condition reduced to `settledWrite` only | 3 of 422: both reducer m2 cases and the workbench probe-409 test |
