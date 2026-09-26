@@ -367,16 +367,11 @@ class AgentTestWorkbench:
         trimmed = name.strip()
         try:
             with session.begin():
+                # A create can never reduce required coverage; it takes the role
+                # lock only so every case write is serialized per role.  Every
+                # lineage keeps its version-1 row forever, so a reused name is
+                # refused by ``uq_agent_test_case_agent_name_version`` below.
                 _lock_role_rows(session, agent_key)
-                rows = _reread_role_rows(session, agent_key)
-                if any(row.name == trimmed for row in rows):
-                    raise TestCaseRejected(
-                        TestCaseIssue(
-                            "name",
-                            "duplicate_name",
-                            "This role already has a test case with this name.",
-                        )
-                    )
                 row = AgentTestCase(
                     agent_key=agent_key,
                     name=trimmed,

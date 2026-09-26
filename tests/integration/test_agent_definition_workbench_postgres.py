@@ -1925,6 +1925,21 @@ def test_postgres_case_versions_are_new_rows_and_every_write_records_its_actor(
                 AgentTestCase.name == "architect_pg_extra"
             )
         ) == 2
+    # A retired lineage's name is still taken: PostgreSQL's unique-constraint
+    # loss is recognised by constraint name and becomes the ordered 422 issue.
+    rows_before = [_case_tuple(factory, created.id), _case_tuple(factory, v2.id)]
+    with factory() as session, pytest.raises(TestCaseRejected) as caught:
+        workbench.create_test_case(
+            session,
+            agent_key="architect",
+            name="architect_pg_extra",
+            synthetic_payload={"message": "again"},
+            assembly_context={"design_system_active": False},
+            is_required=False,
+            actor="creator@example.com",
+        )
+    assert [(i.field, i.code) for i in caught.value.issues] == [("name", "duplicate_name")]
+    assert [_case_tuple(factory, created.id), _case_tuple(factory, v2.id)] == rows_before
     boot = GraphConfiguration().bootstrap_v1(factory)
     assert isinstance(boot, BootstrapResult) and boot.created is False
 
