@@ -20,8 +20,10 @@ import {
   STRUCTURED_OUTPUT_PROBE_FAILURES,
   V2_AUTHORED_PROMPT,
   syntheticAgentDefinitionWorkbench,
+  syntheticAgentReadiness,
   syntheticAgentTestCase,
   syntheticAgentTestCaseList,
+  syntheticDraftReadinessBody,
   syntheticDraftDefinitions,
   syntheticDraftSaveConflict,
   syntheticDraftSaveSuccess,
@@ -34,6 +36,7 @@ import {
   syntheticSchemaUpgradeSuccess,
   syntheticSchemaV2DraftDefinition,
   syntheticSystemModelEndpoints,
+  syntheticTestCaseReadiness,
   syntheticTestRunEvidence,
   syntheticTestRunUnavailable,
   syntheticUpgradeSuccess,
@@ -44,6 +47,8 @@ import { ALLOWED_ACTION_NAMES, forbidsActionName } from '../fixtures/forbiddenAc
 
 const WORKBENCH_ENDPOINT = '**/api/admin/agent-definitions/workbench';
 const MODEL_ENDPOINTS_ENDPOINT = '**/api/admin/agent-definitions/model-endpoints';
+/** #268's readiness read (C24), routed by URL; the default answer is all-unchanged at lock 0. */
+const READINESS_ENDPOINT = '**/api/admin/agent-definitions/readiness';
 const SAVE_ENDPOINT = '**/api/admin/agent-definitions/draft/*';
 const NODE_ORDER = [
   'Architect',
@@ -103,6 +108,14 @@ async function installWorkbenchMock(page: Page, status = 200, body: unknown = sy
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify(syntheticModelEndpointDiscovery()),
+  }));
+  // #268 C24: the workbench reads readiness on load and after every settled write, and
+  // no catch-all route absorbs it, so every spec gets this default. A test that needs
+  // another answer registers its own route later, which wins.
+  await page.route(READINESS_ENDPOINT, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(syntheticDraftReadinessBody()),
   }));
   await page.route(WORKBENCH_ENDPOINT, (route) => {
     requestCount += 1;
@@ -2502,6 +2515,7 @@ async function installAgentTestMock(
     listRuns?: (route: Route, call: number) => Promise<void> | void;
     candidateRun?: (route: Route, call: number) => Promise<void> | void;
     baselineRun?: (route: Route, call: number) => Promise<void> | void;
+    verdict?: (route: Route, call: number) => Promise<void> | void;
   },
 ) {
   const requests: CapturedAgentTestRequest[] = [];
@@ -2518,7 +2532,8 @@ async function installAgentTestMock(
             : method === 'GET' && /\/test-cases\/\d+\/runs$/.test(url.pathname) && url.search === '?limit=100' ? 'listRuns'
           : method === 'POST' && /\/draft\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'candidateRun'
             : method === 'POST' && /\/published\/[a-z_]+\/test-runs$/.test(url.pathname) ? 'baselineRun'
-              : null;
+              : method === 'POST' && /\/test-runs\/\d+\/verdict$/.test(url.pathname) ? 'verdict'
+                : null;
     const respond = key === null ? undefined : responders[key as keyof typeof responders];
     if (!respond || key === null) {
       unroutedAgentTestRequests.push(`${method} ${request.url()}`);
@@ -2861,4 +2876,130 @@ test('Agent Test Cases: after a page reload the stored run and stored baseline a
     '/api/admin/agent-definitions/test-cases/101/runs?limit=100',
     '/api/admin/agent-definitions/test-cases/101/runs?limit=100',
   ]);
+});
+
+// ============================================================
+// #268 Task 6: Approve run, the status badge, and the readiness re-read (C26)
+// ============================================================
+
+const CHANGED_ARCHITECT_HASH = 'd'.repeat(64);
+
+function workbenchWithChangedArchitect() {
+  const body = cloneWorkbench();
+  for (const node of body.nodes) {
+    if (node.execution_kind === 'model' && node.agent_key === 'architect') {
+      node.draft = { ...node.draft, candidate_hash: CHANGED_ARCHITECT_HASH };
+      node.changed = true;
+    }
+  }
+  return body;
+}
+
+function architectReadiness(status: 'awaiting_review' | 'approved', lockVersion = 0) {
+  const approved = status === 'approved';
+  return syntheticDraftReadinessBody({
+    draft_lock_version: lockVersion,
+    all_ready: approved,
+    blocking_agents: approved ? [] : ['architect'],
+    agents: {
+      architect: syntheticAgentReadiness('architect', {
+        candidate_hash: CHANGED_ARCHITECT_HASH,
+        is_changed_from_base: true,
+        ready: approved,
+        cases: [syntheticTestCaseReadiness({
+          status,
+          blocking: !approved,
+          run_id: 501,
+          run_verdict: approved ? 'approved' : null,
+          run_checks_passed: true,
+        })],
+      }),
+    },
+  });
+}
+
+test('Verdicts: Approve run posts exactly {verdict, notes}, the badge turns Approved, and readiness is re-read', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWithChangedArchitect());
+  const readinessReads: string[] = [];
+  let approvedOnServer = false;
+  await page.route(READINESS_ENDPOINT, (route) => {
+    readinessReads.push(route.request().method());
+    return fulfillJson(route, 200, architectReadiness(approvedOnServer ? 'approved' : 'awaiting_review'));
+  });
+  const stored = syntheticTestRunEvidence({
+    candidate_hash: CHANGED_ARCHITECT_HASH, candidate_is_current: null, base_release_is_current: null,
+  });
+  const requests = await installAgentTestMock(page, {
+    listCases: (route) => fulfillJson(route, 200, syntheticAgentTestCaseList()),
+    listRuns: (route) => fulfillJson(route, 200, { items: [stored] }),
+    verdict: (route) => {
+      approvedOnServer = true;
+      return fulfillJson(route, 200, {
+        ...stored,
+        verdict: 'approved',
+        verdict_reviewer: 'admin@test.com',
+        verdict_at: '2026-09-26T10:05:00Z',
+        verdict_notes: 'Ship it.',
+      });
+    },
+  });
+  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
+  await openWorkbench(page);
+  const architect = page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' });
+  await expect(architect).toContainText('Awaiting review');
+  // The dev build runs under StrictMode, which mounts effects twice, so load may read
+  // readiness twice; the reducer drops the older answer by request ID.
+  await expect.poll(() => readinessReads.length).toBeGreaterThanOrEqual(1);
+  const readsBeforeVerdict = readinessReads.length;
+
+  await loadAgentTestCases(page);
+  const compare = await openTestView(page, 'Compare');
+  const verdict = compare.getByRole('region', { name: 'Candidate run verdict' });
+  await expect(verdict).toContainText('No verdict recorded');
+  await verdict.getByRole('textbox', { name: 'Candidate run verdict notes' }).fill('Ship it.');
+  await verdict.getByRole('button', { name: 'Approve run' }).click();
+
+  await expect(verdict).toContainText('Approved by admin@test.com at 2026-09-26T10:05:00Z');
+  await expect(verdict).toContainText('Notes: Ship it.');
+  await expect(verdict.getByRole('button', { name: 'Approve run' })).toHaveCount(0);
+  await expect(verdict.getByRole('button', { name: 'Reject run' })).toBeEnabled();
+  await expect(compare.getByRole('region', { name: 'Test case evidence' })).toContainText('Published baseline (approved)');
+  await expect(architect).toContainText('Approved');
+  // Exactly one readiness re-read after the settled verdict (C26).
+  await expect.poll(() => readinessReads.length).toBe(readsBeforeVerdict + 1);
+  expect(new Set(readinessReads)).toEqual(new Set(['GET']));
+
+  const verdicts = requests.filter((request) => request.method === 'POST' && request.path.endsWith('/verdict'));
+  expect(verdicts.map((request) => request.path)).toEqual(['/api/admin/agent-definitions/test-runs/501/verdict']);
+  expect(verdicts.map((request) => request.raw)).toEqual(['{"verdict":"approved","notes":"Ship it."}']);
+  // The response is the evidence: no run GET follows, and nothing was saved.
+  expect(requests.filter((request) => request.method === 'GET' && /\/test-runs\/\d+$/.test(request.path))).toHaveLength(0);
+  expect(saves).toHaveLength(0);
+  // The verdict controls stay inside the guard. The sweep walks the testing panel: an
+  // Approved role's navigation button carries the status label in its text content
+  // ("ArchitectApproved"), which this lane's text-content source flags on the `approve`
+  // stem although the control's accessible name is "Architect" (reported, not loosened).
+  const names = await testingAside(page).locator('button, a')
+    .evaluateAll((controls) => controls.flatMap((control) => [
+      control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
+    ].filter((source) => source.trim() !== '')));
+  expect(names).toContain('Reject run');
+  for (const name of names) expect(forbidsActionName(name)).toBe(false);
+  await expect(architect).toHaveAccessibleName('Architect');
+});
+
+test('Verdicts: a readiness answer read at another lock never paints Approved', async ({ page }) => {
+  await installExactIdentityMock(page);
+  await installWorkbenchMock(page, 200, workbenchWithChangedArchitect());
+  let reads = 0;
+  await page.route(READINESS_ENDPOINT, (route) => {
+    reads += 1;
+    return fulfillJson(route, 200, architectReadiness('approved', 7));
+  });
+  await openWorkbench(page);
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(1);
+  const architect = page.getByRole('navigation', { name: 'Graph nodes' }).getByRole('button', { name: 'Architect' });
+  await expect(architect).toContainText('Needs test');
+  await expect(architect).not.toContainText('Approved');
 });
