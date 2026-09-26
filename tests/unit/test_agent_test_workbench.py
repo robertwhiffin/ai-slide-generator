@@ -1637,6 +1637,49 @@ def test_a_url_shaped_stored_endpoint_is_refused_before_any_call(factory):
     assert _run_rows(factory) == []
 
 
+def _rewrite_published(factory: sessionmaker, agent_key: str, endpoint_name: str) -> None:
+    """Store a URL-shaped endpoint on the active revision (SQLite has no guard)."""
+    from src.database.models.graph_configuration import AgentDefinitionRevision
+
+    with factory() as session:
+        revision_id = session.scalar(
+            select(GraphReleaseAgent.agent_definition_revision_id)
+            .join(GraphRelease, GraphRelease.id == GraphReleaseAgent.graph_release_id)
+            .where(
+                GraphRelease.effective_to.is_(None),
+                GraphReleaseAgent.agent_key == agent_key,
+            )
+        )
+        row = session.get(AgentDefinitionRevision, revision_id)
+        content = definition_content_from_row(row)
+        content = content.model_copy(
+            update={"model": content.model.model_copy(update={"endpoint_name": endpoint_name})}
+        )
+        for column, value in definition_content_values(content).items():
+            setattr(row, column, value)
+        row.content_hash = definition_content_hash(content)
+        session.commit()
+
+
+def test_a_url_shaped_published_endpoint_is_refused_before_a_baseline_call(factory):
+    """I-2: the baseline twin of the candidate path's stored-name refusal."""
+    url = "https://example.com/serving-endpoints/x"
+    _rewrite_published(factory, "architect", url)
+    workbench, runtime, adapter = _executor(factory)
+
+    with pytest.raises(DraftContentRejected) as caught:
+        _run_baseline(factory, workbench)
+
+    assert [(issue.field, issue.code) for issue in caught.value.issues] == [
+        ("published.model.endpoint_name", "endpoint_url_not_allowed")
+    ]
+    assert url not in str(caught.value)
+    assert all(url not in issue.message for issue in caught.value.issues)
+    assert adapter.calls == []
+    assert runtime.baseline_calls == []
+    assert _run_rows(factory) == []
+
+
 # --- the case: found, same role, active (C22) -------------------------------
 
 

@@ -72,8 +72,16 @@ from src.services.agent_schema_registry import AgentOutputValidationError
 from src.services.agent_schema_types import thaw_json_containers
 from src.services.graph_configuration import GraphConfiguration
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
-from src.services.graph_configuration_draft import DraftSaveConflict
+from src.services.graph_configuration_draft import (
+    DraftContentRejected,
+    DraftSaveConflict,
+    DraftValidationIssue,
+)
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
+from src.services.model_endpoint_catalog import (
+    EndpointValidationFailure,
+    validate_endpoint_name_policy,
+)
 from src.services.persisted_graph_release import (
     GraphReleaseIncompleteError,
     GraphReleaseNotFoundError,
@@ -367,6 +375,10 @@ ExecutionStatus = Literal["completed", "model_error", "assembly_error", "incompl
 #: ``_lock_current_parents``'s diagnosis when it was queued behind a committing
 #: publication: the one transaction-2 failure retried once (C8.6).
 _PARENT_HANDOFF_DIAGNOSIS = "graph configuration parent snapshot is inconsistent"
+
+#: The issue field of a refused published endpoint name (the candidate path's
+#: twin is ``candidate.model.endpoint_name``).
+_PUBLISHED_ENDPOINT_FIELD = "published.model.endpoint_name"
 
 _CONTRACT_FAILED_MESSAGE = "The model output does not satisfy the output contract."
 _NO_OUTPUT_MESSAGE = "The run produced no model output to check."
@@ -976,7 +988,7 @@ class AgentTestWorkbench:
         It goes through ``AgentRuntime.run_published_baseline`` on the active
         release, which resolves exactly as ``run`` does (C20), and is persisted
         as ``published_baseline`` evidence whose ``candidate_*`` columns hold its
-        output.
+        output.  The stored endpoint name is policy-checked first.
         """
         self._require_no_transaction(session)
         self._require_actor(actor)
@@ -999,11 +1011,23 @@ class AgentTestWorkbench:
                     compared_release_id=snapshot.active_release.release_id,
                     compared_definition_revision_id=node.published.revision_id,
                 )
+                endpoint_name = node.published.content.model.endpoint_name
                 case = self._load_active_case(
                     session, agent_key=agent_key, test_case_id=test_case_id
                 )
         except SQLAlchemyError as error:
             raise _unavailable("read_published", agent_key, error) from error
+        # Defence in depth (C32's probe rule, for published content too): a URL-
+        # or path-shaped stored name never reaches a provider.  The catalog-owned
+        # code and message are reported; the stored name is never echoed.
+        try:
+            validate_endpoint_name_policy(endpoint_name)
+        except EndpointValidationFailure as failure:
+            raise DraftContentRejected(
+                DraftValidationIssue(
+                    _PUBLISHED_ENDPOINT_FIELD, failure.code, failure.message
+                )
+            ) from failure
         model_payload = model_payload_for(agent_key, case.synthetic_payload)
         observation = RunObservation()
 
