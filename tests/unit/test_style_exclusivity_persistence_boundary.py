@@ -183,8 +183,12 @@ class TestEveryWriterIsNormalized:
     def test_session_manager_create_session(self, engine):
         """``SessionManager.create_session`` is handed a RAW dict it never parses."""
         from src.api.services.session_manager import SessionManager
+        from src.services.graph_configuration import GraphConfiguration
 
         session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        # create_session projects the conversation's Graph Version (#261), which
+        # needs an active Graph Release -- the state every production database is in.
+        GraphConfiguration().bootstrap_v1(session_local)
 
         @contextmanager
         def _fake_get_db_session():
