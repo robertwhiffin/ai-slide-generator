@@ -4777,7 +4777,11 @@ _TEST_CASE_ROUTES = [
     ("PUT", _test_case_url),
     ("DELETE", _test_case_url),
 ]
+_TEST_CASE_ROUTE_IDS = ["POST-list", "GET-list", "PUT-item", "DELETE-item"]
 _TEST_CASE_WRITE_ROUTES = [route for route in _TEST_CASE_ROUTES if route[0] != "GET"]
+_TEST_CASE_WRITE_ROUTE_IDS = [
+    iid for route, iid in zip(_TEST_CASE_ROUTES, _TEST_CASE_ROUTE_IDS) if route[0] != "GET"
+]
 
 
 def _forbid_test_case_service(monkeypatch, calls: list[str]) -> None:
@@ -4794,7 +4798,7 @@ def _forbid_test_case_service(monkeypatch, calls: list[str]) -> None:
         monkeypatch.setattr(AgentTestWorkbench, method, _must_not_reach)
 
 
-@pytest.mark.parametrize(("method", "url_for"), _TEST_CASE_ROUTES, ids=lambda v: str(v))
+@pytest.mark.parametrize(("method", "url_for"), _TEST_CASE_ROUTES, ids=_TEST_CASE_ROUTE_IDS)
 def test_test_case_routes_deny_non_admins_before_body_or_service(
     session_factory, monkeypatch, method, url_for
 ):
@@ -4826,7 +4830,7 @@ def test_test_case_routes_deny_non_admins_before_body_or_service(
 
 
 @pytest.mark.parametrize(
-    ("method", "url_for"), _TEST_CASE_WRITE_ROUTES, ids=lambda v: str(v)
+    ("method", "url_for"), _TEST_CASE_WRITE_ROUTES, ids=_TEST_CASE_WRITE_ROUTE_IDS
 )
 @pytest.mark.parametrize("principal", [None, " \t "])
 def test_test_case_writes_require_a_trusted_principal_before_body_or_service(
