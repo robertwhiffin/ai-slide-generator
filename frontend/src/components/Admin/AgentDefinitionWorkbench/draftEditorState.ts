@@ -167,6 +167,14 @@ export interface AgentTestingState {
   issues: DraftFieldError[];
   /** An informational outcome that is not an error, such as an edit that changed nothing. */
   notice: string | null;
+  /** The case version whose stored runs were last read (or are being read). */
+  historyCaseId: number | null;
+  /**
+   * The freshness token of the history read that may still land, or `null`. A newer
+   * read, a case switch, or a run that completes meanwhile clears or replaces it, so a
+   * stale answer can never replace newer evidence.
+   */
+  historyRequestId: number | null;
 }
 
 export function emptyAgentTestingState(): AgentTestingState {
@@ -179,6 +187,8 @@ export function emptyAgentTestingState(): AgentTestingState {
     error: null,
     issues: [],
     notice: null,
+    historyCaseId: null,
+    historyRequestId: null,
   };
 }
 
@@ -290,6 +300,9 @@ export type DraftEditorAction =
   | { type: 'testCaseCreated'; requestId: number; testCase: TestCaseListEntry }
   | { type: 'testCaseRetired'; requestId: number; testCase: TestCaseListEntry }
   | { type: 'testCaseUpdated'; requestId: number; testCase: TestCaseListEntry }
+  | { type: 'testRunsLoadStarted'; agentKey: AgentKey; testCaseId: number; requestId: number }
+  | { type: 'testRunsLoaded'; agentKey: AgentKey; requestId: number; items: TestRunEvidence[] }
+  | { type: 'testRunsLoadFailed'; agentKey: AgentKey; requestId: number; message: string }
   | { type: 'testOperationFailed'; requestId: number; message: string; issues: DraftFieldError[] }
   | { type: 'schemaOverlayOptionalFieldToggled'; agentKey: AgentKey; fieldName: string }
   | { type: 'schemaOverlayFieldDescriptionChanged'; agentKey: AgentKey; fieldName: string; description: string }
@@ -743,16 +756,19 @@ export const TEST_RUN_INVALID_RESPONSE_MESSAGE =
 export const TEST_RUN_STALE_DRAFT_MESSAGE =
   'The draft changed on the server. Review the change, then run the test case again.';
 export const TEST_RUN_REJECTED_MESSAGE = 'The saved candidate was refused.';
+export const TEST_RUN_HISTORY_INVALID_RESPONSE_MESSAGE =
+  'Unable to load stored test runs because the server response was invalid.';
 export const TEST_CASE_INVALID_RESPONSE_MESSAGE =
   'Unable to update the test case because the server response was invalid.';
 
-export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load' | 'update';
+export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load' | 'update' | 'history';
 
 const TEST_OPERATION_SUBJECT: Record<TestOperationVerb, string> = {
   run: 'run the test case',
   create: 'save the test case',
   retire: 'retire the test case',
   update: 'save the new test case version',
+  history: 'load stored test runs',
   load: 'load Agent Test Cases',
 };
 
@@ -1354,9 +1370,10 @@ export function draftEditorReducer(
           issues: [],
         }));
       }
+      // A newer run replaces stored evidence, and any history read still in flight is dropped.
       return settleTestOperation(state, pending, (testing) => (pending.operation === 'testRun'
-        ? { ...settledTesting(testing), candidateEvidence: action.evidence }
-        : { ...settledTesting(testing), baselineEvidence: action.evidence }));
+        ? { ...settledTesting(testing), historyRequestId: null, candidateEvidence: action.evidence }
+        : { ...settledTesting(testing), historyRequestId: null, baselineEvidence: action.evidence }));
     }
     case 'testRunRejected': {
       const pending = matchingPending(state, 'testRun', action.requestId);
@@ -1405,6 +1422,39 @@ export function draftEditorReducer(
         casesStatus: 'ready',
         casesRequestId: null,
         cases: testing.cases.filter((item) => item.id !== action.testCase.id),
+      }));
+    }
+    case 'testRunsLoadStarted':
+      return withTesting(state, action.agentKey, (testing) => ({
+        ...testing,
+        historyCaseId: action.testCaseId,
+        historyRequestId: action.requestId,
+      }));
+    case 'testRunsLoaded': {
+      const testing = state.byAgent[action.agentKey].testing;
+      if (testing.historyRequestId !== action.requestId) return state;
+      const coherent = action.items.every((item) => item.agent_key === action.agentKey
+        && item.test_case_id === testing.historyCaseId);
+      if (!coherent) {
+        return withTesting(state, action.agentKey, (current) => ({
+          ...current, historyRequestId: null, error: TEST_RUN_HISTORY_INVALID_RESPONSE_MESSAGE,
+        }));
+      }
+      // Newest first: the newest candidate run, and the newest completed baseline rerun.
+      const candidate = action.items.find((item) => item.run_kind === 'candidate') ?? null;
+      const baseline = action.items.find((item) => item.run_kind === 'published_baseline'
+        && item.execution_status === 'completed') ?? null;
+      return withTesting(state, action.agentKey, (current) => ({
+        ...current,
+        historyRequestId: null,
+        candidateEvidence: candidate,
+        baselineEvidence: baseline,
+      }));
+    }
+    case 'testRunsLoadFailed': {
+      if (state.byAgent[action.agentKey].testing.historyRequestId !== action.requestId) return state;
+      return withTesting(state, action.agentKey, (testing) => ({
+        ...testing, historyRequestId: null, error: action.message,
       }));
     }
     case 'testCaseUpdated': {

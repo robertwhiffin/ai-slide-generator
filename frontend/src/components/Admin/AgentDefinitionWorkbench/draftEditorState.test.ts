@@ -58,6 +58,7 @@ import {
   retainedFormId,
   RETAINED_REASONS,
   validateDraftForm,
+  type DraftEditorAction,
   type DraftEditorState,
   type EditableModelDraftForm,
   type PendingDraftSave,
@@ -2623,6 +2624,8 @@ describe('Agent Test Case and test run reducer', () => {
         error: null,
         issues: [],
         notice: null,
+        historyCaseId: null,
+        historyRequestId: null,
       });
     }
   });
@@ -2782,6 +2785,70 @@ describe('Agent Test Case and test run reducer', () => {
     expect(wrongRole.byAgent.architect.testing.cases).toEqual([syntheticAgentTestCase()]);
     expect(wrongRole.byAgent.architect.testing.error)
       .toBe('Unable to update the test case because the server response was invalid.');
+  });
+
+  it('a history read shows the newest candidate run and the newest completed published baseline', () => {
+    let state = loadedCases(createDraftEditorState(workbench()));
+    state = draftEditorReducer(state, { type: 'testRunsLoadStarted', agentKey: 'architect', testCaseId: 101, requestId: 80 });
+    const newest = syntheticTestRunEvidence({ run_id: 503 });
+    const failedBaseline = syntheticTestRunEvidence({ run_id: 502, run_kind: 'published_baseline', execution_status: 'model_error' });
+    const baseline = syntheticTestRunEvidence({ run_id: 501, run_kind: 'published_baseline' });
+    const next = draftEditorReducer(state, {
+      type: 'testRunsLoaded', agentKey: 'architect', requestId: 80,
+      items: [newest, failedBaseline, baseline, syntheticTestRunEvidence({ run_id: 500 })],
+    });
+    expect(next.byAgent.architect.testing.candidateEvidence).toEqual(newest);
+    expect(next.byAgent.architect.testing.baselineEvidence).toEqual(baseline);
+    expect(next.byAgent.architect.testing.historyRequestId).toBeNull();
+    expect(next.byAgent.architect.testing.historyCaseId).toBe(101);
+    expect(next.pendingSave).toBeNull();
+
+    const empty = draftEditorReducer(state, { type: 'testRunsLoaded', agentKey: 'architect', requestId: 80, items: [] });
+    expect(empty.byAgent.architect.testing.candidateEvidence).toBeNull();
+    expect(empty.byAgent.architect.testing.baselineEvidence).toBeNull();
+  });
+
+  it('drops a stale history read: an older request, a case switch, or a run that completed meanwhile', () => {
+    let state = loadedCases(createDraftEditorState(workbench()));
+    state = draftEditorReducer(state, { type: 'testRunsLoadStarted', agentKey: 'architect', testCaseId: 101, requestId: 80 });
+    const older = syntheticTestRunEvidence({ run_id: 400 });
+
+    const switched = draftEditorReducer(state, { type: 'testRunsLoadStarted', agentKey: 'architect', testCaseId: 102, requestId: 81 });
+    expect(draftEditorReducer(switched, { type: 'testRunsLoaded', agentKey: 'architect', requestId: 80, items: [older] }))
+      .toBe(switched);
+
+    let ran = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun', 'architect', 82) });
+    ran = draftEditorReducer(ran, { type: 'testRunSucceeded', requestId: 82, evidence: syntheticTestRunEvidence({ run_id: 999 }) });
+    const late = draftEditorReducer(ran, { type: 'testRunsLoaded', agentKey: 'architect', requestId: 80, items: [older] });
+    expect(late).toBe(ran);
+    expect(late.byAgent.architect.testing.candidateEvidence?.run_id).toBe(999);
+
+    const mixed = draftEditorReducer(state, {
+      type: 'testRunsLoaded', agentKey: 'architect', requestId: 80, items: [syntheticTestRunEvidence({ test_case_id: 102 })],
+    });
+    expect(mixed.byAgent.architect.testing.candidateEvidence).toBeNull();
+    expect(mixed.byAgent.architect.testing.error).toBe('Unable to load stored test runs because the server response was invalid.');
+  });
+
+  it('a late candidate-run response after a newer save has started never clobbers state (m-1)', () => {
+    let state = createDraftEditorState(workbench());
+    state = draftEditorReducer(state, { type: 'testOperationStarted', pending: testPending('testRun', 'architect', 1) });
+    state = draftEditorReducer(state, { type: 'testOperationFailed', requestId: 1, message: 'Unable to run the test case.', issues: [] });
+    state = draftEditorReducer(state, {
+      type: 'saveStarted',
+      pending: { operation: 'save', requestId: 2, agentKey: 'architect', expectedLockVersion: 0, submittedCandidate: request().candidate },
+    });
+    for (const late of [
+      { type: 'testRunSucceeded', requestId: 1, evidence: syntheticTestRunEvidence() },
+      { type: 'testRunConflicted', requestId: 1, conflict: syntheticNullCandidateConflict(0, 1) },
+      { type: 'testRunRejected', requestId: 1, error: SCHEMA_ALREADY_CURRENT_REJECTION },
+      { type: 'testOperationFailed', requestId: 1, message: 'late', issues: [] },
+    ] satisfies DraftEditorAction[]) {
+      const next = draftEditorReducer(state, late);
+      expect(next).toBe(state);
+      expect(next.pendingSave?.requestId).toBe(2);
+      expect(next.byAgent.architect.testing.candidateEvidence).toBeNull();
+    }
   });
 
   it('a failed test operation keeps the role\'s draft editor state and records only the panel error', () => {

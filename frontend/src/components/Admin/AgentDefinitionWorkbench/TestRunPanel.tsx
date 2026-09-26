@@ -1,4 +1,4 @@
-import { useId, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useState, type KeyboardEvent } from 'react';
 import type {
   AgentKey,
   CreateTestCaseRequest,
@@ -59,6 +59,8 @@ export interface TestRunPanelProps {
     testCaseId: number,
     request: UpdateTestCaseRequest,
   ): Promise<TestCaseListEntry | null>;
+  /** Reads one case version's stored runs; called when a case is selected. */
+  onLoadTestRuns(agentKey: AgentKey, testCaseId: number): void | Promise<void>;
 }
 
 /** Server evidence is only ever rendered as text: React escapes it, and nothing here parses markup. */
@@ -310,6 +312,7 @@ export function TestRunPanel({
   onCreateTestCase,
   onRetireTestCase,
   onUpdateTestCase,
+  onLoadTestRuns,
 }: TestRunPanelProps) {
   const id = useId();
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -327,6 +330,15 @@ export function TestRunPanel({
     : null;
   const loaded = testing.casesStatus === 'ready'
     || (testing.casesStatus === 'loading' && testing.cases.length > 0);
+  const selectedCaseId = loaded && selected !== null ? selected.id : null;
+
+  // Stored evidence survives a reload: selecting a case (or switching to another) reads
+  // that version's runs once. A case whose history is already in the reducer is not reread.
+  useEffect(() => {
+    if (selectedCaseId !== null && testing.historyCaseId !== selectedCaseId) {
+      void onLoadTestRuns(agentKey, selectedCaseId);
+    }
+  }, [agentKey, selectedCaseId, testing.historyCaseId, onLoadTestRuns]);
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const index = VIEWS.indexOf(view);
