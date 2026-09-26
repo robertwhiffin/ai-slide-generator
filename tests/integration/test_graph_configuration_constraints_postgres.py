@@ -438,7 +438,22 @@ EVIDENCE_COLUMN_REWRITES = {
     "input_tokens": 7,
     "output_tokens": 9,
     "run_by": "someone-else",
+    # Rewrites resolved against a second, valid set of parents at run time, so the
+    # FK and check would both accept the new value and only the trigger can raise.
+    "id": "fresh_id",
+    "test_case_id": "other_case_id",
+    "compared_release_id": "other_release_id",
+    "compared_definition_revision_id": "other_revision_id",
+    "run_at": "other_run_at",
+    # Check-valid. No architect revision can also be a builder one, so the composite
+    # FK cannot be satisfied; it is an AFTER row trigger, so this BEFORE trigger
+    # fires first, and the asserted message proves the trigger is what raised.
+    "agent_key": "builder",
 }
+VERDICT_COLUMNS = frozenset({"verdict", "verdict_reviewer", "verdict_at", "verdict_notes"})
+_RESOLVED_REWRITES = frozenset(
+    {"id", "test_case_id", "compared_release_id", "compared_definition_revision_id", "run_at"}
+)
 
 
 def _insert_case(conn) -> int:
@@ -804,6 +819,13 @@ def test_postgres_every_evidence_fk_is_restrict_on_delete_in_pg_constraint(
     )
 
 
+def test_evidence_rewrites_cover_every_non_verdict_agent_test_run_column() -> None:
+    # Read from the table metadata, so a column added later cannot be silently exempt.
+    assert set(EVIDENCE_COLUMN_REWRITES) == (
+        set(AgentTestRun.__table__.columns.keys()) - VERDICT_COLUMNS
+    )
+
+
 @pytest.mark.parametrize("column_name", sorted(EVIDENCE_COLUMN_REWRITES))
 def test_postgres_agent_test_run_evidence_columns_are_immutable(
     postgres_engine, column_name: str
@@ -812,11 +834,33 @@ def test_postgres_agent_test_run_evidence_columns_are_immutable(
         parents = _seed_run_parents(conn)
         run_id = _insert_run(conn, parents)
         before = conn.execute(select(AgentTestRun).where(AgentTestRun.id == run_id)).one()
+        resolved = {
+            "fresh_id": run_id + 1000,
+            "other_case_id": conn.execute(
+                AgentTestCase.__table__.insert()
+                .values(
+                    agent_key="architect",
+                    name="second case",
+                    version=1,
+                    synthetic_payload={},
+                    assembly_context={"design_system_active": False},
+                    created_by="test:postgres",
+                    updated_by="test:postgres",
+                )
+                .returning(AgentTestCase.id)
+            ).scalar_one(),
+            "other_release_id": _insert_release(conn, 2, active=False),
+            "other_revision_id": _insert_revision(conn, "architect", "e"),
+            "other_run_at": before.run_at - timedelta(days=1),
+        }
+    rewrite = EVIDENCE_COLUMN_REWRITES[column_name]
+    if column_name in _RESOLVED_REWRITES:
+        rewrite = resolved[rewrite]
     error = _expect_sqlstate(
         postgres_engine,
         update(AgentTestRun)
         .where(AgentTestRun.id == run_id)
-        .values(**{column_name: EVIDENCE_COLUMN_REWRITES[column_name]}),
+        .values(**{column_name: rewrite}),
         "23514",
         None,
     )
