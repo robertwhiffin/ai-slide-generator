@@ -1275,9 +1275,9 @@ const READINESS_REFRESH_OPERATIONS: readonly DraftOperationKind[] = [
 ];
 
 /**
- * The one reducer. It asks for a fresh readiness read (by counting it) exactly when a
- * pending operation of those kinds settled, whatever its outcome; a dropped completion
- * returns the state unchanged, so it asks for nothing.
+ * The one reducer. It asks for a fresh readiness read (by counting it) when a pending
+ * operation of those kinds settled, whatever its outcome, or when any action adopted
+ * another lock; a dropped completion returns the state unchanged, so it asks for nothing.
  */
 export function draftEditorReducer(
   state: DraftEditorState,
@@ -1285,7 +1285,11 @@ export function draftEditorReducer(
 ): DraftEditorState {
   const next = reduceDraftEditor(state, action);
   const settled = state.pendingSave;
-  if (settled !== null && next.pendingSave === null && READINESS_REFRESH_OPERATIONS.includes(settled.operation)) {
+  const settledWrite = settled !== null && next.pendingSave === null
+    && READINESS_REFRESH_OPERATIONS.includes(settled.operation);
+  // A read's 409 (probe, source recovery) adopts another admin's lock: the readiness it
+  // holds was read at the old one, so it asks for a fresh read too (whole-branch m2).
+  if (settledWrite || next.draft.lock_version !== state.draft.lock_version) {
     return { ...next, readiness: { ...next.readiness, refreshRequested: next.readiness.refreshRequested + 1 } };
   }
   return next;

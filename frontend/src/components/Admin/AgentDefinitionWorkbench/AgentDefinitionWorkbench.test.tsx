@@ -3059,6 +3059,31 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(workbenchGets(fetchMock)).toHaveLength(1);
   });
 
+  it('a probe 409 that adopts another lock re-reads readiness once; a probe that moves no lock reads none', async () => {
+    const fetchMock = mockWorkbenchApi({
+      probe: (_agentKey, _body, call) => (call === 0
+        ? apiResponse(409, syntheticNullCandidateConflict(0, 1))
+        : apiResponse(200, syntheticProbeSuccess({ lock_version: 1 }))),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(1));
+
+    fireEvent.click(probeButton());
+    await screen.findByRole('region', { name: 'Draft changed on the server' });
+    // #268 whole-branch m2: the adopted lock 1 is another admin's save, so the badges'
+    // readiness (read at lock 0) is re-read: exactly one more readiness GET.
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toHaveTextContent(PROBE_SUCCEEDED_TEXT));
+    await act(async () => { await Promise.resolve(); });
+    // A successful probe writes nothing and moves no lock: no readiness GET.
+    expect(readinessGets(fetchMock)).toHaveLength(2);
+  });
+
   it.each([
     ['a network failure', () => Promise.reject(new TypeError('network failed')), PROBE_NETWORK_MESSAGE],
     ['an untyped 500', () => apiResponse(500, { detail: 'Traceback: secret-host.example' }), 'Unable to test structured output (500).'],
@@ -4137,6 +4162,32 @@ describe('AgentDefinitionWorkbench verdict controls (#268)', () => {
     await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
     // A baseline verdict never makes the role Approved: readiness ignores baseline runs (C12).
     expect(architectStatus(navigation)).toHaveAccessibleDescription('Awaiting review');
+  });
+
+  it('a verdict 200 naming another role is contained: the alert shows and the typed notes survive (N1)', async () => {
+    const fetchMock = mockWorkbenchApi({
+      workbench: workbenchWithChangedArchitect(),
+      listCases: caseList(),
+      listRuns: () => apiResponse(200, { items: [storedChangedRun()] }),
+      readiness: () => apiResponse(200, architectReadiness('awaiting_review')),
+      verdict: () => apiResponse(200, { ...approvedChangedRun(null), agent_key: 'builder' }),
+    });
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    await loadTestCasesForSelectedRole();
+    const region = await within(asideTab('Compare')).findByRole('region', { name: 'Candidate run verdict' });
+    fireEvent.change(within(region).getByRole('textbox', { name: 'Candidate run verdict notes' }), {
+      target: { value: 'Keep me.' },
+    });
+
+    fireEvent.click(within(region).getByRole('button', { name: 'Approve run' }));
+
+    const alert = await within(testingAside()).findByRole('alert');
+    expect(alert).toHaveTextContent('Unable to record the verdict because the server response was invalid.');
+    const after = within(asideTab('Compare')).getByRole('region', { name: 'Candidate run verdict' });
+    expect(after).toHaveTextContent('No verdict recorded');
+    expect(within(after).getByRole('textbox', { name: 'Candidate run verdict notes' })).toHaveValue('Keep me.');
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(2));
   });
 
   it('a run whose checks failed offers no enabled Approve run, and names why', async () => {
