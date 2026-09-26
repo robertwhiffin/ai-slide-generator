@@ -1710,6 +1710,20 @@ def test_a_baseline_rerun_goes_through_run_on_the_active_release(factory):
     )
 
 
+def test_a_baseline_rerun_records_the_published_revision_not_the_edited_draft(factory):
+    """C19/C20: a baseline's candidate_hash is its revision's hash, whatever the draft."""
+    _saver("an edited draft the baseline must ignore")(factory)
+    identity = _identity(factory)
+    assert identity["draft_hash"] != identity["revision_hash"]
+    workbench, _runtime_, adapter = _executor(factory)
+
+    evidence = _run_baseline(factory, workbench)
+
+    assert evidence.candidate_hash == identity["revision_hash"]
+    assert "an edited draft the baseline must ignore" not in adapter.calls[0].prompt
+    assert (evidence.candidate_is_current, evidence.base_release_is_current) == (True, True)
+
+
 def test_a_failed_baseline_rerun_is_persisted_with_the_same_status_map(factory):
     workbench, _runtime_, _adapter = _executor(
         factory, DeterministicFakeModelAdapter(mode="provider_unavailable")
