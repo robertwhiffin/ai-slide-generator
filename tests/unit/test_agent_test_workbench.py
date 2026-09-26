@@ -2021,6 +2021,21 @@ def test_list_test_runs_returns_a_cases_runs_newest_first_and_bounded(factory):
     assert [run.run_id for run in limited] == [third.run_id, second.run_id]
 
 
+def test_list_test_runs_of_an_unknown_case_is_not_found(factory):
+    """Catches an unknown case listing as an empty history (Task 5's 404)."""
+    workbench, _runtime_, _adapter = _executor(factory)
+
+    with factory() as session, pytest.raises(TestCaseNotFound):
+        workbench.list_test_runs(session, test_case_id=424242)
+
+
+def test_list_test_runs_of_a_case_with_no_runs_is_empty(factory):
+    workbench, _runtime_, _adapter = _executor(factory)
+
+    with factory() as session:
+        assert workbench.list_test_runs(session, test_case_id=_seed_case_id(factory)) == []
+
+
 @pytest.mark.parametrize("limit", [0, -1, 101, True])
 def test_list_test_runs_rejects_an_out_of_range_limit(factory, limit):
     workbench, _runtime_, _adapter = _executor(factory)
