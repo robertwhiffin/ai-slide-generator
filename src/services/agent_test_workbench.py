@@ -421,8 +421,9 @@ class TestRunEvidence:
     ``synthetic_payload`` is the stored case payload and ``model_payload`` the
     projection actually sent (C37).  ``candidate_is_current`` and
     ``base_release_is_current`` are computed when the run is written and are
-    not persisted, so a later read returns ``None`` for both (C8.5).  Verdict
-    columns are #268's and are deliberately absent (C11).
+    not persisted, so a later read returns ``None`` for both (C8.5).  The four
+    verdict fields are the row's verdict columns (#268 C16): all ``None`` until a
+    verdict is recorded.
     """
 
     __test__ = False
@@ -451,6 +452,10 @@ class TestRunEvidence:
     output_tokens: int | None
     run_by: str
     run_at: datetime
+    verdict: Literal["approved", "rejected"] | None
+    verdict_reviewer: str | None
+    verdict_at: datetime | None
+    verdict_notes: str | None
     candidate_is_current: bool | None = None
     base_release_is_current: bool | None = None
 
@@ -880,6 +885,10 @@ def _evidence_from_row(
         output_tokens=row.output_tokens,
         run_by=row.run_by,
         run_at=row.run_at,
+        verdict=row.verdict,
+        verdict_reviewer=row.verdict_reviewer,
+        verdict_at=row.verdict_at,
+        verdict_notes=row.verdict_notes,
         candidate_is_current=candidate_is_current,
         base_release_is_current=base_release_is_current,
     )

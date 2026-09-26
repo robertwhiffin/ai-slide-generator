@@ -1687,7 +1687,7 @@ export function syntheticAgentTestCaseList(items: TestCaseListEntry[] = [synthet
 
 /**
  * One persisted run exactly as the execute routes serialize it: an execute response
- * carries boolean currency flags, and no verdict field exists (#268 adds verdicts).
+ * carries boolean currency flags, and the four verdict keys are present and null.
  */
 export function syntheticTestRunEvidence(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
   return {
@@ -1723,6 +1723,10 @@ export function syntheticTestRunEvidence(overrides: Partial<TestRunEvidence> = {
     output_tokens: null,
     run_by: 'admin@test.com',
     run_at: '2026-09-26T10:00:00Z',
+    verdict: null,
+    verdict_reviewer: null,
+    verdict_at: null,
+    verdict_notes: null,
     candidate_is_current: true,
     base_release_is_current: true,
     ...overrides,

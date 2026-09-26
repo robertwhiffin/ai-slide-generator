@@ -1192,6 +1192,7 @@ export interface PublishedBaselineTestRunRequest {
 
 export type TestRunKind = 'candidate' | 'published_baseline';
 export type TestRunExecutionStatus = 'completed' | 'model_error' | 'assembly_error' | 'incomplete';
+export type TestRunVerdict = 'approved' | 'rejected';
 
 export interface DeterministicCheckIssue {
   code: string;
@@ -1207,7 +1208,9 @@ export interface DeterministicCheckResult {
 
 /**
  * One immutable run, as evidence. Execute responses carry boolean currency flags and
- * reads carry `null`. There are no verdict fields: #268 adds them.
+ * reads carry `null`. The four verdict fields are always present: all `null` until a
+ * verdict is recorded, then `verdict`, `verdict_reviewer` and `verdict_at` together,
+ * with `verdict_notes` optional (#268).
  */
 export interface TestRunEvidence {
   run_id: number;
@@ -1234,6 +1237,10 @@ export interface TestRunEvidence {
   output_tokens: number | null;
   run_by: string;
   run_at: string;
+  verdict: TestRunVerdict | null;
+  verdict_reviewer: string | null;
+  verdict_at: string | null;
+  verdict_notes: string | null;
   candidate_is_current: boolean | null;
   base_release_is_current: boolean | null;
 }
@@ -1284,6 +1291,7 @@ const TEST_RUN_KINDS: readonly TestRunKind[] = ['candidate', 'published_baseline
 const TEST_RUN_STATUSES: readonly TestRunExecutionStatus[] = [
   'completed', 'model_error', 'assembly_error', 'incomplete',
 ];
+const TEST_RUN_VERDICTS: readonly TestRunVerdict[] = ['approved', 'rejected'];
 const DETERMINISTIC_CHECK_NAMES: readonly DeterministicCheckResult['name'][] = ['output_contract', 'execution'];
 const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
 
@@ -1299,7 +1307,8 @@ const TEST_RUN_KEYS = [
   'assembled_prompt', 'execution_status', 'error_detail', 'deterministic_checks_passed',
   'deterministic_check_results', 'candidate_raw_output', 'candidate_structured_output',
   'baseline_raw_output', 'baseline_structured_output', 'latency_ms', 'input_tokens',
-  'output_tokens', 'run_by', 'run_at', 'candidate_is_current', 'base_release_is_current',
+  'output_tokens', 'run_by', 'run_at', 'verdict', 'verdict_reviewer', 'verdict_at',
+  'verdict_notes', 'candidate_is_current', 'base_release_is_current',
 ] as const;
 
 function isAgentKey(value: unknown): value is AgentKey {
@@ -1320,6 +1329,21 @@ function isNullableNonnegativeInteger(value: unknown): value is number | null {
 
 function isNullableBoolean(value: unknown): value is boolean | null {
   return value === null || typeof value === 'boolean';
+}
+
+/**
+ * The verdict fields' types and pairing: `verdict`, `verdict_reviewer` and `verdict_at`
+ * are all null or all set, and notes exist only beside a verdict.
+ */
+function isVerdictRecord(value: Record<string, unknown>): boolean {
+  if (value.verdict === null) {
+    return value.verdict_reviewer === null && value.verdict_at === null && value.verdict_notes === null;
+  }
+  return typeof value.verdict === 'string'
+    && (TEST_RUN_VERDICTS as readonly string[]).includes(value.verdict)
+    && typeof value.verdict_reviewer === 'string'
+    && typeof value.verdict_at === 'string'
+    && isNullableString(value.verdict_notes);
 }
 
 function isTestCaseListEntry(value: unknown): value is TestCaseListEntry {
@@ -1390,6 +1414,7 @@ export function parseTestRunEvidence(value: unknown): TestRunEvidence | null {
     && isNullableNonnegativeInteger(value.output_tokens)
     && typeof value.run_by === 'string'
     && typeof value.run_at === 'string'
+    && isVerdictRecord(value)
     && isNullableBoolean(value.candidate_is_current)
     && isNullableBoolean(value.base_release_is_current);
   return valid ? value as unknown as TestRunEvidence : null;

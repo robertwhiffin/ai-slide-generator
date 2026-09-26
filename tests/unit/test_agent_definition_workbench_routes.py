@@ -638,6 +638,8 @@ def test_main_app_registers_the_dedicated_workbench_route():
         "/api/admin/agent-definitions/published/{agent_key}/test-runs": {"POST"},
         "/api/admin/agent-definitions/test-runs/{run_id}": {"GET"},
         "/api/admin/agent-definitions/test-cases/{test_case_id}/runs": {"GET"},
+        "/api/admin/agent-definitions/test-runs/{run_id}/verdict": {"POST"},
+        "/api/admin/agent-definitions/readiness": {"GET"},
     }
     for path, methods in expected_methods.items():
         matches = [
@@ -5304,6 +5306,10 @@ _TEST_RUN_KEYS = {
     "output_tokens",
     "run_by",
     "run_at",
+    "verdict",
+    "verdict_reviewer",
+    "verdict_at",
+    "verdict_notes",
     "candidate_is_current",
     "base_release_is_current",
 }
@@ -5451,6 +5457,9 @@ def _assert_body_is_the_row(body: dict[str, object], row: AgentTestRun) -> None:
         assert body[column] == getattr(row, column), column
     assert body["run_id"] == row.id
     assert isinstance(body["run_at"], str) and body["run_at"]
+    for column in ("verdict", "verdict_reviewer", "verdict_notes"):
+        assert body[column] == getattr(row, column), column
+    assert (body["verdict_at"] is None) == (row.verdict_at is None)
 
 
 def _integers_in(document: object) -> list[int]:
@@ -5557,7 +5566,7 @@ def test_test_run_executes_require_a_trusted_principal_before_body_or_service(
 
 
 def test_candidate_run_returns_201_with_the_exact_evidence_row(session_factory, monkeypatch):
-    """Catches a route that reshapes, drops or invents evidence, or returns verdicts."""
+    """Catches a route that reshapes, drops or invents evidence, or invents a verdict."""
     _force_admin(monkeypatch, is_admin=True)
     adapter = DeterministicFakeModelAdapter()
     identity = _identity_row(session_factory)
@@ -5570,8 +5579,10 @@ def test_candidate_run_returns_201_with_the_exact_evidence_row(session_factory, 
     rows = _test_run_rows(session_factory)
     assert len(rows) == 1
     _assert_body_is_the_row(body, rows[0])
+    # #268 C16: the four verdict keys are always present, and null until a verdict.
     for verdict_field in ("verdict", "verdict_reviewer", "verdict_at", "verdict_notes"):
-        assert verdict_field not in body
+        assert verdict_field in body
+        assert body[verdict_field] is None
     assert body["run_kind"] == "candidate"
     assert (body["test_case_id"], body["test_case_version"]) == (case_id, 1)
     assert body["agent_key"] == "architect"
@@ -6408,3 +6419,702 @@ def test_test_run_paths_do_not_collide_with_existing_admin_routes():
     for _method, path in new_routes:
         for reserved in ("model-endpoints", "model-endpoint-probe", "structured"):
             assert reserved not in path
+
+
+# ===========================================================================
+# #268 Task 3: the verdict and readiness routes on the one admin router
+# (C15, C16, C17)
+# ===========================================================================
+
+from sqlalchemy.exc import IntegrityError  # noqa: E402
+
+from src.services.agent_test_workbench import (  # noqa: E402
+    IneligibleForApprovalError,
+)
+
+_READINESS_URL = f"{_TEST_RUN_PREFIX}/readiness"
+_VERDICT_BODY = {"verdict": "approved", "notes": "Looks right."}
+_NOT_COMPLETED_MESSAGE = "Only a completed run can take a verdict."
+_CHECKS_FAILED_MESSAGE = "A run whose deterministic checks failed cannot be approved."
+
+
+def _verdict_url(run_id: int) -> str:
+    return f"{_TEST_RUN_PREFIX}/test-runs/{run_id}/verdict"
+
+
+def _new_candidate_run(client: TestClient, session_factory, agent_key="architect") -> dict:
+    response = client.post(
+        _candidate_run_url(agent_key), json=_candidate_body(session_factory, agent_key)
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def _insert_run_like(session_factory, source_run_id: int, **overrides) -> int:
+    """An INSERT-only copy of a real run (#268 C8): never an UPDATE of a run row."""
+    with session_factory() as session:
+        source = session.get(AgentTestRun, source_run_id)
+        values = {
+            column.key: getattr(source, column.key)
+            for column in AgentTestRun.__table__.columns
+            if column.key != "id"
+        }
+    values.update(overrides)
+    with session_factory() as session:
+        row = AgentTestRun(**values)
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+def _verdict_columns(session_factory, run_id: int) -> tuple[object, ...]:
+    with session_factory() as session:
+        row = session.get(AgentTestRun, run_id)
+        return (row.verdict, row.verdict_reviewer, row.verdict_at, row.verdict_notes)
+
+
+def _change_role_prompt(client: TestClient, agent_key: str = "architect") -> None:
+    """A real draft save (#268 C13): the role's candidate hash moves off the base."""
+    body = _workbench(client)
+    node = _model_node(body, agent_key)
+    response = client.put(
+        _draft_save_url(agent_key),
+        json={
+            "lock_version": body["draft"]["lock_version"],
+            "candidate": _editable_candidate(
+                node, prompt_text=f"{node['draft']['prompt_text']}\n\nA #268 change."
+            ),
+        },
+    )
+    assert response.status_code == 200
+
+
+def _json_shape(value: object) -> object:
+    """``dataclasses.asdict`` output as the wire renders it (tuples are arrays)."""
+    if isinstance(value, dict):
+        return {key: _json_shape(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_shape(item) for item in value]
+    return value
+
+
+_VERDICT_AND_READINESS_ROUTES = [
+    ("POST", lambda run_id: _verdict_url(run_id), "record_verdict"),
+    ("GET", lambda _run_id: _READINESS_URL, "draft_readiness"),
+]
+_VERDICT_AND_READINESS_IDS = ["verdict", "readiness"]
+
+
+def _forbid_verdict_and_readiness_service(monkeypatch, calls: list[str]) -> None:
+    def _must_not_reach(*_args, **_kwargs):
+        calls.append("service")
+        raise AssertionError("authorization reached the verdict or readiness service")
+
+    for method in ("record_verdict", "draft_readiness", "readiness_under_parent_lock"):
+        monkeypatch.setattr(AgentTestWorkbench, method, _must_not_reach)
+
+
+# --- authorization before the body or the service (C15) ---------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "url_for", "_service"),
+    _VERDICT_AND_READINESS_ROUTES,
+    ids=_VERDICT_AND_READINESS_IDS,
+)
+def test_verdict_and_readiness_routes_deny_non_admins_before_body_or_service(
+    session_factory, monkeypatch, method, url_for, _service
+):
+    """Catches either route outside the admin router, or a body read before auth."""
+    _force_admin(monkeypatch, is_admin=False)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("authorization parsed the raw request body")
+
+    _forbid_verdict_and_readiness_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    before = _all_table_rows(session_factory)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        response = client.request(
+            method,
+            url_for(1),
+            content=b'{not json; "verdict": "SUPER_SECRET_VERDICT"}',
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Admin access required"}
+    assert "SUPER_SECRET_VERDICT" not in response.text
+    assert _all_table_rows(session_factory) == before
+
+
+@pytest.mark.parametrize("principal", [None, " \t "])
+def test_the_verdict_route_requires_a_trusted_principal_before_body_or_service(
+    session_factory, monkeypatch, principal
+):
+    """Catches a verdict recorded, or its body read, with no reviewer to audit."""
+    _force_admin(monkeypatch, is_admin=True)
+    set_current_user(principal)
+    calls: list[str] = []
+
+    async def _must_not_parse_json(_request):
+        calls.append("body")
+        raise AssertionError("a missing principal parsed the body")
+
+    _forbid_verdict_and_readiness_service(monkeypatch, calls)
+    monkeypatch.setattr(agent_definition_routes.Request, "json", _must_not_parse_json)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        client.app.dependency_overrides[agent_definition_routes.require_admin] = lambda: None
+        response = client.post(
+            _verdict_url(1),
+            content=b"{not json; should not be parsed}",
+            headers={"content-type": "application/json"},
+        )
+
+    assert calls == []
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Authenticated principal required"}
+
+
+def test_a_blank_reviewer_reaching_the_writer_is_the_principal_403(
+    session_factory, monkeypatch
+):
+    """Catches the writer's blank-``actor`` issue leaking out as a client 422.
+
+    The principal dependency already refuses a blank principal, so this is the
+    route's second line: the reviewer is never the client's to fix.
+    """
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        client.app.dependency_overrides[
+            agent_definition_routes.require_draft_write_principal
+        ] = lambda: "   "
+        response = client.post(_verdict_url(run["run_id"]), json=_VERDICT_BODY)
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Authenticated principal required"}
+    assert _verdict_columns(session_factory, run["run_id"]) == (None, None, None, None)
+
+
+# --- the verdict write (C15, C16) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("verdict", "notes"),
+    [("approved", "Looks right."), ("rejected", None)],
+    ids=["approve", "reject-without-notes"],
+)
+def test_a_verdict_returns_200_evidence_with_the_principal_as_reviewer(
+    session_factory, monkeypatch, verdict, notes
+):
+    """Catches a verdict route that returns 201, loses the evidence, or audits
+    anyone but the authenticated principal."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        response = client.post(
+            _verdict_url(run["run_id"]), json={"verdict": verdict, "notes": notes}
+        )
+        read_back = client.get(_run_url(run["run_id"]))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == _TEST_RUN_KEYS
+    assert body["verdict"] == verdict
+    assert body["verdict_reviewer"] == _ROUTE_ACTOR
+    assert body["verdict_notes"] == notes
+    assert isinstance(body["verdict_at"], str) and body["verdict_at"]
+    assert (body["candidate_is_current"], body["base_release_is_current"]) == (None, None)
+    _assert_body_is_the_row(body, _test_run_rows(session_factory)[0])
+    expected = dict(run)
+    expected.update(
+        verdict=verdict,
+        verdict_reviewer=_ROUTE_ACTOR,
+        verdict_at=body["verdict_at"],
+        verdict_notes=notes,
+        candidate_is_current=None,
+        base_release_is_current=None,
+    )
+    assert body == expected
+    assert read_back.json() == body
+
+
+def test_a_verdict_route_passes_exactly_the_body_and_the_principal(
+    session_factory, monkeypatch
+):
+    """Catches a reviewer, run id or notes taken from anywhere but their owner."""
+    _force_admin(monkeypatch, is_admin=True)
+    calls: list[dict[str, object]] = []
+    original = AgentTestWorkbench.record_verdict
+
+    def _recording(self, session, **kwargs):
+        calls.append(dict(kwargs))
+        return original(self, session, **kwargs)
+
+    monkeypatch.setattr(AgentTestWorkbench, "record_verdict", _recording)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        response = client.post(
+            _verdict_url(run["run_id"]), json={"verdict": "rejected", "notes": "  Kept.  "}
+        )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "run_id": run["run_id"],
+            "verdict": "rejected",
+            "reviewer": _ROUTE_ACTOR,
+            "notes": "  Kept.  ",
+        }
+    ]
+
+
+def test_an_approval_of_a_run_with_failed_checks_is_the_exact_ineligible_422(
+    session_factory, monkeypatch
+):
+    """Catches an ineligible approval written, or refused without its exact reason."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        source = _new_candidate_run(client, session_factory)
+        failing = _insert_run_like(
+            session_factory, source["run_id"], deterministic_checks_passed=False
+        )
+        response = client.post(_verdict_url(failing), json=_VERDICT_BODY)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "ineligible_for_approval",
+        "reason": "checks_failed",
+        "message": _CHECKS_FAILED_MESSAGE,
+    }
+    assert _verdict_columns(session_factory, failing) == (None, None, None, None)
+
+
+@pytest.mark.parametrize("verdict", ["approved", "rejected"])
+def test_a_verdict_on_a_run_that_did_not_complete_is_the_exact_not_completed_422(
+    session_factory, monkeypatch, verdict
+):
+    """Catches a model-error run taking either verdict (#268 C5)."""
+    _force_admin(monkeypatch, is_admin=True)
+    adapter = DeterministicFakeModelAdapter(mode="provider_unavailable")
+    with _run_app(session_factory, adapter) as client:
+        run = _new_candidate_run(client, session_factory)
+        assert run["execution_status"] == "model_error"
+        response = client.post(
+            _verdict_url(run["run_id"]), json={"verdict": verdict, "notes": None}
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "ineligible_for_approval",
+        "reason": "not_completed",
+        "message": _NOT_COMPLETED_MESSAGE,
+    }
+    assert _verdict_columns(session_factory, run["run_id"]) == (None, None, None, None)
+
+
+@pytest.mark.parametrize("run_id", [424242, 0, -3, _INT32_MAX + 1, 2**63])
+def test_a_verdict_on_an_unknown_or_unstorable_run_is_404(session_factory, monkeypatch, run_id):
+    """Catches an unknown run id reaching the database as a 500, or as a write."""
+    _force_admin(monkeypatch, is_admin=True)
+    before = _all_table_rows(session_factory)
+    with _run_app(session_factory) as client:
+        response = client.post(_verdict_url(run_id), json=_VERDICT_BODY)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Test run not found"}
+    assert _all_table_rows(session_factory) == before
+
+
+_FORBIDDEN_VERDICT_BODY_FIELDS = [
+    ("reviewer", "someone-else@example.com"),
+    ("verdict_reviewer", "someone-else@example.com"),
+    ("actor", "someone-else@example.com"),
+    ("run_by", "someone-else@example.com"),
+    ("verdict_at", "2020-01-01T00:00:00Z"),
+    ("run_id", 1),
+    ("verdict_notes", "a second notes field"),
+    ("execution_status", "completed"),
+    ("deterministic_checks_passed", True),
+]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    _FORBIDDEN_VERDICT_BODY_FIELDS,
+    ids=[field for field, _value in _FORBIDDEN_VERDICT_BODY_FIELDS],
+)
+def test_a_verdict_body_cannot_choose_any_server_owned_value(
+    session_factory, monkeypatch, field, value
+):
+    """Catches a verdict body that lets the client name the reviewer, the time,
+    the run or its eligibility (plan sabotage S3)."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        response = client.post(_verdict_url(run["run_id"]), json={**_VERDICT_BODY, field: value})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_verdict",
+        "errors": [
+            {"field": field, "code": "extra_forbidden", "message": "Extra inputs are not permitted"}
+        ],
+    }
+    assert _verdict_columns(session_factory, run["run_id"]) == (None, None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"verdict": "maybe", "notes": None}, [("verdict", "invalid_choice")]),
+        ({"verdict": "Approved", "notes": None}, [("verdict", "invalid_choice")]),
+        ({"verdict": 1, "notes": None}, [("verdict", "strict_type")]),
+        ({"verdict": None, "notes": None}, [("verdict", "strict_type")]),
+        ({"notes": None}, [("verdict", "strict_type")]),
+        ({"verdict": "approved"}, [("notes", "strict_type")]),
+        ({"verdict": "approved", "notes": 3}, [("notes", "strict_type")]),
+        ({"verdict": "approved", "notes": "  "}, [("notes", "blank")]),
+        ({"verdict": "approved", "notes": "x" * 2001}, [("notes", "too_long")]),
+        (
+            {"verdict": "maybe", "notes": ""},
+            [("verdict", "invalid_choice"), ("notes", "blank")],
+        ),
+    ],
+    ids=[
+        "unknown-verdict",
+        "wrong-case-verdict",
+        "number-verdict",
+        "null-verdict",
+        "missing-verdict",
+        "missing-notes",
+        "number-notes",
+        "blank-notes",
+        "long-notes",
+        "both-ordered",
+    ],
+)
+def test_an_invalid_verdict_body_is_the_ordered_invalid_verdict_422(
+    session_factory, monkeypatch, body, expected
+):
+    """Catches a coerced or unvalidated verdict body reaching the row."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        response = client.post(_verdict_url(run["run_id"]), json=body)
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert set(payload) == {"code", "errors"}
+    assert payload["code"] == "invalid_verdict"
+    assert [(error["field"], error["code"]) for error in payload["errors"]] == expected
+    for error in payload["errors"]:
+        assert isinstance(error["message"], str) and error["message"]
+    assert _verdict_columns(session_factory, run["run_id"]) == (None, None, None, None)
+
+
+def test_a_verdict_body_must_be_valid_json_and_a_json_object(session_factory, monkeypatch):
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        malformed = client.post(
+            _verdict_url(run["run_id"]),
+            content=b"{not json",
+            headers={"content-type": "application/json"},
+        )
+        not_an_object = client.post(_verdict_url(run["run_id"]), json=["approved"])
+
+    assert malformed.status_code == 422
+    assert malformed.json() == {
+        "code": "invalid_verdict",
+        "errors": [
+            {"field": "$", "code": "invalid_json", "message": "Request body must be valid JSON."}
+        ],
+    }
+    assert not_an_object.status_code == 422
+    assert not_an_object.json()["code"] == "invalid_verdict"
+    assert _verdict_columns(session_factory, run["run_id"]) == (None, None, None, None)
+
+
+def test_the_verdict_body_is_validated_before_the_run_is_looked_up(session_factory, monkeypatch):
+    """Catches a body error hidden behind a 404, or a lookup made for a bad body."""
+    _force_admin(monkeypatch, is_admin=True)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        AgentTestWorkbench,
+        "record_verdict",
+        lambda *_a, **_k: calls.append("service"),
+    )
+    with _run_app(session_factory) as client:
+        response = client.post(_verdict_url(424242), json={"verdict": 1, "notes": None})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_verdict"
+    assert calls == []
+
+
+def test_a_verdict_integrity_error_is_never_translated(session_factory, monkeypatch):
+    """Catches #269's linked-verdict trigger (23514) swallowed into a 409 or a 422
+    ineligibility (#268 C7): it propagates, and the server renders its 500."""
+    _force_admin(monkeypatch, is_admin=True)
+
+    def _trigger(self, session, **_kwargs):
+        raise IntegrityError("UPDATE agent_test_run", {}, Exception("SECRET_TRIGGER_TEXT"))
+
+    monkeypatch.setattr(AgentTestWorkbench, "record_verdict", _trigger)
+    with _run_app(session_factory) as client, pytest.raises(IntegrityError):
+        client.post(_verdict_url(1), json=_VERDICT_BODY)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        response = client.post(_verdict_url(1), json=_VERDICT_BODY)
+
+    assert response.status_code == 500
+    assert "SECRET_TRIGGER_TEXT" not in response.text
+    assert "ineligible" not in response.text
+
+
+def test_an_ineligibility_reason_the_wire_does_not_know_is_not_rendered(
+    session_factory, monkeypatch
+):
+    """Catches a new service reason serialized as an undocumented 422 code."""
+    _force_admin(monkeypatch, is_admin=True)
+
+    def _unknown(self, session, **kwargs):
+        raise IneligibleForApprovalError(kwargs["run_id"], "linked_to_release")
+
+    monkeypatch.setattr(AgentTestWorkbench, "record_verdict", _unknown)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        response = client.post(_verdict_url(1), json=_VERDICT_BODY)
+
+    assert response.status_code == 500
+    assert "linked_to_release" not in response.text
+
+
+def test_the_verdict_route_waits_on_the_run_row_lock_off_the_event_loop(
+    session_factory, monkeypatch
+):
+    """Catches the L3 ``FOR UPDATE`` wait blocking the server's event loop."""
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+    original = AgentTestWorkbench.record_verdict
+
+    def _observing(self, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop_running.append(False)
+        else:
+            loop_running.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentTestWorkbench, "record_verdict", _observing)
+    with _run_app(session_factory) as client:
+        run = _new_candidate_run(client, session_factory)
+        response = client.post(_verdict_url(run["run_id"]), json=_VERDICT_BODY)
+
+    assert response.status_code == 200
+    assert loop_running == [False]
+
+
+# --- readiness (C15, C17) ---------------------------------------------------
+
+
+def _readiness_of(session_factory) -> dict[str, object]:
+    with session_factory() as session:
+        result = AgentTestWorkbench().draft_readiness(session)
+    return _json_shape(dataclasses.asdict(result))
+
+
+def _readiness_case(body: dict, agent_key: str) -> dict:
+    agent = next(item for item in body["agents"] if item["agent_key"] == agent_key)
+    assert len(agent["cases"]) == 1
+    return agent["cases"][0]
+
+
+def test_readiness_of_an_unchanged_draft_is_200_all_ready_with_the_exact_shape(
+    session_factory, monkeypatch
+):
+    """Catches a readiness wire that relabels, camel-cases or reshapes the result."""
+    _force_admin(monkeypatch, is_admin=True)
+    identity = _identity_row(session_factory)
+    with _run_app(session_factory) as client:
+        response = client.get(_READINESS_URL)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {
+        "draft_lock_version",
+        "base_release_id",
+        "all_ready",
+        "blocking_agents",
+        "agents",
+    }
+    assert body == _readiness_of(session_factory)
+    assert body["draft_lock_version"] == _draft_lock_version(session_factory)
+    assert body["base_release_id"] == identity["release_id"]
+    assert (body["all_ready"], body["blocking_agents"]) == (True, [])
+    assert [agent["agent_key"] for agent in body["agents"]] == list(_GRAPH_V1_AGENT_KEYS)
+    for agent in body["agents"]:
+        assert set(agent) == {
+            "agent_key",
+            "candidate_hash",
+            "is_changed_from_base",
+            "ready",
+            "missing_required_case",
+            "cases",
+        }
+        assert (agent["is_changed_from_base"], agent["ready"]) == (False, True)
+        case = _readiness_case(body, agent["agent_key"])
+        assert set(case) == {
+            "agent_key",
+            "test_case_id",
+            "test_case_name",
+            "test_case_version",
+            "status",
+            "blocking",
+            "run_id",
+            "run_verdict",
+            "run_checks_passed",
+        }
+        assert case["test_case_id"] == _seed_test_case_id(session_factory, agent["agent_key"])
+        assert (case["status"], case["blocking"], case["run_id"]) == ("needs_test", False, None)
+
+
+def test_readiness_names_the_one_blocking_role_and_case(session_factory, monkeypatch):
+    """Catches readiness that hides the changed role, or blocks an unchanged one."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        _change_role_prompt(client, "architect")
+        response = client.get(_READINESS_URL)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == _readiness_of(session_factory)
+    assert (body["all_ready"], body["blocking_agents"]) == (False, ["architect"])
+    architect = next(agent for agent in body["agents"] if agent["agent_key"] == "architect")
+    assert (architect["is_changed_from_base"], architect["ready"]) == (True, False)
+    assert architect["missing_required_case"] is False
+    case = _readiness_case(body, "architect")
+    assert case["test_case_id"] == _seed_test_case_id(session_factory, "architect")
+    assert case["test_case_name"] == "architect_required_smoke_v1"
+    assert (case["status"], case["blocking"], case["run_id"]) == ("needs_test", True, None)
+    for agent in body["agents"]:
+        if agent["agent_key"] != "architect":
+            assert (agent["is_changed_from_base"], agent["ready"]) == (False, True)
+
+
+def test_readiness_follows_a_run_and_its_verdict_through_the_routes(session_factory, monkeypatch):
+    """Catches the readiness wire losing a status code, a run id or the verdict."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _run_app(session_factory) as client:
+        _change_role_prompt(client, "architect")
+        run = _new_candidate_run(client, session_factory)
+        awaiting = client.get(_READINESS_URL).json()
+        client.post(_verdict_url(run["run_id"]), json={"verdict": "rejected", "notes": None})
+        rejected = client.get(_READINESS_URL).json()
+        client.post(_verdict_url(run["run_id"]), json=_VERDICT_BODY)
+        approved = client.get(_READINESS_URL).json()
+
+    assert _readiness_case(awaiting, "architect") == {
+        "agent_key": "architect",
+        "test_case_id": run["test_case_id"],
+        "test_case_name": "architect_required_smoke_v1",
+        "test_case_version": 1,
+        "status": "awaiting_review",
+        "blocking": True,
+        "run_id": run["run_id"],
+        "run_verdict": None,
+        "run_checks_passed": True,
+    }
+    assert _readiness_case(rejected, "architect")["status"] == "test_failed"
+    assert _readiness_case(rejected, "architect")["run_verdict"] == "rejected"
+    assert (approved["all_ready"], approved["blocking_agents"]) == (True, [])
+    assert _readiness_case(approved, "architect")["status"] == "approved"
+    assert _readiness_case(approved, "architect")["blocking"] is False
+    assert _readiness_case(approved, "architect")["run_id"] == run["run_id"]
+
+
+def test_readiness_status_codes_are_the_service_codes_not_labels():
+    """Catches display labels ('Needs test') or a drifted code set on the wire (C17)."""
+    from typing import get_args
+
+    from src.api.schemas.agent_definitions import DraftReadinessResponse
+    from src.services.agent_test_workbench import ReadinessStatus
+
+    agent_model = DraftReadinessResponse.model_fields["agents"].annotation.__args__[0]
+    case_model = agent_model.model_fields["cases"].annotation.__args__[0]
+    assert set(get_args(case_model.model_fields["status"].annotation)) == set(
+        get_args(ReadinessStatus)
+    )
+    assert set(get_args(ReadinessStatus)) == {
+        "needs_test",
+        "test_failed",
+        "awaiting_review",
+        "approved",
+    }
+    for model in (DraftReadinessResponse, agent_model, case_model):
+        assert model.model_config.get("extra") == "forbid", model.__name__
+        assert all(name == name.lower() for name in model.model_fields), model.__name__
+
+
+def test_readiness_of_an_incomplete_configuration_is_the_existing_500(
+    session_factory, monkeypatch
+):
+    """Catches the un-retried parent-handoff error escaping as a raw traceback."""
+    _force_admin(monkeypatch, is_admin=True)
+
+    def _incomplete(self, session):
+        raise GraphConfigurationIntegrityError(
+            "graph configuration parent snapshot is inconsistent"
+        )
+
+    monkeypatch.setattr(AgentTestWorkbench, "draft_readiness", _incomplete)
+    with _run_app(session_factory, raise_server_exceptions=False) as client:
+        response = client.get(_READINESS_URL)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Graph configuration is incomplete"}
+    assert "parent snapshot" not in response.text
+
+
+def test_readiness_reads_off_the_event_loop(session_factory, monkeypatch):
+    """Catches the shared parent-lock wait blocking the server's event loop."""
+    _force_admin(monkeypatch, is_admin=True)
+    loop_running: list[bool] = []
+    original = AgentTestWorkbench.draft_readiness
+
+    def _observing(self, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop_running.append(False)
+        else:
+            loop_running.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentTestWorkbench, "draft_readiness", _observing)
+    with _run_app(session_factory) as client:
+        response = client.get(_READINESS_URL)
+
+    assert response.status_code == 200
+    assert loop_running == [False]
+
+
+def test_verdict_and_readiness_paths_are_on_the_one_router_and_collide_with_nothing():
+    """Catches the plan's off-router paths, or a GET that shadows ``/readiness`` (C15)."""
+    pairs = [
+        (method, route.path)
+        for route in router.routes
+        for method in sorted(getattr(route, "methods", set()))
+    ]
+    assert len(pairs) == len(set(pairs)), "two handlers share one method and path"
+    assert ("POST", "/api/admin/agent-definitions/test-runs/{run_id}/verdict") in pairs
+    assert ("GET", "/api/admin/agent-definitions/readiness") in pairs
+    assert [path for method, path in pairs if path.endswith("/readiness")] == [
+        "/api/admin/agent-definitions/readiness"
+    ]
+    for _method, path in pairs:
+        assert "agent-test-runs" not in path and "graph-draft" not in path
