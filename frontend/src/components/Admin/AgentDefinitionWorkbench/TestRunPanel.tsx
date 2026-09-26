@@ -5,6 +5,7 @@ import type {
   JsonValue,
   TestCaseListEntry,
   TestRunEvidence,
+  TestRunVerdict,
   UpdateTestCaseRequest,
 } from '../../../api/agentDefinitions';
 import type { AgentTestingState, TestOperationKind } from './draftEditorState';
@@ -32,7 +33,14 @@ const PENDING_TEXT: Record<TestOperationKind, string> = {
   testCaseCreate: 'Saving the test case…',
   testCaseRetire: 'Retiring the test case…',
   testCaseUpdate: 'Saving the new test case version…',
+  verdict: 'Recording the verdict…',
 };
+
+/** C26: the reason a verdict control is disabled is visible text, not only a tooltip. */
+export const VERDICT_NOT_COMPLETED_REASON = 'Only completed runs can be reviewed';
+export const VERDICT_CHECKS_FAILED_REASON = 'Deterministic checks did not pass';
+/** The server's notes limit; the textarea stops there. */
+const VERDICT_NOTES_MAX_LENGTH = 2000;
 
 const VIEWS = ['Input', 'Compare', 'Checks'] as const;
 type View = typeof VIEWS[number];
@@ -61,6 +69,20 @@ export interface TestRunPanelProps {
   ): Promise<TestCaseListEntry | null>;
   /** Reads one case version's stored runs; called when a case is selected. */
   onLoadTestRuns(agentKey: AgentKey, testCaseId: number): void | Promise<void>;
+  /** Records an admin's verdict on one shown run (candidate or published baseline). */
+  onRecordVerdict(
+    agentKey: AgentKey,
+    evidence: TestRunEvidence,
+    verdict: TestRunVerdict,
+    notes: string | null,
+  ): void | Promise<void>;
+}
+
+/** The P1 label is verdict-aware (C26): a run is "not approved" until it is approved. */
+function verdictLabel(evidence: TestRunEvidence): string {
+  if (evidence.verdict === 'approved') return 'approved';
+  if (evidence.verdict === 'rejected') return 'rejected';
+  return 'not approved';
 }
 
 /** Server evidence is only ever rendered as text: React escapes it, and nothing here parses markup. */
@@ -98,9 +120,89 @@ function RunFacts({ evidence }: { evidence: TestRunEvidence }) {
   );
 }
 
-function CandidateEvidence({ evidence, savedCandidateHash }: {
+/**
+ * The verdict controls for one shown run (C26). Approve run is disabled, with visible
+ * reason text, unless the run completed and its checks passed; Reject run only needs a
+ * completed run. An approved run offers only Reject run and a rejected one only Approve
+ * run. The recorded reviewer, time and notes are rendered as text only.
+ */
+function VerdictControls({ evidence, label, disabled, onRecord }: {
+  evidence: TestRunEvidence;
+  label: string;
+  disabled: boolean;
+  onRecord(verdict: TestRunVerdict, notes: string | null): void | Promise<void>;
+}) {
+  const id = useId();
+  const [notes, setNotes] = useState('');
+  const completed = evidence.execution_status === 'completed';
+  const approveReason = !completed
+    ? VERDICT_NOT_COMPLETED_REASON
+    : evidence.deterministic_checks_passed ? null : VERDICT_CHECKS_FAILED_REASON;
+  const rejectReason = completed ? null : VERDICT_NOT_COMPLETED_REASON;
+  const offersApprove = evidence.verdict !== 'approved';
+  const offersReject = evidence.verdict !== 'rejected';
+  const reason = offersApprove ? approveReason : rejectReason;
+
+  const submit = async (verdict: TestRunVerdict) => {
+    await onRecord(verdict, notes.trim() === '' ? null : notes);
+    setNotes('');
+  };
+
+  return (
+    <section aria-label={label} className="space-y-2 rounded-md border border-gray-200 p-2 text-xs">
+      {evidence.verdict === null
+        ? <p className="text-gray-600">No verdict recorded</p>
+        : (
+          <p className={evidence.verdict === 'approved' ? 'text-green-800' : 'text-red-800'}>
+            {`${evidence.verdict === 'approved' ? 'Approved' : 'Rejected'} by ${evidence.verdict_reviewer ?? ''} at ${evidence.verdict_at ?? ''}`}
+          </p>
+        )}
+      {evidence.verdict_notes !== null && <p className="text-gray-700">{`Notes: ${evidence.verdict_notes}`}</p>}
+      <div>
+        <label htmlFor={`${id}-notes`} className="block font-medium text-gray-700">{`${label} notes`}</label>
+        <textarea
+          id={`${id}-notes`}
+          value={notes}
+          maxLength={VERDICT_NOTES_MAX_LENGTH}
+          onChange={(event) => setNotes(event.currentTarget.value)}
+          rows={2}
+          className="mt-1 block w-full rounded-md border border-gray-300 p-1 text-xs"
+        />
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {offersApprove && (
+          <button
+            type="button"
+            disabled={disabled || approveReason !== null}
+            aria-describedby={approveReason === null ? undefined : `${id}-reason`}
+            onClick={() => { void submit('approved'); }}
+            className="rounded-md border border-green-300 px-2 py-1 font-medium text-green-800 disabled:cursor-not-allowed disabled:text-gray-400"
+          >
+            Approve run
+          </button>
+        )}
+        {offersReject && (
+          <button
+            type="button"
+            disabled={disabled || rejectReason !== null}
+            aria-describedby={rejectReason === null ? undefined : `${id}-reason`}
+            onClick={() => { void submit('rejected'); }}
+            className="rounded-md border border-red-300 px-2 py-1 font-medium text-red-800 disabled:cursor-not-allowed disabled:text-gray-400"
+          >
+            Reject run
+          </button>
+        )}
+      </div>
+      {reason !== null && <p id={`${id}-reason`} className="text-gray-600">{reason}</p>}
+    </section>
+  );
+}
+
+function CandidateEvidence({ evidence, savedCandidateHash, verdictDisabled, onRecordVerdict }: {
   evidence: TestRunEvidence | null;
   savedCandidateHash: string;
+  verdictDisabled: boolean;
+  onRecordVerdict(evidence: TestRunEvidence, verdict: TestRunVerdict, notes: string | null): void | Promise<void>;
 }) {
   if (evidence === null) return <p className="text-gray-600">{NO_RUN_YET}</p>;
   const candidateRecorded = evidence.candidate_raw_output !== null || evidence.candidate_structured_output !== null;
@@ -126,7 +228,7 @@ function CandidateEvidence({ evidence, savedCandidateHash }: {
         </div>
         <div>
           <h5 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-            Published baseline (not approved)
+            {`Published baseline (${verdictLabel(evidence)})`}
           </h5>
           {baselineRecorded ? (
             <>
@@ -136,6 +238,13 @@ function CandidateEvidence({ evidence, savedCandidateHash }: {
           ) : <p className="text-gray-600">{BASELINE_NOT_RECORDED}</p>}
         </div>
       </div>
+      <VerdictControls
+        key={evidence.run_id}
+        evidence={evidence}
+        label="Candidate run verdict"
+        disabled={verdictDisabled}
+        onRecord={(verdict, notes) => onRecordVerdict(evidence, verdict, notes)}
+      />
     </div>
   );
 }
@@ -313,6 +422,7 @@ export function TestRunPanel({
   onRetireTestCase,
   onUpdateTestCase,
   onLoadTestRuns,
+  onRecordVerdict,
 }: TestRunPanelProps) {
   const id = useId();
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -600,12 +710,17 @@ export function TestRunPanel({
               {view === 'Compare' && (
                 <>
                   <section aria-label="Test case evidence">
-                    <CandidateEvidence evidence={candidateEvidence} savedCandidateHash={savedCandidateHash} />
+                    <CandidateEvidence
+                      evidence={candidateEvidence}
+                      savedCandidateHash={savedCandidateHash}
+                      verdictDisabled={operationsDisabled}
+                      onRecordVerdict={(evidence, verdict, notes) => onRecordVerdict(agentKey, evidence, verdict, notes)}
+                    />
                   </section>
                   {baselineEvidence !== null && (
                     <section aria-label="Published baseline evidence" className="space-y-2 border-t border-gray-200 pt-3">
                       <h5 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        Published baseline rerun (not approved)
+                        {`Published baseline rerun (${verdictLabel(baselineEvidence)})`}
                       </h5>
                       <RunFacts evidence={baselineEvidence} />
                       {baselineEvidence.candidate_raw_output === null && baselineEvidence.candidate_structured_output === null
@@ -616,6 +731,13 @@ export function TestRunPanel({
                             <EvidenceBlock label="Raw output" value={baselineEvidence.candidate_raw_output} />
                           </>
                         )}
+                      <VerdictControls
+                        key={baselineEvidence.run_id}
+                        evidence={baselineEvidence}
+                        label="Published baseline verdict"
+                        disabled={operationsDisabled}
+                        onRecord={(verdict, notes) => onRecordVerdict(agentKey, baselineEvidence, verdict, notes)}
+                      />
                     </section>
                   )}
                 </>
