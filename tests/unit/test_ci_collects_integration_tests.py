@@ -337,3 +337,19 @@ def test_agent_schema_overlay_is_collected_by_integration_graph():
         "upgrade and two-session serialization assertions must execute against "
         "PostgreSQL."
     )
+
+
+def test_graph_release_publication_is_collected_by_integration_graph():
+    """#269's atomic publication core belongs in the graph CI job.
+
+    Its lock-statement order, rollback-at-every-write-seam and published-history
+    guard assertions need real PostgreSQL row locks, deferred constraint
+    triggers and backend PIDs, none of which SQLite can express.
+    """
+    target = "tests/integration/test_graph_release_publication_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its publication lock-order, rollback and "
+        "release-history guard assertions must execute against PostgreSQL."
+    )
