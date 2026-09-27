@@ -100,6 +100,9 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
   if (!selectedNode) return <div role="alert">The Graph contains no nodes.</div>;
 
   const selectNode = (node: AgentNode) => setSelectedKey(node.agent_key);
+  // A role is changed when its saved draft differs from the published definition.
+  const changedAgentCount = Object.values(editor.state.byAgent)
+    .filter((entry) => entry.saved.candidate_hash !== entry.publishedHash).length;
   const pending = editor.state.pendingSave;
   const selectedTestOperation: TestOperationKind | null = pending !== null
     && pending.agentKey === selectedNode.agent_key
@@ -125,7 +128,18 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
             <dt className="font-medium text-gray-500">Lock version</dt>
             <dd>{editor.state.draft.lock_version}</dd>
           </div>
+          <div>
+            <dt className="font-medium text-gray-500">Changed agents</dt>
+            <dd>{changedAgentCount}</dd>
+          </div>
         </dl>
+        {/* A plain anchor (#269): the Vitest suites render the workbench without a Router. */}
+        <a
+          href="/admin/agent-definitions/review"
+          className="rounded bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+        >
+          Review & Publish
+        </a>
       </header>
 
       <div data-testid="workbench-overflow" className="max-w-full overflow-x-auto pb-2">

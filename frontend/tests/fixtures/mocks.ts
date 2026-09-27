@@ -3,6 +3,7 @@
  * These mocks simulate the backend responses for testing.
  */
 import type {
+  ActiveRelease,
   AgentDefinitionWorkbenchResponse,
   AgentKey,
   AgentReadiness,
@@ -24,6 +25,17 @@ import type {
   TestCaseListEntry,
   TestCaseReadiness,
   TestRunEvidence,
+  ChangedDefinitionPreview,
+  DraftFieldError,
+  DraftMetadata,
+  NothingToPublishResponse,
+  PublicationGap,
+  PublicationNotReadyResponse,
+  PublicationValidationErrorResponse,
+  PublishReleaseSuccessResponse,
+  ReleaseFieldDiff,
+  ReleasePreviewResponse,
+  StalePublicationResponse,
 } from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
@@ -1831,4 +1843,187 @@ export function syntheticVerdictIneligible(
     reason,
     message: messages[reason],
   };
+}
+
+// ============================================================
+// #269: Graph Release preview and publication (Task 6; Task 7's Playwright reuses these)
+// ============================================================
+
+const RELEASE_ROLES: AgentKey[] = [
+  'architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer',
+];
+
+/** The architect's saved candidate in the release fixtures (a changed role). */
+export const RELEASE_ARCHITECT_CANDIDATE_HASH = 'c'.repeat(64);
+
+/** The active Graph Version 1, as `GET /release-preview` embeds it. */
+export function syntheticReleaseV1(): ActiveRelease {
+  return structuredClone(syntheticAgentDefinitionWorkbench.active_release);
+}
+
+/** The Graph Version 2 a successful publish returns. */
+export function syntheticReleaseV2(overrides: Partial<ActiveRelease> = {}): ActiveRelease {
+  return {
+    release_id: 42,
+    version_number: 2,
+    previous_release_id: 41,
+    restored_from_release_id: null,
+    release_note: 'Tighten the architect outline',
+    published_by: 'admin@example.com',
+    published_at: '2026-09-27T10:00:00Z',
+    effective_from: '2026-09-27T10:00:00Z',
+    effective_to: null,
+    ...overrides,
+  };
+}
+
+/** The shared draft at `lock_version`, based on Graph Version 1 unless overridden. */
+export function syntheticReleaseDraft(overrides: Partial<DraftMetadata> = {}): DraftMetadata {
+  return {
+    draft_id: 1,
+    base_release_id: 41,
+    base_version_number: 1,
+    lock_version: 3,
+    updated_by: 'admin@example.com',
+    updated_at: '2026-09-27T09:00:00Z',
+    ...overrides,
+  };
+}
+
+/** The architect's two field diffs: a multi-line prompt edit and a temperature change. */
+export function syntheticArchitectFieldDiffs(): ReleaseFieldDiff[] {
+  return [
+    {
+      field: 'prompt_text',
+      published: 'Plan the deck.\nUse three sections.\nCite sources.',
+      candidate: 'Plan the deck.\nUse four sections.\nCite sources.',
+    },
+    { field: 'model.temperature', published: 0.2, candidate: 0.4 },
+  ];
+}
+
+export function syntheticChangedDefinition(
+  agentKey: AgentKey = 'architect',
+  overrides: Partial<ChangedDefinitionPreview> = {},
+): ChangedDefinitionPreview {
+  return {
+    agent_key: agentKey,
+    published_revision_id: 7,
+    published_content_hash: SEED_CANDIDATE_HASH,
+    candidate_hash: RELEASE_ARCHITECT_CANDIDATE_HASH,
+    field_diffs: syntheticArchitectFieldDiffs(),
+    ...overrides,
+  };
+}
+
+/**
+ * The exact `GET /release-preview` 200 for a draft whose architect changed and whose one
+ * required architect case is approved: publishable at lock 3, next Graph Version 2.
+ */
+export function syntheticReleasePreview(overrides: Partial<ReleasePreviewResponse> = {}): ReleasePreviewResponse {
+  return {
+    draft: syntheticReleaseDraft(),
+    active_release: syntheticReleaseV1(),
+    next_version_number: 2,
+    changed: [syntheticChangedDefinition()],
+    readiness: syntheticDraftReadinessBody({
+      draft_lock_version: 3,
+      agents: {
+        architect: syntheticAgentReadiness('architect', {
+          candidate_hash: RELEASE_ARCHITECT_CANDIDATE_HASH,
+          is_changed_from_base: true,
+          ready: true,
+          cases: [syntheticTestCaseReadiness({ status: 'approved', run_id: 501, run_verdict: 'approved', run_checks_passed: true })],
+        }),
+      },
+    }),
+    validation_issues: [],
+    publishable: true,
+    ...overrides,
+  };
+}
+
+/** The preview after Graph Version 2 is published: nothing changed, the draft rebased. */
+export function syntheticPublishedReleasePreview(): ReleasePreviewResponse {
+  return {
+    draft: syntheticReleaseDraft({ base_release_id: 42, base_version_number: 2, lock_version: 4 }),
+    active_release: syntheticReleaseV2(),
+    next_version_number: 3,
+    changed: [],
+    readiness: syntheticDraftReadinessBody({ draft_lock_version: 4, base_release_id: 42 }),
+    validation_issues: [],
+    publishable: false,
+  };
+}
+
+/** The exact `POST /releases` 200: Graph Version 2 with the architect's approval as evidence. */
+export function syntheticPublishSuccess(): PublishReleaseSuccessResponse {
+  return {
+    release: syntheticReleaseV2(),
+    previous_release_id: 41,
+    changed_agents: ['architect'],
+    mappings: Object.fromEntries(RELEASE_ROLES.map((agentKey, index) => [agentKey, {
+      agent_definition_revision_id: agentKey === 'architect' ? 90 : index + 1,
+      content_hash: agentKey === 'architect' ? RELEASE_ARCHITECT_CANDIDATE_HASH : SEED_CANDIDATE_HASH,
+      reused: agentKey !== 'architect',
+    }])) as PublishReleaseSuccessResponse['mappings'],
+    evidence: [{ agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101, evidence_kind: 'approval' }],
+    draft: syntheticReleaseDraft({ base_release_id: 42, base_version_number: 2, lock_version: 4 }),
+  };
+}
+
+/** The exact stale 409: another admin saved (lock 5) and Graph Version 1 is still active. */
+export function syntheticStalePublication(overrides: Partial<StalePublicationResponse> = {}): StalePublicationResponse {
+  return {
+    code: 'stale_publication',
+    expected_lock_version: 3,
+    current_lock_version: 5,
+    active_release: { release_id: 41, version_number: 1 },
+    draft: syntheticReleaseDraft({ lock_version: 5 }),
+    ...overrides,
+  };
+}
+
+export function syntheticNothingToPublish(): NothingToPublishResponse {
+  return {
+    code: 'nothing_to_publish',
+    active_release: { release_id: 41, version_number: 1 },
+    draft: syntheticReleaseDraft(),
+  };
+}
+
+/** The exact not-ready 409; the gaps default to one architect case without an approval. */
+export function syntheticPublicationNotReady(
+  gaps: PublicationGap[] = [{ agent_key: 'architect', test_case_id: 101, code: 'no_eligible_approval' }],
+): PublicationNotReadyResponse {
+  return {
+    code: 'publication_not_ready',
+    gaps,
+    readiness: syntheticDraftReadinessBody({
+      draft_lock_version: 3,
+      all_ready: false,
+      blocking_agents: ['architect'],
+      agents: {
+        architect: syntheticAgentReadiness('architect', {
+          candidate_hash: RELEASE_ARCHITECT_CANDIDATE_HASH,
+          is_changed_from_base: true,
+          ready: false,
+          cases: [syntheticTestCaseReadiness({ status: 'awaiting_review', blocking: true, run_id: 501, run_checks_passed: true })],
+        }),
+      },
+    }),
+  };
+}
+
+/** The service's blank-note triple, verbatim (`_validate_publication_request`). */
+export const RELEASE_NOTE_BLANK_ERROR: DraftFieldError = {
+  field: 'release_note',
+  code: 'blank',
+  message: 'Release note must not be blank.',
+};
+
+export function syntheticPublicationInvalid(
+  errors: DraftFieldError[] = [RELEASE_NOTE_BLANK_ERROR],
+): PublicationValidationErrorResponse {
+  return { code: 'invalid_publication', errors };
 }

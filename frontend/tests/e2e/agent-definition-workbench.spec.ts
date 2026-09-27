@@ -1515,7 +1515,12 @@ test('the forbidden-action rule fires on every banned name and spares the legiti
     expect(forbidsActionName(forbidden)).toBe(true);
   }
   for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
-  expect(ALLOWED_ACTION_NAMES).toHaveLength(7);
+  expect(ALLOWED_ACTION_NAMES).toHaveLength(8);
+  // #269's header link is exempt by exact whole name only (C44).
+  expect(ALLOWED_ACTION_NAMES).toContain('Review & Publish');
+  expect(forbidsActionName('Review & Publish')).toBe(false);
+  expect(forbidsActionName('Review & Publish now')).toBe(true);
+  expect(forbidsActionName('Review & publish')).toBe(true);
   // #268's two verdict controls are exempt by exact name only (C23).
   expect(ALLOWED_ACTION_NAMES).toContain('Approve run');
   expect(ALLOWED_ACTION_NAMES).toContain('Reject run');
