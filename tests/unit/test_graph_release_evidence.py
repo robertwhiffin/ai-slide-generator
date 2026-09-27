@@ -517,6 +517,28 @@ def test_no_required_case_then_stale_hash_gaps_are_ordered_by_role(factory):
     assert _links(factory) == [] and _release_count(factory) == 1
 
 
+def test_a_later_roles_missing_case_sorts_after_an_earlier_roles_case_gap(factory):
+    """C1 order is role order first: builder's ``no_required_case`` follows
+    architect's ``no_eligible_approval`` even though it is emitted first."""
+    _save(factory, "architect", "A changed architect prompt for gap order.")
+    _save(factory, "builder", "A changed builder prompt for gap order.")
+    with factory() as db:
+        db.execute(
+            update(AgentTestCase)
+            .where(AgentTestCase.id == _seed_case_id(factory, "builder"))
+            .values(is_active=False)
+        )
+        db.commit()
+
+    result = _publish(factory)
+
+    assert isinstance(result, PublicationNotReady)
+    assert result.locked_gaps == (
+        PublicationGap("architect", _seed_case_id(factory), "no_eligible_approval"),
+        PublicationGap("builder", None, "no_required_case"),
+    )
+
+
 def test_several_required_cases_of_one_role_are_gaps_in_id_order(factory):
     _save(factory, "architect", "A changed architect prompt for two cases.")
     workbench = AgentTestWorkbench()
