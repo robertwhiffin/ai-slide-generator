@@ -167,3 +167,28 @@ Task 5: complete (commits `04abb2d25..52972f731`). Phase A (Tasks 0-A, 1, 5) com
 ## Phase B start — 2026-09-27
 #268 merged `16aa02b76`, #269 merged `c7ea1d943`, #270 merged `12a521dc7` (all locally, all whole-branch reviewed). #271 rebased cleanly onto `12a521dc7` (12 commits, no conflicts). INTEGRATION_BASE = `12a521dc7`.
 Carries into #271 Phase B: (1) C7/Task 8 — `resolve_engine_mode_or(..., fallback="monolith")` at `src/api/routes/chat.py:~490, ~697` silently falls back to the monolith on a DB failure; (2) the id-equals-version carry from #270 is CLOSED (whole-branch review found none across #268/#269/#270); (3) epic-level review must cover: the Q7 rollback caveat (accepted), the C32 endpoint-policy on rollback, `test_usage_service` midnight flake, `test_shared_deck_mutation_attribution` intermittent hang, `test_dependencies_resolve_on_proxy` network dependency; (4) all L0 locks via `_lock_current_parents` (AST scanner); (5) the forbidden-action count is 8; (6) CI has no ESLint job (found by #270's review — N2).
+
+## Task 0 phase B — 2026-09-27 (at HEAD `9a63ab1b7`, INTEGRATION_BASE `12a521dc7`)
+
+- **Bases.**
+  - `12a521dc7` is an ancestor of HEAD.
+  - Code-wise, `12a521dc7..HEAD` is exactly the rebased Phase A commits `92c1fa49a`, `761e76703` and `119e673ce`. Each is patch-id-identical to its pre-rebase original. Everything else in the range is docs.
+  - Every predecessor merge and reviewed head is recorded in `predecessor-heads.md`, with ancestry proven: #264, #266, #267, the xdist fix, #268, #269 and #270.
+  - `TASK1_BASE` (`050062935`) is intentionally no longer an ancestor (C45).
+- **Corrections 24–46** are appended to `PLAN-CORRECTIONS.md`, together with a per-task self-consistency table, a producer/consumer table and a Phase B blocking summary. Corrections 1–23 are not edited. Errata: C25 overrides C11.3, C26 overrides C3.4, C24 overrides C7's 503-handler claim, C35 overrides C21's sessions claim, and C31 overrides C20's count.
+- **Cause baseline** (`reports/preflight-phase-b.md`):
+  - **Unit:** 2 failed / 7169 passed / 110 skipped. The 2 are exactly the `test_deploy_autoscaling` pair. The skip causes are unchanged.
+  - **PostgreSQL:** all 33 `integration-graph` files, one per invocation, 549 passed, 0 skips, 1 documented xfail. The attribution file ran in 17 s under `timeout 120`, with no hang. The `tellr_int_*` databases were unchanged (5).
+  - **Frontend:** Vitest 21 files / 1099 passed. The app and node typechecks (`tsc --noEmit -p`) are clean.
+  - **`frontend/tests` typecheck:** 1 error with the C3 config and the d.ts.
+  - **ESLint on `frontend/tests`:** 25 pre-existing errors in 12 files.
+- **Ruling (controller to confirm):**
+  - Task 2 is **GO** once the C23 scoped re-review of C24–C46 has passed. None of C24–C46 blocks Task 2 itself.
+  - Task 8 is **NO-GO** until the user rules on C24, which reverses the ws4d fail-open contract.
+  - Task 13 is **NO-GO** until the user authorises the dev-workspace read (C43).
+- **For the user:**
+  1. C24: approve fail-closed engine-mode resolution at all three sites. This inverts four ws4d tests.
+  2. Task 13 / #266 m9: authorise the read-only dev-workspace probe, or accept "m9 open: release gate unverified".
+  3. The deploy_autoscaling issue (still open).
+  4. #266 m7 (still open).
+  5. A CI ESLint job as a follow-up issue (carry 6).
