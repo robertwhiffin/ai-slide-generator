@@ -84,3 +84,30 @@ Note: S5 (controller) goes RED in `agent-definition-workbench.spec.ts` (the brow
 1. **Test (f) is a static test.** `(f)` proves the fixture is correct (the stems still flag the named actions) but does not walk production controls. The production sweep is in `agent-definition-workbench.spec.ts`. This is the same approach as the existing static rule test in that spec.
 
 2. **The admin-route-gate test does not mock `/api/admin/agent-definitions/release-preview`.** The `failAdminSubresources` call in `beforeEach` catches `**/api/admin/**` and returns 500, so any preview fetch is answered 500 before the route renders. The test confirms the URL changes to `/` before any admin content appears.
+
+---
+
+## Fix round 1
+
+**Finding I-1 (Important):** the no-flash assertion in `admin-route-gate.spec.ts` was trivially true. The original test checked `toHaveCount(0)` only AFTER `toHaveURL` had resolved the redirect, and the identity was resolved immediately via `mockIdentity(page, false)`. No flash could ever be detected.
+
+**Root cause:** `page.goto` returns after `load` (before React's `useEffect` for setup status fires). Immediately after goto, the app is in "Loading..." state; routes have not rendered. `toHaveCount(0)` passed trivially because no routes were rendered yet, not because RequireAdmin was protecting correctly.
+
+**Fix (commits `ed8e05dd8` and `64c2e9fcb`):**
+1. Replaced `mockIdentity(page, false)` with an identity-hold route (mirrors `:106-139`).
+2. Added a route counter for `/release-preview` to assert 0 GETs fired.
+3. Navigated to `/admin/agent-definitions/review`.
+4. Waited for the app's own setup-status "Loading..." div to disappear (`waitForFunction(() => !document.querySelector('div[style*="background: #1a1a2e"]')`). After this, RequireAdmin has been evaluated with `loading=true` (identity still held).
+5. Asserted: heading `{ level: 1, name: 'Review & Publish' }` has count 0, `previewGets === 0`, URL is still `/admin/agent-definitions/review`.
+6. Released identity as non-admin; asserted URL → `/`, heading still absent, landing page visible.
+
+**Mutation and proof:** applied `if (loading) return <>{children}</>;` to `RequireAdmin` in `App.tsx` (MUT_T7_F1). The test goes RED: `toHaveCount` finds 1 element (the heading is in the DOM after the setup check clears and RequireAdmin renders the review page). Restored from `ed8e05dd8`, clean, marker 0.
+
+**Gates after fix:**
+| Gate | Result |
+|---|---|
+| `admin-route-gate.spec.ts` (6 tests, chromium) | **6 passed** |
+| `graph-release-review.spec.ts` (9 tests, chromium) | **9 passed** |
+| `agent-definition-workbench.spec.ts` (78 tests, chromium) | **78 passed** |
+| Vitest full | **886 passed** |
+| Typecheck | clean |
