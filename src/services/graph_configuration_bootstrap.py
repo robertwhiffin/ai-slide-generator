@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, text
@@ -18,8 +18,9 @@ from src.database.models.graph_configuration import (
 )
 from src.services.graph_configuration_content import (
     GraphConfigurationIntegrityError,
+    database_transaction_timestamp,
     draft_from_definition,
-    revision_from_definition,
+    materialize_or_reuse_revision,
     validate_definition_hash,
 )
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
@@ -48,7 +49,11 @@ class BootstrapResult:
 
 
 class _GraphConfigurationBootstrap:
-    """Create Graph Version 1 once or validate the complete persisted history."""
+    """Create Graph Version 1 once or validate the complete persisted history.
+
+    Depends on ``_GraphConfigurationWorkbench._lock_current_parents`` through the
+    ``GraphConfiguration`` facade MRO (the only way bootstrap is instantiated).
+    """
 
     def bootstrap_v1(
         self,
@@ -83,14 +88,7 @@ class _GraphConfigurationBootstrap:
 
     @staticmethod
     def _database_timestamp(session: Session) -> datetime:
-        timestamp = session.scalar(select(func.current_timestamp()))
-        if timestamp is None:
-            raise GraphConfigurationIntegrityError(
-                "database did not return a transaction timestamp"
-            )
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        return timestamp
+        return database_transaction_timestamp(session)
 
     def _validate_unreferenced_revisions(self, session: Session) -> None:
         for revision in session.scalars(select(AgentDefinitionRevision)):
@@ -119,6 +117,10 @@ class _GraphConfigurationBootstrap:
             )
 
     def _validate_current_graph(self, session: Session) -> BootstrapResult:
+        # One consistent parent lock (#269 Correction 2): FOR SHARE on the active
+        # release and the draft excludes a publisher for the whole validation, in
+        # the global order advisory lock -> L0 release -> L0 draft.
+        self._lock_current_parents(session, exclusive=False)
         releases = list(session.scalars(select(GraphRelease).order_by(GraphRelease.id)))
         active = [release for release in releases if release.effective_to is None]
         if len(active) != 1:
@@ -214,29 +216,9 @@ class _GraphConfigurationBootstrap:
 
         revisions: dict[str, AgentDefinitionRevision] = {}
         for agent_key in GRAPH_V1_AGENT_KEYS:
-            definition = definitions[agent_key]
-            content_hash = definition_content_hash(definition)
-            revision = session.scalar(
-                select(AgentDefinitionRevision).where(
-                    AgentDefinitionRevision.agent_key == agent_key,
-                    AgentDefinitionRevision.content_hash == content_hash,
-                )
+            revision, _created = materialize_or_reuse_revision(
+                session, definitions[agent_key], actor=actor, timestamp=timestamp
             )
-            if revision is None:
-                revision = revision_from_definition(
-                    definition, actor=actor, timestamp=timestamp
-                )
-                session.add(revision)
-            else:
-                existing = validate_definition_hash(
-                    revision,
-                    expected_hash=content_hash,
-                    label=f"reusable revision {revision.id}",
-                )
-                if existing.canonical_payload() != definition.canonical_payload():
-                    raise GraphConfigurationIntegrityError(
-                        f"reusable revision {revision.id} does not match its hash"
-                    )
             revisions[agent_key] = revision
         session.flush()
         if set(revisions) != _EXPECTED_AGENT_KEYS or any(

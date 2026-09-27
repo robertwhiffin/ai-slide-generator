@@ -210,3 +210,30 @@ def _await_lock_waiters(engine, expected: int) -> int:
             return peak
         time.sleep(0.02)
     return peak
+
+
+def _await_blocked_by(engine, *, waiter_pid: int, blocker_pid: int) -> bool:
+    """Block until *waiter_pid* is observed waiting on a lock held by *blocker_pid*.
+
+    Both halves must hold on one observation: ``pg_stat_activity.wait_event_type
+    = 'Lock'`` for the waiter, and the blocker's PID in
+    ``pg_blocking_pids(waiter)``.  Returns ``False`` after ``_WAIT_SECONDS``.
+    Capture each PID with ``SELECT pg_backend_pid()`` *before* the blocking
+    statement (#269 Correction 5).
+    """
+    deadline = time.monotonic() + _WAIT_SECONDS
+    with engine.connect() as observer:
+        while time.monotonic() < deadline:
+            observed = observer.execute(
+                text(
+                    "SELECT wait_event_type = 'Lock' "
+                    "AND CAST(:blocker AS integer) = ANY(pg_blocking_pids(pid)) "
+                    "FROM pg_stat_activity WHERE pid = :waiter"
+                ),
+                {"waiter": waiter_pid, "blocker": blocker_pid},
+            ).scalar()
+            observer.rollback()
+            if observed:
+                return True
+            time.sleep(0.02)
+    return False

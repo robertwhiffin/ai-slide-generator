@@ -375,7 +375,13 @@ describe('the forbidden-action guard', () => {
 
   it('spares the panel\'s legitimate restore controls without spared names shielding a stem', () => {
     for (const allowed of ALLOWED_ACTION_NAMES) expect(forbidsActionName(allowed)).toBe(false);
-    expect(ALLOWED_ACTION_NAMES).toHaveLength(7);
+    expect(ALLOWED_ACTION_NAMES).toHaveLength(8);
+    // #269's header link is exempt by exact whole name only (C44): the lowercase-p form
+    // and any suffixed form still trip the `review & publish` / `publish` stems.
+    expect(ALLOWED_ACTION_NAMES).toContain('Review & Publish');
+    expect(forbidsActionName('Review & Publish')).toBe(false);
+    expect(forbidsActionName('Review & Publish now')).toBe(true);
+    expect(forbidsActionName('Review & publish')).toBe(true);
     // #268's two verdict controls are exempt by exact name only (C23): the `approve` and
     // `reject` stems still ban every other review control, and neither name is a shield.
     expect(ALLOWED_ACTION_NAMES).toContain('Approve run');
@@ -458,6 +464,29 @@ describe('AgentDefinitionWorkbench', () => {
     expect(screen.getByRole('heading', { name: 'Graph Version 1' })).toBeVisible();
     expect(screen.getByText('Draft base').parentElement).toHaveTextContent('Draft baseGraph Version 1');
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+  });
+
+  it('heads the workbench with the changed-agent count and a plain Review & Publish link (#269)', async () => {
+    renderSuccessfulWorkbench();
+    await loadedNodeNavigation();
+
+    const header = screen.getByRole('banner');
+    expect(within(header).getByText('Changed agents').parentElement).toHaveTextContent('Changed agents0');
+    const link = within(header).getByRole('link', { name: 'Review & Publish' });
+    // A plain anchor: these suites render the workbench without a Router.
+    expect(link.tagName).toBe('A');
+    expect(link).toHaveAttribute('href', '/admin/agent-definitions/review');
+    // The link's text stays outside every navigation button (#268 I1).
+    expect(within(screen.getByRole('navigation', { name: 'Graph nodes' })).queryByText('Review & Publish')).toBeNull();
+    expectNoForbiddenActionNames();
+  });
+
+  it('counts a role whose saved draft differs from the published definition as changed', async () => {
+    mockFetchResponse(200, workbenchWithChangedArchitect());
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+
+    expect(screen.getByText('Changed agents').parentElement).toHaveTextContent('Changed agents1');
   });
 
   it('defaults deterministically to Prompt and supports keyboard and click tab selection', async () => {

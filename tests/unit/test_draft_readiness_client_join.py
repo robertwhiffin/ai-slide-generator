@@ -16,7 +16,7 @@ Text-read rules for those lines (keep them, or this join cannot read them):
   ``const INELIGIBILITY_REASONS: readonly TestRunIneligibilityReason[] = [`` each appear
   exactly once and list single-quoted names up to the closing ``]``.
 * ``export const TEST_RUN_NOT_FOUND_DETAIL = '<text>';`` is one line.
-* In ``mocks.ts``, ``syntheticVerdictIneligible`` keeps its two single-quoted messages.
+* In ``mocks.ts``, ``syntheticVerdictIneligible`` keeps its single-quoted messages (one per reason).
 
 The wire is snake_case codes, never display labels (C17): the client owns the labels.
 """

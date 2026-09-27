@@ -350,6 +350,8 @@ def test_postgres_mutation_guard_migration_is_idempotent_and_schema_objects_are_
             False,
         ),
         ("agent_test_run", "trg_agent_test_run_evidence_immutable", False, False),
+        # #269 C14/C30: the linked-verdict freeze coexists with #267's trigger.
+        ("agent_test_run", "trg_agent_test_run_linked_verdict_immutable", False, False),
         ("graph_release", "trg_graph_release_exactly_one_active", True, True),
         ("graph_release", "trg_graph_release_immutable", False, False),
         (
@@ -387,6 +389,36 @@ def test_postgres_mutation_guard_migration_is_idempotent_and_schema_objects_are_
     _expect_sqlstate(
         postgres_engine,
         update(AgentTestRun).where(AgentTestRun.id == run_id).values(error_detail="rewritten"),
+        "23514",
+        None,
+    )
+    with postgres_engine.connect() as conn:
+        # Exactly once and enabled (``O``) after both migration runs (#269 C14).
+        assert conn.execute(
+            text(
+                "SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+                "WHERE c.relname = 'agent_test_run' "
+                "AND t.tgname = 'trg_agent_test_run_linked_verdict_immutable'"
+            )
+        ).scalars().all() == ["O"]
+    # The linked-verdict body survives a re-run: an unlinked run's verdict still
+    # changes, and once linked it cannot.
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE agent_test_run SET verdict_notes = 'unlinked' WHERE id = :id"),
+            {"id": run_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO graph_release_test_run "
+                "(graph_release_id, agent_test_run_id, evidence_kind, source_release_id) "
+                "VALUES (:release_id, :run_id, 'approval', NULL)"
+            ),
+            {"release_id": release_id, "run_id": run_id},
+        )
+    _expect_sqlstate(
+        postgres_engine,
+        update(AgentTestRun).where(AgentTestRun.id == run_id).values(verdict_notes="linked"),
         "23514",
         None,
     )

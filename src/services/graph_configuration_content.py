@@ -9,9 +9,11 @@ workbench snapshots cross this seam.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from sqlalchemy import func, select
 
 from src.database.models.graph_configuration import (
     DEFINITION_CONTENT_COLUMN_NAMES,
@@ -22,6 +24,9 @@ from src.services.graph_definition_manifest import (
     DefinitionContent,
     definition_content_hash,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 class GraphConfigurationIntegrityError(RuntimeError):
@@ -144,3 +149,64 @@ def validate_definition_hash(
             f"{label} content hash does not match persisted content"
         )
     return content
+
+
+def as_utc_aware(value: datetime) -> datetime:
+    """Label a naive stored timestamp UTC; return an aware value unchanged.
+
+    SQLite loads ``DateTime(timezone=True)`` columns naive while PostgreSQL loads
+    them aware.  This never converts an aware value to another timezone.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def database_transaction_timestamp(session: Session) -> datetime:
+    """The one tz-aware transaction timestamp used by every graph-configuration writer."""
+    timestamp = session.scalar(select(func.current_timestamp()))
+    if timestamp is None:
+        raise GraphConfigurationIntegrityError(
+            "database did not return a transaction timestamp"
+        )
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp
+
+
+def materialize_or_reuse_revision(
+    session: Session,
+    content: DefinitionContent,
+    *,
+    actor: str,
+    timestamp: datetime,
+) -> tuple[AgentDefinitionRevision, bool]:
+    """Return the immutable revision for ``content`` and whether it was newly added.
+
+    ``True`` means a new revision was added to the session; ``False`` means the
+    existing ``(agent_key, content_hash)`` revision is reused after its persisted
+    content is re-validated against ``content``.  Never calls ``flush()`` itself;
+    the lookup may autoflush revisions added earlier in the same session, which is
+    harmless because each is complete.
+    """
+    content_hash = definition_content_hash(content)
+    revision = session.scalar(
+        select(AgentDefinitionRevision).where(
+            AgentDefinitionRevision.agent_key == content.agent_key,
+            AgentDefinitionRevision.content_hash == content_hash,
+        )
+    )
+    if revision is None:
+        revision = revision_from_definition(content, actor=actor, timestamp=timestamp)
+        session.add(revision)
+        return revision, True
+    existing = validate_definition_hash(
+        revision,
+        expected_hash=content_hash,
+        label=f"reusable revision {revision.id}",
+    )
+    if existing.canonical_payload() != content.canonical_payload():
+        raise GraphConfigurationIntegrityError(
+            f"reusable revision {revision.id} does not match its hash"
+        )
+    return revision, False

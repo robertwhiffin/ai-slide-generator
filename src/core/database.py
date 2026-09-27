@@ -943,7 +943,9 @@ def _install_graph_configuration_mutation_guards(
     trigger also requires exactly one active release at transaction end, while allowing
     the atomic close-and-insert transition used by publication. Agent Test Run evidence
     rejects every update that changes a column other than its four verdict columns;
-    deletes stay allowed (bounded cleanup), subject to the RESTRICT release link.
+    deletes stay allowed (bounded cleanup), subject to the RESTRICT release link. A
+    run linked to a release (``graph_release_test_run``) also rejects any change to
+    those four verdict columns (#269).
     """
     if is_sqlite:
         return
@@ -1104,6 +1106,54 @@ def _install_graph_configuration_mutation_guards(
             f"CREATE TRIGGER {evidence_trigger} "
             f"BEFORE UPDATE ON {evidence_table} "
             f"FOR EACH ROW EXECUTE FUNCTION {evidence_function}()"
+        )
+    )
+
+    # #269 (Q3, Corrections 14 and 30): a run linked to a release as evidence
+    # keeps its verdict.  PostgreSQL refuses a subquery in a trigger WHEN, so the
+    # WHEN compares columns only and the function body checks the link, with the
+    # link table schema-qualified so search-path drift cannot change the answer.
+    # It coexists with trg_agent_test_run_evidence_immutable above.
+    linked_verdict_function = qualified("reject_linked_agent_test_run_verdict_change")
+    release_test_run_table = qualified("graph_release_test_run")
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {linked_verdict_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM {release_test_run_table}
+                    WHERE agent_test_run_id = OLD.id
+                ) THEN
+                    RAISE EXCEPTION
+                        'agent test run % is linked to a release; its verdict is immutable',
+                        OLD.id
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    linked_verdict_trigger = preparer.quote("trg_agent_test_run_linked_verdict_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {linked_verdict_trigger} ON {evidence_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {linked_verdict_trigger} "
+            "BEFORE UPDATE OF verdict, verdict_reviewer, verdict_at, verdict_notes "
+            f"ON {evidence_table} "
+            "FOR EACH ROW WHEN ("
+            "OLD.verdict IS DISTINCT FROM NEW.verdict "
+            "OR OLD.verdict_reviewer IS DISTINCT FROM NEW.verdict_reviewer "
+            "OR OLD.verdict_at IS DISTINCT FROM NEW.verdict_at "
+            "OR OLD.verdict_notes IS DISTINCT FROM NEW.verdict_notes) "
+            f"EXECUTE FUNCTION {linked_verdict_function}()"
         )
     )
 
