@@ -1995,6 +1995,35 @@ async def rollback_graph_release(
         _log_rollback("not_found", [])
         raise _graph_version_not_found()
     try:
+        return await _restore_graph_release(
+            db, version_number=version_number, parsed=parsed, actor=actor
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # 6-m1: an unhandled failure (a raw ``IntegrityError``, never translated,
+        # or an unknown outcome) still gets the one record per call; the very
+        # same exception then propagates.
+        logger.error(
+            _ROLLBACK_LOG_MESSAGE,
+            extra={
+                "outcome": "error",
+                "agent_keys": [],
+                "error_class": type(exc).__name__,
+            },
+        )
+        raise
+
+
+async def _restore_graph_release(
+    db: Session,
+    *,
+    version_number: int,
+    parsed: RollbackRequest,
+    actor: str,
+) -> RollbackSuccessResponse | JSONResponse:
+    """Run ``restore_release`` off the event loop and map its outcome to a response."""
+    try:
         outcome = await run_in_threadpool(
             GraphConfiguration().restore_release,
             db,

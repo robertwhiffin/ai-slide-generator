@@ -990,6 +990,52 @@ def test_an_unknown_outcome_is_a_500(factory, monkeypatch):
     assert response.status_code == 500
 
 
+@pytest.mark.parametrize("failure", ["integrity_error", "unknown_outcome"])
+def test_an_unhandled_rollback_failure_logs_one_error_record_and_re_raises_unchanged(
+    factory, monkeypatch, caplog, failure
+):
+    """6-m1: a raw ``IntegrityError`` (never translated, #268 C7) or the unknown
+    outcome's ``AssertionError`` still gets the one record per call: ERROR,
+    ``outcome="error"``, the class name only, no traceback; then the very same
+    exception propagates."""
+    _force_admin(monkeypatch, is_admin=True)
+    raised_exc: list[BaseException] = []
+    if failure == "integrity_error":
+        expected_class = IntegrityError
+
+        def _service(*_args, **_kwargs):
+            exc = IntegrityError("INSERT SECRET", {}, Exception("SECRET ck_violated"))
+            raised_exc.append(exc)
+            raise exc
+    else:
+        expected_class = AssertionError
+
+        def _service(*_args, **_kwargs):
+            return object()
+
+    monkeypatch.setattr(GraphConfiguration, "restore_release", _service)
+    with caplog.at_level(logging.INFO, logger=routes.logger.name):
+        with _app(factory) as client:
+            with pytest.raises(expected_class) as raised:
+                client.post(rollback_url(2), json=_rollback_body(0))
+
+    assert type(raised.value) is expected_class
+    if raised_exc:
+        assert raised.value is raised_exc[0]
+    records = [r for r in caplog.records if r.name == routes.logger.name]
+    assert len(records) == 1, [(_extra(r), r.levelname) for r in records]
+    (record,) = records
+    assert record.getMessage() == "graph_release_rollback"
+    assert record.levelname == "ERROR"
+    assert record.exc_info is None
+    assert _extra(record) == {
+        "outcome": "error",
+        "agent_keys": [],
+        "error_class": expected_class.__name__,
+    }
+    assert "SECRET" not in caplog.text
+
+
 def test_rollback_runs_the_service_off_the_event_loop(factory, monkeypatch, built):
     """C37: rollback can wait on L0 behind a save's remote check."""
     _force_admin(monkeypatch, is_admin=True)
