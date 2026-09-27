@@ -442,10 +442,24 @@ def test_restore_v3_while_v7_active_over_http(acceptance_stack, postgres_engine)
     assert post_rb_wb["active_release"]["release_id"] == _V8_ID
     assert post_rb_wb["draft"]["base_release_id"] == _V8_ID
 
-    changed_by_role = {n["agent_key"]: n["changed"] for n in post_rb_wb["nodes"]}
-    assert changed_by_role["architect"] is False, "architect must be clean after rollback reset"
-    assert changed_by_role["builder"] is False, "builder must be clean (restored == unchanged)"
-    assert changed_by_role["fixer"] is True, "fixer's pending edit must survive the rollback"
+    changed_by_role = {
+        n["agent_key"]: n["changed"]
+        for n in post_rb_wb["nodes"]
+        if n["agent_key"] in GRAPH_V1_AGENT_KEYS
+    }
+    # 9-M01: all seven roles.  architect is clean after its reset, builder and the
+    # other untouched roles are clean (restored == unchanged), and only fixer's
+    # pending edit survives the rollback.
+    assert list(changed_by_role) == list(GRAPH_V1_AGENT_KEYS)
+    assert changed_by_role == {
+        "architect": False,
+        "data_analyst": False,
+        "builder": False,
+        "build_reviewer": False,
+        "fixer": True,
+        "fix_reviewer": False,
+        "deck_reviewer": False,
+    }
 
     # -- Step 12: POST /releases — 409 publication_not_ready naming fixer's case only.
     current_lock = post_rb_wb["draft"]["lock_version"]
