@@ -21,6 +21,9 @@ dependencies = [
     "langchain-text-splitters==1.1.2",
     "litellm==1.80.11",
     "mcp==1.27.0",
+    # agent_runtime.py and model_endpoint_probe.py import openai at module level;
+    # databricks-langchain==0.9.0 requires openai>=1.99.9 directly.
+    "openai>=1.99.9",
     "opentelemetry-api==1.38.0",
     "opentelemetry-sdk==1.38.0",
     "beautifulsoup4==4.14.2",

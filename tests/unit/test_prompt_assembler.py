@@ -9,6 +9,7 @@ import re
 import pytest
 
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE, UNTRUSTED_DATA_NOTICE
+from src.core.skills import load_skill
 from src.core.skills.build_reviewer import (
     BUILD_REVIEWER_AUTHORED_INSTRUCTIONS,
     BUILD_REVIEWER_AUTHORED_PREFIX,
@@ -28,10 +29,7 @@ from src.core.skills.data_analyst import (
 )
 from src.services import prompt_assembler
 from src.services.agent_runtime import (
-    TEST_COMPATIBILITY_GRAPH_RELEASE_ID,
     AgentAssemblyContext,
-    CodeOwnedAgentDefinitionSource,
-    CompatibilityResolvedDefinitionLoader,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_definition_manifest import (
@@ -53,6 +51,10 @@ from src.services.prompt_assembler import (
     PromptAssemblyRejected,
     ProtectedAssemblyBundleUnavailable,
     protected_assembly_v2_digest,
+)
+from tests.fixtures.packaged_release_loader import (
+    PACKAGED_RELEASE_ID,
+    PackagedGraphV1Loader,
 )
 
 HOSTILE = {
@@ -421,12 +423,8 @@ def test_v1_assembly_matches_independent_historical_replay(
 ) -> None:
     """Catches any reinterpretation of frozen v1 blocks, JSON, identity, or bytes."""
     payload = {"deck_brief": "brief"} if agent_key == "build_reviewer" else {"x": 1}
-    content = (
-        CompatibilityResolvedDefinitionLoader(CodeOwnedAgentDefinitionSource())
-        .resolve(TEST_COMPATIBILITY_GRAPH_RELEASE_ID, agent_key)
-        .content
-    )
-    assert content == _definition(agent_key)
+    content = PackagedGraphV1Loader().resolve(PACKAGED_RELEASE_ID, agent_key).content
+    assert content.prompt_text == load_skill(agent_key).instructions
     value = PromptAssembler().assemble(
         definition=content,
         payload=payload,
@@ -453,25 +451,6 @@ def test_v1_assembly_matches_independent_historical_replay(
             parts.append(json.dumps(payload, indent=2, default=str))
     assert content.protected_assembly == V1_PROTECTED_ASSEMBLY_IDENTITY
     assert value.prompt == "\n\n".join(parts)
-
-
-def test_compatibility_persisted_release_path_has_v1_byte_parity() -> None:
-    """Catches divergence between #261's resolved content and raw assembler v1 execution."""
-    loader = CompatibilityResolvedDefinitionLoader(CodeOwnedAgentDefinitionSource())
-    resolved = loader.resolve(TEST_COMPATIBILITY_GRAPH_RELEASE_ID, "architect")
-    actual = PromptAssembler().assemble(
-        definition=resolved.content,
-        payload={"x": 1},
-        context=AgentAssemblyContext(False),
-    )
-    direct = PromptAssembler().assemble(
-        definition=_definition("architect"),
-        payload={"x": 1},
-        context=AgentAssemblyContext(False),
-    )
-    assert actual.prompt == direct.prompt
-    with pytest.raises(ValueError):
-        loader.resolve(TEST_COMPATIBILITY_GRAPH_RELEASE_ID + 1, "architect")
 
 
 def test_protected_stage_view_exposes_locked_exact_display_without_live_payload() -> None:

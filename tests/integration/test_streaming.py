@@ -19,6 +19,10 @@ from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import SessionNotFoundError
 from src.services.persisted_graph_release import GraphReleaseNotFoundError
 
+# #271 C47(c): these tests are not about engine-mode resolution, which now
+# fails closed; they state the monolith answer they relied on.
+pytestmark = pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
+
 # ============================================
 # Helper Functions
 # ============================================

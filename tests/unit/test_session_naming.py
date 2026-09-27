@@ -134,6 +134,8 @@ class TestGenerateSessionTitle:
 # ============================================
 
 
+# #271 C47(c): not about engine-mode resolution, which now fails closed.
+@pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
 class TestSessionNamingInStreaming:
     """Tests that title generation integrates correctly with send_message_streaming.
 

@@ -118,6 +118,10 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the recorded Playwright contract names the commit it was
+          # recorded at, and its unit join checks that commit is an ancestor (#271).
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -478,6 +482,9 @@ jobs:
             tests/integration/test_deck_spec_change_turn.py \
             tests/integration/test_spec_row_alignment.py \
             tests/integration/test_claim_exclusivity_postgres.py \
+            tests/integration/test_graph_lifecycle_acceptance_postgres.py \
+            tests/integration/test_graph_lifecycle_runtime_postgres.py \
+            tests/integration/test_lakebase_contract_failures_postgres.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -728,6 +735,8 @@ jobs:
           - export-csp
           - export-ui
           - findings-drawer
+          - graph-release-admin-journey
+          - graph-release-conversation-journey
           - graph-release-history
           - graph-release-review
           - help-ui

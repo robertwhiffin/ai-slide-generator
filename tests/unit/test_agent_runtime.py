@@ -9,7 +9,7 @@ serialization, model settings, or schema selection during the prefactor.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,13 +26,9 @@ from src.services.agent_runtime import (
     AgentAssemblyContext,
     AgentModelConfiguration,
     AgentRuntime,
-    CodeOwnedAgentDefinitionSource,
     DatabricksModelAdapter,
-    ProtectedPromptIdentity,
     RunObservation,
     UnknownAgentKeyError,
-    _canonical_digest,
-    _schema_contract_material,
 )
 from src.services.agent_runtime_identity import (
     RecordingAgentInvocationIdentitySink,
@@ -40,6 +36,8 @@ from src.services.agent_runtime_identity import (
 from src.services.agent_schema_registry import (
     AgentOutputValidationError,
     AgentSchemaRegistry,
+    _canonical_digest,
+    _schema_contract_material,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_definition_manifest import (
@@ -63,6 +61,7 @@ from tests.fixtures.deterministic_model_adapter import (
     DeterministicFakeModelAdapter,
     fake_output,
 )
+from tests.fixtures.packaged_release_loader import packaged_v1_runtime
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -107,14 +106,6 @@ class RecordingModelAdapter:
     ) -> BaseModel:
         self.calls.append(ModelCall(configuration, schema, prompt))
         return schema.model_validate(self.values)
-
-
-class StaticDefinitionSource:
-    def __init__(self, definition: Any) -> None:
-        self.definition = definition
-
-    def resolve(self, agent_key: str) -> Any:
-        return self.definition
 
 
 #: The one shared table (#267 Correction 26), not a local copy that could drift.
@@ -163,7 +154,7 @@ def _expected_prompt(
 def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_key):
     output = _output_for(agent_key)
     model = RecordingModelAdapter(output)
-    runtime = AgentRuntime.compatibility(model_adapter=model)
+    runtime = packaged_v1_runtime(model_adapter=model)
     payload = _payload_for(agent_key)
 
     result = runtime.run(
@@ -206,7 +197,7 @@ def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_
 def test_design_system_prompt_preserves_precedence_and_omits_frame_constraints():
     output = _output_for("builder")
     model = RecordingModelAdapter(output)
-    runtime = AgentRuntime.compatibility(model_adapter=model)
+    runtime = packaged_v1_runtime(model_adapter=model)
     payload = {"position": 3}
 
     runtime.run(
@@ -228,7 +219,7 @@ def test_design_system_prompt_preserves_precedence_and_omits_frame_constraints()
 def test_build_reviewer_deck_brief_preserves_conditional_instruction_order():
     output = _output_for("build_reviewer")
     model = RecordingModelAdapter(output)
-    runtime = AgentRuntime.compatibility(model_adapter=model)
+    runtime = packaged_v1_runtime(model_adapter=model)
     payload = {"position": 2, "deck_brief": {"argument": "Revenue compounds"}}
 
     runtime.run(
@@ -251,21 +242,19 @@ def test_build_reviewer_deck_brief_preserves_conditional_instruction_order():
     assert model.calls[0].prompt == expected
 
 
-def test_code_owned_contract_identities_are_stable_literals():
-    source = CodeOwnedAgentDefinitionSource()
-
-    definitions = {key: source.resolve(key) for key in MODEL_DRIVEN_AGENT_KEYS}
+def test_manifest_v1_contract_identities_match_stable_literals():
+    definitions = {defn.agent_key: defn for defn in load_graph_v1_manifest().definitions}
 
     assert set(definitions) == set(EXPECTED_SCHEMA_DIGESTS)
-    assert {item.protected_prompt.digest for item in definitions.values()} == {
+    assert {defn.protected_assembly.digest for defn in definitions.values()} == {
         EXPECTED_PROTECTED_PROMPT_DIGEST
     }
     assert {
-        key: definition.schema_contract.digest for key, definition in definitions.items()
+        key: defn.schema_contract.digest for key, defn in definitions.items()
     } == EXPECTED_SCHEMA_DIGESTS
     assert all(
-        isinstance(definition.assembly_rules, AssemblyRulesV1)
-        for definition in definitions.values()
+        isinstance(defn.assembly_rules, AssemblyRulesV1)
+        for defn in definitions.values()
     )
 
 
@@ -329,7 +318,7 @@ def test_schema_contract_identity_changes_with_validation_configuration():
 @pytest.mark.parametrize("agent_key", ["foreman", "unknown", "Architect"])
 def test_unknown_or_deterministic_role_fails_before_model_invocation(agent_key):
     model = RecordingModelAdapter(_output_for("architect"))
-    runtime = AgentRuntime.compatibility(model_adapter=model)
+    runtime = packaged_v1_runtime(model_adapter=model)
 
     with pytest.raises(UnknownAgentKeyError, match=agent_key):
         runtime.run(agent_key, 1, {}, AgentAssemblyContext(False))
@@ -338,15 +327,14 @@ def test_unknown_or_deterministic_role_fails_before_model_invocation(agent_key):
 
 
 def test_unavailable_protected_bundle_fails_before_model_invocation():
-    definition = CodeOwnedAgentDefinitionSource().resolve("architect")
-    unavailable = replace(
-        definition,
-        protected_prompt=ProtectedPromptIdentity(version=999, digest="0" * 64),
-    )
+    manifest = load_graph_v1_manifest()
+    architect_content = next(d for d in manifest.definitions if d.agent_key == "architect")
+    bad_protected = ContentIdentity(version=999, digest="0" * 64)
+    unavailable = architect_content.model_copy(update={"protected_assembly": bad_protected})
     model = RecordingModelAdapter(_output_for("architect"))
-    runtime = AgentRuntime.compatibility(
+    runtime = packaged_v1_runtime(
         model_adapter=model,
-        definition_source=StaticDefinitionSource(unavailable),
+        content_overrides={"architect": unavailable},
     )
 
     with pytest.raises(PersistedConfigurationUnavailableError) as raised:
@@ -357,16 +345,16 @@ def test_unavailable_protected_bundle_fails_before_model_invocation():
 
 
 def test_incompatible_schema_contract_fails_before_model_invocation():
-    source = CodeOwnedAgentDefinitionSource()
-    definition = source.resolve("architect")
-    incompatible = replace(
-        definition,
-        schema_contract=source.resolve("builder").schema_contract,
+    manifest = load_graph_v1_manifest()
+    architect_content = next(d for d in manifest.definitions if d.agent_key == "architect")
+    builder_content = next(d for d in manifest.definitions if d.agent_key == "builder")
+    incompatible = architect_content.model_copy(
+        update={"schema_contract": builder_content.schema_contract}
     )
     model = RecordingModelAdapter(_output_for("architect"))
-    runtime = AgentRuntime.compatibility(
+    runtime = packaged_v1_runtime(
         model_adapter=model,
-        definition_source=StaticDefinitionSource(incompatible),
+        content_overrides={"architect": incompatible},
     )
 
     with pytest.raises(PersistedConfigurationUnavailableError) as raised:
@@ -477,7 +465,7 @@ def test_runtime_deck_brief_stage_tracks_payload_truthiness(payload, expects_dec
     payload shape is asserted to omit the stage.
     """
     model = RecordingModelAdapter(_output_for("build_reviewer"))
-    runtime = AgentRuntime.compatibility(model_adapter=model)
+    runtime = packaged_v1_runtime(model_adapter=model)
 
     runtime.run("build_reviewer", 1, payload, AgentAssemblyContext(design_system_active=False))
 
@@ -492,7 +480,7 @@ def test_runtime_deck_brief_stage_tracks_payload_truthiness(payload, expects_dec
 def test_non_build_reviewer_roles_never_render_the_deck_brief_stage(agent_key):
     """Catches a deck-brief stage that leaks onto a role whose rules never declare it."""
     model = RecordingModelAdapter(_output_for(agent_key))
-    runtime = AgentRuntime.compatibility(model_adapter=model)
+    runtime = packaged_v1_runtime(model_adapter=model)
 
     runtime.run(
         agent_key,
@@ -576,10 +564,11 @@ def test_agent_runtime_construction_still_fails_closed_on_contract_material_drif
 ):
     """Correction 13: swapping the private v1-only registry keeps the check running.
 
-    ``AgentRuntime.__init__`` used to construct the module-private
-    ``_SchemaContractRegistry``, whose constructor re-derived and compared all seven
-    v1 digests.  It now constructs the one public ``AgentSchemaRegistry``, which must
-    still fail closed on material drift — and does so for v1 *and* v2 material.
+    ``AgentRuntime.__init__`` used to construct a module-private v1-only registry
+    (deleted with the compatibility runtime in #271), whose constructor re-derived
+    and compared all seven v1 digests.  It now constructs the one public
+    ``AgentSchemaRegistry``, which must still fail closed on material drift — and
+    does so for v1 *and* v2 material.
     """
     from types import MappingProxyType
 
@@ -591,7 +580,7 @@ def test_agent_runtime_construction_still_fails_closed_on_contract_material_drif
     monkeypatch.setattr(registry_module, "_V1_DIGESTS", MappingProxyType(drifted))
 
     with pytest.raises(SchemaContractMaterialChangedError, match="architect"):
-        AgentRuntime.compatibility(
+        packaged_v1_runtime(
             model_adapter=RecordingModelAdapter(_output_for("architect"))
         )
 
