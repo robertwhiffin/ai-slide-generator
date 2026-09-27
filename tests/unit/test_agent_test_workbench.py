@@ -2381,7 +2381,9 @@ def test_the_verdict_writer_reads_no_parent_or_case_lock_statement(factory):
     assert "FROM agent_test_run" in first
     for statement, _parameters in captured.statements:
         assert "graph_draft" not in statement
-        assert "graph_release" not in statement
+        # #269 C48 adds one unlocked read of the link table after the L3 lock;
+        # no parent (``graph_release``) table is read.
+        assert re.search(r"\bgraph_release\b(?!_)", statement) is None, statement
 
 
 def test_the_verdict_lock_statement_is_for_update_of_the_run_row_only():
