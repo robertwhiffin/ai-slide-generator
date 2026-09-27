@@ -1,10 +1,11 @@
 """One invocation seam for Tellr's seven model-driven Graph Nodes.
 
-The current adapter reads the existing legacy ``Skill`` records and exposes them as
-code-owned Agent Definitions. That source is temporary: persisted Graph Releases
-replace it in later work. Prompt assembly, schema resolution, model construction,
-invocation, and diagnostics already live behind :class:`AgentRuntime`, so changing
-the definition source does not spread those concerns back across graph nodes.
+Agent Definitions are resolved only from persisted Graph Releases in Lakebase,
+through a :class:`~src.services.persisted_graph_release.ResolvedDefinitionLoader`
+(``PersistedGraphReleaseLoader`` in production).  There is no code-owned
+definition source: prompt assembly, schema resolution, model construction,
+invocation, and diagnostics all live behind :class:`AgentRuntime` and act only on
+the resolved, persisted content.
 
 Foreman is deliberately absent.  It is deterministic routing code, not an Agent
 Definition, and an attempt to resolve it fails as an unknown model-driven role.
@@ -12,17 +13,13 @@ Definition, and an attempt to resolve it fails as an unknown model-driven role.
 
 from __future__ import annotations
 
-import hashlib
-import inspect
-import json
 import logging
-import textwrap
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Callable, Literal, Protocol, cast
+from typing import Any, Callable, Literal, Protocol
 
 import httpx
 import openai
@@ -42,16 +39,19 @@ from pydantic_core import to_jsonable_python
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.databricks_client import DatabricksClientError
-from src.core.defaults import DEFAULT_CONFIG
-from src.core.skills import load_skill
-from src.domain.skill_io import OUTPUT_SCHEMAS
+
+# ``RecordingAgentInvocationIdentitySink`` is an explicit re-export: tests import
+# it from this module (C14).
 from src.services.agent_runtime_identity import (
     AgentInvocationIdentity,
     AgentInvocationIdentitySink,
     LoggingAgentInvocationIdentitySink,
-    RecordingAgentInvocationIdentitySink,
+)
+from src.services.agent_runtime_identity import (
+    RecordingAgentInvocationIdentitySink as RecordingAgentInvocationIdentitySink,
 )
 from src.services.agent_schema_registry import (
+    V1_SCHEMA_IDENTITIES,
     AgentOutputValidationError,
     AgentSchemaRegistry,
     SchemaOverlayValidationError,
@@ -64,11 +64,9 @@ from src.services.agent_schema_types import (
 )
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_definition_manifest import (
-    AssemblyRules,
     DefinitionContent,
     ModelConfiguration,
     definition_content_hash,
-    load_graph_v1_manifest,
     schema_contract_identity,
 )
 from src.services.persisted_graph_release import (
@@ -97,20 +95,6 @@ MODEL_DRIVEN_AGENT_KEYS = (
 )
 _MODEL_DRIVEN_AGENT_KEY_SET = frozenset(MODEL_DRIVEN_AGENT_KEYS)
 logger = logging.getLogger(__name__)
-_PROTECTED_PROMPT_VERSION = 1
-_PROTECTED_PROMPT_DIGEST = (
-    "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
-)
-_SCHEMA_CONTRACT_VERSION = 1
-_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
-    "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
-    "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
-    "fixer": "7a4e984c602d16ea73c2f5f3f26ac385c440527001fa14b1cfb5c1245de12297",
-    "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
-    "fix_reviewer": "31ff0a6d02cefb7db4cd2c499b4e7905fdadcda789c658e1c7605cdde01020df",
-    "deck_reviewer": "56c7ce141e07a70fc2c57f614e915ebb9e3914d24b3c11057401c4cc1c637467",
-}
 
 
 class AgentRuntimeError(RuntimeError):
@@ -123,10 +107,6 @@ class UnknownAgentKeyError(AgentRuntimeError):
 
 class IncompatibleSchemaContractError(AgentRuntimeError):
     """A definition names a schema contract that is not valid for its role."""
-
-
-class RuntimeContractIdentityError(AgentRuntimeError):
-    """Code-owned contract material changed without an explicit identity update."""
 
 
 class ModelProviderUnavailableError(AgentRuntimeError):
@@ -167,18 +147,6 @@ class AgentAssemblyContext:
 
 
 @dataclass(frozen=True)
-class AgentDefinition:
-    agent_key: str
-    definition_version: int
-    prompt_text: str
-    model_configuration: AgentModelConfiguration
-    protected_prompt: ProtectedPromptIdentity
-    schema_contract: SchemaContractIdentity
-    legacy_tool_grants: tuple[str, ...]
-    assembly_rules: AssemblyRules
-
-
-@dataclass(frozen=True)
 class AgentInvocationDiagnostics:
     agent_key: str
     definition_version: int
@@ -210,10 +178,6 @@ class AgentInvocationResult:
     diagnostics: AgentInvocationDiagnostics
 
 
-class AgentDefinitionSource(Protocol):
-    def resolve(self, agent_key: str) -> AgentDefinition: ...
-
-
 class AgentModelAdapter(Protocol):
     def invoke(
         self,
@@ -223,173 +187,6 @@ class AgentModelAdapter(Protocol):
         schema: type[BaseModel],
         prompt: str,
     ) -> BaseModel: ...
-
-
-def _canonical_digest(material: Any) -> str:
-    serialized = json.dumps(
-        material,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _schema_contract_material(agent_key: str, schema: type[BaseModel]) -> dict[str, Any]:
-    return {
-        "agent_key": agent_key,
-        "qualified_name": f"{schema.__module__}.{schema.__qualname__}",
-        "json_schema": schema.model_json_schema(mode="validation"),
-        "model_configurations": _schema_configuration_material(schema),
-        "validators": _schema_validator_material(schema),
-    }
-
-
-def _schema_configuration_material(schema: type[BaseModel]) -> list[dict[str, Any]]:
-    """Return Pydantic validation configuration for every model in the contract."""
-    configurations: dict[tuple[str, str], dict[str, Any]] = {}
-
-    def visit(node: Any) -> None:
-        if isinstance(node, dict):
-            model = node.get("cls")
-            config = node.get("config")
-            if (
-                isinstance(model, type)
-                and issubclass(model, BaseModel)
-                and isinstance(config, dict)
-            ):
-                qualified_name = f"{model.__module__}.{model.__qualname__}"
-                item = {
-                    "qualified_name": qualified_name,
-                    "config": config,
-                }
-                configurations[(qualified_name, _canonical_digest(config))] = item
-            for value in node.values():
-                visit(value)
-            return
-        if isinstance(node, (list, tuple)):
-            for value in node:
-                visit(value)
-
-    visit(schema.__pydantic_core_schema__)
-    return [configurations[key] for key in sorted(configurations)]
-
-
-def _schema_validator_material(schema: type[BaseModel]) -> list[dict[str, str]]:
-    """Return stable source identities for validators in a Pydantic contract tree."""
-    validators: dict[tuple[str, str, str], dict[str, str]] = {}
-
-    def visit(node: Any) -> None:
-        if isinstance(node, dict):
-            for value in node.values():
-                visit(value)
-            return
-        if isinstance(node, (list, tuple)):
-            for value in node:
-                visit(value)
-            return
-        if not callable(node) or isinstance(node, type):
-            return
-
-        function = getattr(node, "__func__", node)
-        module = getattr(function, "__module__", "")
-        if module != schema.__module__ and not module.startswith("src."):
-            return
-        qualified_name = getattr(function, "__qualname__", repr(function))
-        try:
-            source = textwrap.dedent(inspect.getsource(function)).strip()
-        except (OSError, TypeError):
-            return
-        key = (module, qualified_name, source)
-        validators[key] = {
-            "module": module,
-            "qualified_name": qualified_name,
-            "source": source,
-        }
-
-    visit(schema.__pydantic_core_schema__)
-    return [validators[key] for key in sorted(validators)]
-
-
-class _SchemaContractRegistry:
-    """Fail-closed v1 identity table for the temporary code-owned definition source.
-
-    Resolution moved to the one public ``AgentSchemaRegistry`` in #264 Task 3, so
-    this retains only the construction-time digest check and ``identity_for``; it has
-    no ``resolve`` any more, which stops an unreachable second contract check from
-    reading as a live guard.
-    """
-
-    def __init__(self) -> None:
-        self._contracts: dict[str, tuple[SchemaContractIdentity, type[BaseModel]]] = {}
-        for agent_key in MODEL_DRIVEN_AGENT_KEYS:
-            schema = OUTPUT_SCHEMAS[agent_key]
-            actual_digest = _canonical_digest(
-                _schema_contract_material(agent_key, schema)
-            )
-            expected_digest = _SCHEMA_CONTRACT_DIGESTS[agent_key]
-            if actual_digest != expected_digest:
-                raise RuntimeContractIdentityError(
-                    f"Schema contract for {agent_key!r} changed without an identity "
-                    f"update: expected {expected_digest}, calculated {actual_digest}"
-                )
-            identity = SchemaContractIdentity(
-                agent_key=agent_key,
-                version=_SCHEMA_CONTRACT_VERSION,
-                digest=expected_digest,
-            )
-            self._contracts[agent_key] = (identity, schema)
-
-    def identity_for(self, agent_key: str) -> SchemaContractIdentity:
-        return self._contracts[agent_key][0]
-
-
-class CodeOwnedAgentDefinitionSource:
-    """Temporary adapter from shipped Python skill records to Agent Definitions."""
-
-    def __init__(self) -> None:
-        self._schemas = _SchemaContractRegistry()
-        self._protected_prompt = ProtectedPromptIdentity(
-            version=_PROTECTED_PROMPT_VERSION,
-            digest=_PROTECTED_PROMPT_DIGEST,
-        )
-
-    def resolve(self, agent_key: str) -> AgentDefinition:
-        if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
-            raise UnknownAgentKeyError(
-                f"Unknown model-driven agent key {agent_key!r}; "
-                f"expected one of {list(MODEL_DRIVEN_AGENT_KEYS)!r}"
-            )
-
-        skill = load_skill(agent_key)
-        expected_schema = OUTPUT_SCHEMAS[agent_key]
-        if skill.output_schema is not expected_schema:
-            raise IncompatibleSchemaContractError(
-                f"Code-owned Agent Definition {agent_key!r} binds "
-                f"{skill.output_schema!r}, not canonical schema {expected_schema!r}"
-            )
-
-        llm = cast(dict[str, Any], DEFAULT_CONFIG["llm"])
-        persisted_v1 = next(
-            definition
-            for definition in load_graph_v1_manifest().definitions
-            if definition.agent_key == agent_key
-        )
-        return AgentDefinition(
-            agent_key=agent_key,
-            definition_version=skill.version,
-            prompt_text=skill.instructions,
-            model_configuration=AgentModelConfiguration(
-                endpoint_name=str(llm["endpoint"]),
-                temperature=float(llm["temperature"]),
-                max_tokens=int(llm["max_tokens"]),
-                top_p=float(llm["top_p"]),
-            ),
-            protected_prompt=self._protected_prompt,
-            schema_contract=self._schemas.identity_for(agent_key),
-            legacy_tool_grants=tuple(skill.tool_grants),
-            assembly_rules=persisted_v1.assembly_rules,
-        )
 
 
 def saved_model_configuration(model: ModelConfiguration) -> AgentModelConfiguration:
@@ -578,48 +375,6 @@ class DatabricksModelAdapter:
             ) from original_error
 
 
-TEST_COMPATIBILITY_GRAPH_RELEASE_ID = 1
-TEST_COMPATIBILITY_GRAPH_VERSION = 1
-
-
-class CompatibilityResolvedDefinitionLoader:
-    """Test-only bridge from legacy code-owned records to persisted content."""
-
-    def __init__(self, source: CodeOwnedAgentDefinitionSource) -> None:
-        self._source = source
-
-    def resolve(self, graph_release_id: int, agent_key: str) -> ResolvedDefinition:
-        if graph_release_id != TEST_COMPATIBILITY_GRAPH_RELEASE_ID:
-            raise ValueError("compatibility runtime requires graph release 1")
-        definition = self._source.resolve(agent_key)
-        content = DefinitionContent.model_validate(
-            {
-                "agent_key": definition.agent_key,
-                "definition_version": definition.definition_version,
-                "prompt_text": definition.prompt_text,
-                "model": definition.model_configuration.__dict__,
-                "schema_overlay": {
-                    "field_overrides": {},
-                    "additional_optional_fields": [],
-                },
-                "assembly_rules": definition.assembly_rules,
-                "protected_assembly": definition.protected_prompt.__dict__,
-                "schema_contract": {
-                    "version": definition.schema_contract.version,
-                    "digest": definition.schema_contract.digest,
-                },
-            }
-        )
-        return ResolvedDefinition(
-            graph_version=TEST_COMPATIBILITY_GRAPH_VERSION,
-            graph_release_id=TEST_COMPATIBILITY_GRAPH_RELEASE_ID,
-            agent_key=agent_key,
-            agent_definition_revision_id=definition.definition_version,
-            content_hash=definition_content_hash(content),
-            content=content,
-        )
-
-
 def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:
     """Convert one provider result into the raw top-level keys it actually supplied.
 
@@ -805,26 +560,6 @@ class AgentRuntime:
         self._identity_sink = identity_sink
         self._prompt_assembler = PromptAssembler()
         self._schema_registry = AgentSchemaRegistry()
-
-    @classmethod
-    def compatibility(
-        cls,
-        *,
-        model_adapter: AgentModelAdapter | None = None,
-        definition_source: AgentDefinitionSource | None = None,
-        identity_sink: AgentInvocationIdentitySink | None = None,
-    ) -> AgentRuntime:
-        """Build the temporary runtime backed by current code-owned definitions."""
-        return cls(
-            persisted_release_loader=CompatibilityResolvedDefinitionLoader(
-                cast(
-                    CodeOwnedAgentDefinitionSource,
-                    definition_source or CodeOwnedAgentDefinitionSource(),
-                )
-            ),
-            model_adapter=model_adapter or DatabricksModelAdapter(),
-            identity_sink=identity_sink or RecordingAgentInvocationIdentitySink(),
-        )
 
     def run(
         self,
@@ -1015,7 +750,9 @@ class AgentRuntime:
             schema_identity = schema_contract_identity(
                 definition.agent_key, content.schema_contract
             )
-            if schema_identity.version == _SCHEMA_CONTRACT_VERSION and (
+            # The registry's frozen v1 contract admits no schema overlay.
+            v1_version = V1_SCHEMA_IDENTITIES[definition.agent_key].version
+            if schema_identity.version == v1_version and (
                 content.schema_overlay.field_overrides
                 or content.schema_overlay.additional_optional_fields
             ):

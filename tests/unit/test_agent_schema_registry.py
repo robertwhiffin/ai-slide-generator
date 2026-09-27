@@ -1318,19 +1318,21 @@ def test_schema_contract_identity_is_defined_exactly_once_in_the_repository() ->
 
 
 def test_runtime_and_registry_agree_on_identity_class_equality_and_isinstance() -> None:
-    """The two registries must produce equal, mutually-isinstance identities."""
-    from src.services.agent_runtime import _SchemaContractRegistry
+    """The registry's v1 identities must equal the manifest's stored identities."""
+    from src.services.graph_definition_manifest import (
+        load_graph_v1_manifest,
+        schema_contract_identity,
+    )
 
-    runtime_registry = _SchemaContractRegistry()
     registry = AgentSchemaRegistry()
 
-    for role in EXPECTED_ROLES:
-        runtime_identity = runtime_registry.identity_for(role)
-        public_identity = registry.identity_for(role, 1)
-        assert type(runtime_identity) is type(public_identity)
-        assert isinstance(runtime_identity, SchemaContractIdentity)
-        assert runtime_identity == public_identity
-        assert runtime_identity.digest == EXPECTED_V1_DIGESTS[role]
+    for defn in load_graph_v1_manifest().definitions:
+        manifest_identity = schema_contract_identity(defn.agent_key, defn.schema_contract)
+        public_identity = registry.identity_for(defn.agent_key, 1)
+        assert type(manifest_identity) is type(public_identity)
+        assert isinstance(manifest_identity, SchemaContractIdentity)
+        assert manifest_identity == public_identity
+        assert manifest_identity.digest == EXPECTED_V1_DIGESTS[defn.agent_key]
 
 
 def test_upgrade_rejects_a_shadow_identity_carrier_loudly_instead_of_replacing_it() -> None:

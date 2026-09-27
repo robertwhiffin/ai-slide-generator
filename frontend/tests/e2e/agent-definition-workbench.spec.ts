@@ -44,6 +44,7 @@ import {
   v2ProtectedStageView,
 } from '../fixtures/mocks';
 import { ALLOWED_ACTION_NAMES, forbidsActionName } from '../fixtures/forbiddenActionNames';
+import { sweepForbiddenActionNames } from '../fixtures/forbiddenActionHelpers';
 
 const WORKBENCH_ENDPOINT = '**/api/admin/agent-definitions/workbench';
 const MODEL_ENDPOINTS_ENDPOINT = '**/api/admin/agent-definitions/model-endpoints';
@@ -1568,17 +1569,9 @@ test('no control in the panel ever offers execution, review, publication, histor
   await expect(page.getByRole('button', { name: 'Restore published Graph Version 1 prompt' }))
     .toBeVisible();
 
-  const sweep = async () => {
-    // Each name source (aria-label, text, title) is checked on its own: exemptions are
-    // exact whole names (review m-5), so a control naming itself twice is not concatenated.
-    const names = await panel.locator('button, a')
-      .evaluateAll((controls) => controls.flatMap((control) => [
-        control.getAttribute('aria-label') ?? '', control.textContent ?? '', control.getAttribute('title') ?? '',
-      ].filter((source) => source.trim() !== '')));
-    expect(names.length).toBeGreaterThan(0);
-    for (const name of names) expect(forbidsActionName(name)).toBe(false);
-    return names;
-  };
+  // Each name source (aria-label, text, title) is checked on its own (C16/C40: the
+  // shared fixture, so the admin journey sweeps with the same walker).
+  const sweep = () => sweepForbiddenActionNames(panel);
 
   // v1 with the recovery control live, v1 plain, and v2 with custom-block controls.
   const withRecovery = await sweep();

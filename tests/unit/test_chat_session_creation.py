@@ -17,6 +17,10 @@ from src.api.main import app
 from src.core.database import Base, get_db
 from src.api.schemas.streaming import StreamEventType
 
+# #271 C47(c): these tests are not about engine-mode resolution, which now
+# fails closed; they state the monolith answer they relied on.
+pytestmark = pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
+
 
 # ============================================
 # Fixtures

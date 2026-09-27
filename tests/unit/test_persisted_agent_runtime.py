@@ -26,8 +26,6 @@ from src.services.agent_runtime import (
     AgentInvocationIdentity,
     AgentModelConfiguration,
     AgentRuntime,
-    CodeOwnedAgentDefinitionSource,
-    CompatibilityResolvedDefinitionLoader,
     DatabricksModelAdapter,
     LoggingAgentInvocationIdentitySink,
     ModelProviderUnavailableError,
@@ -66,6 +64,9 @@ from src.services.prompt_assembler import (
     ResolvedPromptStage,
 )
 from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
+from tests.fixtures.log_records import STANDARD_LOG_RECORD_ATTRS as _STANDARD_LOG_RECORD_ATTRS
+from tests.fixtures.log_records import rendered_record
+from tests.fixtures.packaged_release_loader import PackagedGraphV1Loader
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -908,17 +909,6 @@ EXPECTED_LOG_MESSAGE = "persisted_agent_invocation"
 #: must change this constant deliberately.
 SUCCESS_LOG_FIELDS = PERMITTED_LOG_FIELDS | {"additional_field_names"}
 
-#: Every attribute the stdlib puts on a LogRecord, so the difference is exactly
-#: what the sink's ``extra=`` contributed.  ``message``/``asctime``/``taskName`` are
-#: added when a record is FORMATTED (caplog formats them), and ``logging`` refuses
-#: an ``extra`` key that collides with an existing record attribute — it raises
-#: ``KeyError: "Attempt to overwrite 'message' in LogRecord"`` — so no sink field
-#: can ever hide behind one of these three names.
-_STANDARD_LOG_RECORD_ATTRS = frozenset(
-    vars(logging.LogRecord("n", logging.INFO, "p", 1, "m", None, None))
-) | {"message", "asctime", "taskName"}
-
-
 def emitted_fields(record: logging.LogRecord) -> set:
     """The fields the sink added to *record* — its whole disclosure surface."""
     return {name for name in vars(record) if name not in _STANDARD_LOG_RECORD_ATTRS}
@@ -945,7 +935,7 @@ def test_logging_sink_logs_identity_outcome_and_error_class_only(caplog):
     assert emitted_fields(record) == PERMITTED_LOG_FIELDS
     assert record.msg == EXPECTED_LOG_MESSAGE
     assert record.args in (None, ())
-    rendered = str(vars(record))
+    rendered = rendered_record(record)
     assert "owner-session-9f" not in rendered
     assert "contributor-session-3b" not in rendered
 
@@ -1029,15 +1019,17 @@ def test_runtime_logging_sink_success_record_is_identity_outcome_and_optional_pr
     assert emitted_fields(record) == SUCCESS_LOG_FIELDS
     assert record.msg == EXPECTED_LOG_MESSAGE
     assert record.args in (None, ())
-    rendered = str(vars(record))
+    rendered = rendered_record(record)
     for secret in ("private", "payload", "owner-session-9f", "contributor-session-3b"):
         assert secret not in rendered
     # With no optional selected by this v1 overlay no optional name is logged.
     assert record.additional_field_names == []
 
 
-def test_compatibility_loader_constructs_exact_synthetic_persisted_definitions():
-    loader = CompatibilityResolvedDefinitionLoader(CodeOwnedAgentDefinitionSource())
+def test_packaged_v1_loader_constructs_exact_synthetic_persisted_definitions():
+    from src.services.persisted_graph_release import GraphReleaseNotFoundError
+
+    loader = PackagedGraphV1Loader()
 
     for agent_key in GRAPH_V1_AGENT_KEYS:
         resolved = loader.resolve(1, agent_key)
@@ -1049,7 +1041,7 @@ def test_compatibility_loader_constructs_exact_synthetic_persisted_definitions()
         assert set(parsed.schema_contract.model_dump()) == {"version", "digest"}
         assert resolved.content_hash == definition_content_hash(parsed)
 
-    with pytest.raises(ValueError, match="requires graph release 1"):
+    with pytest.raises(GraphReleaseNotFoundError):
         loader.resolve(2, "architect")
 
 
@@ -1058,7 +1050,7 @@ def test_get_agent_runtime_uses_persisted_loader_and_logging_sink():
 
     get_agent_runtime.cache_clear()
     runtime = get_agent_runtime()
-    assert not isinstance(runtime._persisted_release_loader, CompatibilityResolvedDefinitionLoader)
+    assert not isinstance(runtime._persisted_release_loader, PackagedGraphV1Loader)
     assert isinstance(runtime._model_adapter, DatabricksModelAdapter)
     assert isinstance(runtime._identity_sink, LoggingAgentInvocationIdentitySink)
     get_agent_runtime.cache_clear()
@@ -1456,7 +1448,7 @@ def test_exact_optional_values_reach_diagnostics_and_both_sink_traces(
     # optional NAMES only.  Explicit null and [] are supplied, so they are named;
     # absence is not.  No value ever reaches the record.
     assert records[0].additional_field_names == sorted(expected)
-    rendered = str(vars(records[0]))
+    rendered = rendered_record(records[0])
     for value in supplied.get("diagnostic_notes") or ():
         assert value.strip() not in rendered
     assert emitted_fields(records[0]) == SUCCESS_LOG_FIELDS
@@ -1625,8 +1617,9 @@ def test_invalid_output_logs_one_error_outcome_and_no_success_field(
     assert emitted_fields(records[0]) == PERMITTED_LOG_FIELDS
     assert records[0].msg == EXPECTED_LOG_MESSAGE
     assert records[0].args in (None, ())
-    assert "never log" not in str(vars(records[0]))
-    assert "undeclared-secret" not in str(vars(records[0]))
+    _rendered_0 = rendered_record(records[0])
+    assert "never log" not in _rendered_0
+    assert "undeclared-secret" not in _rendered_0
 
 
 def test_an_unselected_optional_output_field_is_rejected_as_undeclared() -> None:
@@ -1933,13 +1926,8 @@ def _logging_candidate_runtime(adapter: object, logger: logging.Logger) -> Agent
 
 
 def _rendered(record: logging.LogRecord) -> str:
-    """Everything a handler could write for *record*, including a traceback."""
-    parts = [record.getMessage(), repr(record.args), str(vars(record))]
-    if record.exc_info:
-        parts.append(logging.Formatter().formatException(record.exc_info))
-    if record.exc_text:
-        parts.append(record.exc_text)
-    return "\n".join(parts)
+    """Everything a handler could emit for *record* excluding its source location."""
+    return rendered_record(record)
 
 
 def _candidate_records(caplog) -> list[logging.LogRecord]:

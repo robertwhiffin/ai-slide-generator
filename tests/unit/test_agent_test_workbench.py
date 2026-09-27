@@ -872,6 +872,7 @@ from tests.fixtures.deterministic_model_adapter import (  # noqa: E402
     DeterministicFakeModelAdapter,
     fake_output,
 )
+from tests.fixtures.log_records import rendered_record  # noqa: E402
 
 RUNNER = "runner@example.com"
 _SEEDED_IDENTIFIERS = (
@@ -2006,9 +2007,7 @@ def test_the_executor_logs_no_payload_prompt_or_output(factory, caplog, mode):
         adapter.calls[0].prompt[:200],
     ]
     for record in caplog.records:
-        text = record.getMessage() + json.dumps(
-            {key: str(value) for key, value in vars(record).items()}
-        )
+        text = rendered_record(record)
         for value in forbidden:
             assert value not in text, (record.name, record.getMessage())
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator, Literal, Protocol
+from typing import Iterator, Literal, Protocol, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -28,6 +28,52 @@ class PersistedRuntimeError(RuntimeError):
     """Base error for an unavailable immutable persisted runtime."""
 
 
+#: Attributes the interpreter and the standard library assign on a live
+#: exception: ``raise ... from``, ``contextlib`` re-binding the traceback of a
+#: ``RuntimeError`` in ``_GeneratorContextManager.__exit__``, and
+#: ``BaseException.add_note`` (LangGraph notes the failing task on every error).
+_EXCEPTION_RUNTIME_ATTRIBUTES = frozenset(
+    {"__traceback__", "__cause__", "__context__", "__suppress_context__", "__notes__"}
+)
+
+_ErrorT = TypeVar("_ErrorT", bound=type[BaseException])
+
+
+def _context_manager_safe(cls: _ErrorT) -> _ErrorT:
+    """Keep a frozen dataclass exception's fields read-only, and nothing else.
+
+    A frozen dataclass's ``__setattr__`` refuses EVERY assignment on an instance
+    of the class itself, including the interpreter-managed exception attributes.
+    (With ``slots=True`` the refusal even surfaces as ``TypeError: super(type,
+    obj)``.)  So a typed pinned-runtime error raised inside any
+    ``@contextmanager`` -- LangGraph runs every node inside
+    ``set_config_context`` -- was replaced by that ``TypeError`` before any
+    caller could match it (#271 C52).  This wrapper lets exactly
+    :data:`_EXCEPTION_RUNTIME_ATTRIBUTES` through and keeps the dataclass
+    refusal for the declared fields.
+    """
+    frozen_setattr = cls.__setattr__
+    frozen_delattr = cls.__delattr__
+
+    def setattr_(self, name: str, value: object) -> None:
+        if name in _EXCEPTION_RUNTIME_ATTRIBUTES:
+            object.__setattr__(self, name, value)
+        else:
+            frozen_setattr(self, name, value)
+
+    def delattr_(self, name: str) -> None:
+        if name in _EXCEPTION_RUNTIME_ATTRIBUTES:
+            object.__delattr__(self, name)
+        else:
+            frozen_delattr(self, name)
+
+    setattr_.__name__ = "__setattr__"
+    delattr_.__name__ = "__delattr__"
+    cls.__setattr__ = setattr_  # type: ignore[method-assign]
+    cls.__delattr__ = delattr_  # type: ignore[method-assign]
+    return cls
+
+
 class GraphReleaseNotFoundError(PersistedRuntimeError):
     """The exact requested Graph Release does not exist."""
 
@@ -36,7 +82,8 @@ class GraphReleaseIncompleteError(PersistedRuntimeError):
     """The exact requested Graph Release is not a complete role aggregate."""
 
 
-@dataclass(frozen=True, slots=True)
+@_context_manager_safe
+@dataclass(frozen=True)
 class PersistedConfigurationUnavailableError(PersistedRuntimeError):
     code: Literal[
         "lakebase_unavailable",
@@ -53,7 +100,8 @@ class PersistedConfigurationUnavailableError(PersistedRuntimeError):
         return "Persisted graph configuration is unavailable"
 
 
-@dataclass(frozen=True, slots=True)
+@_context_manager_safe
+@dataclass(frozen=True)
 class PinnedInvocationEndpointError(PersistedRuntimeError):
     endpoint_name: str
     graph_release_id: int

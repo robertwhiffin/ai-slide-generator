@@ -56,14 +56,16 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
+from src.api.routes.chat import ENGINE_MODE_UNAVAILABLE_DETAIL
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services import job_queue
 from src.api.services.chat_service import (
     AGENT_MODE_PHRASE,
     ChatService,
-    resolve_engine_mode_or,
+    resolve_engine_mode_or_unavailable,
 )
 from src.core.database import Base, get_db
+from src.services.persisted_graph_release import PersistedConfigurationUnavailableError
 from tests.unit.conftest import _make_factory, _make_fake_db
 
 # resolve_engine_mode and clear_context import get_db_session lazily inside the
@@ -232,6 +234,9 @@ class TestStreamingRoute:
         sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "graph"
+        # A healthy turn releases the lock exactly once, from the SSE generator's
+        # `finally` -- the fail-closed branch added its own release (#271 C47).
+        route_env["manager"].release_session_lock.assert_called_once_with(sid)
 
     def test_the_mode_is_sticky_on_this_entry_point(self, route_env):
         """A later turn carrying no phrase still runs on the graph.
@@ -551,75 +556,271 @@ class TestDefaultsFailClosed:
         assert param.default == "monolith"
 
 
-class TestResolutionFailureNeverFailsATurn:
-    """Mode resolution must never be the thing that fails a turn (Task 1's own
-    contract, quoted from `resolve_engine_mode`'s docstring).
+class TestResolutionFailureFailsTheTurnClosed:
+    """A FAILURE to resolve the engine fails the turn explicitly (#271 C24/C47).
 
-    `resolve_engine_mode` returns monolith for its three "no answer" cases but
-    lets an unexpected database error propagate, and every call site sits on the
-    request path of a turn that would otherwise have run fine.  Measured while
-    adding the seventh edit point: a bare re-resolve killed three pre-existing
-    monolith tests with `psycopg2.ProgrammingError`, which is the same shape a
-    transient database error takes in production — a monolith turn that
-    previously needed no database read at all would 500.
+    ws4d shipped this as a fail-OPEN: every call site went through
+    ``resolve_engine_mode_or``, and a raising resolver kept "the mode already in
+    hand", which on every call site but one was ``"monolith"``.  That silently
+    ran a pinned graph conversation on the legacy monolith (code-owned prompts,
+    ``DEFAULT_CONFIG["llm"]``) during a Lakebase outage, which spec §15 forbids:
+    "Lakebase unavailable | Fail explicitly; no code defaults or latest-release
+    substitution."  "Fail only when pinned" is unimplementable, because knowing
+    whether the session is pinned needs the same database read that just failed.
 
-    So every call site goes through `resolve_engine_mode_or`, and these are the
-    assertions that it is a fail-OPEN and not a fail-loud.
+    So the four fail-open tests that stood here are INVERTED, deliberately and
+    by controller ruling (C24, surfaced to the user): a raising resolver now
+    yields a typed 503 ``lakebase_unavailable`` on both routes, with the session
+    lock released and the service never reached, and the SSE turn-1 re-resolve
+    yields the safe ``pinned_graph_configuration_unavailable`` event then raises.
+    ``resolve_engine_mode``'s three "no answer -> monolith" cases are answers,
+    not failures, and are unchanged (``test_engine_mode_selection.py``).
     """
 
     _BOOM = "src.api.services.chat_service.resolve_engine_mode"
+    _INTERNAL = "the database went away at 10.0.0.7:5432"
 
-    def test_a_raising_resolver_returns_the_callers_value(self):
-        def boom(session_id):
-            raise RuntimeError("the database went away")
+    def _boom(self, session_id):
+        raise RuntimeError(self._INTERNAL)
 
-        with patch(self._BOOM, boom):
-            assert resolve_engine_mode_or("s-1", "graph") == "graph"
+    def test_a_raising_resolver_raises_the_typed_lakebase_error(self):
+        """Inverts ws4d's ``test_a_raising_resolver_returns_the_callers_value``."""
+        with patch(self._BOOM, self._boom):
+            with pytest.raises(PersistedConfigurationUnavailableError) as raised:
+                resolve_engine_mode_or_unavailable("s-1")
+        assert raised.value.code == "lakebase_unavailable"
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert self._INTERNAL not in str(raised.value)
 
-    def test_the_fallback_defaults_to_monolith(self):
-        def boom(session_id):
-            raise RuntimeError("the database went away")
+    def test_the_error_record_is_redacted_and_the_cause_is_logged_at_debug(self, caplog):
+        """Operators can see WHY resolution failed, at DEBUG only (fix round 1, M3).
 
-        with patch(self._BOOM, boom):
-            assert resolve_engine_mode_or("s-1") == "monolith"
+        The ERROR record carries the error class and nothing else: no traceback,
+        no exception text.  The DEBUG record carries the full ``exc_info``.
+        """
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="src.api.services.chat_service"):
+            with patch(self._BOOM, self._boom):
+                with pytest.raises(PersistedConfigurationUnavailableError):
+                    resolve_engine_mode_or_unavailable("s-1")
+
+        records = [
+            r for r in caplog.records
+            if r.name == "src.api.services.chat_service" and "Engine-mode resolution" in r.msg
+        ]
+        errors = [r for r in records if r.levelno == logging.ERROR]
+        debugs = [r for r in records if r.levelno == logging.DEBUG]
+        assert len(errors) == 1 and len(debugs) == 1, [(r.levelname, r.msg) for r in records]
+        assert errors[0].exc_info is None
+        assert errors[0].error_class == "RuntimeError"
+        assert self._INTERNAL not in errors[0].getMessage()
+        assert debugs[0].exc_info is not None
+        assert debugs[0].exc_info[1].args == (self._INTERNAL,)
+
+    def test_there_is_no_fallback_to_default_to(self):
+        """Inverts ws4d's ``test_the_fallback_defaults_to_monolith``.
+
+        The wrapper takes the session id and nothing else: no caller can hand
+        it a mode to fall back to.
+        """
+        assert list(inspect.signature(resolve_engine_mode_or_unavailable).parameters) == [
+            "session_id"
+        ]
+        import src.api.services.chat_service as chat_service_module
+
+        assert not hasattr(chat_service_module, "resolve_engine_mode_or")
 
     def test_a_successful_resolution_is_passed_straight_through(self):
         """The wrapper must not swallow the answer as well as the error."""
         with patch(self._BOOM, lambda session_id: "graph"):
-            assert resolve_engine_mode_or("s-1", "monolith") == "graph"
+            assert resolve_engine_mode_or_unavailable("s-1") == "graph"
+        with patch(self._BOOM, lambda session_id: "monolith"):
+            assert resolve_engine_mode_or_unavailable("s-1") == "monolith"
 
-    def test_the_streaming_route_still_serves_the_turn(self, route_env):
+    def _assert_typed_503(self, response):
+        assert response.status_code == 503, response.text
+        assert response.json() == {"detail": ENGINE_MODE_UNAVAILABLE_DETAIL}
+        assert ENGINE_MODE_UNAVAILABLE_DETAIL["code"] == "lakebase_unavailable"
+        assert self._INTERNAL not in response.text
+        assert "RuntimeError" not in response.text
+
+    def test_the_streaming_route_fails_with_a_typed_503_and_releases_the_lock(
+        self, route_env
+    ):
+        """Inverts ws4d's ``test_the_streaming_route_still_serves_the_turn``.
+
+        The 503 is raised BEFORE the StreamingResponse starts, so the SSE
+        generator's ``finally`` never runs: the route itself must release the
+        lock it took, exactly once.
+        """
         sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
 
-        def boom(session_id):
-            raise RuntimeError("the database went away")
-
-        with patch(self._BOOM, boom):
+        with patch(self._BOOM, self._boom):
             response = route_env["client"].post(
                 "/api/chat/stream",
                 json={"session_id": sid, "message": _PLAIN_MESSAGE},
             )
-            assert response.status_code == 200, response.text
-            response.read()
+        self._assert_typed_503(response)
+        route_env["service"].send_message_streaming.assert_not_called()
+        route_env["manager"].acquire_session_lock.assert_called_once_with(sid)
+        route_env["manager"].release_session_lock.assert_called_once_with(sid)
 
-        call = route_env["service"].send_message_streaming.call_args
-        assert call.kwargs["engine_mode"] == "monolith"
+    def test_the_async_route_fails_with_a_typed_503_and_releases_the_lock(
+        self, route_env
+    ):
+        """Inverts ws4d's ``test_the_async_route_still_enqueues_the_job``.
 
-    def test_the_async_route_still_enqueues_the_job(self, route_env):
+        Resolution runs inside the route's ``try``, whose ``except Exception``
+        would turn the failure into a 500 "Internal server error"; the typed
+        clause ahead of it releases the lock and answers 503.  C47(e): the user
+        message and the ``chat_requests`` row were persisted before resolution
+        and remain.
+        """
         sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
 
-        def boom(session_id):
-            raise RuntimeError("the database went away")
-
-        with patch(self._BOOM, boom):
+        with patch(self._BOOM, self._boom):
             response = route_env["client"].post(
                 "/api/chat/async",
                 json={"session_id": sid, "message": _PLAIN_MESSAGE},
             )
-            assert response.status_code == 200, response.text
+        self._assert_typed_503(response)
+        route_env["enqueue"].assert_not_awaited()
+        route_env["manager"].release_session_lock.assert_called_once_with(sid)
+        route_env["manager"].create_chat_request.assert_called_once()
+        route_env["manager"].add_message.assert_called_once()
 
-        payload = route_env["enqueue"].await_args.args[1]
-        assert payload["engine_mode"] == "monolith"
+    def test_only_the_resolve_call_is_labelled_lakebase_unavailable_on_the_async_route(
+        self, route_env
+    ):
+        """The typed 503 is scoped to resolution: the same error class raised by any
+        other step of the route's ``try`` (here, persisting the user message) is the
+        route's generic 500, not a mislabelled ``lakebase_unavailable``."""
+        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        route_env["manager"].add_message.side_effect = PersistedConfigurationUnavailableError(
+            code="lakebase_unavailable"
+        )
+
+        with patch(self._BOOM, lambda session_id: "graph"):
+            response = route_env["client"].post(
+                "/api/chat/async",
+                json={"session_id": sid, "message": _PLAIN_MESSAGE},
+            )
+        assert response.status_code == 500, response.text
+        assert response.json() == {"detail": "Internal server error"}
+        route_env["enqueue"].assert_not_awaited()
+        route_env["manager"].release_session_lock.assert_called_once_with(sid)
+
+
+class TestTheSseReResolveFailsClosed:
+    """The THIRD site (C24): ``send_message_streaming``'s SSE turn-1 re-resolve.
+
+    On turn 1 of an SSE session the route necessarily resolved ``monolith`` (no
+    user row yet).  A raising re-resolve used to keep that ``monolith`` and run
+    the legacy path on a graph deck.  It now yields the typed safe event and
+    raises, and the monolith is never built.
+    """
+
+    _BOOM = "src.api.services.chat_service.resolve_engine_mode"
+
+    @pytest.fixture
+    def service_env(self):
+        manager = MagicMock()
+        manager.get_session.return_value = {"message_count": 0}
+        manager.add_message.return_value = {"id": 7}
+
+        def monolith_reached(*args, **kwargs):
+            raise AssertionError("the monolith was built after a failed re-resolve")
+
+        with patch(
+            "src.api.services.chat_service.get_session_manager", return_value=manager
+        ), patch("src.core.settings_db.get_settings", return_value=MagicMock()), patch.object(
+            ChatService, "_build_agent_for_session", monolith_reached
+        ), patch.object(
+            ChatService,
+            "_send_message_streaming_graph",
+            side_effect=AssertionError("the graph ran after a failed re-resolve"),
+        ):
+            yield manager
+
+    def _drive(self, *, engine_mode: str):
+        events: List[StreamEvent] = []
+        with pytest.raises(PersistedConfigurationUnavailableError) as raised:
+            for event in ChatService().send_message_streaming(
+                session_id="sse-turn-1",
+                message=_PHRASE_MESSAGE,
+                engine_mode=engine_mode,
+            ):
+                events.append(event)
+        return events, raised.value
+
+    @pytest.mark.parametrize("route_mode", ["monolith", "graph"])
+    def test_a_raising_re_resolve_yields_the_safe_event_then_raises(
+        self, service_env, route_mode
+    ):
+        def boom(session_id):
+            raise RuntimeError("the database went away")
+
+        with patch(self._BOOM, boom):
+            events, error = self._drive(engine_mode=route_mode)
+
+        assert error.code == "lakebase_unavailable"
+        assert len(events) == 1, events
+        assert job_queue.is_pinned_graph_configuration_error_event(events[0])
+        safe = job_queue.pinned_graph_configuration_error_event_payload()
+        assert events[0] == StreamEvent(**safe)
+        # C47(e): the user message was persisted before the re-resolve and stays.
+        service_env.add_message.assert_called_once()
+
+    def test_the_route_answer_then_a_failing_re_resolve_fails_the_turn_on_the_real_route(
+        self, route_env
+    ):
+        """C47(d): monolith on the ROUTE's call, a raise on the SERVICE's call.
+
+        An always-raising resolver would 503 at the route first, so a fail-open
+        restored at the service site alone would stay green; this two-call
+        resolver reaches it through the shipped ``/chat/stream`` route.
+        """
+        sid = _seed_session(route_env["factory"], [])
+        calls: List[str] = []
+
+        def route_then_boom(session_id):
+            calls.append(session_id)
+            if len(calls) == 1:
+                return "monolith"
+            raise RuntimeError("the database went away")
+
+        manager = route_env["manager"]
+        manager.add_message.return_value = {"id": 7}
+
+        def monolith_reached(*args, **kwargs):
+            raise AssertionError("the monolith was built after a failed re-resolve")
+
+        with patch(self._BOOM, route_then_boom), patch(
+            "src.api.routes.chat.get_chat_service", return_value=ChatService()
+        ), patch(
+            "src.api.services.chat_service.get_session_manager", return_value=manager
+        ), patch("src.core.settings_db.get_settings", return_value=MagicMock()), patch.object(
+            ChatService, "_build_agent_for_session", monolith_reached
+        ):
+            response = route_env["client"].post(
+                "/api/chat/stream",
+                json={"session_id": sid, "message": _PHRASE_MESSAGE},
+            )
+            assert response.status_code == 200, response.text
+            body = response.read().decode()
+
+        assert calls == [sid, sid]
+        data_lines = [line for line in body.splitlines() if line.startswith("data: ")]
+        assert len(data_lines) == 1, body
+        import json
+
+        sent = StreamEvent(**json.loads(data_lines[0][len("data: ") :]))
+        assert job_queue.is_pinned_graph_configuration_error_event(sent)
+        safe = job_queue.pinned_graph_configuration_error_event_payload()
+        assert sent == StreamEvent(**safe)
+        assert "the database went away" not in body
+        manager.release_session_lock.assert_called_once_with(sid)
 
 
 class TestSendMessageNeverReferencesTheGraph:

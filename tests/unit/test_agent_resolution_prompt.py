@@ -23,9 +23,9 @@ from src.core.skills import load_skill
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     AgentModelConfiguration,
-    AgentRuntime,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+from tests.fixtures.packaged_release_loader import packaged_v1_runtime
 
 VALID_OUTPUT_VALUES: dict[str, dict[str, object]] = {
     "architect": {"intent": "discuss", "message": "an answer"},
@@ -73,7 +73,7 @@ def _assembled_prompt(
     design_system_active: bool,
 ) -> str:
     model = PromptCaptureAdapter()
-    result = AgentRuntime.compatibility(model_adapter=model).run(
+    result = packaged_v1_runtime(model_adapter=model).run(
         agent_key,
         1,
         payload,

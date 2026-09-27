@@ -305,3 +305,62 @@ def test_only_explicit_sessions_route_maps_no_active_release_to_503():
 
     assert raised.value.status_code == 503
     assert raised.value.detail == "No active Graph Release available"
+
+
+def _run_contribute(factory, integrity_error):
+    """Drive the contribute route with a parent read that raises ``integrity_error``."""
+    from src.api.routes.sessions import get_or_create_contributor_session
+
+    manager = Mock()
+    manager.get_session.side_effect = integrity_error
+    with patch(
+        "src.api.routes.sessions.get_current_user", return_value="contributor@example.com"
+    ), patch("src.api.routes.sessions.get_session_manager", return_value=manager), factory() as db:
+        return asyncio.run(get_or_create_contributor_session("parent", db)), manager
+
+
+def test_contribute_maps_a_parent_read_without_an_active_release_to_the_typed_503(factory):
+    """#271 Task 8 fix round 1: the parent read fails first when no release is active.
+
+    ``SessionManager.get_session``'s projection raises the integrity error before
+    ``get_or_create_contributor_session`` can raise the typed one, and the route's
+    generic handler used to answer 500.
+    """
+    from fastapi import HTTPException
+
+    from src.services.conversation_pins import ConversationGraphReleaseIntegrityError
+
+    with pytest.raises(HTTPException) as raised:
+        _run_contribute(factory, ConversationGraphReleaseIntegrityError("no active Graph Release"))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "No active Graph Release available"
+    with factory() as db:
+        assert db.scalars(select(UserSession)).all() == []
+
+
+def test_contribute_keeps_a_parent_integrity_error_with_an_active_release_generic(factory):
+    """The same error class with a release ACTIVE is a different fault, never "no release"."""
+    from fastapi import HTTPException
+
+    from src.services.conversation_pins import ConversationGraphReleaseIntegrityError
+
+    now = datetime.now(timezone.utc)
+    with factory.begin() as db:
+        db.add(
+            GraphRelease(
+                version_number=1,
+                release_note="active",
+                published_by="t@example.com",
+                published_at=now,
+                effective_from=now,
+            )
+        )
+
+    with pytest.raises(HTTPException) as raised:
+        _run_contribute(
+            factory, ConversationGraphReleaseIntegrityError("missing pinned Graph Release")
+        )
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "Failed to create contributor session"

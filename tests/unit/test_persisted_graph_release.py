@@ -502,3 +502,119 @@ def test_the_candidate_sentinel_release_id_never_resolves_through_run(
 
     assert adapter.calls == []
     assert sink.calls == []
+
+
+# ---------------------------------------------------------------------------
+# C52 (#271 Task 8): the typed pinned-runtime errors survive context managers
+# ---------------------------------------------------------------------------
+#
+# ``contextlib._GeneratorContextManager.__exit__`` re-binds a ``RuntimeError``'s
+# ``__traceback__`` (``exc.__traceback__ = traceback``).  A frozen+slots dataclass
+# exception turns that assignment into ``TypeError: super(type, obj)``, and
+# LangGraph runs EVERY node inside ``set_config_context`` (a ``@contextmanager``),
+# so a node-raised pinned-configuration failure reached the chat seam as a
+# ``TypeError`` and the safe ``pinned_graph_configuration_unavailable`` event was
+# never emitted.
+
+
+def _typed_pinned_runtime_errors() -> list[Exception]:
+    return [
+        PersistedConfigurationUnavailableError(code="protected_bundle_unavailable"),
+        PinnedInvocationEndpointError(
+            endpoint_name="pinned-endpoint", graph_release_id=4, agent_definition_revision_id=9
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "error", _typed_pinned_runtime_errors(), ids=lambda error: type(error).__name__
+)
+def test_typed_pinned_runtime_errors_survive_a_plain_context_manager(error):
+    import contextlib
+
+    @contextlib.contextmanager
+    def managed():
+        yield
+
+    with pytest.raises(type(error)) as raised:
+        with managed():
+            raise error
+
+    assert raised.value is error
+    assert raised.value.__traceback__ is not None
+
+
+@pytest.mark.parametrize(
+    "error", _typed_pinned_runtime_errors(), ids=lambda error: type(error).__name__
+)
+def test_typed_pinned_runtime_errors_survive_langgraph_set_config_context(error):
+    from langgraph._internal._runnable import set_config_context
+
+    with pytest.raises(type(error)) as raised:
+        with set_config_context({"configurable": {}}):
+            raise error
+
+    assert raised.value is error
+
+
+@pytest.mark.parametrize(
+    "error", _typed_pinned_runtime_errors(), ids=lambda error: type(error).__name__
+)
+def test_typed_pinned_runtime_errors_escape_a_real_langgraph_node_unchanged(error):
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+
+    class _State(TypedDict, total=False):
+        value: int
+
+    def failing_node(_state: _State) -> _State:
+        raise error
+
+    builder = StateGraph(_State)
+    builder.add_node("failing", failing_node)
+    builder.add_edge(START, "failing")
+    builder.add_edge("failing", END)
+    graph = builder.compile()
+
+    with pytest.raises(type(error)) as raised:
+        graph.invoke({"value": 1})
+
+    assert raised.value is error
+
+
+def test_context_manager_safe_errors_keep_frozen_fields_str_args_and_chaining():
+    from dataclasses import FrozenInstanceError
+
+    configuration = PersistedConfigurationUnavailableError(code="lakebase_unavailable")
+    assert configuration.code == "lakebase_unavailable"
+    assert configuration.args == ("lakebase_unavailable",)
+    assert str(configuration) == "Persisted graph configuration is unavailable"
+    assert configuration == PersistedConfigurationUnavailableError(code="lakebase_unavailable")
+    with pytest.raises(FrozenInstanceError):
+        configuration.code = "invalid_persisted_definition"
+    with pytest.raises(FrozenInstanceError):
+        del configuration.code
+
+    endpoint = PinnedInvocationEndpointError(
+        endpoint_name="pinned-endpoint", graph_release_id=4, agent_definition_revision_id=9
+    )
+    assert endpoint.args == ("pinned-endpoint", 4, 9)
+    assert str(endpoint) == "Pinned graph model endpoint is unavailable"
+    for field_name in ("endpoint_name", "graph_release_id", "agent_definition_revision_id"):
+        with pytest.raises(FrozenInstanceError):
+            setattr(endpoint, field_name, "changed")
+
+    # The interpreter-managed exception attributes stay writable.
+    cause = ValueError("cause")
+    try:
+        try:
+            raise cause
+        except ValueError as exc:
+            raise configuration from exc
+    except PersistedConfigurationUnavailableError as raised:
+        assert raised.__cause__ is cause
+        assert raised.__suppress_context__ is True
+    configuration.__traceback__ = None
+    configuration.add_note("a note")
+    assert configuration.__notes__ == ["a note"]

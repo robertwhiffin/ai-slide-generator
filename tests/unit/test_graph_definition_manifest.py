@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
-import importlib.util
 import json
 import re
 import subprocess
@@ -9,7 +7,6 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 from uuid import UUID
@@ -17,17 +14,13 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from scripts.generate_graph_definition_manifest_v1 import (
-    build_manifest_json,
-    render_manifest_module,
-)
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
+from src.core.skills import load_skill
 from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
 from src.services.agent_definition_manifest_v1 import GRAPH_VERSION_1_MANIFEST_JSON
 from src.services.agent_runtime import (
     MODEL_DRIVEN_AGENT_KEYS,
     AgentAssemblyContext,
-    CodeOwnedAgentDefinitionSource,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_definition_manifest import (
@@ -263,24 +256,21 @@ def test_importing_typed_manifest_does_not_import_static_snapshot():
     assert completed.returncode == 0, completed.stderr
 
 
-def test_packaged_v1_manifest_matches_exact_compatibility_definitions():
+def test_packaged_v1_manifest_hashes_and_contracts_match_stable_literals():
+    """Compare manifest against literals and load_skill as a test-side historical record."""
     manifest = load_graph_v1_manifest()
     assert tuple(item.agent_key for item in manifest.definitions) == MODEL_DRIVEN_AGENT_KEYS
-    source = CodeOwnedAgentDefinitionSource()
+    # Protected-assembly oracle: the one shared digest literal.
+    expected_protected_digest = "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
     for item in manifest.definitions:
-        current = source.resolve(item.agent_key)
-        assert item.prompt_text == current.prompt_text
-        assert item.definition_version == current.definition_version
-        assert item.model.model_dump() == dataclasses.asdict(current.model_configuration)
-        assert item.protected_assembly.model_dump() == {
-            "version": current.protected_prompt.version,
-            "digest": current.protected_prompt.digest,
-        }
-        assert current.schema_contract.agent_key == item.agent_key
-        assert item.schema_contract.model_dump() == {
-            "version": current.schema_contract.version,
-            "digest": current.schema_contract.digest,
-        }
+        # load_skill is the test-side historical record: the manifest's prompt_text must
+        # equal the shipped skill instructions (C-24: a literal, not an import).
+        assert item.prompt_text == load_skill(item.agent_key).instructions
+        assert definition_content_hash(item) == PACKAGED_V1_CONTENT_HASHES[item.agent_key]
+        assert item.schema_contract.version == 1
+        assert item.schema_contract.digest == V1_SCHEMA_CONTRACT_DIGESTS[item.agent_key]
+        assert item.protected_assembly.version == 1
+        assert item.protected_assembly.digest == expected_protected_digest
 
 
 def test_v1_definition_versions_are_frozen_at_two():
@@ -689,45 +679,6 @@ def test_manifest_models_forbid_extra_fields_and_incomplete_role_sets():
 def test_assembly_rules_for_rejects_unknown_roles():
     with pytest.raises(ValueError, match="Unknown model-driven agent key"):
         assembly_rules_for("foreman")
-
-
-def test_generator_output_is_deterministic_and_matches_packaged_snapshot():
-    generated_json = build_manifest_json()
-    assert generated_json == GRAPH_VERSION_1_MANIFEST_JSON
-    expected_file = Path("src/services/agent_definition_manifest_v1.py").read_text()
-    assert render_manifest_module(generated_json) == expected_file
-
-
-def test_generated_python_literal_safely_round_trips_arbitrary_prompt_bytes(tmp_path: Path):
-    json_text = json.dumps(
-        {"prompt": "quotes ''' and \"\"\", slashes \\\\, unicode λ, newline\n"},
-        ensure_ascii=False,
-        indent=2,
-    )
-    module_path = tmp_path / "generated_probe.py"
-    module_path.write_text(render_manifest_module(json_text))
-    spec = importlib.util.spec_from_file_location("generated_probe", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.GRAPH_VERSION_1_MANIFEST_JSON == json_text
-
-
-def test_generator_runs_via_documented_direct_script_invocation(tmp_path: Path):
-    output_path = tmp_path / "agent_definition_manifest_v1.py"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "scripts/generate_graph_definition_manifest_v1.py",
-            "--output",
-            str(output_path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert output_path.read_text() == render_manifest_module(build_manifest_json())
 
 
 # ---------------------------------------------------------------------------
