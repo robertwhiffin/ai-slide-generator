@@ -234,6 +234,9 @@ class TestStreamingRoute:
         sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "graph"
+        # A healthy turn releases the lock exactly once, from the SSE generator's
+        # `finally` -- the fail-closed branch added its own release (#271 C47).
+        route_env["manager"].release_session_lock.assert_called_once_with(sid)
 
     def test_the_mode_is_sticky_on_this_entry_point(self, route_env):
         """A later turn carrying no phrase still runs on the graph.
@@ -589,6 +592,32 @@ class TestResolutionFailureFailsTheTurnClosed:
         assert isinstance(raised.value.__cause__, RuntimeError)
         assert self._INTERNAL not in str(raised.value)
 
+    def test_the_error_record_is_redacted_and_the_cause_is_logged_at_debug(self, caplog):
+        """Operators can see WHY resolution failed, at DEBUG only (fix round 1, M3).
+
+        The ERROR record carries the error class and nothing else: no traceback,
+        no exception text.  The DEBUG record carries the full ``exc_info``.
+        """
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="src.api.services.chat_service"):
+            with patch(self._BOOM, self._boom):
+                with pytest.raises(PersistedConfigurationUnavailableError):
+                    resolve_engine_mode_or_unavailable("s-1")
+
+        records = [
+            r for r in caplog.records
+            if r.name == "src.api.services.chat_service" and "Engine-mode resolution" in r.msg
+        ]
+        errors = [r for r in records if r.levelno == logging.ERROR]
+        debugs = [r for r in records if r.levelno == logging.DEBUG]
+        assert len(errors) == 1 and len(debugs) == 1, [(r.levelname, r.msg) for r in records]
+        assert errors[0].exc_info is None
+        assert errors[0].error_class == "RuntimeError"
+        assert self._INTERNAL not in errors[0].getMessage()
+        assert debugs[0].exc_info is not None
+        assert debugs[0].exc_info[1].args == (self._INTERNAL,)
+
     def test_there_is_no_fallback_to_default_to(self):
         """Inverts ws4d's ``test_the_fallback_defaults_to_monolith``.
 
@@ -660,6 +689,27 @@ class TestResolutionFailureFailsTheTurnClosed:
         route_env["manager"].release_session_lock.assert_called_once_with(sid)
         route_env["manager"].create_chat_request.assert_called_once()
         route_env["manager"].add_message.assert_called_once()
+
+    def test_only_the_resolve_call_is_labelled_lakebase_unavailable_on_the_async_route(
+        self, route_env
+    ):
+        """The typed 503 is scoped to resolution: the same error class raised by any
+        other step of the route's ``try`` (here, persisting the user message) is the
+        route's generic 500, not a mislabelled ``lakebase_unavailable``."""
+        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        route_env["manager"].add_message.side_effect = PersistedConfigurationUnavailableError(
+            code="lakebase_unavailable"
+        )
+
+        with patch(self._BOOM, lambda session_id: "graph"):
+            response = route_env["client"].post(
+                "/api/chat/async",
+                json={"session_id": sid, "message": _PLAIN_MESSAGE},
+            )
+        assert response.status_code == 500, response.text
+        assert response.json() == {"detail": "Internal server error"}
+        route_env["enqueue"].assert_not_awaited()
+        route_env["manager"].release_session_lock.assert_called_once_with(sid)
 
 
 class TestTheSseReResolveFailsClosed:

@@ -66,6 +66,10 @@ ENGINE_MODE_UNAVAILABLE_DETAIL = {
 }
 
 
+class _EngineModeUnresolvedError(Exception):
+    """The async route's engine-mode resolution (and nothing else) failed closed."""
+
+
 def _engine_mode_unavailable() -> HTTPException:
     return HTTPException(status_code=503, detail=dict(ENGINE_MODE_UNAVAILABLE_DETAIL))
 
@@ -724,12 +728,16 @@ async def submit_chat_async(
         # message: on turn 1 that row has to exist already or the phrase in the
         # very first message would resolve to monolith.
         #
-        # FAIL CLOSED (#271 C24/C47): a failure raises the typed error, which the
-        # clause below turns into a 503 (not the generic 500) after releasing the
-        # lock.  The chat_requests row and the user message persisted above stay.
-        engine_mode = await asyncio.to_thread(
-            resolve_engine_mode_or_unavailable, request.session_id
-        )
+        # FAIL CLOSED (#271 C24/C47): a failure of THIS call (and only this call)
+        # becomes `_EngineModeUnresolvedError`, which the clause below turns into a 503
+        # (not the generic 500) after releasing the lock.  The chat_requests row
+        # and the user message persisted above stay.
+        try:
+            engine_mode = await asyncio.to_thread(
+                resolve_engine_mode_or_unavailable, request.session_id
+            )
+        except PersistedConfigurationUnavailableError as e:
+            raise _EngineModeUnresolvedError() from e
 
         # Queue for processing
         await enqueue_job(
@@ -762,11 +770,11 @@ async def submit_chat_async(
             status_code=404,
             detail=f"Session not found: {request.session_id}",
         ) from e
-    except PersistedConfigurationUnavailableError as e:
+    except _EngineModeUnresolvedError as e:
         await asyncio.to_thread(
             session_manager.release_session_lock, request.session_id
         )
-        raise _engine_mode_unavailable() from e
+        raise _engine_mode_unavailable() from e.__cause__
     except Exception as e:
         # Release lock on failure
         await asyncio.to_thread(

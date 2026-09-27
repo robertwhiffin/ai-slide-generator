@@ -8,11 +8,9 @@ On a fresh database where Graph Version 1 was never bootstrapped, each of the
 seven graph-capable creators (#269's ``CREATORS``) refuses with
 ``ActiveGraphReleaseUnavailableError`` through ``_create`` (C38/C51), writes no
 ``user_sessions`` row and reads no code-owned definition (the AC1 tripwire).
-The five creators reachable over HTTP refuse through the shipped sessions and
-chat routers: four with 503 "No active Graph Release available", and the
-contribute route with a generic 500 (a finding, pinned exactly; see
-``ROUTE_CREATORS``).  (The refusals are landed #261/#262 behaviour: this is a
-regression pin, C18.5.)
+The five creators reachable over HTTP answer 503 "No active Graph Release
+available" through the shipped sessions and chat routers.  (The refusals are
+landed #261/#262 behaviour: this is a regression pin, C18.5.)
 
 Explicit invocation failures preserve conversation state (AC3)
 --------------------------------------------------------------
@@ -947,18 +945,15 @@ ROUTE_CREATORS = {
         {"session_id": "route-supplied", "message": f"{AGENT_MODE_PHRASE} go"},
         _NO_ACTIVE,
     ),
-    # FINDING (#271 Task 8, routed to the controller, not fixed here): the
-    # contribute route reads the PARENT through ``SessionManager.get_session``
-    # first, whose public projection requires an active release and raises
-    # ``ConversationGraphReleaseIntegrityError``, so the route's generic handler
-    # answers 500 before ``get_or_create_contributor_session`` can raise the typed
-    # error its 503 clause maps.  Still an explicit refusal with no internal text
-    # and no row; pinned exactly so a fix turns this red on purpose.
+    # Fix round 1 (was a FINDING pinned at 500): the contribute route reads the
+    # PARENT through ``SessionManager.get_session`` first, whose public
+    # projection requires an active release.  With none, that read now surfaces
+    # as the same typed refusal as every other creator, not a generic 500.
     "contributor": (
         "POST",
         "/api/sessions/contributor-source/contribute",
         None,
-        (500, {"detail": "Failed to create contributor session"}),
+        _NO_ACTIVE,
     ),
     "duplicate": (
         "POST",
