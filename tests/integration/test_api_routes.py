@@ -315,6 +315,8 @@ class TestChatEndpoints:
         data = response.json()
         assert data["status"] == "healthy"
 
+    # #271 C47(c): not about engine-mode resolution, which now fails closed.
+    @pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
     def test_chat_async_submit(self, client, mock_session_manager):
         """POST /api/chat/async returns request_id."""
         mock_session_manager.create_chat_request.return_value = "req-abc123"

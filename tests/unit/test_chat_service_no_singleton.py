@@ -129,6 +129,8 @@ class TestSendMessageBuildsAgentPerRequest:
         assert session_data["genie_conversation_id"] == "genie-123"
 
 
+# #271 C47(c): not about engine-mode resolution, which now fails closed.
+@pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
 class TestSendMessageStreamingBuildsAgentPerRequest:
     """send_message_streaming() should build agent per-request."""
 
