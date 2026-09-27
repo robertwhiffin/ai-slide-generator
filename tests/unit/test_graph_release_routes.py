@@ -706,7 +706,6 @@ def test_a_changed_role_without_a_required_case_is_a_null_case_gap(
     _force_admin(monkeypatch, is_admin=True)
     with _app(session_factory) as client:
         _save(client, "architect", "A tuned architect prompt.")
-        builder_run = None
         _save(client, "builder", "A tuned builder prompt.")
         builder_run = _approve(client, session_factory, "builder")
         with session_factory.begin() as db:
@@ -725,6 +724,7 @@ def test_a_changed_role_without_a_required_case_is_a_null_case_gap(
         {"agent_key": "architect", "test_case_id": None, "code": "no_required_case"}
     ]
     assert list(body["gaps"][0]) == ["agent_key", "test_case_id", "code"]
+    assert _release_count(session_factory) == 1
 
 
 # --- 200 published --------------------------------------------------------------
