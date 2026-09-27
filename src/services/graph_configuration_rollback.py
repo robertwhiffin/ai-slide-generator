@@ -506,21 +506,13 @@ class _GraphConfigurationRollback(_GraphConfigurationPublication):
 
         The saves' local phase (incl. #266's endpoint-name policy), then the
         post-stale phase, in one ``try``: a failed local phase skips post-stale,
-        as in ``_changed_candidate_issues``.
+        as in ``_changed_candidate_issues``: both call ``_candidate_contents_issues``.
         """
-        issues: list[DraftValidationIssue] = []
-        for key in GRAPH_V1_AGENT_KEYS:
-            try:
-                self._run_candidate_validators(self._save_local_validators(), contents[key])
-                self._run_candidate_validators(self.post_stale_validators, contents[key])
-            except DraftContentRejected as rejection:
-                issues.extend(
-                    DraftValidationIssue(
-                        f"definitions.{key}.{issue.field}", issue.code, issue.message
-                    )
-                    for issue in rejection.issues
-                )
-        return tuple(issues)
+        return tuple(
+            self._candidate_contents_issues(
+                {key: contents[key] for key in GRAPH_V1_AGENT_KEYS}
+            )
+        )
 
     @staticmethod
     def _draft_effect(
