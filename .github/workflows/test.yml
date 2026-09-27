@@ -736,6 +736,7 @@ jobs:
           - export-ui
           - findings-drawer
           - graph-release-admin-journey
+          - graph-release-conversation-journey
           - graph-release-history
           - graph-release-review
           - help-ui
