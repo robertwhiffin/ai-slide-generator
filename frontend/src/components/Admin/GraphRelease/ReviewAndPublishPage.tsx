@@ -197,7 +197,6 @@ export function ReviewAndPublishPage() {
           >
             <p className="font-semibold">{`Published Graph Version ${state.published.release.version_number}`}</p>
             <p>{`The shared draft is now based on Graph Version ${state.published.draft.base_version_number}`}</p>
-            {state.errorMessage !== null && <p>{state.errorMessage}</p>}
           </div>
         )}
 

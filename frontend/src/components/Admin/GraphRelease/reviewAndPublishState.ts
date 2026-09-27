@@ -151,12 +151,9 @@ export function reviewAndPublishReducer(
       };
     case 'previewFailed':
       if (action.requestId !== state.previewRequestId) return state;
-      return {
-        ...state,
-        previewRequestId: null,
-        status: state.status === 'published' ? 'published' : 'error',
-        errorMessage: action.message,
-      };
+      // Even after a publish a failed read is an `error`, whose Reload preview leads back
+      // to `loading` and `ready`; `published` keeps the release on record (m2).
+      return { ...state, previewRequestId: null, status: 'error', errorMessage: action.message };
     case 'noteChanged':
       if (state.status === 'publishing') return state;
       // Editing the note answers a refused note: the issues are cleared and Publish may
@@ -274,6 +271,6 @@ export function publicationErrorMessage(error: DraftFieldError): string {
   }
   if (error.field === 'lock_version') return 'The draft lock version was refused. Reload the preview.';
   const role = DEFINITION_ISSUE_FIELD.exec(error.field)?.[1];
-  if (role !== undefined && role in ROLE_LABELS) return `${ROLE_LABELS[role as AgentKey]}: ${error.message}`;
+  if (role !== undefined && Object.hasOwn(ROLE_LABELS, role)) return `${ROLE_LABELS[role as AgentKey]}: ${error.message}`;
   return 'The publish request was refused.';
 }

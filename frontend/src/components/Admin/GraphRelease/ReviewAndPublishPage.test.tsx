@@ -266,6 +266,19 @@ describe('ReviewAndPublishPage: the Publish button (Correction 22)', () => {
     expect(publishButton()).toBeDisabled();
   });
 
+  it('counts code points, as the server does: 2000 astral characters fill the cap and still publish (m1)', async () => {
+    mockReleaseApi({ previews: [previewOf()] });
+    render(<ReviewAndPublishPage />);
+    await loadedPage();
+    const astral = '\u{1F680}'.repeat(2000);
+    expect(astral.length).toBe(4000);
+
+    typeNote(astral);
+
+    expect(screen.getByText('2000 / 2000')).toBeInTheDocument();
+    expect(publishButton()).toBeEnabled();
+  });
+
   it('sends exactly one POST per click, with the previewed lock and the typed note', async () => {
     let settle: (value: unknown) => void = () => {};
     const fetchMock = mockReleaseApi({
@@ -317,6 +330,32 @@ describe('ReviewAndPublishPage: publication outcomes', () => {
     // Settle any stray effect before counting again.
     await act(async () => {});
     expect(previewGets(fetchMock)).toHaveLength(2);
+  });
+
+  it('recovers a failed post-publish refetch through Reload preview (m2)', async () => {
+    const fetchMock = mockReleaseApi({
+      previews: [previewOf(), () => apiResponse(500, { detail: 'boom' }), previewOf(syntheticPublishedReleasePreview())],
+      publishes: [() => apiResponse(200, syntheticPublishSuccess())],
+    });
+    render(<ReviewAndPublishPage />);
+    await loadedPage();
+    typeNote('Tighten the outline');
+
+    fireEvent.click(publishButton());
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Unable to load the release preview (500).');
+    // The publication itself is still reported.
+    expect(screen.getByTestId('release-success-panel')).toHaveTextContent('Published Graph Version 2');
+    expect(previewGets(fetchMock)).toHaveLength(2);
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Reload preview' }));
+
+    await screen.findByText('Draft base: Graph Version 2');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('No Agent Definitions changed since Graph Version 2.')).toBeInTheDocument();
+    expect(previewGets(fetchMock)).toHaveLength(3);
+    expect(publishPosts(fetchMock)).toHaveLength(1);
   });
 
   it('keeps the note on a stale 409 and never retries until Reload preview, which reads once', async () => {
