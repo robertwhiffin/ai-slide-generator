@@ -165,35 +165,24 @@ function previewAfterRollbackToV3(): ReleasePreviewResponse {
   };
 }
 
-/** v1–v12 history: v12 is active, v3 restores v1. For two-digit version test.
- * Uses January 2026 dates (1-12) to avoid September day-overflow (September has 30
- * days; 20 + v >= 31 for v >= 11 produces invalid timestamps that the strict parser
- * rejects). The effective_to override avoids the syntheticHistoryEntry formula too. */
+/** v1–v12 history: v12 is active, v3 restores v1. For the two-digit version test.
+ * The shared fixture's dates roll into October from v10, so no override is needed. */
 function historyV12(): ReleaseHistoryListResponse {
-  function entry(v: number, opts: { active?: boolean; restoredFrom?: number; restoredBy?: number[] } = {}): ReturnType<typeof syntheticHistoryEntry> {
-    const d = String(v).padStart(2, '0');
-    const nextD = String(v + 1).padStart(2, '0');
-    return syntheticHistoryEntry(v, opts, {
-      published_at: `2026-01-${d}T12:00:00Z`,
-      effective_from: `2026-01-${d}T12:00:00Z`,
-      effective_to: opts.active ? null : `2026-01-${nextD}T12:00:00Z`,
-    });
-  }
   return {
     active_release: releaseRef(12),
     releases: [
-      entry(12, { active: true }),
-      entry(11),
-      entry(10),
-      entry(9),
-      entry(8),
-      entry(7),
-      entry(6),
-      entry(5),
-      entry(4),
-      entry(3, { restoredFrom: 1 }),
-      entry(2),
-      entry(1, { restoredBy: [3] }),
+      syntheticHistoryEntry(12, { active: true }),
+      syntheticHistoryEntry(11),
+      syntheticHistoryEntry(10),
+      syntheticHistoryEntry(9),
+      syntheticHistoryEntry(8),
+      syntheticHistoryEntry(7),
+      syntheticHistoryEntry(6),
+      syntheticHistoryEntry(5),
+      syntheticHistoryEntry(4),
+      syntheticHistoryEntry(3, { restoredFrom: 1 }),
+      syntheticHistoryEntry(2),
+      syntheticHistoryEntry(1, { restoredBy: [3] }),
     ],
   };
 }
@@ -642,12 +631,9 @@ test('(f) name-collision sweep: no two distinct accessible names are substrings 
   await installPreviewMock(page, syntheticReleasePreview(), previewAfterRollbackToV3());
 
   // For the 'blocked' state: blocked preview
-  let rollbackPreviewCallCount = 0;
-  await page.route(ROLLBACK_PREVIEW_URL, (route) => {
-    rollbackPreviewCallCount += 1;
-    // First call: restorable; second call (for blocked scenario): already set up in separate test flow
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rollbackPreviewV3()) });
-  });
+  await page.route(ROLLBACK_PREVIEW_URL, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rollbackPreviewV3()) }),
+  );
 
   let historyGetCount = 0;
   await page.route(HISTORY_URL, (route) => {

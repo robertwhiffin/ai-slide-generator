@@ -11,6 +11,7 @@ import {
   syntheticReleaseComparison,
   syntheticReleaseDetail,
   syntheticReleaseHistory,
+  syntheticHistoryEntry,
   syntheticRollbackIncompatible,
   syntheticRollbackInvalid,
   syntheticRollbackPreview,
@@ -427,6 +428,37 @@ describe('parseReleaseHistoryListResponse', () => {
     const body = syntheticReleaseHistory() as unknown as Mutable;
     mutate(body);
     expect(parseReleaseHistoryListResponse(body)).toBeNull();
+  });
+});
+
+describe('syntheticHistoryEntry: always valid instants (#270 Task 8 fixture)', () => {
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+  const valid = (value: string | null) =>
+    value === null || (ISO.test(value) && new Date(value).toISOString().replace('.000Z', 'Z') === value);
+
+  it.each([1, 9, 10, 11, 12, 20, 45])('v%i has real, round-tripping ISO timestamps', (v) => {
+    const entry = syntheticHistoryEntry(v);
+    expect([entry.published_at, entry.effective_from, entry.effective_to].every(valid)).toBe(true);
+  });
+
+  it('keeps the existing v1-v9 strings and rolls v10 onward into October', () => {
+    expect(syntheticHistoryEntry(4).published_at).toBe('2026-09-24T12:00:00Z');
+    expect(syntheticHistoryEntry(9).effective_to).toBe('2026-09-30T12:00:00Z');
+    expect(syntheticHistoryEntry(10).effective_from).toBe('2026-09-30T12:00:00Z');
+    expect(syntheticHistoryEntry(10).effective_to).toBe('2026-10-01T12:00:00Z');
+    expect(syntheticHistoryEntry(12, { active: true }).published_at).toBe('2026-10-02T12:00:00Z');
+  });
+
+  it('a v1-v12 history built from it parses', () => {
+    const releases = [
+      syntheticHistoryEntry(12, { active: true }),
+      ...[11, 10, 9, 8, 7, 6, 5, 4].map((v) => syntheticHistoryEntry(v)),
+      syntheticHistoryEntry(3, { restoredFrom: 1 }),
+      syntheticHistoryEntry(2),
+      syntheticHistoryEntry(1, { restoredBy: [3] }),
+    ];
+    const body = { active_release: releaseRef(12), releases };
+    expect(parseReleaseHistoryListResponse(structuredClone(body))).toEqual(body);
   });
 });
 
