@@ -192,3 +192,8 @@ Carries into #271 Phase B: (1) C7/Task 8 — `resolve_engine_mode_or(..., fallba
   3. The deploy_autoscaling issue (still open).
   4. #266 m7 (still open).
   5. A CI ESLint job as a follow-up issue (carry 6).
+Ruling (C24): ADOPT fail-closed engine-mode resolution at all three sites (`chat.py:~490, ~697`, `chat_service.py:1141`) — #271 AC3 requires explicit failures that preserve conversation state, and "fail only when pinned" is unimplementable (the pin needs the same failed read). The stream route releases the session lock before raising; a typed 503 mapping is added; the four ws4d fail-open tests in `test_engine_mode_wiring.py` are inverted deliberately. — this reverses the ratified ws4d fail-open contract; SURFACED to the user for override. — cost if wrong: Task 8 rework; during a DB outage graph-mode turns 503 instead of silently running the monolith.
+Ruling (Task 13 / #266 m9): NOT run — the dev-workspace probe is the user's to authorise (their workspace, their profile). Per C43, Task 13 writes no code; the ledger records "m9 open: release gate unverified"; the epic is not called shippable until the user runs it. Local merge proceeds.
+Ruling (Task 12): the compatibility runtime has no production caller — deletion proceeds.
+Ruling (C46): Task 8 runs before Task 7.
+Next: the C23 scoped re-review of C24–C46, then Task 2.
