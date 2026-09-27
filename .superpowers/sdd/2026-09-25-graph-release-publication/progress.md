@@ -130,3 +130,7 @@ Task 6: controller sabotage (plan controller target, C22) — `canPublish` drops
 Task 6: review (Opus): spec PASS, quality APPROVE WITH MINOR FIXES — 0 Critical, 0 Important, 3 Minor. Parity (13 key lists + codes + routes + labels) read from both sides; no second readiness type; one canPublish never reads readiness; one reducer/counter/gate; exemptions exact, length 8; text-only rendering; header link plain anchor. Reviewer sabotage: S1 counter uses UTF-16 `.length` → SURVIVED 878/878 (m1); S2 shared preview GET caches a success → RED 9. Restored GREEN 878.
 Ruling: fix all three — m1 pin the code-point counter (2000 astral chars → `2000 / 2000`, Publish enabled); m2 a failed refetch in `published` offers Reload preview (no dead end); m3 `Object.hasOwn(ROLE_LABELS, role)`.
 Task 6: fix round 1/5 dispatched (resume implementer).
+Task 6: fix round 1/5 (3 addressed, 0 open; `d9f4aabf3`): m1 code-point counter pin (2000 × U+1F680 → `2000 / 2000`, Publish enabled); m2 `previewFailed` → `error` with Reload preview (auto-refetch after publish still keeps `published`; one gate/counter); m3 `Object.hasOwn(ROLE_LABELS, role)` (constructor / __proto__ refused). Gates: Vitest 886; typecheck/ESLint clean; joins 67. Mutations F1–F4 RED.
+Controller re-check: reviewer's S1 (counter `.length`) re-applied → RED 1/22 on the page file; restored clean.
+Ruling: no scoped re-review subagent — three narrow fixes, each mutated RED, the surviving reviewer sabotage now RED. Cost if wrong: small.
+Task 6: complete (commits `585d4366c..d9f4aabf3`, review clean after 1 fix round).
