@@ -32,6 +32,10 @@ export const FORBIDDEN_ACTION_STEMS =
  * #268 appends exactly its two verdict controls (C23). The `approve` and `reject`
  * stems stay, so `Approve all`, `Approve draft` and `Approve run and publish` are still
  * banned; only the whole names below are spared.
+ *
+ * #269 appends exactly its header link to the Review & Publish page (C7/C44). The
+ * `review & publish` and `publish` stems stay, so `Review & publish` (lowercase p),
+ * `Review & Publish now` and `Publish draft` are still banned.
  */
 export const ALLOWED_ACTION_NAMES = [
   'Restore published Graph Version 1 prompt',
@@ -41,6 +45,7 @@ export const ALLOWED_ACTION_NAMES = [
   'Run published baseline',
   'Approve run',
   'Reject run',
+  'Review & Publish',
 ] as const;
 
 /**
