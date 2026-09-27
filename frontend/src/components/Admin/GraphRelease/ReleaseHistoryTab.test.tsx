@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   HISTORY_ACTIVE_ARCHITECT_PROMPT,
@@ -19,6 +19,8 @@ import {
   syntheticStaleRollback,
 } from '../../../../tests/fixtures/mocks';
 import { ReviewAndPublishPage } from './ReviewAndPublishPage';
+import { canConfirmRollback } from './reviewAndPublishState';
+import { useReviewAndPublish } from './useReviewAndPublish';
 import { formatInstant } from './releaseText';
 
 const PREVIEW_URL = /\/api\/admin\/agent-definitions\/release-preview$/;
@@ -336,20 +338,32 @@ describe('Release History: confirming a rollback', () => {
     expect(calls(fetchMock, 'POST', ROLLBACK_URL)).toHaveLength(1);
   });
 
-  it('sends no POST when the reducer refuses the start, even though the last render enabled Confirm (m4)', async () => {
-    const fetchMock = mockHistoryApi({});
-    render(<ReviewAndPublishPage />);
-    await openRollbackTo(2);
-    const button = confirmButton();
-    expect(button).toBeEnabled();
+  it('sends no POST when the reducer refuses the start, though the last render allowed it (m4)', async () => {
+    // A controlled textarea's change re-renders synchronously, so the page cannot hold a
+    // stale enabled Confirm; the hook's calls from one render's closures can.
+    const fetchMock = mockHistoryApi({ rollbacks: [ok(syntheticRollbackSuccess())] });
+    const { result } = renderHook(() => useReviewAndPublish());
+    await waitFor(() => expect(result.current.state.status).toBe('ready'));
+    await act(async () => { await result.current.openRollback(2); });
+    expect(canConfirmRollback(result.current.state)).toBe(true);
 
-    // Blank the note and click inside one render: the rendered button is still enabled.
-    act(() => {
-      typeRollbackNote('  ');
-      fireEvent.click(button);
+    const { setRollbackNote, confirmRollback } = result.current;
+    await act(async () => {
+      setRollbackNote('  ');
+      await confirmRollback();
     });
 
+    expect(result.current.state.rollback.status).toBe('confirming');
     expect(calls(fetchMock, 'POST', /./)).toHaveLength(0);
+
+    // The same two calls with a real note do send (the test can see a POST).
+    const later = result.current;
+    await act(async () => {
+      later.setRollbackNote('A real note');
+      await later.confirmRollback();
+    });
+    expect(calls(fetchMock, 'POST', ROLLBACK_URL)).toHaveLength(1);
+    expect(calls(fetchMock, 'POST', ROLLBACK_URL)[0][1].body).toBe('{"lock_version":3,"release_note":"A real note"}');
   });
 
   it('shows the success, then refetches the history and the release preview exactly once each', async () => {
