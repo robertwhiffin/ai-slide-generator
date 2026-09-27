@@ -613,6 +613,36 @@ def test_a_failed_local_phase_skips_the_post_stale_phase(factory, monkeypatch):
     assert all(i.code == "protected_bundle_unavailable" for i in rejected.issues)
 
 
+def test_rollback_and_publication_share_one_candidate_validation_loop(monkeypatch):
+    """2-m-2: ``_structural_issues`` and #269's ``_changed_candidate_issues`` both
+    delegate to one helper over a contents mapping, so a validator phase added to
+    publication also applies to rollback (Correction 32)."""
+    from types import SimpleNamespace
+
+    calls: list[list[tuple[str, object]]] = []
+    marker = DraftValidationIssue("definitions.x.y", "shared", "Shared.")
+
+    def _spy(self, contents):
+        calls.append(list(contents.items()))
+        return [marker]
+
+    monkeypatch.setattr(GraphConfiguration, "_candidate_contents_issues", _spy)
+    service = GraphConfiguration()
+    contents = {key: f"content-{key}" for key in reversed(GRAPH_V1_AGENT_KEYS)}
+
+    assert service._structural_issues(contents) == (marker,)
+    assert calls == [[(key, f"content-{key}") for key in GRAPH_V1_AGENT_KEYS]]
+
+    calls.clear()
+    changed = (GRAPH_V1_AGENT_KEYS[3], GRAPH_V1_AGENT_KEYS[0])
+    model_nodes = {
+        key: SimpleNamespace(draft=SimpleNamespace(content=f"draft-{key}"))
+        for key in GRAPH_V1_AGENT_KEYS
+    }
+    assert service._changed_candidate_issues(model_nodes, changed) == [marker]
+    assert calls == [[(key, f"draft-{key}") for key in changed]]
+
+
 def test_preview_runs_the_remote_check_after_the_locked_transaction(factory, monkeypatch):
     """Corrections 2 and 34: the remote check runs outside any transaction."""
     build_v2_v3_v4(factory, monkeypatch)
@@ -1152,6 +1182,33 @@ def test_refusals_write_nothing(factory, monkeypatch, case):
     assert rollback_artifacts(factory) == before
 
 
+def test_restore_refuses_an_endpoint_url_before_any_write(factory, monkeypatch):
+    """3a-m2: the restore itself, not only the preview, refuses #266's endpoint
+    policy with ``RollbackIncompatible`` and writes nothing."""
+    build_v2_v3_v4(factory, monkeypatch)
+    r = refs(factory)
+    with factory.begin() as db:  # SQLite has no mutation guards
+        revision = db.get(
+            AgentDefinitionRevision, mapping(factory, r[2].release_id)["architect"]
+        )
+        revision.endpoint_name = "https://example.invalid/serving-endpoints/x"
+        revision.content_hash = definition_content_hash(definition_content_from_row(revision))
+    before = rollback_artifacts(factory)
+
+    with pytest.raises(RollbackIncompatible) as raised:
+        restore(factory, 2)
+
+    assert raised.value.source == r[2]
+    assert raised.value.issues == (
+        DraftValidationIssue(
+            "definitions.architect.candidate.model.endpoint_name",
+            "endpoint_url_not_allowed",
+            "Endpoint must be a Databricks endpoint name, not a URL.",
+        ),
+    )
+    assert rollback_artifacts(factory) == before
+
+
 _V_TYPE = DraftValidationIssue(
     "version_number", "strict_type", "version_number must be an integer."
 )
@@ -1433,13 +1490,61 @@ def test_a_verdict_change_on_a_linked_run_is_refused_after_rollback(factory, mon
     assert rollback_artifacts(factory) == before
 
 
-def test_assign_locked_candidate_is_the_only_content_writer():
-    """Structural pin (C36), reviewed rather than relied on: the draft behaviour is
-    proven by ``test_graph_configuration_draft.py`` in the gate."""
-    source = inspect.getsource(draft_module._GraphConfigurationDraft._write_locked_content)
-    assert "_GraphConfigurationDraft._assign_locked_candidate(" in source
-    assert "setattr(" not in source
-    root = Path(__file__).resolve().parents[2] / "src"
+_CANDIDATE_HASH_WRITER_ALLOWLIST = [
+    # Bootstrap's builder creates a fresh draft row from authoritative content.
+    "services/graph_configuration_content.py:draft_from_definition:constructor",
+    # The one attribute writer: the three-way rebase and every draft save (C36).
+    "services/graph_configuration_draft.py:_assign_locked_candidate:attribute",
+]
+
+
+def _call_name(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _candidate_hash_writes(node: ast.AST) -> list[str]:
+    """The kinds of ``candidate_hash`` write ``node`` performs, if any."""
+    kinds: list[str] = []
+    targets = (
+        node.targets if isinstance(node, ast.Assign)
+        else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign))
+        else []
+    )
+    if any(isinstance(t, ast.Attribute) and t.attr == "candidate_hash" for t in targets):
+        kinds.append("attribute")
+    if not isinstance(node, ast.Call):
+        return kinds
+    name = _call_name(node.func)
+    keywords = {k.arg for k in node.keywords}
+    if name == "GraphDraftAgent" and "candidate_hash" in keywords:
+        kinds.append("constructor")
+    if name == "values" and (
+        "candidate_hash" in keywords
+        or any(
+            isinstance(arg, ast.Dict)
+            and any(
+                isinstance(k, ast.Constant) and k.value == "candidate_hash"
+                for k in arg.keys
+            )
+            for arg in node.args
+        )
+    ):
+        kinds.append("values")
+    if (
+        name == "setattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "candidate_hash"
+    ):
+        kinds.append("setattr")
+    return kinds
+
+
+def _candidate_hash_writers(root: Path) -> list[str]:
     writers: list[str] = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -1447,14 +1552,36 @@ def test_assign_locked_candidate_is_the_only_content_writer():
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for node in ast.walk(func):
-                targets = (
-                    node.targets if isinstance(node, ast.Assign)
-                    else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign))
-                    else []
-                )
-                if any(
-                    isinstance(t, ast.Attribute) and t.attr == "candidate_hash"
-                    for t in targets
-                ):
-                    writers.append(f"{path.relative_to(root)}:{func.name}")
-    assert writers == ["services/graph_configuration_draft.py:_assign_locked_candidate"]
+                for kind in _candidate_hash_writes(node):
+                    writers.append(f"{path.relative_to(root)}:{func.name}:{kind}")
+    return sorted(writers)
+
+
+def test_candidate_hash_writers_are_the_allowlisted_attribute_and_builder_sites():
+    """Structural pin (C36), reviewed rather than relied on: the draft behaviour is
+    proven by ``test_graph_configuration_draft.py`` in the gate.
+
+    Pins every ``candidate_hash`` write in ``src``: attribute assignment anywhere,
+    ``GraphDraftAgent(candidate_hash=...)``, Core ``.values(candidate_hash=...)`` or a
+    ``{"candidate_hash": ...}`` values mapping, and ``setattr(..., "candidate_hash",
+    ...)``. Only the allowlisted sites may write it."""
+    source = inspect.getsource(draft_module._GraphConfigurationDraft._write_locked_content)
+    assert "_GraphConfigurationDraft._assign_locked_candidate(" in source
+    assert "setattr(" not in source
+    root = Path(__file__).resolve().parents[2] / "src"
+    assert _candidate_hash_writers(root) == _CANDIDATE_HASH_WRITER_ALLOWLIST
+
+
+@pytest.mark.parametrize(
+    ("snippet", "kind"),
+    [
+        ("row.candidate_hash = h", "attribute"),
+        ("GraphDraftAgent(graph_draft_id=1, candidate_hash=h)", "constructor"),
+        ("update(GraphDraftAgent).values(candidate_hash=h)", "values"),
+        ('update(GraphDraftAgent).values({"candidate_hash": h})', "values"),
+        ('setattr(row, "candidate_hash", h)', "setattr"),
+    ],
+)
+def test_candidate_hash_writer_scan_detects_each_write_form(tmp_path, snippet, kind):
+    (tmp_path / "rogue.py").write_text(f"def rogue(row, h):\n    {snippet}\n")
+    assert _candidate_hash_writers(tmp_path) == [f"rogue.py:rogue:{kind}"]
