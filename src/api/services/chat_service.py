@@ -192,8 +192,10 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         ``"graph"`` when the owner deck's first user message carries
         :data:`AGENT_MODE_PHRASE`, else ``"monolith"``.  A missing session, a
         deck with no user turn yet, and an empty first message all resolve to
-        ``"monolith"`` — mode resolution is a test affordance and must never be
-        the thing that fails a turn.
+        ``"monolith"``: those are answers.  An unexpected database error is not
+        an answer and propagates; every call site goes through
+        :func:`resolve_engine_mode_or_unavailable`, which fails the turn
+        explicitly (#271 C24).
     """
     from src.core.database import get_db_session
     from src.database.models.session import SessionMessage
@@ -236,38 +238,55 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
     return mode
 
 
-def resolve_engine_mode_or(
-    session_id: Optional[str], fallback: str = "monolith"
-) -> str:
-    """:func:`resolve_engine_mode`, where a FAILURE to resolve never fails the turn.
+def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
+    """:func:`resolve_engine_mode`, where a FAILURE to resolve fails the turn closed.
 
-    ``resolve_engine_mode`` handles its three "no answer" cases itself and
-    returns monolith for them, but an unexpected database error propagates —
-    and every call site sits on the request path of a turn that would otherwise
-    have run perfectly well.  Measured: with the re-resolve in
-    ``send_message_streaming`` calling it bare, three pre-existing monolith
-    tests died with ``psycopg2.ProgrammingError: can't adapt type 'MagicMock'``,
-    which is the same shape a transient database error takes in production — a
-    monolith turn that used to need no database read at all now 500s.
+    ``resolve_engine_mode`` answers its three "no answer" cases itself (a
+    missing session, a deck with no user turn, an empty first message: all
+    ``"monolith"``); those are answers and pass straight through.  Any other
+    exception is a failure to read the database, and it is NOT an answer.
 
-    Task 1's own contract is that mode resolution "is a test affordance and must
-    never be the thing that fails a turn".  This is where that promise is kept:
-    on any exception the caller's existing value stands.
+    ws4d shipped this wrapper as a fail-OPEN (``resolve_engine_mode_or``, which
+    kept "the mode already in hand" -- ``"monolith"`` at both routes).  That ran
+    a pinned graph conversation on the legacy monolith, with code-owned prompts
+    and ``DEFAULT_CONFIG["llm"]``, whenever Lakebase blipped: the exact path
+    spec §15 forbids ("Lakebase unavailable | Fail explicitly; no code defaults
+    or latest-release substitution").  Failing only when the session is pinned
+    is unimplementable, because the pin is behind the same read that just
+    failed.  So every call site now fails explicitly (#271 C24/C47):
 
-    Args:
-        session_id: Session whose turn is about to run.
-        fallback: What to return if resolution raises — the mode the caller
-            already had, so a failure is a no-op rather than a downgrade.
+    * ``POST /chat/stream`` and ``POST /chat/async`` release the session lock
+      and answer a typed 503 (``ENGINE_MODE_UNAVAILABLE_DETAIL``);
+    * the SSE turn-1 re-resolve in :meth:`ChatService.send_message_streaming`
+      yields the safe ``pinned_graph_configuration_unavailable`` event, then
+      raises.
+
+    The persisted user message (and the async ``chat_requests`` row) written
+    before resolution stay: nothing else about the conversation changes.
+
+    Raises:
+        PersistedConfigurationUnavailableError: ``code="lakebase_unavailable"``,
+            chained from the original error, which is logged by class only.
     """
     try:
         return resolve_engine_mode(session_id)
-    except Exception:
-        logger.warning(
-            "Engine-mode resolution failed; keeping the mode already in hand",
-            extra={"session_id": session_id, "engine_mode": fallback},
-            exc_info=True,
+    except Exception as exc:
+        logger.error(
+            "Engine-mode resolution failed; failing the turn closed",
+            extra={"session_id": session_id, "error_class": type(exc).__name__},
         )
-        return fallback
+        raise PersistedConfigurationUnavailableError(
+            code="lakebase_unavailable"
+        ) from exc
+
+
+def _pinned_graph_configuration_error_event() -> StreamEvent:
+    """The one safe, typed event for an unavailable pinned graph configuration."""
+    return StreamEvent(
+        type=StreamEventType.ERROR,
+        error="Pinned graph configuration is unavailable",
+        metadata={"code": "pinned_graph_configuration_unavailable"},
+    )
 
 
 class ChatService:
@@ -1137,8 +1156,18 @@ class ChatService:
         # The plan contradicts itself here — D1 asserts the row exists before
         # mode resolution on this path while D0 mandates resolving in the route —
         # so this resolves a plan defect rather than deviating from the plan.
+        #
+        # FAIL CLOSED (#271 C24/C47): a failure to re-resolve used to keep the
+        # route's `monolith` and run the legacy path on a graph deck.  It now
+        # yields the safe typed event and raises; the lock is released by the
+        # route's SSE generator `finally`, and the user message persisted just
+        # above stays (C47(e)).
         if not request_id:
-            engine_mode = resolve_engine_mode_or(session_id, engine_mode)
+            try:
+                engine_mode = resolve_engine_mode_or_unavailable(session_id)
+            except PersistedConfigurationUnavailableError:
+                yield _pinned_graph_configuration_error_event()
+                raise
 
         # ws4d D2 — the graph branch.  Placed AFTER the user message is
         # persisted (the resolver upstream reads that row) and BEFORE anything
@@ -1940,15 +1969,7 @@ class ChatService:
                 else:
                     graph_error = e
                 error_container["error"] = graph_error
-                event_queue.put(
-                    StreamEvent(
-                        type=StreamEventType.ERROR,
-                        error="Pinned graph configuration is unavailable",
-                        metadata={
-                            "code": "pinned_graph_configuration_unavailable"
-                        },
-                    )
-                )
+                event_queue.put(_pinned_graph_configuration_error_event())
             except Exception as e:
                 logger.error(
                     f"Graph turn failed: {e}",
