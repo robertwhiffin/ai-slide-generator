@@ -1,4 +1,4 @@
-"""Graph Release rollback: compare, validate and preview (#270).
+"""Graph Release rollback: compare, validate, preview and restore (#270).
 
 Rollback is a thin caller of #269's publication core with historical content.
 This module owns only what is rollback-specific: loading a historical release
@@ -14,6 +14,10 @@ Locks (global order, see ``graph_configuration_publication``):
   the draft effect is coherent with the active release.  The remote endpoint
   check runs only after that transaction commits, once per distinct endpoint
   (Corrections 2 and 34): no network call happens under a lock.
+- ``restore_release`` takes L0 exclusive (the first statement of its own
+  transaction), L1 (all seven draft agents), then L3 (the source's linked
+  candidate runs, ``FOR UPDATE OF agent_test_run`` in id order) before #269's
+  core links them (Correction 28).  It never takes L2 and runs no approval gate.
 
 This module imports neither ``graph_release_evidence`` nor #268's workbench at
 module scope (Correction 29): the facade imports this module, and both of those
@@ -29,7 +33,11 @@ from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import func, select
 
-from src.database.models.graph_configuration import AgentTestRun, GraphReleaseTestRun
+from src.database.models.graph_configuration import (
+    AgentTestRun,
+    GraphRelease,
+    GraphReleaseTestRun,
+)
 from src.services.graph_configuration_content import GraphConfigurationIntegrityError
 from src.services.graph_configuration_draft import (
     DraftContentRejected,
@@ -38,6 +46,9 @@ from src.services.graph_configuration_draft import (
 from src.services.graph_configuration_publication import (
     EvidenceLink,
     FieldDiff,
+    PublicationConflict,
+    PublicationRejected,
+    PublishedRelease,
     _GraphConfigurationPublication,
     _model_nodes,
     definition_field_diffs,
@@ -46,6 +57,7 @@ from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
     DefinitionContent,
+    definition_content_hash,
 )
 from src.services.graph_release_history import (
     GraphVersionNotFound,
@@ -58,6 +70,7 @@ from src.services.graph_release_history import (
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from src.database.models.graph_configuration import GraphDraft
     from src.services.graph_configuration_workbench import GraphWorkbenchSnapshot
     from src.services.graph_release_history import _HistorySnapshot
 
@@ -65,6 +78,13 @@ DraftEffect = Literal["reset", "kept", "unchanged"]
 RollbackBlock = Literal["source_is_active", "matches_active", "incompatible"]
 
 _AGENT_KEY_ORDER = {key: index for index, key in enumerate(GRAPH_V1_AGENT_KEYS)}
+#: Correction 19: a wrong type (``bool`` included) versus a non-positive ``int``.
+_VERSION_NOT_INT = DraftValidationIssue(
+    "version_number", "strict_type", "version_number must be an integer."
+)
+_VERSION_OUT_OF_RANGE = DraftValidationIssue(
+    "version_number", "out_of_range", "version_number must be a positive integer."
+)
 
 
 @dataclass(frozen=True)
@@ -112,6 +132,51 @@ class RollbackPreview:
     @property
     def restorable(self) -> bool:
         return self.blocked is None
+
+
+@dataclass(frozen=True)
+class RestoredRelease:
+    #: #269's ``PublishedRelease``; ``published.release.restored_from_release_id``
+    #: is ``source.release_id`` and every mapping is ``reused``.
+    published: PublishedRelease
+    source: ReleaseRef
+    #: Exactly seven, in ``GRAPH_V1_AGENT_KEYS`` order: what the rebase did.
+    draft_effect: Mapping[AgentKey, DraftEffect]
+
+
+@dataclass(frozen=True)
+class RollbackSourceActive:
+    active: ReleaseRef
+
+
+@dataclass(frozen=True)
+class RollbackMatchesActive:
+    active: ReleaseRef
+    source: ReleaseRef
+
+
+class RollbackIncompatible(ValueError):  # noqa: N818 - stable public domain name
+    """The historical release fails today's structural validation; nothing written."""
+
+    source: ReleaseRef
+    issues: tuple[DraftValidationIssue, ...]
+
+    def __init__(
+        self, source: ReleaseRef, issues: tuple[DraftValidationIssue, ...]
+    ) -> None:
+        if not issues:
+            raise ValueError("RollbackIncompatible requires at least one issue")
+        self.source = source
+        self.issues = tuple(issues)
+        super().__init__(
+            f"Graph Version {source.version_number} is not restorable: "
+            + "; ".join(issue.message for issue in self.issues)
+        )
+
+
+RollbackOutcome = (
+    RestoredRelease | PublicationConflict | RollbackSourceActive | RollbackMatchesActive
+)
 
 
 @dataclass(frozen=True)
@@ -242,6 +307,174 @@ class _GraphConfigurationRollback(_GraphConfigurationPublication):
             warnings=warnings,
             blocked=blocked,
         )
+
+    def restore_release(
+        self,
+        session: Session,
+        *,
+        version_number: int,
+        expected_lock_version: int,
+        release_note: str,
+        actor: str,
+    ) -> RollbackOutcome:
+        """Publish a historical release's exact seven revisions as the next version.
+
+        One transaction, in the global lock order: L0 (``_lock_current_parents``,
+        exclusive, the first statement), L1 (all seven draft agents), then L3
+        (the source's linked runs, ``FOR UPDATE`` in id order) before #269's core
+        links them.  Rollback owns every rollback-specific refusal, because the
+        core accepts a no-op (Correction 26); every refusal precedes every write.
+        No approval gate runs (Correction 30) and no model, runtime or remote
+        endpoint call is made.  The draft is rebased three ways (Q7 default): the
+        core moves the parent once, then clean roles whose restored content
+        differs are reset; pending edits are kept.
+        """
+        self._validate_rollback_request(
+            version_number, actor, expected_lock_version, release_note
+        )
+        with session.begin():
+            release_row, draft_row = self._lock_current_parents(session, exclusive=True)
+            draft_rows = {
+                row.agent_key: row
+                for row in self._lock_all_draft_agents(session, draft_id=draft_row.id)
+            }
+            snapshot = self._snapshot_locked_workbench(
+                session, release=release_row, draft=draft_row
+            )
+            source = self._load_source(session, version_number=version_number)
+            if expected_lock_version != draft_row.lock_version:
+                return PublicationConflict(
+                    expected_lock_version=expected_lock_version,
+                    current_lock_version=draft_row.lock_version,
+                    active_release_id=release_row.id,
+                    active_version_number=release_row.version_number,
+                    draft=snapshot.draft,
+                )
+            active = ReleaseRef(release_row.id, release_row.version_number)
+            if source.ref.release_id == release_row.id:
+                return RollbackSourceActive(active)
+            model_nodes = _model_nodes(snapshot)
+            if all(
+                source.definitions[key].agent_definition_revision_id
+                == model_nodes[key].published.revision_id
+                for key in GRAPH_V1_AGENT_KEYS
+            ):
+                return RollbackMatchesActive(active=active, source=source.ref)
+            contents = source.contents
+            issues = self._structural_issues(contents)
+            if issues:
+                raise RollbackIncompatible(source.ref, issues)
+            evidence = self._historical_evidence(
+                session, source_release_id=source.ref.release_id, lock=True
+            )
+            effect = self._draft_effect(
+                snapshot,
+                {key: source.definitions[key].content_hash for key in GRAPH_V1_AGENT_KEYS},
+            )
+            published = self._commit_locked_publication(
+                session,
+                release_row=release_row,
+                draft_row=draft_row,
+                snapshot=snapshot,
+                contents=contents,
+                evidence=evidence,
+                release_note=release_note,
+                actor=actor,
+                restored_from_release_id=source.ref.release_id,
+            )
+            if not all(m.reused for m in published.mappings.values()):
+                raise GraphConfigurationIntegrityError(
+                    "rollback materialized a new revision"
+                )
+            for key in GRAPH_V1_AGENT_KEYS:
+                if effect[key] == "reset":
+                    self._assign_locked_candidate(draft_rows[key], contents[key])
+            session.flush()
+            new_release_row = session.get(GraphRelease, published.release.release_id)
+            if new_release_row is None:
+                raise GraphConfigurationIntegrityError(
+                    "restored release is missing after publication"
+                )
+            self._verify_rebased_draft(
+                session,
+                release_row=new_release_row,
+                draft_row=draft_row,
+                effect=effect,
+                before=snapshot,
+                restored=contents,
+            )
+            return RestoredRelease(
+                published=published, source=source.ref, draft_effect=effect
+            )
+
+    def _validate_rollback_request(
+        self,
+        version_number: object,
+        actor: object,
+        lock_version: object,
+        release_note: object,
+    ) -> None:
+        """Before any lock: ``version_number``, then #269's actor, lock and note rules.
+
+        One copy of publication's rules (Correction 31); the version issue codes
+        follow Correction 19.
+        """
+        issues: list[DraftValidationIssue] = []
+        if isinstance(version_number, bool) or not isinstance(version_number, int):
+            issues.append(_VERSION_NOT_INT)
+        elif version_number < 1:
+            issues.append(_VERSION_OUT_OF_RANGE)
+        try:
+            self._validate_publication_request(actor, lock_version, release_note)
+        except PublicationRejected as rejection:
+            issues.extend(rejection.issues)
+        if issues:
+            raise PublicationRejected(*issues)
+
+    def _verify_rebased_draft(
+        self,
+        session: Session,
+        *,
+        release_row: GraphRelease,
+        draft_row: GraphDraft,
+        effect: Mapping[AgentKey, DraftEffect],
+        before: GraphWorkbenchSnapshot,
+        restored: Mapping[AgentKey, DefinitionContent],
+    ) -> None:
+        """Re-read the draft against the restored release and prove the rebase.
+
+        ``reset`` and ``unchanged`` roles are clean at the restored content, and
+        ``unchanged`` roles also keep their prior candidate; ``kept`` roles keep
+        their exact prior candidate.  Anything else is an integrity error, raised
+        inside the transaction so nothing commits.
+        """
+        if draft_row.base_release_id != release_row.id:
+            raise GraphConfigurationIntegrityError(
+                "rebased draft is not based on the restored release"
+            )
+        prior = _model_nodes(before)
+        after = _model_nodes(
+            self._snapshot_locked_workbench(session, release=release_row, draft=draft_row)
+        )
+        for key in GRAPH_V1_AGENT_KEYS:
+            node = after[key]
+            prior_hash = prior[key].draft.candidate_hash
+            code = effect[key]
+            if code == "kept":
+                holds = node.draft.candidate_hash == prior_hash
+            elif code in ("reset", "unchanged"):
+                holds = (
+                    node.changed is False
+                    and node.draft.candidate_hash
+                    == definition_content_hash(restored[key])
+                    and (code == "reset" or node.draft.candidate_hash == prior_hash)
+                )
+            else:
+                holds = False
+            if not holds:
+                raise GraphConfigurationIntegrityError(
+                    f"rebased draft role {key!r} does not match its effect {code!r}"
+                )
 
     def _load_source(self, session: Session, *, version_number: int) -> _HistoricalSource:
         """The historical release's exact seven definitions (Correction 33, Option B).
