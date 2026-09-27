@@ -110,6 +110,10 @@ const oldRootNonGets: string[] = [];
 /** Chat request bodies captured for step 5. */
 const chatBodies: Array<Record<string, unknown>> = [];
 
+/** Invocation counts for the non-contract collaboration-history stubs. */
+let newRootCollabCount = 0;
+let postRollbackCollabCount = 0;
+
 async function newConversationContext(
   browser: import('@playwright/test').Browser,
 ): Promise<BrowserContext> {
@@ -175,6 +179,7 @@ test.describe.serial(
         '**/api/sessions/new-root/collaboration-history',
         async (route, request) => {
           expect(request.method()).toBe('GET');
+          newRootCollabCount += 1;
           await route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -186,6 +191,7 @@ test.describe.serial(
         '**/api/sessions/post-rollback-root/collaboration-history',
         async (route, request) => {
           expect(request.method()).toBe('GET');
+          postRollbackCollabCount += 1;
           await route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -486,11 +492,12 @@ test.describe.serial(
         'fields in the served conversation exchange bodies (AC6 user side)',
       async () => {
         const adminRequestUrls: string[] = [];
-        page.on('request', (req) => {
+        const adminRequestHandler = (req: import('@playwright/test').Request) => {
           if (req.url().includes('/api/admin/')) {
             adminRequestUrls.push(`${req.method()} ${req.url()}`);
           }
-        });
+        };
+        page.on('request', adminRequestHandler);
 
         // Navigate to the admin page (wrapped in RequireAdmin in App.tsx).
         // /admin IS guarded by RequireAdmin; /admin/agent-definitions has no
@@ -510,6 +517,8 @@ test.describe.serial(
 
         // AC6: no admin API requests were made.
         expect(adminRequestUrls).toEqual([]);
+
+        page.off('request', adminRequestHandler);
 
         // AC6: the response bodies of the conversation exchanges contain no
         // agent-definition fields (prompt_text, endpoint_name).
@@ -563,7 +572,7 @@ test.describe.serial(
     // Final — exact contract state: unmatched, mutations, lookahead, carried
     // ------------------------------------------------------------------
     test(
-      'final: exact contract state — unmatched empty, one mutation, pinned gaps',
+      'final: exact contract state — unmatched empty, one mutation, pinned gaps, stub counts',
       async () => {
         expect(served.unmatched).toEqual([]);
         expect(served.mutations.map((m) => m.id)).toEqual([
@@ -592,6 +601,15 @@ test.describe.serial(
           'S16-get-old-root',
           'S16-get-old-root',
         ]);
+
+        // Non-contract collaboration-history stubs: new-root is visited in step
+        // 2 (1 GET); post-rollback-root is fetched by handleStartLatest in step
+        // 1 (1 GET) and then by the URL effect on step 1's navigation + step 5's
+        // page.goto, which in React 18 dev-mode StrictMode fires the URL effect
+        // twice (2 GETs) for a total of 3.  Pin the counts so a new history read
+        // or a skipped route makes this test red.
+        expect(newRootCollabCount).toBe(1);
+        expect(postRollbackCollabCount).toBe(3);
       },
     );
   },

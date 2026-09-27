@@ -914,9 +914,12 @@ export const api = {
 
         if (!response.ok) {
           const error = await response.json().catch(() => ({}));
+          const det = error.detail;
           throw new ApiError(
             response.status,
-            error.detail || 'Failed to start streaming'
+            (typeof det === 'object' && det !== null && typeof det.message === 'string')
+              ? det.message
+              : (det || 'Failed to start streaming'),
           );
         }
 
@@ -999,7 +1002,13 @@ export const api = {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, error.detail || 'Failed to submit chat');
+      const det = error.detail;
+      throw new ApiError(
+        response.status,
+        (typeof det === 'object' && det !== null && typeof det.message === 'string')
+          ? det.message
+          : (det || 'Failed to submit chat'),
+      );
     }
 
     return response.json();
