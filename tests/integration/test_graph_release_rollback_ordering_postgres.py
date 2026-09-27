@@ -689,5 +689,16 @@ def test_rollback_and_cleanup_serialize_with_exact_deletions(postgres_engine, fi
     outcome = restored.result(timeout=0)
     _assert_restored_v2(outcome, lock_before=lock)
     assert [link.agent_test_run_id for link in outcome.published.evidence] == [runs[2]]
-    assert _links(factory)[-1] == (_V5_ID, runs[2], "historical_restore", _V2_ID)
+    # Task 5 Minor 4: R2's full link list in both orders (its approval link to v2
+    # survives cleanup, plus the one restore link), and the whole link table.
+    assert [link for link in _links(factory) if link[1] == runs[2]] == [
+        (_V2_ID, runs[2], "approval", None),
+        (_V5_ID, runs[2], "historical_restore", _V2_ID),
+    ]
+    assert _links(factory) == [
+        (_V2_ID, runs[2], "approval", None),
+        (4, runs[3], "approval", None),
+        (_V4_ID, runs[4], "approval", None),
+        (_V5_ID, runs[2], "historical_restore", _V2_ID),
+    ]
     _assert_five_releases_v5_active(factory)
