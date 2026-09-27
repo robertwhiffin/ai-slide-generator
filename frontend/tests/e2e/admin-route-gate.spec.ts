@@ -137,4 +137,22 @@ test.describe('/admin route gate', () => {
     await expect(adminHeading(page)).toBeVisible();
     await expect(page).toHaveURL(/\/admin$/);
   });
+
+  test('non-admin visiting /admin/agent-definitions/review is redirected with no review content', async ({
+    page,
+  }) => {
+    await mockIdentity(page, false);
+
+    await page.goto('/admin/agent-definitions/review');
+
+    await expect(page).toHaveURL(/\/(help)?$/);
+    // The review page heading must not have flashed before the redirect.
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Review & Publish' })
+    ).toHaveCount(0);
+    // The landing page really rendered (not a blank redirect target).
+    await expect(
+      page.getByRole('heading', { level: 2, name: 'AI Assistant' })
+    ).toBeVisible();
+  });
 });
