@@ -770,6 +770,8 @@ def test_an_approved_change_publishes_the_exact_200_body(
                 "agent_key": "architect",
                 "test_case_id": _case_id(session_factory, "architect"),
                 "evidence_kind": "approval",
+                # #270 C38: the widened item; a publication's source is null.
+                "source_release_id": None,
             }
         ],
         "draft": after["draft"],

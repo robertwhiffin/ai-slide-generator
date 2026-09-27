@@ -8,6 +8,17 @@ import {
   syntheticPublishedReleasePreview,
   syntheticReleasePreview,
   syntheticStalePublication,
+  releaseRef,
+  syntheticBlockedRollbackPreview,
+  syntheticReleaseComparison,
+  syntheticReleaseDetail,
+  syntheticReleaseHistory,
+  syntheticRestoredReleaseHistory,
+  syntheticRollbackIncompatible,
+  syntheticRollbackInvalid,
+  syntheticRollbackPreview,
+  syntheticRollbackSuccess,
+  syntheticStaleRollback,
 } from '../../../../tests/fixtures/mocks';
 import {
   AGENT_KEYS,
@@ -17,6 +28,11 @@ import {
 } from '../../../api/agentDefinitions';
 import type { DraftStatus } from '../AgentDefinitionWorkbench/draftEditorState';
 import {
+  DRAFT_EFFECT_LABELS,
+  canConfirmRollback,
+  rollbackBlockedMessage,
+  rollbackErrorMessage,
+  rollbackFailureAction,
   ROLE_LABELS,
   canPublish,
   createReviewAndPublishState,
@@ -347,4 +363,325 @@ describe('labels', () => {
         .toBe('The publish request was refused.');
     },
   );
+});
+
+// ============================================================
+// #270 Task 7: the history, inspection and rollback slices of the one reducer
+// ============================================================
+
+/** A rollback to Graph Version 2 with its preview loaded (note = the default). */
+function confirming(state = ready(), preview = syntheticRollbackPreview()): ReviewAndPublishState {
+  return run([
+    { type: 'rollbackOpened', requestId: 10, versionNumber: 2 },
+    { type: 'rollbackPreviewSucceeded', requestId: 10, preview },
+  ], state);
+}
+
+function rollingBack(state = confirming()): ReviewAndPublishState {
+  return reviewAndPublishReducer(state, { type: 'rollbackStarted', requestId: 11 });
+}
+
+describe('reviewAndPublishReducer: the history list', () => {
+  it('starts idle, loads, and shows the list of the current request', () => {
+    expect(createReviewAndPublishState().history.status).toBe('idle');
+    const loading = run([{ type: 'historyRequested', requestId: 1 }]);
+    expect(loading.history.status).toBe('loading');
+    const loaded = run([{ type: 'historySucceeded', requestId: 1, history: syntheticReleaseHistory() }], loading);
+    expect(loaded.history).toEqual({ status: 'ready', list: syntheticReleaseHistory(), requestId: null, errorMessage: null });
+  });
+
+  it('drops an out-of-order history answer by the one request counter', () => {
+    const state = run([
+      { type: 'historyRequested', requestId: 1 },
+      { type: 'historyRequested', requestId: 2 },
+      { type: 'historySucceeded', requestId: 2, history: syntheticRestoredReleaseHistory() },
+    ]);
+    const late = run([{ type: 'historySucceeded', requestId: 1, history: syntheticReleaseHistory() }], state);
+    expect(late).toBe(state);
+    expect(late.history.list?.active_release.version_number).toBe(5);
+    expect(run([{ type: 'historyFailed', requestId: 1, message: 'late' }], state)).toBe(state);
+  });
+
+  it('keeps the shown list while a refetch loads, and shows a failed read as an error', () => {
+    const loaded = run([
+      { type: 'historyRequested', requestId: 1 },
+      { type: 'historySucceeded', requestId: 1, history: syntheticReleaseHistory() },
+      { type: 'historyRequested', requestId: 2 },
+    ]);
+    expect(loaded.history.list).toEqual(syntheticReleaseHistory());
+    const failed = run([{ type: 'historyFailed', requestId: 2, message: 'boom' }], loaded);
+    expect(failed.history.status).toBe('error');
+    expect(failed.history.errorMessage).toBe('boom');
+  });
+});
+
+describe('reviewAndPublishReducer: inspection', () => {
+  it('goes none -> loading -> shown for the current request only', () => {
+    expect(createReviewAndPublishState().inspection.status).toBe('none');
+    const loading = run([{ type: 'inspectRequested', requestId: 3, versionNumber: 2 }]);
+    expect(loading.inspection.status).toBe('loading');
+    expect(loading.inspection.versionNumber).toBe(2);
+    const newer = run([{ type: 'inspectRequested', requestId: 4, versionNumber: 3 }], loading);
+    const stale = run([{ type: 'inspectSucceeded', requestId: 3, detail: syntheticReleaseDetail(), comparison: syntheticReleaseComparison() }], newer);
+    expect(stale).toBe(newer);
+    const shown = run([{ type: 'inspectSucceeded', requestId: 4, detail: syntheticReleaseDetail(), comparison: syntheticReleaseComparison() }], newer);
+    expect(shown.inspection.status).toBe('shown');
+    expect(shown.inspection.detail).toEqual(syntheticReleaseDetail());
+  });
+
+  it('returns a failed inspection to none with a message', () => {
+    const failed = run([
+      { type: 'inspectRequested', requestId: 3, versionNumber: 2 },
+      { type: 'inspectFailed', requestId: 3, message: 'boom' },
+    ]);
+    expect(failed.inspection.status).toBe('none');
+    expect(failed.inspection.errorMessage).toBe('boom');
+  });
+});
+
+describe('reviewAndPublishReducer: the rollback preview', () => {
+  it('starts closed, loads, and confirms a restorable preview with the default note', () => {
+    expect(createReviewAndPublishState().rollback.status).toBe('closed');
+    const loading = run([{ type: 'rollbackOpened', requestId: 10, versionNumber: 2 }], ready());
+    expect(loading.rollback.status).toBe('previewLoading');
+    const state = confirming();
+    expect(state.rollback.status).toBe('confirming');
+    expect(state.rollback.note).toBe('Roll back to Graph Version 2.');
+    expect(canConfirmRollback(state)).toBe(true);
+  });
+
+  it('shows a blocked preview as blocked, with its issues, and refuses confirm', () => {
+    const state = confirming(ready(), syntheticBlockedRollbackPreview());
+    expect(state.rollback.status).toBe('blocked');
+    expect(state.rollback.blocked).toEqual({
+      reason: 'incompatible',
+      source: releaseRef(2),
+      active: releaseRef(4),
+      issues: syntheticBlockedRollbackPreview().issues,
+    });
+    expect(canConfirmRollback(state)).toBe(false);
+    expect(reviewAndPublishReducer(state, { type: 'rollbackStarted', requestId: 11 })).toBe(state);
+  });
+
+  it('drops an out-of-order rollback preview by the one request counter', () => {
+    const state = run([
+      { type: 'rollbackOpened', requestId: 10, versionNumber: 2 },
+      { type: 'rollbackOpened', requestId: 12, versionNumber: 3 },
+    ], ready());
+    const late = run([{ type: 'rollbackPreviewSucceeded', requestId: 10, preview: syntheticRollbackPreview() }], state);
+    expect(late).toBe(state);
+    expect(late.rollback.versionNumber).toBe(3);
+    expect(run([{ type: 'rollbackPreviewFailed', requestId: 10, message: 'late' }], state)).toBe(state);
+  });
+
+  it('drops an out-of-order release preview while a rollback is open (one counter, both reads)', () => {
+    const state = run([
+      { type: 'reloadPreview', requestId: 20 },
+      { type: 'reloadPreview', requestId: 21 },
+    ], confirming());
+    expect(run([{ type: 'previewSucceeded', requestId: 20, preview: syntheticPublishedReleasePreview() }], state)).toBe(state);
+  });
+});
+
+describe('canConfirmRollback: the confirm guard', () => {
+  it.each(['', '   ', '\n\t'])('refuses the blank note %j', (note) => {
+    const state = reviewAndPublishReducer(confirming(), { type: 'rollbackNoteChanged', note });
+    expect(canConfirmRollback(state)).toBe(false);
+    expect(reviewAndPublishReducer(state, { type: 'rollbackStarted', requestId: 11 })).toBe(state);
+  });
+
+  it('caps the note at 2000 code points, as the server counts them', () => {
+    const at = reviewAndPublishReducer(confirming(), { type: 'rollbackNoteChanged', note: '\u{1F680}'.repeat(2000) });
+    expect(canConfirmRollback(at)).toBe(true);
+    const over = reviewAndPublishReducer(confirming(), { type: 'rollbackNoteChanged', note: 'x'.repeat(2001) });
+    expect(canConfirmRollback(over)).toBe(false);
+  });
+
+  it('is allowed only from confirming', () => {
+    expect(canConfirmRollback(run([{ type: 'rollbackOpened', requestId: 10, versionNumber: 2 }], ready()))).toBe(false);
+    expect(canConfirmRollback(rollingBack())).toBe(false);
+    expect(canConfirmRollback(ready())).toBe(false);
+  });
+});
+
+describe('the one write gate (Correction 39)', () => {
+  it('publish is refused while rollingBack', () => {
+    const state = rollingBack();
+    expect(state.rollback.status).toBe('rollingBack');
+    expect(canPublish(state)).toBe(false);
+    expect(reviewAndPublishReducer(state, { type: 'publishStarted', requestId: 30 })).toBe(state);
+    expect(reviewAndPublishReducer(state, { type: 'reloadPreview', requestId: 30 })).toBe(state);
+  });
+
+  it('openRollback and confirm are refused while publishing', () => {
+    const open = publishing();
+    expect(reviewAndPublishReducer(open, { type: 'rollbackOpened', requestId: 30, versionNumber: 2 })).toBe(open);
+    const confirmThenPublish = reviewAndPublishReducer(confirming(), { type: 'publishStarted', requestId: 31 });
+    expect(confirmThenPublish.status).toBe('publishing');
+    expect(canConfirmRollback(confirmThenPublish)).toBe(false);
+    expect(reviewAndPublishReducer(confirmThenPublish, { type: 'rollbackStarted', requestId: 32 })).toBe(confirmThenPublish);
+  });
+
+  it('a second rollback cannot open, cancel or restart while one is in flight', () => {
+    const state = rollingBack();
+    expect(reviewAndPublishReducer(state, { type: 'rollbackOpened', requestId: 30, versionNumber: 3 })).toBe(state);
+    expect(reviewAndPublishReducer(state, { type: 'rollbackCancelled' })).toBe(state);
+    expect(reviewAndPublishReducer(state, { type: 'rollbackStarted', requestId: 31 })).toBe(state);
+    expect(reviewAndPublishReducer(state, { type: 'rollbackNoteChanged', note: 'x' })).toBe(state);
+  });
+});
+
+describe('reviewAndPublishReducer: rollback outcomes', () => {
+  it('drops an outcome from another request id', () => {
+    const state = rollingBack();
+    expect(reviewAndPublishReducer(state, { type: 'rollbackSucceeded', requestId: 99, result: syntheticRollbackSuccess() })).toBe(state);
+  });
+
+  it('stores the restored release and clears the note', () => {
+    const state = reviewAndPublishReducer(rollingBack(), { type: 'rollbackSucceeded', requestId: 11, result: syntheticRollbackSuccess() });
+    expect(state.rollback.status).toBe('restored');
+    expect(state.rollback.restored).toEqual(syntheticRollbackSuccess());
+    expect(state.rollback.note).toBe('');
+    // A restored rollback accepts no further edits.
+    expect(reviewAndPublishReducer(state, { type: 'rollbackNoteChanged', note: 'x' })).toBe(state);
+  });
+
+  it('keeps an edited note through a stale 409 and its explicit reload', () => {
+    const edited = reviewAndPublishReducer(confirming(), { type: 'rollbackNoteChanged', note: 'Emergency: v4 broke outlines' });
+    const stale = run([
+      { type: 'rollbackStarted', requestId: 11 },
+      { type: 'rollbackStale', requestId: 11, conflict: syntheticStaleRollback() },
+    ], edited);
+    expect(stale.rollback.status).toBe('stale');
+    expect(stale.rollback.stale).toEqual(syntheticStaleRollback());
+    expect(canConfirmRollback(stale)).toBe(false);
+    const reloaded = run([
+      { type: 'rollbackReloaded', requestId: 12 },
+      { type: 'rollbackPreviewSucceeded', requestId: 12, preview: syntheticRollbackPreview({ lock_version: 5 }) },
+    ], stale);
+    expect(reloaded.rollback.status).toBe('confirming');
+    expect(reloaded.rollback.preview?.lock_version).toBe(5);
+    expect(reloaded.rollback.note).toBe('Emergency: v4 broke outlines');
+    expect(reloaded.rollback.stale).toBeNull();
+  });
+
+  it('resets an unedited note to the reloaded preview\'s default', () => {
+    const stale = run([
+      { type: 'rollbackStarted', requestId: 11 },
+      { type: 'rollbackStale', requestId: 11, conflict: syntheticStaleRollback() },
+      { type: 'rollbackReloaded', requestId: 12 },
+      { type: 'rollbackPreviewSucceeded', requestId: 12, preview: syntheticRollbackPreview({ default_release_note: 'Roll back to Graph Version 2 again.' }) },
+    ], confirming());
+    expect(stale.rollback.note).toBe('Roll back to Graph Version 2 again.');
+  });
+
+  it('shows an invalid note, and an edit returns to confirming', () => {
+    const invalid = run([{ type: 'rollbackInvalid', requestId: 11, errors: syntheticRollbackInvalid().errors }], rollingBack());
+    expect(invalid.rollback.status).toBe('invalid');
+    expect(canConfirmRollback(invalid)).toBe(false);
+    const edited = reviewAndPublishReducer(invalid, { type: 'rollbackNoteChanged', note: 'A real note' });
+    expect(edited.rollback.status).toBe('confirming');
+    expect(edited.rollback.errors).toEqual([]);
+    expect(canConfirmRollback(edited)).toBe(true);
+  });
+
+  it('cancels back to closed', () => {
+    expect(reviewAndPublishReducer(confirming(), { type: 'rollbackCancelled' }).rollback).toEqual(createReviewAndPublishState().rollback);
+  });
+});
+
+describe('rollbackFailureAction: keyed on the typed code, never on message text', () => {
+  const failure = (status: number, payload: unknown) => new AgentDefinitionApiError(status, payload);
+
+  it('maps each typed refusal', () => {
+    expect(rollbackFailureAction(7, failure(409, syntheticStaleRollback()))).toEqual({
+      type: 'rollbackStale', requestId: 7, conflict: syntheticStaleRollback(),
+    });
+    expect(rollbackFailureAction(7, failure(422, syntheticRollbackInvalid()))).toEqual({
+      type: 'rollbackInvalid', requestId: 7, errors: syntheticRollbackInvalid().errors,
+    });
+    expect(rollbackFailureAction(7, failure(422, syntheticRollbackIncompatible()))).toEqual({
+      type: 'rollbackBlocked',
+      requestId: 7,
+      // Fix round 1 m3: the 422 names no active release, so none is stored (never the source).
+      blocked: { reason: 'incompatible', source: releaseRef(2), active: null, issues: syntheticRollbackIncompatible().errors },
+    });
+    expect(rollbackFailureAction(7, failure(409, { code: 'rollback_source_active', active_release: releaseRef(4) })))
+      .toMatchObject({ type: 'rollbackBlocked', blocked: { reason: 'source_is_active' } });
+    expect(rollbackFailureAction(7, failure(409, { code: 'rollback_matches_active', active_release: releaseRef(4), source: releaseRef(2) })))
+      .toMatchObject({ type: 'rollbackBlocked', blocked: { reason: 'matches_active', source: releaseRef(2), active: releaseRef(4) } });
+  });
+
+  it('maps an invalid response, another status and a network failure to fixed client copy', () => {
+    expect(rollbackFailureAction(7, new InvalidReleaseResponseError())).toMatchObject({ type: 'rollbackFailed' });
+    expect(rollbackFailureAction(7, failure(500, { detail: 'Graph configuration is incomplete' }))).toEqual({
+      type: 'rollbackFailed', requestId: 7,
+      message: 'Unable to roll back (500). Reload Release History to see the active Graph Version.',
+    });
+    expect(rollbackFailureAction(7, new TypeError('fetch failed'))).toMatchObject({
+      message: 'Unable to confirm the rollback. Reload Release History to see the active Graph Version.',
+    });
+  });
+});
+
+describe('rollback labels', () => {
+  it('labels the three draft effects (Q7)', () => {
+    expect(DRAFT_EFFECT_LABELS).toEqual({
+      reset: 'Reset to restored content',
+      kept: 'Pending edit kept',
+      unchanged: 'Unchanged',
+    });
+  });
+
+  it('labels rollback 422 issues by code, never echoing Pydantic text', () => {
+    expect(rollbackErrorMessage({ field: 'release_note', code: 'blank', message: 'Release note must not be blank.' })).toBe('Enter a rollback note.');
+    expect(rollbackErrorMessage({ field: 'release_note', code: 'too_long', message: 'x' })).toBe('Rollback note must be at most 2000 characters.');
+    expect(rollbackErrorMessage({ field: '$', code: 'strict_type', message: 'Input should be a valid dictionary or instance of RollbackRequest' }))
+      .toBe('The rollback request was refused.');
+    expect(rollbackErrorMessage({ field: 'definitions.builder.model.endpoint_name', code: 'c', message: 'Endpoint name is not allowed.' }))
+      .toBe('Builder: Endpoint name is not allowed.');
+  });
+
+  it('says why nothing was restored, by block code', () => {
+    const blocked = { source: releaseRef(2), active: releaseRef(4), issues: [] };
+    expect(rollbackBlockedMessage({ ...blocked, reason: 'source_is_active' })).toBe('Graph Version 2 is already active.');
+    expect(rollbackBlockedMessage({ ...blocked, reason: 'matches_active' }))
+      .toBe('Graph Version 2 has the same definitions as the active Graph Version 4.');
+  });
+});
+
+describe('fix round 1 m5: a success clears a shown inspection (it compared against the old active)', () => {
+  function inspected(state: ReviewAndPublishState): ReviewAndPublishState {
+    return run([
+      { type: 'inspectRequested', requestId: 40, versionNumber: 2 },
+      { type: 'inspectSucceeded', requestId: 40, detail: syntheticReleaseDetail(), comparison: syntheticReleaseComparison() },
+    ], state);
+  }
+
+  it('clears it when a rollback restores', () => {
+    const state = inspected(rollingBack());
+    expect(state.inspection.status).toBe('shown');
+    const restored = reviewAndPublishReducer(state, { type: 'rollbackSucceeded', requestId: 11, result: syntheticRollbackSuccess() });
+    expect(restored.inspection).toEqual(createReviewAndPublishState().inspection);
+  });
+
+  it('clears it when a publish succeeds', () => {
+    const state = inspected(publishing());
+    const published = reviewAndPublishReducer(state, { type: 'publishSucceeded', requestId: 2, result: syntheticPublishSuccess() });
+    expect(published.inspection).toEqual(createReviewAndPublishState().inspection);
+  });
+
+  it('drops a late inspection answer that was in flight across the success', () => {
+    const state = run([{ type: 'inspectRequested', requestId: 40, versionNumber: 2 }], rollingBack());
+    const restored = reviewAndPublishReducer(state, { type: 'rollbackSucceeded', requestId: 11, result: syntheticRollbackSuccess() });
+    const late = reviewAndPublishReducer(restored, {
+      type: 'inspectSucceeded', requestId: 40, detail: syntheticReleaseDetail(), comparison: syntheticReleaseComparison(),
+    });
+    expect(late).toBe(restored);
+  });
+
+  it('keeps a shown inspection through a refused publish or rollback', () => {
+    const stale = reviewAndPublishReducer(inspected(rollingBack()), { type: 'rollbackStale', requestId: 11, conflict: syntheticStaleRollback() });
+    expect(stale.inspection.status).toBe('shown');
+  });
 });

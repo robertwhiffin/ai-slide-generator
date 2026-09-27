@@ -128,10 +128,14 @@ def test_the_client_refusal_codes_are_the_server_literals() -> None:
     ):
         (code,) = get_args(model.model_fields["code"].annotation)
         assert source.count(f"'{code}'") >= 2, code  # the type and the parser
-    (kind,) = get_args(
+    # #270 C38: the evidence item carries both kinds; the client checks each one
+    # (and publication's approval-only rule) by name.
+    kinds = get_args(
         schemas.ReleaseEvidenceResponse.model_fields["evidence_kind"].annotation
     )
-    assert f"evidence_kind === '{kind}'" in source
+    assert set(kinds) == {"approval", "historical_restore"}
+    for kind in kinds:
+        assert f"evidence_kind === '{kind}'" in source, kind
 
 
 def test_the_client_note_cap_is_the_service_cap() -> None:

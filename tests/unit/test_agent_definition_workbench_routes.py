@@ -642,7 +642,14 @@ def test_main_app_registers_the_dedicated_workbench_route():
         "/api/admin/agent-definitions/readiness": {"GET"},
         # #269 Task 5: on the one admin router (C31/C35).
         "/api/admin/agent-definitions/release-preview": {"GET"},
-        "/api/admin/agent-definitions/releases": {"POST"},
+        "/api/admin/agent-definitions/releases": {"GET", "POST"},
+        # #270 Task 6: history, comparison and rollback, on the same router (C37).
+        "/api/admin/agent-definitions/releases/{version_number}": {"GET"},
+        "/api/admin/agent-definitions/releases/{version_number}/comparison": {"GET"},
+        "/api/admin/agent-definitions/releases/{version_number}/rollback-preview": {
+            "GET"
+        },
+        "/api/admin/agent-definitions/releases/{version_number}/rollback": {"POST"},
     }
     for path, methods in expected_methods.items():
         matches = [

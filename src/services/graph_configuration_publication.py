@@ -452,9 +452,22 @@ class _GraphConfigurationPublication(_GraphConfigurationDraft):
         release row is locked here (Correction 37).  Shared by ``publish_draft``
         (which raises) and ``preview_release`` (which reports).
         """
+        return self._candidate_contents_issues(
+            {key: model_nodes[key].draft.content for key in changed}
+        )
+
+    def _candidate_contents_issues(
+        self, contents: Mapping[AgentKey, DefinitionContent]
+    ) -> list[DraftValidationIssue]:
+        """The one candidate validation loop, in ``contents``' order.
+
+        Per role, one ``try``: the saves' local phase (incl. #266's endpoint
+        policy), then post-stale, so a failed local phase skips post-stale.  Each
+        issue is re-fielded as ``definitions.<key>.<field>``.  Never the remote
+        endpoint check.  Shared by publication and rollback (Correction 32).
+        """
         issues: list[DraftValidationIssue] = []
-        for key in changed:
-            content = model_nodes[key].draft.content
+        for key, content in contents.items():
             try:
                 self._run_candidate_validators(self._save_local_validators(), content)
                 self._run_candidate_validators(self.post_stale_validators, content)
