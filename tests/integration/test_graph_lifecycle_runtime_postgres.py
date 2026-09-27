@@ -102,14 +102,8 @@ S17 = Stage(
 
 
 def _in_stage(journey, current: Stage):
-    """Run a Task 7 stage body under Task 6's attribution.
-
-    Task 6's fix round adds a public ``journey.in_stage(stage)``; when it lands,
-    this body becomes ``return journey.in_stage(current)`` (the one-line switch).
-    No stage body here uses ``journey.call``, so none needs ``journey._current``.
-    """
-    del journey
-    return stage(current)
+    """Run a Task 7 stage body under Task 6's attribution (``journey.in_stage``)."""
+    return journey.in_stage(current)
 
 
 MESSAGE = "USE AGENT MODE build a deck"
