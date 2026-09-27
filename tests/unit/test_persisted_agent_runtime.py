@@ -64,6 +64,7 @@ from src.services.prompt_assembler import (
     ResolvedPromptStage,
 )
 from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
+from tests.fixtures.log_records import STANDARD_LOG_RECORD_ATTRS as _STANDARD_LOG_RECORD_ATTRS
 from tests.fixtures.log_records import rendered_record
 from tests.fixtures.packaged_release_loader import PackagedGraphV1Loader
 
@@ -907,17 +908,6 @@ EXPECTED_LOG_MESSAGE = "persisted_agent_invocation"
 #: record.  Session IDs likewise never reach the log.  Any change to either rule
 #: must change this constant deliberately.
 SUCCESS_LOG_FIELDS = PERMITTED_LOG_FIELDS | {"additional_field_names"}
-
-#: Every attribute the stdlib puts on a LogRecord, so the difference is exactly
-#: what the sink's ``extra=`` contributed.  ``message``/``asctime``/``taskName`` are
-#: added when a record is FORMATTED (caplog formats them), and ``logging`` refuses
-#: an ``extra`` key that collides with an existing record attribute — it raises
-#: ``KeyError: "Attempt to overwrite 'message' in LogRecord"`` — so no sink field
-#: can ever hide behind one of these three names.
-_STANDARD_LOG_RECORD_ATTRS = frozenset(
-    vars(logging.LogRecord("n", logging.INFO, "p", 1, "m", None, None))
-) | {"message", "asctime", "taskName"}
-
 
 def emitted_fields(record: logging.LogRecord) -> set:
     """The fields the sink added to *record* — its whole disclosure surface."""

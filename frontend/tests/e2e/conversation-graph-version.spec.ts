@@ -107,7 +107,11 @@ test.describe('conversation graph versions', () => {
         return;
       }
       creationBodies.push(request.postDataJSON() as Record<string, unknown>);
-      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Graph runtime is unavailable' }) });
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: { code: 'lakebase_unavailable', message: 'Conversation configuration is temporarily unavailable. Please retry.' } }),
+      });
     });
     await page.route('http://127.0.0.1:8000/api/chat/stream', async (route, request) => {
       graphTurns.push(request.postDataJSON() as Record<string, unknown>);
@@ -122,6 +126,7 @@ test.describe('conversation graph versions', () => {
     await expect.poll(() => creationBodies.length).toBe(1);
     expect(creationBodies[0]).toMatchObject({ graph_capable: true });
     expect(graphTurns).toEqual([]);
+    await expect(page.locator('[data-testid="toast"]').first()).toContainText('Failed to create a new session');
   });
 
   test('initial root persists a graph-capable root before its first USE AGENT MODE turn', async ({ page }) => {
@@ -336,5 +341,57 @@ test.describe('conversation graph versions', () => {
     await expect(page).toHaveURL('/');
     await expect(page.getByTestId('graph-version-status')).toContainText('Pinned Graph Version unavailable');
     expect(graphTurns).toEqual([]);
+  });
+
+  test('chat stream typed 503 body shows the backend message in the error panel (not [object Object])', async ({ page }) => {
+    // Regression for I1: the chat stream endpoint returns a dict detail:
+    //   {"code": "lakebase_unavailable", "message": "Conversation configuration …"}
+    // Before the fix api.ts passed the dict directly as the ApiError message,
+    // so the error panel displayed "[object Object]".  After the fix the message
+    // field is extracted and the panel shows the real sentence.
+    await setupMocks(page);
+    await allowEditing(page);
+
+    // An existing, fully-pinned session (version=2, not older) so that
+    // isSessionPersisted becomes true and ensureGraphCapableRoot is NOT called.
+    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+      if (request.method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sessionResponse(SESSION_A, 2, 2, false)),
+      });
+    });
+
+    // Chat stream returns the typed 503 dict body.
+    await page.route('http://127.0.0.1:8000/api/chat/stream', async (route) => {
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          detail: {
+            code: 'lakebase_unavailable',
+            message: 'Conversation configuration is temporarily unavailable. Please retry.',
+          },
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${SESSION_A}/edit`);
+    // Wait until the session is loaded and the input is enabled.
+    await expect(page.getByTestId('chat-input')).toBeEnabled();
+
+    await page.getByTestId('chat-input').fill('USE AGENT MODE build a deck about graphs');
+    await page.getByTestId('chat-input').press('Enter');
+
+    // The error panel should show the real backend message, not "[object Object]".
+    await expect(
+      page.getByTestId('chat-panel').getByText(
+        'Conversation configuration is temporarily unavailable. Please retry.',
+      ),
+    ).toBeVisible();
   });
 });
