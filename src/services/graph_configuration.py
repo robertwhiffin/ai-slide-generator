@@ -29,8 +29,10 @@ from src.services.graph_configuration_draft import (
     _GraphConfigurationDraft,
 )
 from src.services.graph_configuration_publication import (
+    ChangedDefinitionPreview,
     EvidenceKind,
     EvidenceLink,
+    FieldDiff,
     NothingToPublish,
     PublicationConflict,
     PublicationEvidenceGate,
@@ -41,7 +43,9 @@ from src.services.graph_configuration_publication import (
     PublicationRejected,
     PublishedMapping,
     PublishedRelease,
+    ReleasePreview,
     _GraphConfigurationPublication,
+    definition_field_diffs,
 )
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
 from src.services.graph_configuration_workbench import (
@@ -109,6 +113,7 @@ __all__ = [
     "ActiveReleaseSnapshot",
     "BootstrapResult",
     "CatalogRemoteEndpointDraftValidator",
+    "ChangedDefinitionPreview",
     "DeterministicAgentNodeSnapshot",
     "DraftAggregateSnapshot",
     "DraftCandidateValidator",
@@ -124,6 +129,7 @@ __all__ = [
     "EditableModelDraft",
     "EvidenceKind",
     "EvidenceLink",
+    "FieldDiff",
     "GraphConfiguration",
     "GraphConfigurationIntegrityError",
     "GraphWorkbenchSnapshot",
@@ -140,7 +146,9 @@ __all__ = [
     "PublishedMapping",
     "PublishedRelease",
     "REQUIRED_SMOKE_PAYLOADS",
+    "ReleasePreview",
     "RemoteEndpointDraftValidator",
     "bootstrap_graph_configuration",
     "build_remote_endpoint_draft_validator",
+    "definition_field_diffs",
 ]

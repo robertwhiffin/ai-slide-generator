@@ -4,7 +4,8 @@ Publication is not a second draft writer.  It takes the draft writer's own paren
 lock (``_lock_current_parents(exclusive=True)``), re-runs the saves' local
 validators, and writes only the draft **parent** row (rebase plus the one audit
 helper).  The evidence gate decides readiness under its own locks; this module
-never consults #268's readiness result to decide anything.
+never consults #268's readiness result to decide anything.  The read-only
+``preview_release`` shows readiness and an advisory ``publishable`` flag only.
 
 Lock order (global): L0 active release -> L0 draft (one statement) -> L1 all
 seven draft agents by ``agent_key`` -> [gate: L2 case rows -> L3 run rows].
@@ -13,6 +14,7 @@ No model, runtime or network call happens while any of these are held.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Mapping, Protocol
@@ -21,6 +23,7 @@ from sqlalchemy import func, select
 
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
+    AgentTestCase,
     GraphDraft,
     GraphDraftAgent,
     GraphRelease,
@@ -171,6 +174,102 @@ PublicationOutcome = (
 )
 
 
+#: The fixed field-diff vocabulary, in wire order: every ``DefinitionContent``
+#: field except the identity-constant ``agent_key``.  ``schema_overlay`` and
+#: ``assembly_rules`` compare as whole JSON documents.
+_DIFF_FIELDS: tuple[tuple[str, ...], ...] = (
+    ("definition_version",),
+    ("prompt_text",),
+    ("model", "endpoint_name"),
+    ("model", "temperature"),
+    ("model", "max_tokens"),
+    ("model", "top_p"),
+    ("schema_overlay",),
+    ("assembly_rules",),
+    ("protected_assembly", "version"),
+    ("protected_assembly", "digest"),
+    ("schema_contract", "version"),
+    ("schema_contract", "digest"),
+)
+DIFF_FIELD_NAMES: tuple[str, ...] = tuple(".".join(path) for path in _DIFF_FIELDS)
+
+
+@dataclass(frozen=True)
+class FieldDiff:
+    """One differing definition field; both values are canonical JSON values."""
+
+    field: str
+    published: object
+    candidate: object
+
+
+@dataclass(frozen=True)
+class ChangedDefinitionPreview:
+    agent_key: AgentKey
+    published_revision_id: int
+    published_content_hash: str
+    candidate_hash: str
+    field_diffs: tuple[FieldDiff, ...]
+
+
+@dataclass(frozen=True)
+class ReleasePreview:
+    draft: DraftMetadataSnapshot
+    active_release: ActiveReleaseSnapshot
+    next_version_number: int
+    #: Changed roles in ``GRAPH_V1_AGENT_KEYS`` order.
+    changed: tuple[ChangedDefinitionPreview, ...]
+    #: #268's readiness, read in the preview's own transaction after the shared
+    #: parent lock.  Informational (Correction 32).
+    readiness: object
+    #: The publication validators' issues, collected instead of raised, with the
+    #: same ``definitions.<agent_key>.`` prefix ``publish_draft`` uses.
+    validation_issues: tuple[DraftValidationIssue, ...]
+    #: Advisory (Correction 22); the evidence gate inside ``publish_draft`` decides.
+    publishable: bool
+
+
+def definition_field_diffs(
+    published: DefinitionContent, candidate: DefinitionContent
+) -> tuple[FieldDiff, ...]:
+    """The differing fields of two definitions, in ``DIFF_FIELD_NAMES`` order.
+
+    Values come from ``canonical_payload()``, so a float and the ``Decimal`` of
+    the same value are not a diff, and every value is JSON-serializable.  Nothing
+    outside the two definitions' content is read.
+    """
+    before, after = published.canonical_payload(), candidate.canonical_payload()
+    diffs: list[FieldDiff] = []
+    for path in _DIFF_FIELDS:
+        old: object = before
+        new: object = after
+        for segment in path:
+            old = old[segment]  # type: ignore[index]
+            new = new[segment]  # type: ignore[index]
+        if old != new:
+            diffs.append(FieldDiff(".".join(path), old, new))
+    return tuple(diffs)
+
+
+def release_is_publishable(
+    *,
+    changed: tuple[AgentKey, ...],
+    validation_issues: tuple[DraftValidationIssue, ...],
+    roles_with_required_case: frozenset[AgentKey] | set[AgentKey],
+    blocking_agents: tuple[str, ...] | list[str],
+) -> bool:
+    """The one definition of ``publishable`` (Correction 22).
+
+    Advisory only: it is shown by the preview and never decides publication.
+    """
+    return (
+        bool(changed)
+        and not validation_issues
+        and all(key in roles_with_required_case for key in changed)
+        and not set(blocking_agents) & set(changed)
+    )
+
+
 class _GraphConfigurationPublication(_GraphConfigurationDraft):
     """Publish the shared draft as the next complete Graph Release."""
 
@@ -259,15 +358,92 @@ class _GraphConfigurationPublication(_GraphConfigurationDraft):
             )
         return rows
 
+    def preview_release(
+        self,
+        session: Session,
+        *,
+        readiness: Callable[[Session], object],
+    ) -> ReleasePreview:
+        """What publishing the shared draft now would change, read-only.
+
+        One transaction: the shared parent lock (the ``read_workbench`` pattern),
+        the locked snapshot, the publication validators collected without
+        raising, the changed roles' active required cases, then #268's readiness
+        (Correction 39).  No row lock beyond the shared parents, no write, and no
+        remote endpoint check (Correction 37).
+        """
+        with session.begin():
+            release_row, draft_row = self._lock_current_parents(session, exclusive=False)
+            snapshot = self._snapshot_locked_workbench(
+                session, release=release_row, draft=draft_row
+            )
+            model_nodes = _model_nodes(snapshot)
+            changed = tuple(key for key in GRAPH_V1_AGENT_KEYS if model_nodes[key].changed)
+            validation_issues = tuple(
+                self._changed_candidate_issues(model_nodes, changed)
+            )
+            roles_with_required_case = (
+                set(
+                    session.scalars(
+                        select(AgentTestCase.agent_key)
+                        .where(
+                            AgentTestCase.agent_key.in_(changed),
+                            AgentTestCase.is_active.is_(True),
+                            AgentTestCase.is_required.is_(True),
+                        )
+                        .distinct()
+                    )
+                )
+                if changed
+                else set()
+            )
+            readiness_result = readiness(session)
+            return ReleasePreview(
+                draft=snapshot.draft,
+                active_release=snapshot.active_release,
+                next_version_number=snapshot.active_release.version_number + 1,
+                changed=tuple(
+                    ChangedDefinitionPreview(
+                        agent_key=key,
+                        published_revision_id=model_nodes[key].published.revision_id,
+                        published_content_hash=model_nodes[key].published.content_hash,
+                        candidate_hash=model_nodes[key].draft.candidate_hash,
+                        field_diffs=definition_field_diffs(
+                            model_nodes[key].published.content,
+                            model_nodes[key].draft.content,
+                        ),
+                    )
+                    for key in changed
+                ),
+                readiness=readiness_result,
+                validation_issues=validation_issues,
+                publishable=release_is_publishable(
+                    changed=changed,
+                    validation_issues=validation_issues,
+                    roles_with_required_case=roles_with_required_case,
+                    blocking_agents=readiness_result.blocking_agents,  # type: ignore[attr-defined]
+                ),
+            )
+
     def _validate_changed_candidates(
         self,
         model_nodes: Mapping[AgentKey, ModelAgentNodeSnapshot],
         changed: tuple[AgentKey, ...],
     ) -> None:
+        issues = self._changed_candidate_issues(model_nodes, changed)
+        if issues:
+            raise PublicationRejected(*issues)
+
+    def _changed_candidate_issues(
+        self,
+        model_nodes: Mapping[AgentKey, ModelAgentNodeSnapshot],
+        changed: tuple[AgentKey, ...],
+    ) -> list[DraftValidationIssue]:
         """The saves' local phase (incl. #266's endpoint policy), then post-stale.
 
         Never the remote endpoint check: that is a network call, and the active
-        release row is held ``FOR UPDATE`` here (Correction 37).
+        release row is locked here (Correction 37).  Shared by ``publish_draft``
+        (which raises) and ``preview_release`` (which reports).
         """
         issues: list[DraftValidationIssue] = []
         for key in changed:
@@ -282,8 +458,7 @@ class _GraphConfigurationPublication(_GraphConfigurationDraft):
                     )
                     for issue in rejection.issues
                 )
-        if issues:
-            raise PublicationRejected(*issues)
+        return issues
 
     def _commit_locked_publication(
         self,
@@ -442,8 +617,11 @@ def _model_nodes(
 
 
 __all__ = [
+    "DIFF_FIELD_NAMES",
+    "ChangedDefinitionPreview",
     "EvidenceKind",
     "EvidenceLink",
+    "FieldDiff",
     "NothingToPublish",
     "PublicationConflict",
     "PublicationEvidenceGate",
@@ -455,4 +633,7 @@ __all__ = [
     "PublishedMapping",
     "PublishedRelease",
     "RELEASE_NOTE_MAX_LENGTH",
+    "ReleasePreview",
+    "definition_field_diffs",
+    "release_is_publishable",
 ]
