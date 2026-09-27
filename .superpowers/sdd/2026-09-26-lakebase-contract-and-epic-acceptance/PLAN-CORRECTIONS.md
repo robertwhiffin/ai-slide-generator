@@ -1260,3 +1260,11 @@ The C37 harness wires `RecordingAgentInvocationIdentitySink` (`rollback_acceptan
 
 ### Correction 51 — erratum to C38 (BLOCKING Task 8)
 `_create` calls the manager and service directly, so all 7 creators raise `ActiveGraphReleaseUnavailableError`, never HTTP 503. Task 8 asserts `pytest.raises(ActiveGraphReleaseUnavailableError)` for all 7 through `_create`; the route-level 503 is a separate HTTP parametrisation over the 5 route creators (or cited as owned by `test_conversation_pin_creation.py:291`). The `chat-service-streaming` creator passes `request_id`, so it never reaches `chat_service.py:1141`.
+
+### Correction 52 — production defect found by Task 7: pinned-runtime errors become `TypeError` inside any `@contextmanager` (BLOCKING Task 8)
+
+**Evidence:** `PersistedConfigurationUnavailableError` and `PinnedInvocationEndpointError` (`src/services/persisted_graph_release.py:39-68`) are `@dataclass(frozen=True, slots=True)` subclasses of `RuntimeError`. Raised through a `@contextmanager` (LangGraph runs every node inside `set_config_context`), they surface as `TypeError: super(type, obj): obj must be an instance or subtype of type`. Controller-reproduced with no database (a plain `@contextmanager` + `raise`): both classes → `TypeError`. Consequence: a node-raised pinned-runtime failure (bundle unavailable, invalid definition, Lakebase down, removed endpoint) reaches `chat_service.py:~1914` as a `TypeError`; the safe `pinned_graph_configuration_unavailable` event and its log are never emitted, the ERROR event leaks internal text, and `:~2030` re-raises the `TypeError`. Green today only because the envelope tests fake `invoke_graph` or raise before any node runs.
+
+**Ruling:** Task 8 owns the fix (it already owns the safe-error path, C24/C47). Make both exceptions safe to traverse context managers — drop `slots=True` (keep `frozen` only if `__traceback__` assignment still works; otherwise plain classes with read-only properties), preserving their fields, `__str__` and `__post_init__` validation. Add a RED-first regression test that raises each through a real LangGraph node (or `set_config_context`) and asserts the exact typed exception and the safe event, per the recipe in `task-7-report.md`.
+
+**Cost if wrong:** during a pinned-configuration outage users get a leaked internal `TypeError` instead of the safe, typed error event.
