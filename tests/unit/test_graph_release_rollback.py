@@ -1069,6 +1069,32 @@ def test_restore_v3_while_v7_active_produces_v8_restoring_v3(factory, monkeypatc
     assert by_version[3].restored_by == (ReleaseRef(v8.id, 8),)
 
 
+def test_restore_writes_through_the_one_publication_core(factory, monkeypatch):
+    """N1: the restore's writes go through #269's ``_commit_locked_publication``
+    exactly once, never a copy of it (whole-branch review sabotage S2)."""
+    core = publication_module._GraphConfigurationPublication._commit_locked_publication
+    assert GraphConfiguration._commit_locked_publication is core
+    build_v2_to_v7(factory, monkeypatch)
+    r = refs(factory)
+    calls: list[dict[str, object]] = []
+
+    def _spy(self, session, **kwargs):
+        calls.append(kwargs)
+        return core(self, session, **kwargs)
+
+    monkeypatch.setattr(
+        publication_module._GraphConfigurationPublication,
+        "_commit_locked_publication",
+        _spy,
+    )
+    restored = restore(factory, 3)
+
+    assert isinstance(restored, RestoredRelease), restored
+    assert len(calls) == 1
+    assert calls[0]["restored_from_release_id"] == r[3].release_id
+    assert calls[0]["restored_from_release_id"] != r[3].version_number
+
+
 def test_restore_resets_clean_roles_and_keeps_pending_edits(factory, monkeypatch):
     build_v2_to_v7(factory, monkeypatch)
     r = refs(factory)
