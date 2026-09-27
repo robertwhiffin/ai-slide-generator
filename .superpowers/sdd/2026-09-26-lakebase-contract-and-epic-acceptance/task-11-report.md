@@ -5,7 +5,7 @@
 ## Commits
 
 - TASK_BASE was `a2793d8fe`.
-- `<commit-sha>` `test: conversation-user Playwright journey across three Graph Versions (#271)`.  Committed by explicit path.  It touches:
+- `8ec771298` `test: conversation-user Playwright journey across three Graph Versions (#271)`.  Committed by explicit path.  It touches:
   - `frontend/tests/e2e/graph-release-conversation-journey.spec.ts` (new, 6 tests).
   - `.github/workflows/test.yml`: `graph-release-conversation-journey` inserted between `graph-release-admin-journey` and `graph-release-history` (nearest sorted neighbour, C39).
   - This report, force-added.
