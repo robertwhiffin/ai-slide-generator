@@ -97,13 +97,13 @@
   - `forbiddenActionNames.ts` and the workbench are unchanged (`git diff 4ed72a984 HEAD` is empty for both).
 - **Typecheck:** `npm run typecheck` (`tsc -b`) is clean.
 - **ESLint:** clean on `src/api/agentDefinitions.ts`, `src/components/Admin/GraphRelease` and `tests/fixtures/mocks.ts`.
-- **Join tests:** every `tests/unit/test_*client_join*.py` (6 files) passes, **112 in all**. The #270 join has 67, previously 20.
+- **Join tests:** every `tests/unit/test_*client_join*.py` (6 files) passes, **112 in all**. The #270 join has **45** (Task 6 left 20, so +25) and the #269 join has **22**. *(Corrected in fix round 1: the original said 67, which was the two files' combined total.)*
 - **Full unit suite** (run from the real worktree, not `/tmp`): **6 failed / 7148 passed / 110 skipped**. The 6 are the baseline nodes with the baseline causes:
   - deploy_autoscaling ×2: `'provisioned' == 'autoscaling'`
   - chokepoint ×3: `_FakeSession.execute`
   - persistence_boundary ×1: `ConversationGraphReleaseIntegrityError: no active Graph Release`
 
-  The failures match by cause, not just by count. I did not reconcile the pass count against Task 6's 7122 (+26 here, while the join file alone added 47). Task 6's run was from `/tmp`, with one extra environment failure, so its pass count is not a clean baseline.
+  The failures match by cause, not just by count. The pass count is 26 above Task 6's 7122; the #270 join file accounts for 25 of those. *(Corrected in fix round 1: the original said the join file added 47.)* I did not reconcile the remaining 1. Task 6's run was from `/tmp`, with one extra environment failure, so its pass count is not a clean baseline.
 - **RED evidence:** I ran the tests at `f13b1d82a` against base production code. I checked out `4ed72a984`'s `agentDefinitions.ts`, state, hook, page and `index.ts`, and removed the three new production files.
   - GraphRelease Vitest: 172 failed and 155 passed. The passes are #269's and Task 6's existing tests.
   - The #270 join: 24 failed and 21 passed. The passes are Task 6's own.
@@ -112,7 +112,7 @@
 
 ## Mutation sweep
 - **Method:** `/tmp/t270-7/mutate.py`. Every row uses anchor count 1 (asserted), and a `MUT270_7` marker where the syntax allows.
-- **Suites run on each mutation:** the GraphRelease Vitest (348), plus the #270 and #269 join files (67 + 26).
+- **Suites run on each mutation:** the GraphRelease Vitest (348), plus the #270 and #269 join files (45 + 22 = 67, the "67 passed" in each row's join line). *(Corrected in fix round 1: the original said 67 + 26.)*
 - **Restore:** each mutation was restored with `git checkout 7a2d094ee -- <file>`. After each, `git diff --quiet 7a2d094ee -- frontend tests src` was clean and the marker count was 0 (37/37).
 
 | # | Mutation | Result (first RED) |
@@ -255,3 +255,55 @@ Task 8's plan scenario (v1–v8, v3 restored as v8) needs its own route mocks. T
 4. **`Confirm rollback`, `Cancel rollback` and `Release History` match the forbidden stems.** This is deviation 2, and it needs a controller ruling if the stems are ever meant to apply beyond the workbench.
 5. **#269's parked m4 remains in `publish()`.** It still checks `canPublish` against render state. I did not fix it, because it is out of scope.
 6. **The Publish section still renders below every tab, History included,** because it is tied to the release preview as C39 says. It is disabled while a rollback is in flight.
+
+## Fix round 1
+
+The review came back APPROVED with 6 Minor findings. This round fixes them, plus the TZ pin the controller asked for. It touches only `frontend/`, and was committed by explicit path; a Task 9 agent has uncommitted Python changes in this tree.
+
+**Commit:** `45fb54756` fix: Task 7 review round 1 for release history and rollback (#270).
+
+### Findings
+| Finding | Status | What changed |
+|---|---|---|
+| m1: report join counts | addressed | Corrected above: the #270 join is 45, the #269 join is 22. The "67" was the two files combined. |
+| m2: C4 test non-vacuity | addressed | `ReviewAndPublishPage.test.tsx`: `expect(names.length).toBeGreaterThan(0)` and the `/history\|rollback\|roll back/i` regex are restored, over buttons and links. Tabs are excluded from that list because the three-tab assertion pins them exactly (the tab `Release History` would match `history`). The three-tab assertion is kept. |
+| m3: incompatible stored the source as active | addressed | `RollbackBlocked.active` is now `ReleaseIdentity \| null`. `rollbackFailureAction` stores `active: null` for `rollback_incompatible`, because that 422 names no active release. `rollbackBlockedMessage` handles `null`. The test now asserts the exact action with `active: null`. |
+| m4: shared button name | addressed | The stale alert's button is exactly **`Reload rollback preview`**. The test queries it by that name and asserts there is no `Reload preview` inside the alert. See the stem note below. |
+| m5: stale inspection after a success | addressed | `rollbackSucceeded` and `publishSucceeded` both reset `inspection` to `none`. That also drops a late inspection answer that was in flight across the success, because the request id is cleared. There are 4 reducer tests (restore, publish, the late answer, and a refusal that keeps the inspection) and 1 component test (inspect v2, roll back, success: no detail and no comparison on screen). |
+| m6: diff direction | addressed | A second assertion: Builder `model.max_tokens` reads `8192 → 4096` (active → historical). The comparison heading reads `Graph Version 2 against the active Graph Version 4`. |
+| TZ pin | addressed | `releaseClient.test.ts` sets `process.env.TZ = 'Asia/Kolkata'`. It asserts the switch took effect (`getTimezoneOffset() === -330`), then asserts that `parseInstant` reads a zoneless value as UTC, including a fractional value. It restores TZ in a `finally` and asserts the restore. |
+
+**Stem note for m4 (not hidden):** `Reload rollback preview` **does** match the `rollback` stem: `forbidsActionName` is true, and I checked it against `FORBIDDEN_ACTION_STEMS`. `Confirm rollback`, `Cancel rollback` and `Release History` also match. None is swept, because C40 applies the sweep only to the workbench panel and these render only on the review page. No exemption was added, and the count stays 8. `Roll back to this version`, `Inspect this version` and `Reload versions` match no stem.
+
+**Name collisions (for Task 8 (f)):** `Reload rollback preview` and `Reload preview` are distinct, and neither is a substring of the other.
+
+### Gates at `45fb54756`
+- **Vitest, full:** 21 files, **1090 passed** (GraphRelease 354).
+- **Typecheck:** `tsc -b` is clean.
+- **ESLint:** clean on `src/components/Admin/GraphRelease`.
+- **Join tests:** all 6 `test_*client_join*.py` pass, 112 (#270 45, #269 22).
+- **No Playwright, no `npm install`.**
+- **RED before the fix:** 6 tests failed. They were m3's exact-action test, m5's three reducer tests plus its component test, and m4's stale test. m2, m6 and the TZ test pin behaviour that already existed, so the mutations below prove them.
+
+### Mutations
+- **Pin:** `45fb54756`, via `/tmp/t270-7/mutate_r1.py`.
+- **Method:** each anchor count 1, suite GraphRelease Vitest (354), restored with `git checkout 45fb54756 -- <file>`.
+- **Restore check:** `git diff --quiet 45fb54756 -- frontend` was clean after each, with 0 markers.
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 (m2) | the page renders a `History` link before the tab opens | RED `offers exactly three tabs, in order, and no rollback control before Release History opens` |
+| F2 (m3) | incompatible stores `active: failure.source` | RED `rollbackFailureAction … maps each typed refusal` |
+| F3 (m4) | the stale button is named `Reload preview` again | RED `on a stale 409 names the current lock and active version …` |
+| F4 (m5) | a restore keeps the shown inspection | RED 3 (component `clears a shown inspection once the rollback restores`, reducer restore, and the late-answer drop) |
+| F5 (m5) | a publish keeps the shown inspection | RED `clears it when a publish succeeds` |
+| F6 (m6) | comparison `before`/`after` swapped | RED `inspection shows the seven definitions, the evidence and the field diffs against active` |
+| F7 (TZ, host BST) | zoneless read as local time (M21) | RED 3, including the new TZ pin |
+| **F7u (TZ, `TZ=UTC` host)** | same mutation, Vitest run with `TZ=UTC` | **RED 1: the new TZ pin.** The two host-dependent tests stay green, which is the gap the pin closes. |
+| F0u (control) | no mutation, `TZ=UTC` | 0 failed / 354 |
+
+F6 goes RED in one test, the one that holds both direction assertions (temperature and the new max_tokens row). A swap trips both, so the second assertion is not proven independently of the first.
+
+### For Task 8 (the only name change)
+- The stale-alert button is now **`Reload rollback preview`**. It was `Reload preview`.
+- `RollbackBlocked.active` may be `null` (for `rollback_incompatible`).
