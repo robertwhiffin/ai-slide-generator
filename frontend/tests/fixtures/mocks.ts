@@ -1967,7 +1967,7 @@ export function syntheticPublishSuccess(): PublishReleaseSuccessResponse {
       content_hash: agentKey === 'architect' ? RELEASE_ARCHITECT_CANDIDATE_HASH : SEED_CANDIDATE_HASH,
       reused: agentKey !== 'architect',
     }])) as PublishReleaseSuccessResponse['mappings'],
-    evidence: [{ agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101, evidence_kind: 'approval' }],
+    evidence: [{ agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101, evidence_kind: 'approval', source_release_id: null }],
     draft: syntheticReleaseDraft({ base_release_id: 42, base_version_number: 2, lock_version: 4 }),
   };
 }
