@@ -17,12 +17,13 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.dialects import postgresql
 
 import src.services.graph_configuration_content as content_module
 import src.services.graph_configuration_draft as draft_module
 import src.services.graph_configuration_publication as publication_module
+from src.core.database import Base
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     GraphRelease,
@@ -53,6 +54,7 @@ from src.services.graph_release_history import (
     GraphVersionNotFound,
     ReleaseRef,
     list_release_history,
+    read_release_detail,
 )
 from src.services.model_endpoint_catalog import EndpointValidationFailure
 from src.services.prompt_assembler import PromptAssembler, _default_bundles
@@ -156,8 +158,65 @@ def refs(factory) -> dict[int, ReleaseRef]:
     return {e.version_number: ReleaseRef(e.release_id, e.version_number) for e in entries}
 
 
+#: v1's id after ``offset_release_ids``: every later release id is its version
+#: number plus this, so no id equals any version number (fix round 1, I-1).
+RELEASE_ID_OFFSET = 10
+
+
+def offset_release_ids(factory, offset: int = RELEASE_ID_OFFSET) -> None:
+    """Re-key the bootstrapped v1 to ``1 + offset`` so ids never equal versions.
+
+    On PostgreSQL a rolled-back publication consumes a ``graph_release.id``
+    sequence value, so ids and version numbers diverge in production.  SQLite
+    allocates ``max(id) + 1`` and has no sequence to burn, so this re-keys v1
+    and every column that references ``graph_release.id`` (found from the ORM
+    metadata), then proves referential integrity with ``foreign_key_check``.
+    Later releases then get ``version + offset`` from SQLite's own allocation.
+    """
+    referencing = [
+        (fk.parent.table.name, fk.parent.name)
+        for table in Base.metadata.sorted_tables
+        for fk in table.foreign_keys
+        if fk.column.table.name == "graph_release" and fk.column.name == "id"
+    ]
+    raw = factory.kw["bind"].raw_connection()
+    try:
+        cursor = raw.cursor()
+        assert cursor.execute("SELECT id, version_number FROM graph_release").fetchall() == [
+            (1, 1)
+        ]
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("UPDATE graph_release SET id = id + ?", (offset,))
+        for table, column in referencing:
+            cursor.execute(
+                f"UPDATE {table} SET {column} = {column} + ? WHERE {column} IS NOT NULL",
+                (offset,),
+            )
+        raw.commit()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        assert cursor.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        raw.close()
+
+
+def release_ids(factory) -> list[tuple[int, int]]:
+    with factory() as db:
+        return [
+            tuple(row)
+            for row in db.execute(
+                select(GraphRelease.id, GraphRelease.version_number).order_by(
+                    GraphRelease.version_number
+                )
+            )
+        ]
+
+
 def build_v2_v3_v4(factory, monkeypatch) -> dict[str, object]:
-    """v2 (architect +A), v3 (builder +B), v4 (architect +C), all via ``publish_draft``."""
+    """v2 (architect +A), v3 (builder +B), v4 (architect +C), all via ``publish_draft``.
+
+    Release ids are ``version + RELEASE_ID_OFFSET`` (``offset_release_ids``).
+    """
+    offset_release_ids(factory)
     clock = install_release_clock(monkeypatch, factory)
     v1_texts = {key: draft_content(factory, key).prompt_text for key in GRAPH_V1_AGENT_KEYS}
     _save_prompt(factory, "architect", "\n\nTune A.", lock=current_lock(factory))
@@ -364,6 +423,80 @@ def test_preview_draft_effect_is_three_way(factory, monkeypatch):
         **{key: "unchanged" for key in _OTHERS},
     }
     assert tuple(result.draft_effect) == GRAPH_V1_AGENT_KEYS
+
+
+def test_a_pending_edit_is_kept_even_on_a_role_identical_in_both_releases(
+    factory, monkeypatch
+):
+    """Q7: a saved edit is kept whatever the active and restored contents are."""
+    build_v2_v3_v4(factory, monkeypatch)
+    _save_prompt(factory, "fixer", "\n\nPending P.", lock=current_lock(factory))
+
+    result = preview(factory, 2)
+
+    assert result.draft_effect["fixer"] == "kept"
+    assert result.draft_effect["architect"] == "reset"
+    assert result.draft_effect["builder"] == "reset"
+
+
+def test_a_draft_saved_to_exactly_the_restored_content_is_kept(factory, monkeypatch):
+    """Q7: equal to the restored content is still a pending edit against the active."""
+    built = build_v2_v3_v4(factory, monkeypatch)
+    save_prompt_text(factory, "architect", built["v2_architect"])
+
+    result = preview(factory, 2)
+
+    assert result.draft_effect["architect"] == "kept"
+    assert result.draft_effect["builder"] == "reset"
+
+
+def test_ids_that_differ_from_versions_resolve_by_version_everywhere(
+    factory, monkeypatch
+):
+    """Fix round 1, I-1: every version-to-id resolution, with id = version + 10."""
+    build_v2_v3_v4(factory, monkeypatch)
+    offset = RELEASE_ID_OFFSET
+    assert release_ids(factory) == [(v + offset, v) for v in (1, 2, 3, 4)]
+    ids = _link_v2_runs(factory, {1: ReleaseRef(1 + offset, 1), 2: ReleaseRef(2 + offset, 2)})
+
+    with factory() as db:
+        entries = list_release_history(db)
+        detail = read_release_detail(db, version_number=2)
+    assert [(e.release_id, e.version_number) for e in entries] == [
+        (v + offset, v) for v in (4, 3, 2, 1)
+    ]
+    assert entries[0].previous == ReleaseRef(3 + offset, 3)
+    assert (detail.entry.release_id, detail.entry.version_number) == (2 + offset, 2)
+    assert detail.entry.previous == ReleaseRef(1 + offset, 1)
+
+    comparison = compare(factory, 2)
+    assert comparison.active == ReleaseRef(4 + offset, 4)
+    assert comparison.historical == ReleaseRef(2 + offset, 2)
+
+    result = preview(factory, 2)
+    assert result.source == ReleaseRef(2 + offset, 2)
+    assert result.active == ReleaseRef(4 + offset, 4)
+    assert result.next_version_number == 5
+    assert result.default_release_note == "Roll back to Graph Version 2."
+    assert {link.source_release_id for link in result.evidence} == {2 + offset}
+    assert {link.agent_test_run_id for link in result.evidence} == {
+        ids[name]
+        for name in ("builder", "architect_other", "architect_first", "architect_second")
+    }
+
+
+def test_preview_first_statement_is_the_shared_parent_lock(factory, monkeypatch):
+    """Fix round 1, I-2: L0 ``FOR SHARE`` (never ``FOR UPDATE``), first statement."""
+    build_v2_v3_v4(factory, monkeypatch)
+    statements: list[object] = []
+    with factory() as db:
+        event.listen(
+            db, "do_orm_execute", lambda state: statements.append(state.statement)
+        )
+        GraphConfiguration().preview_rollback(db, version_number=2)
+
+    first = " ".join(str(statements[0].compile(dialect=postgresql.dialect())).split())
+    assert first.endswith("FOR SHARE OF graph_release, graph_draft")
 
 
 def test_preview_blocks_source_active_then_matches_active(factory, monkeypatch):
