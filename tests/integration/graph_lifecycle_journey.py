@@ -320,10 +320,12 @@ class _RaisingModule(types.ModuleType):
 
 
 class CodeDefaultTripwire:
-    """After arm(), any read of a code-owned definition source or the bootstrap manifest raises."""
+    """After arm(), any read of a code-owned definition source or the bootstrap manifest raises.
 
-    #: The two targets Task 12 removes along with the compatibility runtime.
-    UNTIL_TASK_12 = ("CodeOwnedAgentDefinitionSource", "CompatibilityResolvedDefinitionLoader")
+    The compatibility runtime's two class targets were dropped in #271 Task 12,
+    when the classes were deleted; ``test_lakebase_only_runtime_contract.py``
+    pins that they cannot return.
+    """
 
     def __init__(self) -> None:
         self.reads: list[str] = []
@@ -346,7 +348,6 @@ class CodeDefaultTripwire:
     def arm(self, monkeypatch) -> None:
         import src.core.skills as skills
         import src.services as services_package
-        import src.services.agent_runtime as agent_runtime
         import src.services.graph_definition_manifest as manifest
 
         manifest_module = "src.services.agent_definition_manifest_v1"
@@ -369,12 +370,6 @@ class CodeDefaultTripwire:
         monkeypatch.setattr(
             services_package, "agent_definition_manifest_v1", stand_in, raising=False
         )
-        for class_name in self.UNTIL_TASK_12:
-            monkeypatch.setattr(
-                getattr(agent_runtime, class_name),
-                "resolve",
-                self._raiser(f"{class_name}.resolve"),
-            )
         monkeypatch.setattr(sys.modules[__name__], "_ARMED_TRIPWIRE", self)
 
 
