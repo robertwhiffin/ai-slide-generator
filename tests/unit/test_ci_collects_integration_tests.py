@@ -386,3 +386,19 @@ def test_graph_release_evidence_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its evidence lock-order, race and "
         "linked-verdict trigger assertions must execute against PostgreSQL."
     )
+
+
+def test_graph_release_publication_acceptance_is_collected_by_integration_graph():
+    """#269's HTTP acceptance flow (the #271 AC7 seam) belongs in the graph CI job.
+
+    It drives edit, test, approve, preview, publish and pin through the shipped
+    admin router over real PostgreSQL, and proves the preview's shared parent
+    lock by backend PID in ``pg_blocking_pids``, none of which SQLite can express.
+    """
+    target = "tests/integration/test_graph_release_publication_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its end-to-end publication and preview "
+        "shared-lock assertions must execute against PostgreSQL."
+    )
