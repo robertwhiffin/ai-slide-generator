@@ -515,3 +515,727 @@
   - Correction 20 (M9): OQ2 follow-up must keep two imports; record in Task 12 guard 2 allowlist (Task 12).
   - Correction 21 (M10): `model_validate_json(json.dumps(…))` for strict models; sessions routes shape-only (Task 10).
   - Correction 22 (M11): controller triage before routing any failure (Task 6, Task 7).
+
+---
+
+# Task 0 phase B corrections (24–46) — 2026-09-27
+
+- **Probed at:** HEAD `9a63ab1b7` on `plan/lakebase-contract-acceptance-271`; INTEGRATION_BASE `12a521dc7` (Merge #270). All file:line citations below are at that HEAD. Corrections 1–23 are not edited; where one is wrong, an **erratum** correction below overrides it.
+- **Evidence logs:** `reports/preflight-phase-b.md` and `reports/logs/`.
+- **Scoped re-review (C23):** every correction in this section is in scope for the scoped re-review that C23 requires before Task 2 dispatches.
+- Format per correction: **Overrides** (plan line or earlier correction) · **Evidence** (file:line) · **Proposed ruling** · **Binds** · **Cost if wrong**.
+
+---
+
+### Correction 24 — Phase B carry (1), refines C7: the monolith fallback has THREE call sites; "only when pinned" is unimplementable; there is no 503 handler; the lock must be released; the fail-open contract is pinned by ws4d tests
+
+**Overrides:** C7 replacement instruction 2 and 3; plan Task 8 Files block (:697-699, "tests only"); plan :712 ("implement (tests only)").
+
+**Evidence:**
+- Call sites: `src/api/routes/chat.py:490-492` (`/chat/stream`, after the session lock at `:475`, **outside** any `try`), `:697-699` (`/chat/async`, inside the `try` opened at `:668`, whose `except Exception` at `~:732-738` releases the lock and returns 500), and a third one C7 missed: `src/api/services/chat_service.py:1141` (`engine_mode = resolve_engine_mode_or(session_id, engine_mode)`, the SSE turn-1 re-resolve). On turn 1 of an SSE graph deck the route necessarily resolved `monolith` (no user row yet), so a DB error at `:1141` keeps `monolith` and runs the legacy path — the same defect.
+- `resolve_engine_mode_or` (`chat_service.py:239-270`) catches every `Exception`. `resolve_engine_mode` (`:158-237`) decides graph vs monolith from the owner deck's earliest `role='user'` message, not from the pin; knowing whether the session is pinned needs the same database read that just failed. C7's "if the session has no pin … the monolith fallback is permitted" cannot be evaluated on the failure path.
+- **C7 erratum:** "the existing HTTP handler at the route level maps `PersistedConfigurationUnavailableError` to 503" is false. `src/api/main.py` has one `exception_handler` (`:469`, `UserClientRequiredError`). The stream route maps `PersistedRuntimeError` inside the SSE generator (`chat.py:563-566`), after the 200 has started.
+- The fail-open is a pinned ws4d contract: `tests/unit/test_engine_mode_wiring.py:550-625` (`test_a_raising_resolver_returns_the_callers_value`, `test_the_fallback_defaults_to_monolith`, `test_the_streaming_route_still_serves_the_turn`, `test_the_async_route_still_enqueues_the_job`) assert that a raising resolver still serves the turn as monolith.
+
+**Proposed ruling:**
+1. Fail closed at all three sites on any resolution exception, whatever the pin. `/chat/stream` and `/chat/async` release the session lock and then raise `HTTPException(503, detail={"code": "lakebase_unavailable", …})` before any response starts. The service site (`chat_service.py:1141`) raises `PersistedConfigurationUnavailableError(code="lakebase_unavailable")`, which the existing SSE mapping turns into the safe error event. Keep `resolve_engine_mode`'s three "no answer → monolith" cases unchanged: those are answers, not failures.
+2. Invert the four ws4d tests listed above, rather than deleting them: a raising resolver now yields 503 or the safe event, with the lock released and the monolith never built.
+3. Task 8 Files block adds: Modify `src/api/routes/chat.py`, `src/api/services/chat_service.py`, and `tests/unit/test_engine_mode_wiring.py`. Task 8 is then a production change, not tests only.
+4. C7's reviewer sabotage stays: restore `resolve_engine_mode_or` at `chat.py:490`. Add a controller sabotage on the third site: restore the fallback at `chat_service.py:1141`. Predicted RED: the SSE turn-1 case runs the monolith.
+5. **This reverses a ratified ws4d contract. The user must confirm it (see the user-decision list).**
+
+**Binds:** Phase B, blocking before Task 8 dispatch.
+
+**Cost if wrong:** Fixing only the two route sites leaves turn 1 of every SSE graph deck on the silent monolith fallback. Raising without releasing the lock leaves the session "processing" until the lock expires. A pin-conditional design adds a second DB read that fails the same way.
+
+---
+
+### Correction 25 — Erratum to C11 step 3: `tsc --noEmit -p tsconfig.json` typechecks nothing
+
+**Overrides:** C11 replacement instruction 3; C3 instruction 3 (`tsc --noEmit -p frontend/tsconfig.e2e.json` is correct only for the e2e config).
+
+**Evidence:**
+- `frontend/tsconfig.json` is a solution config (`"files": []` plus references).
+- `tsc` without `-b` does not follow references. Measured: `./node_modules/.bin/tsc --noEmit -p tsconfig.json --listFilesOnly | wc -l` gives **0**.
+
+**Proposed ruling:** The typecheck gate for agents is three commands, run from `frontend/`:
+- `./node_modules/.bin/tsc --noEmit -p tsconfig.app.json`
+- `./node_modules/.bin/tsc --noEmit -p tsconfig.node.json`
+- after Task 4, `./node_modules/.bin/tsc --noEmit -p tsconfig.e2e.json`
+
+Each must exit 0. None of these writes a tsbuildinfo (measured: the `node_modules/.tmp/*.tsbuildinfo` mtimes are unchanged after the runs). Never use `npm run typecheck` or `tsc -b` from an agent.
+
+**Binds:** Phase B, blocking before Task 4 (and every task that runs the typecheck gate: 10, 11, 14).
+
+**Cost if wrong:** The typecheck gate is vacuously green for every task.
+
+---
+
+### Correction 26 — Erratum to C3 instruction 4: removing `tsBuildInfoFile` makes `tsc -b` write an un-ignored file into the worktree
+
+**Overrides:** C3 replacement instruction 4.
+
+**Evidence:**
+- `npm run typecheck` and `npm run build` are `tsc -b` (`frontend/package.json:8-9`). CI's frontend-build also runs `npx tsc -b` (`.github/workflows/test.yml:616`).
+- In build mode the siblings write buildinfo to `./node_modules/.tmp/` (`tsconfig.app.json:3`, `tsconfig.node.json:3`).
+- With no `tsBuildInfoFile`, the e2e project's buildinfo defaults to `frontend/tsconfig.e2e.tsbuildinfo`. `git check-ignore frontend/tsconfig.e2e.tsbuildinfo` says **not ignored**.
+
+**Proposed ruling:** Keep `"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo"`, consistent with the siblings. The shared-`node_modules` risk is handled by C25: agents never run `tsc -b`.
+
+**Binds:** Phase B, Task 4.
+
+**Cost if wrong:** Every developer and CI `tsc -b` leaves an untracked `tsconfig.e2e.tsbuildinfo`, and the next `git add -A` commits it.
+
+---
+
+### Correction 27 — Task 4 (B5 re-measure): the exact error list, the Files block, and the ESLint baseline
+
+**Overrides:**
+- plan :503 (Files block: "`slide-viewer.spec.ts:14,33,46` and `slide-surface-fidelity.spec.ts:1022,1070` (plus 4 more lines…)");
+- plan :536 ("`npx eslint tests` shows the same warning causes as preflight-B");
+- C3 instruction 2.
+
+**Evidence:** P1's recipe was run against the integrated tree (copied to `/tmp/t271-0b-ts`, `node_modules` symlinked, TypeScript 5.9.3). The C3 config has no `verbatimModuleSyntax` and has `types: ["node","vite/client"]`.
+- **Without the `.d.ts`: 10 errors.**
+  - 1 × TS2740 at `tests/e2e/findings-drawer.spec.ts(87,7)`.
+  - 9 × TS2307 at `slide-surface-fidelity.spec.ts` :838, :880, :927, :1019, :1022, :1070 and `slide-viewer.spec.ts` :14, :33, :46.
+- **With `tests/types/browser-modules.d.ts` (`declare module '/src/*';`): 1 error**, the TS2740.
+- **With `verbatimModuleSyntax: true` re-added: 35 errors**, of which 34 are TS1484 across 29 files. #269 and #270 added TS1484 sites, so C3's prediction of "42" for its sabotage is stale.
+- **ESLint on `frontend/tests`: 25 errors, 0 warnings, in 12 files:**
+  - 18 `no-unused-vars`, 5 `no-explicit-any`, 1 `rules-of-hooks`, 1 `prefer-const`;
+  - the files are 02-creating-profiles, 04-retrieving-feedback, 07-exporting-to-google-slides, deck-prompts-integration, export-csp, genie-detail-panel, history-integration, incremental-slide-delivery, navigation, save-points-versioning, slide-styles-integration, and `tests/fixtures/base-test.ts`;
+  - none are in the #268–#270 specs, and #270's N2 is fixed.
+- CI has no ESLint job (`grep -n eslint .github/workflows/test.yml` is empty; carry 6).
+
+**Proposed ruling:**
+1. **Task 4 Files block:**
+   - Modify only `tests/e2e/findings-drawer.spec.ts:87`, at its cause.
+   - Create `tests/types/browser-modules.d.ts`.
+   - `slide-viewer.spec.ts` and `slide-surface-fidelity.spec.ts` are **not** edited; the `.d.ts` covers them.
+2. **Task 4 Step 3's ESLint clause** becomes: "ESLint on `tests/` has exactly the 25-error cause set above (same rule × file pairs). Task 4 adds none."
+3. **Controller sabotage (C3):** the predicted RED is "35 errors, 34 TS1484", or at minimum "TS1484 appears".
+4. **Tasks 10 and 11:** ESLint on each new file must exit 0. There is no CI lint to catch it later.
+
+**Binds:** Phase B, blocking before Task 4.
+
+**Cost if wrong:** The implementer edits two specs that need no edit. Or Task 4 "fails" its ESLint gate on 25 pre-existing errors. Or a sabotage prediction mismatch is misread as a broken guard.
+
+---
+
+### Correction 28 — Task 2 (log-record rendering): the integrated site list
+
+**Overrides:** plan :368 (the site list), and C12's list.
+
+**Evidence** (`rg -n "vars\(record|record\.__dict__" tests`):
+- `tests/unit/test_persisted_agent_runtime.py`:
+  - `:924` is a field-**name** set; keep it as is;
+  - rendering sites: `:948`, `:1032`, `:1459`, `:1628`, `:1629`, `:1937`.
+- `tests/unit/test_agent_test_workbench.py:2010` (the plan said `:2003`; #268 drift).
+- `tests/unit/test_graph_release_history_routes.py:168-174` (#270's `_extra`):
+  - it already excludes every standard attribute, including `taskName`;
+  - it is not a path-matching site.
+- `tests/unit/test_logging_extra_reserved_keys.py:65` is a name set, out of scope.
+- `tests/unit/test_conversation_graph_version_responses.py:141` renders a dataclass, not a LogRecord.
+- No other #268–#270 site exists.
+
+**Proposed ruling:**
+- Migrate exactly `test_persisted_agent_runtime.py:948, :1032, :1459, :1628-1629, :1937` and `test_agent_test_workbench.py:2010`.
+- #270's `_extra` may import `STANDARD_LOG_RECORD_ATTRS`, but this is optional and not required.
+- The helper should union `{"taskName"}` explicitly, so that a 3.11 run and a 3.12 run render identically. (`makeLogRecord` on 3.11 has no `taskName`; #270's tests add it by hand.)
+
+**Binds:** Phase B, Task 2. Non-blocking.
+
+**Cost if wrong:** One rendering site is left matching `/private/tmp`, and one `taskName` extra leaks into the rendering on 3.12.
+
+---
+
+### Correction 29 — Task 3 (B3 re-inventory): no new compatibility caller after #268–#270; two citation drifts
+
+**Overrides:** C14 (`test_graph_configuration_draft.py:2920`) and plan :474 (`PACKAGED_V1_CONTENT_HASHES` at `:745-751`).
+
+**Evidence:**
+- The AST import scan plus `rg` over `src scripts tests packages` finds the same callers as the Phase A re-count:
+  - R1: 13 sites in 4 files, byte-identical lines;
+  - R2 and R3 importers: `test_agent_runtime.py:24`, `test_graph_configuration_bootstrap.py:27`, `test_graph_definition_manifest.py:27`, `test_persisted_agent_runtime.py:23`, `test_prompt_assembler.py:30`, and `scripts/generate_graph_definition_manifest_v1.py:19`;
+  - `_SchemaContractRegistry`: `test_agent_schema_registry.py:1322`;
+  - `_canonical_digest` and `_schema_contract_material`: `test_agent_runtime.py:24`.
+- `RecordingAgentInvocationIdentitySink` is imported from `agent_runtime` at `test_graph_configuration_draft.py:2917` and `test_persisted_agent_runtime.py:23`.
+- There are no string monkeypatch targets on `src.services.agent_runtime.*`.
+- There is no `docs/technical` mention of any retired name.
+- `src/services/agent_runtime.py` is byte-unchanged since `a08389ec3`, so every agent_runtime line cited in the plan still holds.
+- `PACKAGED_V1_CONTENT_HASHES` is at `test_graph_definition_manifest.py:744` and `V1_SCHEMA_CONTRACT_DIGESTS` is at `:754`.
+
+**Proposed ruling:** The Task 3 Files block is unchanged. Use `:744` for the literal table copy (still copied, not imported).
+
+**Binds:** Phase B, Task 3. Non-blocking. It sits alongside C10, which is blocking.
+
+**Cost if wrong:** None beyond a citation.
+
+---
+
+### Correction 30 — Task 12 guard 3: the expected reader set names a file that never matches
+
+**Overrides:** plan :882-886 (`test_the_bootstrap_manifest_is_read_only_by_bootstrap`'s expected set), and plan :98 (bootstrap reader at `graph_configuration_bootstrap.py:71-73`).
+
+**Evidence:**
+- `grep -c "agent_definition_manifest_v1\|load_graph_v1_manifest" src/services/agent_definition_manifest_v1.py` gives 0. Its only text is the docstring plus `GRAPH_VERSION_1_MANIFEST_JSON`.
+- `rg -l` over `src` gives exactly `graph_definition_manifest.py`, `graph_configuration_bootstrap.py` and `agent_runtime.py`.
+- Bootstrap reads the manifest at `graph_configuration_bootstrap.py:75-78`, lazily, and only when no release exists (`:67-70`).
+
+**Proposed ruling:**
+- After the deletion, the exact expected set is `{"services/graph_definition_manifest.py", "services/graph_configuration_bootstrap.py"}`.
+- Before the deletion, guard 3 is RED only on `services/agent_runtime.py`. Record this in C13's RED list.
+
+**Binds:** Phase B, Task 12.
+
+**Cost if wrong:** Guard 3 stays permanently RED after a correct deletion. The implementer then "fixes" it by adding the string to the frozen v1 file, which plan :825 forbids.
+
+---
+
+### Correction 31 — Task 12 guards 2 and 4: the exact allowlist and the scope limits (makes C6/C20 concrete)
+
+**Overrides:** C6 instructions 2 and 3, and C20's "keep two imports" (the actual count is six names in two modules).
+
+**Evidence:**
+- `prompt_assembler.py:14-27` imports:
+  - from `src.core.skills.build_reviewer`: `BUILD_REVIEWER_AUTHORED_INSTRUCTIONS`, `BUILD_REVIEWER_CRITERIA_STAGE`, `DECK_BRIEF_REVIEW` and `INSTRUCTIONS` (as `BUILD_REVIEWER_V1_PROMPT`);
+  - from `src.core.skills.data_analyst`: `ANALYST_AUTHORED_INSTRUCTIONS` and `INSTRUCTIONS` (as `ANALYST_V1_PROMPT`).
+- The only other `src.core.skills` importer outside the package is `agent_runtime.py:46` (`load_skill`, which R7 deletes).
+- `load_skill` indexes `_SKILLS` at `src/core/skills/__init__.py:138`. `list_skills` (`:145`) has no `src` caller.
+- In C6's widened guard-4 scope, `DEFAULT_CONFIG` appears only at `agent_runtime.py:45` and `:372`.
+- `src/services/graph/nodes.py:722` contains the text `tool_grants` in a docstring.
+
+**Proposed ruling:**
+- **Guard 2** is an AST allowlist keyed by `(importing file, module, name)`, and it contains exactly the six pairs above. It exempts files under `src/core/skills/` themselves. Any other `src.core.skills*` import in `src/` fails.
+- **Guard 4:**
+  - the `DEFAULT_CONFIG["llm"]` / `DEFAULT_CONFIG.get("llm"` scan uses C6's widened module set;
+  - the `tool_grants` text check stays scoped to `agent_runtime.py`;
+  - otherwise the `nodes.py:722` docstring is a false positive.
+- **C20 follow-up issue text:** keep all six names, not "two".
+
+**Binds:** Phase B, Task 12.
+
+**Cost if wrong:** Guard 2 is either RED on correct code (a protected constant not allowlisted) or blind to a new import. Or guard 4 is RED on a docstring.
+
+---
+
+### Correction 32 — Tasks 7, 8 and 12: the real bundle-resolution and bundle-removal seams
+
+**Overrides:**
+- plan :685 (S17 "`AgentSchemaRegistry()`'s resolution of `(agent_key, schema_contract)`");
+- plan :908 (the ledger "`AgentSchemaRegistry()`'s resolution");
+- plan :710 ("`PromptAssembler._bundles` is patched");
+- plan :913 (the `_SCHEMA_CONTRACT_VERSION` replacement name).
+
+**Evidence:**
+- **The schema registry has no public "resolve" method.** `AgentSchemaRegistry` (`agent_schema_registry.py:360`) has public `identity_for(agent_key, version)` (`:378`), `validate_overlay` and `compose` (`:451`), and private `_resolve(agent_key, identity)` (`:381-387`). `_resolve` reads the module global `SCHEMA_CONTRACT_BUNDLES` (`:304-314`, a `MappingProxyType`).
+- **`_bundles` is per instance.** `PromptAssembler._bundles` is an instance attribute built in `__init__` from `_default_bundles()` (`prompt_assembler.py:387`, `:410`). Every `AgentRuntime` builds its own `PromptAssembler()` in `__init__` (`agent_runtime.py:806`), so patching the class attribute does nothing.
+- **The replacement identity exists.** `V1_SCHEMA_IDENTITIES` is at `agent_schema_registry.py:298`. The v1-only overlay rule is still at `agent_runtime.py:1018` (`schema_identity.version == _SCHEMA_CONTRACT_VERSION`).
+- **Existing PostgreSQL recipes.** `test_persisted_graph_runtime_failures_postgres.py:337` builds a closed release with an unknown protected contract, rather than patching bundles.
+
+**Proposed ruling:**
+- **Resolving a schema identity (S17 and the ledger):** assert `AgentSchemaRegistry().identity_for(role, v) == SchemaContractIdentity(role, v, <literal digest>)`, and `AgentSchemaRegistry().compose(...)` succeeds for the persisted overlay.
+- **Resolving a protected identity:** `PromptAssembler().resolve_bundle(ContentIdentity(v, digest))`.
+- **Task 8's dropped-bundle cases:**
+  - Protected: `monkeypatch.setattr("src.services.prompt_assembler._default_bundles", lambda: {k: b for k, b in real().items() if k != (2, V2_DIGEST)})` **before** the runtime is constructed. Alternatively, pop the key from the constructed runtime's `_prompt_assembler._bundles`.
+  - Schema v2: `monkeypatch.setattr(agent_schema_registry, "SCHEMA_CONTRACT_BUNDLES", MappingProxyType({k: v for k, v in … if k != ("builder", 2)}))`.
+- **Replacement at `agent_runtime.py:1018`:** `schema_identity.version == V1_SCHEMA_IDENTITIES[definition.agent_key].version`. This is behaviour-identical. Do not tighten it to full identity equality in a deletion task.
+
+**Binds:** Phase B. Task 7 (S17), Task 8 (bundle cases) and Task 12 (ledger and replacement). Non-blocking.
+
+**Cost if wrong:** The S17 or ledger test fails at `AttributeError`. Or Task 8's bundle-drop is a no-op, so the case passes vacuously on the retained bundle.
+
+---
+
+### Correction 33 — Task 6 S07: the "no `graph_release_id == -1`" assertion is vacuous
+
+**Overrides:** plan :636 ("no `persisted_agent_invocation` record carries `graph_release_id == -1`").
+
+**Evidence:**
+- Candidate runs use `_PassThroughIdentitySink` (`agent_runtime.py:756-768`), which records nothing.
+- A candidate run emits exactly one `agent_candidate_run` record, with extras `{agent_key, status, error_code, error_class}` (`:771-792`).
+- `CANDIDATE_RUN_GRAPH_VERSION`, `CANDIDATE_RUN_GRAPH_RELEASE_ID` and `CANDIDATE_RUN_REVISION_ID` are all `-1` (`:641-643`), but they never reach a log record.
+
+**Proposed ruling:** S07 asserts both of these:
+- **zero** `persisted_agent_invocation` records during S07;
+- exactly one `agent_candidate_run` record per run, whose extra-key set (via `STANDARD_LOG_RECORD_ATTRS`, Task 2) is exactly `{agent_key, status, error_code, error_class}`, with `status == "completed"`.
+
+**Binds:** Phase B, Task 6.
+
+**Cost if wrong:** A regression that routes candidate runs through the production sink, with a fabricated `-1` id, passes S07.
+
+---
+
+### Correction 34 — Task 6 S10 and the Task 6 controller sabotage: exact diff field names and the sabotage anchor
+
+**Overrides:** plan :639 ("`protected_assembly` … fields (names per Task 0-B)"), and plan :658 (the controller sabotage "`definition_field_diffs`, or the name Task 0-B recorded").
+
+**Evidence:**
+- **Field names.** `DiffFieldName` (`src/api/schemas/graph_releases.py:30-43`) lists 12 fields in order:
+  - `definition_version`, `prompt_text`;
+  - `model.endpoint_name`, `model.temperature`, `model.max_tokens`, `model.top_p`;
+  - `schema_overlay`, `assembly_rules`;
+  - `protected_assembly.version`, `protected_assembly.digest`;
+  - `schema_contract.version`, `schema_contract.digest`.
+- **Where the diff is built.** `definition_field_diffs` (`graph_configuration_publication.py:239-258`) iterates the module's `_DIFF_FIELDS`. It is also used by the rollback comparison (`graph_configuration_rollback.py:212`).
+- **Preview shape.** `ReleasePreviewResponse` is `{draft, active_release, next_version_number, changed[{agent_key, published_revision_id, published_content_hash, candidate_hash, field_diffs[{field, published, candidate}]}], readiness, validation_issues, publishable}`.
+
+**Proposed ruling:**
+- **S10's architect diff field set** is exactly `{prompt_text, model.temperature, assembly_rules, protected_assembly.version, protected_assembly.digest}`. It is exact, not "includes". S05's upgrade changes protected assembly v1→v2, and S05 adds a custom block.
+- **Builder's field set** is `{prompt_text, schema_overlay, schema_contract.version, schema_contract.digest}`.
+- **Fixer's field set** is `{model.endpoint_name}`.
+- Before writing the literals, Task 6 confirms by probe whether a protected-assembly upgrade also rewrites `assembly_rules` or `prompt_text`, and records the result.
+- **Controller sabotage anchor:** remove the `prompt_text` entry from `_DIFF_FIELDS` in `graph_configuration_publication.py`. Grep the marker to prove it sits on the executed path. The predicted first RED is `[#269] S10 preview`, because S10 runs before S14's comparison.
+
+**Binds:** Phase B, blocking before Task 6.
+
+**Cost if wrong:** The literal `protected_assembly` never matches a wire field name, so S10 is RED on correct code and gets misrouted to #269.
+
+---
+
+### Correction 35 — The consumed-interface record (Step B2): the rows C268-1 … C270-4 as built, and five contradictions
+
+**Overrides:** plan :159-177 (the consumed-interface table), C21's "sessions routes have no response models", and plan :171 (C270-4 "consumed by Task 7").
+
+**Evidence:** A probe of `app.routes` plus `model_config` over `src.api.schemas.{agent_definitions,graph_releases,graph_release_history}`. Every response model listed below is `extra="forbid"`. Every request model listed is `extra="forbid"` and `strict=True`.
+
+**C268-1 (verdict)**
+- `POST /test-runs/{run_id}/verdict` (`agent_definitions.py:1352`), request `VerdictRequest{verdict, notes}`.
+- 200 `TestRunEvidenceResponse`: 30 keys, including `verdict`, `verdict_reviewer`, `verdict_at`, `verdict_notes`, `candidate_is_current` and `base_release_is_current`.
+- 422 `IneligibleForApprovalResponse{code, reason, message}`, with reasons `not_completed`, `checks_failed` and `linked_to_release` (the last from #269 C48).
+
+**C268-2 (readiness)**
+- `GET /readiness` (`:1410`) returns `DraftReadinessResponse{draft_lock_version, base_release_id, all_ready, blocking_agents, agents}`.
+
+**C268-3 (cleanup)**
+- It is a **method**: `AgentTestWorkbench.cleanup_unpublished_test_runs(self, session, *, per_case_limit=20)` (`agent_test_workbench.py:1647`), not a free function.
+- `rg` finds no production caller (confirmed).
+
+**C268-4 (frontend verdict controls)**
+- `ALLOWED_ACTION_NAMES` has length 8 (`frontend/tests/fixtures/forbiddenActionNames.ts`). The length is pinned at `AgentDefinitionWorkbench.test.tsx:378` and `agent-definition-workbench.spec.ts:1518`.
+
+**C269-1 (preview and publish)**
+- `GET /release-preview` (`:1613`) returns `ReleasePreviewResponse` (C34).
+- `POST /releases` (`:1632`), request `PublishReleaseRequest{lock_version, release_note}`, returns **200** (there is no `status_code=`) with `PublishReleaseSuccessResponse{release, previous_release_id, changed_agents, mappings, evidence, draft}`.
+  - mappings are `PublishedMappingResponse{agent_definition_revision_id, content_hash, reused}`;
+  - evidence is `ReleaseEvidenceResponse{agent_test_run_id, agent_key, test_case_id, evidence_kind, source_release_id}`.
+- 409 responses: `StalePublicationResponse{code, expected_lock_version, current_lock_version, active_release, draft}`, `NothingToPublishResponse` and `PublicationNotReadyResponse{code, gaps[{agent_key, test_case_id, code}], readiness}`.
+- 422: `PublicationValidationErrorResponse{code: invalid_publication, errors}`.
+
+**C269-2 (publication service)**
+- `publish_draft(self, session, *, expected_lock_version, release_note, actor, evidence_gate)` (`graph_configuration_publication.py:283-290`).
+- `ApprovalEvidenceGate(*, readiness)` (`graph_release_evidence.py:152-160`).
+
+**C269-3 (review page)**
+- Page `/admin/agent-definitions/review` sits inside `RequireAdmin` (`App.tsx:55`).
+- Test ids in `ReviewAndPublishPage.tsx`: `release-review-page`, `release-success-panel`, `release-stale-alert`, `release-not-ready-panel`, `release-nothing-panel`, `release-next-version`, `release-note-input` and `release-publish-button`.
+- Tabs are `release-changes-tab` "Changes & Approvals", `release-diff-tab` "Definition Diff" and `release-history-tab` "Release History" (`:26-28`).
+- The publish control's name is `Publish Graph Version ${next}` (`:335`).
+- **`Review & Publish` is an `<a href>` link** (`AgentDefinitionWorkbench.tsx:138-141`), so Task 10 uses `getByRole('link', { name: 'Review & Publish', exact: true })`.
+
+**C270-1 (history and rollback routes)**
+- `GET /releases` (`:1856`) returns `ReleaseHistoryListResponse{active_release, releases[ReleaseHistoryEntryResponse{release_id, version_number, is_active, release_note, published_by, published_at, effective_from, effective_to, previous, restored_from, restored_by, changed_agents}]}`.
+- `GET /releases/{v}` (`:1877`) returns `ReleaseDetailResponse{release, definitions, evidence}`. History evidence carries **`source`** (a `ReleaseIdentityResponse`), not `source_release_id`.
+- `GET /releases/{v}/comparison` (`:1901`) returns `ReleaseComparisonResponse{active_release, release, agents[{agent_key, active_revision_id, historical_revision_id, same_revision, field_diffs[{field, active, historical}]}]}`.
+- `GET /releases/{v}/rollback-preview` (`:1930`) returns `RollbackPreviewResponse{source, active_release, next_version_number, lock_version, default_release_note, restorable, blocked, issues, warnings, agents, evidence, draft_effect: dict[AgentKey, reset|kept|unchanged]}`.
+- `POST /releases/{v}/rollback` (`:1963`), request `RollbackRequest{lock_version, release_note}`, returns 200 `RollbackSuccessResponse{release, restored_from, previous_release_id, changed_agents, mappings, evidence, draft, draft_effect}`.
+- 409 codes: `stale_rollback`, `rollback_source_active` and `rollback_matches_active`. 422 codes: `rollback_incompatible` and `invalid_rollback`.
+- **Plus a 404 `"Graph Version not found"`** on every `{version_number}` route (`agent_definitions.py:1706-1710`). The plan omits it.
+
+**C270-3 (history tab)**
+- Names `Inspect this version` and `Roll back to this version` (`ReleaseHistoryTab.tsx:27-28`), `Confirm rollback` and `Cancel rollback`.
+- Test ids: `release-history-row-<v>`, `release-history-detail`, `release-comparison`, `rollback-preview`, `rollback-lineage`, `rollback-warnings`, `rollback-blocked-panel`, `rollback-note-input`, `rollback-confirm-button`, `rollback-cancel-button`, `rollback-stale-alert` and `rollback-success-panel`.
+
+**C270-4 (rollback log)**
+- `graph_release_rollback` is emitted by the **route** (`agent_definitions.py:1702-1708`), once per rollback call, with outcome and role key names only.
+
+**Other request models** (all `extra="forbid"`, `strict=True`):
+- `DraftSaveRequest{lock_version, candidate: {prompt_text, model{endpoint_name, temperature, max_tokens, top_p}, assembly_rules, schema_overlay}}`;
+- `DraftLockRequest{lock_version}`, for the two upgrade routes;
+- `CandidateTestRunRequest{test_case_id, lock_version}` and `BaselineTestRunRequest{test_case_id}`. Both run POSTs return **201**.
+
+**Sessions**
+- `/{id}/collaboration-history` **has** a response model: `CollaborationHistoryResponse{mixed_release_warning, has_legacy_evidence, groups[{actor_label, graph_version, mutation_count, last_mutation_at}]}` (`sessions.py:389-416`). This is the **C21 erratum**.
+- The other sessions routes return plain dicts, whose graph projection keys are `graph_version`, `active_graph_version` and `is_older_than_active` (`session_manager.py:752-754`, `:788-789`, `:847-848`, `:1059-1060`).
+
+**Task 11 components**
+- `graph-version-status` is rendered by `frontend/src/components/Conversation/GraphVersionStatus.tsx:20-46`. Its text is ``Pinned Graph Version {graphVersion}{isOlder ? `; latest is ${activeGraphVersion}` : ''}``, so Task 11's sabotage edits `:32`.
+- `mixed-release-warning` is in `MixedReleaseWarning.tsx:79`/`:185`.
+- The app-shell mock is `setupMocks` (`frontend/tests/helpers/setup-mocks.ts:22`). Boot also reads `/api/setup/status` and `/api/user/current`.
+
+**Proposed ruling:**
+- These shapes replace the plan's table.
+- Task 10's contract `response_model` / `request_model` dotted paths use the class names above.
+- `collaboration-history` exchanges are validated against `CollaborationHistoryResponse`, not shape-only.
+- The rollback-log assertion moves from Task 7 to Task 6 S15. Using `rendered_record`, the record's extra-key set is exactly the route's `{outcome, agent_keys}` set; Task 6 confirms the key names at `agent_definitions.py:1977+`.
+- Tasks 6 and 10 add a 404 exchange (for example `GET /releases/99`) to the contract.
+
+**Binds:** Phase B, blocking before Tasks 6, 9, 10 and 11.
+
+**Cost if wrong:** The Python join points at non-existent classes. Or Task 7 waits for a log record its turns never emit. Or Task 10 uses `getByRole('button')` for a link, and it never matches.
+
+---
+
+### Correction 36 — Task 9: the `EXPECTED_ADMIN_ROUTES` literal (24 pairs) and its fixtures
+
+**Overrides:** plan :727 ("Task 0-B fills from the integrated app"), and plan :726 (the non-admin fixtures at `:398-440`).
+
+**Evidence:** `app.routes` gives exactly 24 `(method, path)` pairs under `/api/admin/agent-definitions`, all with `endpoint.__module__ == "src.api.routes.agent_definitions"`:
+
+**Workbench and draft**
+- GET `/workbench`
+- GET `/model-endpoints`
+- PUT `/draft/{agent_key}`
+- POST `/draft/{agent_key}/protected-assembly-upgrade`
+- POST `/draft/{agent_key}/schema-contract-upgrade`
+- POST `/draft/{agent_key}/legacy-prompt-source`
+- POST `/draft/{agent_key}/model-endpoint-probe`
+
+**Test cases and runs**
+- GET `/test-cases`, POST `/test-cases`
+- PUT `/test-cases/{test_case_id}`, DELETE `/test-cases/{test_case_id}`
+- POST `/draft/{agent_key}/test-runs`
+- POST `/published/{agent_key}/test-runs`
+- GET `/test-runs/{run_id}`
+- GET `/test-cases/{test_case_id}/runs`
+- POST `/test-runs/{run_id}/verdict`
+- GET `/readiness`
+
+**Releases**
+- GET `/release-preview`
+- POST `/releases`, GET `/releases`
+- GET `/releases/{version_number}`
+- GET `/releases/{version_number}/comparison`
+- GET `/releases/{version_number}/rollback-preview`
+- POST `/releases/{version_number}/rollback`
+
+**Router and fixtures**
+- The one router is `agent_definitions.py:161-165` (`prefix`, `dependencies=[Depends(require_admin)]`). `require_admin` is at `_authz.py:326` and `require_draft_write_principal` at `agent_definitions.py:168`.
+- The non-admin helpers are `_force_admin(monkeypatch, is_admin=False)` and `_app_for(session_factory, …)` (`test_agent_definition_workbench_routes.py:155`, used at `:398-412`).
+- Six handlers read their body through `await request.json()` (`:487`, `:638`, `:933`, `:1102`, `:1335`, `:1471`), so the `Request.json` patch is meaningful.
+- An existing owner test already pins one router for the release routes: `test_graph_release_routes.py:343` (`test_release_routes_are_on_the_one_admin_router`).
+
+**Proposed ruling:**
+- `EXPECTED_ADMIN_ROUTES` is exactly the 24 pairs above.
+- Task 9's one-router test generalises `test_graph_release_routes.py:343` to all 24 routes; it does not duplicate that test.
+
+**Binds:** Phase B, Task 9.
+
+**Cost if wrong:** The inventory is either RED on correct code (a miscounted route) or blind to a new route.
+
+---
+
+### Correction 37 — Task 6 harness: extend #270's acceptance seam; every graph-capable `POST /api/sessions` must send `graph_capable: true`
+
+**Overrides:** plan :575 and :623 (the "`real_route_stack` recipe"), and plan :631, :640, :641 and :644 (the sessions calls).
+
+**Evidence:**
+- **The seam to extend.** It is #270's `acceptance_stack` (`test_graph_release_rollback_acceptance_postgres.py:106-137`), which is `real_route_stack` plus the `get_agent_test_workbench` override (C53) over `_fake_adapter_workbench` (`:96-103`). #270's `_session_manager_on` (`:140-163`) patches `src.api.services.session_manager.get_db_session`. #269's publication acceptance uses the same seam (`test_graph_release_publication_acceptance_postgres.py:101-141`).
+- **`graph_capable` defaults to `false`.** `POST /api/sessions` (`sessions.py:79-127`) calls the global `get_session_manager().create_session(..., graph_capable=request.graph_capable)`, and `CreateSessionRequest.graph_capable` defaults to **`False`** (`src/api/schemas/requests.py:137-140`), so it persists a **null** pin.
+- **The sessions routes also read other sources.** They use `Depends(get_db)` (`sessions.py:33`) and module-level `get_db_session` (`:69-74`).
+- **Every principal is an admin in the seam.** `acceptance_stack` also sets `_admin_acl_probe = lambda _user: True` (`:129`), so C2 applies to it as well.
+
+**Proposed ruling:**
+- The Task 6 helper builds on `acceptance_stack` and `_session_manager_on`. It does not copy them: import them, or move them to a shared helper that both files import.
+- It includes `src.api.routes.sessions.router` in the same app, with the `get_db` override plus the `session_manager.get_db_session` patch.
+- S02 (`old-root`), S11 (`mid-root`), S12 (`new-root`) and S16 (`post-rollback-root`) send `{"graph_capable": true}`.
+- One control conversation created with the default body must persist a null pin. It is recorded for Task 8's legacy case.
+
+**Binds:** Phase B, blocking before Task 6.
+
+**Cost if wrong:** Every S02/S11/S12/S16 pin is null, so S02 is RED on correct code and misrouted to #261. Or the sessions router writes to the conftest SQLite file instead of PostgreSQL.
+
+---
+
+### Correction 38 — Task 8 "every creator needs a pin": there are seven creators, not four
+
+**Overrides:** plan :706 (parametrised over "root / chat auto-created / contributor / duplicate"), and C18 instruction 5.
+
+**Evidence:**
+- **The seven creators.** `CREATORS` (`tests/integration/test_mixed_release_creation_postgres.py:27-35`) is `explicit-root`, `chat-generated-id`, `chat-supplied-id`, `chat-service-sync`, `chat-service-streaming`, `contributor` and `duplicate`. It is driven by `_create(factory, creator)` (`:129`) and `_creator_patches(factory)` (`:175`), and #269's `test_graph_release_session_ordering_postgres.py:53-57` imports all three.
+- **Seeding for the copy creators.** Contributor and duplicate seeding follows `_seed` (`session_ordering:85-110`).
+- **Where 503 is raised.** "No active Graph Release available" is raised at `sessions.py:116-119`, `:377` and `:664`, and at `chat.py:360`, `:470` and `:654`.
+- **Existing coverage.**
+  - Unit (SQLite): `tests/unit/test_conversation_pin_creation.py:207` and `:291`.
+  - PostgreSQL cases already in `test_persisted_graph_runtime_failures_postgres.py`: `:297`, `:337`, `:369`, `:398`, and also `:458`, `test_persisted_corruption_escapes_later_node_recovery`, which C18 did not list.
+- **The removed-endpoint case.** A1's first turn reaches fixer (`test_conversation_pin_acceptance_postgres.py:60-71`, `_first_turn_outputs` `:209`), so the removed-endpoint case reuses A1. No new `FAKE_OUTPUTS` are needed for C18 step 3.
+
+**Proposed ruling:**
+- Parametrise the missing-active refusal over the imported `CREATORS` (7).
+- For each creator, assert all of these:
+  - the explicit error: HTTP 503, or `ActiveGraphReleaseUnavailableError` for the service creators;
+  - no new `user_sessions` row;
+  - the tripwire is unread.
+- Name the five existing PostgreSQL cases as already landed.
+
+**Binds:** Phase B, Task 8.
+
+**Cost if wrong:** Three chat creators and the sync service creator are unguarded by the acceptance matrix, which is exactly the "every creator" claim of AC2.
+
+---
+
+### Correction 39 — CI facts the plan cites are stale: the `integration-graph` span, `DELIBERATE_EXCLUSIONS`, and the lint and typecheck jobs
+
+**Overrides:**
+- plan :51 ("`DELIBERATE_EXCLUSIONS` stays empty");
+- plan :250, :965 and every "`test.yml:448-472`";
+- plan :113 (the unit job lines).
+
+**Evidence:**
+- **`integration-graph`** is 33 files at `.github/workflows/test.yml:448-480`.
+- **`DELIBERATE_EXCLUSIONS` is not empty.** In `tests/unit/test_ci_collects_integration_tests.py:37` it holds `test_graph_live_real_model.py`, and `tests/unit/test_e2e_matrix_covers_specs.py:51` has its own dict.
+- **e2e matrix:** `test.yml:711-757`.
+- **frontend-build:** `npx tsc -b` at `:616`.
+- **ESLint:** there is no ESLint job.
+
+**Proposed ruling:**
+- "`DELIBERATE_EXCLUSIONS` is **unchanged**; #271 adds no exclusion."
+- New PostgreSQL files are appended after `:480`.
+- New specs are appended to the matrix in alphabetical position.
+
+**Binds:** Phase B. Tasks 6, 7, 8, 10 and 11. Non-blocking.
+
+**Cost if wrong:** An implementer "fixes" the exclusions dict to empty, which enrols the live real-model test in CI with real spend.
+
+---
+
+### Correction 40 — The text-read frontend files, re-derived (plan :64)
+
+**Overrides:** plan :64 (the list), and C16 instruction 2.
+
+**Evidence:** `rg -l "frontend/" tests/unit` plus the path constants in the join tests. Beyond the plan's list, these files are also read:
+- `frontend/src/components/Admin/GraphRelease/reviewAndPublishState.ts` (`test_graph_release_client_join.py:46`, `test_graph_release_history_client_join.py:143`, which parse `ROLE_LABELS` line by line);
+- `frontend/tests/e2e/agent-definition-workbench.spec.ts` (`test_prompt_assembler.py:1310`, `:1400`, which parse `const AFFECTED_ROLES`).
+
+The forbidden-action sweep that C16 extracts is an inline closure at `agent-definition-workbench.spec.ts:1571-1580`.
+
+**Proposed ruling:**
+- Add both files to the text-read list.
+- C16's extraction moves only the `sweep` closure body into `frontend/tests/fixtures/forbiddenActionHelpers.ts`, parameterised by a `Locator`. It must leave `const AFFECTED_ROLES` and its line format byte-identical.
+- Re-run `tests/unit/test_prompt_assembler.py` in Task 10's GREEN.
+
+**Binds:** Phase B, Task 10.
+
+**Cost if wrong:** A reformat by the extraction silently turns a Python join test RED.
+
+---
+
+### Correction 41 — The epic invariant owner tests (Step B4)
+
+**Overrides:** plan :272 ("A missing owner test becomes a Task 12 addition").
+
+**Evidence:**
+
+| Invariant | Owner test |
+|---|---|
+| One model binding | `tests/unit/test_agent_runtime.py:769` `test_structured_output_binding_has_one_call_site_and_the_probe_has_none`. `rg -c "with_structured_output\(" src` = 1. |
+| One draft-content writer | `tests/unit/test_graph_release_rollback.py:1586` `test_candidate_hash_writers_are_the_allowlisted_attribute_and_builder_sites`, and `:1611` `…writer_scan_detects_each_write_form`. |
+| One both-parent locker | `tests/unit/test_graph_parent_lock_is_single_sourced.py:62`. |
+| One publication core | `tests/unit/test_graph_release_rollback.py:1072` `test_restore_writes_through_the_one_publication_core`. |
+| One admin router | `tests/unit/test_graph_release_routes.py:343`, release routes only. |
+| One gate, one counter (frontend) | `draftEditorState.test.ts:1115`, `:2654`; `reviewAndPublishState.test.ts:477`, `:508`, `:516`; `TestRunPanel.test.tsx:303`; `AgentDefinitionWorkbench.test.tsx:3319`. |
+| One reducer per page | No structural pin. It is covered behaviourally only. |
+
+**Proposed ruling:**
+- The table above is the Task 14 Step 6 re-run list.
+- The "one reducer per page" gap is **not** a Task 12 addition. Task 12 is the deletion task, and a structural `useReducer` count is brittle. Task 14's epic review rules on it as covered-with-ruling.
+- The one-admin-router owner test is generalised in Task 9 (C36).
+
+**Binds:** Phase B, Task 14.
+
+**Cost if wrong:** Task 12 grows a frontend change outside its scope. Or the epic review has no owner list to re-run.
+
+---
+
+### Correction 42 — The Phase B carries, each bound to a task
+
+**Overrides:** nothing in the plan. It adds the `progress.md` "Phase B start" carries to the task steps.
+
+**Evidence:** The `progress.md` "Phase B start" carries, re-probed:
+1. The monolith fallback. See C24.
+2. id ≠ version is **closed**. #270's whole-branch review §5 found no version resolved by id.
+3. The epic-review items:
+   - the Q7 rollback caveat (#270 review O1);
+   - the C32 endpoint policy on rollback;
+   - the `test_usage_service` midnight flake;
+   - the `test_shared_deck_mutation_attribution` hang. It did not reproduce here: 60 passed in 17.3 s under `timeout 120`.
+   - `test_dependencies_resolve_on_proxy`. It is `@live` + `@slow` (`tests/unit/test_dependencies_resolve.py:149-151`), and **it is not deselected in local runs**, because there is no `addopts` `-m "not live"`. It needs the network, and it passed in this baseline run.
+4. L0 is taken only through `_lock_current_parents`. The AST scanner is `test_graph_parent_lock_is_single_sourced.py:62`.
+5. The forbidden-action list has 8 names (C35).
+6. There is no ESLint job (C39).
+
+**Proposed ruling:**
+
+| Carry | Bound to | Instruction |
+|---|---|---|
+| 1 | Task 8 | C24 |
+| 2 | Task 14 Step 6 | Record "closed by #270 review §5". No test is needed. |
+| 3 | Task 14 Step 6 and every full-unit gate | Each full-unit gate records its UTC start and end, and a `test_usage_service` failure inside ±5 min of 00:00 UTC is the flake cause. A `test_dependencies_resolve_on_proxy` failure with a network error is the network cause, not a regression. `test_shared_deck_mutation_attribution.py` always runs under `timeout 120`, and exit 124 is the hang cause. The epic review rules on Q7 and on C32-on-rollback as covered-with-ruling or open. |
+| 4 | Task 14 Step 5 | The writer table cites the scanner as GREEN, and confirms #271 adds no locker. |
+| 5 | Tasks 10, 11, 14 | Assert `ALLOWED_ACTION_NAMES` length is still 8. #271 adds no exemption. |
+| 6 | Tasks 4, 10, 11, 14 | ESLint runs locally on every touched frontend file (C27). Task 14 lists "add a CI lint job" as a follow-up issue for the user. |
+
+**Binds:** Phase B, the named tasks.
+
+**Cost if wrong:** A known flake is misread as a regression, or a real regression is dismissed as the flake.
+
+---
+
+### Correction 43 — Task 13 without the dev-workspace check (#266 m9)
+
+**Overrides:** plan :933-935 (the Files block "Task 0 records the name").
+
+**Evidence:**
+- The readiness check is at `src/services/model_endpoint_catalog.py:242-271`:
+  - `config_update = getattr(state, "config_update", None)`;
+  - `IN_PROGRESS`, `UPDATE_FAILED` and `UPDATE_CANCELED` each have their own code;
+  - `ready != READY` **or** `config_update != NOT_UPDATING` gives `endpoint_not_ready`. So `None` (absent) is refused.
+- The unit test file is `tests/unit/test_model_endpoint_catalog.py`. The draft-side use is in `tests/unit/test_graph_configuration_draft.py`.
+- The user's authorisation is outstanding.
+
+**Proposed ruling:**
+- Task 13 does **not** dispatch without the user's explicit authorisation. No speculative "absent" code is written.
+- Record "m9 open: release gate unverified" in `progress.md` and in the Task 14 final report. The local merge may proceed (OQ4), but the epic is not declared shippable.
+- If authorised, run only Step 1's read-only `databricks serving-endpoints get … --profile tellr-dev -o json`, then 2a or 2b as planned. The files are the two named above.
+
+**Binds:** Phase B, Task 13.
+
+**Cost if wrong:** Speculative code relaxes a readiness check that may be correct. Or the epic is reported shippable with its highest-impact external assumption unverified.
+
+---
+
+### Correction 44 — Task 12's retained-bundle ledger literals, as re-read
+
+**Overrides:** plan :905-906 ("write the full 64-hex literals, as re-read at Task 0-B").
+
+**Evidence:**
+- Protected assembly: `prompt_assembler.py:43` and `:377`.
+- Schema contracts: `agent_schema_registry.py:49-71`.
+
+**Proposed ruling:** Use these literals.
+- **Protected assembly:**
+  - v1 `e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852`;
+  - v2 `fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a`.
+- **Schema v1:**
+  - architect `a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd`
+  - data_analyst `610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281`
+  - builder `fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387`
+  - build_reviewer `50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d`
+  - fixer `7a4e984c602d16ea73c2f5f3f26ac385c440527001fa14b1cfb5c1245de12297`
+  - fix_reviewer `31ff0a6d02cefb7db4cd2c499b4e7905fdadcda789c658e1c7605cdde01020df`
+  - deck_reviewer `56c7ce141e07a70fc2c57f614e915ebb9e3914d24b3c11057401c4cc1c637467`
+- **Schema v2:**
+  - architect `a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122`
+  - data_analyst `0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5`
+  - builder `65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad`
+  - build_reviewer `20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1`
+  - fixer `a77a9896705534109179e75a542eec212dbb25fd78582dff256d6b6c976a6143`
+  - fix_reviewer `bbe6bf025d5c2e5dcbe1c23db029caff425890602f7e3819c6472c46e7fdfd99`
+  - deck_reviewer `c466043b24678ceef8c80d3707f7e80672275415a8b1c0e4385f94bfea7104d3`
+- They match the plan's prefixes and `V1_SCHEMA_CONTRACT_DIGESTS` (`test_graph_definition_manifest.py:754`).
+- Assert resolution per C32.
+
+**Binds:** Phase B, Task 12.
+
+**Cost if wrong:** A transcription error makes the ledger RED on correct code.
+
+---
+
+### Correction 45 — "Task 1's baseline" after the rebase; `TASK1_BASE` is no longer an ancestor
+
+**Overrides:** plan :491, :920 and :947 ("cause set must equal Task 1's"), and plan :38 (read with the rebase).
+
+**Evidence:**
+- The `TASK1_BASE` file holds `0500629354d5…`, the pre-rebase base. `git merge-base --is-ancestor 0500629… HEAD` is false after the rebase. This is expected: `a08389ec3` is an ancestor of `INTEGRATION_BASE`, and the Phase A patches are patch-id-identical (`predecessor-heads.md`).
+- The full unit run at HEAD `9a63ab1b7` (`reports/preflight-phase-b.md`) gave **2 failed / 7169 passed / 110 skipped**. The two failures are exactly the deploy_autoscaling pair.
+
+**Proposed ruling:**
+- "Task 1's baseline" means the Phase B cause set recorded in `preflight-phase-b.md`:
+  - exactly the two `test_deploy_autoscaling.py::TestGetOrCreateLakebase` nodes, with their two causes;
+  - 110 skips in the four listed cause groups.
+- Do not rewrite `TASK1_BASE`. It stays an immutable Phase A record.
+
+**Binds:** Phase B, every task's GREEN step.
+
+**Cost if wrong:** A reviewer compares against the pre-rebase six-failure set and misses a new cause hidden by a count difference.
+
+---
+
+### Correction 46 — Task 7 seams confirmed, and one sequencing rule with Task 8
+
+**Overrides:** nothing. It confirms plan :669-692 with citations, and adds one ordering rule.
+
+**Evidence:**
+- **`graph_chat_env`:** `tests/integration/test_graph_mode_turn.py:342`.
+- **In `test_conversation_pin_acceptance_postgres.py`:**
+  - `A1_ROLES` at `:60-71`;
+  - `_OrderedAdapter` at `:83`;
+  - `_first_turn_outputs` at `:209`;
+  - `Send` recording at `:426-432`.
+- **The pin load:**
+  - It happens at `src/services/graph/builder.py:345`.
+  - `state.update` runs after `dict(initial)` (`:352-357`), so a seeded `graph_release_id` is overwritten. That is exactly the plan's step 3 premise.
+- **The logging allow-list:** `_LOGGED_IDENTITY_FIELDS` is at `agent_runtime_identity.py:123-129`.
+- **The model adapter:** `DatabricksModelAdapter(*, model_factory, client_factory, transport_options)` is at `agent_runtime.py:506-515`.
+- **Unchanged since `a08389ec3`:** `conversation_pins.py`, `graph/`, `session_manager.py`, `sessions.py`, `chat.py`, `chat_service.py`, `agent_runtime*.py`, `persisted_graph_release.py`, `prompt_assembler.py` and `agent_schema_registry.py` are byte-unchanged since `a08389ec3`. #268–#270 touched none of them.
+
+**Proposed ruling:**
+- Task 7 drives `send_message_streaming`. Task 8 (C24) edits `chat_service.py`.
+- So if Task 8 lands after Task 7, re-run Task 7's file in Task 8's GREEN step.
+- Otherwise, dispatch Task 8 before Task 7. Both are "sequence by file".
+
+**Binds:** Phase B, Tasks 7 and 8.
+
+**Cost if wrong:** C24's change to the SSE path breaks Task 7's turn driver unnoticed.
+
+---
+
+## Per-task self-consistency (Phase B)
+
+For each task: does the Files block cover every file the steps (plus the corrections) touch? Does every consumed name exist at HEAD? Is each sabotage anchor on the executed path?
+
+| Task | Files block complete? | Consumed names exist? | Sabotage anchors valid? | Blocking corrections | Verdict |
+|---|---|---|---|---|---|
+| 2 | Yes, with the C28 site list | `logging.makeLogRecord` ✓ | ✓ (`pathname` exclusion; `exc_text` branch) | C23 | Consistent after C28 |
+| 3 | Yes (C29: unchanged) | `load_graph_v1_manifest`, `definition_content_hash`, `ResolvedDefinition`, `GraphReleaseNotFoundError` (`persisted_graph_release.py:31`), `AgentRuntime(...)` ✓ | Controller ✓; reviewer per C10 | C10 | Consistent |
+| 4 | **No.** C27: only `findings-drawer.spec.ts` + the new `.d.ts` | `tsconfig.*` ✓ | Controller per C27 (35/TS1484); reviewer ✓ | C3, C25, C26, C27 | Consistent after C25–C27 |
+| 6 | **No.** It needs the shared seam from `test_graph_release_rollback_acceptance_postgres.py` (import or move, C37), plus the sessions router | `acceptance_stack`, `_session_manager_on`, `definition_field_diffs`/`_DIFF_FIELDS`, `restore_release` ✓ | Controller per C34; reviewer ✓ (`rollback.py:383`) | C1, C2, C6, C9 (Task 6 stage), C33, C34, C35, C37 | Consistent after corrections |
+| 7 | Yes | All of C46 ✓; `AgentSchemaRegistry` resolution per C32 | Controller ✓ (`builder.py:345`); reviewer per C8 | C8, C9, C32 | Consistent; sequence with Task 8 (C46) |
+| 8 | **No.** It needs `chat.py`, `chat_service.py` and `test_engine_mode_wiring.py` (C24) | `CREATORS`, `_create`, `_creator_patches` ✓; bundle seams per C32 | Controller ✓ (`conversation_pins.py:151-160`); reviewer per C7; extra controller per C24 | C7, C18, C24, C38 | Consistent after C24 (**needs a user decision**) |
+| 9 | Yes | `require_admin`, `require_draft_write_principal`, `_force_admin`, `_app_for` ✓ | Controller ✓ (`agent_definitions.py:164`); reviewer ✓ (`session_manager.py:752`) | C36 | Consistent |
+| 10 | **No.** C16 and C40 add `forbiddenActionHelpers.ts`, `agent-definition-workbench.spec.ts` and the acceptance PG file | Class paths per C35; `setupMocks` ✓ | Controller ✓; reviewer name `Publish Graph Version 2` (C15) ✓ | C1, C11, C16, C21, C25, C35, C40 | Consistent after corrections |
+| 11 | Yes | `GraphVersionStatus.tsx:32`, `MixedReleaseWarning.tsx` ✓ | Controller ✓ (`GraphVersionStatus.tsx:32`); reviewer ✓ | C9, C11, C25, C35 | Consistent; depends on Task 6's S12b exchange (C9) |
+| 12 | Yes, plus the C14/C29 import updates (`test_graph_configuration_draft.py:2917`, `test_persisted_agent_runtime.py:23`) if `RecordingAgentInvocationIdentitySink` moves | `V1_SCHEMA_IDENTITIES` ✓; guard 5 attribute `_persisted_release_loader` (`agent_runtime.py:803`) ✓ | Controller per C6; reviewer ✓ (`_default_bundles`) | C6, C13, C14, C30, C31, C44 | Consistent after C30/C31 (guard 3 would otherwise be permanently RED) |
+| 13 | Yes (C43 names the files) | `model_endpoint_catalog.py:242-271` ✓ | ✓ | C43 (user authorisation) | **Does not dispatch without the user** |
+| 14 | Yes | Owner list per C41; every gate per C25/C42/C45 | Final sabotage anchor ✓ (`persisted_graph_release.py:96`, `_cache: dict[int, …]`) | C41, C42, C45 | Consistent |
+
+## Producer/consumer table (Phase B)
+
+| Producer (task) | Output | Consumers | Shape source |
+|---|---|---|---|
+| Task 2 | `tests/fixtures/log_records.py`: `rendered_record`, `STANDARD_LOG_RECORD_ATTRS` (+`taskName`, C28) | Tasks 6 (S07 C33, S15 rollback log C35), 7 (log contract), 8 | plan :371 + C28 |
+| Task 3 | `tests/fixtures/packaged_release_loader.py`: `PackagedGraphV1Loader`, `packaged_v1_runtime`, `PACKAGED_RELEASE_ID`/`VERSION` | Task 12 (drops the parity half), migrated unit files | plan :447-470 + C10, C14 |
+| Task 4 | `frontend/tsconfig.e2e.json` + `tests/types/browser-modules.d.ts` + the Python guard | Tasks 10, 11, 14 (typecheck gate per C25) | C3, C25–C27 |
+| Task 6 | `tests/integration/graph_lifecycle_journey.py`: `Stage`, `stage()`, `require()`, `CodeDefaultTripwire` (traps `_SKILLS` + the manifest, C6), `LifecycleJourney.run_to()`, `RecordedExchange`; stages S01–S12, S12b (C9), S14–S16, S18 | Task 7 (`run_to("S16")`), Task 8 (`run_to("S12")`), Task 10 (`write_contract`, shape test), Task 11 (exchanges S02, S11-mid-root, S12, S12b, S16), Task 12 (drops two tripwire targets) | plan :578-647 + C1, C2, C9, C33, C34, C35, C37 |
+| Task 7 | S13, S17 stages; the turn driver | Task 8 (the turn driver), Task 12 gate, Task 14 final sabotage | plan :669-692 + C8, C32, C46 |
+| Task 8 | `_conversation_state`; production fix at the 3 fallback sites (C24) | Task 12 gate, Task 14 Step 5(4) | plan :703 + C7, C18, C24, C38 |
+| Task 9 | `EXPECTED_ADMIN_ROUTES` (24, C36), projection test | Task 12 gate, Task 14 | C36 |
+| Task 10 | `graphLifecycleContract.json`/`.ts` (`loadContract`, `installContract` with C1 cursor replay), `forbiddenActionHelpers.ts` (C16/C40), the admin journey spec | Task 11 | plan :753-758 + C1, C16, C21, C35, C40 |
+| Task 11 | The conversation journey spec | Task 12 gate | plan :798-812 + C9 |
+| Task 12 | Deletion + `test_lakebase_only_runtime_contract.py` + `test_retained_bundle_ledger.py` | Task 14 | plan :827-927 + C6, C13, C14, C30, C31, C44 |
+| #268/#269/#270 (upstream) | Routes, models and test ids per C35; `acceptance_stack`/`_session_manager_on` (C37); `CREATORS` (C38) | Tasks 6–11 | C35, C37, C38 |
+
+## Blocking summary for Phase B (supersedes the Phase B part of the earlier summary where they differ)
+
+- **Before Task 2:** C23 (the scoped re-review, now covering C24–C46).
+- **Before Task 3:** C10.
+- **Before Task 4:** C3, C25, C26, C27.
+- **Before Task 6:** C1, C2, C6, C9, C33, C34, C35, C37.
+- **Before Task 7:** C8, C9, C32 (S17 seam); sequence with Task 8 (C46).
+- **Before Task 8:** C7 + **C24 (and a user decision)**, C38.
+- **Before Task 9:** C36.
+- **Before Task 10:** C1, C11, C16, C25, C35, C40.
+- **Before Task 11:** C9, C11, C35.
+- **Before Task 12:** C6, C30, C31, C44; the AC10 gate.
+- **Before Task 13:** C43 (**user authorisation**).
+- **Non-blocking:** C28, C29, C32 (Task 8/12 parts), C39, C41, C42, C45.
