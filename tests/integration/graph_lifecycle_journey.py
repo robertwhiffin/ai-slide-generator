@@ -128,6 +128,8 @@ BUILDER_SCHEMA_CONTRACT_V2_DIGEST = (
 ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST = (
     "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
 )
+#: ``GraphConfiguration.bootstrap_v1``'s default actor: v1's ``published_by``.
+BOOTSTRAP_ACTOR = "system:bootstrap"
 CUSTOM_BLOCK_ID = "7c1f0a52-2b7e-4d7e-9a51-6f1d7e0c2b71"
 CUSTOM_BLOCK_TEXT = "Lifecycle custom block: keep every slide to one idea."
 ARCHITECT_SUFFIX = " Lifecycle A."
@@ -437,15 +439,27 @@ class LifecycleJourney:
             raise KeyError(f"unknown stage {stage_code!r}; stages are {order}")
         target = order.index(stage_code)
         for code in order[len(self.completed) : target + 1]:
-            current = STAGES[code]
-            self._current = current
-            try:
-                with stage(current):
-                    _STAGE_BODIES[code](self)
-            finally:
-                self._current = None
+            with self.in_stage(STAGES[code]):
+                _STAGE_BODIES[code](self)
             self.completed.append(code)
         return self
+
+    @contextmanager
+    def in_stage(self, current: Stage) -> Iterator[None]:
+        """Run a caller's own stage body (e.g. Task 7's S13/S17) with attribution.
+
+        ``call()`` records its exchanges under ``current.code`` and any failure is
+        labelled as ``stage(current)`` labels it.  The enclosing stage, if any, is
+        restored on exit.  A caller stage is not appended to ``completed``, so
+        ``run_to`` is unaffected.
+        """
+        previous = self._current
+        self._current = current
+        try:
+            with stage(current):
+                yield
+        finally:
+            self._current = previous
 
     def call(
         self,
@@ -766,9 +780,12 @@ def _s04_overlay(j: LifecycleJourney) -> None:
     assert definition["schema_contract"] == {
         "version": 2,
         "digest": BUILDER_SCHEMA_CONTRACT_V2_DIGEST,
-    }
-    assert definition["prompt_text"].endswith(BUILDER_SUFFIX)
-    assert definition["candidate_hash"] != j.state["builder_hash_s03"]
+    }, definition["schema_contract"]
+    assert definition["prompt_text"].endswith(BUILDER_SUFFIX), definition["prompt_text"][-80:]
+    assert definition["candidate_hash"] != j.state["builder_hash_s03"], (
+        "the overlay save did not change builder's candidate hash",
+        definition["candidate_hash"],
+    )
     row = j.draft_row("builder")
     assert (
         row["schema_overlay"],
@@ -853,15 +870,15 @@ def _s05_assembly(j: LifecycleJourney) -> None:
     assert definition["protected_assembly"] == {
         "version": 2,
         "digest": ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST,
-    }
-    assert definition["prompt_text"].endswith(ARCHITECT_SUFFIX)
-    assert definition["model"]["temperature"] == 0.4
+    }, definition["protected_assembly"]
+    assert definition["prompt_text"].endswith(ARCHITECT_SUFFIX), definition["prompt_text"][-80:]
+    assert definition["model"]["temperature"] == 0.4, definition["model"]
     row = j.draft_row("architect")
     assert row["assembly_rules"] == {"format_version": 2, "custom_blocks": [block]}, row
     assert (row["protected_assembly_version"], row["protected_assembly_digest"]) == (
         2,
         ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST,
-    )
+    ), (row["protected_assembly_version"], row["protected_assembly_digest"])
     j.read_readiness("readiness-after-custom-block")
 
 
@@ -887,8 +904,8 @@ def _s06_endpoint(j: LifecycleJourney) -> None:
         },
     )
     _set_lock(j, saved)
-    assert saved["definition"]["model"]["endpoint_name"] == SONNET
-    assert j.draft_row("fixer")["endpoint_name"] == SONNET
+    assert saved["definition"]["model"]["endpoint_name"] == SONNET, saved["definition"]["model"]
+    assert j.draft_row("fixer")["endpoint_name"] == SONNET, j.draft_row("fixer")["endpoint_name"]
     j.read_readiness("readiness-after-endpoint")
 
 
@@ -1255,7 +1272,7 @@ def _s12_pinned(j: LifecycleJourney) -> None:
         new_root["active_graph_version"],
         new_root["is_older_than_active"],
     ) == (2, 2, False), new_root
-    assert j.pin_of("new-root") == v2_id
+    assert j.pin_of("new-root") == v2_id, ("new-root", j.pin_of("new-root"))
 
     _grant_contributor(j)
     contributor = j.call(
@@ -1271,7 +1288,10 @@ def _s12_pinned(j: LifecycleJourney) -> None:
         contributor["is_contributor_session"],
         contributor["my_permission"],
     ) == ("old-root", CONTRIBUTOR, True, "CAN_VIEW"), contributor
-    assert j.pin_of(contributor["session_id"]) == v2_id
+    assert j.pin_of(contributor["session_id"]) == v2_id, (
+        "contributor",
+        j.pin_of(contributor["session_id"]),
+    )
     j.state["contributor_id"] = contributor["session_id"]
 
     duplicate = j.call(
@@ -1285,7 +1305,10 @@ def _s12_pinned(j: LifecycleJourney) -> None:
         "old-root",
         CONTRIBUTOR,
     ), duplicate
-    assert j.pin_of(duplicate["session_id"]) == v2_id
+    assert j.pin_of(duplicate["session_id"]) == v2_id, (
+        "duplicate",
+        j.pin_of(duplicate["session_id"]),
+    )
     j.state["duplicate_id"] = duplicate["session_id"]
 
     for session_id, label in (("old-root", "get-old-root"), ("mid-root", "get-mid-root")):
@@ -1313,8 +1336,10 @@ def _s12_pinned(j: LifecycleJourney) -> None:
         "new-root": v2_id,
         contributor["session_id"]: v2_id,
         duplicate["session_id"]: v2_id,
-    }
-    assert pins_before == {"old-root": v1_id, "control-legacy": None, "mid-root": v1_id}
+    }, j.pins()
+    assert pins_before == {"old-root": v1_id, "control-legacy": None, "mid-root": v1_id}, (
+        pins_before
+    )
 
 
 def _s12b_collaboration_history(j: LifecycleJourney) -> None:
@@ -1399,7 +1424,7 @@ def _s14_history(j: LifecycleJourney) -> None:
         for e in history["releases"]
     ] == [
         (3, 2, True, v1, None, [], ADMIN),
-        (1, 1, False, None, None, [], history["releases"][1]["published_by"]),
+        (1, 1, False, None, None, [], BOOTSTRAP_ACTOR),
     ], history["releases"]
     assert history["releases"][0]["changed_agents"] == CHANGED_ROLES
     assert history["releases"][1]["effective_to"] == history["releases"][0]["effective_from"]
@@ -1524,7 +1549,7 @@ def _s15_rollback(j: LifecycleJourney) -> None:
         for key, m in restored["mappings"].items()
     } == {key: (True, j.state["v1_mappings"][key]) for key in GRAPH_V1_AGENT_KEYS}
     # C19: v1 is the bootstrap release; it has no linked runs, so nothing is copied.
-    assert restored["evidence"] == []
+    assert restored["evidence"] == [], restored["evidence"]
     assert restored["draft_effect"] == preview["draft_effect"]
     _set_lock(j, restored)
     j.state["v3_id"] = 4
