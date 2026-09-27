@@ -91,6 +91,34 @@ describe('reviewAndPublishReducer: loading the preview', () => {
   });
 });
 
+describe('reviewAndPublishReducer: a failed refetch after a publish (fix round 1, m2)', () => {
+  function publishedThenRefetchFailed(): ReviewAndPublishState {
+    return run([
+      { type: 'publishSucceeded', requestId: 2, result: syntheticPublishSuccess() },
+      { type: 'reloadPreview', requestId: 3 },
+      { type: 'previewFailed', requestId: 3, message: 'Unable to load the release preview (500).' },
+    ], publishing());
+  }
+
+  it('leaves published for error, keeping the published release on record', () => {
+    const state = publishedThenRefetchFailed();
+    expect(state.status).toBe('error');
+    expect(state.errorMessage).toBe('Unable to load the release preview (500).');
+    expect(state.published?.release.version_number).toBe(2);
+  });
+
+  it('recovers through an explicit reloadPreview: loading, then ready on the new preview', () => {
+    const loading = reviewAndPublishReducer(publishedThenRefetchFailed(), { type: 'reloadPreview', requestId: 4 });
+    expect(loading.status).toBe('loading');
+    expect(loading.errorMessage).toBeNull();
+    const settled = reviewAndPublishReducer(loading, {
+      type: 'previewSucceeded', requestId: 4, preview: syntheticPublishedReleasePreview(),
+    });
+    expect(settled.status).toBe('ready');
+    expect(settled.preview?.draft.base_version_number).toBe(2);
+  });
+});
+
 describe('canPublish (Correction 22)', () => {
   it('is true only from ready with a publishable preview and a non-blank note', () => {
     expect(canPublish(ready())).toBe(true);
@@ -311,4 +339,12 @@ describe('labels', () => {
       field: 'definitions.architect.prompt_text', code: 'blank', message: 'Prompt text must not be blank.',
     })).toBe('Architect: Prompt text must not be blank.');
   });
+
+  it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])(
+    'refuses the inherited Object key %s as a role (fix round 1, m3)',
+    (key) => {
+      expect(publicationErrorMessage({ field: `definitions.${key}.prompt_text`, code: 'blank', message: 'leaked text' }))
+        .toBe('The publish request was refused.');
+    },
+  );
 });
