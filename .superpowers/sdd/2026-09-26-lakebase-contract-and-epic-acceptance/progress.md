@@ -198,3 +198,7 @@ Ruling (Task 12): the compatibility runtime has no production caller — deletio
 Ruling (C46): Task 8 runs before Task 7.
 Next: the C23 scoped re-review of C24–C46, then Task 2.
 C23 scoped re-review (Opus): GO for Task 2. C24/C33/C35/C37/C38 PARTIAL → errata C47–C51 written (controller). Task 8 proceeds on the controller's C24 ruling with C47's expanded scope (user may override).
+
+## Task 2 — 2026-09-27
+Task 2: implementer (Sonnet) DONE at `41ca3f134` (TASK_BASE `491cdf179`): `bfc8be5fe` `tests/fixtures/log_records.py` (`rendered_record`, `STANDARD_LOG_RECORD_ATTRS` = makeLogRecord attrs ∪ {message, asctime, taskName}) + `tests/unit/test_log_record_rendering.py`; 6 sites migrated in `test_persisted_agent_runtime.py`, 1 in `test_agent_test_workbench.py` (C28). Gates: 2 new, 361 touched-file, full unit 2 (baseline deploy_autoscaling pair) / 7171 / 110; ruff clean. Mutations: drop `pathname` RED; drop `exc_text` RED. Real-leak proof: old `str(vars(record))` false-fails on a `/private/tmp/…payload.py` pathname; the helper does not.
+Task 2: controller sabotage (fresh) — extras not rendered (`CTRL271_2_EXTRAS`): RED 1/361 (`test_extras_message_args_and_exception_text_do_reach_it`). Restored clean.
