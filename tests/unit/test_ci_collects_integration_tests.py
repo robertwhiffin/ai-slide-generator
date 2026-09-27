@@ -472,3 +472,20 @@ def test_graph_release_rollback_acceptance_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its end-to-end rollback and history "
         "assertions must execute against PostgreSQL."
     )
+
+
+def test_graph_lifecycle_acceptance_is_collected_by_integration_graph():
+    """#271's staged edit-to-rollback lifecycle journey (AC7, AC1) belongs in the graph CI job.
+
+    It drives bootstrap through rollback and post-rollback pins through the shipped
+    admin and sessions routers over real PostgreSQL, burns a ``graph_release`` id
+    with ``nextval`` and arms the code-owned-definition tripwire; none of these
+    assertions can be cashed against SQLite.
+    """
+    target = "tests/integration/test_graph_lifecycle_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its staged lifecycle and AC1 tripwire "
+        "assertions must execute against PostgreSQL."
+    )
