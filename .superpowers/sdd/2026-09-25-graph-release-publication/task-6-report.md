@@ -245,3 +245,36 @@ Two private helpers can be exported if #270 needs to parse release lists: `isAct
 2. **After the controller commit, `TASK_BASE` is not `HEAD~1`.** My commit's parent is `585d4366c`, not `d83ad95ce`, so a Task 6 diff should be `585d4366c..b46dde573`, or `d83ad95ce..b46dde573` minus progress.md.
 3. **The 422 note-error scenario is only reachable when JS and Python whitespace rules disagree** (for example U+001F, which JS keeps and Python strips), or when the server's rules change. The page test uses exactly that note. Blank and too-long notes are otherwise blocked on the client, which is why Task 7's (e) needs a mocked 422.
 4. **Pre-existing `act(...)` warnings** from `TestRunPanel` and `WorkbenchContent` appear in the workbench suite. None come from the GraphRelease tests.
+
+## Fix round 1 (review PASS, 3 Minor findings)
+
+HEAD before the round: `489dc2973`. Fix commit: `d9f4aabf3`, which is the pin for the mutations below.
+
+| Finding | State | Change |
+|---|---|---|
+| m1: the code-point counter was unpinned | addressed | New page test: typing `'\u{1F680}'.repeat(2000)` (4000 UTF-16 units) shows `2000 / 2000`, and Publish stays enabled. Test only; the code was already correct. |
+| m2: a failed refetch after a publish was a dead end | addressed | In `reviewAndPublishState.ts`, `previewFailed` now always goes to `error`, including after a publish. `published` still holds the release, so the success panel stays. The page's error alert carries `Reload preview`, and `reloadPreview` from `error` goes to `loading`, then `previewSucceeded` goes to `ready`. The error text inside the success panel is removed. The automatic post-publish refetch still keeps `published`. There is still one gate and one counter. New tests: 2 reducer tests and 1 page test. The page test checks 3 GETs, 1 POST, and the recovered preview showing `Draft base: Graph Version 2`. |
+| m3: the role check read the prototype | addressed | `role in ROLE_LABELS` is now `Object.hasOwn(ROLE_LABELS, role)`. New test: `definitions.<key>.x` for `constructor`, `__proto__`, `toString` and `hasOwnProperty` gets the generic "The publish request was refused." Only `constructor` and `__proto__` match the field regex, so those two carry the test; the other two are extra coverage. |
+
+### Gates
+| Gate | Result |
+|---|---|
+| Vitest, full | 20 files, 886 passed (878 before this round, +8 new) |
+| Typecheck | clean |
+| ESLint on `GraphRelease/` | clean |
+| Python joins (5 files) | 67 passed |
+
+Playwright was not run, as instructed.
+
+### RED before the fixes
+Before any code change, 5 new tests failed: 2 m2 reducer tests, 2 m3 cases (`constructor`, `__proto__`) and the m2 page test. The m1 test passed at once because it pins code that was already correct. F1 below proves it can fail.
+
+### Mutations
+Each was restored with `git checkout d9f4aabf3 -- <file>`, and `git diff --quiet d9f4aabf3` returned 0 after every one. All 4 went RED.
+
+| # | Mutation | RED |
+|---|---|---|
+| F1 | page `noteLength = state.note.length` (the reviewer's mutation) | 1: `counts code points … (m1)` |
+| F2 | `previewFailed` keeps `published` (the old behaviour) | 3: both m2 reducer tests and the m2 page test |
+| F3 | `reloadPreview` treats `published !== null` as published, so it never leaves | 1: `recovers through an explicit reloadPreview: loading, then ready` |
+| F4 | back to `role in ROLE_LABELS` | 2: `constructor` and `__proto__` |
