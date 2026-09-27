@@ -134,3 +134,7 @@ Task 6: fix round 1/5 (3 addressed, 0 open; `d9f4aabf3`): m1 code-point counter 
 Controller re-check: reviewer's S1 (counter `.length`) re-applied → RED 1/22 on the page file; restored clean.
 Ruling: no scoped re-review subagent — three narrow fixes, each mutated RED, the surviving reviewer sabotage now RED. Cost if wrong: small.
 Task 6: complete (commits `585d4366c..d9f4aabf3`, review clean after 1 fix round).
+
+## Task 7 — 2026-09-27
+Task 7: implementer (Sonnet) DONE at `3b6949e57` (TASK_BASE `f611c2a88`): `523a64489` `frontend/tests/e2e/graph-release-review.spec.ts` (9: scenarios a–f + an extra publishable=false case) + 1 in `admin-route-gate.spec.ts` (non-admin redirect from the review route). Gates: new 9/9, admin-route-gate 6/6, workbench 78/78, combined 93/93 Playwright; Vitest 886; typecheck clean; joins 31. Concern (f) is a static assertion; the production sweep is the workbench spec. Reviewer sabotage target lives in `useReviewAndPublish.ts` (RED on d).
+Task 7: controller sabotage (fresh) — workbench header link href → `/admin/agent-definitions/reviews` (`CTRL269_7_HREF`, anchor 1): new spec RED 1/9 (`toHaveURL` in the link-reaches-the-page scenario). Restored from pinned HEAD, clean, marker 0; port 3000 free.
