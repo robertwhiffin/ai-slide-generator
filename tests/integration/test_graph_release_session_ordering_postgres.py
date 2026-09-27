@@ -697,6 +697,14 @@ def _seed_v4(postgres_engine, creator):
             v2_id = published.release.release_id
         if v == 4:
             v4_id = published.release.release_id
+    # Task 5 Minor 1: the literal ids, so ids differ from versions by construction.
+    assert [(row[0], row[1]) for row in _release_rows(factory)] == [
+        (1, 1),
+        (3, 2),
+        (4, 3),
+        (5, 4),
+    ]
+    assert (v2_id, v4_id) == (3, 5)
     if creator in {"contributor", "duplicate"}:
         with factory.begin() as db:
             source = UserSession(
@@ -805,6 +813,7 @@ def test_rollback_first_each_creator_pins_the_restoring_release(postgres_engine,
 
     assert isinstance(restored, RestoredRelease), restored
     v5_id = restored.published.release.release_id
+    assert v5_id == 6
     assert restored.published.release.version_number == 5
     assert restored.source.release_id == v2_id
     assert race.scans == [1, 1]
@@ -931,8 +940,11 @@ def test_creator_behind_fully_flushed_rollback_never_sees_partial_release(
 
     actor = _session(factory, actor_id)
     rows = _release_rows(factory)
+    assert len(race.rollback_statements) == 1
     if outcome == "rollback":
         assert rollback_error is injected
+        # One scan: the aborted rollback never closed v4, so it is still active.
+        assert race.scans == [1]
         assert actor.graph_release_id == v4_id
         assert len(rows) == 4  # v5 was never committed
         assert rows[-1] == (v4_id, 4, True)
@@ -941,6 +953,9 @@ def test_creator_behind_fully_flushed_rollback_never_sees_partial_release(
         restored = rollback_fut.result(timeout=0)
         assert isinstance(restored, RestoredRelease), restored
         v5_id = restored.published.release.release_id
+        assert v5_id == 6
+        # Two scans: the first lands on the now-closed v4, the rescan locks v5.
+        assert race.scans == [1, 1]
         assert actor.graph_release_id == v5_id
         assert len(rows) == 5
         assert rows[-1] == (v5_id, 5, True)
