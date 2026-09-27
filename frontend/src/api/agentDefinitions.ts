@@ -2321,3 +2321,600 @@ export async function publishRelease(request: PublishReleaseRequest): Promise<Pu
   }
   throw new AgentDefinitionApiError(response.status, payload, response.statusText);
 }
+
+// ============================================================
+// #270: Graph Release history, comparison and rollback (Task 7)
+// ============================================================
+// The wire is `src/api/schemas/graph_release_history.py` (Task 6). Every parser below
+// is exact-key at every level, and `tests/unit/test_graph_release_history_client_join.py`
+// pins each key list and literal to the server model. Releases are addressed by
+// `version_number`, never by id: the two differ in production. Refusals are keyed on
+// `code`; a Pydantic message can name a Python class, so no message is ever matched.
+
+/** How a rollback treats one role of the shared draft (ruling Q7). */
+export type DraftEffect = 'reset' | 'kept' | 'unchanged';
+
+/** Why a rollback preview is not restorable; `null` exactly when it is. */
+export type RollbackBlock = 'source_is_active' | 'matches_active' | 'incompatible';
+
+export type ReleaseEvidenceKind = 'approval' | 'historical_restore';
+
+export type ReleaseRunVerdict = 'approved' | 'rejected';
+
+export type ReleaseRunExecutionStatus = 'completed' | 'model_error' | 'assembly_error' | 'incomplete';
+
+/** One row of `GET /releases`. Timestamps are ISO instants (see `parseInstant`). */
+export interface ReleaseHistoryEntry {
+  release_id: number;
+  version_number: number;
+  is_active: boolean;
+  release_note: string;
+  published_by: string;
+  published_at: string;
+  effective_from: string;
+  effective_to: string | null;
+  previous: ReleaseIdentity | null;
+  restored_from: ReleaseIdentity | null;
+  /** Later releases that restore this one, ascending. */
+  restored_by: ReleaseIdentity[];
+  /** Roles whose revision differs from `previous`'s, in Graph order (v1 lists all seven). */
+  changed_agents: AgentKey[];
+}
+
+/** `GET /releases` (200): every release, newest first. */
+export interface ReleaseHistoryListResponse {
+  active_release: ReleaseIdentity;
+  releases: ReleaseHistoryEntry[];
+}
+
+/** One release's definition: `content` is the server's canonical payload, a JSON object. */
+export interface ReleaseDefinition {
+  agent_definition_revision_id: number;
+  content_hash: string;
+  content: Record<string, JsonValue>;
+}
+
+/** One candidate run linked to a release; `source` is set exactly for a restore. */
+export interface ReleaseHistoryEvidence {
+  agent_test_run_id: number;
+  agent_key: AgentKey;
+  test_case_id: number;
+  test_case_version: number;
+  evidence_kind: ReleaseEvidenceKind;
+  source: ReleaseIdentity | null;
+  verdict: ReleaseRunVerdict | null;
+  verdict_reviewer: string | null;
+  verdict_at: string | null;
+  execution_status: ReleaseRunExecutionStatus;
+  deterministic_checks_passed: boolean;
+  run_at: string;
+}
+
+/** `GET /releases/{version_number}` (200). */
+export interface ReleaseDetailResponse {
+  release: ReleaseHistoryEntry;
+  /** Exactly the seven roles, in Graph order. */
+  definitions: Record<AgentKey, ReleaseDefinition>;
+  evidence: ReleaseHistoryEvidence[];
+}
+
+/** One differing field between the active release and a historical one (C46). */
+export interface ReleaseComparisonFieldDiff {
+  field: ReleaseDiffField;
+  active: JsonValue;
+  historical: JsonValue;
+}
+
+export interface AgentComparison {
+  agent_key: AgentKey;
+  active_revision_id: number;
+  historical_revision_id: number;
+  same_revision: boolean;
+  /** Only differing fields, in `RELEASE_DIFF_FIELDS` order; empty when equal. */
+  field_diffs: ReleaseComparisonFieldDiff[];
+}
+
+/** `GET /releases/{version_number}/comparison` (200). */
+export interface ReleaseComparisonResponse {
+  active_release: ReleaseIdentity;
+  release: ReleaseIdentity;
+  /** Exactly the seven roles, in Graph order. */
+  agents: AgentComparison[];
+}
+
+export interface RollbackPreviewEvidence {
+  agent_test_run_id: number;
+  agent_key: AgentKey;
+  test_case_id: number;
+}
+
+/**
+ * `GET /releases/{version_number}/rollback-preview` (200). Advisory: the rollback
+ * re-checks everything under its own locks. `warnings` never block (Correction 2).
+ */
+export interface RollbackPreviewResponse {
+  source: ReleaseIdentity;
+  active_release: ReleaseIdentity;
+  next_version_number: number;
+  lock_version: number;
+  default_release_note: string;
+  restorable: boolean;
+  blocked: RollbackBlock | null;
+  issues: DraftFieldError[];
+  warnings: DraftFieldError[];
+  agents: AgentComparison[];
+  evidence: RollbackPreviewEvidence[];
+  draft_effect: Record<AgentKey, DraftEffect>;
+}
+
+/** `POST /releases/{version_number}/rollback`: exactly `{ lock_version, release_note }`. */
+export interface RollbackRequest {
+  lock_version: number;
+  release_note: string;
+}
+
+/** `POST …/rollback` (200): the restoring release, its source, and the rebased draft. */
+export interface RollbackSuccessResponse {
+  release: ActiveRelease;
+  restored_from: ReleaseIdentity;
+  previous_release_id: number;
+  changed_agents: AgentKey[];
+  /** Exactly the seven roles, every one reused. */
+  mappings: Record<AgentKey, PublishedMapping>;
+  /** Every item is `historical_restore`. */
+  evidence: ReleaseEvidence[];
+  draft: DraftMetadata;
+  draft_effect: Record<AgentKey, DraftEffect>;
+}
+
+/** 422: key on each issue's `code`; Pydantic messages can name Python classes. */
+export interface RollbackValidationErrorResponse {
+  code: 'invalid_rollback';
+  errors: DraftFieldError[];
+}
+
+/** 422: the historical definitions fail today's structural validation. */
+export interface RollbackIncompatibleResponse {
+  code: 'rollback_incompatible';
+  source: ReleaseIdentity;
+  errors: DraftFieldError[];
+}
+
+/** 409: the draft moved on after the preview was read; nothing was written. */
+export interface StaleRollbackResponse {
+  code: 'stale_rollback';
+  expected_lock_version: number;
+  current_lock_version: number;
+  active_release: ReleaseIdentity;
+  draft: DraftMetadata;
+}
+
+/** 409: the requested release is already active. */
+export interface RollbackSourceActiveResponse {
+  code: 'rollback_source_active';
+  active_release: ReleaseIdentity;
+}
+
+/** 409: the requested release has exactly the active release's definitions. */
+export interface RollbackMatchesActiveResponse {
+  code: 'rollback_matches_active';
+  active_release: ReleaseIdentity;
+  source: ReleaseIdentity;
+}
+
+export type RollbackFailure =
+  | RollbackValidationErrorResponse
+  | RollbackIncompatibleResponse
+  | StaleRollbackResponse
+  | RollbackSourceActiveResponse
+  | RollbackMatchesActiveResponse;
+
+const RELEASE_HISTORY_LIST_KEYS = ['active_release', 'releases'] as const;
+
+const RELEASE_HISTORY_ENTRY_KEYS = [
+  'release_id', 'version_number', 'is_active', 'release_note', 'published_by', 'published_at',
+  'effective_from', 'effective_to', 'previous', 'restored_from', 'restored_by', 'changed_agents',
+] as const;
+
+const RELEASE_DETAIL_KEYS = ['release', 'definitions', 'evidence'] as const;
+
+const RELEASE_DEFINITION_KEYS = ['agent_definition_revision_id', 'content_hash', 'content'] as const;
+
+const RELEASE_HISTORY_EVIDENCE_KEYS = [
+  'agent_test_run_id', 'agent_key', 'test_case_id', 'test_case_version', 'evidence_kind', 'source',
+  'verdict', 'verdict_reviewer', 'verdict_at', 'execution_status', 'deterministic_checks_passed',
+  'run_at',
+] as const;
+
+const RELEASE_COMPARISON_KEYS = ['active_release', 'release', 'agents'] as const;
+
+const AGENT_COMPARISON_KEYS = [
+  'agent_key', 'active_revision_id', 'historical_revision_id', 'same_revision', 'field_diffs',
+] as const;
+
+const RELEASE_COMPARISON_FIELD_DIFF_KEYS = ['field', 'active', 'historical'] as const;
+
+const ROLLBACK_PREVIEW_KEYS = [
+  'source', 'active_release', 'next_version_number', 'lock_version', 'default_release_note',
+  'restorable', 'blocked', 'issues', 'warnings', 'agents', 'evidence', 'draft_effect',
+] as const;
+
+const ROLLBACK_PREVIEW_EVIDENCE_KEYS = ['agent_test_run_id', 'agent_key', 'test_case_id'] as const;
+
+const ROLLBACK_REQUEST_KEYS = ['lock_version', 'release_note'] as const;
+
+const ROLLBACK_SUCCESS_KEYS = [
+  'release', 'restored_from', 'previous_release_id', 'changed_agents', 'mappings', 'evidence',
+  'draft', 'draft_effect',
+] as const;
+
+const ROLLBACK_VALIDATION_KEYS = ['code', 'errors'] as const;
+
+const ROLLBACK_INCOMPATIBLE_KEYS = ['code', 'source', 'errors'] as const;
+
+const STALE_ROLLBACK_KEYS = [
+  'code', 'expected_lock_version', 'current_lock_version', 'active_release', 'draft',
+] as const;
+
+const ROLLBACK_SOURCE_ACTIVE_KEYS = ['code', 'active_release'] as const;
+
+const ROLLBACK_MATCHES_ACTIVE_KEYS = ['code', 'active_release', 'source'] as const;
+
+export const DRAFT_EFFECTS: readonly DraftEffect[] = ['reset', 'kept', 'unchanged'];
+
+export const ROLLBACK_BLOCKS: readonly RollbackBlock[] = ['source_is_active', 'matches_active', 'incompatible'];
+
+const RELEASE_RUN_VERDICTS: readonly ReleaseRunVerdict[] = ['approved', 'rejected'];
+
+const RELEASE_RUN_EXECUTION_STATUSES: readonly ReleaseRunExecutionStatus[] = [
+  'completed', 'model_error', 'assembly_error', 'incomplete',
+];
+
+const ISO_INSTANT = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$/;
+
+/**
+ * An ISO timestamp as epoch milliseconds, or `null` when it is not one. A value with no
+ * zone is UTC: SQLite's `/workbench` timestamps carry none while the history wire ends in
+ * `Z` (Task 6 concern 3), and `Date.parse` would read a zoneless value as local time.
+ * Compare these numbers, never the strings.
+ */
+export function parseInstant(value: string): number | null {
+  const match = ISO_INSTANT.exec(value);
+  if (match === null) return null;
+  const [, date, time, fraction = '', zone = 'Z'] = match;
+  const millis = fraction.padEnd(3, '0').slice(0, 3);
+  const parsed = Date.parse(`${date}T${time}.${millis}${zone}`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function isInstant(value: unknown): value is string {
+  return typeof value === 'string' && parseInstant(value) !== null;
+}
+
+function isNullableInstant(value: unknown): value is string | null {
+  return value === null || isInstant(value);
+}
+
+function isNullableReleaseIdentity(value: unknown): value is ReleaseIdentity | null {
+  return value === null || isReleaseIdentity(value);
+}
+
+function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value is T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value);
+}
+
+/** Roles, each at most once, in Graph order; at least one. */
+function isAgentKeyList(value: unknown): value is AgentKey[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  let previous = -1;
+  for (const item of value) {
+    if (!isAgentKey(item)) return false;
+    const index = AGENT_KEYS.indexOf(item);
+    if (index <= previous) return false;
+    previous = index;
+  }
+  return true;
+}
+
+/** An object keyed by exactly the seven roles, in Graph order, each value passing `item`. */
+function isSevenRoleRecord<T>(value: unknown, item: (entry: unknown) => entry is T): value is Record<AgentKey, T> {
+  if (!isPlainRecord(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === AGENT_KEYS.length
+    && AGENT_KEYS.every((key, index) => keys[index] === key)
+    && Object.values(value).every(item);
+}
+
+function isDraftEffect(value: unknown): value is DraftEffect {
+  return isOneOf(value, DRAFT_EFFECTS);
+}
+
+function isDraftFieldErrorList(value: unknown, minimum: number): value is DraftFieldError[] {
+  return Array.isArray(value) && value.length >= minimum && value.every(isDraftFieldError);
+}
+
+/** Refs ascending by version, each once. */
+function isAscendingIdentityList(value: unknown): value is ReleaseIdentity[] {
+  if (!Array.isArray(value)) return false;
+  let previous = 0;
+  for (const item of value) {
+    if (!isReleaseIdentity(item) || item.version_number <= previous) return false;
+    previous = item.version_number;
+  }
+  return true;
+}
+
+function isReleaseHistoryEntry(value: unknown): value is ReleaseHistoryEntry {
+  return isPlainRecord(value)
+    && hasExactKeys(value, RELEASE_HISTORY_ENTRY_KEYS)
+    && isPositiveInteger(value.release_id)
+    && isPositiveInteger(value.version_number)
+    && typeof value.is_active === 'boolean'
+    && typeof value.release_note === 'string'
+    && typeof value.published_by === 'string'
+    && isInstant(value.published_at)
+    && isInstant(value.effective_from)
+    && isNullableInstant(value.effective_to)
+    && isNullableReleaseIdentity(value.previous)
+    && isNullableReleaseIdentity(value.restored_from)
+    && isAscendingIdentityList(value.restored_by)
+    && isAgentKeyList(value.changed_agents);
+}
+
+/** The strict `GET /releases` parser: newest first, with exactly one active row. */
+export function parseReleaseHistoryListResponse(value: unknown): ReleaseHistoryListResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, RELEASE_HISTORY_LIST_KEYS)) return null;
+  if (!isReleaseIdentity(value.active_release) || !Array.isArray(value.releases) || value.releases.length === 0) {
+    return null;
+  }
+  if (!value.releases.every(isReleaseHistoryEntry)) return null;
+  const releases = value.releases as ReleaseHistoryEntry[];
+  const newestFirst = releases.every((entry, index) => index === 0
+    || entry.version_number < releases[index - 1].version_number);
+  const active = releases.filter((entry) => entry.is_active);
+  const activeRelease = value.active_release;
+  const consistent = active.length === 1
+    && active[0].release_id === activeRelease.release_id
+    && active[0].version_number === activeRelease.version_number;
+  return newestFirst && consistent ? value as unknown as ReleaseHistoryListResponse : null;
+}
+
+function isReleaseDefinition(value: unknown): value is ReleaseDefinition {
+  return isPlainRecord(value)
+    && hasExactKeys(value, RELEASE_DEFINITION_KEYS)
+    && isPositiveInteger(value.agent_definition_revision_id)
+    && isSha256(value.content_hash)
+    && isJsonObject(value.content);
+}
+
+function isReleaseHistoryEvidence(value: unknown): value is ReleaseHistoryEvidence {
+  if (!isPlainRecord(value) || !hasExactKeys(value, RELEASE_HISTORY_EVIDENCE_KEYS)) return false;
+  const shaped = isPositiveInteger(value.agent_test_run_id)
+    && isAgentKey(value.agent_key)
+    && isPositiveInteger(value.test_case_id)
+    && isPositiveInteger(value.test_case_version)
+    && (value.verdict === null || isOneOf(value.verdict, RELEASE_RUN_VERDICTS))
+    && (value.verdict_reviewer === null || typeof value.verdict_reviewer === 'string')
+    && isNullableInstant(value.verdict_at)
+    && isOneOf(value.execution_status, RELEASE_RUN_EXECUTION_STATUSES)
+    && typeof value.deterministic_checks_passed === 'boolean'
+    && isInstant(value.run_at);
+  if (!shaped) return false;
+  // The source is set exactly for `historical_restore` evidence (the server's validator).
+  if (value.evidence_kind === 'approval') return value.source === null;
+  if (value.evidence_kind === 'historical_restore') return isReleaseIdentity(value.source);
+  return false;
+}
+
+/** The strict `GET /releases/{version_number}` parser. */
+export function parseReleaseDetailResponse(value: unknown): ReleaseDetailResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, RELEASE_DETAIL_KEYS)) return null;
+  const valid = isReleaseHistoryEntry(value.release)
+    && isSevenRoleRecord(value.definitions, isReleaseDefinition)
+    && Array.isArray(value.evidence)
+    && value.evidence.every(isReleaseHistoryEvidence);
+  return valid ? value as unknown as ReleaseDetailResponse : null;
+}
+
+/** Each field at most once, in the server's vocabulary order; empty when equal. */
+function isComparisonFieldDiffList(value: unknown): value is ReleaseComparisonFieldDiff[] {
+  if (!Array.isArray(value)) return false;
+  let previous = -1;
+  for (const item of value) {
+    if (!isPlainRecord(item) || !hasExactKeys(item, RELEASE_COMPARISON_FIELD_DIFF_KEYS)) return false;
+    const index = (RELEASE_DIFF_FIELDS as readonly unknown[]).indexOf(item.field);
+    if (index <= previous || !isJsonValue(item.active) || !isJsonValue(item.historical)) return false;
+    previous = index;
+  }
+  return true;
+}
+
+function isAgentComparison(value: unknown): value is AgentComparison {
+  return isPlainRecord(value)
+    && hasExactKeys(value, AGENT_COMPARISON_KEYS)
+    && isAgentKey(value.agent_key)
+    && isPositiveInteger(value.active_revision_id)
+    && isPositiveInteger(value.historical_revision_id)
+    && typeof value.same_revision === 'boolean'
+    && isComparisonFieldDiffList(value.field_diffs);
+}
+
+/** Exactly the seven roles, in Graph order. */
+function isSevenAgentComparisons(value: unknown): value is AgentComparison[] {
+  return Array.isArray(value)
+    && value.length === AGENT_KEYS.length
+    && value.every((item, index) => isAgentComparison(item) && item.agent_key === AGENT_KEYS[index]);
+}
+
+/** The strict `GET /releases/{version_number}/comparison` parser. */
+export function parseReleaseComparisonResponse(value: unknown): ReleaseComparisonResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, RELEASE_COMPARISON_KEYS)) return null;
+  const valid = isReleaseIdentity(value.active_release)
+    && isReleaseIdentity(value.release)
+    && isSevenAgentComparisons(value.agents);
+  return valid ? value as unknown as ReleaseComparisonResponse : null;
+}
+
+function isRollbackPreviewEvidence(value: unknown): value is RollbackPreviewEvidence {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ROLLBACK_PREVIEW_EVIDENCE_KEYS)
+    && isPositiveInteger(value.agent_test_run_id)
+    && isAgentKey(value.agent_key)
+    && isPositiveInteger(value.test_case_id);
+}
+
+/** The strict rollback preview parser: `restorable` is exactly `blocked === null`. */
+export function parseRollbackPreviewResponse(value: unknown): RollbackPreviewResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ROLLBACK_PREVIEW_KEYS)) return null;
+  const valid = isReleaseIdentity(value.source)
+    && isReleaseIdentity(value.active_release)
+    && isInteger(value.next_version_number) && value.next_version_number >= 2
+    && isNonnegativeInteger(value.lock_version)
+    && typeof value.default_release_note === 'string'
+    && typeof value.restorable === 'boolean'
+    && (value.blocked === null || isOneOf(value.blocked, ROLLBACK_BLOCKS))
+    && value.restorable === (value.blocked === null)
+    && isDraftFieldErrorList(value.issues, 0)
+    && isDraftFieldErrorList(value.warnings, 0)
+    && isSevenAgentComparisons(value.agents)
+    && Array.isArray(value.evidence)
+    && value.evidence.every(isRollbackPreviewEvidence)
+    && isSevenRoleRecord(value.draft_effect, isDraftEffect);
+  return valid ? value as unknown as RollbackPreviewResponse : null;
+}
+
+/** The strict rollback 200 parser: a pure restoration (every revision reused). */
+export function parseRollbackSuccessResponse(value: unknown): RollbackSuccessResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ROLLBACK_SUCCESS_KEYS)) return null;
+  const valid = isActiveRelease(value.release)
+    && isReleaseIdentity(value.restored_from)
+    && isPositiveInteger(value.previous_release_id)
+    && isAgentKeyList(value.changed_agents)
+    && isSevenMappings(value.mappings)
+    && Object.values(value.mappings).every((mapping) => mapping.reused === true)
+    && Array.isArray(value.evidence)
+    // A rollback links only restore evidence (the server's validator).
+    && value.evidence.every((item) => isReleaseEvidence(item) && item.evidence_kind === 'historical_restore')
+    && isDraftMetadata(value.draft)
+    && isSevenRoleRecord(value.draft_effect, isDraftEffect);
+  return valid ? value as unknown as RollbackSuccessResponse : null;
+}
+
+/**
+ * The strict refusal parser for the rollback route: a 422 is `invalid_rollback` or
+ * `rollback_incompatible`, a 409 one of the three typed conflicts. It keys on `code`.
+ */
+export function parseRollbackFailure(status: number, value: unknown): RollbackFailure | null {
+  if (!isPlainRecord(value)) return null;
+  if (status === 422) {
+    switch (value.code) {
+      case 'invalid_rollback':
+        return hasExactKeys(value, ROLLBACK_VALIDATION_KEYS) && isDraftFieldErrorList(value.errors, 1)
+          ? value as unknown as RollbackValidationErrorResponse
+          : null;
+      case 'rollback_incompatible':
+        return hasExactKeys(value, ROLLBACK_INCOMPATIBLE_KEYS)
+          && isReleaseIdentity(value.source)
+          && isDraftFieldErrorList(value.errors, 1)
+          ? value as unknown as RollbackIncompatibleResponse
+          : null;
+      default:
+        return null;
+    }
+  }
+  if (status !== 409) return null;
+  switch (value.code) {
+    case 'stale_rollback':
+      return hasExactKeys(value, STALE_ROLLBACK_KEYS)
+        && isInteger(value.expected_lock_version)
+        && isNonnegativeInteger(value.current_lock_version)
+        && isReleaseIdentity(value.active_release)
+        && isDraftMetadata(value.draft)
+        ? value as unknown as StaleRollbackResponse
+        : null;
+    case 'rollback_source_active':
+      return hasExactKeys(value, ROLLBACK_SOURCE_ACTIVE_KEYS) && isReleaseIdentity(value.active_release)
+        ? value as unknown as RollbackSourceActiveResponse
+        : null;
+    case 'rollback_matches_active':
+      return hasExactKeys(value, ROLLBACK_MATCHES_ACTIVE_KEYS)
+        && isReleaseIdentity(value.active_release)
+        && isReleaseIdentity(value.source)
+        ? value as unknown as RollbackMatchesActiveResponse
+        : null;
+    default:
+      return null;
+  }
+}
+
+function releaseVersionUrl(versionNumber: number, suffix = ''): string {
+  if (!isPositiveInteger(versionNumber)) throw new RangeError('A Graph Version number is a positive integer.');
+  return `${RELEASES_URL}/${versionNumber}${suffix}`;
+}
+
+/** A strict GET: a malformed 200 is `InvalidReleaseResponseError`, any other status an API error. */
+async function getStrict<T>(url: string, parse: (value: unknown) => T | null): Promise<T> {
+  const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    const parsed = parse(payload);
+    if (parsed === null) throw new InvalidReleaseResponseError();
+    return parsed;
+  }
+  throw new AgentDefinitionApiError(response.status, payload, response.statusText);
+}
+
+/** Reads every Graph Release, newest first. */
+export function listGraphReleases(): Promise<ReleaseHistoryListResponse> {
+  return getStrict(RELEASES_URL, parseReleaseHistoryListResponse);
+}
+
+/** Reads one Graph Version's lineage, seven definitions and linked evidence. */
+export async function getGraphRelease(versionNumber: number): Promise<ReleaseDetailResponse> {
+  return getStrict(releaseVersionUrl(versionNumber), parseReleaseDetailResponse);
+}
+
+/** Compares one Graph Version with the active release, per role. */
+export async function compareGraphRelease(versionNumber: number): Promise<ReleaseComparisonResponse> {
+  return getStrict(releaseVersionUrl(versionNumber, '/comparison'), parseReleaseComparisonResponse);
+}
+
+/** Reads what rolling back to one Graph Version now would do. It writes nothing. */
+export async function getRollbackPreview(versionNumber: number): Promise<RollbackPreviewResponse> {
+  return getStrict(releaseVersionUrl(versionNumber, '/rollback-preview'), parseRollbackPreviewResponse);
+}
+
+/**
+ * Publishes one historical Graph Version's exact revisions as the next Graph Version.
+ * The body is exactly `{ lock_version, release_note }`.
+ *
+ * The 200 is strictly parsed. A 409 or 422 throws `AgentDefinitionApiError` whose
+ * `payload` is the strictly parsed `RollbackFailure`; a malformed 200/409/422 is
+ * `InvalidReleaseResponseError`; any other status (403, 404, 500) is a plain
+ * `AgentDefinitionApiError`. Nothing here retries.
+ */
+export async function rollbackGraphRelease(
+  versionNumber: number,
+  request: RollbackRequest,
+): Promise<RollbackSuccessResponse> {
+  const url = releaseVersionUrl(versionNumber, '/rollback');
+  const values: RollbackRequest = { lock_version: request.lock_version, release_note: request.release_note };
+  const body = Object.fromEntries(ROLLBACK_REQUEST_KEYS.map((key) => [key, values[key]]));
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    const restored = parseRollbackSuccessResponse(payload);
+    if (restored === null) throw new InvalidReleaseResponseError();
+    return restored;
+  }
+  if (response.status === 409 || response.status === 422) {
+    const failure = parseRollbackFailure(response.status, payload);
+    if (failure === null) throw new InvalidReleaseResponseError();
+    throw new AgentDefinitionApiError(response.status, failure, response.statusText);
+  }
+  throw new AgentDefinitionApiError(response.status, payload, response.statusText);
+}
