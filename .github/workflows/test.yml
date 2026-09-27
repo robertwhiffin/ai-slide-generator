@@ -728,6 +728,7 @@ jobs:
           - export-csp
           - export-ui
           - findings-drawer
+          - graph-release-history
           - graph-release-review
           - help-ui
           - history-integration
