@@ -56,6 +56,13 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 
+class _ReadinessResult(Protocol):
+    """The part of #268's readiness result the preview reads (informational, C32)."""
+
+    @property
+    def blocking_agents(self) -> tuple[str, ...]: ...
+
+
 _EXPECTED_AGENT_KEYS = frozenset(GRAPH_V1_AGENT_KEYS)
 RELEASE_NOTE_MAX_LENGTH = 2000
 _NOTE_NOT_STRING = DraftValidationIssue(
@@ -362,7 +369,7 @@ class _GraphConfigurationPublication(_GraphConfigurationDraft):
         self,
         session: Session,
         *,
-        readiness: Callable[[Session], object],
+        readiness: Callable[[Session], _ReadinessResult],
     ) -> ReleasePreview:
         """What publishing the shared draft now would change, read-only.
 
@@ -421,7 +428,7 @@ class _GraphConfigurationPublication(_GraphConfigurationDraft):
                     changed=changed,
                     validation_issues=validation_issues,
                     roles_with_required_case=roles_with_required_case,
-                    blocking_agents=readiness_result.blocking_agents,  # type: ignore[attr-defined]
+                    blocking_agents=readiness_result.blocking_agents,
                 ),
             )
 
