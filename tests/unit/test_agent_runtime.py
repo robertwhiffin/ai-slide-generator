@@ -242,7 +242,7 @@ def test_build_reviewer_deck_brief_preserves_conditional_instruction_order():
     assert model.calls[0].prompt == expected
 
 
-def test_code_owned_contract_identities_are_stable_literals():
+def test_manifest_v1_contract_identities_match_stable_literals():
     definitions = {defn.agent_key: defn for defn in load_graph_v1_manifest().definitions}
 
     assert set(definitions) == set(EXPECTED_SCHEMA_DIGESTS)

@@ -101,3 +101,30 @@ Both mutations were restored from explicit file edits (not SHA). Fixture is clea
 2. **Content override test re-uses `load_graph_v1_manifest()` inline** (which is `lru_cache`d). No impact on test isolation.
 
 3. **Pre-existing ruff errors** in `test_deck_level_spec_change.py` (I001, F811×12) and `test_graph_configuration_bootstrap.py` (E501×8, all in comment tables) were not introduced by this task and match their HEAD versions exactly.
+
+---
+
+## Fix Round 1 — 2026-09-27
+
+**Review verdict:** APPROVE with 1 Important, 3 Minor.  
+**Fix commit:** `5193ae9e2` — `test: fix round 1 — rename and strengthen manifest tests (#271)`
+
+### Per-finding table
+
+| Finding | Addressed? | Action |
+|---------|-----------|--------|
+| **Important** — `test_packaged_v1_loader_persisted_release_path_has_v1_byte_parity` compares manifest with itself (tautology) | ADDRESSED | Deleted the test. Assembly through `PackagedGraphV1Loader` is already covered by `test_v1_assembly_matches_independent_historical_replay` (all 7 roles × 2 design_system_active). The `GraphReleaseNotFoundError` check is covered by `test_wrong_release_id_raises_graph_release_not_found_error` in `test_packaged_release_loader.py`. |
+| **Minor** — `content == _definition(agent_key)` at `:426` is a tautology | ADDRESSED | Replaced with `content.prompt_text == load_skill(agent_key).instructions`. Proved non-tautological: mutating architect's `prompt_text` in `agent_definition_manifest_v1.py` made the parametrised test RED for architect; restored from SHA `9f5516b2ae079f5d72ab0c79d67240d6bce604f2`. |
+| **Minor** — `test_code_owned_contract_identities_are_stable_literals` name is misleading | ADDRESSED | Renamed to `test_manifest_v1_contract_identities_match_stable_literals`. |
+| **Minor** — `test_packaged_v1_manifest_matches_exact_compatibility_definitions` name is misleading | ADDRESSED | Renamed to `test_packaged_v1_manifest_hashes_and_contracts_match_stable_literals`. |
+| **Minor** — missing explicit `protected_assembly.version` and `schema_contract.version` checks | ADDRESSED | Added `assert item.schema_contract.version == 1` and `assert item.protected_assembly.version == 1` inside the per-definition loop. |
+
+### Gates (fix round 1)
+
+- **Modified files** (test_prompt_assembler.py, test_agent_runtime.py, test_graph_definition_manifest.py): 292 passed.
+- **Full unit suite** (excluding Task 6's untracked file whose collection error was transient): 2 failed (pre-existing deploy_autoscaling pair) / 7217 passed / 110 skipped.
+- **Ruff**: all three modified files pass with zero errors.
+
+### Mutation (for the line 426 fix)
+
+Appended `XMUTATION.` to the architect `prompt_text` in `src/services/agent_definition_manifest_v1.py`. `test_v1_assembly_matches_independent_historical_replay[False-architect]` went RED (new assert `content.prompt_text == load_skill(...)` failed). Restored from SHA `9f5516b2ae079f5d72ab0c79d67240d6bce604f2`.
