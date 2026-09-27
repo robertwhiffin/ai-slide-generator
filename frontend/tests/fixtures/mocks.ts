@@ -2060,6 +2060,15 @@ const HISTORY_CHANGED: Record<number, AgentKey[]> = {
 };
 
 /**
+ * Noon UTC on 2026-09-(20 + `offset`), rolled by `Date.UTC` into later months, so any
+ * version yields a real instant (v9 is 2026-09-29; v10's successor is 2026-10-01).
+ * Seconds precision with a `Z` suffix, as on the SQLite history wire.
+ */
+function historyInstant(offset: number): string {
+  return new Date(Date.UTC(2026, 8, 20 + offset, 12)).toISOString().replace('.000Z', 'Z');
+}
+
+/**
  * One `GET /releases` row. Timestamps end in `Z` (the SQLite history wire); `active`
  * marks the newest row. `restoredFrom` and `restoredBy` are version numbers.
  */
@@ -2068,7 +2077,7 @@ export function syntheticHistoryEntry(
   options: { active?: boolean; restoredFrom?: number | null; restoredBy?: number[]; supersededBy?: number } = {},
   overrides: Partial<ReleaseHistoryEntry> = {},
 ): ReleaseHistoryEntry {
-  const day = String(20 + versionNumber).padStart(2, '0');
+  const at = historyInstant(versionNumber);
   const next = options.supersededBy ?? versionNumber + 1;
   return {
     release_id: versionNumber + 40,
@@ -2076,9 +2085,9 @@ export function syntheticHistoryEntry(
     is_active: options.active ?? false,
     release_note: versionNumber === 1 ? 'Bootstrap current code-owned Agent Definitions' : `Release note for Graph Version ${versionNumber}`,
     published_by: versionNumber === 1 ? 'system:bootstrap' : 'admin@example.com',
-    published_at: `2026-09-${day}T12:00:00Z`,
-    effective_from: `2026-09-${day}T12:00:00Z`,
-    effective_to: options.active ? null : `2026-09-${String(20 + next).padStart(2, '0')}T12:00:00Z`,
+    published_at: at,
+    effective_from: at,
+    effective_to: options.active ? null : historyInstant(next),
     previous: versionNumber === 1 ? null : releaseRef(versionNumber - 1),
     restored_from: options.restoredFrom == null ? null : releaseRef(options.restoredFrom),
     restored_by: (options.restoredBy ?? []).map(releaseRef),
