@@ -480,6 +480,7 @@ jobs:
             tests/integration/test_claim_exclusivity_postgres.py \
             tests/integration/test_graph_lifecycle_acceptance_postgres.py \
             tests/integration/test_graph_lifecycle_runtime_postgres.py \
+            tests/integration/test_lakebase_contract_failures_postgres.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live"
       - uses: actions/upload-artifact@v4
         if: always()
