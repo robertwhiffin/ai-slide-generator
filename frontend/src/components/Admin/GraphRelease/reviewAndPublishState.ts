@@ -115,7 +115,11 @@ export type RollbackStatus =
 export interface RollbackBlocked {
   reason: RollbackBlock;
   source: ReleaseIdentity;
-  active: ReleaseIdentity;
+  /**
+   * The active release the refusal named, or `null` when it named none: a 422
+   * `rollback_incompatible` carries only the source, which is never the active one.
+   */
+  active: ReleaseIdentity | null;
   issues: DraftFieldError[];
 }
 
@@ -248,7 +252,8 @@ function settlePublish(state: ReviewAndPublishState, action: PublishOutcome): Re
   const settled = { ...state, ...CLEARED_REFUSALS, publishRequestId: null };
   switch (action.type) {
     case 'publishSucceeded':
-      return { ...settled, status: 'published', published: action.result, note: '' };
+      // A shown inspection compared against the old active release: clear it.
+      return { ...settled, status: 'published', published: action.result, note: '', inspection: createInspectionSlice() };
     case 'publishStale':
       return { ...settled, status: 'stale', stale: action.conflict };
     case 'publishNotReady':
@@ -448,7 +453,11 @@ function settleRollback(state: ReviewAndPublishState, action: RollbackOutcome): 
   const settled: Partial<RollbackSlice> = { ...CLEARED_ROLLBACK_REFUSALS, postRequestId: null };
   switch (action.type) {
     case 'rollbackSucceeded':
-      return withRollback(state, { ...settled, status: 'restored', restored: action.result, note: '', noteEdited: false });
+      return {
+        ...withRollback(state, { ...settled, status: 'restored', restored: action.result, note: '', noteEdited: false }),
+        // A shown inspection compared against the old active release: clear it.
+        inspection: createInspectionSlice(),
+      };
     case 'rollbackStale':
       return withRollback(state, { ...settled, status: 'stale', stale: action.conflict });
     case 'rollbackBlocked':
@@ -596,7 +605,7 @@ export function rollbackFailureAction(requestId: number, error: unknown): Review
         return { type: 'rollbackInvalid', requestId, errors: failure.errors };
       case 'rollback_incompatible':
         return { type: 'rollbackBlocked', requestId, blocked: {
-          reason: 'incompatible', source: failure.source, active: failure.source, issues: failure.errors,
+          reason: 'incompatible', source: failure.source, active: null, issues: failure.errors,
         } };
       case 'rollback_source_active':
         return { type: 'rollbackBlocked', requestId, blocked: {
@@ -660,7 +669,8 @@ export function rollbackBlockedMessage(blocked: RollbackBlocked): string {
     case 'source_is_active':
       return `Graph Version ${blocked.source.version_number} is already active.`;
     case 'matches_active':
-      return `Graph Version ${blocked.source.version_number} has the same definitions as the active Graph Version ${blocked.active.version_number}.`;
+      return `Graph Version ${blocked.source.version_number} has the same definitions as ${
+        blocked.active === null ? 'the active Graph Version' : `the active Graph Version ${blocked.active.version_number}`}.`;
     case 'incompatible':
       return `Graph Version ${blocked.source.version_number} cannot be restored: it fails today's validation.`;
   }

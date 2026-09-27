@@ -370,6 +370,21 @@ describe('parseInstant: instants, never strings (Task 6 concern 3)', () => {
     expect(parseInstant('2026-09-27T11:00:00+01:00')).toBe(parseInstant('2026-09-27T10:00:00Z'));
   });
 
+  it('reads a zoneless value as UTC even on a non-UTC host (fix round 1: TZ-independent pin)', () => {
+    const saved = process.env.TZ;
+    try {
+      process.env.TZ = 'Asia/Kolkata';
+      // The switch took effect: local midnight is 05:30 ahead of UTC here.
+      expect(new Date(2026, 0, 1).getTimezoneOffset()).toBe(-330);
+      expect(parseInstant('2026-09-27T10:00:00')).toBe(Date.UTC(2026, 8, 27, 10, 0, 0));
+      expect(parseInstant('2026-09-27T10:00:00.250')).toBe(Date.UTC(2026, 8, 27, 10, 0, 0, 250));
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+    expect(process.env.TZ).toBe(saved);
+  });
+
   it.each(['', 'yesterday', '2026-09-27', '2026-13-40T99:00:00Z'])('refuses %j', (value) => {
     expect(parseInstant(value)).toBeNull();
   });

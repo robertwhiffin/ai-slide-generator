@@ -215,9 +215,11 @@ describe('ReviewAndPublishPage: the preview', () => {
       'Definition Diff',
       'Release History',
     ]);
+    // Buttons and links only: the tabs are pinned exactly above.
     const names = [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link')]
       .map((control) => control.textContent ?? '');
-    expect(names.filter((name) => /rollback|roll back/i.test(name))).toEqual([]);
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.filter((name) => /history|rollback|roll back/i.test(name))).toEqual([]);
     // The history is read only when its tab is opened.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

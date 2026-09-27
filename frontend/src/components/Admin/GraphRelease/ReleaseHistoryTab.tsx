@@ -266,7 +266,7 @@ function RollbackPanel({
             onClick={onReloadRollback}
             className="mt-2 rounded border border-gray-300 bg-white px-3 py-1 text-sm font-medium text-gray-800 hover:bg-gray-50"
           >
-            Reload preview
+            Reload rollback preview
           </button>
         </div>
       )}
