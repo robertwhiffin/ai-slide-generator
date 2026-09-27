@@ -600,8 +600,11 @@ describe('rollbackFailureAction: keyed on the typed code, never on message text'
     expect(rollbackFailureAction(7, failure(422, syntheticRollbackInvalid()))).toEqual({
       type: 'rollbackInvalid', requestId: 7, errors: syntheticRollbackInvalid().errors,
     });
-    expect(rollbackFailureAction(7, failure(422, syntheticRollbackIncompatible()))).toMatchObject({
-      type: 'rollbackBlocked', blocked: { reason: 'incompatible', issues: syntheticRollbackIncompatible().errors },
+    expect(rollbackFailureAction(7, failure(422, syntheticRollbackIncompatible()))).toEqual({
+      type: 'rollbackBlocked',
+      requestId: 7,
+      // Fix round 1 m3: the 422 names no active release, so none is stored (never the source).
+      blocked: { reason: 'incompatible', source: releaseRef(2), active: null, issues: syntheticRollbackIncompatible().errors },
     });
     expect(rollbackFailureAction(7, failure(409, { code: 'rollback_source_active', active_release: releaseRef(4) })))
       .toMatchObject({ type: 'rollbackBlocked', blocked: { reason: 'source_is_active' } });
@@ -644,5 +647,41 @@ describe('rollback labels', () => {
     expect(rollbackBlockedMessage({ ...blocked, reason: 'source_is_active' })).toBe('Graph Version 2 is already active.');
     expect(rollbackBlockedMessage({ ...blocked, reason: 'matches_active' }))
       .toBe('Graph Version 2 has the same definitions as the active Graph Version 4.');
+  });
+});
+
+describe('fix round 1 m5: a success clears a shown inspection (it compared against the old active)', () => {
+  function inspected(state: ReviewAndPublishState): ReviewAndPublishState {
+    return run([
+      { type: 'inspectRequested', requestId: 40, versionNumber: 2 },
+      { type: 'inspectSucceeded', requestId: 40, detail: syntheticReleaseDetail(), comparison: syntheticReleaseComparison() },
+    ], state);
+  }
+
+  it('clears it when a rollback restores', () => {
+    const state = inspected(rollingBack());
+    expect(state.inspection.status).toBe('shown');
+    const restored = reviewAndPublishReducer(state, { type: 'rollbackSucceeded', requestId: 11, result: syntheticRollbackSuccess() });
+    expect(restored.inspection).toEqual(createReviewAndPublishState().inspection);
+  });
+
+  it('clears it when a publish succeeds', () => {
+    const state = inspected(publishing());
+    const published = reviewAndPublishReducer(state, { type: 'publishSucceeded', requestId: 2, result: syntheticPublishSuccess() });
+    expect(published.inspection).toEqual(createReviewAndPublishState().inspection);
+  });
+
+  it('drops a late inspection answer that was in flight across the success', () => {
+    const state = run([{ type: 'inspectRequested', requestId: 40, versionNumber: 2 }], rollingBack());
+    const restored = reviewAndPublishReducer(state, { type: 'rollbackSucceeded', requestId: 11, result: syntheticRollbackSuccess() });
+    const late = reviewAndPublishReducer(restored, {
+      type: 'inspectSucceeded', requestId: 40, detail: syntheticReleaseDetail(), comparison: syntheticReleaseComparison(),
+    });
+    expect(late).toBe(restored);
+  });
+
+  it('keeps a shown inspection through a refused publish or rollback', () => {
+    const stale = reviewAndPublishReducer(inspected(rollingBack()), { type: 'rollbackStale', requestId: 11, conflict: syntheticStaleRollback() });
+    expect(stale.inspection.status).toBe('shown');
   });
 });

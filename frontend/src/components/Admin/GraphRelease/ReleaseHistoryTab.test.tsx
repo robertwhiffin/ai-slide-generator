@@ -223,6 +223,10 @@ describe('Release History: inspection', () => {
     ]);
     expect(HISTORY_ACTIVE_ARCHITECT_PROMPT).toContain('four');
     expect(within(architect).getByTestId('release-comparison-diff-model.temperature')).toHaveTextContent('0.4 → 0.2');
+    // Fix round 1 m6: every diff reads active → historical, not the other way.
+    expect(within(comparison).getByRole('region', { name: 'Builder comparison' })).toHaveTextContent('model.max_tokens');
+    expect(within(comparison).getByTestId('release-comparison-diff-model.max_tokens')).toHaveTextContent('8192 → 4096');
+    expect(comparison).toHaveTextContent('Graph Version 2 against the active Graph Version 4');
     expect(within(comparison).getByRole('region', { name: 'Fixer comparison' })).toHaveTextContent('Same as active');
     expect(calls(fetchMock, 'POST', /./)).toHaveLength(0);
   });
@@ -392,6 +396,27 @@ describe('Release History: confirming a rollback', () => {
     expect(calls(fetchMock, 'POST', ROLLBACK_URL)).toHaveLength(1);
   });
 
+  it('clears a shown inspection once the rollback restores (fix round 1 m5)', async () => {
+    mockHistoryApi({
+      rollbacks: [ok(syntheticRollbackSuccess())],
+      previews: [ok(syntheticReleasePreview()), ok(syntheticRolledBackReleasePreview())],
+      histories: [ok(syntheticReleaseHistory()), ok(syntheticRestoredReleaseHistory())],
+    });
+    render(<ReviewAndPublishPage />);
+    await openHistory();
+    fireEvent.click(within(row(2)).getByRole('button', { name: 'Inspect this version' }));
+    expect(await screen.findByTestId('release-comparison')).toHaveTextContent('against the active Graph Version 4');
+    fireEvent.click(rollBackButton(2));
+    await screen.findByTestId('rollback-lineage');
+
+    fireEvent.click(confirmButton());
+
+    await screen.findByTestId('rollback-success-panel');
+    await screen.findByTestId('release-history-row-5');
+    expect(screen.queryByTestId('release-history-detail')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('release-comparison')).not.toBeInTheDocument();
+  });
+
   it('on a stale 409 names the current lock and active version, keeps the note, and reloads only on request', async () => {
     const fetchMock = mockHistoryApi({
       rollbacks: [() => apiResponse(409, syntheticStaleRollback())],
@@ -412,7 +437,9 @@ describe('Release History: confirming a rollback', () => {
     expect(calls(fetchMock, 'POST', ROLLBACK_URL)).toHaveLength(1);
     expect(calls(fetchMock, 'GET', ROLLBACK_PREVIEW_URL)).toHaveLength(1);
 
-    fireEvent.click(within(alert).getByRole('button', { name: 'Reload preview' }));
+    // Fix round 1 m4: its own name, never the page's `Reload preview`.
+    expect(within(alert).queryByRole('button', { name: 'Reload preview' })).not.toBeInTheDocument();
+    fireEvent.click(within(alert).getByRole('button', { name: 'Reload rollback preview' }));
 
     await screen.findByText('Graph Version 5 will restore Graph Version 2 (predecessor Graph Version 4).');
     await act(async () => {});
