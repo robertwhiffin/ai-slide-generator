@@ -100,3 +100,36 @@ None. All six conversation endpoints expose `graph_version`, `active_graph_versi
 2. **`test_ci_collects_integration_tests.py::test_every_integration_file_is_collected_or_excluded_with_reason` — intermittent flake.** This test failed once in the full suite alongside my files, but passed on every other run (isolated, paired, and the second full-suite run). It passes in isolation and with my tests prepended. The flake is pre-existing (not caused by Task 9 files) and is already noted in the progress ledger.
 
 3. **Task 8 `src/` changes not yet reviewed.** Task 8's fix round committed production changes to `chat.py`, `sessions.py`, and `chat_service.py`. These are outside Task 9's scope. The projection tests confirm the session responses still satisfy AC6 after Task 8's edits.
+
+---
+
+## Fix round 1 — controller sabotage finding
+
+**Finding (controller):** a `GET /api/admin/leaky-diagnostics` route registered directly on `app` in `src/api/main.py` (without `require_admin`) stayed GREEN on all 27 existing inventory tests. Root cause: both `test_app_has_exactly_the_expected_24_admin_route_pairs` and `test_every_admin_route_declares_require_admin` used `_ADMIN_PREFIX = "/api/admin/agent-definitions"`, so any route at `/api/admin/<not-agent-definitions>` was invisible to both checks.
+
+**Fix (TDD, `test_admin_route_authorization_inventory.py` only):**
+
+1. Added `_ALL_ADMIN_PREFIX = "/api/admin"` constant.
+2. Added `EXPECTED_ALL_ADMIN_ROUTES` (35 pairs = the 24 agent-definitions + 11 pre-existing admin routes from `src.api.routes.admin` and `src.api.routes.admin_usage`, all of which already carry `require_admin`).
+3. Added new test `test_every_api_admin_route_is_in_the_known_set` — asserts `app.routes` filtered to `/api/admin` equals `EXPECTED_ALL_ADMIN_ROUTES` exactly.
+4. Updated `test_every_admin_route_declares_require_admin` to use `_ALL_ADMIN_PREFIX`, walking the full namespace.
+
+**Reported finding:** 11 `/api/admin/*` routes exist outside `/api/admin/agent-definitions`:
+- `src.api.routes.admin`: `GET /api/admin/judge-backend`, `PUT /api/admin/judge-backend`, `POST /api/admin/google-credentials`, `GET /api/admin/google-credentials/status`, `DELETE /api/admin/google-credentials`
+- `src.api.routes.admin_usage`: `GET /api/admin/usage/{summary,daily,top-users,funnel,retention,heatmap}`
+
+All 11 carry `require_admin` in their flat dependant tree. No production defect.
+
+**Commit:** `2ef0ba1be` — `test: widen admin route inventory to full /api/admin namespace (#271 Task 9 fix round 1)`
+
+**Mutation result (controller sabotage `GET /api/admin/leaky-diagnostics` on `main.py`):**
+- `test_every_api_admin_route_is_in_the_known_set` — RED (surplus route not in expected set)
+- `test_every_admin_route_declares_require_admin` — RED (leaky route has no require_admin)
+- All other tests — GREEN (28/28 passing; the leaky route is not at the agent-definitions prefix)
+
+Worktree `/Users/robert.whiffin/Documents/slide-gen-branch-eval/t271-9-fix` removed after the sabotage run. `src/api/main.py` restored from explicit SHA `eba136e66`.
+
+**Gates:**
+- Both Task 9 files: 35 passed (28 inventory + 7 projection)
+- Full unit suite: 2 failed (deploy_autoscaling baseline) / 7272 passed / 110 skipped
+- ruff: clean
