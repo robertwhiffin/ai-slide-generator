@@ -4,8 +4,8 @@
 release, for unit tests only.  ``packaged_v1_runtime`` wraps it in the full
 runtime for tests that need a live runtime backed by the known-good v1 definitions.
 
-Neither of these ships in the product: they live here so tests can drive the
-runtime without depending on ``AgentRuntime.compatibility``, which Task 12 deletes.
+Neither of these ships in the product: production resolves only persisted Graph
+Releases.  These let unit tests drive the full runtime without a database.
 """
 
 from __future__ import annotations

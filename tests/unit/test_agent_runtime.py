@@ -564,10 +564,11 @@ def test_agent_runtime_construction_still_fails_closed_on_contract_material_drif
 ):
     """Correction 13: swapping the private v1-only registry keeps the check running.
 
-    ``AgentRuntime.__init__`` used to construct the module-private
-    ``_SchemaContractRegistry``, whose constructor re-derived and compared all seven
-    v1 digests.  It now constructs the one public ``AgentSchemaRegistry``, which must
-    still fail closed on material drift — and does so for v1 *and* v2 material.
+    ``AgentRuntime.__init__`` used to construct a module-private v1-only registry
+    (deleted with the compatibility runtime in #271), whose constructor re-derived
+    and compared all seven v1 digests.  It now constructs the one public
+    ``AgentSchemaRegistry``, which must still fail closed on material drift — and
+    does so for v1 *and* v2 material.
     """
     from types import MappingProxyType
 

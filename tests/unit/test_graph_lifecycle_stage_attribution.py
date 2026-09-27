@@ -197,7 +197,6 @@ def test_every_code_owned_source_is_trapped(monkeypatch) -> None:
     tripwire = CodeDefaultTripwire()
     tripwire.arm(monkeypatch)
     import src.core.skills
-    import src.services.agent_runtime as agent_runtime
     import src.services.graph_definition_manifest as manifest
 
     attempts = {
@@ -209,12 +208,6 @@ def test_every_code_owned_source_is_trapped(monkeypatch) -> None:
         "src.services.agent_definition_manifest_v1": lambda: (
             sys.modules["src.services.agent_definition_manifest_v1"]
         ).GRAPH_VERSION_1_MANIFEST_JSON,
-        "CodeOwnedAgentDefinitionSource.resolve": lambda: (
-            agent_runtime.CodeOwnedAgentDefinitionSource.resolve(None, "architect")
-        ),
-        "CompatibilityResolvedDefinitionLoader.resolve": lambda: (
-            agent_runtime.CompatibilityResolvedDefinitionLoader.resolve(None, 1, "architect")
-        ),
     }
     for name, attempt in attempts.items():
         with pytest.raises(CodeDefaultRead, match=f"read after Graph Version 1: {name}$"):

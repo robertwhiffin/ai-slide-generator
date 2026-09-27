@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import subprocess
@@ -8,7 +7,6 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 from uuid import UUID
@@ -16,10 +14,6 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from scripts.generate_graph_definition_manifest_v1 import (
-    build_manifest_json,
-    render_manifest_module,
-)
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
 from src.core.skills import load_skill
 from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
@@ -685,45 +679,6 @@ def test_manifest_models_forbid_extra_fields_and_incomplete_role_sets():
 def test_assembly_rules_for_rejects_unknown_roles():
     with pytest.raises(ValueError, match="Unknown model-driven agent key"):
         assembly_rules_for("foreman")
-
-
-def test_generator_output_is_deterministic_and_matches_packaged_snapshot():
-    generated_json = build_manifest_json()
-    assert generated_json == GRAPH_VERSION_1_MANIFEST_JSON
-    expected_file = Path("src/services/agent_definition_manifest_v1.py").read_text()
-    assert render_manifest_module(generated_json) == expected_file
-
-
-def test_generated_python_literal_safely_round_trips_arbitrary_prompt_bytes(tmp_path: Path):
-    json_text = json.dumps(
-        {"prompt": "quotes ''' and \"\"\", slashes \\\\, unicode λ, newline\n"},
-        ensure_ascii=False,
-        indent=2,
-    )
-    module_path = tmp_path / "generated_probe.py"
-    module_path.write_text(render_manifest_module(json_text))
-    spec = importlib.util.spec_from_file_location("generated_probe", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.GRAPH_VERSION_1_MANIFEST_JSON == json_text
-
-
-def test_generator_runs_via_documented_direct_script_invocation(tmp_path: Path):
-    output_path = tmp_path / "agent_definition_manifest_v1.py"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "scripts/generate_graph_definition_manifest_v1.py",
-            "--output",
-            str(output_path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert output_path.read_text() == render_manifest_module(build_manifest_json())
 
 
 # ---------------------------------------------------------------------------

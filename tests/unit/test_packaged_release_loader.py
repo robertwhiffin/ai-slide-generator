@@ -1,28 +1,20 @@
 """Test suite for the test-only packaged Graph Version 1 loader.
 
-The parity half of this test (packaged_v1_runtime vs AgentRuntime.compatibility)
-is possible only while the compatibility code still exists.  Task 12 deletes the
-compatibility runtime together with the parity assertion at the bottom of this file.
+Its parity half (``packaged_v1_runtime`` against the code-owned compatibility
+runtime) was deleted with that runtime in #271 Task 12.  The literal content
+hashes below remain the byte-identity oracle.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from src.services.agent_runtime import (
-    MODEL_DRIVEN_AGENT_KEYS,
-    AgentAssemblyContext,
-    AgentModelConfiguration,
-    AgentRuntime,
-)
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
 from src.services.persisted_graph_release import GraphReleaseNotFoundError
-from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
 from tests.fixtures.packaged_release_loader import (
     PACKAGED_GRAPH_VERSION,
     PACKAGED_RELEASE_ID,
     PackagedGraphV1Loader,
-    packaged_v1_runtime,
 )
 
 # The seven packaged v1 content hashes — copied verbatim from
@@ -86,66 +78,3 @@ def test_content_override_changes_only_the_overridden_role():
         resolved = loader_with_override.resolve(PACKAGED_RELEASE_ID, agent_key)
         baseline = loader_baseline.resolve(PACKAGED_RELEASE_ID, agent_key)
         assert resolved.content == baseline.content
-
-
-# ---------------------------------------------------------------------------
-# Parity: packaged_v1_runtime must be byte-identical to AgentRuntime.compatibility.
-# This half is deleted in Task 12 together with the compatibility code itself.
-# ---------------------------------------------------------------------------
-
-
-class _RecordingAdapter:
-    """Minimal model adapter that records every invoke call."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def invoke(
-        self,
-        *,
-        agent_key: str,
-        configuration: AgentModelConfiguration,
-        schema: type,
-        prompt: str,
-    ) -> object:
-        self.calls.append(
-            {
-                "agent_key": agent_key,
-                "configuration": configuration,
-                "schema": schema,
-                "prompt": prompt,
-            }
-        )
-        from pydantic import BaseModel
-        assert issubclass(schema, BaseModel)
-        return schema.model_validate(FAKE_OUTPUTS[agent_key])
-
-
-@pytest.mark.parametrize("agent_key", MODEL_DRIVEN_AGENT_KEYS)
-@pytest.mark.parametrize("design_system_active", [False, True])
-def test_packaged_v1_runtime_prompt_configuration_and_schema_are_identical_to_compatibility(
-    agent_key, design_system_active
-):
-    """Byte-for-byte parity between packaged_v1_runtime and AgentRuntime.compatibility.
-
-    This is only verifiable while the compatibility code still exists.
-    Task 12 deletes AgentRuntime.compatibility together with the comparison half.
-    """
-    payload = {"agent_key": agent_key, "sequence": 7, "optional": None}
-    context = AgentAssemblyContext(design_system_active=design_system_active)
-
-    packed_adapter = _RecordingAdapter()
-    packaged_v1_runtime(model_adapter=packed_adapter).run(agent_key, 1, payload, context)
-
-    compat_adapter = _RecordingAdapter()
-    AgentRuntime.compatibility(model_adapter=compat_adapter).run(agent_key, 1, payload, context)
-
-    assert len(packed_adapter.calls) == 1
-    assert len(compat_adapter.calls) == 1
-
-    packed_call = packed_adapter.calls[0]
-    compat_call = compat_adapter.calls[0]
-
-    assert packed_call["prompt"] == compat_call["prompt"]
-    assert packed_call["configuration"] == compat_call["configuration"]
-    assert packed_call["schema"].model_json_schema() == compat_call["schema"].model_json_schema()
