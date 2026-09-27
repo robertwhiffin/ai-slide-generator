@@ -262,7 +262,7 @@ def test_importing_typed_manifest_does_not_import_static_snapshot():
     assert completed.returncode == 0, completed.stderr
 
 
-def test_packaged_v1_manifest_matches_exact_compatibility_definitions():
+def test_packaged_v1_manifest_hashes_and_contracts_match_stable_literals():
     """Compare manifest against literals and load_skill as a test-side historical record."""
     manifest = load_graph_v1_manifest()
     assert tuple(item.agent_key for item in manifest.definitions) == MODEL_DRIVEN_AGENT_KEYS
@@ -273,7 +273,9 @@ def test_packaged_v1_manifest_matches_exact_compatibility_definitions():
         # equal the shipped skill instructions (C-24: a literal, not an import).
         assert item.prompt_text == load_skill(item.agent_key).instructions
         assert definition_content_hash(item) == PACKAGED_V1_CONTENT_HASHES[item.agent_key]
+        assert item.schema_contract.version == 1
         assert item.schema_contract.digest == V1_SCHEMA_CONTRACT_DIGESTS[item.agent_key]
+        assert item.protected_assembly.version == 1
         assert item.protected_assembly.digest == expected_protected_digest
 
 
