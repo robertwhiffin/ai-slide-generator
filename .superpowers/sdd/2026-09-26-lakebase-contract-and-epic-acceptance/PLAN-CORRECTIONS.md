@@ -1239,3 +1239,24 @@ For each task: does the Files block cover every file the steps (plus the correct
 - **Before Task 12:** C6, C30, C31, C44; the AC10 gate.
 - **Before Task 13:** C43 (**user authorisation**).
 - **Non-blocking:** C28, C29, C32 (Task 8/12 parts), C39, C41, C42, C45.
+
+---
+
+## Corrections 47–51 — errata from the C23 scoped re-review (2026-09-27)
+
+Source: the C23 scoped re-review of C24–C46 at `78728e188` (controller dispatch; verdict GO for Task 2). C25–C32, C34, C36, C39, C41–C46 CONFIRMED; C28 confirmed. Notes: C31 guard 2 must also catch `ast.Import` (`import src.core.skills`); C32's `_default_bundles` lambda must capture the original before patching; C39 matrix is not strictly sorted (use nearest sorted neighbour); C40's text-read list is NOT exhaustive (`AssemblyEditor.tsx`, `template-viewer.spec.ts`, `slideDocument.ts`, `services/api.ts`, …) — any Task touching those files must re-grep the text-read tests.
+
+### Correction 47 — erratum to C24 (BLOCKING Task 8)
+(a) `/chat/async`: an `HTTPException(503)` raised at `chat.py:697` is inside the `try` opened at `:668`; `except Exception` at `:732` turns it into 500. Add an `except HTTPException:` (release the session lock; re-raise) BEFORE `except Exception`, or a typed exception with its own handler. (b) There is NO existing SSE mapping: the safe event (`pinned_graph_configuration_unavailable`) is emitted only inside `_send_message_streaming_graph.run_graph` (`chat_service.py:1913-1950`). At `:1141` the service must yield the typed pinned-config error event before raising (or `chat.py:563` gets an explicit `PersistedConfigurationUnavailableError` branch). (c) ~50 incidental fail-open dependents go RED when resolution is bare: 22 in `tests/unit/test_chat_session_creation.py`; `test_chat_service_no_singleton.py::…test_streaming_calls_build_agent`; `test_session_naming.py::TestSessionNamingInStreaming` ×2; 24 in `tests/integration/test_streaming.py`; `test_api_routes.py::test_chat_async_submit`. Task 8's Files block adds them, plus a fixture patching `src.api.services.chat_service.resolve_engine_mode` for tests that are not about resolution. (d) The `:1141` sabotage needs a resolver that returns `monolith` on the first call and raises on the second (an always-raising resolver fails at the route first, so the `:1141` restore stays GREEN). (e) Accepted and documented: on async and SSE turn 1 the user message (and the async `chat_requests` row) is already persisted before resolution and remains after the 503/error. Lock release: `/chat/stream` releases explicitly before raising at `:490` (the generator's `finally` at `:583` never runs); `/chat/async` in the new `except HTTPException` clause; `:1141` needs nothing extra (the generator's `finally` releases).
+
+### Correction 48 — erratum to C33 (BLOCKING Task 6)
+The C37 harness wires `RecordingAgentInvocationIdentitySink` (`rollback_acceptance:96-103`), so the "zero `persisted_agent_invocation` log records" half of S07 can never go RED there. S07 must ALSO assert the workbench runtime's Recording sink `.calls` is unchanged across S07 (reach it via `workbench._runtime_override._identity_sink`), or parameterise the helper with a `LoggingAgentInvocationIdentitySink`.
+
+### Correction 49 — erratum to C35 (BLOCKING Task 10)
+`CollaborationHistoryResponse` (+ its group model) lives at `src/api/routes/sessions.py:389-416`, not in `src.api.schemas`, and its `model_config` is `{}` (NOT `extra="forbid"`). Task 10 asserts exact key-set equality and uses the dotted path `src.api.routes.sessions.CollaborationHistoryResponse`. `PATCH /{id}/global` has `DeckGlobalPermissionResponse` (`:268`). The rollback log is emitted by `_log_rollback` (`agent_definitions.py:1845-1848`): success extras `{outcome, agent_keys}`, error paths add `error_class` (`:2007-2013`, `:2061-2067`).
+
+### Correction 50 — erratum to C37 (BLOCKING Task 6)
+`sessions.py:69-74` lazily imports `src.core.database.get_db_session`; the `session_manager.get_db_session` patch does not cover it — any stage hitting `GET /api/sessions/{id}/slides` patches `src.core.database.get_db_session` too. `acceptance_stack` builds its own `FastAPI()` and yields `(factory, client, adapter)`: Task 6 uses `client.app.include_router(sessions_router)` (ruling: the smaller change; no shared-helper refactor of #270's file).
+
+### Correction 51 — erratum to C38 (BLOCKING Task 8)
+`_create` calls the manager and service directly, so all 7 creators raise `ActiveGraphReleaseUnavailableError`, never HTTP 503. Task 8 asserts `pytest.raises(ActiveGraphReleaseUnavailableError)` for all 7 through `_create`; the route-level 503 is a separate HTTP parametrisation over the 5 route creators (or cited as owned by `test_conversation_pin_creation.py:291`). The `chat-service-streaming` creator passes `request_id`, so it never reaches `chat_service.py:1141`.

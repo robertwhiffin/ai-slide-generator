@@ -197,3 +197,4 @@ Ruling (Task 13 / #266 m9): NOT run — the dev-workspace probe is the user's to
 Ruling (Task 12): the compatibility runtime has no production caller — deletion proceeds.
 Ruling (C46): Task 8 runs before Task 7.
 Next: the C23 scoped re-review of C24–C46, then Task 2.
+C23 scoped re-review (Opus): GO for Task 2. C24/C33/C35/C37/C38 PARTIAL → errata C47–C51 written (controller). Task 8 proceeds on the controller's C24 ruling with C47's expanded scope (user may override).
