@@ -443,10 +443,11 @@ class _GraphConfigurationRollback(_GraphConfigurationPublication):
     ) -> None:
         """Re-read the draft against the restored release and prove the rebase.
 
-        ``reset`` and ``unchanged`` roles are clean at the restored content, and
-        ``unchanged`` roles also keep their prior candidate; ``kept`` roles keep
-        their exact prior candidate.  Anything else is an integrity error, raised
-        inside the transaction so nothing commits.
+        ``reset`` and ``unchanged`` roles hold exactly the restored content (so
+        ``changed is False``: the core read back a mapping of exactly these
+        revisions); ``kept`` roles keep their exact prior candidate.  Anything
+        else is an integrity error, raised inside the transaction so nothing
+        commits.
         """
         if draft_row.base_release_id != release_row.id:
             raise GraphConfigurationIntegrityError(
@@ -463,11 +464,8 @@ class _GraphConfigurationRollback(_GraphConfigurationPublication):
             if code == "kept":
                 holds = node.draft.candidate_hash == prior_hash
             elif code in ("reset", "unchanged"):
-                holds = (
-                    node.changed is False
-                    and node.draft.candidate_hash
-                    == definition_content_hash(restored[key])
-                    and (code == "reset" or node.draft.candidate_hash == prior_hash)
+                holds = node.draft.candidate_hash == definition_content_hash(
+                    restored[key]
                 )
             else:
                 holds = False

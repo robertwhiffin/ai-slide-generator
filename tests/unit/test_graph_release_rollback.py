@@ -1356,7 +1356,9 @@ def test_a_wrong_draft_effect_is_caught_by_the_rebase_verification(
     assert rollback_artifacts(factory) == before
 
 
-@pytest.mark.parametrize("branch", ["reset_not_clean", "unchanged_moved", "kept_moved"])
+@pytest.mark.parametrize(
+    "branch", ["reset_not_clean", "unchanged_moved", "kept_moved", "not_based"]
+)
 def test_verify_rebased_draft_checks_each_effect(factory, monkeypatch, branch):
     """Direct: each effect's post-condition, against the locked current release."""
     build_v2_to_v7(factory, monkeypatch)
@@ -1387,9 +1389,14 @@ def test_verify_rebased_draft_checks_each_effect(factory, monkeypatch, branch):
                 fixer = nodes["fixer"].draft.content
                 moved = fixer.model_copy(update={"prompt_text": fixer.prompt_text + " moved"})
                 service._assign_locked_candidate(rows["fixer"], moved)
-            else:
+            elif branch == "kept_moved":
                 service._assign_locked_candidate(
                     rows["builder"], nodes["builder"].published.content
+                )
+            else:
+                # A release the draft is not based on (v6; the draft is on v7).
+                release_row = db.scalar(
+                    select(GraphRelease).where(GraphRelease.version_number == 6)
                 )
             db.flush()
             with pytest.raises(GraphConfigurationIntegrityError, match="rebased draft"):
