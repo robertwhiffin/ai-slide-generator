@@ -354,6 +354,7 @@ def test_an_unchanged_draft_previews_nothing_and_is_not_publishable(factory):
 
 
 def test_changed_roles_preview_in_role_order_with_exact_diffs(factory):
+    """Role order is not alphabetical: fixer precedes deck_reviewer."""
     before = _workbench(factory)
     published = {
         node.agent_key: node.published
@@ -361,10 +362,10 @@ def test_changed_roles_preview_in_role_order_with_exact_diffs(factory):
         if node.execution_kind == "model"
     }
     # Saved out of role order on purpose.
-    _save(factory, "builder", "A tuned builder prompt.")
-    _save(factory, "architect", "A tuned architect prompt.")
-    _approve_current(factory, "builder")
-    _approve_current(factory, "architect")
+    _save(factory, "deck_reviewer", "A tuned deck_reviewer prompt.")
+    _save(factory, "fixer", "A tuned fixer prompt.")
+    _approve_current(factory, "deck_reviewer")
+    _approve_current(factory, "fixer")
 
     preview = _preview(factory)
 
@@ -386,7 +387,7 @@ def test_changed_roles_preview_in_role_order_with_exact_diffs(factory):
                 ),
             ),
         )
-        for key in ("architect", "builder")
+        for key in ("fixer", "deck_reviewer")
     )
     assert preview.next_version_number == 2
     assert preview.draft == after.draft
