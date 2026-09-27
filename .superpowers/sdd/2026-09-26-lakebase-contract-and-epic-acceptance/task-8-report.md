@@ -205,3 +205,6 @@ Env: `PYTHONPATH=tree:tree/packages/databricks-tellr`, `DATABASE_URL=sqlite:////
 3. **The async `chat_requests` row is left `pending`** after the 503 (C47(e), accepted). It relies on the existing stuck-request recovery and sweeper to be closed out.
 4. **Planned mutation M6 (`slots=True` restored) stays GREEN.** It is an equivalent mutant under this fix (see the table). M6b and M6c are the decisive mutants.
 5. **The reviewer is reviewing Task 7 concurrently.** This task imports `open_turn_driver`, `GraphTurnDriver`, `MESSAGE`, `RUNTIME_LOGGER` and `TURN_TIMEOUT_SECONDS` from Task 7's file, and it did not modify that file.
+6. **Untracked files from another agent.** Two untracked Task 9 files appeared in the shared tree at about 19:15 UTC: `tests/unit/test_admin_route_authorization_inventory.py` and `tests/unit/test_conversation_graph_version_projection.py`. They are not mine, and I left them untouched.
+   - The 19:23 full-unit run collected them, which accounts for most of the 7232 → 7267 difference.
+   - The failure cause was unchanged: only the deploy_autoscaling pair failed.
