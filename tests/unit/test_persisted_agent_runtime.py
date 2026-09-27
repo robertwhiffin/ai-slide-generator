@@ -26,8 +26,6 @@ from src.services.agent_runtime import (
     AgentInvocationIdentity,
     AgentModelConfiguration,
     AgentRuntime,
-    CodeOwnedAgentDefinitionSource,
-    CompatibilityResolvedDefinitionLoader,
     DatabricksModelAdapter,
     LoggingAgentInvocationIdentitySink,
     ModelProviderUnavailableError,
@@ -67,6 +65,7 @@ from src.services.prompt_assembler import (
 )
 from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
 from tests.fixtures.log_records import rendered_record
+from tests.fixtures.packaged_release_loader import PackagedGraphV1Loader
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -1037,8 +1036,10 @@ def test_runtime_logging_sink_success_record_is_identity_outcome_and_optional_pr
     assert record.additional_field_names == []
 
 
-def test_compatibility_loader_constructs_exact_synthetic_persisted_definitions():
-    loader = CompatibilityResolvedDefinitionLoader(CodeOwnedAgentDefinitionSource())
+def test_packaged_v1_loader_constructs_exact_synthetic_persisted_definitions():
+    from src.services.persisted_graph_release import GraphReleaseNotFoundError
+
+    loader = PackagedGraphV1Loader()
 
     for agent_key in GRAPH_V1_AGENT_KEYS:
         resolved = loader.resolve(1, agent_key)
@@ -1050,7 +1051,7 @@ def test_compatibility_loader_constructs_exact_synthetic_persisted_definitions()
         assert set(parsed.schema_contract.model_dump()) == {"version", "digest"}
         assert resolved.content_hash == definition_content_hash(parsed)
 
-    with pytest.raises(ValueError, match="requires graph release 1"):
+    with pytest.raises(GraphReleaseNotFoundError):
         loader.resolve(2, "architect")
 
 
@@ -1059,7 +1060,7 @@ def test_get_agent_runtime_uses_persisted_loader_and_logging_sink():
 
     get_agent_runtime.cache_clear()
     runtime = get_agent_runtime()
-    assert not isinstance(runtime._persisted_release_loader, CompatibilityResolvedDefinitionLoader)
+    assert not isinstance(runtime._persisted_release_loader, PackagedGraphV1Loader)
     assert isinstance(runtime._model_adapter, DatabricksModelAdapter)
     assert isinstance(runtime._identity_sink, LoggingAgentInvocationIdentitySink)
     get_agent_runtime.cache_clear()

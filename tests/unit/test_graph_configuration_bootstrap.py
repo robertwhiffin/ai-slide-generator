@@ -26,8 +26,6 @@ from src.database.models.graph_configuration import (
 )
 from src.services.agent_runtime import (
     AgentAssemblyContext,
-    AgentRuntime,
-    CodeOwnedAgentDefinitionSource,
 )
 from src.services.graph_configuration import (
     REQUIRED_SMOKE_PAYLOADS,
@@ -41,6 +39,7 @@ from src.services.graph_definition_manifest import (
     definition_content_hash,
     load_graph_v1_manifest,
 )
+from tests.fixtures.packaged_release_loader import packaged_v1_runtime
 
 EXPECTED_REQUIRED_SMOKE_PAYLOADS = {
     "architect": {
@@ -411,9 +410,7 @@ def test_required_cases_pass_unchanged_through_current_runtime_adapter_seam(
             return schema.model_validate(valid_output_values[agent_key])
 
     adapter = RecordingAdapter()
-    runtime = AgentRuntime.compatibility(
-        definition_source=CodeOwnedAgentDefinitionSource(), model_adapter=adapter
-    )
+    runtime = packaged_v1_runtime(model_adapter=adapter)
     for case in cases:
         before = json.loads(json.dumps(case.synthetic_payload))
         runtime.run(

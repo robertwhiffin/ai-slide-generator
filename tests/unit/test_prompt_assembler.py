@@ -28,10 +28,7 @@ from src.core.skills.data_analyst import (
 )
 from src.services import prompt_assembler
 from src.services.agent_runtime import (
-    TEST_COMPATIBILITY_GRAPH_RELEASE_ID,
     AgentAssemblyContext,
-    CodeOwnedAgentDefinitionSource,
-    CompatibilityResolvedDefinitionLoader,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
 from src.services.graph_definition_manifest import (
@@ -53,6 +50,10 @@ from src.services.prompt_assembler import (
     PromptAssemblyRejected,
     ProtectedAssemblyBundleUnavailable,
     protected_assembly_v2_digest,
+)
+from tests.fixtures.packaged_release_loader import (
+    PACKAGED_RELEASE_ID,
+    PackagedGraphV1Loader,
 )
 
 HOSTILE = {
@@ -421,11 +422,7 @@ def test_v1_assembly_matches_independent_historical_replay(
 ) -> None:
     """Catches any reinterpretation of frozen v1 blocks, JSON, identity, or bytes."""
     payload = {"deck_brief": "brief"} if agent_key == "build_reviewer" else {"x": 1}
-    content = (
-        CompatibilityResolvedDefinitionLoader(CodeOwnedAgentDefinitionSource())
-        .resolve(TEST_COMPATIBILITY_GRAPH_RELEASE_ID, agent_key)
-        .content
-    )
+    content = PackagedGraphV1Loader().resolve(PACKAGED_RELEASE_ID, agent_key).content
     assert content == _definition(agent_key)
     value = PromptAssembler().assemble(
         definition=content,
@@ -455,10 +452,12 @@ def test_v1_assembly_matches_independent_historical_replay(
     assert value.prompt == "\n\n".join(parts)
 
 
-def test_compatibility_persisted_release_path_has_v1_byte_parity() -> None:
-    """Catches divergence between #261's resolved content and raw assembler v1 execution."""
-    loader = CompatibilityResolvedDefinitionLoader(CodeOwnedAgentDefinitionSource())
-    resolved = loader.resolve(TEST_COMPATIBILITY_GRAPH_RELEASE_ID, "architect")
+def test_packaged_v1_loader_persisted_release_path_has_v1_byte_parity() -> None:
+    """Catches divergence between the packaged manifest content and raw assembler v1 execution."""
+    from src.services.persisted_graph_release import GraphReleaseNotFoundError
+
+    loader = PackagedGraphV1Loader()
+    resolved = loader.resolve(PACKAGED_RELEASE_ID, "architect")
     actual = PromptAssembler().assemble(
         definition=resolved.content,
         payload={"x": 1},
@@ -470,8 +469,8 @@ def test_compatibility_persisted_release_path_has_v1_byte_parity() -> None:
         context=AgentAssemblyContext(False),
     )
     assert actual.prompt == direct.prompt
-    with pytest.raises(ValueError):
-        loader.resolve(TEST_COMPATIBILITY_GRAPH_RELEASE_ID + 1, "architect")
+    with pytest.raises(GraphReleaseNotFoundError):
+        loader.resolve(PACKAGED_RELEASE_ID + 1, "architect")
 
 
 def test_protected_stage_view_exposes_locked_exact_display_without_live_payload() -> None:

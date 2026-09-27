@@ -1003,7 +1003,8 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
     """
     from src.core.skills import load_skill
     from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
-    from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+    from src.services.agent_runtime import AgentAssemblyContext
+    from tests.fixtures.packaged_release_loader import packaged_v1_runtime
 
     class Capture:
         def __init__(self):
@@ -1023,7 +1024,7 @@ def test_the_deck_brief_block_is_added_only_when_a_deck_brief_is_present():
     baseline = str(skill.instructions)
     build_payload = {"position": 0, "html": "<div>x</div>", "scripts": ""}
     capture = Capture()
-    runtime = AgentRuntime.compatibility(model_adapter=capture)
+    runtime = packaged_v1_runtime(model_adapter=capture)
 
     runtime.run("build_reviewer", 1, build_payload, AgentAssemblyContext(False))
     runtime.run(
@@ -1056,8 +1057,9 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
     from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE
     from src.core.skills import load_skill
     from src.core.skills.build_reviewer import DECK_BRIEF_REVIEW
-    from src.services.agent_runtime import AgentAssemblyContext, AgentRuntime
+    from src.services.agent_runtime import AgentAssemblyContext
     from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+    from tests.fixtures.packaged_release_loader import packaged_v1_runtime
 
     class Capture:
         def __init__(self):
@@ -1082,7 +1084,7 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
     }
     for design_system_active in (False, True):
         capture = Capture()
-        AgentRuntime.compatibility(model_adapter=capture).run(
+        packaged_v1_runtime(model_adapter=capture).run(
             "build_reviewer",
             1,
             payload,
