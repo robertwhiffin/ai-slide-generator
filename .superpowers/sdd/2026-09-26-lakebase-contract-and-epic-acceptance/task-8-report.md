@@ -208,3 +208,59 @@ Env: `PYTHONPATH=tree:tree/packages/databricks-tellr`, `DATABASE_URL=sqlite:////
 6. **Untracked files from another agent.** Two untracked Task 9 files appeared in the shared tree at about 19:15 UTC: `tests/unit/test_admin_route_authorization_inventory.py` and `tests/unit/test_conversation_graph_version_projection.py`. They are not mine, and I left them untouched.
    - The 19:23 full-unit run collected them, which accounts for most of the 7232 → 7267 difference.
    - The failure cause was unchanged: only the deploy_autoscaling pair failed.
+
+## Fix round 1 (review: 0 Critical, 0 Important, 4 Minor, plus the concern-1 ruling)
+**Commit:** `ad0f5753e` `fix: contribute refuses with the typed 503 and the async 503 is scoped to resolution (#271 Task 8 fix round 1)`.
+
+- **Commit hygiene: a mistake, caught and corrected before anything else ran.** The Task 9 agent had *staged* its two unit files, so my first commit of this round (`7accdcecb`) swept them in, even though I added only my own paths.
+  - I amended at once: `git rm --cached` on the two files, then `--amend`. The result is `ad0f5753e`, which touches only my 6 files.
+  - I then re-staged their two files, so the other agent's index state is exactly as it left it: `A` for both.
+  - `7accdcecb` is unreachable. From here on, every commit uses `git commit -- <paths>`.
+
+| Finding | Status | Change |
+|---|---|---|
+| **Concern 1** (ruling: fix). Contribute answers 500 with no active release. | Addressed | `sessions.py`: the contribute route's parent read (`SessionManager.get_session`) catches `ConversationGraphReleaseIntegrityError`. **Only** when `_active_graph_release_exists(db)` is false (a read-only query on the route's own `db`) does it raise `ActiveGraphReleaseUnavailableError`, which the route's existing clause maps to 503 "No active Graph Release available". Any other integrity fault is re-raised, so it keeps answering the generic 500. No row is written and no internal text leaks. The PostgreSQL HTTP test is inverted: `contributor` now expects `_NO_ACTIVE`, the FINDING comment is replaced, and the module docstring is corrected. There are 2 new unit tests in `test_conversation_pin_creation.py`: no active release gives 503 and no row; an active release plus an integrity error still gives 500. |
+| **M2.** Scope the async typed `except` to resolution. | Addressed | `chat.py` `/chat/async`: only the resolve call converts the typed error, into the private `_EngineModeUnresolvedError`. The outer clause catches only that sentinel, releases the lock and raises the 503 from the original cause. New unit test: `add_message` raising `PersistedConfigurationUnavailableError` gets the generic 500 "Internal server error", nothing is enqueued, and the lock is released once. |
+| **M3.** Give operators the cause. | Addressed | `resolve_engine_mode_or_unavailable` adds `logger.debug("Engine-mode resolution failure cause", exc_info=True)`. The ERROR record is unchanged: class name only, no `exc_info`. New unit test: exactly one ERROR record (no `exc_info`, `error_class == "RuntimeError"`, no internal text) and exactly one DEBUG record carrying the exception. |
+| **M4.** Healthy-turn lock release. | Addressed | `TestStreamingRoute::test_a_graph_mode_session_reaches_the_service_as_graph` now asserts `release_session_lock.assert_called_once_with(sid)`. |
+| **M1** (ruling: document only). Empty session left by a chat-generated-id 503. | Documented | See below. |
+
+**M1, C47(e) residue.** On the chat-generated-id path (a `/chat/stream` or `/chat/async` with no `session_id`, or with a client id that does not exist yet), `_maybe_create_session` creates, and commits, the `user_sessions` row *before* the session lock is taken and *before* engine-mode resolution.
+- If resolution then fails closed (503 `lakebase_unavailable`), that new session row remains.
+- On `/chat/stream` it is empty. On `/chat/async` it also has the `chat_requests` row and the user message, which C47(e) already covers.
+
+This is accepted residue under C47(e). No deletion was added, per the ruling: a compensating delete would be a second write during the same outage. The client did not receive a `session_id` from the 503, but a client-generated id is reusable on retry.
+
+**Gates (fix round 1).** Every PostgreSQL run below had zero skips.
+
+| Gate | Result |
+|---|---|
+| `test_engine_mode_wiring.py` | 41 passed |
+| `test_conversation_pin_creation.py` | 16 passed |
+| `test_deck_contributor_routes.py` | 11 passed |
+| `test_sessions_error_sanitization.py` | 4 passed |
+| `test_security_permission_checks.py` | 14 passed |
+| New PostgreSQL file | 22 passed |
+| Task 7 `test_graph_lifecycle_runtime_postgres.py` | 2 passed |
+| Task 6 lifecycle acceptance | 1 passed |
+| `test_conversation_pin_creation_postgres.py` | 2 passed |
+| C47(c) files: `test_chat_session_creation` / `test_chat_service_no_singleton` / `test_session_naming` / `test_streaming` / `test_api_routes` | 49 / 9 / 17 / 28 / 87 (the 2 pre-existing MLflow skips) |
+| CI collection | 25 passed |
+| Full unit (`-n 4`; UTC 19:52:03–19:54:22) | 2 failed / 7271 passed / 110 skipped. The 2 failures are exactly the deploy_autoscaling pair. |
+| ruff | No count went up: `sessions.py` 10→10, `chat.py` 8→8, `chat_service.py` 125→125, test files 0 new. The new file is format-clean. |
+
+`tellr_int_*`: 5 databases, unchanged.
+
+**Mutations (fix round 1).**
+- They ran in my own temp worktree `t271-8-mut`, detached at `ad0f5753e`, which has since been removed.
+- Each file was restored with `git checkout ad0f5753e -- <file>`, and a clean diff and porcelain status were asserted.
+- The runner is `reports/t271-8-fix1-run_mut.py`.
+
+| # | Mutation | Result |
+|---|---|---|
+| F1a | Parent-read mapping removed (back to 500) | RED: the unit 503 test and PostgreSQL `route_creator[contributor]` |
+| F1b | Every parent integrity error mapped to 503 (mislabel) | RED: the unit "active release keeps the generic 500" test |
+| F2 | The async typed `except` widened back over the whole `try` | RED: the unit `test_only_the_resolve_call_is_labelled…`. The PostgreSQL async test stays GREEN, as expected: there the failure is in resolution, which is correctly a 503. |
+| F3a | DEBUG cause log removed | RED: `…redacted_and_the_cause_is_logged_at_debug` |
+| F3b | `exc_info=True` added to the ERROR record | RED: the same test |
+| F4 | The SSE generator's `finally` lock release removed | RED: `TestStreamingRoute::test_a_graph_mode_session_reaches_the_service_as_graph` |
