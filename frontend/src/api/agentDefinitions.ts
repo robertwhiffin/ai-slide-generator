@@ -1667,7 +1667,7 @@ export interface TestRunVerdictRequest {
   notes: string | null;
 }
 
-export type TestRunIneligibilityReason = 'not_completed' | 'checks_failed';
+export type TestRunIneligibilityReason = 'not_completed' | 'checks_failed' | 'linked_to_release';
 
 /**
  * The verdict route's typed refusals. Nothing was written for any of them; the reviewer
@@ -1696,7 +1696,7 @@ export class TestRunVerdictApiError extends Error {
 export const TEST_RUN_NOT_FOUND_DETAIL = 'Test run not found';
 
 const VERDICT_REQUEST_KEYS = ['verdict', 'notes'] as const;
-const INELIGIBILITY_REASONS: readonly TestRunIneligibilityReason[] = ['not_completed', 'checks_failed'];
+const INELIGIBILITY_REASONS: readonly TestRunIneligibilityReason[] = ['not_completed', 'checks_failed', 'linked_to_release'];
 
 function parseTestRunVerdictFailure(status: number, payload: unknown): TestRunVerdictFailure | null {
   if (!isPlainRecord(payload)) return null;

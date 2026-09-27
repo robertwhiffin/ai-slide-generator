@@ -1818,12 +1818,17 @@ export function syntheticDraftReadinessBody(
 }
 
 /** The route's exact 422 for a verdict the run cannot carry (nothing was written). */
-export function syntheticVerdictIneligible(reason: 'not_completed' | 'checks_failed' = 'checks_failed') {
+export function syntheticVerdictIneligible(
+  reason: 'not_completed' | 'checks_failed' | 'linked_to_release' = 'checks_failed',
+) {
+  const messages = {
+    not_completed: 'Only a completed run can take a verdict.',
+    checks_failed: 'A run whose deterministic checks failed cannot be approved.',
+    linked_to_release: 'This run is evidence for a published Graph Version; its verdict cannot change.',
+  } as const;
   return {
     code: 'ineligible_for_approval' as const,
     reason,
-    message: reason === 'not_completed'
-      ? 'Only a completed run can take a verdict.'
-      : 'A run whose deterministic checks failed cannot be approved.',
+    message: messages[reason],
   };
 }

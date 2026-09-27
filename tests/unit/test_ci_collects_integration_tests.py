@@ -369,3 +369,20 @@ def test_graph_release_session_ordering_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its creator-versus-publication lock-order "
         "assertions must execute against PostgreSQL."
     )
+
+
+def test_graph_release_evidence_is_collected_by_integration_graph():
+    """#269's approval evidence gate belongs in the graph CI job.
+
+    Its case-row and run-row lock order, the cleanup and verdict races, the
+    rollback of evidence links and the linked-verdict trigger need real
+    PostgreSQL row locks, triggers and backend PIDs, none of which SQLite can
+    express.
+    """
+    target = "tests/integration/test_graph_release_evidence_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its evidence lock-order, race and "
+        "linked-verdict trigger assertions must execute against PostgreSQL."
+    )

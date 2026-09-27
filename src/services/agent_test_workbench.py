@@ -500,7 +500,7 @@ class TestRunNotFound(LookupError):  # noqa: N818 - stable public domain name
 
 
 VerdictChoice = Literal["approved", "rejected"]
-IneligibleReason = Literal["not_completed", "checks_failed"]
+IneligibleReason = Literal["not_completed", "checks_failed", "linked_to_release"]
 
 MAX_VERDICT_NOTES_LENGTH = 2000
 _VERDICT_CHOICES: tuple[str, ...] = ("approved", "rejected")
@@ -1484,8 +1484,10 @@ class AgentTestWorkbench:
         model or runtime is touched (C27).  A run that did not complete takes no
         verdict; an approval also needs passing checks.  An identical re-submit
         writes nothing; any difference re-stamps all four columns, ``verdict_at``
-        from the database clock.  An ``IntegrityError`` (the DDL checks, or a
-        later linked-verdict trigger) propagates unchanged (C7).
+        from the database clock.  A run linked to a release as evidence takes no
+        verdict change (#269 C48, ``linked_to_release``).  An ``IntegrityError``
+        (the DDL checks, or #269's linked-verdict trigger on a direct write)
+        propagates unchanged (C7).
         """
         issues = [
             *_actor_issues(reviewer),
@@ -1499,6 +1501,13 @@ class AgentTestWorkbench:
             row = session.scalar(_verdict_lock_statement(run_id))
             if row is None:
                 raise TestRunNotFound(run_id)
+            # #269 C48: a NEW statement after the L3 lock (C33), so a publication
+            # that linked this run while the lock waited is seen.  The linked-
+            # verdict trigger stays the backstop for direct writes.
+            if session.scalar(
+                select(exists().where(GraphReleaseTestRun.agent_test_run_id == run_id))
+            ):
+                raise IneligibleForApprovalError(run_id, "linked_to_release")
             if row.execution_status != "completed":
                 raise IneligibleForApprovalError(run_id, "not_completed")
             if verdict == "approved" and not row.deterministic_checks_passed:
