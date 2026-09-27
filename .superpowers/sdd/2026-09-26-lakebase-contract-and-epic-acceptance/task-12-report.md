@@ -159,3 +159,51 @@ The mutation runner is at `/Users/robert.whiffin/Documents/slide-gen-branch-eval
 2. **Guard 2 does not catch dynamic imports.** `importlib.import_module("src.core.skills")` and `__import__` are invisible to the AST walk. The C6 tripwire (`_SKILLS` trap) still covers runtime reads during the lifecycle journey.
 3. **The ledger's superset check reads the private `PromptAssembler()._bundles`.** There is no public enumeration. Renaming the attribute would turn it RED with `AttributeError`, which is loud, not silent.
 4. **Nothing structurally forbids a new generator script under `scripts/`,** since the guards scan only `src/`. Any such script would have no code-owned source to import, because guard 1 keeps the deleted classes gone.
+
+---
+
+## Fix round 1 — 2026-09-27
+
+**Review verdict:** APPROVE WITH FIXES (1 Important, 1 Minor).
+**Fix commit:** `2f6e4673f` — `test: guard 2 resolves relative skills imports; note the frozen v1 snapshot (#271 Task 12 fix round 1)`
+
+### Per-finding table
+
+| Finding | Status | Action |
+|---------|--------|--------|
+| **I1.** Guard 2 skipped relative imports (`node.level == 0`), so the reviewer's probe stayed GREEN | ADDRESSED | See below. |
+| **M1.** Record that the v1 snapshot is frozen and has no generator | ADDRESSED | One sentence added to the module docstring of `src/services/graph_definition_manifest.py`, which is where `load_graph_v1_manifest` lives. It says `agent_definition_manifest_v1.py` is a frozen artefact with no generator since #271, and that its content hashes are pinned by `PACKAGED_V1_CONTENT_HASHES`. `agent_definition_manifest_v1.py` is untouched. Guard 3 is unaffected: this file was already in its expected reader set. |
+
+**How I1 was fixed:**
+- `_package_of(path)` gives the dotted package of a `src/` file: its directory, whether it is a module or an `__init__.py`.
+- `_absolute_module` resolves each `ImportFrom` the way the import system does. Level 1 is the file's own package, and each further level drops one parent.
+- `_skills_imports_in(source, package)` applies the same allowlist to the resolved module. It also catches the parent-package form (`from ..core import skills` and `from . import skills` resolve to `src.core.skills`, name `*`).
+- A relative import that climbs above `src` is reported as an offender and never skipped.
+- 12 synthetic-source cases pin every spelling: absolute, `import`, `from src.core import skills`, the reviewer's probe verbatim, `from ..core import skills`, a three-level import, `from . import skills`, `from .skills import …`, a function-level relative import, an unresolvable level, and two negatives. One more case pins `_package_of`.
+- TDD: the new cases were RED first (12 failed, NameError) and GREEN after the fix.
+
+### Gates
+
+- Guard file and ledger: 36 passed (18 + 18). With `test_graph_definition_manifest.py` added: 134 passed.
+- Full unit suite: 2 failed / 7436 passed / 110 skipped. The 2 are `test_deploy_autoscaling.py` ×2, the same cause set as the baseline.
+- ruff: clean on both changed files.
+
+### Mutations
+
+These ran in the temp worktree `t271-12-mut`. Each was restored with `git checkout 2f6e4673f -- src tests`, `git status` was clean afterwards, and the worktree was removed.
+
+| # | Mutation | Actual |
+|---|----------|--------|
+| P0 | **The reviewer's probe at the pre-fix SHA `2698aa414`:** `from ..core.skills import load_skill as _probe` appended to `persisted_graph_release.py` | GREEN (5 passed). This reproduces the finding. Restored from `2698aa414`. |
+| F1 | the same probe at `2f6e4673f` | **RED:** `test_no_src_module_reads_code_owned_agent_definitions` |
+| F2 | `from ..core import skills` in `persisted_graph_release.py` | RED: guard 2 |
+| F3 | `from ...core.skills.data_analyst import INSTRUCTIONS` in `graph/nodes.py` | RED: guard 2 |
+| F4 | `from . import skills` in `src/core/defaults.py` | RED: guard 2 |
+| F5 | a function-level `from ..core.skills import load_skill` in `persisted_graph_release.py` | RED: guard 2 |
+| F6 | guard sabotage: restore the `level == 0` skip, and apply F1's probe | RED: 7 synthetic cases. The whole-`src` guard alone went GREEN, which reproduces the gap; the synthetic cases catch it. |
+| F7 | guard sabotage: off-by-one level resolution | RED: 6 synthetic cases |
+| F8 | guard sabotage: skip unresolvable relative imports | RED: the unresolvable-level case |
+
+### Open
+
+None from this round. The earlier concerns still stand: the controller must run the Playwright journeys, and the S17 erratum for the reviewer sabotage still needs writing.
