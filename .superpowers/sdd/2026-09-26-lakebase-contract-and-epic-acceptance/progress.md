@@ -163,3 +163,7 @@ Task 5: review (Sonnet): spec PASS, quality PASS — 0 Critical, 0 Important, 3 
 Task 5: fix round 1/5 (controller, 3 addressed, 0 open; `52972f731`): comments corrected in all three manifests; test parses the declared string directly. GREEN 5/5; root-bound sabotage re-run RED 1/5, restored; ruff clean.
 Ruling: no scoped re-review — comment edits plus a two-line test simplification, re-sabotaged by the controller. Cost if wrong: none.
 Task 5: complete (commits `04abb2d25..52972f731`). Phase A (Tasks 0-A, 1, 5) complete; Phase B waits for #268, #269, #270 merges.
+
+## Phase B start — 2026-09-27
+#268 merged `16aa02b76`, #269 merged `c7ea1d943`, #270 merged `12a521dc7` (all locally, all whole-branch reviewed). #271 rebased cleanly onto `12a521dc7` (12 commits, no conflicts). INTEGRATION_BASE = `12a521dc7`.
+Carries into #271 Phase B: (1) C7/Task 8 — `resolve_engine_mode_or(..., fallback="monolith")` at `src/api/routes/chat.py:~490, ~697` silently falls back to the monolith on a DB failure; (2) the id-equals-version carry from #270 is CLOSED (whole-branch review found none across #268/#269/#270); (3) epic-level review must cover: the Q7 rollback caveat (accepted), the C32 endpoint-policy on rollback, `test_usage_service` midnight flake, `test_shared_deck_mutation_attribution` intermittent hang, `test_dependencies_resolve_on_proxy` network dependency; (4) all L0 locks via `_lock_current_parents` (AST scanner); (5) the forbidden-action count is 8; (6) CI has no ESLint job (found by #270's review — N2).
