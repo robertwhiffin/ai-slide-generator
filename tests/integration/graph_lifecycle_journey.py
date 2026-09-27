@@ -53,12 +53,16 @@ v2 = id 3, v3 = id 4).
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import subprocess
 import sys
 import types
+import typing
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1700,3 +1704,239 @@ def lifecycle_journey(acceptance_stack, monkeypatch) -> Iterator[LifecycleJourne
     factory, client, adapter = acceptance_stack
     with contextlib.ExitStack() as stack:
         yield open_journey(factory, client, adapter, monkeypatch, stack)
+
+
+# ---------------------------------------------------------------------------
+# The recorded contract (Task 10, AC9): the journey's exchanges as the fixture the
+# admin Playwright journey replays.  Additive: nothing above calls this.
+# ---------------------------------------------------------------------------
+
+CONTRACT_VERSION = 1
+CONTRACT_PATH = Path(__file__).resolve().parents[2] / (
+    "frontend/tests/fixtures/graphLifecycleContract.json"
+)
+CONTRACT_EXCHANGE_KEYS = (
+    "id",
+    "method",
+    "path",
+    "request",
+    "status",
+    "body",
+    "response_model",
+    "request_model",
+)
+
+#: Routes that read their body by hand (strict ``model_validate``), so FastAPI does
+#: not know their request model.  Keyed by endpoint function name.
+_MANUAL_REQUEST_MODELS: dict[str, str] = {
+    "save_agent_definition_draft": "src.api.schemas.agent_definitions.DraftSaveRequest",
+    "upgrade_agent_definition_protected_assembly": (
+        "src.api.schemas.agent_definitions.DraftLockRequest"
+    ),
+    "upgrade_agent_definition_schema_contract": (
+        "src.api.schemas.agent_definitions.DraftLockRequest"
+    ),
+    "execute_agent_candidate_test_run": (
+        "src.api.schemas.agent_definitions.CandidateTestRunRequest"
+    ),
+    "record_agent_test_run_verdict": "src.api.schemas.agent_definitions.VerdictRequest",
+    "publish_graph_release": "src.api.schemas.graph_releases.PublishReleaseRequest",
+    "rollback_graph_release": "src.api.schemas.graph_release_history.RollbackRequest",
+}
+#: Statuses a route returns through a hand-built ``JSONResponse`` without declaring
+#: them in ``responses=`` (``_conflict_response``'s 409).
+_UNDECLARED_RESPONSE_MODELS: dict[tuple[str, int], str] = {
+    ("save_agent_definition_draft", 409): (
+        "src.api.schemas.agent_definitions.DraftSaveConflictResponse"
+    ),
+}
+
+
+def _dotted(model: Any) -> str:
+    return f"{model.__module__}.{model.__qualname__}"
+
+
+def _route_for(method: str, path: str):
+    from fastapi.routing import APIRoute
+    from starlette.routing import Match
+
+    scope = {"type": "http", "method": method, "path": path.split("?", 1)[0]}
+    routes = [*agent_definition_routes.router.routes, *sessions_routes.router.routes]
+    for route in routes:
+        if isinstance(route, APIRoute) and route.matches(scope)[0] is Match.FULL:
+            return route
+    raise LookupError(f"no shipped route serves {method} {path}")
+
+
+def _union_member_for(model: Any, body: Any) -> Any:
+    """The member of a declared ``A | B`` response whose ``code`` literal is the body's."""
+    members = typing.get_args(model)
+    if not members:
+        return model
+    code = body.get("code") if isinstance(body, dict) else None
+    matches = [
+        member
+        for member in members
+        if code in typing.get_args(member.model_fields["code"].annotation)
+    ]
+    assert len(matches) == 1, (model, code)
+    return matches[0]
+
+
+def exchange_models(
+    method: str, path: str, status: int, request: Any, body: Any
+) -> tuple[str | None, str | None]:
+    """``(response_model, request_model)`` dotted paths the SHIPPED route uses.
+
+    ``None`` means that side has no model: the sessions routes' plain dicts (C21),
+    FastAPI's ``{"detail": ...}`` errors, and an exchange that sent no body.
+    """
+    route = _route_for(method, path)
+    name = route.endpoint.__name__
+    if request is None:
+        request_model: str | None = None
+    elif name in _MANUAL_REQUEST_MODELS:
+        request_model = _MANUAL_REQUEST_MODELS[name]
+    elif route.body_field is not None:
+        request_model = _dotted(route.body_field.type_)
+    else:
+        request_model = None
+
+    success = route.status_code or 200
+    if status == success:
+        response = route.response_model
+    elif (name, status) in _UNDECLARED_RESPONSE_MODELS:
+        return _UNDECLARED_RESPONSE_MODELS[(name, status)], request_model
+    else:
+        declared = (route.responses or {}).get(status) or {}
+        response = declared.get("model")
+    if response is None:
+        return None, request_model
+    return _dotted(_union_member_for(response, body)), request_model
+
+
+def build_contract(exchanges: list[RecordedExchange], recorded_at_commit: str) -> dict:
+    """The contract document for ``exchanges``, in recording (stage) order."""
+    rows = []
+    for exchange in exchanges:
+        response_model, request_model = exchange_models(
+            exchange.method, exchange.path, exchange.status, exchange.request, exchange.body
+        )
+        row = {
+            "id": exchange.id,
+            "method": exchange.method,
+            "path": exchange.path,
+            "request": exchange.request,
+            "status": exchange.status,
+            "body": exchange.body,
+            "response_model": response_model,
+            "request_model": request_model,
+        }
+        assert tuple(row) == CONTRACT_EXCHANGE_KEYS
+        rows.append(row)
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "recorded_at_commit": recorded_at_commit,
+        "exchanges": rows,
+    }
+
+
+def _value_shape(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _value_shape(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_value_shape(item) for item in value]
+    return type(value).__name__
+
+
+def contract_shape(contract: dict) -> list[tuple]:
+    """Ids, methods, statuses, models and the recursive key structure; no values.
+
+    Ids (session tokens, run ids) and timestamps are values, so two recordings of the
+    same backend have the same shape.  Scalars become their JSON type name.
+    """
+    return [
+        (
+            row["id"],
+            row["method"],
+            row["status"],
+            row["response_model"],
+            row["request_model"],
+            _value_shape(row["request"]),
+            _value_shape(row["body"]),
+        )
+        for row in contract["exchanges"]
+    ]
+
+
+def _head_commit() -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=CONTRACT_PATH.parents[3],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+class _ContractRecorder:
+    """A pytest plugin: keeps the journey's exchanges once its test has passed."""
+
+    def __init__(self) -> None:
+        self.exchanges: list[RecordedExchange] | None = None
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_call(self, item):
+        result = yield  # re-raises when the journey failed, so nothing is kept
+        journey = item.funcargs.get("lifecycle_journey")
+        if isinstance(journey, LifecycleJourney) and journey.completed == list(STAGES):
+            self.exchanges = list(journey.exchanges)
+        return result
+
+
+def write_contract(path: Path | str) -> int:
+    """Run the Task 6 journey on a throwaway PostgreSQL database; write its contract.
+
+    A developer command (``python -m tests.integration.graph_lifecycle_journey
+    --write-contract <path>``), never run by a test.  It drives the journey test
+    itself, so a recording exists only for a journey whose every stage passed.
+    Returns a process exit code.
+    """
+    test = (
+        CONTRACT_PATH.parents[3] / "tests/integration/test_graph_lifecycle_acceptance_postgres.py"
+    )
+    recorder = _ContractRecorder()
+    code = pytest.main(
+        [
+            f"{test}::test_edit_test_approve_preview_publish_pin_rollback_lifecycle",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rs",
+        ],
+        plugins=[recorder],
+    )
+    if code != 0 or recorder.exchanges is None:
+        print(f"journey did not pass (pytest exit {code}); nothing written", file=sys.stderr)
+        return int(code) or 1
+    contract = build_contract(recorder.exchanges, _head_commit())
+    Path(path).write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {len(contract['exchanges'])} exchanges to {path}")
+    return 0
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m tests.integration.graph_lifecycle_journey")
+    parser.add_argument("--write-contract", metavar="PATH", required=True, type=Path)
+    return write_contract(parser.parse_args(argv).write_contract)
+
+
+if __name__ == "__main__":
+    # Run the importable module's copy, not ``__main__``'s: the journey test imports
+    # ``tests.integration.graph_lifecycle_journey``, and the recorder's isinstance
+    # check must see that module's ``LifecycleJourney``.
+    from tests.integration.graph_lifecycle_journey import _main as _canonical_main
+
+    raise SystemExit(_canonical_main())
