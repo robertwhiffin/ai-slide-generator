@@ -66,6 +66,7 @@ from src.services.prompt_assembler import (
     ResolvedPromptStage,
 )
 from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
+from tests.fixtures.log_records import rendered_record
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -945,7 +946,7 @@ def test_logging_sink_logs_identity_outcome_and_error_class_only(caplog):
     assert emitted_fields(record) == PERMITTED_LOG_FIELDS
     assert record.msg == EXPECTED_LOG_MESSAGE
     assert record.args in (None, ())
-    rendered = str(vars(record))
+    rendered = rendered_record(record)
     assert "owner-session-9f" not in rendered
     assert "contributor-session-3b" not in rendered
 
@@ -1029,7 +1030,7 @@ def test_runtime_logging_sink_success_record_is_identity_outcome_and_optional_pr
     assert emitted_fields(record) == SUCCESS_LOG_FIELDS
     assert record.msg == EXPECTED_LOG_MESSAGE
     assert record.args in (None, ())
-    rendered = str(vars(record))
+    rendered = rendered_record(record)
     for secret in ("private", "payload", "owner-session-9f", "contributor-session-3b"):
         assert secret not in rendered
     # With no optional selected by this v1 overlay no optional name is logged.
@@ -1456,7 +1457,7 @@ def test_exact_optional_values_reach_diagnostics_and_both_sink_traces(
     # optional NAMES only.  Explicit null and [] are supplied, so they are named;
     # absence is not.  No value ever reaches the record.
     assert records[0].additional_field_names == sorted(expected)
-    rendered = str(vars(records[0]))
+    rendered = rendered_record(records[0])
     for value in supplied.get("diagnostic_notes") or ():
         assert value.strip() not in rendered
     assert emitted_fields(records[0]) == SUCCESS_LOG_FIELDS
@@ -1625,8 +1626,9 @@ def test_invalid_output_logs_one_error_outcome_and_no_success_field(
     assert emitted_fields(records[0]) == PERMITTED_LOG_FIELDS
     assert records[0].msg == EXPECTED_LOG_MESSAGE
     assert records[0].args in (None, ())
-    assert "never log" not in str(vars(records[0]))
-    assert "undeclared-secret" not in str(vars(records[0]))
+    _rendered_0 = rendered_record(records[0])
+    assert "never log" not in _rendered_0
+    assert "undeclared-secret" not in _rendered_0
 
 
 def test_an_unselected_optional_output_field_is_rejected_as_undeclared() -> None:
@@ -1933,13 +1935,8 @@ def _logging_candidate_runtime(adapter: object, logger: logging.Logger) -> Agent
 
 
 def _rendered(record: logging.LogRecord) -> str:
-    """Everything a handler could write for *record*, including a traceback."""
-    parts = [record.getMessage(), repr(record.args), str(vars(record))]
-    if record.exc_info:
-        parts.append(logging.Formatter().formatException(record.exc_info))
-    if record.exc_text:
-        parts.append(record.exc_text)
-    return "\n".join(parts)
+    """Everything a handler could emit for *record* excluding its source location."""
+    return rendered_record(record)
 
 
 def _candidate_records(caplog) -> list[logging.LogRecord]:
