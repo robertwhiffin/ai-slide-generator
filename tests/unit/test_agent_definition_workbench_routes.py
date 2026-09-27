@@ -6883,14 +6883,15 @@ def test_an_ineligibility_reason_the_wire_does_not_know_is_not_rendered(
     _force_admin(monkeypatch, is_admin=True)
 
     def _unknown(self, session, **kwargs):
-        raise IneligibleForApprovalError(kwargs["run_id"], "linked_to_release")
+        # ``linked_to_release`` became a wire reason in #269 (C48).
+        raise IneligibleForApprovalError(kwargs["run_id"], "withdrawn")
 
     monkeypatch.setattr(AgentTestWorkbench, "record_verdict", _unknown)
     with _run_app(session_factory, raise_server_exceptions=False) as client:
         response = client.post(_verdict_url(1), json=_VERDICT_BODY)
 
     assert response.status_code == 500
-    assert "linked_to_release" not in response.text
+    assert "withdrawn" not in response.text
 
 
 def test_the_verdict_route_waits_on_the_run_row_lock_off_the_event_loop(

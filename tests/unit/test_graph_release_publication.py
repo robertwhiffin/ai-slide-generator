@@ -667,8 +667,9 @@ def test_publication_not_ready_accepts_both_gap_codes():
     assert value.locked_gaps[1].test_case_id == 4
 
 
-def test_evidence_from_a_phase_a_gate_is_refused_before_the_draft_rebases(factory):
-    """Phase A has no evidence table; a gate that returns links cannot publish."""
+def test_evidence_naming_a_missing_run_is_refused_before_the_draft_rebases(factory):
+    """Task 4 replaced Phase A's refusal with ``link_release_evidence``: a link to
+    a run that does not exist is an integrity error, and nothing is written."""
     _backdate_v1(factory)
     _save_prompt(factory, "architect", "\n\nTune A.", lock=0)
     before = _artifacts(factory)
@@ -682,7 +683,7 @@ def test_evidence_from_a_phase_a_gate_is_refused_before_the_draft_rebases(factor
 
     with pytest.raises(
         GraphConfigurationIntegrityError,
-        match="^release evidence linking is not available$",
+        match="^release evidence names a missing run$",
     ):
         _publish(factory, lock=1, gate=_FixedGate((link,)))
 
