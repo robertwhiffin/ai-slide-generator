@@ -749,20 +749,74 @@ def test_link_release_evidence_refuses_a_missing_run(factory):
 # --- Correction 48: a linked run's verdict is a typed refusal -----------------
 
 
-def test_a_verdict_on_a_published_evidence_run_is_refused_as_linked(factory):
+def _published_linked_run(factory) -> int:
     source = _changed_architect(factory)
     _approve(factory, source)
-    unlinked = _insert_run_like(factory, source, run_at=_at(-5), **_UNREVIEWED)
-    assert isinstance(_publish(factory), PublishedRelease)
-    before = _row(factory, source)
+    result = _publish(factory)
+    assert isinstance(result, PublishedRelease)
+    assert [link.agent_test_run_id for link in result.evidence] == [source]
+    return source
 
-    for verdict in ("rejected", "approved"):
-        with pytest.raises(IneligibleForApprovalError) as caught:
-            _approve(factory, source, verdict)
-        assert (caught.value.run_id, caught.value.reason) == (source, "linked_to_release")
-    assert _row(factory, source) == before
-    # An unlinked run still takes a verdict.
-    assert _approve(factory, unlinked, "rejected").verdict == "rejected"
+
+def _verdict(factory, run_id, *, verdict="approved", reviewer=REVIEWER, notes=None):
+    with factory() as db:
+        return AgentTestWorkbench().record_verdict(
+            db, run_id=run_id, verdict=verdict, reviewer=reviewer, notes=notes
+        )
+
+
+def test_an_identical_verdict_on_a_linked_run_is_a_no_op(factory):
+    """Fix round 1 (#268 C6 retry-safety): the identical triple
+    ``(verdict, verdict_reviewer, verdict_notes)`` on published evidence writes
+    nothing and returns the stored evidence; it is never ``linked_to_release``."""
+    linked = _published_linked_run(factory)
+    before = _row(factory, linked)
+    engine = factory.kw["bind"]
+    updates: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _params, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE"):
+            updates.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        evidence = _verdict(factory, linked)
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert updates == []
+    assert _row(factory, linked) == before
+    assert (evidence.run_id, evidence.verdict, evidence.verdict_reviewer) == (
+        linked,
+        "approved",
+        REVIEWER,
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"verdict": "rejected"}, id="flip"),
+        pytest.param({"reviewer": "second@example.com"}, id="other-reviewer"),
+        pytest.param({"notes": "Different notes."}, id="other-notes"),
+    ],
+)
+def test_any_verdict_change_on_a_linked_run_is_refused_as_linked(factory, change):
+    linked = _published_linked_run(factory)
+    before = _row(factory, linked)
+
+    with pytest.raises(IneligibleForApprovalError) as caught:
+        _verdict(factory, linked, **change)
+
+    assert (caught.value.run_id, caught.value.reason) == (linked, "linked_to_release")
+    assert _row(factory, linked) == before
+
+
+def test_an_unlinked_run_still_takes_a_verdict_change(factory):
+    linked = _published_linked_run(factory)
+    unlinked = _insert_run_like(factory, linked, run_at=_at(-5), **_UNREVIEWED)
+
+    assert _verdict(factory, unlinked, verdict="rejected").verdict == "rejected"
 
 
 def test_the_linked_refusal_is_a_422_ineligible_body_with_its_message():

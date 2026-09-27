@@ -1485,7 +1485,8 @@ class AgentTestWorkbench:
         verdict; an approval also needs passing checks.  An identical re-submit
         writes nothing; any difference re-stamps all four columns, ``verdict_at``
         from the database clock.  A run linked to a release as evidence takes no
-        verdict change (#269 C48, ``linked_to_release``).  An ``IntegrityError``
+        verdict change (#269 C48, ``linked_to_release``); an identical re-submit
+        is still a no-op.  An ``IntegrityError``
         (the DDL checks, or #269's linked-verdict trigger on a direct write)
         propagates unchanged (C7).
         """
@@ -1501,22 +1502,25 @@ class AgentTestWorkbench:
             row = session.scalar(_verdict_lock_statement(run_id))
             if row is None:
                 raise TestRunNotFound(run_id)
-            # #269 C48: a NEW statement after the L3 lock (C33), so a publication
-            # that linked this run while the lock waited is seen.  The linked-
-            # verdict trigger stays the backstop for direct writes.
-            if session.scalar(
-                select(exists().where(GraphReleaseTestRun.agent_test_run_id == run_id))
-            ):
-                raise IneligibleForApprovalError(run_id, "linked_to_release")
-            if row.execution_status != "completed":
-                raise IneligibleForApprovalError(run_id, "not_completed")
-            if verdict == "approved" and not row.deterministic_checks_passed:
-                raise IneligibleForApprovalError(run_id, "checks_failed")
-            if (row.verdict, row.verdict_reviewer, row.verdict_notes) != (
+            identical = (row.verdict, row.verdict_reviewer, row.verdict_notes) == (
                 verdict,
                 reviewer,
                 notes,
-            ):
+            )
+            if not identical:
+                # #269 C48: a NEW statement after the L3 lock (C33), so a
+                # publication that linked this run while the lock waited is
+                # seen.  An identical re-submit stays a retry-safe no-op even on
+                # published evidence (#268 C6); the linked-verdict trigger stays
+                # the backstop for direct writes.
+                if session.scalar(
+                    select(exists().where(GraphReleaseTestRun.agent_test_run_id == run_id))
+                ):
+                    raise IneligibleForApprovalError(run_id, "linked_to_release")
+                if row.execution_status != "completed":
+                    raise IneligibleForApprovalError(run_id, "not_completed")
+                if verdict == "approved" and not row.deterministic_checks_passed:
+                    raise IneligibleForApprovalError(run_id, "checks_failed")
                 # A Core UPDATE, so the SET list is always exactly the four
                 # verdict columns (the ORM would omit an unchanged value).
                 session.execute(

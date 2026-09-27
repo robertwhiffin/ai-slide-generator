@@ -559,6 +559,13 @@ def test_gate_lock_statement_sequence(postgres_engine):
     assert " FOR " not in reselect
     assert "FROM AGENT_TEST_RUN" in l3 and "RUN_KIND" in l3.split(" WHERE ", 1)[1]
     assert l3.endswith("ORDER BY AGENT_TEST_RUN.ID FOR UPDATE")
+    # C33 / C45: L3 is literal columns of agent_test_run only.  A join or a
+    # correlated eligibility predicate inside the locking statement is not
+    # re-evaluated by EvalPlanQual; that belongs in the NEW re-verify statement.
+    assert " JOIN " not in l3, l3
+    assert "GRAPH_DRAFT_AGENT" not in l3, l3
+    assert "AGENT_TEST_CASE" not in l3, l3
+    assert " EXISTS" not in l3, l3
     assert "FROM AGENT_TEST_RUN" in reverify and " FOR " not in reverify
     assert not any(s.startswith(("INSERT", "UPDATE", "DELETE")) for s in statements)
 
