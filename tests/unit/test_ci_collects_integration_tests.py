@@ -419,3 +419,20 @@ def test_graph_release_history_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its statement-coherence and no-lock "
         "assertions must execute against PostgreSQL."
     )
+
+
+def test_graph_release_rollback_is_collected_by_integration_graph():
+    """#270's historical-release restore belongs in the graph CI job.
+
+    Its injected-failure stages use a deferred PostgreSQL constraint trigger and
+    a burned ``graph_release.id`` sequence value, and its evidence comes from
+    the real row-locking gate; SQLite can express none of these, so the file
+    must run in the graph job's PostgreSQL environment rather than the unit job.
+    """
+    target = "tests/integration/test_graph_release_rollback_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its atomic-rollback and evidence-link "
+        "assertions must execute against PostgreSQL."
+    )
