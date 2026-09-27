@@ -10,7 +10,8 @@ TASK_BASE is `693df109e`. HEAD moved to `eb3daa898` during the task: that is the
    - `.github/workflows/test.yml` (enrolled in `integration-graph` after `test_graph_lifecycle_acceptance_postgres.py`);
    - `tests/unit/test_ci_collects_integration_tests.py` (new pin `test_graph_lifecycle_runtime_is_collected_by_integration_graph`).
 2. `fb5d40caa` `test: label bundle-stage turn failures S17 and fail a turn on any error event (#271 Task 7)`. It touches the new file only.
-3. This report, force-added. The mutation runner is copied to `reports/t271-7-run_mut.py` for the reviewer.
+3. `dadffe0b1` `test: route Task 7 stage bodies through journey.in_stage (#271 Task 7)`.
+4. This report, force-added. The mutation runner is copied to `reports/t271-7-run_mut.py` for the reviewer.
 
 ## What the file does
 - Both tests run `lifecycle_journey.run_to("S16")`, with the tripwire still armed. They then drive one first graph turn per conversation through `ChatService.send_message_streaming(session_id, "USE AGENT MODE build a deck", engine_mode="graph")`:
@@ -137,7 +138,10 @@ Env: `PYTHONPATH=tree:tree/packages/databricks-tellr`, `DATABASE_URL=sqlite:////
 
 ## Deviations
 1. **C8 superset.** The real `DatabricksModelAdapter` with the raising `ChatModel` double drives **all** turns and roles (30 calls), not "one turn per role" with `DeterministicFakeModelAdapter` elsewhere. That keeps determinism, because the ordered deque still supplies the outputs, and strengthens AC5.
-2. **The stage helper.** `journey.in_stage(stage)` has not landed (the Task 6 fix round is in progress). The file routes its stage bodies through `_in_stage(journey, stage)`, which today returns Task 6's `stage(current)`. The switch is the one-line body change `return journey.in_stage(current)`. No Task 7 body calls `journey.call`, so nothing touches `journey._current`.
+2. **The stage helper.** `journey.in_stage(stage)` landed with Task 6's fix round (`38f24b4b2`) while this task was running. `dadffe0b1` switches `_in_stage` to `return journey.in_stage(current)`. After the switch:
+   - both files are GREEN again (this file 2 passed, the Task 6 file 1 passed);
+   - M4b and M9b were re-run in a fresh temp worktree at `dadffe0b1`, and both are still RED 2/2 with the same `[#261] S13` / `[#265] S17` labels;
+   - `journey._current` is never set directly.
 3. **S17 re-drives the turns.** Each test runs the journey and the three turns itself (≈3.5 s each), rather than sharing state across tests. The S17 test labels its turns S17.
 4. **"Prose" is defined.** A prose string is a string leaf with whitespace, markup or `://`. Role vocabulary such as `build`, `clean` and `surfaced` is excluded; `build` is a substring of the allow-listed `agent_key` `builder`. 14 strings are checked.
 5. **Imports.** `A1_ROLES`, `_first_turn_outputs` and `_release_mapping` come from the pin acceptance file, by name. Nothing comes from the workbench file.
