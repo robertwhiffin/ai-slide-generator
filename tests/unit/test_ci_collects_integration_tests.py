@@ -506,3 +506,20 @@ def test_graph_lifecycle_runtime_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its pinned-release identity, fan-out and "
         "trace assertions must execute against PostgreSQL."
     )
+
+
+def test_lakebase_contract_failures_are_collected_by_integration_graph():
+    """#271 Task 8's explicit Lakebase-contract failures (AC3, AC2) belong in the graph CI job.
+
+    It drives failing graph turns through ``send_message_streaming`` and the
+    shipped chat router on conversations pinned over real PostgreSQL, spies on
+    active-release statements and refuses every creator on a never-bootstrapped
+    database; none of this can be cashed against SQLite.
+    """
+    target = "tests/integration/test_lakebase_contract_failures_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its fail-closed and state-preservation "
+        "assertions must execute against PostgreSQL."
+    )
