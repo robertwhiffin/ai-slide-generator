@@ -222,3 +222,52 @@ Conversations present at that point:
 - **C50 patch not load-bearing (H1).** The `src.core.database.get_db_session` patch changes nothing today. `GET /api/sessions/old-root` runs `_substitute_deck_images` against the conftest SQLite without error, because the deck has no image placeholders. It is kept for Tasks 7 and 8 and for any stage that hits `/slides`.
 - **Random session ids in exchange paths.** The contributor and duplicate session ids are random tokens (`secrets.token_urlsafe`), and they appear in exchange paths, e.g. `S12-get-contributor`. Task 10's contract should join on the exchange id rather than the literal path.
 - **Long failure messages.** Some assertion messages print whole response bodies (M7's is very long). The label is always on the first line.
+
+## Fix round 1 (review: APPROVED WITH FIXES)
+
+**Commit:** `afac6cf3c` `test: pin the whole stage table, add in_stage, assert the bootstrap actor (#271 Task 6 fix round 1)`. It touches only `tests/integration/graph_lifecycle_journey.py` and `tests/unit/test_graph_lifecycle_stage_attribution.py`, and it was committed by explicit path.
+
+Every harness change is additive: no rename, and no signature change to `LifecycleJourney`, `run_to`, `call` or any stage label. `run_to` now uses `in_stage` internally, and its behaviour is unchanged.
+
+| Finding | Status | What changed |
+|---|---|---|
+| I1 | addressed | `test_the_whole_stage_table_is_pinned` asserts all 17 `(code, name, ticket, seam)` rows as a literal `EXPECTED_STAGES`, matching the brief's ticket column. |
+| m1 | addressed | Messages were added to the bare asserts: S15 `restored["evidence"]`; S04 `schema_contract`, prompt suffix and candidate-hash change; S05 `protected_assembly`, prompt suffix, temperature and the DB `protected_assembly` pair; S06 endpoint in the response and in the DB; S12 new-root, contributor and duplicate pins, the full pin map and `pins_before`. |
+| m2 | addressed | S14 now asserts v1's `published_by == BOOTSTRAP_ACTOR` (`"system:bootstrap"`, which is `bootstrap_v1`'s default actor) instead of comparing the value with itself. |
+| m4 | addressed | A public `journey.in_stage(stage)` context manager was added (details below). |
+| m3 | parked | Not done, as instructed. |
+
+**`in_stage` in detail.**
+- It sets the stage `call()` records under.
+- It relabels failures exactly as `stage()` does, including `[AC1/#271]` tripwire reads.
+- It restores the enclosing stage on exit and does not append to `completed`.
+- Unit tests:
+  - `test_in_stage_runs_a_caller_stage_with_recording_and_attribution`;
+  - `test_in_stage_restores_the_enclosing_stage`;
+  - `test_call_outside_any_stage_is_refused`.
+- The two `in_stage` tests went RED first, with `AttributeError: 'LifecycleJourney' object has no attribute 'in_stage'`.
+
+**Constraint on Task 7 (and any caller stage):** custom stages run with `in_stage`, such as Task 7's S13 and S17, must not create sessions or shared-deck mutations that would change:
+- S12b's exact collaboration-history groups `[(v2, 2), (v1, 4)]` on old-root's deck;
+- S12's exact pin map;
+- S16's exact pin map, which lists every `UserSession` row: `old-root`, `control-legacy`, `mid-root`, `new-root`, contributor, duplicate, `post-rollback-root`.
+
+Such a stage must either run after those assertions (after `run_to("S12b")` for deck mutations, and after `run_to("S16")` for new sessions), or avoid new rows. The S18 closing checks read only `graph_release` rows and `tripwire.reads`, so sessions created after S16 do not affect them.
+
+**Gates:**
+
+| Gate | Result |
+|---|---|
+| Attribution unit file | 17 passed |
+| `test_ci_collects_integration_tests.py` | 24 passed (includes Task 7's new pin) |
+| `test_graph_lifecycle_acceptance_postgres.py` | 1 passed, zero skips |
+| ruff check (4 files) | clean; `ruff format` applied to the two edited files |
+
+The `tellr_int_*` set is unchanged.
+
+**Mutations.** Both ran in a separate detached worktree, `/Users/robert.whiffin/Documents/slide-gen-branch-eval/t271-6-fix` at `afac6cf3c`. Each was restored with `git checkout afac6cf3c -- <file>` plus `git diff --quiet`, and the worktree was then removed. Nothing was mutated in the shared tree.
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 (I1 proof) | Relabel S15 from `#270` to `#269` in the helper's stage table | RED 1/17: `test_the_whole_stage_table_is_pinned`. It was GREEN before this round. |
+| F2 (m2 proof) | `bootstrap_v1`'s default actor changed from `"system:bootstrap"` to `"lifecycle-admin@example.com"` | RED: `[#270] S14 history via GET /api/admin/agent-definitions/releases: AssertionError: …`. The old self-comparison stayed green here. |
