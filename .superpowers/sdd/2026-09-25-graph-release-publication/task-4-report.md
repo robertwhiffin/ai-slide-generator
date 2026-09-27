@@ -139,3 +139,57 @@ Controller targets I did **not** run:
 2. **UI text.** `draftEditorState.ts:854` shows "Deterministic checks did not pass…" for `linked_to_release`. Task 6 must add the label.
 3. **M4, M13 and M23 are equivalent survivors.** The re-verify statement is proved load-bearing only in combination (M27). That is expected, because the literal L3 predicate is complete. A reviewer may question the redundancy; it is kept for C33/C45.
 4. **Mutation coverage over RED coverage.** Most new tests were never RED against real pre-Task-4 code, only against the missing module. Their power rests on the sweep above.
+
+## Fix round 1 (HEAD before: `b3857b038`)
+
+**Commit:** `89dead4e2` — "fix: an identical verdict on published evidence stays a no-op; pin L3 literal-only (#269)". This is also the pin SHA for this round's mutations.
+
+| Finding | Status | What changed |
+|---|---|---|
+| Concern 2 + review m2: an identical re-submit on a linked run must be a no-op | ADDRESSED | See the details below. |
+| m1: L3 must be pinned literal-only | ADDRESSED | See the details below. |
+
+**Concern 2 + review m2: what changed**
+
+The new order in `record_verdict` is:
+
+1. lock;
+2. not-found;
+3. identical, which is a no-op and returns the evidence. "Identical" is the triple `(verdict, verdict_reviewer, verdict_notes)`;
+4. the linked re-check, a NEW statement (C33), which refuses with `linked_to_release`;
+5. `not_completed`;
+6. `checks_failed`;
+7. the UPDATE.
+
+The old combined test was replaced by three tests:
+
+- `test_an_identical_verdict_on_a_linked_run_is_a_no_op`: it records no UPDATE statement, the row is unchanged, and the stored evidence is returned.
+- `test_any_verdict_change_on_a_linked_run_is_refused_as_linked`, parametrized as `[flip, other-reviewer, other-notes]`: each is refused, and the row is unchanged.
+- `test_an_unlinked_run_still_takes_a_verdict_change`.
+
+The PostgreSQL test `test_publication_first_then_verdict_change`, which expects a typed refusal for a flip, is unchanged and GREEN. #268's idempotence and refusal tests in `test_agent_test_workbench.py` and the routes file are GREEN.
+
+**m1: what changed**
+
+`test_gate_lock_statement_sequence` now asserts that the L3 statement contains none of `" JOIN "`, `GRAPH_DRAFT_AGENT`, `AGENT_TEST_CASE` or `" EXISTS"`.
+
+**RED before the fix.** `test_an_identical_verdict_on_a_linked_run_is_a_no_op` failed with `IneligibleForApprovalError: … linked_to_release`. The other five new or split tests were already GREEN; they preserve the refusal behaviour.
+
+### Mutations
+Each was restored from `89dead4e2`: diff-exit 0, marker count 0.
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 | Linked check placed before the identical check (the pre-fix order) | RED `test_an_identical_verdict_on_a_linked_run_is_a_no_op` (`linked_to_release` raised) |
+| F2 | "Identical" compares the verdict only | RED `[other-reviewer]` and `[other-notes]` (`DID NOT RAISE`) |
+| F3 | Reviewer S1, second form: the eligibility join (`agent_test_case`, `graph_draft_agent`, `eligible_approval_clause`) folded into L3 with plain `FOR UPDATE` | RED `test_gate_lock_statement_sequence` at `assert " JOIN " not in l3` |
+
+A first F3 attempt used `FOR UPDATE OF agent_test_run` and went RED earlier, at the `endswith` check. It was re-run with plain `FOR UPDATE` to hit the new assertion. I did not run the controller's C48 target (deleting the linked check).
+
+### Gates
+- **Unit.** The evidence, workbench, routes and readiness-join files: 727 passed.
+- **Full unit suite** (run without `TELLR_TEST_POSTGRES_URL`, as the baseline was): 6 failed, 6858 passed, 110 skipped. These are the baseline six by node and cause. The run went from 01:28 to 01:34 UTC.
+  - An earlier run in this round set `TELLR_TEST_POSTGRES_URL=` (empty). That collects 38 fewer tests (6936 against 6974), so it is not comparable to the baseline. It still showed the same six failures.
+- **PostgreSQL, 0 skips:** evidence 18, workbench 49, constraints 66.
+- **ruff:** clean on the changed files.
+- **Databases:** the 4 older `tellr_int_*` only.
