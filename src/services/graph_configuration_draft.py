@@ -11,7 +11,7 @@ from typing import Callable, Generic, Literal, Mapping, Protocol, TypeVar
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from src.database.models.graph_configuration import GraphDraft
+from src.database.models.graph_configuration import GraphDraft, GraphDraftAgent
 from src.services.agent_schema_registry import (
     AgentSchemaRegistry,
     upgrade_content_to_v2,
@@ -1010,6 +1010,16 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
         draft_row.updated_at = timestamp
 
     @staticmethod
+    def _assign_locked_candidate(row: GraphDraftAgent, content: DefinitionContent) -> None:
+        """The one draft-agent content write: columns and canonical candidate hash.
+
+        The caller holds the row's lock and owns the parent audit write.
+        """
+        for column_name, value in definition_content_values(content).items():
+            setattr(row, column_name, value)
+        row.candidate_hash = definition_content_hash(content)
+
+    @staticmethod
     def _write_locked_content(
         session: Session,
         *,
@@ -1019,9 +1029,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
     ) -> DraftSaveResult:
         old_hash = locked.selected.draft.candidate_hash
         new_hash = definition_content_hash(content)
-        for column_name, value in definition_content_values(content).items():
-            setattr(locked.selected_row, column_name, value)
-        locked.selected_row.candidate_hash = new_hash
+        _GraphConfigurationDraft._assign_locked_candidate(locked.selected_row, content)
         timestamp = database_transaction_timestamp(session)
         _GraphConfigurationDraft._advance_locked_draft(
             locked.draft_row, actor=actor, timestamp=timestamp

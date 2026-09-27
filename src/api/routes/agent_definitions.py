@@ -9,7 +9,7 @@ from typing import Annotated, Protocol, TypeVar, cast
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from src.api.routes._authz import require_admin
@@ -52,6 +52,25 @@ from src.api.schemas.agent_definitions import (
     UpdateTestCaseRequest,
     VerdictRequest,
     VerdictValidationErrorResponse,
+)
+from src.api.schemas.graph_release_history import (
+    AgentComparisonResponse,
+    ReleaseComparisonResponse,
+    ReleaseDefinitionResponse,
+    ReleaseDetailResponse,
+    ReleaseFieldDiffResponse,
+    ReleaseHistoryEntryResponse,
+    ReleaseHistoryEvidenceResponse,
+    ReleaseHistoryListResponse,
+    RollbackIncompatibleResponse,
+    RollbackMatchesActiveResponse,
+    RollbackPreviewEvidenceResponse,
+    RollbackPreviewResponse,
+    RollbackRequest,
+    RollbackSourceActiveResponse,
+    RollbackSuccessResponse,
+    RollbackValidationErrorResponse,
+    StaleRollbackResponse,
 )
 from src.api.schemas.graph_releases import (
     ChangedDefinitionResponse,
@@ -101,9 +120,16 @@ from src.services.graph_configuration import (
     PublicationNotReady,
     PublicationRejected,
     PublishedRelease,
+    ReleaseComparison,
     RemoteEndpointDraftValidator,
+    RestoredRelease,
+    RollbackIncompatible,
+    RollbackMatchesActive,
+    RollbackPreview,
+    RollbackSourceActive,
     build_remote_endpoint_draft_validator,
 )
+from src.services.graph_configuration_content import as_utc_aware
 from src.services.graph_configuration_publication import ReleasePreview
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
@@ -111,6 +137,14 @@ from src.services.graph_definition_manifest import (
     AssemblyRulesV2,
 )
 from src.services.graph_release_evidence import ApprovalEvidenceGate
+from src.services.graph_release_history import (
+    GraphVersionNotFound,
+    ReleaseDetail,
+    ReleaseHistoryEntry,
+    ReleaseRef,
+    list_release_history,
+    read_release_detail,
+)
 from src.services.model_endpoint_catalog import (
     ModelEndpointCatalogFailure,
     SystemModelDiscovery,
@@ -1421,14 +1455,22 @@ def _publication_validation_response(
     return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
 
 
-async def _parse_publish_request(
+_ReleaseBody = TypeVar("_ReleaseBody", bound=BaseModel)
+
+
+async def _parse_release_body(
     request: Request,
-) -> PublishReleaseRequest | JSONResponse:
-    """Malformed JSON, then the strict body; every 422 is ``invalid_publication``."""
+    model: type[_ReleaseBody],
+    invalid: Callable[[list[DraftFieldErrorResponse]], JSONResponse],
+) -> _ReleaseBody | JSONResponse:
+    """Malformed JSON, then the strict body; every 422 goes through ``invalid``.
+
+    The one parser for the release write bodies (publish, #270 rollback).
+    """
     try:
         raw_body = await request.json()
     except json.JSONDecodeError:
-        return _publication_validation_response(
+        return invalid(
             [
                 DraftFieldErrorResponse(
                     field="$",
@@ -1438,9 +1480,18 @@ async def _parse_publish_request(
             ]
         )
     try:
-        return PublishReleaseRequest.model_validate(raw_body)
+        return model.model_validate(raw_body)
     except ValidationError as exc:
-        return _publication_validation_response(_request_validation_errors(exc))
+        return invalid(_request_validation_errors(exc))
+
+
+async def _parse_publish_request(
+    request: Request,
+) -> PublishReleaseRequest | JSONResponse:
+    """Malformed JSON, then the strict body; every 422 is ``invalid_publication``."""
+    return await _parse_release_body(
+        request, PublishReleaseRequest, _publication_validation_response
+    )
 
 
 def _graph_integrity_failure(exc: GraphConfigurationIntegrityError) -> HTTPException:
@@ -1488,7 +1539,12 @@ def _release_preview_response(preview: ReleasePreview) -> ReleasePreviewResponse
 
 
 def _published_response(outcome: PublishedRelease) -> PublishReleaseSuccessResponse:
-    return PublishReleaseSuccessResponse(
+    return PublishReleaseSuccessResponse(**_published_fields(outcome))
+
+
+def _published_fields(outcome: PublishedRelease) -> dict[str, object]:
+    """The wire fields a publication and a rollback (#270) share."""
+    return dict(
         release=ActiveReleaseResponse.model_validate(outcome.release, from_attributes=True),
         previous_release_id=outcome.previous_release_id,
         changed_agents=list(outcome.changed_agent_keys),
@@ -1506,6 +1562,7 @@ def _published_response(outcome: PublishedRelease) -> PublishReleaseSuccessRespo
                 agent_key=link.agent_key,
                 test_case_id=link.test_case_id,
                 evidence_kind=link.evidence_kind,
+                source_release_id=link.source_release_id,
             )
             for link in outcome.evidence
         ],
@@ -1632,3 +1689,424 @@ async def publish_graph_release(
     if isinstance(outcome, (PublicationConflict, NothingToPublish, PublicationNotReady)):
         return _publication_refusal(outcome)
     raise AssertionError(f"Unexpected publication outcome: {type(outcome)!r}")
+
+
+# --- Graph Release history, comparison and rollback (#270 Task 6) --------------
+# Still the one admin router (C37).  Releases are addressed by ``version_number``
+# and never resolved by id: the two differ in production.  The four reads and the
+# POST resolve no model, catalog, probe or workbench dependency; only the
+# rollback preview composes the remote endpoint validator, which the service
+# runs after its locked transaction commits (C2, C34).  The POST reads its body
+# only after both auth gates, takes the actor from the principal, and runs in the
+# threadpool (it can wait on L0).  Every rollback call emits exactly one
+# ``graph_release_rollback`` record carrying only the outcome code and role key
+# names (OQ7); an integrity failure is that one record at ERROR with the class
+# name and no traceback (C13, C37), so the rollback never uses
+# ``_graph_integrity_failure``.  An ``IntegrityError`` is never mapped.
+
+_GRAPH_VERSION_NOT_FOUND = "Graph Version not found"
+_ROLLBACK_LOG_MESSAGE = "graph_release_rollback"
+
+
+def _graph_version_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail=_GRAPH_VERSION_NOT_FOUND)
+
+
+def _ref_response(ref: ReleaseRef) -> ReleaseIdentityResponse:
+    return ReleaseIdentityResponse(release_id=ref.release_id, version_number=ref.version_number)
+
+
+def _optional_ref(ref: ReleaseRef | None) -> ReleaseIdentityResponse | None:
+    return None if ref is None else _ref_response(ref)
+
+
+def _wire_timestamp(value):
+    """Stored instants labelled UTC (SQLite loads them naive; Task 1 ruling)."""
+    return None if value is None else as_utc_aware(value)
+
+
+def _history_entry_response(entry: ReleaseHistoryEntry) -> ReleaseHistoryEntryResponse:
+    return ReleaseHistoryEntryResponse(
+        release_id=entry.release_id,
+        version_number=entry.version_number,
+        is_active=entry.is_active,
+        release_note=entry.release_note,
+        published_by=entry.published_by,
+        published_at=_wire_timestamp(entry.published_at),
+        effective_from=_wire_timestamp(entry.effective_from),
+        effective_to=_wire_timestamp(entry.effective_to),
+        previous=_optional_ref(entry.previous),
+        restored_from=_optional_ref(entry.restored_from),
+        restored_by=[_ref_response(ref) for ref in entry.restored_by],
+        changed_agents=list(entry.changed_agent_keys),
+    )
+
+
+def _release_detail_response(detail: ReleaseDetail) -> ReleaseDetailResponse:
+    return ReleaseDetailResponse(
+        release=_history_entry_response(detail.entry),
+        definitions={
+            key: ReleaseDefinitionResponse(
+                agent_definition_revision_id=detail.definitions[key].agent_definition_revision_id,
+                content_hash=detail.definitions[key].content_hash,
+                content=detail.definitions[key].content.canonical_payload(),
+            )
+            for key in GRAPH_V1_AGENT_KEYS
+        },
+        evidence=[
+            ReleaseHistoryEvidenceResponse(
+                agent_test_run_id=item.agent_test_run_id,
+                agent_key=item.agent_key,
+                test_case_id=item.test_case_id,
+                test_case_version=item.test_case_version,
+                evidence_kind=item.evidence_kind,
+                source=_optional_ref(item.source),
+                verdict=item.verdict,
+                verdict_reviewer=item.verdict_reviewer,
+                verdict_at=_wire_timestamp(item.verdict_at),
+                execution_status=item.execution_status,
+                deterministic_checks_passed=item.deterministic_checks_passed,
+                run_at=_wire_timestamp(item.run_at),
+            )
+            for item in detail.evidence
+        ],
+    )
+
+
+def _comparison_agents(comparison: ReleaseComparison) -> list[AgentComparisonResponse]:
+    """C46: ``FieldDiff.published`` is the active side, ``.candidate`` the historical."""
+    return [
+        AgentComparisonResponse(
+            agent_key=agent.agent_key,
+            active_revision_id=agent.active_revision_id,
+            historical_revision_id=agent.historical_revision_id,
+            same_revision=agent.same_revision,
+            field_diffs=[
+                ReleaseFieldDiffResponse(
+                    field=diff.field, active=diff.published, historical=diff.candidate
+                )
+                for diff in agent.field_diffs
+            ],
+        )
+        for agent in comparison.agents
+    ]
+
+
+def _issue_responses(issues) -> list[DraftFieldErrorResponse]:
+    return [
+        DraftFieldErrorResponse(field=issue.field, code=issue.code, message=issue.message)
+        for issue in issues
+    ]
+
+
+def _rollback_preview_response(preview: RollbackPreview) -> RollbackPreviewResponse:
+    return RollbackPreviewResponse(
+        source=_ref_response(preview.source),
+        active_release=_ref_response(preview.active),
+        next_version_number=preview.next_version_number,
+        lock_version=preview.lock_version,
+        default_release_note=preview.default_release_note,
+        restorable=preview.restorable,
+        blocked=preview.blocked,
+        issues=_issue_responses(preview.issues),
+        warnings=_issue_responses(preview.warnings),
+        agents=_comparison_agents(preview.comparison),
+        evidence=[
+            RollbackPreviewEvidenceResponse(
+                agent_test_run_id=link.agent_test_run_id,
+                agent_key=link.agent_key,
+                test_case_id=link.test_case_id,
+            )
+            for link in preview.evidence
+        ],
+        draft_effect={key: preview.draft_effect[key] for key in GRAPH_V1_AGENT_KEYS},
+    )
+
+
+def _restored_response(outcome: RestoredRelease) -> RollbackSuccessResponse:
+    fields = _published_fields(outcome.published)
+    return RollbackSuccessResponse(
+        release=fields["release"],
+        restored_from=_ref_response(outcome.source),
+        previous_release_id=fields["previous_release_id"],
+        changed_agents=fields["changed_agents"],
+        mappings=fields["mappings"],
+        evidence=fields["evidence"],
+        draft=fields["draft"],
+        draft_effect={key: outcome.draft_effect[key] for key in GRAPH_V1_AGENT_KEYS},
+    )
+
+
+def _rollback_validation_response(errors: list[DraftFieldErrorResponse]) -> JSONResponse:
+    response = RollbackValidationErrorResponse(code="invalid_rollback", errors=errors)
+    return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
+
+
+def _log_rollback(outcome: str, agent_keys: list[str]) -> None:
+    """The one record per rollback call: the outcome code and role key names only."""
+    logger.info(
+        _ROLLBACK_LOG_MESSAGE, extra={"outcome": outcome, "agent_keys": agent_keys}
+    )
+
+
+def _json(status_code: int, response: BaseModel) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content=response.model_dump(mode="json"))
+
+
+@router.get(
+    "/releases",
+    response_model=ReleaseHistoryListResponse,
+    responses={403: {"description": "Admin access required"}},
+)
+def list_graph_releases(db: Session = Depends(get_db)) -> ReleaseHistoryListResponse:
+    """Every Graph Release, newest first, with lineage.  Lock-free; writes nothing."""
+    try:
+        with db.begin():
+            entries = list_release_history(db)
+    except GraphConfigurationIntegrityError as exc:
+        raise _graph_integrity_failure(exc) from exc
+    active = next(entry for entry in entries if entry.is_active)
+    return ReleaseHistoryListResponse(
+        active_release=ReleaseIdentityResponse(
+            release_id=active.release_id, version_number=active.version_number
+        ),
+        releases=[_history_entry_response(entry) for entry in entries],
+    )
+
+
+@router.get(
+    "/releases/{version_number}",
+    response_model=ReleaseDetailResponse,
+    responses={
+        403: {"description": "Admin access required"},
+        404: {"description": _GRAPH_VERSION_NOT_FOUND},
+    },
+)
+def get_graph_release(
+    version_number: int, db: Session = Depends(get_db)
+) -> ReleaseDetailResponse:
+    """One release: its lineage, exact seven definitions, and linked evidence."""
+    if not _is_storable_row_id(version_number):
+        raise _graph_version_not_found()
+    try:
+        with db.begin():
+            detail = read_release_detail(db, version_number=version_number)
+    except GraphVersionNotFound as exc:
+        raise _graph_version_not_found() from exc
+    except GraphConfigurationIntegrityError as exc:
+        raise _graph_integrity_failure(exc) from exc
+    return _release_detail_response(detail)
+
+
+@router.get(
+    "/releases/{version_number}/comparison",
+    response_model=ReleaseComparisonResponse,
+    responses={
+        403: {"description": "Admin access required"},
+        404: {"description": _GRAPH_VERSION_NOT_FOUND},
+    },
+)
+def compare_graph_release(
+    version_number: int, db: Session = Depends(get_db)
+) -> ReleaseComparisonResponse:
+    """The active release against one historical release, per role.  Lock-free."""
+    if not _is_storable_row_id(version_number):
+        raise _graph_version_not_found()
+    try:
+        comparison = GraphConfiguration().compare_with_active(
+            db, version_number=version_number
+        )
+    except GraphVersionNotFound as exc:
+        raise _graph_version_not_found() from exc
+    except GraphConfigurationIntegrityError as exc:
+        raise _graph_integrity_failure(exc) from exc
+    return ReleaseComparisonResponse(
+        active_release=_ref_response(comparison.active),
+        release=_ref_response(comparison.historical),
+        agents=_comparison_agents(comparison),
+    )
+
+
+@router.get(
+    "/releases/{version_number}/rollback-preview",
+    response_model=RollbackPreviewResponse,
+    responses={
+        403: {"description": "Admin access required"},
+        404: {"description": _GRAPH_VERSION_NOT_FOUND},
+    },
+)
+def preview_graph_release_rollback(
+    version_number: int,
+    remote_endpoint_validator: Annotated[
+        RemoteEndpointDraftValidator, Depends(get_remote_endpoint_draft_validator)
+    ],
+    db: Session = Depends(get_db),
+) -> RollbackPreviewResponse:
+    """What rolling back to ``version_number`` now would do; it writes nothing.
+
+    A plain ``def`` (FastAPI runs it in the threadpool): the remote endpoint
+    check runs after the service's locked transaction commits (C34).
+    """
+    if not _is_storable_row_id(version_number):
+        raise _graph_version_not_found()
+    try:
+        preview = GraphConfiguration(
+            remote_endpoint_validator=remote_endpoint_validator
+        ).preview_rollback(db, version_number=version_number)
+    except GraphVersionNotFound as exc:
+        raise _graph_version_not_found() from exc
+    except GraphConfigurationIntegrityError as exc:
+        raise _graph_integrity_failure(exc) from exc
+    return _rollback_preview_response(preview)
+
+
+@router.post(
+    "/releases/{version_number}/rollback",
+    response_model=RollbackSuccessResponse,
+    responses={
+        403: {"description": "Admin access or an authenticated principal required"},
+        404: {"description": _GRAPH_VERSION_NOT_FOUND},
+        409: {
+            "model": StaleRollbackResponse
+            | RollbackSourceActiveResponse
+            | RollbackMatchesActiveResponse
+        },
+        422: {"model": RollbackValidationErrorResponse | RollbackIncompatibleResponse},
+    },
+)
+async def rollback_graph_release(
+    request: Request,
+    version_number: int,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    db: Session = Depends(get_db),
+) -> RollbackSuccessResponse | JSONResponse:
+    """Publish historical Graph Version ``version_number``'s exact revisions as the next.
+
+    The body is exactly ``{"lock_version", "release_note"}``.  No approval gate,
+    model, runtime or remote endpoint call runs (#270 rulings).
+    """
+    parsed = await _parse_release_body(
+        request, RollbackRequest, _rollback_validation_response
+    )
+    if isinstance(parsed, JSONResponse):
+        _log_rollback("rejected", [])
+        return parsed
+    if not _is_storable_row_id(version_number):
+        _log_rollback("not_found", [])
+        raise _graph_version_not_found()
+    try:
+        return await _restore_graph_release(
+            db, version_number=version_number, parsed=parsed, actor=actor
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # 6-m1: an unhandled failure (a raw ``IntegrityError``, never translated,
+        # or an unknown outcome) still gets the one record per call; the very
+        # same exception then propagates.
+        logger.error(
+            _ROLLBACK_LOG_MESSAGE,
+            extra={
+                "outcome": "error",
+                "agent_keys": [],
+                "error_class": type(exc).__name__,
+            },
+        )
+        raise
+
+
+async def _restore_graph_release(
+    db: Session,
+    *,
+    version_number: int,
+    parsed: RollbackRequest,
+    actor: str,
+) -> RollbackSuccessResponse | JSONResponse:
+    """Run ``restore_release`` off the event loop and map its outcome to a response."""
+    try:
+        outcome = await run_in_threadpool(
+            GraphConfiguration().restore_release,
+            db,
+            version_number=version_number,
+            expected_lock_version=parsed.lock_version,
+            release_note=parsed.release_note,
+            actor=actor,
+        )
+    except PublicationRejected as exc:
+        _log_rollback("rejected", [])
+        if any(issue.field == "actor" for issue in exc.issues):
+            # The principal, not the body, is at fault (the verdict route's rule).
+            raise HTTPException(
+                status_code=403,
+                detail="Authenticated principal required",
+            ) from exc
+        return _rollback_validation_response(_issue_responses(exc.issues))
+    except GraphVersionNotFound as exc:
+        _log_rollback("not_found", [])
+        raise _graph_version_not_found() from exc
+    except RollbackIncompatible as exc:
+        _log_rollback(
+            "incompatible",
+            sorted({issue.field.split(".")[1] for issue in exc.issues}),
+        )
+        return _json(
+            422,
+            RollbackIncompatibleResponse(
+                code="rollback_incompatible",
+                source=_ref_response(exc.source),
+                errors=_issue_responses(exc.issues),
+            ),
+        )
+    except GraphConfigurationIntegrityError as exc:
+        logger.error(
+            _ROLLBACK_LOG_MESSAGE,
+            extra={
+                "outcome": "integrity_error",
+                "agent_keys": [],
+                "error_class": type(exc).__name__,
+            },
+        )
+        raise HTTPException(
+            status_code=500, detail="Graph configuration is incomplete"
+        ) from exc
+
+    if isinstance(outcome, RestoredRelease):
+        _log_rollback("restored", sorted(outcome.published.changed_agent_keys))
+        return _restored_response(outcome)
+    if isinstance(outcome, PublicationConflict):
+        _log_rollback("stale", [])
+        return _json(
+            409,
+            StaleRollbackResponse(
+                code="stale_rollback",
+                expected_lock_version=outcome.expected_lock_version,
+                current_lock_version=outcome.current_lock_version,
+                active_release=ReleaseIdentityResponse(
+                    release_id=outcome.active_release_id,
+                    version_number=outcome.active_version_number,
+                ),
+                draft=DraftMetadataResponse.model_validate(
+                    outcome.draft, from_attributes=True
+                ),
+            ),
+        )
+    if isinstance(outcome, RollbackSourceActive):
+        _log_rollback("source_active", [])
+        return _json(
+            409,
+            RollbackSourceActiveResponse(
+                code="rollback_source_active",
+                active_release=_ref_response(outcome.active),
+            ),
+        )
+    if isinstance(outcome, RollbackMatchesActive):
+        _log_rollback("matches_active", [])
+        return _json(
+            409,
+            RollbackMatchesActiveResponse(
+                code="rollback_matches_active",
+                active_release=_ref_response(outcome.active),
+                source=_ref_response(outcome.source),
+            ),
+        )
+    raise AssertionError(f"Unexpected rollback outcome: {type(outcome)!r}")

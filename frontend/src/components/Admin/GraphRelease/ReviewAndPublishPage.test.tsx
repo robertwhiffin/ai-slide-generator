@@ -202,17 +202,26 @@ describe('ReviewAndPublishPage: the preview', () => {
     expect(previewGets(fetchMock)).toHaveLength(2);
   });
 
-  it('offers no History or Rollback control (they belong to #270)', async () => {
-    mockReleaseApi({ previews: [previewOf()] });
+  // #270 Correction 4: the one deliberate edit to this #269 test. The absence of any
+  // history or rollback control became exactly three tabs, in order.
+  it('offers exactly three tabs, in order, and no rollback control before Release History opens', async () => {
+    const fetchMock = mockReleaseApi({ previews: [previewOf()] });
     render(<ReviewAndPublishPage />);
     await loadedPage();
     typeNote('A note');
 
-    const names = [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link'), ...screen.queryAllByRole('tab')]
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'Changes & Approvals',
+      'Definition Diff',
+      'Release History',
+    ]);
+    // Buttons and links only: the tabs are pinned exactly above.
+    const names = [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link')]
       .map((control) => control.textContent ?? '');
     expect(names.length).toBeGreaterThan(0);
     expect(names.filter((name) => /history|rollback|roll back/i.test(name))).toEqual([]);
-    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Changes & Approvals', 'Definition Diff']);
+    // The history is read only when its tab is opened.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

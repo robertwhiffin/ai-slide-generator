@@ -16,9 +16,10 @@ Two assertions
    load-bearing of the previously-uncollected files; a future re-drop must be
    loud).
 """
+from pathlib import Path
+
 import pytest
 import yaml
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Paths (anchored from this file — never cwd-relative)
@@ -401,4 +402,73 @@ def test_graph_release_publication_acceptance_is_collected_by_integration_graph(
         f"{target!r} is not named in integration-graph's run block in "
         ".github/workflows/test.yml. Its end-to-end publication and preview "
         "shared-lock assertions must execute against PostgreSQL."
+    )
+
+
+def test_graph_release_history_is_collected_by_integration_graph():
+    """#270's release-history read model belongs in the graph CI job.
+
+    Its coherence assertion forces a publication to commit between the history
+    read's statements under READ COMMITTED, and its no-lock assertion inspects
+    rendered row-lock clauses; SQLite can express neither, so the file must run
+    in the graph job's PostgreSQL environment rather than the unit job.
+    """
+    target = "tests/integration/test_graph_release_history_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its statement-coherence and no-lock "
+        "assertions must execute against PostgreSQL."
+    )
+
+
+def test_graph_release_rollback_is_collected_by_integration_graph():
+    """#270's historical-release restore belongs in the graph CI job.
+
+    Its injected-failure stages use a deferred PostgreSQL constraint trigger and
+    a burned ``graph_release.id`` sequence value, and its evidence comes from
+    the real row-locking gate; SQLite can express none of these, so the file
+    must run in the graph job's PostgreSQL environment rather than the unit job.
+    """
+    target = "tests/integration/test_graph_release_rollback_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its atomic-rollback and evidence-link "
+        "assertions must execute against PostgreSQL."
+    )
+
+
+def test_graph_release_rollback_ordering_is_collected_by_integration_graph():
+    """#270's rollback forced orderings belong in the graph CI job.
+
+    Each test pauses one transaction on a PostgreSQL row lock and observes the
+    other in ``pg_blocking_pids``; SQLite has neither row locks nor that view,
+    so the file must run in the graph job's PostgreSQL environment rather than
+    the unit job.
+    """
+    target = "tests/integration/test_graph_release_rollback_ordering_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its forced lock orderings must execute "
+        "against PostgreSQL."
+    )
+
+
+def test_graph_release_rollback_acceptance_is_collected_by_integration_graph():
+    """#270's end-to-end rollback acceptance (the Task 9 flow) belongs in the graph CI job.
+
+    It drives the full restore-v3-while-v7-active flow through the shipped admin
+    router over real PostgreSQL: burns an id, builds v2-v7 via HTTP, verifies the
+    comparison, preview and rollback 200 body, the stale 409, the updated history,
+    conversation pin loyalty and the publication_not_ready guard; none of these
+    assertions can be cashed against SQLite.
+    """
+    target = "tests/integration/test_graph_release_rollback_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its end-to-end rollback and history "
+        "assertions must execute against PostgreSQL."
     )
