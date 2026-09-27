@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime
 from types import MappingProxyType
 from typing import Callable, Generic, Literal, Mapping, Protocol, TypeVar
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from src.database.models.graph_configuration import GraphDraft
 from src.services.agent_schema_registry import (
     AgentSchemaRegistry,
     upgrade_content_to_v2,
@@ -19,6 +19,7 @@ from src.services.agent_schema_registry import (
 from src.services.agent_schema_types import SchemaOverlay, SchemaValidationIssue
 from src.services.graph_configuration_content import (
     GraphConfigurationIntegrityError,
+    database_transaction_timestamp,
     definition_content_from_row,
     definition_content_values,
 )
@@ -763,6 +764,16 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
 
     @staticmethod
     def _validate_common(actor: object, lock_version: object, agent_key: object) -> None:
+        issues = _GraphConfigurationDraft._actor_issues(actor)
+        issues.extend(
+            _GraphConfigurationDraft._lock_and_agent_key_issues(lock_version, agent_key)
+        )
+        if issues:
+            raise DraftContentRejected(*issues)
+
+    @staticmethod
+    def _actor_issues(actor: object) -> list[DraftValidationIssue]:
+        """The one actor rule shared by every draft and publication write."""
         issues: list[DraftValidationIssue] = []
         if not isinstance(actor, str):
             issues.append(
@@ -772,11 +783,7 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             issues.append(
                 DraftValidationIssue("actor", "blank", "Actor must not be blank.")
             )
-        issues.extend(
-            _GraphConfigurationDraft._lock_and_agent_key_issues(lock_version, agent_key)
-        )
-        if issues:
-            raise DraftContentRejected(*issues)
+        return issues
 
     @staticmethod
     def _validate_lock_and_agent_key(lock_version: object, agent_key: object) -> None:
@@ -790,6 +797,20 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
     def _lock_and_agent_key_issues(
         lock_version: object, agent_key: object
     ) -> list[DraftValidationIssue]:
+        issues = _GraphConfigurationDraft._lock_version_issues(lock_version)
+        if agent_key not in _EXPECTED_AGENT_KEYS:
+            issues.append(
+                DraftValidationIssue(
+                    "agent_key",
+                    "unknown_agent",
+                    "Agent key must identify an editable model role.",
+                )
+            )
+        return issues
+
+    @staticmethod
+    def _lock_version_issues(lock_version: object) -> list[DraftValidationIssue]:
+        """The one expected-lock-version rule shared by draft and publication writes."""
         issues: list[DraftValidationIssue] = []
         if isinstance(lock_version, bool) or not isinstance(lock_version, int):
             issues.append(
@@ -805,14 +826,6 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     "lock_version",
                     "out_of_range",
                     "Lock version must be greater than or equal to 0.",
-                )
-            )
-        if agent_key not in _EXPECTED_AGENT_KEYS:
-            issues.append(
-                DraftValidationIssue(
-                    "agent_key",
-                    "unknown_agent",
-                    "Agent key must identify an editable model role.",
                 )
             )
         return issues
@@ -988,6 +1001,15 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
         )
 
     @staticmethod
+    def _advance_locked_draft(
+        draft_row: GraphDraft, *, actor: str, timestamp: datetime
+    ) -> None:
+        """The one draft-parent audit write: every successful draft or publication write."""
+        draft_row.lock_version += 1
+        draft_row.updated_by = actor
+        draft_row.updated_at = timestamp
+
+    @staticmethod
     def _write_locked_content(
         session: Session,
         *,
@@ -1000,16 +1022,10 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
         for column_name, value in definition_content_values(content).items():
             setattr(locked.selected_row, column_name, value)
         locked.selected_row.candidate_hash = new_hash
-        timestamp = session.scalar(select(func.current_timestamp()))
-        if timestamp is None:
-            raise GraphConfigurationIntegrityError(
-                "database did not return a transaction timestamp"
-            )
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        locked.draft_row.lock_version += 1
-        locked.draft_row.updated_by = actor
-        locked.draft_row.updated_at = timestamp
+        timestamp = database_transaction_timestamp(session)
+        _GraphConfigurationDraft._advance_locked_draft(
+            locked.draft_row, actor=actor, timestamp=timestamp
+        )
         session.flush()
         return DraftSaveResult(
             draft=DraftMetadataSnapshot(

@@ -167,6 +167,9 @@ _DISPLAY_NAMES = {
     "fix_reviewer": "Fix Reviewer",
     "deck_reviewer": "Deck Reviewer",
 }
+#: Mirrors ``conversation_pins.MAX_ACTIVE_RELEASE_LOCK_SCANS``: one scan plus
+#: one rescan after a committed publication handoff (#269).
+_MAX_PARENT_LOCK_SCANS = 2
 _FOREMAN_READ_ONLY_REASON = (
     "Foreman is deterministic scheduling and routing code; "
     "it has no Agent Definition."
@@ -206,7 +209,14 @@ class _GraphConfigurationWorkbench:
                 read=True,
                 of=(GraphRelease, GraphDraft),
             )
-        parent_rows = session.execute(parent_statement).all()
+        for scan in range(_MAX_PARENT_LOCK_SCANS):
+            parent_rows = session.execute(parent_statement).all()
+            # A zero-row scan is the publication handoff: the locked release was
+            # closed by a committed publication and READ COMMITTED re-checked it.
+            # Rescan once to lock the newly active release; never retry a
+            # multi-row result.
+            if parent_rows or scan + 1 == _MAX_PARENT_LOCK_SCANS:
+                break
         if len(parent_rows) != 1:
             active_count = session.scalar(
                 select(func.count())

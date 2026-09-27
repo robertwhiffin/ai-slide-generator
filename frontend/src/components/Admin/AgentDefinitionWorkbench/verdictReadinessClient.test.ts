@@ -16,6 +16,7 @@ import {
   recordTestRunVerdict,
   type TestRunEvidence,
 } from '../../../api/agentDefinitions';
+import { testOperationFailure } from './draftEditorState';
 
 // ============================================================
 // #268: the verdict and readiness clients #269 consumes (C22)
@@ -123,7 +124,7 @@ describe('the verdict client', () => {
     expect(error).not.toBeInstanceOf(TestRunVerdictApiError);
   });
 
-  it.each(['not_completed', 'checks_failed'] as const)('types the exact %s 422 as ineligible_for_approval', async (reason) => {
+  it.each(['not_completed', 'checks_failed', 'linked_to_release'] as const)('types the exact %s 422 as ineligible_for_approval', async (reason) => {
     stubFetch(422, syntheticVerdictIneligible(reason));
 
     const error = await rejection(recordTestRunVerdict(501, { verdict: 'approved', notes: null }));
@@ -296,5 +297,16 @@ describe('the readiness client', () => {
 
     expect(error).toBeInstanceOf(AgentDefinitionApiError);
     expect((error as AgentDefinitionApiError).status).toBe(500);
+  });
+});
+
+describe('the verdict refusal copy (#269 C48)', () => {
+  it.each([
+    ['not_completed', 'Only completed runs can be reviewed.'],
+    ['checks_failed', 'Deterministic checks did not pass, so this run cannot be approved.'],
+    ['linked_to_release', 'This run is evidence for a published Graph Version; its verdict cannot change.'],
+  ] as const)('labels %s with its own client message', (reason, message) => {
+    const error = new TestRunVerdictApiError(422, syntheticVerdictIneligible(reason));
+    expect(testOperationFailure(error, 'verdict')).toEqual({ message, issues: [] });
   });
 });

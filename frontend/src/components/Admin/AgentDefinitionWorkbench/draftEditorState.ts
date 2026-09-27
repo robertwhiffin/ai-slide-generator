@@ -28,6 +28,7 @@ import {
   type StructuredOutputProbeSuccessResponse,
   type TestCaseListEntry,
   type TestRunEvidence,
+  type TestRunIneligibilityReason,
   type AgentReadiness,
   type DraftReadiness,
   type TestRunVerdict,
@@ -823,6 +824,13 @@ export const TEST_CASE_INVALID_RESPONSE_MESSAGE =
 export const VERDICT_INVALID_RESPONSE_MESSAGE =
   'Unable to record the verdict because the server response was invalid.';
 
+/** Client copy per ineligibility reason; `linked_to_release` is #269's (C48). */
+const INELIGIBLE_VERDICT_MESSAGES: Record<TestRunIneligibilityReason, string> = {
+  not_completed: 'Only completed runs can be reviewed.',
+  checks_failed: 'Deterministic checks did not pass, so this run cannot be approved.',
+  linked_to_release: 'This run is evidence for a published Graph Version; its verdict cannot change.',
+};
+
 export type TestOperationVerb = 'run' | 'create' | 'retire' | 'load' | 'update' | 'history' | 'verdict';
 
 const TEST_OPERATION_SUBJECT: Record<TestOperationVerb, string> = {
@@ -850,12 +858,7 @@ export function testOperationFailure(
       case 'test_run_not_found':
         return { message: 'This test run no longer exists. Refresh test cases.', issues: [] };
       case 'ineligible_for_approval':
-        return {
-          message: error.failure.reason === 'not_completed'
-            ? 'Only completed runs can be reviewed.'
-            : 'Deterministic checks did not pass, so this run cannot be approved.',
-          issues: [],
-        };
+        return { message: INELIGIBLE_VERDICT_MESSAGES[error.failure.reason], issues: [] };
       case 'invalid_verdict':
         return { message: 'The verdict was refused.', issues: error.failure.errors };
       case 'verdict_forbidden':

@@ -1667,7 +1667,7 @@ export interface TestRunVerdictRequest {
   notes: string | null;
 }
 
-export type TestRunIneligibilityReason = 'not_completed' | 'checks_failed';
+export type TestRunIneligibilityReason = 'not_completed' | 'checks_failed' | 'linked_to_release';
 
 /**
  * The verdict route's typed refusals. Nothing was written for any of them; the reviewer
@@ -1696,7 +1696,7 @@ export class TestRunVerdictApiError extends Error {
 export const TEST_RUN_NOT_FOUND_DETAIL = 'Test run not found';
 
 const VERDICT_REQUEST_KEYS = ['verdict', 'notes'] as const;
-const INELIGIBILITY_REASONS: readonly TestRunIneligibilityReason[] = ['not_completed', 'checks_failed'];
+const INELIGIBILITY_REASONS: readonly TestRunIneligibilityReason[] = ['not_completed', 'checks_failed', 'linked_to_release'];
 
 function parseTestRunVerdictFailure(status: number, payload: unknown): TestRunVerdictFailure | null {
   if (!isPlainRecord(payload)) return null;
@@ -1882,6 +1882,431 @@ export async function getDraftReadiness(): Promise<DraftReadiness> {
     const readiness = parseDraftReadinessResponse(payload);
     if (readiness === null) throw new InvalidReadinessResponseError();
     return readiness;
+  }
+  throw new AgentDefinitionApiError(response.status, payload, response.statusText);
+}
+
+// ============================================================
+// #269: Graph Release preview and publication (Task 6)
+// ============================================================
+// The wire is `src/api/schemas/graph_releases.py` (Task 5). Every parser below is
+// exact-key at every level, and `tests/unit/test_graph_release_client_join.py` pins the
+// key lists, the diff-field order, the gap codes and the note cap to the server. The
+// embedded readiness is #268's `DraftReadiness`, parsed by `parseDraftReadinessResponse`;
+// there is no second readiness type. Readiness is informational (C32): the page shows
+// it, but only the server's `publishable` and the publication gate decide.
+
+/** `graph_configuration_publication.RELEASE_NOTE_MAX_LENGTH`, in Python code points (C10). */
+export const RELEASE_NOTE_MAX_LENGTH = 2000;
+
+/** The field-diff vocabulary, in the server's order (`DIFF_FIELD_NAMES`). */
+export const RELEASE_DIFF_FIELDS = [
+  'definition_version',
+  'prompt_text',
+  'model.endpoint_name',
+  'model.temperature',
+  'model.max_tokens',
+  'model.top_p',
+  'schema_overlay',
+  'assembly_rules',
+  'protected_assembly.version',
+  'protected_assembly.digest',
+  'schema_contract.version',
+  'schema_contract.digest',
+] as const;
+
+export type ReleaseDiffField = typeof RELEASE_DIFF_FIELDS[number];
+
+/** One differing field; `schema_overlay` and `assembly_rules` are whole JSON documents. */
+export interface ReleaseFieldDiff {
+  field: ReleaseDiffField;
+  published: JsonValue;
+  candidate: JsonValue;
+}
+
+/** One role whose saved candidate differs from the active release. */
+export interface ChangedDefinitionPreview {
+  agent_key: AgentKey;
+  published_revision_id: number;
+  published_content_hash: string;
+  candidate_hash: string;
+  field_diffs: ReleaseFieldDiff[];
+}
+
+/**
+ * `GET /release-preview` (200): what publishing the shared draft now would change. It
+ * writes nothing. `publishable` is the server's one definition (C22) and is advisory:
+ * the publication gate decides.
+ */
+export interface ReleasePreviewResponse {
+  draft: DraftMetadata;
+  active_release: ActiveRelease;
+  next_version_number: number;
+  changed: ChangedDefinitionPreview[];
+  readiness: DraftReadiness;
+  validation_issues: DraftFieldError[];
+  publishable: boolean;
+}
+
+/** `POST /releases`: exactly `{ lock_version, release_note }`. The actor is the principal. */
+export interface PublishReleaseRequest {
+  lock_version: number;
+  release_note: string;
+}
+
+export interface PublishedMapping {
+  agent_definition_revision_id: number;
+  content_hash: string;
+  reused: boolean;
+}
+
+export interface ReleaseEvidence {
+  agent_test_run_id: number;
+  agent_key: AgentKey;
+  test_case_id: number;
+  evidence_kind: 'approval';
+}
+
+/** `POST /releases` (200, ruling Q6): the new active release and the rebased draft. */
+export interface PublishReleaseSuccessResponse {
+  release: ActiveRelease;
+  previous_release_id: number;
+  changed_agents: AgentKey[];
+  /** Exactly the seven roles, in Graph order. */
+  mappings: Record<AgentKey, PublishedMapping>;
+  evidence: ReleaseEvidence[];
+  draft: DraftMetadata;
+}
+
+export interface ReleaseIdentity {
+  release_id: number;
+  version_number: number;
+}
+
+/** 409: the draft moved on after the preview was read; nothing was written. */
+export interface StalePublicationResponse {
+  code: 'stale_publication';
+  expected_lock_version: number;
+  current_lock_version: number;
+  active_release: ReleaseIdentity;
+  draft: DraftMetadata;
+}
+
+/** 409: the draft matches the active release. */
+export interface NothingToPublishResponse {
+  code: 'nothing_to_publish';
+  active_release: ReleaseIdentity;
+  draft: DraftMetadata;
+}
+
+/** A gap code has no server message: the client labels it (C1). */
+export type PublicationGapCode = 'no_required_case' | 'no_eligible_approval';
+
+/** `test_case_id` is `null` exactly for a `no_required_case` gap. */
+export interface PublicationGap {
+  agent_key: AgentKey;
+  test_case_id: number | null;
+  code: PublicationGapCode;
+}
+
+/** 409: the gate's locked gaps (authoritative) and #268's informational readiness (C32). */
+export interface PublicationNotReadyResponse {
+  code: 'publication_not_ready';
+  gaps: PublicationGap[];
+  readiness: DraftReadiness;
+}
+
+/** 422: key on each issue's `code`; Pydantic messages can name Python classes. */
+export interface PublicationValidationErrorResponse {
+  code: 'invalid_publication';
+  errors: DraftFieldError[];
+}
+
+export type PublishReleaseFailure =
+  | StalePublicationResponse
+  | NothingToPublishResponse
+  | PublicationNotReadyResponse
+  | PublicationValidationErrorResponse;
+
+/** A release 200, 409 or 422 whose body does not match the exact contract. */
+export class InvalidReleaseResponseError extends Error {
+  constructor() {
+    super('Graph Release response did not match the expected contract.');
+    this.name = 'InvalidReleaseResponseError';
+  }
+}
+
+const RELEASE_PREVIEW_URL = `${AGENT_DEFINITIONS_URL}/release-preview`;
+const RELEASES_URL = `${AGENT_DEFINITIONS_URL}/releases`;
+
+const ACTIVE_RELEASE_KEYS = [
+  'release_id', 'version_number', 'previous_release_id', 'restored_from_release_id',
+  'release_note', 'published_by', 'published_at', 'effective_from', 'effective_to',
+] as const;
+
+const RELEASE_PREVIEW_KEYS = [
+  'draft', 'active_release', 'next_version_number', 'changed', 'readiness',
+  'validation_issues', 'publishable',
+] as const;
+
+const CHANGED_DEFINITION_KEYS = [
+  'agent_key', 'published_revision_id', 'published_content_hash', 'candidate_hash', 'field_diffs',
+] as const;
+
+const FIELD_DIFF_KEYS = ['field', 'published', 'candidate'] as const;
+
+const PUBLISH_RELEASE_REQUEST_KEYS = ['lock_version', 'release_note'] as const;
+
+const PUBLISH_RELEASE_SUCCESS_KEYS = [
+  'release', 'previous_release_id', 'changed_agents', 'mappings', 'evidence', 'draft',
+] as const;
+
+const PUBLISHED_MAPPING_KEYS = ['agent_definition_revision_id', 'content_hash', 'reused'] as const;
+
+const RELEASE_EVIDENCE_KEYS = ['agent_test_run_id', 'agent_key', 'test_case_id', 'evidence_kind'] as const;
+
+const RELEASE_IDENTITY_KEYS = ['release_id', 'version_number'] as const;
+
+const STALE_PUBLICATION_KEYS = [
+  'code', 'expected_lock_version', 'current_lock_version', 'active_release', 'draft',
+] as const;
+
+const NOTHING_TO_PUBLISH_KEYS = ['code', 'active_release', 'draft'] as const;
+
+const PUBLICATION_NOT_READY_KEYS = ['code', 'gaps', 'readiness'] as const;
+
+const PUBLICATION_GAP_KEYS = ['agent_key', 'test_case_id', 'code'] as const;
+
+const PUBLICATION_VALIDATION_KEYS = ['code', 'errors'] as const;
+
+const PUBLICATION_GAP_CODES: readonly PublicationGapCode[] = ['no_required_case', 'no_eligible_approval'];
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && LOWERCASE_SHA256.test(value);
+}
+
+function isNullablePositiveInteger(value: unknown): value is number | null {
+  return value === null || isPositiveInteger(value);
+}
+
+function isActiveRelease(value: unknown): value is ActiveRelease {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ACTIVE_RELEASE_KEYS)
+    && isPositiveInteger(value.release_id)
+    && isPositiveInteger(value.version_number)
+    && isNullablePositiveInteger(value.previous_release_id)
+    && isNullablePositiveInteger(value.restored_from_release_id)
+    && typeof value.release_note === 'string'
+    && typeof value.published_by === 'string'
+    && typeof value.published_at === 'string'
+    && typeof value.effective_from === 'string'
+    && (value.effective_to === null || typeof value.effective_to === 'string');
+}
+
+function isReleaseIdentity(value: unknown): value is ReleaseIdentity {
+  return isPlainRecord(value)
+    && hasExactKeys(value, RELEASE_IDENTITY_KEYS)
+    && isPositiveInteger(value.release_id)
+    && isPositiveInteger(value.version_number);
+}
+
+/** Each field at most once and in the server's vocabulary order; at least one. */
+function isFieldDiffList(value: unknown): value is ReleaseFieldDiff[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  let previous = -1;
+  for (const item of value) {
+    if (!isPlainRecord(item) || !hasExactKeys(item, FIELD_DIFF_KEYS)) return false;
+    const index = (RELEASE_DIFF_FIELDS as readonly unknown[]).indexOf(item.field);
+    if (index <= previous || !isJsonValue(item.published) || !isJsonValue(item.candidate)) return false;
+    previous = index;
+  }
+  return true;
+}
+
+function isChangedDefinition(value: unknown): value is ChangedDefinitionPreview {
+  return isPlainRecord(value)
+    && hasExactKeys(value, CHANGED_DEFINITION_KEYS)
+    && isAgentKey(value.agent_key)
+    && isPositiveInteger(value.published_revision_id)
+    && isSha256(value.published_content_hash)
+    && isSha256(value.candidate_hash)
+    && isFieldDiffList(value.field_diffs);
+}
+
+/** Changed roles: each at most once, in Graph order (`GRAPH_V1_AGENT_KEYS`). */
+function isChangedDefinitionList(value: unknown): value is ChangedDefinitionPreview[] {
+  if (!Array.isArray(value)) return false;
+  let previous = -1;
+  for (const item of value) {
+    if (!isChangedDefinition(item)) return false;
+    const index = AGENT_KEYS.indexOf(item.agent_key);
+    if (index <= previous) return false;
+    previous = index;
+  }
+  return true;
+}
+
+/** The strict preview parser: exact keys at every level; readiness via #268's parser. */
+export function parseReleasePreviewResponse(value: unknown): ReleasePreviewResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, RELEASE_PREVIEW_KEYS)) return null;
+  const valid = isDraftMetadata(value.draft)
+    && isActiveRelease(value.active_release)
+    && isInteger(value.next_version_number) && value.next_version_number >= 2
+    && isChangedDefinitionList(value.changed)
+    && parseDraftReadinessResponse(value.readiness) !== null
+    && Array.isArray(value.validation_issues)
+    && value.validation_issues.every(isDraftFieldError)
+    && typeof value.publishable === 'boolean';
+  return valid ? value as unknown as ReleasePreviewResponse : null;
+}
+
+function isPublishedMapping(value: unknown): value is PublishedMapping {
+  return isPlainRecord(value)
+    && hasExactKeys(value, PUBLISHED_MAPPING_KEYS)
+    && isPositiveInteger(value.agent_definition_revision_id)
+    && isSha256(value.content_hash)
+    && typeof value.reused === 'boolean';
+}
+
+function isReleaseEvidence(value: unknown): value is ReleaseEvidence {
+  return isPlainRecord(value)
+    && hasExactKeys(value, RELEASE_EVIDENCE_KEYS)
+    && isPositiveInteger(value.agent_test_run_id)
+    && isAgentKey(value.agent_key)
+    && isPositiveInteger(value.test_case_id)
+    && value.evidence_kind === 'approval';
+}
+
+/** Exactly the seven roles, in Graph order, as the server's validator requires. */
+function isSevenMappings(value: unknown): value is Record<AgentKey, PublishedMapping> {
+  if (!isPlainRecord(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === AGENT_KEYS.length
+    && AGENT_KEYS.every((key, index) => keys[index] === key)
+    && Object.values(value).every(isPublishedMapping);
+}
+
+/** The strict publish 200 parser. */
+export function parsePublishReleaseSuccessResponse(value: unknown): PublishReleaseSuccessResponse | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, PUBLISH_RELEASE_SUCCESS_KEYS)) return null;
+  const valid = isActiveRelease(value.release)
+    && isPositiveInteger(value.previous_release_id)
+    && Array.isArray(value.changed_agents)
+    && value.changed_agents.length > 0
+    && value.changed_agents.every(isAgentKey)
+    && isSevenMappings(value.mappings)
+    && Array.isArray(value.evidence)
+    && value.evidence.every(isReleaseEvidence)
+    && isDraftMetadata(value.draft);
+  return valid ? value as unknown as PublishReleaseSuccessResponse : null;
+}
+
+function isPublicationGap(value: unknown): value is PublicationGap {
+  return isPlainRecord(value)
+    && hasExactKeys(value, PUBLICATION_GAP_KEYS)
+    && isAgentKey(value.agent_key)
+    && isNullablePositiveInteger(value.test_case_id)
+    && typeof value.code === 'string'
+    && (PUBLICATION_GAP_CODES as readonly string[]).includes(value.code)
+    // `null` exactly for `no_required_case` (the server's gap validator, C1).
+    && (value.code === 'no_required_case') === (value.test_case_id === null);
+}
+
+/**
+ * The strict refusal parser for the publish route: a 409 is exactly one of the three
+ * typed conflicts, a 422 exactly `invalid_publication`. It keys on `code` only.
+ */
+export function parsePublishReleaseFailure(status: number, value: unknown): PublishReleaseFailure | null {
+  if (!isPlainRecord(value)) return null;
+  if (status === 422) {
+    return value.code === 'invalid_publication'
+      && hasExactKeys(value, PUBLICATION_VALIDATION_KEYS)
+      && Array.isArray(value.errors)
+      && value.errors.length > 0
+      && value.errors.every(isDraftFieldError)
+      ? value as unknown as PublicationValidationErrorResponse
+      : null;
+  }
+  if (status !== 409) return null;
+  switch (value.code) {
+    case 'stale_publication':
+      return hasExactKeys(value, STALE_PUBLICATION_KEYS)
+        && isInteger(value.expected_lock_version)
+        && isNonnegativeInteger(value.current_lock_version)
+        && isReleaseIdentity(value.active_release)
+        && isDraftMetadata(value.draft)
+        ? value as unknown as StalePublicationResponse
+        : null;
+    case 'nothing_to_publish':
+      return hasExactKeys(value, NOTHING_TO_PUBLISH_KEYS)
+        && isReleaseIdentity(value.active_release)
+        && isDraftMetadata(value.draft)
+        ? value as unknown as NothingToPublishResponse
+        : null;
+    case 'publication_not_ready':
+      return hasExactKeys(value, PUBLICATION_NOT_READY_KEYS)
+        && Array.isArray(value.gaps)
+        && value.gaps.length > 0
+        && value.gaps.every(isPublicationGap)
+        && parseDraftReadinessResponse(value.readiness) !== null
+        ? value as unknown as PublicationNotReadyResponse
+        : null;
+    default:
+      return null;
+  }
+}
+
+let releasePreviewRequest: Promise<ReleasePreviewResponse> | null = null;
+
+/**
+ * Reads the release preview. As with the workbench aggregate, one in-flight read is
+ * shared, so React StrictMode's development remount does not read the prompts twice.
+ * A malformed 200 is `InvalidReleaseResponseError`; any other status is an API error.
+ */
+export function getReleasePreview(): Promise<ReleasePreviewResponse> {
+  if (releasePreviewRequest) return releasePreviewRequest;
+  releasePreviewRequest = (async () => {
+    const response = await fetch(RELEASE_PREVIEW_URL, { method: 'GET', headers: { Accept: 'application/json' } });
+    const payload: unknown = await response.json().catch(() => null);
+    if (response.status === 200) {
+      const preview = parseReleasePreviewResponse(payload);
+      if (preview === null) throw new InvalidReleaseResponseError();
+      return preview;
+    }
+    throw new AgentDefinitionApiError(response.status, payload, response.statusText);
+  })().finally(() => {
+    releasePreviewRequest = null;
+  });
+  return releasePreviewRequest;
+}
+
+/**
+ * Publishes the shared draft as the next Graph Version. The body is exactly
+ * `{ lock_version, release_note }` (the server forbids any other key, `actor` included).
+ *
+ * The 200 is strictly parsed. A 409 or 422 throws `AgentDefinitionApiError` whose
+ * `payload` is the strictly parsed `PublishReleaseFailure`; a malformed 200/409/422 is
+ * `InvalidReleaseResponseError`; any other status (403, 500) is a plain
+ * `AgentDefinitionApiError`. Nothing here retries.
+ */
+export async function publishRelease(request: PublishReleaseRequest): Promise<PublishReleaseSuccessResponse> {
+  const values: PublishReleaseRequest = { lock_version: request.lock_version, release_note: request.release_note };
+  const body = Object.fromEntries(PUBLISH_RELEASE_REQUEST_KEYS.map((key) => [key, values[key]]));
+  const response = await fetch(RELEASES_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    const published = parsePublishReleaseSuccessResponse(payload);
+    if (published === null) throw new InvalidReleaseResponseError();
+    return published;
+  }
+  if (response.status === 409 || response.status === 422) {
+    const failure = parsePublishReleaseFailure(response.status, payload);
+    if (failure === null) throw new InvalidReleaseResponseError();
+    throw new AgentDefinitionApiError(response.status, failure, response.statusText);
   }
   throw new AgentDefinitionApiError(response.status, payload, response.statusText);
 }

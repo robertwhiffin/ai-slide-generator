@@ -337,3 +337,68 @@ def test_agent_schema_overlay_is_collected_by_integration_graph():
         "upgrade and two-session serialization assertions must execute against "
         "PostgreSQL."
     )
+
+
+def test_graph_release_publication_is_collected_by_integration_graph():
+    """#269's atomic publication core belongs in the graph CI job.
+
+    Its lock-statement order, rollback-at-every-write-seam and published-history
+    guard assertions need real PostgreSQL row locks, deferred constraint
+    triggers and backend PIDs, none of which SQLite can express.
+    """
+    target = "tests/integration/test_graph_release_publication_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its publication lock-order, rollback and "
+        "release-history guard assertions must execute against PostgreSQL."
+    )
+
+
+def test_graph_release_session_ordering_is_collected_by_integration_graph():
+    """#269's creator-versus-publication ordering proof belongs in the graph CI job.
+
+    It proves every conversation creator linearizes with real publication at the
+    active release row, observed through backend PIDs and ``pg_blocking_pids``,
+    none of which SQLite can express.
+    """
+    target = "tests/integration/test_graph_release_session_ordering_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its creator-versus-publication lock-order "
+        "assertions must execute against PostgreSQL."
+    )
+
+
+def test_graph_release_evidence_is_collected_by_integration_graph():
+    """#269's approval evidence gate belongs in the graph CI job.
+
+    Its case-row and run-row lock order, the cleanup and verdict races, the
+    rollback of evidence links and the linked-verdict trigger need real
+    PostgreSQL row locks, triggers and backend PIDs, none of which SQLite can
+    express.
+    """
+    target = "tests/integration/test_graph_release_evidence_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its evidence lock-order, race and "
+        "linked-verdict trigger assertions must execute against PostgreSQL."
+    )
+
+
+def test_graph_release_publication_acceptance_is_collected_by_integration_graph():
+    """#269's HTTP acceptance flow (the #271 AC7 seam) belongs in the graph CI job.
+
+    It drives edit, test, approve, preview, publish and pin through the shipped
+    admin router over real PostgreSQL, and proves the preview's shared parent
+    lock by backend PID in ``pg_blocking_pids``, none of which SQLite can express.
+    """
+    target = "tests/integration/test_graph_release_publication_acceptance_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its end-to-end publication and preview "
+        "shared-lock assertions must execute against PostgreSQL."
+    )
