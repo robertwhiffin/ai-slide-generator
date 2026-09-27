@@ -4,13 +4,13 @@ import {
   type AgentReadiness,
   type ChangedDefinitionPreview,
   type DraftReadiness,
-  type JsonValue,
-  type ReleaseFieldDiff,
   type ReleasePreviewResponse,
 } from '../../../api/agentDefinitions';
-import { lineDiff } from './lineDiff';
+import { FieldDiffView } from './FieldDiffView';
+import { ReleaseHistoryTab } from './ReleaseHistoryTab';
 import {
   ROLE_LABELS,
+  canConfirmRollback,
   canPublish,
   publicationErrorMessage,
   publicationGapLabel,
@@ -19,11 +19,14 @@ import {
 } from './reviewAndPublishState';
 import { useReviewAndPublish } from './useReviewAndPublish';
 
-type TabId = 'changes' | 'diff';
+type TabId = 'changes' | 'diff' | 'history';
 
-function jsonText(value: JsonValue): string {
-  return JSON.stringify(value, null, 2);
-}
+/** The three tabs, in order (Correction 4): id, label, test id (also the element id). */
+const TABS = [
+  ['changes', 'Changes & Approvals', 'release-changes-tab'],
+  ['diff', 'Definition Diff', 'release-diff-tab'],
+  ['history', 'Release History', 'release-history-tab'],
+] as const satisfies readonly (readonly [TabId, string, string])[];
 
 function ReadinessList({ agent }: { agent: AgentReadiness | undefined }) {
   if (agent === undefined) return <p className="text-sm text-gray-500">No readiness reported for this role.</p>;
@@ -79,35 +82,6 @@ function ChangesPanel({ preview }: { preview: ReleasePreviewResponse }) {
   );
 }
 
-const LINE_PREFIX = { same: '  ', removed: '- ', added: '+ ' } as const;
-const LINE_CLASS = {
-  same: 'text-gray-700',
-  removed: 'bg-red-50 text-red-800',
-  added: 'bg-green-50 text-green-800',
-} as const;
-
-function FieldDiffView({ diff }: { diff: ReleaseFieldDiff }) {
-  if (diff.field === 'prompt_text' && typeof diff.published === 'string' && typeof diff.candidate === 'string') {
-    return (
-      <ul aria-label={diff.field} className="overflow-x-auto rounded border border-gray-200 font-mono text-xs">
-        {lineDiff(diff.published, diff.candidate).map((line, index) => (
-          <li key={index} data-kind={line.kind} className={`whitespace-pre ${LINE_CLASS[line.kind]}`}>
-            {`${LINE_PREFIX[line.kind]}${line.text}`}
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  return (
-    <pre
-      data-testid={`release-diff-${diff.field}`}
-      className="overflow-x-auto rounded border border-gray-200 bg-gray-50 p-2 font-mono text-xs"
-    >
-      {`${jsonText(diff.published)} → ${jsonText(diff.candidate)}`}
-    </pre>
-  );
-}
-
 function DiffPanel({ changed }: { changed: ChangedDefinitionPreview[] }) {
   if (changed.length === 0) return <p className="text-sm text-gray-600">No field differences.</p>;
   return (
@@ -122,7 +96,7 @@ function DiffPanel({ changed }: { changed: ChangedDefinitionPreview[] }) {
           {role.field_diffs.map((diff) => (
             <div key={diff.field} className="mt-3">
               <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">{diff.field}</h4>
-              <FieldDiffView diff={diff} />
+              <FieldDiffView field={diff.field} before={diff.published} after={diff.candidate} />
             </div>
           ))}
         </section>
@@ -157,10 +131,26 @@ function NotReadyGaps({ gaps, readiness }: { gaps: Parameters<typeof publication
  * Review & Publish (#269, spec §13.2): the changed roles with their required-case
  * readiness, the field diffs, the release note and one Publish action. Readiness is
  * informational (C32); only the server's `publishable` enables Publish. Everything is
- * rendered as text. Release History arrives with #270.
+ * rendered as text.
+ *
+ * #270 adds the Release History tab. The tab row renders outside the release preview
+ * (Correction 39), so history and rollback stay reachable when the preview fails; the
+ * Publish section stays tied to the preview.
  */
 export function ReviewAndPublishPage() {
-  const { state, setNote, publish, reloadPreview } = useReviewAndPublish();
+  const {
+    state,
+    setNote,
+    publish,
+    reloadPreview,
+    loadHistory,
+    inspectRelease,
+    openRollback,
+    reloadRollback,
+    setRollbackNote,
+    cancelRollback,
+    confirmRollback,
+  } = useReviewAndPublish();
   const [tab, setTab] = useState<TabId>('changes');
   const { preview } = state;
   const noteErrors = state.errors.filter((error) => error.field === 'release_note');
@@ -169,6 +159,12 @@ export function ReviewAndPublishPage() {
   const publishing = state.status === 'publishing';
   const noteBlank = state.note.trim() === '';
   const noteLength = releaseNoteLength(state.note);
+  const selectTab = (id: TabId) => {
+    setTab(id);
+    // The history is read when its tab is first opened.
+    if (id === 'history' && state.history.status === 'idle') void loadHistory();
+  };
+  const activeTab = TABS.find(([id]) => id === tab) ?? TABS[0];
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -253,82 +249,92 @@ export function ReviewAndPublishPage() {
         )}
 
         {preview !== null && (
-          <>
-            <dl className="mb-4 flex flex-wrap gap-5 text-sm text-gray-600">
-              <div data-testid="release-next-version">{`Next Graph Version: ${preview.next_version_number}`}</div>
-              <div>{`Active: Graph Version ${preview.active_release.version_number}`}</div>
-              <div>{`Draft base: Graph Version ${preview.draft.base_version_number}`}</div>
-              <div>{`Lock version: ${preview.draft.lock_version}`}</div>
-            </dl>
+          <dl className="mb-4 flex flex-wrap gap-5 text-sm text-gray-600">
+            <div data-testid="release-next-version">{`Next Graph Version: ${preview.next_version_number}`}</div>
+            <div>{`Active: Graph Version ${preview.active_release.version_number}`}</div>
+            <div>{`Draft base: Graph Version ${preview.draft.base_version_number}`}</div>
+            <div>{`Lock version: ${preview.draft.lock_version}`}</div>
+          </dl>
+        )}
 
-            <div role="tablist" aria-label="Release review" className="mb-4 flex gap-1 border-b border-gray-200">
-              {([['changes', 'Changes & Approvals', 'release-changes-tab'], ['diff', 'Definition Diff', 'release-diff-tab']] as const)
-                .map(([id, label, testId]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    role="tab"
-                    id={testId}
-                    data-testid={testId}
-                    aria-selected={tab === id}
-                    aria-controls={`${testId}-panel`}
-                    onClick={() => setTab(id)}
-                    className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${
-                      tab === id ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-600'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-            </div>
-
-            <div
-              role="tabpanel"
-              id={`${tab === 'changes' ? 'release-changes-tab' : 'release-diff-tab'}-panel`}
-              aria-labelledby={tab === 'changes' ? 'release-changes-tab' : 'release-diff-tab'}
-              className="mb-6"
+        <div role="tablist" aria-label="Release review" className="mb-4 flex gap-1 border-b border-gray-200">
+          {TABS.map(([id, label, testId]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              id={testId}
+              data-testid={testId}
+              aria-selected={tab === id}
+              aria-controls={`${testId}-panel`}
+              onClick={() => selectTab(id)}
+              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${
+                tab === id ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-600'
+              }`}
             >
-              {tab === 'changes' ? <ChangesPanel preview={preview} /> : <DiffPanel changed={preview.changed} />}
-            </div>
+              {label}
+            </button>
+          ))}
+        </div>
 
-            <section aria-label="Publish" className="rounded-lg border border-gray-200 bg-white p-4">
-              <label htmlFor="release-note" className="block text-sm font-medium text-gray-700">Release note</label>
-              <textarea
-                id="release-note"
-                data-testid="release-note-input"
-                value={state.note}
-                readOnly={publishing}
-                onChange={(event) => setNote(event.target.value)}
-                aria-invalid={noteErrors.length > 0 ? 'true' : undefined}
-                aria-describedby={noteErrors.length > 0 ? 'release-note-error release-note-count' : 'release-note-count'}
-                rows={3}
-                className="mt-1 w-full rounded border border-gray-300 p-2 text-sm"
-              />
-              <p id="release-note-count" className="text-xs text-gray-500">
-                {`${noteLength} / ${RELEASE_NOTE_MAX_LENGTH}`}
+        <div role="tabpanel" id={`${activeTab[2]}-panel`} aria-labelledby={activeTab[2]} className="mb-6">
+          {tab === 'history' ? (
+            <ReleaseHistoryTab
+              history={state.history}
+              inspection={state.inspection}
+              rollback={state.rollback}
+              canConfirm={canConfirmRollback(state)}
+              onReloadHistory={() => { void loadHistory(); }}
+              onInspect={(version) => { void inspectRelease(version); }}
+              onOpenRollback={(version) => { void openRollback(version); }}
+              onRollbackNoteChange={setRollbackNote}
+              onConfirmRollback={() => { void confirmRollback(); }}
+              onCancelRollback={cancelRollback}
+              onReloadRollback={() => { void reloadRollback(); }}
+            />
+          ) : preview !== null && (
+            tab === 'changes' ? <ChangesPanel preview={preview} /> : <DiffPanel changed={preview.changed} />
+          )}
+        </div>
+
+        {preview !== null && (
+          <section aria-label="Publish" className="rounded-lg border border-gray-200 bg-white p-4">
+            <label htmlFor="release-note" className="block text-sm font-medium text-gray-700">Release note</label>
+            <textarea
+              id="release-note"
+              data-testid="release-note-input"
+              value={state.note}
+              readOnly={publishing}
+              onChange={(event) => setNote(event.target.value)}
+              aria-invalid={noteErrors.length > 0 ? 'true' : undefined}
+              aria-describedby={noteErrors.length > 0 ? 'release-note-error release-note-count' : 'release-note-count'}
+              rows={3}
+              className="mt-1 w-full rounded border border-gray-300 p-2 text-sm"
+            />
+            <p id="release-note-count" className="text-xs text-gray-500">
+              {`${noteLength} / ${RELEASE_NOTE_MAX_LENGTH}`}
+            </p>
+            {noteErrors.length > 0 && (
+              <p id="release-note-error" className="text-sm text-red-700">
+                {noteErrors.map(publicationErrorMessage).join(' ')}
               </p>
-              {noteErrors.length > 0 && (
-                <p id="release-note-error" className="text-sm text-red-700">
-                  {noteErrors.map(publicationErrorMessage).join(' ')}
-                </p>
-              )}
-              {state.status === 'ready' && !preview.publishable && (
-                <p className="mt-2 text-sm text-gray-700">This draft cannot be published yet.</p>
-              )}
-              {state.status === 'ready' && preview.publishable && noteBlank && (
-                <p className="mt-2 text-sm text-gray-700">Enter a release note to publish.</p>
-              )}
-              <button
-                type="button"
-                data-testid="release-publish-button"
-                disabled={!canPublish(state)}
-                onClick={() => { void publish(); }}
-                className="mt-3 rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-300"
-              >
-                {`Publish Graph Version ${preview.next_version_number}`}
-              </button>
-            </section>
-          </>
+            )}
+            {state.status === 'ready' && !preview.publishable && (
+              <p className="mt-2 text-sm text-gray-700">This draft cannot be published yet.</p>
+            )}
+            {state.status === 'ready' && preview.publishable && noteBlank && (
+              <p className="mt-2 text-sm text-gray-700">Enter a release note to publish.</p>
+            )}
+            <button
+              type="button"
+              data-testid="release-publish-button"
+              disabled={!canPublish(state)}
+              onClick={() => { void publish(); }}
+              className="mt-3 rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-300"
+            >
+              {`Publish Graph Version ${preview.next_version_number}`}
+            </button>
+          </section>
         )}
       </div>
     </div>

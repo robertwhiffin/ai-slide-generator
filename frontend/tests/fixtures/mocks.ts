@@ -36,6 +36,17 @@ import type {
   ReleaseFieldDiff,
   ReleasePreviewResponse,
   StalePublicationResponse,
+  AgentComparison,
+  DraftEffect,
+  ReleaseComparisonResponse,
+  ReleaseDetailResponse,
+  ReleaseHistoryEntry,
+  ReleaseHistoryListResponse,
+  RollbackIncompatibleResponse,
+  RollbackPreviewResponse,
+  RollbackSuccessResponse,
+  RollbackValidationErrorResponse,
+  StaleRollbackResponse,
 } from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
@@ -2026,4 +2037,283 @@ export function syntheticPublicationInvalid(
   errors: DraftFieldError[] = [RELEASE_NOTE_BLANK_ERROR],
 ): PublicationValidationErrorResponse {
   return { code: 'invalid_publication', errors };
+}
+
+// ============================================================
+// #270: Graph Release history and rollback (Task 7; Task 8's Playwright reuses these)
+// ============================================================
+// Graph Versions 1-4 exist and v4 is active; v3 restored v1. Every release id is the
+// version plus 40, so an id/version confusion shows (ids are never versions). Rolling
+// back to v2 publishes v5 (id 45).
+
+/** A `{ release_id, version_number }` ref with the fixture's id = version + 40. */
+export function releaseRef(versionNumber: number) {
+  return { release_id: versionNumber + 40, version_number: versionNumber };
+}
+
+const HISTORY_CHANGED: Record<number, AgentKey[]> = {
+  1: [...RELEASE_ROLES],
+  2: ['architect', 'builder'],
+  3: ['architect', 'builder'],
+  4: ['architect'],
+  5: ['architect', 'builder'],
+};
+
+/**
+ * One `GET /releases` row. Timestamps end in `Z` (the SQLite history wire); `active`
+ * marks the newest row. `restoredFrom` and `restoredBy` are version numbers.
+ */
+export function syntheticHistoryEntry(
+  versionNumber: number,
+  options: { active?: boolean; restoredFrom?: number | null; restoredBy?: number[]; supersededBy?: number } = {},
+  overrides: Partial<ReleaseHistoryEntry> = {},
+): ReleaseHistoryEntry {
+  const day = String(20 + versionNumber).padStart(2, '0');
+  const next = options.supersededBy ?? versionNumber + 1;
+  return {
+    release_id: versionNumber + 40,
+    version_number: versionNumber,
+    is_active: options.active ?? false,
+    release_note: versionNumber === 1 ? 'Bootstrap current code-owned Agent Definitions' : `Release note for Graph Version ${versionNumber}`,
+    published_by: versionNumber === 1 ? 'system:bootstrap' : 'admin@example.com',
+    published_at: `2026-09-${day}T12:00:00Z`,
+    effective_from: `2026-09-${day}T12:00:00Z`,
+    effective_to: options.active ? null : `2026-09-${String(20 + next).padStart(2, '0')}T12:00:00Z`,
+    previous: versionNumber === 1 ? null : releaseRef(versionNumber - 1),
+    restored_from: options.restoredFrom == null ? null : releaseRef(options.restoredFrom),
+    restored_by: (options.restoredBy ?? []).map(releaseRef),
+    changed_agents: HISTORY_CHANGED[versionNumber] ?? ['architect'],
+    ...overrides,
+  };
+}
+
+/** `GET /releases` with v4 active: rows v4, v3 (restores v1), v2, v1. */
+export function syntheticReleaseHistory(): ReleaseHistoryListResponse {
+  return {
+    active_release: releaseRef(4),
+    releases: [
+      syntheticHistoryEntry(4, { active: true }),
+      syntheticHistoryEntry(3, { restoredFrom: 1 }),
+      syntheticHistoryEntry(2),
+      syntheticHistoryEntry(1, { restoredBy: [3] }),
+    ],
+  };
+}
+
+/** `GET /releases` after the rollback to v2: v5 is active and restores v2. */
+export function syntheticRestoredReleaseHistory(): ReleaseHistoryListResponse {
+  return {
+    active_release: releaseRef(5),
+    releases: [
+      syntheticHistoryEntry(5, { active: true, restoredFrom: 2 }),
+      syntheticHistoryEntry(4),
+      syntheticHistoryEntry(3, { restoredFrom: 1 }),
+      syntheticHistoryEntry(2, { restoredBy: [5] }),
+      syntheticHistoryEntry(1, { restoredBy: [3] }),
+    ],
+  };
+}
+
+/** The active (v4) and historical (v2) architect prompts the comparison diffs. */
+export const HISTORY_ACTIVE_ARCHITECT_PROMPT = 'Plan the deck.\nUse four sections.\nCite sources.';
+export const HISTORY_V2_ARCHITECT_PROMPT = 'Plan the deck.\nUse three sections.\nCite sources.';
+
+/** `GET /releases/2`: v2's seven definitions and its linked evidence (one of each kind). */
+export function syntheticReleaseDetail(): ReleaseDetailResponse {
+  return {
+    release: syntheticHistoryEntry(2),
+    definitions: Object.fromEntries(RELEASE_ROLES.map((agentKey, index) => [agentKey, {
+      agent_definition_revision_id: 200 + index,
+      content_hash: agentKey === 'architect' ? 'b'.repeat(64) : SEED_CANDIDATE_HASH,
+      content: {
+        agent_key: agentKey,
+        definition_version: 1,
+        prompt_text: agentKey === 'architect' ? HISTORY_V2_ARCHITECT_PROMPT : `You are the ${agentKey} agent.`,
+        model: { endpoint_name: 'databricks-claude-sonnet-4', temperature: 0.2, max_tokens: 4096, top_p: 1 },
+      },
+    }])) as unknown as ReleaseDetailResponse['definitions'],
+    evidence: [
+      {
+        agent_test_run_id: 501,
+        agent_key: 'architect',
+        test_case_id: 101,
+        test_case_version: 2,
+        evidence_kind: 'approval',
+        source: null,
+        verdict: 'approved',
+        verdict_reviewer: 'reviewer@example.com',
+        verdict_at: '2026-09-22T11:00:00Z',
+        execution_status: 'completed',
+        deterministic_checks_passed: true,
+        run_at: '2026-09-22T10:00:00Z',
+      },
+      {
+        agent_test_run_id: 502,
+        agent_key: 'builder',
+        test_case_id: 202,
+        test_case_version: 1,
+        evidence_kind: 'historical_restore',
+        source: releaseRef(1),
+        verdict: 'rejected',
+        verdict_reviewer: 'reviewer@example.com',
+        verdict_at: '2026-09-21T11:00:00Z',
+        execution_status: 'completed',
+        deterministic_checks_passed: true,
+        run_at: '2026-09-21T10:00:00Z',
+      },
+    ],
+  };
+}
+
+/** The seven roles' active (v4) vs historical (v2) comparison: architect and builder differ. */
+export function syntheticAgentComparisons(): AgentComparison[] {
+  return RELEASE_ROLES.map((agentKey, index) => {
+    if (agentKey === 'architect') {
+      return {
+        agent_key: agentKey,
+        active_revision_id: 400,
+        historical_revision_id: 200,
+        same_revision: false,
+        field_diffs: [
+          { field: 'prompt_text', active: HISTORY_ACTIVE_ARCHITECT_PROMPT, historical: HISTORY_V2_ARCHITECT_PROMPT },
+          { field: 'model.temperature', active: 0.4, historical: 0.2 },
+        ],
+      };
+    }
+    if (agentKey === 'builder') {
+      return {
+        agent_key: agentKey,
+        active_revision_id: 402,
+        historical_revision_id: 202,
+        same_revision: false,
+        field_diffs: [{ field: 'model.max_tokens', active: 8192, historical: 4096 }],
+      };
+    }
+    return {
+      agent_key: agentKey,
+      active_revision_id: 200 + index,
+      historical_revision_id: 200 + index,
+      same_revision: true,
+      field_diffs: [],
+    };
+  });
+}
+
+/** `GET /releases/2/comparison`. */
+export function syntheticReleaseComparison(): ReleaseComparisonResponse {
+  return { active_release: releaseRef(4), release: releaseRef(2), agents: syntheticAgentComparisons() };
+}
+
+/** Ruling Q7: architect is clean (reset), builder holds a pending edit (kept). */
+export function syntheticDraftEffect(): Record<AgentKey, DraftEffect> {
+  return Object.fromEntries(RELEASE_ROLES.map((agentKey) => [
+    agentKey,
+    agentKey === 'architect' ? 'reset' : agentKey === 'builder' ? 'kept' : 'unchanged',
+  ])) as Record<AgentKey, DraftEffect>;
+}
+
+/** `GET /releases/2/rollback-preview`: restorable at lock 3, next Graph Version 5. */
+export function syntheticRollbackPreview(overrides: Partial<RollbackPreviewResponse> = {}): RollbackPreviewResponse {
+  return {
+    source: releaseRef(2),
+    active_release: releaseRef(4),
+    next_version_number: 5,
+    lock_version: 3,
+    default_release_note: 'Roll back to Graph Version 2.',
+    restorable: true,
+    blocked: null,
+    issues: [],
+    warnings: [],
+    agents: syntheticAgentComparisons(),
+    evidence: [
+      { agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101 },
+      { agent_test_run_id: 502, agent_key: 'builder', test_case_id: 202 },
+    ],
+    draft_effect: syntheticDraftEffect(),
+    ...overrides,
+  };
+}
+
+/** A structurally incompatible v2: blocked, with one issue. */
+export function syntheticBlockedRollbackPreview(): RollbackPreviewResponse {
+  return syntheticRollbackPreview({
+    restorable: false,
+    blocked: 'incompatible',
+    issues: [{
+      field: 'definitions.builder.model.endpoint_name',
+      code: 'endpoint_name_not_allowed',
+      message: 'Endpoint name is not allowed by the current policy.',
+    }],
+  });
+}
+
+/** `POST /releases/2/rollback` (200): v5 restores v2; the draft is rebased onto v5. */
+export function syntheticRollbackSuccess(): RollbackSuccessResponse {
+  return {
+    release: {
+      release_id: 45,
+      version_number: 5,
+      previous_release_id: 44,
+      restored_from_release_id: 42,
+      release_note: 'Roll back to Graph Version 2.',
+      published_by: 'admin@example.com',
+      published_at: '2026-09-25T12:00:00Z',
+      effective_from: '2026-09-25T12:00:00Z',
+      effective_to: null,
+    },
+    restored_from: releaseRef(2),
+    previous_release_id: 44,
+    changed_agents: ['architect', 'builder'],
+    mappings: Object.fromEntries(RELEASE_ROLES.map((agentKey, index) => [agentKey, {
+      agent_definition_revision_id: 200 + index,
+      content_hash: agentKey === 'architect' ? 'b'.repeat(64) : SEED_CANDIDATE_HASH,
+      reused: true,
+    }])) as RollbackSuccessResponse['mappings'],
+    evidence: [
+      { agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101, evidence_kind: 'historical_restore', source_release_id: 42 },
+      { agent_test_run_id: 502, agent_key: 'builder', test_case_id: 202, evidence_kind: 'historical_restore', source_release_id: 42 },
+    ],
+    draft: syntheticReleaseDraft({ base_release_id: 45, base_version_number: 5, lock_version: 4 }),
+    draft_effect: syntheticDraftEffect(),
+  };
+}
+
+/** The release preview after the rollback: the draft is based on v5. */
+export function syntheticRolledBackReleasePreview(): ReleasePreviewResponse {
+  return {
+    draft: syntheticReleaseDraft({ base_release_id: 45, base_version_number: 5, lock_version: 4 }),
+    active_release: { ...syntheticRollbackSuccess().release },
+    next_version_number: 6,
+    changed: [],
+    readiness: syntheticDraftReadinessBody({ draft_lock_version: 4, base_release_id: 45 }),
+    validation_issues: [],
+    publishable: false,
+  };
+}
+
+/** 409 `stale_rollback`: another admin saved (lock 5); v4 is still active. */
+export function syntheticStaleRollback(): StaleRollbackResponse {
+  return {
+    code: 'stale_rollback',
+    expected_lock_version: 3,
+    current_lock_version: 5,
+    active_release: releaseRef(4),
+    draft: syntheticReleaseDraft({ base_release_id: 44, base_version_number: 4, lock_version: 5 }),
+  };
+}
+
+/** 422 `rollback_incompatible` for v2. */
+export function syntheticRollbackIncompatible(): RollbackIncompatibleResponse {
+  return {
+    code: 'rollback_incompatible',
+    source: releaseRef(2),
+    errors: syntheticBlockedRollbackPreview().issues,
+  };
+}
+
+/** 422 `invalid_rollback`: the service's blank-note triple. */
+export function syntheticRollbackInvalid(
+  errors: DraftFieldError[] = [RELEASE_NOTE_BLANK_ERROR],
+): RollbackValidationErrorResponse {
+  return { code: 'invalid_rollback', errors };
 }
