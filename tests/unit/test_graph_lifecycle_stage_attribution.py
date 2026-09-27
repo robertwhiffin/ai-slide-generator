@@ -23,6 +23,7 @@ from tests.integration.graph_lifecycle_journey import (
     STAGES,
     CodeDefaultRead,
     CodeDefaultTripwire,
+    LifecycleJourney,
     Stage,
     StageFailure,
     require,
@@ -62,6 +63,42 @@ def test_the_stage_table_names_each_ticket_and_seam() -> None:
         "S18",
     ]
     assert all(code == STAGES[code].code for code in STAGES)
+
+
+_ADMIN = "/api/admin/agent-definitions"
+
+#: The whole table, as the brief's ticket column names it (fix round 1, I1): a
+#: stage relabelled to another ticket would misroute every failure it reports.
+EXPECTED_STAGES = [
+    ("S01", "bootstrap", "#260", f"GET {_ADMIN}/workbench"),
+    ("S02", "old conversation", "#261", "POST /api/sessions"),
+    ("S03", "edit prompts and model", "#263", f"PUT {_ADMIN}/draft/{{agent_key}}"),
+    ("S04", "overlay", "#264", f"POST {_ADMIN}/draft/{{agent_key}}/schema-contract-upgrade"),
+    ("S05", "assembly", "#265", f"POST {_ADMIN}/draft/{{agent_key}}/protected-assembly-upgrade"),
+    ("S06", "endpoint", "#266", f"GET {_ADMIN}/model-endpoints"),
+    ("S07", "test", "#267", f"POST {_ADMIN}/draft/{{agent_key}}/test-runs"),
+    ("S08", "approve", "#268", f"POST {_ADMIN}/test-runs/{{run_id}}/verdict"),
+    ("S09", "readiness", "#268", f"GET {_ADMIN}/readiness"),
+    ("S10", "preview", "#269", f"GET {_ADMIN}/release-preview"),
+    ("S11", "publish", "#269", f"POST {_ADMIN}/releases"),
+    ("S12", "pinned conversations", "#262", "POST /api/sessions/{session_id}/contribute"),
+    (
+        "S12b",
+        "collaboration history",
+        "#262",
+        "GET /api/sessions/{session_id}/collaboration-history",
+    ),
+    ("S14", "history", "#270", f"GET {_ADMIN}/releases"),
+    ("S15", "rollback", "#270", f"POST {_ADMIN}/releases/{{version_number}}/rollback"),
+    ("S16", "post-rollback pins", "#270", "POST /api/sessions"),
+    ("S18", "closing checks", "#271", "graph_release rows"),
+]
+
+
+def test_the_whole_stage_table_is_pinned() -> None:
+    assert [
+        (stage_.code, stage_.name, stage_.ticket, stage_.seam) for stage_ in STAGES.values()
+    ] == EXPECTED_STAGES
 
 
 def test_an_exception_inside_a_stage_is_labelled_with_that_stage() -> None:
@@ -212,3 +249,60 @@ def test_no_read_before_arm_and_a_disarmed_stage_is_silent() -> None:
     with stage(S11):
         src.core.skills.load_skill("architect")
     assert tripwire.reads == []
+
+
+class _FakeResponse:
+    status_code = 200
+    text = "{}"
+
+    def json(self):
+        return {"ok": True}
+
+
+class _FakeClient:
+    def request(self, method, path, json=None):
+        return _FakeResponse()
+
+
+def _bare_journey() -> LifecycleJourney:
+    client = _FakeClient()
+    return LifecycleJourney(
+        factory=None, admin=client, user=client, adapter=None, tripwire=CodeDefaultTripwire()
+    )
+
+
+S13 = Stage("S13", "graph turn", "#262", "POST /api/chat/stream")
+
+
+def test_in_stage_runs_a_caller_stage_with_recording_and_attribution() -> None:
+    journey = _bare_journey()
+    with journey.in_stage(S13):
+        body = journey.call("turn", "GET", "/x", principal="p@example.com", expect=200)
+    assert body == {"ok": True}
+    assert [(e.id, e.method, e.path, e.status) for e in journey.exchanges] == [
+        ("S13-turn", "GET", "/x", 200)
+    ]
+    assert journey._current is None
+    assert journey.completed == [], "a caller stage is not a journey stage"
+
+    with pytest.raises(StageFailure) as caught:
+        with journey.in_stage(S13):
+            raise RuntimeError("boom")
+    assert (
+        str(caught.value) == "[#262] S13 graph turn via POST /api/chat/stream: RuntimeError: boom"
+    )
+    assert journey._current is None
+
+
+def test_in_stage_restores_the_enclosing_stage() -> None:
+    journey = _bare_journey()
+    with journey.in_stage(S11):
+        with journey.in_stage(S13):
+            assert journey._current is S13
+        assert journey._current is S11
+    assert journey._current is None
+
+
+def test_call_outside_any_stage_is_refused() -> None:
+    with pytest.raises(AssertionError, match="outside a stage"):
+        _bare_journey().call("x", "GET", "/x", principal="p", expect=200)
