@@ -175,6 +175,14 @@ test.describe('/admin route gate', () => {
 
     await page.goto('/admin/agent-definitions/review');
 
+    // Wait for the app's own setup-status loading state to clear.  Until then we
+    // are only observing the "Loading…" splash, not RequireAdmin's decision.
+    // After this, RequireAdmin has been evaluated with loading=true (identity still held)
+    // and the heading is either in the DOM (mutation) or absent (correct).
+    await page.waitForFunction(
+      () => !document.querySelector('div[style*="background: #1a1a2e"]'),
+    );
+
     // While identity is still unknown, RequireAdmin renders null: no heading, no GET.
     await expect(
       page.getByRole('heading', { level: 1, name: 'Review & Publish' })
