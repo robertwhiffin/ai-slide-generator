@@ -322,6 +322,10 @@ class GraphTurnDriver:
         if errors:
             raise errors[0]
         self.next_seed = None
+        failed = [
+            (event.error, event.metadata) for event in events if event.type == StreamEventType.ERROR
+        ]
+        assert failed == [], f"the graph turn on {session_id!r} failed: {failed}"
 
         latest = self.checkpointer.get_tuple({"configurable": {"thread_id": session_id}})
         assert latest is not None, f"no checkpoint persisted for {session_id!r}"
@@ -473,7 +477,13 @@ class PinnedTurns:
     mappings: dict[int, dict[str, tuple[int, str]]]  # release id -> role -> (rev, hash)
 
 
-def _run_pinned_turns(journey, monkeypatch, caplog) -> PinnedTurns:
+def _run_pinned_turns(journey, monkeypatch, caplog, *, driving: Stage) -> PinnedTurns:
+    """Run the journey to S16, then one first graph turn per pinned conversation.
+
+    ``driving`` labels a failure while the turns run: ``S13`` when the test is
+    about identity, ``S17`` when it is about bundles, so a turn that cannot
+    execute a historical bundle is blamed on the bundle stage.
+    """
     journey.run_to("S16")
     v1_id, v2_id, v3_id = (journey.state[k] for k in ("v1_id", "v2_id", "v3_id"))
     s16 = STAGES["S16"]
@@ -491,7 +501,7 @@ def _run_pinned_turns(journey, monkeypatch, caplog) -> PinnedTurns:
     #: Each turn's graph input is seeded with a DIFFERENT release than its pin.
     seeds = {"old-root": v2_id, "new-root": v3_id, "post-rollback-root": v1_id}
     turns: dict[str, TurnRecord] = {}
-    with _in_stage(journey, S13):
+    with _in_stage(journey, driving):
         for session_id in PINNED_CONVERSATIONS:
             turns[session_id] = driver.drive(session_id, seed_release_id=seeds[session_id])
     mappings = {rid: _release_mapping(journey.factory, rid) for rid in (v1_id, v2_id, v3_id)}
@@ -512,7 +522,7 @@ def test_every_pinned_release_drives_its_own_revisions_through_state_fan_out_and
     monkeypatch,
     caplog,
 ) -> None:
-    run = _run_pinned_turns(lifecycle_journey, monkeypatch, caplog)
+    run = _run_pinned_turns(lifecycle_journey, monkeypatch, caplog, driving=S13)
     journey, adapter = run.journey, run.driver.adapter
     v1_id, v2_id, v3_id = (journey.state[k] for k in ("v1_id", "v2_id", "v3_id"))
     session_ids = _all_session_ids(journey)
@@ -644,7 +654,7 @@ def test_every_readable_release_executes_with_its_own_bundles_after_it_stops_bei
     monkeypatch,
     caplog,
 ) -> None:
-    run = _run_pinned_turns(lifecycle_journey, monkeypatch, caplog)
+    run = _run_pinned_turns(lifecycle_journey, monkeypatch, caplog, driving=S17)
     journey = run.journey
     v1_id, v2_id, v3_id = (journey.state[k] for k in ("v1_id", "v2_id", "v3_id"))
 
