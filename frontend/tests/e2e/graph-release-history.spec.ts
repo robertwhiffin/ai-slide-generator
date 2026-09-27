@@ -39,8 +39,6 @@ import {
   syntheticBlockedRollbackPreview,
   syntheticStaleRollback,
   syntheticRollbackIncompatible,
-  HISTORY_ACTIVE_ARCHITECT_PROMPT,
-  HISTORY_V2_ARCHITECT_PROMPT,
   SEED_CANDIDATE_HASH,
 } from '../fixtures/mocks';
 import { forbidsActionName } from '../fixtures/forbiddenActionNames';
@@ -468,10 +466,9 @@ test('(c-1) 422 rollback_incompatible: blocked panel is shown and no further POS
   const confirmButton = rollbackPanel.getByTestId('rollback-confirm-button');
   await expect(confirmButton).toBeDisabled();
 
-  // Clicking the disabled button fires no additional POST
+  // A disabled Confirm fires no additional POST.
   await confirmButton.click({ force: true }).catch(() => undefined);
-  await page.waitForTimeout(100);
-  expect(postCount).toBe(1);
+  await expect.poll(() => postCount).toBe(1);
 });
 
 // ---------------------------------------------------------------------------
