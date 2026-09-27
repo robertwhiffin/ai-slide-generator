@@ -39,7 +39,10 @@ from src.services.collaboration_history import (
     authorized_collaboration_root,
     get_collaboration_history,
 )
-from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
+from src.services.conversation_pins import (
+    ActiveGraphReleaseUnavailableError,
+    ConversationGraphReleaseIntegrityError,
+)
 from src.services.permission_service import (
     VALID_DECK_GLOBAL_PERMISSIONS,
     get_permission_service,
@@ -316,6 +319,16 @@ async def set_deck_global_permission(
     )
 
 
+def _active_graph_release_exists(db: Session) -> bool:
+    """Whether any Graph Release is active (read-only; selects nothing)."""
+    from src.database.models.graph_configuration import GraphRelease
+
+    return (
+        db.query(GraphRelease.id).filter(GraphRelease.effective_to.is_(None)).first()
+        is not None
+    )
+
+
 @router.post("/{session_id}/contribute")
 async def get_or_create_contributor_session(
     session_id: str,
@@ -344,10 +357,19 @@ async def get_or_create_contributor_session(
     try:
         session_manager = get_session_manager()
 
-        # Get parent session to check permissions
-        parent_session = await asyncio.to_thread(
-            session_manager.get_session, session_id
-        )
+        # Get parent session to check permissions.  Its public projection needs
+        # an active release; with none it raises the projection's integrity
+        # error before the creator below can raise the typed one, so map exactly
+        # that case to the same typed refusal as every other creator (#271 Task
+        # 8).  Any other integrity fault stays a generic failure.
+        try:
+            parent_session = await asyncio.to_thread(
+                session_manager.get_session, session_id
+            )
+        except ConversationGraphReleaseIntegrityError as e:
+            if not _active_graph_release_exists(db):
+                raise ActiveGraphReleaseUnavailableError("no active Graph Release") from e
+            raise
 
         # Don't allow creating contributor session on your own session
         if parent_session.get("created_by") == current_user:

@@ -275,6 +275,12 @@ def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
             "Engine-mode resolution failed; failing the turn closed",
             extra={"session_id": session_id, "error_class": type(exc).__name__},
         )
+        # The cause, for operators: DEBUG only, so the ERROR record stays redacted.
+        logger.debug(
+            "Engine-mode resolution failure cause",
+            extra={"session_id": session_id},
+            exc_info=True,
+        )
         raise PersistedConfigurationUnavailableError(
             code="lakebase_unavailable"
         ) from exc
