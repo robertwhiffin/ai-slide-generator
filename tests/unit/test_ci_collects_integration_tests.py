@@ -436,3 +436,20 @@ def test_graph_release_rollback_is_collected_by_integration_graph():
         ".github/workflows/test.yml. Its atomic-rollback and evidence-link "
         "assertions must execute against PostgreSQL."
     )
+
+
+def test_graph_release_rollback_ordering_is_collected_by_integration_graph():
+    """#270's rollback forced orderings belong in the graph CI job.
+
+    Each test pauses one transaction on a PostgreSQL row lock and observes the
+    other in ``pg_blocking_pids``; SQLite has neither row locks nor that view,
+    so the file must run in the graph job's PostgreSQL environment rather than
+    the unit job.
+    """
+    target = "tests/integration/test_graph_release_rollback_ordering_postgres.py"
+    run_blocks = _collect_job_run_blocks("integration-graph")
+    assert any(target in block for block in run_blocks), (
+        f"{target!r} is not named in integration-graph's run block in "
+        ".github/workflows/test.yml. Its forced lock orderings must execute "
+        "against PostgreSQL."
+    )
