@@ -21,6 +21,8 @@ import ast
 import pathlib
 import re
 
+import pytest
+
 import src.services.agent_runtime as runtime_module
 from src.services.agent_runtime import AgentRuntime
 
@@ -89,28 +91,62 @@ def _is_skills_module(module: str) -> bool:
     return module == _SKILLS_PACKAGE or module.startswith(_SKILLS_PACKAGE + ".")
 
 
-def _skills_imports(path: pathlib.Path):
-    """Yield (module, name) for every ``src.core.skills`` import in one file.
+def _package_of(path: pathlib.Path) -> str:
+    """The dotted package a ``src/`` file's relative imports resolve against.
+
+    Its containing directory, for a module and for a package's ``__init__.py``.
+    """
+    return ".".join(path.resolve().relative_to(_SRC.parent).parent.parts)
+
+
+def _absolute_module(node: ast.ImportFrom, package: str) -> str | None:
+    """Resolve an ``ImportFrom`` to its absolute module, as the import system would.
+
+    ``level`` 1 is the file's own package; each further level drops one parent.
+    Returns ``None`` for a relative import that climbs above the top package.
+    """
+    if node.level == 0:
+        return node.module
+    parts = package.split(".")
+    if node.level - 1 >= len(parts):
+        return None
+    base = ".".join(parts[: len(parts) - (node.level - 1)])
+    return f"{base}.{node.module}" if node.module else base
+
+
+def _skills_imports_in(source: str, package: str):
+    """Yield (module, name) for every ``src.core.skills`` import in one source.
 
     Catches ``from src.core.skills[.x] import y``, ``import src.core.skills[.x]``
-    (the form a function-level sabotage uses, C31) and ``from src.core import
-    skills``.  A bare ``import`` yields the name ``"*"``: it binds the whole
-    package, so it can never be allowlisted.
+    (the form a function-level sabotage uses, C31), ``from src.core import
+    skills``, and every relative spelling of those (``from ..core.skills import
+    y``, ``from ..core import skills``, ``from . import skills``), which are
+    resolved against ``package`` first (fix round 1, I1).  A whole-package
+    binding yields the name ``"*"``, which can never be allowlisted.  A relative
+    import that cannot be resolved is reported as an offender, never skipped.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(source)
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            if _is_skills_module(node.module):
+        if isinstance(node, ast.ImportFrom):
+            module = _absolute_module(node, package)
+            if module is None:
                 for alias in node.names:
-                    yield node.module, alias.name
-            elif node.module == "src.core":
+                    yield f"<unresolved relative import level {node.level}>", alias.name
+            elif _is_skills_module(module):
                 for alias in node.names:
-                    if alias.name == "skills":
-                        yield _SKILLS_PACKAGE, "*"
+                    yield module, alias.name
+            else:
+                for alias in node.names:
+                    if _is_skills_module(f"{module}.{alias.name}"):
+                        yield f"{module}.{alias.name}", "*"
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if _is_skills_module(alias.name):
                     yield alias.name, "*"
+
+
+def _skills_imports(path: pathlib.Path):
+    return _skills_imports_in(path.read_text(encoding="utf-8"), _package_of(path))
 
 
 def test_the_compatibility_runtime_is_gone():
@@ -170,3 +206,46 @@ def test_production_runtimes_resolve_only_persisted_releases():
         factory.cache_clear()
         assert type(factory()._persisted_release_loader) is PersistedGraphReleaseLoader
         factory.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Guard 2's import walk, driven on synthetic sources (fix round 1, I1): every
+# spelling of a ``src.core.skills`` import must resolve to its absolute module,
+# relative imports included.
+# ---------------------------------------------------------------------------
+
+
+_SK = _SKILLS_PACKAGE
+_SVC = "src.services"
+
+
+@pytest.mark.parametrize(
+    ("source", "package", "expected"),
+    [
+        ("from src.core.skills import load_skill", _SVC, {(_SK, "load_skill")}),
+        ("import src.core.skills", _SVC, {(_SK, "*")}),
+        ("from src.core import skills", _SVC, {(_SK, "*")}),
+        # The reviewer's probe, verbatim.
+        ("from ..core.skills import load_skill as _probe", _SVC, {(_SK, "load_skill")}),
+        ("from ..core import skills", _SVC, {(_SK, "*")}),
+        (
+            "from ...core.skills.data_analyst import INSTRUCTIONS",
+            "src.services.graph",
+            {(f"{_SK}.data_analyst", "INSTRUCTIONS")},
+        ),
+        ("from . import skills", "src.core", {(_SK, "*")}),
+        ("from .skills import load_skill", "src.core", {(_SK, "load_skill")}),
+        ("def f():\n    from ..core.skills import load_skill\n", _SVC, {(_SK, "load_skill")}),
+        ("from ....skills import x", _SVC, {("<unresolved relative import level 4>", "x")}),
+        ("from . import prompt_assembler", _SVC, set()),
+        ("from ..core import defaults", _SVC, set()),
+    ],
+)
+def test_the_import_walk_resolves_every_spelling_of_a_skills_import(source, package, expected):
+    assert set(_skills_imports_in(source, package)) == expected
+
+
+def test_the_package_of_a_src_file_is_its_dotted_directory():
+    assert _package_of(_SRC / "services" / "persisted_graph_release.py") == "src.services"
+    assert _package_of(_SRC / "services" / "graph" / "nodes.py") == "src.services.graph"
+    assert _package_of(_SRC / "core" / "skills" / "__init__.py") == "src.core.skills"

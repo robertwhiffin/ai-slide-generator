@@ -3,6 +3,10 @@
 The large generated snapshot is intentionally imported only by
 ``load_graph_v1_manifest``. Existing installations can therefore use the contract and
 hash helpers without parsing every frozen prompt.
+
+That snapshot, ``agent_definition_manifest_v1.py``, is a frozen artefact with no
+generator since #271 (the code-owned source it was generated from is deleted); its
+content hashes are pinned by ``PACKAGED_V1_CONTENT_HASHES`` in the unit tests.
 """
 
 from __future__ import annotations
