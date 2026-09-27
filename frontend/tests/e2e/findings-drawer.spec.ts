@@ -84,7 +84,7 @@ test.describe('findings-drawer — window global is gone', () => {
     };
 
     await page.addInitScript((f) => {
-      (window as unknown as { __TELLR_TEST_FINDINGS__: typeof f }).__TELLR_TEST_FINDINGS__ = [f];
+      (window as unknown as { __TELLR_TEST_FINDINGS__: typeof f }).__TELLR_TEST_FINDINGS__ = f;
     }, sentinel);
 
     await openDeck(page);
