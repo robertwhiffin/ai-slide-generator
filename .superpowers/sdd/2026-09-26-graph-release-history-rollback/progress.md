@@ -143,3 +143,8 @@ Task 2: fix round 1/5 (3 addressed, m-2 parked; `daaf9daf4`, test-only): `offset
 Controller re-check: `next_version_number = release_row.id + 1` (`CTRL270_2_ID`) → RED 2/25; restored clean.
 Ruling: no scoped re-review — test-only, every finding mutated RED, controller swap RED. Cost if wrong: small.
 Task 2: complete (commits `e4385f487..daaf9daf4`, review clean after 1 fix round). Tasks 3a+ inherit ids ≠ versions via `build_v2_v3_v4`.
+
+## Task 3a — 2026-09-27
+Task 3a: implementer DONE_WITH_CONCERNS at `e6142ab72` (TASK_BASE `6dbd051c7`): `d64ba5ce0` `restore_release` (`graph_configuration_rollback.py:311`), `_validate_rollback_request`, `_verify_rebased_draft`, `_assign_locked_candidate` extraction (`graph_configuration_draft.py:1013`), facade exports, 31 SQLite tests; `5e15d5cf2` one post-condition per draft effect + base-release guard test. Gates: rollback unit 57; named 970; full unit 6 (baseline) / 7031 / 110; PG publication 21, evidence 18, workbench 49, overlay 10, history 5 — zero skips; ruff clean. 34 mutations: 32 RED (incl. plan reviewer sabotage), M27/M28 equivalent (guards kept deliberately).
+Ruling: concern 3 (unknown version + stale lock → `GraphVersionNotFound` before conflict, per the plan's check order) ACCEPTED; Task 6 maps it. Concern 4 (`test_dependencies_resolve_on_proxy` does a real network resolve — slow) noted for the baseline.
+Task 3a: controller sabotage (plan controller target) — `restored_from_release_id=None` (`CTRL270_3A_RESTORED`, anchor 1, `:383`): rollback + history unit RED 1/74 (`test_restore_v3_while_v7_active_produces_v8_restoring_v3`). Restored clean, marker 0.
