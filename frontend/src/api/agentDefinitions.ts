@@ -1960,11 +1960,17 @@ export interface PublishedMapping {
   reused: boolean;
 }
 
+/**
+ * One evidence link a release wrote. A publication links `approval` evidence with
+ * a null source; a rollback (#270) links `historical_restore` evidence naming the
+ * release it restores from (Correction 38).
+ */
 export interface ReleaseEvidence {
   agent_test_run_id: number;
   agent_key: AgentKey;
   test_case_id: number;
-  evidence_kind: 'approval';
+  evidence_kind: 'approval' | 'historical_restore';
+  source_release_id: number | null;
 }
 
 /** `POST /releases` (200, ruling Q6): the new active release and the rebased draft. */
@@ -2063,7 +2069,9 @@ const PUBLISH_RELEASE_SUCCESS_KEYS = [
 
 const PUBLISHED_MAPPING_KEYS = ['agent_definition_revision_id', 'content_hash', 'reused'] as const;
 
-const RELEASE_EVIDENCE_KEYS = ['agent_test_run_id', 'agent_key', 'test_case_id', 'evidence_kind'] as const;
+const RELEASE_EVIDENCE_KEYS = [
+  'agent_test_run_id', 'agent_key', 'test_case_id', 'evidence_kind', 'source_release_id',
+] as const;
 
 const RELEASE_IDENTITY_KEYS = ['release_id', 'version_number'] as const;
 
@@ -2168,13 +2176,15 @@ function isPublishedMapping(value: unknown): value is PublishedMapping {
     && typeof value.reused === 'boolean';
 }
 
+/** The source is set exactly for `historical_restore` evidence (the server's validator). */
 function isReleaseEvidence(value: unknown): value is ReleaseEvidence {
-  return isPlainRecord(value)
-    && hasExactKeys(value, RELEASE_EVIDENCE_KEYS)
-    && isPositiveInteger(value.agent_test_run_id)
-    && isAgentKey(value.agent_key)
-    && isPositiveInteger(value.test_case_id)
-    && value.evidence_kind === 'approval';
+  if (!isPlainRecord(value) || !hasExactKeys(value, RELEASE_EVIDENCE_KEYS)) return false;
+  if (!isPositiveInteger(value.agent_test_run_id)
+    || !isAgentKey(value.agent_key)
+    || !isPositiveInteger(value.test_case_id)) return false;
+  if (value.evidence_kind === 'approval') return value.source_release_id === null;
+  if (value.evidence_kind === 'historical_restore') return isPositiveInteger(value.source_release_id);
+  return false;
 }
 
 /** Exactly the seven roles, in Graph order, as the server's validator requires. */
@@ -2196,7 +2206,8 @@ export function parsePublishReleaseSuccessResponse(value: unknown): PublishRelea
     && value.changed_agents.every(isAgentKey)
     && isSevenMappings(value.mappings)
     && Array.isArray(value.evidence)
-    && value.evidence.every(isReleaseEvidence)
+    // A publication links only approval evidence (Correction 38).
+    && value.evidence.every((item) => isReleaseEvidence(item) && item.evidence_kind === 'approval')
     && isDraftMetadata(value.draft);
   return valid ? value as unknown as PublishReleaseSuccessResponse : null;
 }

@@ -181,8 +181,14 @@ describe('parsePublishReleaseSuccessResponse', () => {
     ['a string reused flag', (body: Mutable) => { (body.mappings as Record<string, Mutable>).builder.reused = 'yes'; }],
     ['no changed agents', (body: Mutable) => { body.changed_agents = []; }],
     ['an unknown changed agent', (body: Mutable) => { body.changed_agents = ['foreman']; }],
-    ['a restore evidence kind', (body: Mutable) => { (body.evidence as Mutable[])[0].evidence_kind = 'historical_restore'; }],
-    ['an extra evidence key', (body: Mutable) => { (body.evidence as Mutable[])[0].source_release_id = 41; }],
+    ['a well-formed restore evidence item', (body: Mutable) => {
+      const item = (body.evidence as Mutable[])[0];
+      item.evidence_kind = 'historical_restore';
+      item.source_release_id = 41;
+    }],
+    ['a restore evidence kind without a source', (body: Mutable) => { (body.evidence as Mutable[])[0].evidence_kind = 'historical_restore'; }],
+    ['an approval with a source', (body: Mutable) => { (body.evidence as Mutable[])[0].source_release_id = 41; }],
+    ['an extra evidence key', (body: Mutable) => { (body.evidence as Mutable[])[0].note = 'x'; }],
     ['a missing release key', (body: Mutable) => { delete (body.release as Mutable).effective_to; }],
   ])('rejects a 200 with %s', (_label, mutate) => {
     const body = syntheticPublishSuccess() as unknown as Mutable;

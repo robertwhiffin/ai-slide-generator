@@ -102,10 +102,29 @@ class PublishedMappingResponse(_StrictResponse):
 
 
 class ReleaseEvidenceResponse(_StrictResponse):
+    """One evidence link a release wrote.
+
+    Widened for #270 (Correction 38): a rollback links ``historical_restore``
+    evidence naming the release it came from.  Publication stays approval-only
+    (``PublishReleaseSuccessResponse``'s validator).
+    """
+
     agent_test_run_id: _RowId
     agent_key: AgentKey
     test_case_id: _RowId
-    evidence_kind: Literal["approval"]
+    evidence_kind: Literal["approval", "historical_restore"]
+    #: Non-null iff ``evidence_kind == "historical_restore"``.
+    source_release_id: _RowId | None
+
+    @model_validator(mode="after")
+    def source_agrees_with_kind(self) -> ReleaseEvidenceResponse:
+        if (self.evidence_kind == "historical_restore") != (
+            self.source_release_id is not None
+        ):
+            raise ValueError(
+                "source_release_id is set exactly for historical_restore evidence"
+            )
+        return self
 
 
 class PublishReleaseSuccessResponse(_StrictResponse):
@@ -122,6 +141,8 @@ class PublishReleaseSuccessResponse(_StrictResponse):
     def require_exact_role_set(self) -> PublishReleaseSuccessResponse:
         if list(self.mappings) != list(GRAPH_V1_AGENT_KEYS):
             raise ValueError("a published release maps exactly the seven roles in order")
+        if any(item.evidence_kind != "approval" for item in self.evidence):
+            raise ValueError("a publication links only approval evidence")
         return self
 
 
