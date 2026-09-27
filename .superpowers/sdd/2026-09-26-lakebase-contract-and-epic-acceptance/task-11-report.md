@@ -80,3 +80,65 @@ All mutations ran in `/Users/robert.whiffin/Documents/slide-gen-branch-eval/t271
 2. **Collaboration history route bypasses contract.** The `collaboration-history` context route calls `route.fallback()` for old-root — passing to the contract — but serves other sessions directly. This means `S12b-get-old-root-collaboration-history` is recorded in `served.reads` only when the page's request reaches the contract; if the LIFO chain changes, the exchange could become unrecorded.
 
 3. **step 4 mutation note.** The `adminRequestUrls` listener is added per-test with `page.on()` — these listeners accumulate across tests in the serial block. In practice there are no admin requests, but a future test that navigates to the admin page and does return could confuse later tests' `adminRequestUrls` arrays if not scoped properly.
+
+---
+
+## Fix round 1 (2026-09-27)
+
+### Findings addressed / open
+
+| Finding | Status | How addressed |
+|---|---|---|
+| Concern 1 — `/admin` instead of brief's URL | Accepted | Carried as deviation (see original report) |
+| Concern 3 — `served.lookahead` and `served.carried` not pinned | **Fixed** | Exact lists pinned in the final test; see below |
+| Concern 4 — silent `route.fallback()` for collaboration history | **Fixed** | Replaced with specific named routes; no `route.fallback()` anywhere |
+
+### Architecture change (Concern 4)
+
+The revised spec has **no `route.fallback()` calls**. Route discipline:
+
+- **Old-root collaboration history**: served explicitly from `OLD_ROOT_COLLAB_BODY = exchange(contract, 'S12b-get-old-root-collaboration-history').body`. No fallback.
+- **New-root collaboration history** (not in recording): served from `NEW_ROOT_COLLAB_STUB` (named empty body), with `expect(request.method()).toBe('GET')` guard.
+- **Post-rollback-root collaboration history** (not in recording): served from `POST_ROLLBACK_COLLAB_STUB` (named empty body), with GET assertion.
+- **Named stubs listed**: `NEW_ROOT_COLLAB_STUB`, `POST_ROLLBACK_COLLAB_STUB`, `POST_ROLLBACK_SESSION_BODY` (v3 session GET echoing the POST body).
+- **Unknown UUID session GETs**: UUID-only pattern `[0-9a-f]{8}-...-[0-9a-f]{12}` → 404. Named sessions (old-root, new-root) bypass this and reach the contract directly.
+- **Session list GETs**: matched only when `url.search.length > 0` (i.e., always-present query params). `POST /api/sessions` has no query params and flows directly to the contract's mutation queue.
+
+### Pinned lists (Concern 3)
+
+`served.lookahead` is empty: all session GETs in CONVERSATION_IDS have recordings at positions 2 and 3, both before the mutation at position 4.
+
+`served.carried` (after the mutation consumes position 4):
+```
+['S16-get-new-root', 'S16-get-new-root', 'S16-get-new-root',
+ 'S16-get-old-root', 'S16-get-old-root', 'S16-get-old-root']
+```
+Each session is fetched 3 times due to React StrictMode double-rendering plus an additional fetch from a sub-component. The carried list is pinned exactly in the `final` test.
+
+Collaboration-history GETs (`old-root`, `new-root`, `post-rollback-root`) are served by named context routes before the contract, so they do not appear in `served.carried` or `served.reads`.
+
+### Fix-round mutation (coordinator-requested)
+
+**Target:** `frontend/src/contexts/SessionContext.tsx` in `/Users/robert.whiffin/Documents/slide-gen-branch-eval/t271-11f1-mut` (detached HEAD `4504259d4`).
+
+**Mutation:** Added `await api.getSession(newSessionId)` before the `existingSessionInfo` branch, causing one extra `GET /api/sessions/{id}` per navigation.
+
+**Predicted RED:** `served.carried` has two extra entries (one for each StrictMode invocation of the extra call on the new-root page), making the length 8 instead of 6.
+
+**Observed RED:** `expect(served.carried).toEqual([...])` failed at the `final` test — the array was longer than the 6-entry pinned list. ✓
+
+**Restored from:** `git checkout 4504259d4 -- frontend/src/contexts/SessionContext.tsx`. `git diff --quiet` confirmed clean. Re-run: 6 passed. ✓
+
+### Commits (fix round 1)
+
+- `bc7877382` `test: fix round 1 — pin contract gaps and remove silent fallbacks (#271 Task 11)`
+- This fix-round section force-added to `task-11-report.md`.
+
+### Gates (fix round 1)
+
+| Gate | Result |
+|---|---|
+| `graph-release-conversation-journey` (chromium, 1 worker) | 6 passed, 3 consecutive runs |
+| `graph-release-admin-journey` | 8 passed |
+| `tsc --noEmit -p tsconfig.e2e.json` | exit 0 |
+| `test_e2e_matrix_covers_specs.py` | 4 passed |
