@@ -171,3 +171,76 @@ All Python runs used `PYTHONPATH=<W>:<W>/packages/databricks-tellr` and `DATABAS
 2. **The preview's warnings run even for a blocked source.** See Deviation 5. If the controller prefers to skip the remote check when `blocked` is set, the change is one `if` in `preview_rollback`, and one test would need a non-blocked source (all current warning tests already use one).
 3. **The C35/Q7 disclosure still stands for Task 3a:** a kept edit with an approved run stays approved after rollback, as C20(a) records. Task 2 only reports `draft_effect`.
 4. **The RED was an `ImportError` on the facade export, not a `ModuleNotFoundError`.** The cause is the same: the module was absent.
+
+---
+
+## Fix round 1 (review: 2 Important and 1 Minor addressed; m-2 parked)
+
+- **Commit:** `daaf9daf4` "test: pin id-vs-version resolution, preview lock mode and draft effect (#270)".
+- **Scope:** tests only. `src` is unchanged, so the review's line numbers still hold.
+- **Files:**
+  - `tests/unit/test_graph_release_rollback.py`: a fixture change plus 5 tests.
+  - `tests/integration/test_graph_release_history_postgres.py`: +1 test. This is Task 1's existing file, already enrolled in integration-graph and pinned, so no enrolment change is needed.
+- **TDD note:** these findings are coverage gaps against correct code. Each new test was GREEN on arrival, so its RED is proven by the sabotage table below. Each sabotage was applied to `daaf9daf4` and restored from `git show daaf9daf4:<path>`, then checked with `git diff --quiet`.
+
+| Finding | Status | What was done |
+|---|---|---|
+| I-1: id ≠ version never exercised | addressed | See "I-1 detail" below. |
+| I-2: preview lock mode untested | addressed | `test_preview_first_statement_is_the_shared_parent_lock` captures every ORM statement through the session's `do_orm_execute` event. It compiles the first one for PostgreSQL and asserts that it ends `FOR SHARE OF graph_release, graph_draft`. |
+| m-1: three-way gaps | addressed | `test_a_pending_edit_is_kept_even_on_a_role_identical_in_both_releases`: fixer +P gives `kept`. `test_a_draft_saved_to_exactly_the_restored_content_is_kept`: architect saved to v2's text gives `kept`. |
+| m-2: duplicated validator loop | parked (per instruction) | — |
+
+**I-1 detail, SQLite:**
+- SQLite allocates `max(id)+1` and has no sequence to burn. So `offset_release_ids` re-keys the bootstrapped v1 to id 11 before v2 is published.
+- It re-keys every column the ORM metadata says references `graph_release.id`, with `PRAGMA foreign_keys=OFF`. It then turns foreign keys back on and asserts `PRAGMA foreign_key_check == []`.
+- After that, every release id is its version + 10.
+- `build_v2_v3_v4` applies it, so **every** fixture-based rollback test now runs with ids ≠ versions.
+- `test_ids_that_differ_from_versions_resolve_by_version_everywhere` asserts literal `(id, version)` pairs for:
+  - the history entries and their `previous`;
+  - `read_release_detail(2)`;
+  - the comparison refs;
+  - the preview's source and active refs;
+  - `next_version_number == 5` and the default note;
+  - evidence `source_release_id == 12`.
+
+**I-1 detail, PostgreSQL:**
+- `test_ids_diverging_from_versions_resolve_by_version_everywhere` imports #269's `_install_commit_failure`.
+- A failed publish burns id 2 (the trigger fired once). v2 and v3 are then published, so the rows are `(1,1),(3,2),(4,3)`.
+- It makes the same assertions as the SQLite test, with `next_version_number == 4` and evidence `source_release_id == 3`.
+
+### Fix-round sabotage table
+
+- **Driver:** `/tmp/t270-2/mutate2.py`. Results are in `/tmp/t270-2/mut/results-round1.json`.
+- **Suites:** U = the rollback and history unit files; P = the history PostgreSQL file.
+- **Every row:** anchor count 1, marker count 1, restored clean.
+
+| ID | Mutation | RED |
+|---|---|---|
+| S-H152 | history refs `ReleaseRef(id, id)` | U `test_ids_that_differ…`; P `test_ids_diverging…` |
+| S-H180 | entry `version_number=release.id` | U 21 tests; P |
+| S-H251 | `read_release_detail` looks up by `release_id` | U `test_ids_that_differ…`; P |
+| S-R198 | preview active ref `ReleaseRef(id, id)` | U 2; P |
+| S-R220 | evidence `source_release_id = version_number` | U 3; P |
+| S-R226 | `next_version_number = release_row.id + 1` | U 2; P |
+| S-R262 | `_source_from_history` looks up by `release_id` | U 20; P |
+| S-R267 | source ref `ReleaseRef(id, id)` | U 4; P |
+| M23 | note built from `release_id` | U 2 (`…default_note`, `test_ids_that_differ…`); P. **No longer survives.** |
+| S1 | preview calls `_lock_current_parents(exclusive=True)` | U `test_preview_first_statement_is_the_shared_parent_lock` |
+| S2 | `restored == published → unchanged` checked before the pending check | U `test_a_pending_edit_is_kept_even_on_a_role_identical_in_both_releases` |
+| S3 | `candidate == restored → unchanged` checked before the pending check | U `test_a_draft_saved_to_exactly_the_restored_content_is_kept` |
+
+All 8 of the review's swaps, plus M23, go RED on both SQLite and PostgreSQL. M26 stays accepted as equivalent, per the controller ruling.
+
+### Fix-round gates (at `daaf9daf4`)
+
+| Gate | Result |
+|---|---|
+| Rollback, history, #269 publication and preview, draft and workbench unit files, plus the AST scanner | 285 passed |
+| Full `tests/unit` | 6 failed / 7000 passed / 110 skipped |
+| History PostgreSQL file | 5 passed, 0 skips |
+| `tellr_int_*` databases | the same 4 older ones; no leak |
+| ruff on the changed files | clean |
+
+The 6 full-unit failures are the baseline six, with causes re-checked: provisioned vs autoscaling ×2, `_FakeSession.execute` ×3, and `no active Graph Release` ×1. The run started at 05:45 UTC.
+
+**For later tasks:** `offset_release_ids` and `release_ids` join the Task 2 unit-file harness. Tasks 3a and 6 get ids ≠ versions automatically through `build_v2_v3_v4`.
