@@ -640,6 +640,9 @@ def test_main_app_registers_the_dedicated_workbench_route():
         "/api/admin/agent-definitions/test-cases/{test_case_id}/runs": {"GET"},
         "/api/admin/agent-definitions/test-runs/{run_id}/verdict": {"POST"},
         "/api/admin/agent-definitions/readiness": {"GET"},
+        # #269 Task 5: on the one admin router (C31/C35).
+        "/api/admin/agent-definitions/release-preview": {"GET"},
+        "/api/admin/agent-definitions/releases": {"POST"},
     }
     for path, methods in expected_methods.items():
         matches = [

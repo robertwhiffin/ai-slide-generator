@@ -3,7 +3,7 @@
 import dataclasses
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Annotated, Protocol, TypeVar, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from src.api.routes._authz import require_admin
 from src.api.schemas.agent_definitions import (
     MAX_ROW_ID,
+    ActiveReleaseResponse,
     BaselineTestRunRequest,
     CandidateTestRunRequest,
     CreateTestCaseRequest,
@@ -22,6 +23,7 @@ from src.api.schemas.agent_definitions import (
     DraftDefinitionResponse,
     DraftFieldErrorResponse,
     DraftLockRequest,
+    DraftMetadataResponse,
     DraftReadinessResponse,
     DraftSaveConflictResponse,
     DraftSaveConflictServerResponse,
@@ -51,6 +53,21 @@ from src.api.schemas.agent_definitions import (
     VerdictRequest,
     VerdictValidationErrorResponse,
 )
+from src.api.schemas.graph_releases import (
+    ChangedDefinitionResponse,
+    FieldDiffResponse,
+    NothingToPublishResponse,
+    PublicationGapResponse,
+    PublicationNotReadyResponse,
+    PublicationValidationErrorResponse,
+    PublishedMappingResponse,
+    PublishReleaseRequest,
+    PublishReleaseSuccessResponse,
+    ReleaseEvidenceResponse,
+    ReleaseIdentityResponse,
+    ReleasePreviewResponse,
+    StalePublicationResponse,
+)
 from src.core import databricks_client
 from src.core.database import get_db
 from src.core.user_context import get_current_user
@@ -79,14 +96,21 @@ from src.services.graph_configuration import (
     EditableModelDraft,
     GraphConfiguration,
     GraphConfigurationIntegrityError,
+    NothingToPublish,
+    PublicationConflict,
+    PublicationNotReady,
+    PublicationRejected,
+    PublishedRelease,
     RemoteEndpointDraftValidator,
     build_remote_endpoint_draft_validator,
 )
+from src.services.graph_configuration_publication import ReleasePreview
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AgentKey,
     AssemblyRulesV2,
 )
+from src.services.graph_release_evidence import ApprovalEvidenceGate
 from src.services.model_endpoint_catalog import (
     ModelEndpointCatalogFailure,
     SystemModelDiscovery,
@@ -1368,3 +1392,243 @@ def get_agent_definition_draft_readiness(
             detail="Graph configuration is incomplete",
         ) from exc
     return DraftReadinessResponse.model_validate(result, from_attributes=True)
+
+
+# --- Graph Release preview and publication (#269 Task 5) ----------------------
+# Still the one admin router (C31/C35): a separate module decorating ``router``
+# after ``main.py``'s ``include_router`` would register nothing.  The publish
+# body is read only after both auth gates; the actor is the principal, never a
+# body field.  Publication can wait on L0 behind a save's remote endpoint check,
+# so it runs in the threadpool (C46); the preview is a plain ``def``, which
+# FastAPI runs there.  Readiness is informational (C32): the evidence gate
+# decides under its own locks.  Every outcome maps explicitly; an
+# ``IntegrityError`` is never mapped and stays a 500 (#268 C7).
+
+
+def _readiness_callable(workbench: AgentTestWorkbench) -> Callable[[Session], object]:
+    """The one production binding to #268 readiness (C39).
+
+    ``workbench`` is the route's resolved ``get_agent_test_workbench`` dependency,
+    so one override of that dependency covers runs, verdicts and readiness.
+    """
+    return workbench.readiness_under_parent_lock
+
+
+def _publication_validation_response(
+    errors: list[DraftFieldErrorResponse],
+) -> JSONResponse:
+    response = PublicationValidationErrorResponse(code="invalid_publication", errors=errors)
+    return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
+
+
+async def _parse_publish_request(
+    request: Request,
+) -> PublishReleaseRequest | JSONResponse:
+    """Malformed JSON, then the strict body; every 422 is ``invalid_publication``."""
+    try:
+        raw_body = await request.json()
+    except json.JSONDecodeError:
+        return _publication_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field="$",
+                    code="invalid_json",
+                    message="Request body must be valid JSON.",
+                )
+            ]
+        )
+    try:
+        return PublishReleaseRequest.model_validate(raw_body)
+    except ValidationError as exc:
+        return _publication_validation_response(_request_validation_errors(exc))
+
+
+def _graph_integrity_failure(exc: GraphConfigurationIntegrityError) -> HTTPException:
+    logger.exception("Persisted Graph Configuration is incomplete")
+    return HTTPException(status_code=500, detail="Graph configuration is incomplete")
+
+
+def _readiness_body(readiness: object) -> DraftReadinessResponse:
+    return DraftReadinessResponse.model_validate(readiness, from_attributes=True)
+
+
+def _release_preview_response(preview: ReleasePreview) -> ReleasePreviewResponse:
+    return ReleasePreviewResponse(
+        draft=DraftMetadataResponse.model_validate(preview.draft, from_attributes=True),
+        active_release=ActiveReleaseResponse.model_validate(
+            preview.active_release, from_attributes=True
+        ),
+        next_version_number=preview.next_version_number,
+        changed=[
+            ChangedDefinitionResponse(
+                agent_key=item.agent_key,
+                published_revision_id=item.published_revision_id,
+                published_content_hash=item.published_content_hash,
+                candidate_hash=item.candidate_hash,
+                field_diffs=[
+                    FieldDiffResponse(
+                        field=diff.field,
+                        published=diff.published,
+                        candidate=diff.candidate,
+                    )
+                    for diff in item.field_diffs
+                ],
+            )
+            for item in preview.changed
+        ],
+        readiness=_readiness_body(preview.readiness),
+        validation_issues=[
+            DraftFieldErrorResponse(
+                field=issue.field, code=issue.code, message=issue.message
+            )
+            for issue in preview.validation_issues
+        ],
+        publishable=preview.publishable,
+    )
+
+
+def _published_response(outcome: PublishedRelease) -> PublishReleaseSuccessResponse:
+    return PublishReleaseSuccessResponse(
+        release=ActiveReleaseResponse.model_validate(outcome.release, from_attributes=True),
+        previous_release_id=outcome.previous_release_id,
+        changed_agents=list(outcome.changed_agent_keys),
+        mappings={
+            key: PublishedMappingResponse(
+                agent_definition_revision_id=outcome.mappings[key].agent_definition_revision_id,
+                content_hash=outcome.mappings[key].content_hash,
+                reused=outcome.mappings[key].reused,
+            )
+            for key in GRAPH_V1_AGENT_KEYS
+        },
+        evidence=[
+            ReleaseEvidenceResponse(
+                agent_test_run_id=link.agent_test_run_id,
+                agent_key=link.agent_key,
+                test_case_id=link.test_case_id,
+                evidence_kind=link.evidence_kind,
+            )
+            for link in outcome.evidence
+        ],
+        draft=DraftMetadataResponse.model_validate(outcome.draft, from_attributes=True),
+    )
+
+
+def _publication_refusal(
+    outcome: PublicationConflict | NothingToPublish | PublicationNotReady,
+) -> JSONResponse:
+    response: StalePublicationResponse | NothingToPublishResponse | PublicationNotReadyResponse
+    if isinstance(outcome, PublicationConflict):
+        response = StalePublicationResponse(
+            code="stale_publication",
+            expected_lock_version=outcome.expected_lock_version,
+            current_lock_version=outcome.current_lock_version,
+            active_release=ReleaseIdentityResponse(
+                release_id=outcome.active_release_id,
+                version_number=outcome.active_version_number,
+            ),
+            draft=DraftMetadataResponse.model_validate(outcome.draft, from_attributes=True),
+        )
+    elif isinstance(outcome, NothingToPublish):
+        response = NothingToPublishResponse(
+            code="nothing_to_publish",
+            active_release=ReleaseIdentityResponse(
+                release_id=outcome.active_release_id,
+                version_number=outcome.active_version_number,
+            ),
+            draft=DraftMetadataResponse.model_validate(outcome.draft, from_attributes=True),
+        )
+    else:
+        response = PublicationNotReadyResponse(
+            code="publication_not_ready",
+            gaps=[
+                PublicationGapResponse(
+                    agent_key=gap.agent_key,
+                    test_case_id=gap.test_case_id,
+                    code=gap.code,
+                )
+                for gap in outcome.locked_gaps
+            ],
+            readiness=_readiness_body(outcome.readiness),
+        )
+    return JSONResponse(status_code=409, content=response.model_dump(mode="json"))
+
+
+@router.get(
+    "/release-preview",
+    response_model=ReleasePreviewResponse,
+    responses={403: {"description": "Admin access required"}},
+)
+def get_graph_release_preview(
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> ReleasePreviewResponse:
+    """What publishing the shared draft now would change; it writes nothing."""
+    try:
+        preview = GraphConfiguration().preview_release(
+            db, readiness=_readiness_callable(workbench)
+        )
+    except GraphConfigurationIntegrityError as exc:
+        raise _graph_integrity_failure(exc) from exc
+    return _release_preview_response(preview)
+
+
+@router.post(
+    "/releases",
+    response_model=PublishReleaseSuccessResponse,
+    responses={
+        403: {"description": "Admin access or an authenticated principal required"},
+        409: {
+            "model": StalePublicationResponse
+            | NothingToPublishResponse
+            | PublicationNotReadyResponse
+        },
+        422: {"model": PublicationValidationErrorResponse},
+    },
+)
+async def publish_graph_release(
+    request: Request,
+    actor: Annotated[str, Depends(require_draft_write_principal)],
+    workbench: Annotated[AgentTestWorkbench, Depends(get_agent_test_workbench)],
+    db: Session = Depends(get_db),
+) -> PublishReleaseSuccessResponse | JSONResponse:
+    """Publish the shared draft as the next complete Graph Version.
+
+    The body is exactly ``{"lock_version", "release_note"}``.  The route builds
+    the production evidence gate; its readiness is the #268 binding (C39).
+    """
+    parsed = await _parse_publish_request(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    gate = ApprovalEvidenceGate(readiness=_readiness_callable(workbench))
+    try:
+        outcome = await run_in_threadpool(
+            GraphConfiguration().publish_draft,
+            db,
+            expected_lock_version=parsed.lock_version,
+            release_note=parsed.release_note,
+            actor=actor,
+            evidence_gate=gate,
+        )
+    except PublicationRejected as exc:
+        if any(issue.field == "actor" for issue in exc.issues):
+            # The principal, not the body, is at fault (the verdict route's rule).
+            raise HTTPException(
+                status_code=403,
+                detail="Authenticated principal required",
+            ) from exc
+        return _publication_validation_response(
+            [
+                DraftFieldErrorResponse(
+                    field=issue.field, code=issue.code, message=issue.message
+                )
+                for issue in exc.issues
+            ]
+        )
+    except GraphConfigurationIntegrityError as exc:
+        raise _graph_integrity_failure(exc) from exc
+
+    if isinstance(outcome, PublishedRelease):
+        return _published_response(outcome)
+    if isinstance(outcome, (PublicationConflict, NothingToPublish, PublicationNotReady)):
+        return _publication_refusal(outcome)
+    raise AssertionError(f"Unexpected publication outcome: {type(outcome)!r}")
